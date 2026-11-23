@@ -19,6 +19,8 @@ ring = "0.17"
 base64 = "0.22"
 # A local package archive's own manifest (unity6::payload).
 flate2 = { workspace = true }
+# VCC's and ALCOM's project list, one entry at a time (vcc_list.rs): what vrc-get-vpm itself keeps it with.
+vrc-get-litedb = { version = "=0.3.0-beta.8", default-features = false }
 vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
@@ -54,4 +56,6 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
 
 [dev-dependencies]
+# Tests of it have their own app data and VCC folder, never the person's.
+orbiters-core = { workspace = true, features = ["test-support"] }
 tempfile = "3"

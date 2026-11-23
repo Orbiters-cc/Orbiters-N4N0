@@ -2,7 +2,9 @@
 pub mod avatars;
 pub mod blender;
 mod builtin_templates;
+mod bundled_templates;
 pub mod coherent;
+mod copying;
 pub mod discovery;
 pub mod editor;
 pub mod git;
@@ -22,6 +24,7 @@ pub mod suggestions;
 pub mod templates;
 pub mod unity6;
 pub mod updates;
+mod vcc_list;
 pub mod vpm;
 mod vpm_http;
 
@@ -34,10 +37,6 @@ pub fn data_dir() -> PathBuf {
     if let Some(roots) = orbiters_core::paths::roots() {
         return roots.local_data.clone();
     }
-    // This crate's own tests never read or write the person's app data.
-    #[cfg(test)]
-    return std::env::temp_dir().join(format!("orbiters-projects-tests-{}", std::process::id()));
-    #[allow(unreachable_code)]
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Orbiters")
 }
 
@@ -327,7 +326,9 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
     );
     // What may happen to it, before anything at all does (even bringing an editor forward): a Unity 6 trial keeps its
     // protections whoever opens it.
-    let way = unity6::authority::allow(&data_dir(), &project.path, unity6::authority::Action::Open(caller)).map_err(|why| anyhow::anyhow!("{why}"))?;
+    let ask = || unity6::authority::allow(&data_dir(), &project.path, unity6::authority::Action::Open(caller)).map_err(|why| anyhow::anyhow!("{why}"));
+    let way = ask()?;
+    let folder = owned::id_of(&project.path)?;
     let locked = unity_open(&project.path);
     let editors = editor::running();
     if let Some(open) = editor::of(&editors, &project.path, locked) {
@@ -344,9 +345,9 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
     // Read again now, not as the scan saw it: Creator Companion or another tool may have changed it since (M6).
     let stamp = unity6::standing::EditorStamp::read(&project.path);
     anyhow::ensure!(stamp.parsed, "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
-    if let unity6::authority::Way::Trial(job) = way {
+    if let unity6::authority::Way::Trial(job) = &way {
         let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
-        unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
+        unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::PROCESSES, &start)?;
         return Ok(Opened { already_open: false, moved: None });
     }
     let unity = stamp.text.clone();
@@ -363,6 +364,9 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
         "{}",
         tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = editor.display(), version = project.unity)
     );
+    // And the project: still that folder, on that version and build, and still to be opened so.
+    let same = as_it_was(&project.path, folder, &stamp);
+    anyhow::ensure!(same && ask()? == way, "{}", tr!("{name} changed while its editor was being found (another program may be working on it). Try again.", name = project.name));
     #[cfg(not(target_os = "macos"))]
     let started = {
         let mut command = hidden_command(&editor);
@@ -373,6 +377,11 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
     let started = start_on_mac(&editor, &project.path, START_WATCH, &project.unity);
     started?;
     Ok(Opened { already_open: false, moved })
+}
+
+/// Whether the project at `path` is still the folder `id`, stamped as `stamp`.
+fn as_it_was(path: &Path, id: owned::FileId, stamp: &unity6::standing::EditorStamp) -> bool {
+    owned::is_same(path, id) && unity6::standing::EditorStamp::read(path) == *stamp
 }
 
 fn preflight(project: &Path) -> Option<PathBuf> {

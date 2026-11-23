@@ -265,6 +265,9 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
 
 /// [`solve_with`] for the project at `path`, against the repositories as last downloaded.
 pub async fn solve(root: &Path, path: &Path, requested: &[(String, String)], remove: &[String], prerelease: bool) -> anyhow::Result<Plan> {
+    // A plan is for a change: where none may be made, none is. And looking changes nothing.
+    crate::vpm::may_change(path)?;
+    anyhow::ensure!(crate::vpm::loads_unchanged(path)?, "{}", tr("Its package list uses an old range spelling; change a package once to check for updates."));
     let (_, packages) = crate::vpm::collection(root, false).await?;
     let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     Ok(solve_with(&project, &packages, requested, remove, prerelease).await)

@@ -353,6 +353,8 @@ pub fn load(dir: &Path, key: Option<&[u8; 32]>) -> Matrix {
     let Some(kept) = read_kept(dir) else { return built };
     match open(kept.envelope.as_bytes(), key) {
         // Never one older than the highest ever taken here, whatever the kept file holds now.
+        // One with the built-in list's own number is that list, or nothing (a copy kept since before an update of the app).
+        Ok(data) if data.serial == built.data.serial && serde_json::to_value(&data).ok() != serde_json::to_value(&built.data).ok() => built,
         Ok(data) if data.serial >= built.data.serial && data.serial >= highest(dir, Some(&kept)) => Matrix { data, origin: Origin::Served { verified: kept.verified }, built_in: built.built_in },
         _ => built,
     }

@@ -96,30 +96,41 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(projects)
 }
 
+/// Puts the project at `path` on the list VCC and ALCOM share (`add`), or takes it off: the one entry every window, tool and
+/// page goes through. Where it stands as a Unity 6 trial is asked first.
 pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
-    std::fs::create_dir_all(root)?;
+    use crate::unity6::authority::{allow, Action};
+    allow(&crate::data_dir(), path, if add { Action::List } else { Action::Unlist }).map_err(|why| anyhow::anyhow!("{why}"))?;
+    list_entry(root, path, &crate::vcc_list::Which::of(path), add).await
+}
+
+/// The one entry `which` of the list, put in for the project at `path` or taken out. **No byte of the project is read through
+/// VPM or written** (`crate::vcc_list`). For whoever asked the authority already.
+pub(crate) async fn list_entry(root: &Path, path: &Path, which: &crate::vcc_list::Which, add: bool) -> anyhow::Result<()> {
+    if add && !crate::discovery::is_project(path) {
+        bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
+    }
+    let list = crate::unity6::gate::ListRoot::open(root)?;
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    let mut settings = Settings::load(&io).await?;
-    let mut db = VccDatabaseConnection::connect(&io).await?;
+    // Held: Creator Companion's and ALCOM's own lock of the database.
+    let _database = VccDatabaseConnection::connect(&io).await?;
     if add {
-        if !crate::discovery::is_project(path) {
-            bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
-        }
-        let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-        if db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)?.is_none() {
-            db.add_project(&project).await?;
-        }
-        settings.add_user_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?);
+        crate::vcc_list::add(&list, path, which)
     } else {
-        if let Some(p) = db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)? {
-            db.remove_project(&p);
-        }
-        settings.retain_user_projects(|p| crate::discovery::key(Path::new(p)) != crate::discovery::key(path));
+        crate::vcc_list::remove(&list, which)
     }
-    db.save(&io).await?;
-    settings.save(&io).await?;
-    Ok(())
+}
+
+/// Whether VPM's project loader leaves the project as it is: vrc-get's `UnityProject::load` rewrites a manifest holding the
+/// "3.2-3.8" range spelling an old vrc-get wrote.
+pub(crate) fn loads_unchanged(path: &Path) -> std::io::Result<bool> {
+    const REWRITTEN: &[u8] = br#""3.2-3.8""#;
+    match std::fs::read(path.join("Packages/vpm-manifest.json")) {
+        Ok(manifest) => Ok(!manifest.windows(REWRITTEN.len()).any(|w| w == REWRITTEN)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 pub(crate) struct EnabledCollection {
@@ -368,7 +379,7 @@ pub enum Change {
     /// Any failure puts the project's manifest back and restores its packages.
     Plan { install: Vec<(String, String)>, remove: Vec<String>, prerelease: bool },
 }
-fn may_change(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn may_change(path: &Path) -> anyhow::Result<()> {
     use crate::unity6::authority::{allow, Action};
     allow(&crate::data_dir(), path, Action::Packages).map(|_| ()).map_err(|why| anyhow::anyhow!("{why}"))
 }

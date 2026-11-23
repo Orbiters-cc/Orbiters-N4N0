@@ -792,7 +792,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 (icons::X_CIRCLE, theme::DANGER, text)
             }
             trial::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied and compared, but it could not be listed.").to_string())),
-            trial::Status::Uncertain(why) => (icons::PROHIBIT, theme::WARN, orbiters_projects::unity6::journal::uncertain_text(why)),
+            trial::Status::Uncertain(why) => (icons::PROHIBIT, theme::WARN, orbiters_projects::unity6::trial::uncertain_text(why)),
             trial::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
             trial::Status::Replaced => (icons::PROHIBIT, theme::FG_3, tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
             _ => continue,

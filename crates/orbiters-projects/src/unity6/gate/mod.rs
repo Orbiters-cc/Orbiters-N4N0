@@ -1,17 +1,21 @@
-//! The one gate every write of the Unity 6 transition goes through (second verification: the write audit).
+//! The one gate every write goes through, of the Unity 6 transition and of every copy of a project (Duplicate, a new
+//! project from a template): second and third verifications, the write audits.
 //!
 //! - [`ReadRoot`] is a folder that is only read (the original, a folder it links to, a local package): held open by
 //!   handle, listed and read relative to it. It has no function that writes.
-//! - [`TrialRoot`] is the proof that a folder is the very trial of a job's record: it is made only by opening the folder by
-//!   handle and comparing its identity with the record's. Everything written in a trial is made **relative to that
-//!   handle**, one name at a time: a name that is a link, a junction, a mounted folder or any reparse point is refused, and
-//!   so is one whose opened object is not (by its final path) below the root, on the root's own volume. Nothing is ever
-//!   written over: a trial's files are only made anew, and only what this run made is ever removed.
-//! - [`Destination`] and [`NewTrial`] make the trial's own (new, empty) folder in a parent held by handle, after the parent
-//!   was checked against everything the original can see ([`Protected`]).
-//! - [`AppRoot`] is Orbiters' app data: the journal, the leases, the logs, the kept release list.
+//! - [`Destination`] is a place checked against everything the original can see ([`Protected`]), its parent held by handle;
+//!   [`NewFolder`] is the new folder made in it, held with it for the whole of the operation that made it.
+//! - [`WriteRoot`] is the only thing files are written through. It comes from a [`NewFolder`] just made, or from a private
+//!   look in the journal ([`WriteRoot::of_job`]: the job, the folder's part in it, its phase and its identity), never from a
+//!   path. Everything written is made **relative to its handle**, one name at a time: a name that is a link, a junction, a
+//!   mounted folder or any reparse point is refused, and so is one whose opened object is not (by its final path) below the
+//!   root, on the root's own volume. Nothing is ever written over: files are only made anew, and only what the same run made
+//!   is ever removed.
+//! - [`ListRoot`] is Creator Companion's own folder, where one entry of its list is put in or taken out (`crate::vcc_list`).
+//! - [`AppRoot`] is Orbiters' app data: the journal, the leases, the logs, the kept release list, a restore's staging folder.
 //!
-//! A test (`no_other_module_writes`) keeps every other module of the feature free of the filesystem's writing calls.
+//! A test (`no_other_module_writes`) keeps every other module of the feature, and the copier of projects, to a list of calls
+//! that only read.
 
 #[cfg(unix)]
 mod sys_unix;
@@ -78,7 +82,6 @@ pub struct Entry {
     pub name: OsString,
     pub kind: Kind,
     pub len: u64,
-    pub modified: u64,
 }
 
 fn entries(dir: &File) -> io::Result<Vec<Entry>> {
@@ -93,7 +96,6 @@ fn entries(dir: &File) -> io::Result<Vec<Entry>> {
             },
             name: l.name,
             len: l.len,
-            modified: l.modified,
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -127,6 +129,10 @@ impl ReadFile {
     pub fn id(&self) -> io::Result<FileId> {
         id_of_file(&self.0)
     }
+
+    pub fn len(&self) -> io::Result<u64> {
+        Ok(self.0.metadata()?.len())
+    }
 }
 
 impl ReadRoot {
@@ -139,7 +145,15 @@ impl ReadRoot {
         if !dir.metadata()?.is_dir() {
             return Err(io::Error::from(io::ErrorKind::NotADirectory));
         }
-        Ok(Self { id: id_of_file(&dir)?, real: sys::final_path(&dir)?, shown: sys::plain_path(&dir)?, dir, last: Mutex::default() })
+        // A folder on a network disk has no volume of this computer to be named by: it is named as the system does.
+        let shown = sys::plain_path(&dir)?;
+        let real = sys::final_path(&dir).unwrap_or_else(|_| shown.clone());
+        Ok(Self { id: id_of_file(&dir)?, real, shown, dir, last: Mutex::default() })
+    }
+
+    /// Whether it is on a network disk.
+    pub fn remote(&self) -> bool {
+        sys::remote(&self.dir)
     }
 
     /// The folder `rel` below, none of whose names is a link.
@@ -210,10 +224,22 @@ pub struct Protected {
     pub shown: PathBuf,
 }
 
-/// Where a trial may be made: an existing folder of this computer, held, checked against everything the original can see.
+/// Where a new folder may be made: a place on a disk of this computer, held, checked against everything the original can see.
 pub struct Destination {
+    /// The nearest folder of the place that exists.
     parent: ReadRoot,
-    name: String,
+    /// The folders of the place that do not exist yet, outermost first (none for a trial).
+    missing: Vec<OsString>,
+    name: OsString,
+}
+
+/// Whether folders on the way that do not exist are made with the new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Parents {
+    /// They must exist (a trial).
+    Exist,
+    /// Made, each relative to the one above (a project's copy, a new project).
+    Make,
 }
 
 /// Why a place is refused.
@@ -230,18 +256,21 @@ pub enum Refused {
     Exists(PathBuf),
     Name(String),
     Unreadable(String),
+    /// The original links to a folder Orbiters or Creator Companion keeps its own files in.
+    Own(PathBuf),
 }
 
 impl Refused {
     pub fn text(&self) -> String {
         match self {
             Refused::NotAbsolute => tr("Choose an absolute destination folder.").into(),
-            Refused::NotLocal => tr("Choose an ordinary folder on a disk of this computer: a trial is not made on a network share.").into(),
+            Refused::NotLocal => tr("Choose an ordinary folder on a disk of this computer: a copy is not made on a network share.").into(),
             Refused::NoFolder(p) => tr!("{path} is not a folder: choose one that exists.", path = p.display()),
-            Refused::Shared(p) => tr!("The original uses {path}: a trial there would change it. Choose a folder the original does not use.", path = p.display()),
+            Refused::Shared(p) => tr!("The original uses {path}: a copy there would change it. Choose a folder the original does not use.", path = p.display()),
             Refused::InsideProject(p) => tr!("{project} is a Unity project: choose a folder outside any Unity project.", project = p.display()),
             Refused::Exists(p) => tr!("{path} exists already: choose another name.", path = p.display()),
             Refused::Name(why) => why.clone(),
+            Refused::Own(p) => tr!("The original links to {path}, where Orbiters or Creator Companion keeps its own files: working on a copy of it would write in what it links to.", path = p.display()),
             Refused::Unreadable(why) => tr!("This place cannot be checked: {why}", why = why),
         }
     }
@@ -257,7 +286,7 @@ impl std::error::Error for Refused {}
 
 impl Destination {
     /// Checks `parent`/`name` by reading only. `protected`: what the original can see.
-    pub fn check(parent: &Path, name: &str, protected: &[Protected]) -> Result<Self, Refused> {
+    pub fn check(parent: &Path, name: &str, protected: &[Protected], parents: Parents) -> Result<Self, Refused> {
         crate::templates::validate_name(name).map_err(|e| Refused::Name(format!("{e:#}")))?;
         if !parent.is_absolute() {
             return Err(Refused::NotAbsolute);
@@ -269,6 +298,15 @@ impl Destination {
         if !plain || parent.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(Refused::NotLocal);
         }
+        // The nearest folder of it that is there; what is missing below it are plain names.
+        let (mut existing, mut missing) = (parent, vec![]);
+        while parents == Parents::Make && !existing.exists() {
+            let (Some(name), Some(above)) = (existing.file_name(), existing.parent()) else { return Err(Refused::NoFolder(parent.to_path_buf())) };
+            crate::templates::validate_name(&name.to_string_lossy()).map_err(|e| Refused::Name(format!("{e:#}")))?;
+            missing.insert(0, name.to_os_string());
+            existing = above;
+        }
+        let parent = existing;
         let held = ReadRoot::open(parent).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Refused::NoFolder(parent.to_path_buf()),
             _ if parent.is_file() => Refused::NoFolder(parent.to_path_buf()),
@@ -276,7 +314,7 @@ impl Destination {
             _ if parent.is_dir() => Refused::NotLocal,
             _ => Refused::Unreadable(e.to_string()),
         })?;
-        if sys::remote(&held.dir) {
+        if held.remote() || sys::final_path(&held.dir).is_err() {
             return Err(Refused::NotLocal);
         }
         for p in protected {
@@ -299,52 +337,105 @@ impl Destination {
             }
             above = folder.parent();
         }
+        if !missing.is_empty() {
+            return Ok(Self { parent: held, missing, name: name.into() });
+        }
         // Anything at all under that name, whatever it is and however it is spelled (its case, its short name).
         let free = [Want::Dir { hold: false }, Want::File].into_iter().all(|w| sys::open_at(&held.dir, OsStr::new(name), w, false).is_err_and(|e| e.kind() == io::ErrorKind::NotFound));
         if !free {
             return Err(Refused::Exists(held.shown.join(name)));
         }
-        Ok(Self { parent: held, name: name.to_string() })
+        Ok(Self { parent: held, missing, name: name.into() })
     }
 
-    /// The trial's own path, in its real form (no link, no substituted drive).
+    /// The new folder's own path, in its real form (no link, no substituted drive).
     pub fn path(&self) -> PathBuf {
-        self.parent.shown.join(&self.name)
+        let mut out = self.parent.shown.clone();
+        out.extend(&self.missing);
+        out.join(&self.name)
     }
 
-    /// Makes the trial's folder: new (never one that is there), in the very parent checked.
-    pub fn make(self) -> io::Result<NewTrial> {
-        let dir = sys::open_at(&self.parent.dir, OsStr::new(&self.name), Want::NewDir, false)?;
-        let (id, real) = (id_of_file(&dir)?, sys::final_path(&dir)?);
-        if sys::is_link(&dir)? || !sys::within(&real, &self.parent.real) || real == self.parent.real {
-            return Err(io::Error::other("the folder made is not in the place checked")); // i18n: not shown (an error chained under a message)
+    /// Room for this person on its disk.
+    pub fn free(&self) -> Option<u64> {
+        sys::free_space(&self.parent.dir)
+    }
+
+    /// Makes the folder: new (never one that is there), in the very parent checked; what is missing above it first, each
+    /// relative to the handle of the one above.
+    pub fn make(self) -> io::Result<NewFolder> {
+        let path = self.path();
+        let mut made = NewFolder { id: FileId { volume: 0, index: 0 }, path, parent: self.parent, chain: vec![] };
+        for name in self.missing.iter().chain([&self.name]) {
+            let above = made.chain.last().map_or(&made.parent.dir, |c| &c.dir);
+            let step = (|| -> io::Result<Link> {
+                let dir = sys::open_at(above, name, Want::NewDir, false)?;
+                let (id, real, over) = (id_of_file(&dir)?, sys::final_path(&dir)?, sys::final_path(above)?);
+                if sys::is_link(&dir)? || !sys::within(&real, &over) || real == over || id.volume != made.parent.id.volume {
+                    return Err(io::Error::other("the folder made is not in the place checked")); // i18n: not shown (an error chained under a message)
+                }
+                Ok(Link { dir, name: name.clone(), id })
+            })();
+            match step {
+                Ok(link) => made.chain.push(link),
+                Err(e) => {
+                    let _ = made.remove();
+                    return Err(e);
+                }
+            }
         }
-        Ok(NewTrial { id, path: self.path(), _dir: dir, parent: self.parent })
+        made.id = made.chain.last().map(|l| l.id).unwrap_or(made.id);
+        Ok(made)
     }
 }
 
-/// The trial's folder just made, held with its parent.
-pub struct NewTrial {
+struct Link {
+    dir: File,
+    name: OsString,
+    id: FileId,
+}
+
+/// The folder just made, held with every folder made above it and the parent it is in: the proof for the whole operation.
+pub struct NewFolder {
     pub id: FileId,
     pub path: PathBuf,
-    _dir: File,
     parent: ReadRoot,
+    chain: Vec<Link>,
 }
 
-impl NewTrial {
-    /// Lets the folder go and removes it, empty, when it is still the very one made.
+impl NewFolder {
+    /// What writes in it.
+    pub fn root(&self) -> io::Result<WriteRoot> {
+        let dir = match self.chain.last() {
+            Some(l) => l.dir.try_clone()?,
+            None => return Err(io::Error::other("nothing was made")), // i18n: not shown (an error chained under a message)
+        };
+        Ok(WriteRoot { id: self.id, real: sys::final_path(&dir)?, path: self.path.clone(), dir, last: Mutex::default() })
+    }
+
+    /// Lets the folder go and removes it, empty, with the folders made above it, each when it is still the very one made.
+    /// Whether the folder itself went.
     pub fn remove(self) -> io::Result<bool> {
-        let NewTrial { id, path, _dir, parent } = self;
-        drop(_dir);
-        match path.file_name() {
-            Some(name) => sys::remove_at(&parent.dir, name, id, true),
-            None => Ok(false),
+        let NewFolder { parent, mut chain, .. } = self;
+        let (mut itself, mut first) = (Ok(false), true);
+        while let Some(link) = chain.pop() {
+            drop(link.dir);
+            let above = chain.last().map_or(&parent.dir, |c| &c.dir);
+            let gone = sys::remove_at(above, &link.name, link.id, true);
+            let went = matches!(gone, Ok(true));
+            if first {
+                itself = gone;
+                first = false;
+            }
+            if !went {
+                break;
+            }
         }
+        itself
     }
 }
 
-/// The proof that a folder is the very trial of a record: the only thing writes in a trial are made through.
-pub struct TrialRoot {
+/// What files are written through: see the module.
+pub struct WriteRoot {
     dir: File,
     pub id: FileId,
     real: PathBuf,
@@ -352,7 +443,21 @@ pub struct TrialRoot {
     last: Last,
 }
 
-/// A file being made in a trial.
+/// Which folder of a job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The trial Orbiters copied.
+    Trial,
+    /// The copy Creator Companion made of it, taken in its place.
+    Migrated,
+    /// The same, being taken.
+    Adopting,
+}
+
+/// A folder made during a copy, held while this lives.
+pub struct HeldDir(#[allow(dead_code)] File);
+
+/// A file being made.
 pub struct NewFile {
     file: File,
     pub id: FileId,
@@ -378,17 +483,39 @@ impl NewFile {
     }
 }
 
-impl TrialRoot {
-    /// The folder of `place`, when it is the very one recorded.
-    pub fn open(place: &super::journal::Place) -> anyhow::Result<Self> {
+impl WriteRoot {
+    /// The folder a job of the journal in `dir` has in `role`, when it may be written in now and is the very one recorded:
+    /// looked up here, so that no other place (the job's original, a folder chosen somewhere) can ever be passed for it.
+    pub fn of_job(dir: &Path, id: &str, role: Role) -> anyhow::Result<Self> {
+        use crate::unity6::journal::{self, Phase};
+        let record = journal::read(dir);
+        if let Some(why) = record.error.clone().or_else(|| record.uncertain(id)) {
+            anyhow::bail!("{}", journal::uncertain_text(&why));
+        }
+        let job = record.job(id).ok_or_else(|| anyhow::anyhow!("{}", journal::gone_text()))?;
+        let place = match role {
+            Role::Trial => Some(&job.trial),
+            Role::Migrated => job.migrated.as_ref(),
+            Role::Adopting => job.adopting.as_ref(),
+        };
+        let Some(place) = place else { anyhow::bail!("{}", journal::gone_text()) };
         let not_it = || anyhow::anyhow!("{}", tr!("The folder at {path} is not the trial Orbiters made.", path = place.path.display()));
+        let allowed = match role {
+            Role::Trial => !matches!(job.phase, Phase::Planned),
+            Role::Migrated | Role::Adopting => matches!(job.phase, Phase::Listed | Phase::Abandoned { .. }),
+        };
         let recorded = place.id.ok_or_else(not_it)?;
-        let dir = sys::open_root(&place.path, false).map_err(|_| not_it())?;
-        let id = id_of_file(&dir)?;
-        if sys::is_link(&dir)? || id != recorded || !dir.metadata()?.is_dir() {
+        // Never the original, whatever the record says.
+        let apart = job.source.id.is_some_and(|source| source != recorded) && crate::owned::id_of(&job.source.path).ok() != Some(recorded);
+        if !allowed || !apart {
             return Err(not_it());
         }
-        Ok(Self { id, real: sys::final_path(&dir)?, path: place.path.clone(), dir, last: Mutex::default() })
+        let held = sys::open_root(&place.path, false).map_err(|_| not_it())?;
+        let now = id_of_file(&held)?;
+        if sys::is_link(&held)? || now != recorded || !held.metadata()?.is_dir() {
+            return Err(not_it());
+        }
+        Ok(Self { id: now, real: sys::final_path(&held)?, path: place.path.clone(), dir: held, last: Mutex::default() })
     }
 
     /// `file` (just opened below this root) as the gate takes it: not a link, on the root's volume, below the root.
@@ -405,7 +532,9 @@ impl TrialRoot {
     fn dir(&self, rel: &Path) -> io::Result<File> {
         if let Some((at, dir)) = &*self.last.lock().unwrap() {
             if at == rel {
-                return dir.try_clone();
+                let dir = dir.try_clone()?;
+                // Not held elsewhere than on Windows: still below the root before anything is made in it.
+                return if cfg!(windows) || rel.as_os_str().is_empty() { Ok(dir) } else { self.inside(dir, rel) };
             }
         }
         let mut at = self.dir.try_clone()?;
@@ -418,11 +547,11 @@ impl TrialRoot {
         Ok(at)
     }
 
-    /// A new folder at `rel` (its parent made before), with its identity.
-    pub fn make_dir(&self, rel: &Path) -> io::Result<FileId> {
+    /// A new folder at `rel` (its parent made before), with its identity, held.
+    pub fn make_dir(&self, rel: &Path) -> io::Result<(FileId, HeldDir)> {
         let (parent, name) = split(rel)?;
         let made = self.inside(sys::open_at(&self.dir(parent)?, name, Want::NewDir, false)?, rel)?;
-        id_of_file(&made)
+        Ok((id_of_file(&made)?, HeldDir(made)))
     }
 
     /// A new file at `rel`: never one that is there.
@@ -456,22 +585,98 @@ impl TrialRoot {
         sys::free_space(&self.dir)
     }
 
-    /// The trial's own folder as something to compare with.
-    pub fn protected(&self) -> Protected {
-        Protected { id: Some(self.id), real: self.real.clone(), shown: self.path.clone() }
-    }
-
-    /// Puts the trial on VCC's and ALCOM's list (`on`) or takes it off, the very folder held meanwhile. What VCC's library
-    /// writes is its own list, never the trial.
+    /// Puts the project on VCC's and ALCOM's list (`on`) or takes it off by its identity, the very folder held meanwhile. No
+    /// byte of it is written (`crate::vcc_list`).
     pub fn list(&self, vcc: &Path, on: bool) -> anyhow::Result<()> {
-        crate::runtime()?.block_on(crate::vpm::register(vcc, &self.path, on))
+        let which = crate::vcc_list::Which::folder(&self.path, self.id);
+        crate::runtime()?.block_on(crate::vpm::list_entry(vcc, &self.path, &which, on))
     }
 }
 
-/// Takes a folder that is not there any more off VCC's and ALCOM's list (nothing of it can be held).
-pub fn unlist_missing(vcc: &Path, path: &Path) -> anyhow::Result<()> {
-    anyhow::ensure!(!path.exists(), "{}", tr!("The folder at {path} is not the trial Orbiters made.", path = path.display()));
-    crate::runtime()?.block_on(crate::vpm::register(vcc, path, false))
+/// Creator Companion's and ALCOM's own folder, where one entry of their list is put in or taken out.
+pub struct ListRoot {
+    dir: File,
+}
+
+impl ListRoot {
+    pub fn open(root: &Path) -> io::Result<Self> {
+        std::fs::create_dir_all(root)?;
+        Ok(Self { dir: sys::open_root(root, true)? })
+    }
+
+    /// The file `name` as it is; `None` when there is none.
+    pub fn read(&self, name: &Path) -> io::Result<Option<Vec<u8>>> {
+        let (_, name) = split(name)?;
+        match sys::open_at(&self.dir, name, Want::File, true) {
+            Ok(mut file) => {
+                let mut out = vec![];
+                file.read_to_end(&mut out)?;
+                Ok(Some(out))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Replaces the file `name` whole, at once, when it is still `before` and nobody holds it open.
+    pub fn replace(&self, name: &Path, before: Option<&[u8]>, after: &[u8]) -> anyhow::Result<()> {
+        let (_, leaf) = split(name)?;
+        let busy = || anyhow::anyhow!("{}", tr!("Creator Companion or ALCOM is using {file}: close it, then try again. Nothing was changed.", file = name.display()));
+        // Alone with it until it is replaced: anybody else having it open refuses this, and nobody changes it meanwhile.
+        let alone = match before {
+            Some(_) => Some(sys::open_at(&self.dir, leaf, Want::Alone, false).map_err(|_| busy())?),
+            None => None,
+        };
+        if let Some(mut now) = alone.as_ref() {
+            anyhow::ensure!(!sys::is_link(now)?, "{}", tr!("{path} is a link: Orbiters does not write through it.", path = name.display()));
+            // Somebody else's change since it was read is never written over.
+            let mut bytes = vec![];
+            now.read_to_end(&mut bytes)?;
+            anyhow::ensure!(Some(&bytes[..]) == before, "{}", busy());
+        } else {
+            anyhow::ensure!(self.read(name)?.is_none(), "{}", busy());
+        }
+        let temp = OsString::from(format!("{}.{}.tmp", leaf.to_string_lossy(), uuid::Uuid::new_v4().simple())); // i18n: not shown (a file's name)
+        let mut file = sys::open_at(&self.dir, &temp, Want::NewFile, false)?;
+        let done = (|| -> anyhow::Result<()> {
+            file.write_all(after)?;
+            file.sync_all()?;
+            sys::publish_held(&self.dir, &file, &temp, leaf, alone).map_err(|_| busy())
+        })();
+        if done.is_err() {
+            if let Ok(id) = id_of_file(&file) {
+                drop(file);
+                let _ = sys::remove_at(&self.dir, &temp, id, false);
+            }
+        }
+        done
+    }
+}
+
+/// Orbiters' own folders (`own`: its app data, VCC's list) are nothing the original can see: else what is written there would
+/// be written in the original. A folder that is not there yet is asked by the nearest one above it.
+pub fn apart(own: &[&Path], protected: &[Protected]) -> Result<(), Refused> {
+    for folder in own {
+        let mut at: &Path = folder;
+        while !at.exists() {
+            let Some(above) = at.parent() else { break };
+            at = above;
+        }
+        let Ok(held) = ReadRoot::open(at) else { continue };
+        let mut above = Some(held.real.as_path());
+        // Either way round: what is written here is seen in the original, or the original sees what is kept here. (The original
+        // itself, first among them, may be somewhere inside: a template of VCC's.)
+        let mut shared = protected.iter().any(|p| p.id == Some(held.id) || sys::within(&held.real, &p.real)) || (at == *folder && protected.iter().skip(1).any(|p| sys::within(&p.real, &held.real)));
+        while let (false, Some(up)) = (shared, above) {
+            let id = sys::open_root(up, false).and_then(|d| id_of_file(&d)).ok();
+            shared = id.is_some() && protected.iter().any(|p| p.id == id);
+            above = up.parent();
+        }
+        if shared {
+            return Err(Refused::Own(folder.to_path_buf()));
+        }
+    }
+    Ok(())
 }
 
 /// Whether Unity holds the project's lock file, asked by reading only (the original is never opened for writing): a read that
@@ -623,6 +828,27 @@ impl AppRoot {
         listed.into_iter().filter(|e| matches!(e.kind, Kind::File { .. })).map(|e| e.name).collect()
     }
 
+    /// The folders in the folder `rel` (none when it is not there).
+    pub fn folders(&self, rel: &Path) -> Vec<OsString> {
+        let listed = self.sub(rel, false).and_then(|d| entries(&d)).unwrap_or_default();
+        listed.into_iter().filter(|e| e.kind == Kind::Dir).map(|e| e.name).collect()
+    }
+
+    /// Removes the folder `rel` and what is in it, following nothing: a link in it is taken away as one.
+    pub fn remove_tree(&self, rel: &Path) -> io::Result<()> {
+        let dir = self.sub(rel, false)?;
+        empty(&dir)?;
+        let (parent, name) = split(rel)?;
+        let id = id_of_file(&dir)?;
+        drop(dir);
+        sys::remove_at(&self.sub(parent, false)?, name, id, true).map(|_| ())
+    }
+
+    /// The folder `rel`, made when it is not there.
+    pub fn make_dir(&self, rel: &Path) -> io::Result<()> {
+        self.sub(rel, true).map(|_| ())
+    }
+
     /// Removes the file `rel` (never a link, never a folder).
     pub fn remove_file(&self, rel: &Path) -> io::Result<()> {
         let (parent, name) = split(rel)?;
@@ -630,6 +856,23 @@ impl AppRoot {
         let id = id_of_file(&sys::open_at(&dir, name, Want::File, false)?)?;
         sys::remove_at(&dir, name, id, false).map(|_| ())
     }
+}
+
+fn empty(dir: &File) -> io::Result<()> {
+    for e in entries(dir)? {
+        match e.kind {
+            Kind::Dir => {
+                let sub = sys::open_at(dir, &e.name, Want::Dir { hold: false }, false)?;
+                let id = id_of_file(&sub)?;
+                empty(&sub)?;
+                drop(sub);
+                sys::remove_at(dir, &e.name, id, true)?;
+            }
+            Kind::Link { dir: folder } => sys::unlink_at(dir, &e.name, folder)?,
+            Kind::File { .. } | Kind::Other => sys::unlink_at(dir, &e.name, false)?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

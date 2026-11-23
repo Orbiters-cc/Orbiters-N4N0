@@ -86,6 +86,8 @@ pub enum Want {
     Append,
     /// A file to lock, made when it is not there.
     Lock,
+    /// A file that is there, which nobody else has open.
+    Alone,
     /// What is there, to delete.
     Delete { dir: bool },
 }
@@ -121,6 +123,7 @@ pub fn open_at(dir: &File, name: &OsStr, want: Want, follow: bool) -> io::Result
         Want::NewFile => (READ_DATA | WRITE_DATA | READ_ATTRIBUTES | WRITE_ATTRIBUTES | DELETE, SHARE_READ, CREATE, NOT_DIRECTORY),
         Want::Append => (READ_DATA | APPEND_DATA | READ_ATTRIBUTES, SHARE_READ | SHARE_WRITE, OPEN_IF, NOT_DIRECTORY),
         Want::Lock => (READ_DATA | WRITE_DATA | READ_ATTRIBUTES, SHARE_READ | SHARE_WRITE, OPEN_IF, NOT_DIRECTORY),
+        Want::Alone => (READ_DATA | WRITE_DATA | READ_ATTRIBUTES, SHARE_DELETE, OPEN, NOT_DIRECTORY),
         Want::Delete { dir } => (DELETE | READ_ATTRIBUTES, all, OPEN, if dir { DIRECTORY | BACKUP_INTENT } else { NOT_DIRECTORY }),
     };
     let options = options | SYNCHRONOUS | if follow { 0 } else { REPARSE_POINT };
@@ -227,7 +230,6 @@ pub struct Listed {
     /// Another reparse point (a file kept online, deduplicated): read like any other, never written through.
     pub special: bool,
     pub len: u64,
-    pub modified: u64,
 }
 
 pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
@@ -263,7 +265,6 @@ pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
                     link: surrogate,
                     special: reparse && !surrogate,
                     len: entry.EndOfFile as u64,
-                    modified: entry.LastWriteTime as u64,
                 });
             }
             if entry.NextEntryOffset == 0 {
@@ -281,6 +282,11 @@ pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Resu
     if is_link(&file)? || crate::owned::id_of_file(&file)? != id {
         return Ok(false);
     }
+    delete(&file)?;
+    Ok(true)
+}
+
+fn delete(file: &File) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: a live handle and a value of the size given.
     unsafe {
@@ -291,19 +297,41 @@ pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Resu
             std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     }
-    .map_err(|e| io::Error::from_raw_os_error((e.code().0 as u32 & 0xffff) as i32))?;
-    Ok(true)
+    .map_err(|e| io::Error::from_raw_os_error((e.code().0 as u32 & 0xffff) as i32))
+}
+
+/// Takes away the file or link `name` itself under `dir` (never what a link leads to): for Orbiters' own staging folder.
+pub fn unlink_at(dir: &File, name: &OsStr, is_dir: bool) -> io::Result<()> {
+    delete(&open_at(dir, name, Want::Delete { dir: is_dir }, false)?)
 }
 
 /// Puts the open file `file` (made under `dir` by this process) at `name` under `dir`, in place of what is there.
 pub fn publish_at(dir: &File, file: &File, _from: &OsStr, name: &OsStr) -> io::Result<()> {
+    rename(dir, file, name, false)
+}
+
+/// [`publish_at`] in the place of the file `held` (which nobody else has open), still held while it is replaced, where the
+/// disk can do that.
+pub fn publish_held(dir: &File, file: &File, _from: &OsStr, name: &OsStr, held: Option<File>) -> io::Result<()> {
+    match &held {
+        Some(_) if rename(dir, file, name, true).is_ok() => Ok(()),
+        _ => {
+            drop(held);
+            rename(dir, file, name, false)
+        }
+    }
+}
+
+/// `posix`: what is replaced may be open (by whoever shares it so).
+fn rename(dir: &File, file: &File, name: &OsStr, posix: bool) -> io::Result<()> {
     let wide: Vec<u16> = name.encode_wide().collect();
     // FILE_RENAME_INFORMATION: replace (aligned), the root directory, the name's length in bytes, the name.
     let mut buffer = vec![0u64; 3 + wide.len() / 4 + 1];
     let bytes = buffer.as_mut_ptr().cast::<u8>();
     // SAFETY: the buffer is larger than the header and the name written into it.
     unsafe {
-        *bytes = 1;
+        // FILE_RENAME_INFORMATION_EX has flags where the other one has a byte: replace (1), POSIX (2).
+        *bytes = if posix { 3 } else { 1 };
         *bytes.add(8).cast::<*mut c_void>() = dir.as_raw_handle();
         *bytes.add(16).cast::<u32>() = (wide.len() * 2) as u32;
         std::ptr::copy_nonoverlapping(wide.as_ptr(), bytes.add(20).cast::<u16>(), wide.len());
@@ -312,11 +340,11 @@ pub fn publish_at(dir: &File, file: &File, _from: &OsStr, name: &OsStr) -> io::R
     let mut tries = 0;
     loop {
         let mut io = IoStatus { status: 0, information: 0 };
-        // SAFETY: live handles; the buffer holds `length` bytes of the structure class 10 expects.
-        let status = unsafe { NtSetInformationFile(file.as_raw_handle(), &mut io, buffer.as_ptr().cast(), length, 10) };
+        // SAFETY: live handles; the buffer holds `length` bytes of the structure classes 10 and 65 expect.
+        let status = unsafe { NtSetInformationFile(file.as_raw_handle(), &mut io, buffer.as_ptr().cast(), length, if posix { 65 } else { 10 }) };
         match check(status) {
             // Someone reads or replaces the same file at this instant.
-            Err(_) if tries < 20 => {
+            Err(_) if !posix && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(5 * tries));
             }

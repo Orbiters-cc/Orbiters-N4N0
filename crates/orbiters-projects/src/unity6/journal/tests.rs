@@ -233,3 +233,28 @@ fn a_killed_process_leaves_no_lock_behind() {
     drop(Lease::take(&e.app, &job.id).unwrap());
     set(&e.app, &job.id, |j| j.error = None).unwrap();
 }
+
+/// Third verification B5: the only line of a trial destroyed past recognition, its folder is not an ordinary project: where a
+/// job's folders are is kept beside its logs too. Set aside by the person, it is.
+#[test]
+fn a_trial_whose_only_line_is_lost_is_not_an_ordinary_project() {
+    use crate::unity6::authority::{allow, state, Action, TrialState};
+    let e = env();
+    let job = run(&e).unwrap();
+    // Every line of it, each damaged so that nothing of it can be read.
+    let lines = text(&e).iter().filter(|b| **b == b'\n').count();
+    put(&e, &b"################\n".repeat(lines));
+    let r = read(&e.app);
+    assert!(r.jobs.is_empty() && r.named(&job.trial.path).is_none());
+    assert!(matches!(state(&e.app, &job.trial.path), TrialState::Unknown(_)));
+    for action in [Action::Packages, Action::List, Action::Unlist, Action::Duplicate, Action::Storage] {
+        assert!(allow(&e.app, &job.trial.path, action).is_err(), "{action:?}");
+    }
+    // Moved, it still is what it is; other projects are what they are.
+    let moved = e.root.join("Projects/Moved");
+    std::fs::rename(&job.trial.path, &moved).unwrap();
+    assert!(matches!(state(&e.app, &moved), TrialState::Unknown(_)));
+    assert_eq!(state(&e.app, &e.source), TrialState::NotATrial);
+    set_aside(&e.app).unwrap();
+    assert_eq!(state(&e.app, &moved), TrialState::NotATrial);
+}

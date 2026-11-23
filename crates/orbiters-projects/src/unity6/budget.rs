@@ -178,9 +178,9 @@ pub struct EditorNeed {
 }
 
 impl EditorNeed {
-    /// What adding modules to the editor installed here takes: `None` when it needs none.
-    pub fn modules(size: &super::matrix::EditorSize, android: bool, ios: bool) -> Option<Self> {
-        let mut need = Self { install_at: editor_install_folder(), installed: 0, download_at: std::env::temp_dir(), download: 0 };
+    /// What adding modules to the editor `program` installed here takes, on the disk it is on: `None` when it needs none.
+    pub fn modules(program: &Path, size: &super::matrix::EditorSize, android: bool, ios: bool) -> Option<Self> {
+        let mut need = Self { install_at: program.parent().unwrap_or(program).to_path_buf(), installed: 0, download_at: std::env::temp_dir(), download: 0 };
         for (wanted, module) in [(android, size.android), (ios, size.ios)] {
             if let (true, Some([d, i])) = (wanted, module) {
                 need.download += d;
@@ -195,7 +195,11 @@ impl EditorNeed {
     pub fn here(size: &super::matrix::EditorSize, unity6: &super::editors::Found, unity2022: &super::editors::Found) -> Option<Self> {
         let wanted = unity2022.usable().map(|c| c.modules).unwrap_or(super::editors::Modules { android: true, android_tools: true, ios: true });
         match unity6 {
-            super::editors::Found::Exact(c) => Self::modules(size, wanted.android && !c.modules.android, wanted.ios && !c.modules.ios),
+            super::editors::Found::Exact(c) => {
+                // Its Android module without the SDK, NDK and JDK is not enough to build: they are counted whole.
+                let android = (wanted.android && !c.modules.android) || (wanted.android_tools && !c.modules.android_tools);
+                Self::modules(&c.program, size, android, wanted.ios && !c.modules.ios)
+            }
             _ => Some(Self::of(size, wanted.android, wanted.ios)),
         }
     }

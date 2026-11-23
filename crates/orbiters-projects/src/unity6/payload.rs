@@ -1,13 +1,16 @@
-//! What a trial is made of, read from the original and nothing else: every file and folder a copy takes, what the original
-//! links to or takes packages from outside it (where a trial must never go), its content IDs, and the few files whose bytes
-//! are the trial's own (its product GUID, the entries of its local packages). The original is only read ([`ReadRoot`]).
+//! What a copy of a project is made of, read from the original and nothing else: every file and folder a copy takes, what the
+//! original links to or takes packages from outside it (where a copy must never go), and the few files whose bytes are the
+//! copy's own (its product GUID, the entries of its local packages, packages it was missing). The original is only read
+//! ([`ReadRoot`]). A trial and a duplicate are both made of one.
 //!
-//! A linked folder is copied as ordinary files: the trial holds no link at all, so nothing in it is anything the original
-//! can see. (Refusing such projects instead would leave everyone who shares assets between projects without a trial; what
-//! made links dangerous is the trial's place, which is checked against every one of them before anything is made.)
+//! A linked folder is copied as ordinary files: the copy holds no link at all, so nothing in it is anything the original
+//! can see. (Refusing such projects instead would leave everyone who shares assets between projects without a copy; what
+//! made links dangerous is the copy's place, which is checked against every one of them before anything is made.)
 
-use super::gate::{Entry, Kind, Protected, ReadFile, ReadRoot, TrialRoot};
+use super::content::{self, Content};
+use super::gate::{Entry, Kind, Protected, ReadFile, ReadRoot, WriteRoot};
 use super::journal::hex;
+use crate::templates::Keep;
 use orbiters_i18n::tr;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -28,7 +31,7 @@ pub struct Origin {
 pub enum Item {
     Dir,
     File(Origin),
-    /// The trial's own bytes, made from the original's.
+    /// The copy's own bytes, made from the original's.
     Made(Vec<u8>),
 }
 
@@ -46,44 +49,67 @@ pub struct Outside {
     pub from: PathBuf,
 }
 
-/// Everything a trial of one project holds.
+/// What a copy is for.
+#[derive(Clone, Copy, Default)]
+pub struct Making<'a> {
+    pub keep: Keep,
+    /// What makes it a project of its own (`None`: the files as they are).
+    pub own: Option<Own<'a>>,
+    /// A trial: everything it cannot do without must be there and understood, or it is refused. Else a project is copied as it
+    /// is, its own faults included.
+    pub strict: bool,
+    /// The Unity version of a project that does not say one.
+    pub unity: Option<&'a str>,
+}
+
+/// A copy's own settings.
+#[derive(Clone, Copy)]
+pub struct Own<'a> {
+    pub name: &'a str,
+    /// The product name it takes `name` in the place of (`None`: whatever it was).
+    pub from: Option<&'a str>,
+    pub guid: &'a str,
+}
+
+/// Everything a copy of one project holds.
 pub struct Payload {
     roots: Vec<ReadRoot>,
-    /// By its path in the trial, folders before what is in them.
+    /// By its path in the copy, folders before what is in them.
     pub items: BTreeMap<PathBuf, Item>,
     pub bytes: u64,
     pub linked: Vec<Linked>,
     pub outside: Vec<Outside>,
-    /// Local packages whose `Packages/manifest.json` entry is changed in the trial.
+    /// Local packages whose `Packages/manifest.json` entry is changed in the copy.
     pub localized: Vec<String>,
-    /// What a trial must never go into: the original, what it links to, its local packages.
+    /// What a copy must never go into: the original, what it links to, its local packages.
     pub protected: Vec<Protected>,
-    /// The content IDs (`avtr_…`, `wrld_…`) the project's scenes and prefabs were uploaded as.
-    pub content: BTreeSet<String>,
     /// Layouts a copy cannot keep whole.
     pub problems: Vec<String>,
-    /// Local packages that are not where the project says.
-    pub missing: Vec<String>,
+    /// Local packages that are not where the project says, and where that is.
+    pub missing: Vec<(String, PathBuf)>,
+    /// Why a local package is not in a copy that is made without it (not [`Making::strict`]).
+    pub late: Option<String>,
 }
 
-/// What a copy without its Library leaves out, at any depth ([`crate::templates`]' rules).
-fn left_out(entry: &Entry, depth: usize, project: bool) -> bool {
+/// What a copy leaves out, at any depth ([`crate::templates`]' rules).
+fn left_out(entry: &Entry, depth: usize, keep: Keep, project: bool) -> bool {
     let dir = matches!(entry.kind, Kind::Dir | Kind::Link { dir: true });
-    crate::templates::left_out(&entry.name.to_string_lossy(), depth, dir, crate::templates::Keep::default(), project)
+    crate::templates::left_out(&entry.name.to_string_lossy(), depth, dir, keep, project)
 }
 
 /// Files Unity cannot do without: a project missing one is not copied.
 pub const NEEDED: [&str; 3] = ["ProjectSettings/ProjectVersion.txt", "ProjectSettings/ProjectSettings.asset", "Packages/manifest.json"];
 const SETTINGS: &str = "ProjectSettings/ProjectSettings.asset";
 const MANIFEST: &str = "Packages/manifest.json";
+const VPM_MANIFEST: &str = "Packages/vpm-manifest.json";
+pub const VERSION_FILE: &str = "ProjectSettings/ProjectVersion.txt";
 
 /// How deep links may lead through other links.
 const DEEPEST: usize = 64;
 
 struct Scan<'a> {
     cancel: &'a AtomicBool,
-    /// Whether scenes and prefabs are read for what they were uploaded as.
-    content: bool,
+    how: Making<'a>,
     out: Payload,
     /// The folders being gone through, so that a link to one of them is refused instead of followed for ever.
     open: Vec<crate::owned::FileId>,
@@ -98,7 +124,7 @@ impl Scan<'_> {
         let entries = self.out.roots[root].entries(rel).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = at.display(), error = e)))?;
         for e in entries {
             let (from, to) = (rel.join(&e.name), at.join(&e.name));
-            let out = left_out(&e, depth, project);
+            let out = left_out(&e, depth, self.how.keep, project);
             if let Kind::Link { .. } = e.kind {
                 // What it leads to is never a trial's place, copied or not (a Library kept on another disk is one).
                 let place = self.out.roots[root].protected_at(&from).map_err(|e| anyhow::anyhow!("{}", tr!("The link {path} leads nowhere that can be read: {error}", path = to.display(), error = e)));
@@ -139,12 +165,9 @@ impl Scan<'_> {
                     let follow = matches!(e.kind, Kind::Link { .. } | Kind::File { online: true });
                     let len = if matches!(e.kind, Kind::Link { .. }) { size_of(&mut self.out.roots[root].file(&from, true)?)? } else { e.len };
                     self.out.bytes = self.out.bytes.saturating_add(len);
-                    let origin = Origin { root, rel: from, follow };
-                    if project && self.content {
-                        self.content(&to, &origin)?;
-                    }
-                    self.put(to, Item::File(origin));
+                    self.put(to, Item::File(Origin { root, rel: from, follow }));
                 }
+                Kind::Other if !self.how.strict => {}
                 Kind::Other => anyhow::bail!("{}", tr!("{path} is not a file or a folder: a copy cannot keep it.", path = to.display())),
             }
         }
@@ -157,16 +180,18 @@ impl Scan<'_> {
         }
     }
 
-    /// The content IDs a scene or prefab was uploaded as. (The SDK's own samples are nobody's upload: every project has them.)
-    fn content(&mut self, at: &Path, origin: &Origin) -> anyhow::Result<()> {
-        let is = |x: &str| at.extension().is_some_and(|e| e.eq_ignore_ascii_case(x));
-        let sdk = at.components().nth(1).is_some_and(|c| c.as_os_str().to_string_lossy().to_lowercase().starts_with("com.vrchat.")) && at.starts_with("Packages");
-        if (is("unity") || is("prefab")) && !sdk {
-            let mut bytes = vec![];
-            self.out.open(origin)?.read_to_end(&mut bytes)?;
-            self.out.content.extend(content_ids(&bytes));
+    /// All of the file that `item` is, or `None` when it is not one.
+    fn read(&self, at: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+        self.out.read(at)
+    }
+
+    /// `name` is a fault of the project: a trial is not made of it; any other copy is, and says so (`why`).
+    fn fault(&mut self, name: &str, why: impl FnOnce() -> String) {
+        if self.how.strict {
+            self.out.problems.push(name.to_string());
+        } else if self.out.late.is_none() {
+            self.out.late = Some(why());
         }
-        Ok(())
     }
 }
 
@@ -174,84 +199,33 @@ fn size_of(file: &mut ReadFile) -> anyhow::Result<u64> {
     Ok(std::io::copy(file, &mut std::io::sink())?)
 }
 
-/// The content IDs written in a scene or prefab as what it was uploaded as. In Unity's text only where a blueprint ID is
-/// (a portal names other worlds); in a binary file anything that looks like one (it cannot be told, and a warning too many
-/// costs less than one too few).
-pub fn content_ids(bytes: &[u8]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut find = |text: &[u8]| {
-        for prefix in [&b"avtr_"[..], b"wrld_", b"prop_"] {
-            let mut rest = text;
-            while let Some(i) = rest.windows(prefix.len()).position(|w| w == prefix) {
-                let id = &rest[i..rest.len().min(i + prefix.len() + 36)];
-                let uuid = &id[prefix.len()..];
-                if uuid.len() == 36 && uuid.iter().all(|b| b.is_ascii_hexdigit() || *b == b'-') {
-                    out.insert(String::from_utf8_lossy(id).to_lowercase());
-                }
-                rest = &rest[i + prefix.len()..];
-            }
-        }
-    };
-    if bytes.starts_with(b"%YAML") || bytes.starts_with(b"\xef\xbb\xbf%YAML") || !bytes.contains(&0) {
-        let mut property = false;
-        for line in bytes.split(|b| *b == b'\n') {
-            let says = |word: &[u8]| line.windows(word.len()).any(|w| w == word);
-            // A component's own field, or a prefab override's value under its property's name.
-            if says(b"blueprintId:") || (property && says(b"value:")) {
-                find(line);
-            }
-            if says(b"propertyPath:") {
-                property = says(b"blueprintId");
-            }
-        }
-    } else {
-        find(bytes);
-    }
-    out
-}
-
-/// Reads what a trial of `original` holds. `guid`: the trial's product GUID; `name`: its folder's name.
-pub fn scan(original: &Path, name: &str, guid: &str, cancel: &AtomicBool) -> anyhow::Result<Payload> {
-    scan_for(original, name, guid, true, cancel)
-}
-
-/// [`scan`] without reading any scene ([`Payload::content`] is empty): for looking at a place.
-pub fn scan_layout(original: &Path, name: &str, cancel: &AtomicBool) -> anyhow::Result<Payload> {
-    scan_for(original, name, "", false, cancel)
-}
-
-fn scan_for(original: &Path, name: &str, guid: &str, content: bool, cancel: &AtomicBool) -> anyhow::Result<Payload> {
+/// Reads what a copy of `original` holds.
+pub fn scan(original: &Path, how: Making, cancel: &AtomicBool) -> anyhow::Result<Payload> {
     let root = ReadRoot::open(original).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = original.display(), error = e)))?;
     let (id, protected) = (root.id, root.protected());
-    let mut scan = Scan {
-        cancel,
-        content,
-        out: Payload {
-            roots: vec![root],
-            items: BTreeMap::new(),
-            bytes: 0,
-            linked: vec![],
-            outside: vec![],
-            localized: vec![],
-            protected: vec![protected],
-            content: BTreeSet::new(),
-            problems: vec![],
-            missing: vec![],
-        },
-        open: vec![id],
-    };
+    let mut scan = Scan { cancel, how, out: Payload::of(root, protected), open: vec![id] };
     scan.folder(0, Path::new(""), Path::new(""), 1, true)?;
-    for needed in NEEDED {
-        if !matches!(scan.out.items.get(Path::new(needed)), Some(Item::File(_))) {
-            scan.out.problems.push(needed.to_string());
+    if how.strict {
+        for needed in NEEDED {
+            if !matches!(scan.out.items.get(Path::new(needed)), Some(Item::File(_))) {
+                scan.out.problems.push(needed.to_string());
+            }
         }
     }
-    local_packages(&mut scan, original)?;
-    settings(&mut scan.out, original, name, guid)?;
-    // Two names the trial's disk would take for one (a package of the project's own in the place of a local one).
-    let mut seen = BTreeSet::new();
-    let twice: Vec<String> = scan.out.items.keys().filter(|k| !seen.insert(k.to_string_lossy().to_lowercase())).map(|k| k.display().to_string()).collect();
-    scan.out.problems.extend(twice);
+    if let Some(own) = how.own {
+        local_packages(&mut scan, original)?;
+        settings(&mut scan, own)?;
+    }
+    if let (Some(unity), false) = (how.unity, scan.out.items.contains_key(Path::new(VERSION_FILE))) {
+        scan.out.items.entry(PathBuf::from("ProjectSettings")).or_insert(Item::Dir); // i18n: not shown (a folder's name)
+        scan.out.items.insert(PathBuf::from(VERSION_FILE), Item::Made(format!("m_EditorVersion: {unity}\n").into_bytes()));
+    }
+    if how.strict {
+        // Two names the copy's disk would take for one (a package of the project's own in the place of a local one).
+        let mut seen = BTreeSet::new();
+        let twice: Vec<String> = scan.out.items.keys().filter(|k| !seen.insert(k.to_string_lossy().to_lowercase())).map(|k| k.display().to_string()).collect();
+        scan.out.problems.extend(twice);
+    }
     scan.out.problems.sort();
     scan.out.problems.dedup();
     Ok(scan.out)
@@ -287,26 +261,25 @@ fn entry_for(rel: &Path) -> String {
     }
 }
 
-/// The project's local packages: those outside it become part of the trial, under `Packages`, and their entries name them
-/// there; those inside it keep (or get) an entry that names them inside the trial.
+/// The project's local packages: those outside it become part of the copy, under `Packages`, and their entries name them
+/// there; those inside it keep (or get) an entry that names them inside the copy.
 fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
-    for lock in ["Packages/packages-lock.json", "Packages/vpm-manifest.json"] {
-        if let Some(Item::File(o)) = scan.out.items.get(Path::new(lock)).cloned() {
-            let mut bytes = vec![];
-            scan.out.open(&o)?.read_to_end(&mut bytes)?;
-            match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(v) if v.is_object() => {}
-                _ => scan.out.problems.push(lock.to_string()),
+    if scan.how.strict {
+        for lock in ["Packages/packages-lock.json", VPM_MANIFEST] {
+            if let Some(bytes) = scan.read(Path::new(lock))? {
+                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(v) if v.is_object() => {}
+                    _ => scan.out.problems.push(lock.to_string()),
+                }
             }
         }
     }
-    let Some(Item::File(o)) = scan.out.items.get(Path::new(MANIFEST)).cloned() else { return Ok(()) };
-    let mut bytes = vec![];
-    scan.out.open(&o)?.read_to_end(&mut bytes)?;
+    let Some(bytes) = scan.read(Path::new(MANIFEST))? else { return Ok(()) };
+    let unreadable = || tr!("{path} cannot be read: {error}", path = MANIFEST, error = tr("it is not a package list"));
     let mut manifest: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v @ serde_json::Value::Object(_)) => v,
         _ => {
-            scan.out.problems.push(MANIFEST.to_string());
+            scan.fault(MANIFEST, unreadable);
             return Ok(());
         }
     };
@@ -314,39 +287,41 @@ fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
         None => return Ok(()),
         Some(serde_json::Value::Object(d)) => d.clone(),
         Some(_) => {
-            scan.out.problems.push(MANIFEST.to_string());
+            scan.fault(MANIFEST, unreadable);
             return Ok(());
         }
     };
+    let strict = scan.how.strict;
     let mut changed = false;
     for (name, value) in dependencies {
         let Some(value) = value.as_str() else {
-            scan.out.problems.push(name.clone());
+            if strict {
+                scan.out.problems.push(name);
+            }
             continue;
         };
         let Some(local) = value.strip_prefix("file:") else { continue };
         if name.is_empty() || name.contains(['/', '\\', ':']) || name.contains("..") {
-            scan.out.problems.push(name.clone());
+            scan.fault(&name, || tr!("Invalid package name: {name}", name = name));
             continue;
         }
         let (inside, absolute) = (lexical(local), Path::new(local).is_absolute());
-        // Copied with the project, whatever links lead to it: its entry names it in the trial as it did in the original.
-        if !absolute && inside.as_ref().is_some_and(|i| scan.out.items.contains_key(i)) {
-            let package = inside.unwrap();
-            if nested(scan, &package)? {
+        // Copied with the project, whatever links lead to it: its entry names it in the copy as it did in the original.
+        if let Some(package) = inside.filter(|i| !absolute && scan.out.items.contains_key(i)) {
+            if strict && !package_whole(scan, &package, &name)? {
                 scan.out.problems.push(name.clone());
             }
             continue;
         }
         let at = if absolute { PathBuf::from(local) } else { original.join("Packages").join(local) };
         let Ok(real) = std::fs::canonicalize(&at) else {
-            scan.out.missing.push(name.clone());
+            scan.out.missing.push((name.clone(), at));
             continue;
         };
         let folder = real.is_dir();
         let parent = if folder { real.clone() } else { real.parent().unwrap_or(&real).to_path_buf() };
         let root = ReadRoot::open(&parent).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = at.display(), error = e)))?;
-        // Named by its whole path though it is inside the original: the trial names its own copy.
+        // Named by its whole path though it is inside the original: the copy names its own.
         let own = scan.out.roots[0].holds(&root.protected()).then(|| crate::owned::id_of(&real).ok()).flatten();
         if let Some(id) = own {
             let found = scan.out.items.iter().find_map(|(at, item)| match item {
@@ -356,46 +331,67 @@ fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
             });
             match found {
                 Some(rel) => {
-                    if nested(scan, &rel)? {
+                    if strict && !package_whole(scan, &rel, &name)? {
                         scan.out.problems.push(name.clone());
                     }
                     manifest["dependencies"][&name] = entry_for(&rel).into();
                     changed = true;
                     scan.out.localized.push(name);
+                    continue;
                 }
                 // Somewhere a copy leaves out (Library, Temp).
-                None => scan.out.problems.push(name.clone()),
+                None if strict => {
+                    scan.out.problems.push(name.clone());
+                    continue;
+                }
+                None => {}
             }
-            continue;
         }
         scan.out.outside.push(Outside { name: name.clone(), from: real.clone() });
-        // A folder the original takes a package from is never a trial's place (an archive has no inside to write in).
+        // A folder the original takes a package from is never a copy's place (an archive has no inside to write in).
         let p = root.protected();
         if folder && !scan.out.protected.contains(&p) {
             scan.out.protected.push(p);
         }
         let target = PathBuf::from("Packages").join(if folder { name.clone() } else { format!("{name}.tgz") });
-        let taken = scan.out.items.keys().any(|k| k.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy()));
-        if taken {
-            scan.out.problems.push(target.display().to_string());
-            continue;
-        }
-        let id = root.id;
-        scan.out.roots.push(root);
-        let new = scan.out.roots.len() - 1;
-        if folder {
-            scan.put(target.clone(), Item::Dir);
-            scan.open.push(id);
-            scan.folder(new, Path::new(""), &target, 1, false)?;
-            scan.open.pop();
-        } else {
-            let file = real.file_name().map(PathBuf::from).unwrap_or_default();
-            let origin = Origin { root: new, rel: file, follow: true };
-            scan.out.bytes = scan.out.bytes.saturating_add(size_of(&mut scan.out.open(&origin)?)?);
-            scan.put(target.clone(), Item::File(origin));
-        }
-        if nested(scan, &target)? {
-            scan.out.problems.push(name.clone());
+        let taken = scan.out.items.keys().find(|k| k.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy())).cloned();
+        let file = PathBuf::from(real.file_name().unwrap_or_default());
+        match taken {
+            Some(_) if strict => {
+                scan.out.problems.push(target.display().to_string());
+                continue;
+            }
+            // The project's own folder of that name is the package, as Unity takes it.
+            Some(_) if folder => {}
+            // The same archive is kept; another one is never written over.
+            Some(own) => {
+                let bytes = root.read(&file)?;
+                if scan.read(&own)?.as_deref() != Some(&bytes[..]) {
+                    scan.out.bytes = scan.out.bytes.saturating_add(bytes.len() as u64);
+                    scan.fault(&name, || {
+                        tr!("{file} in the copy's Packages folder is another archive than the one {name} needs ({path})", file = format!("{name}.tgz"), name = name, path = real.display())
+                    });
+                    continue;
+                }
+            }
+            None => {
+                let id = root.id;
+                scan.out.roots.push(root);
+                let new = scan.out.roots.len() - 1;
+                if folder {
+                    scan.put(target.clone(), Item::Dir);
+                    scan.open.push(id);
+                    scan.folder(new, Path::new(""), &target, 1, false)?;
+                    scan.open.pop();
+                } else {
+                    let origin = Origin { root: new, rel: file, follow: true };
+                    scan.out.bytes = scan.out.bytes.saturating_add(size_of(&mut scan.out.open(&origin)?)?);
+                    scan.put(target.clone(), Item::File(origin));
+                }
+                if strict && !package_whole(scan, &target, &name)? {
+                    scan.out.problems.push(name.clone());
+                }
+            }
         }
         manifest["dependencies"][&name] = entry_for(&target).into();
         changed = true;
@@ -407,30 +403,23 @@ fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the package at `at` of the trial asks for local packages of its own, or cannot be read as a package.
-fn nested(scan: &Scan, at: &Path) -> anyhow::Result<bool> {
+/// Whether the package at `at` of the copy is one Unity takes as `name`: its `package.json` an object that says that name and
+/// a version, with no local package of its own (nothing copies those).
+fn package_whole(scan: &Scan, at: &Path, name: &str) -> anyhow::Result<bool> {
     let manifest = match scan.out.items.get(at) {
-        Some(Item::Dir) => match scan.out.items.get(&at.join("package.json")) {
-            Some(Item::File(o)) => {
-                let mut bytes = vec![];
-                scan.out.open(o)?.read_to_end(&mut bytes)?;
-                bytes
-            }
-            _ => return Ok(true),
-        },
-        Some(Item::File(o)) => match archive_manifest(scan.out.open(o)?) {
-            Some(bytes) => bytes,
-            None => return Ok(true),
-        },
-        _ => return Ok(true),
+        Some(Item::Dir) => scan.read(&at.join("package.json"))?,
+        Some(Item::File(o)) => archive_manifest(scan.out.open(o)?),
+        _ => None,
     };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&manifest) else { return Ok(true) };
-    let deps = match v.get("dependencies") {
-        None => return Ok(false),
-        Some(serde_json::Value::Object(d)) => d,
-        Some(_) => return Ok(true),
+    let package = manifest.and_then(|m| serde_json::from_slice::<serde_json::Value>(&m).ok());
+    let Some(serde_json::Value::Object(package)) = package else { return Ok(false) };
+    let version = package.get("version").and_then(|v| v.as_str()).is_some_and(|v| v.parse::<vrc_get_vpm::version::Version>().is_ok());
+    let dependencies = match package.get("dependencies") {
+        None => true,
+        Some(serde_json::Value::Object(d)) => d.values().all(|d| d.as_str().is_some_and(|s| !s.starts_with("file:"))),
+        Some(_) => false,
     };
-    Ok(deps.values().any(|d| d.as_str().is_none_or(|s| s.starts_with("file:"))))
+    Ok(version && dependencies && package.get("name").and_then(|n| n.as_str()) == Some(name))
 }
 
 /// `package.json` of a package archive (`.tgz`), read in a stream.
@@ -456,18 +445,15 @@ fn archive_manifest(file: ReadFile) -> Option<Vec<u8>> {
     }
 }
 
-/// The trial's own project settings: its product GUID and, when it was the project's, its name.
-fn settings(out: &mut Payload, original: &Path, name: &str, guid: &str) -> anyhow::Result<()> {
-    let Some(Item::File(o)) = out.items.get(Path::new(SETTINGS)).cloned() else { return Ok(()) };
-    let mut bytes = vec![];
-    out.open(&o)?.read_to_end(&mut bytes)?;
+/// The copy's own project settings: its product GUID and, when it was the project's, its name.
+fn settings(scan: &mut Scan, own: Own) -> anyhow::Result<()> {
+    let Some(bytes) = scan.read(Path::new(SETTINGS))? else { return Ok(()) };
     let Ok(text) = String::from_utf8(bytes) else {
-        out.problems.push(SETTINGS.to_string());
+        scan.fault(SETTINGS, || tr!("{path} cannot be read: {error}", path = SETTINGS, error = tr("it is not text")));
         return Ok(());
     };
-    let from = original.file_name().map(|n| n.to_string_lossy().into_owned());
-    let own = crate::templates::retarget_with(&text, name, from.as_deref(), guid);
-    out.items.insert(PathBuf::from(SETTINGS), Item::Made(own.into_bytes()));
+    let mine = crate::templates::retarget_with(&text, own.name, own.from, own.guid);
+    scan.out.items.insert(PathBuf::from(SETTINGS), Item::Made(mine.into_bytes()));
     Ok(())
 }
 
@@ -502,6 +488,79 @@ fn digest(mut file: impl Read, buffer: &mut [u8], cancel: &AtomicBool, mut each:
 }
 
 impl Payload {
+    fn of(root: ReadRoot, protected: Protected) -> Self {
+        Payload {
+            roots: vec![root],
+            items: BTreeMap::new(),
+            bytes: 0,
+            linked: vec![],
+            outside: vec![],
+            localized: vec![],
+            protected: vec![protected],
+            problems: vec![],
+            missing: vec![],
+            late: None,
+        }
+    }
+
+    /// The whole file at `at` of the copy; `None` when it has none.
+    pub fn read(&self, at: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+        match self.items.get(at) {
+            Some(Item::File(o)) => {
+                let mut bytes = vec![];
+                self.open(o)?.read_to_end(&mut bytes)?;
+                Ok(Some(bytes))
+            }
+            Some(Item::Made(bytes)) => Ok(Some(bytes.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether every VPM package its lock names is in it, at that version.
+    pub fn packages_complete(&self) -> anyhow::Result<bool> {
+        crate::templates::dependencies_complete(|rel| self.read(Path::new(rel)))
+    }
+
+    /// The content IDs of everything in it: the copy has the same.
+    pub fn content(&self, cancel: &AtomicBool) -> anyhow::Result<Content> {
+        let mut out = Content::default();
+        for (at, item) in &self.items {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("{}", tr("Stopped."));
+            }
+            let Item::File(o) = item else { continue };
+            if content::carries(at) {
+                let read = self.open(o).and_then(|f| f.len().and_then(|len| out.read(at, f, len)));
+                read.map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = at.display(), error = e)))?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// With the packages restored in the folder `stage` (a project's own layout) in the place of what it had of them, and the
+    /// package list that goes with them. Nothing else of it changes.
+    pub fn with_restored(self, stage: &Path, names: &[std::ffi::OsString], cancel: &AtomicBool) -> anyhow::Result<Payload> {
+        let root = ReadRoot::open(stage)?;
+        let id = root.id;
+        let mut scan = Scan { cancel, how: Making::default(), out: self, open: vec![id] };
+        scan.out.roots.push(root);
+        let new = scan.out.roots.len() - 1;
+        for name in names {
+            let at = Path::new("Packages").join(name); // i18n: not shown (a folder's name)
+            let low = at.to_string_lossy().to_lowercase();
+            scan.out.items.retain(|k, _| {
+                let k = k.to_string_lossy().to_lowercase().replace('/', "\\");
+                let low = low.replace('/', "\\");
+                k != low && !k.starts_with(&format!("{low}\\"))
+            });
+            scan.put(at.clone(), Item::Dir);
+            scan.folder(new, &at, &at, 2, false)?;
+        }
+        let manifest = scan.out.roots[new].read(Path::new(VPM_MANIFEST))?;
+        scan.out.items.insert(PathBuf::from(VPM_MANIFEST), Item::Made(manifest));
+        Ok(scan.out)
+    }
+
     pub fn open(&self, origin: &Origin) -> std::io::Result<ReadFile> {
         self.roots[origin.root].file(&origin.rel, origin.follow)
     }
@@ -528,8 +587,8 @@ impl Payload {
     }
 }
 
-/// What the trial holds, read in one pass. Anything that is not a plain file or folder is an error of its own.
-pub fn trial_digests(trial: &TrialRoot, cancel: &AtomicBool, mut progress: impl FnMut(&Path)) -> anyhow::Result<(Digests, Vec<String>)> {
+/// What the copy holds, read in one pass. Anything that is not a plain file or folder is an error of its own.
+pub fn trial_digests(trial: &WriteRoot, cancel: &AtomicBool, mut progress: impl FnMut(&Path)) -> anyhow::Result<(Digests, Vec<String>)> {
     let mut buffer = vec![0u8; PIECE];
     let (mut out, mut odd) = (Digests::new(), vec![]);
     let mut folders = vec![PathBuf::new()];
@@ -596,41 +655,61 @@ pub fn from_text(text: &str) -> Option<Digests> {
     Some(out)
 }
 
-/// The content IDs of the project at `project` now, and whether all of it could be read: what an upload from it is of.
-pub fn content_of(project: &Path, cancel: &AtomicBool) -> anyhow::Result<BTreeSet<String>> {
-    let root = ReadRoot::open(project).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = project.display(), error = e)))?;
-    let id = root.id;
-    let mut scan = Scan {
-        cancel,
-        content: true,
-        out: Payload {
-            roots: vec![root],
-            items: BTreeMap::new(),
-            bytes: 0,
-            linked: vec![],
-            outside: vec![],
-            localized: vec![],
-            protected: vec![],
-            content: BTreeSet::new(),
-            problems: vec![],
-            missing: vec![],
-        },
-        open: vec![id],
-    };
-    for top in ["Assets", "Packages"] { // i18n: not shown (folder names)
-        let has = scan.out.roots[0].entries(Path::new(""))?.into_iter().find(|e| e.name.eq_ignore_ascii_case(top));
-        match has.map(|e| e.kind) {
-            Some(Kind::Dir) => scan.folder(0, Path::new(top), Path::new(top), 2, true)?,
-            Some(Kind::Link { dir: true }) => {
-                let target = scan.out.roots[0].follow_dir(Path::new(top))?;
-                scan.out.roots.push(target);
-                let new = scan.out.roots.len() - 1;
-                scan.folder(new, Path::new(""), Path::new(top), 2, true)?;
+/// The content IDs of everything in a copy as it is now, read through the proof of its folder.
+pub fn copy_content(root: &WriteRoot, cancel: &AtomicBool) -> anyhow::Result<Content> {
+    let mut out = Content::default();
+    let mut folders = vec![PathBuf::new()];
+    while let Some(folder) = folders.pop() {
+        for e in root.entries(&folder)? {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("{}", tr("Stopped."));
             }
-            _ => {}
+            let at = folder.join(&e.name);
+            match e.kind {
+                // What Unity makes again from the rest says nothing of its own.
+                Kind::Dir if folder.as_os_str().is_empty() && left_out(&e, 1, Keep::default(), true) => {}
+                Kind::Dir => folders.push(at),
+                Kind::File { .. } if content::carries(&at) => {
+                    let file = root.file(&at)?;
+                    let len = file.len()?;
+                    out.read(&at, file, len)?;
+                }
+                Kind::File { .. } => {}
+                Kind::Link { .. } | Kind::Other => out.unreadable(at.display().to_string()),
+            }
         }
     }
-    Ok(scan.out.content)
+    Ok(out)
+}
+
+/// The content IDs of the project at `project` now, its local packages and those only its Library holds included: what an
+/// upload from it is of.
+pub fn content_of(project: &Path, cancel: &AtomicBool) -> anyhow::Result<Content> {
+    let own = Own { name: "", from: None, guid: "" };
+    let payload = scan(project, Making { own: Some(own), ..Default::default() }, cancel)?;
+    let mut out = payload.content(cancel)?;
+    for (name, at) in &payload.missing {
+        out.unreadable(format!("{name} ({})", at.display()));
+    }
+    if payload.late.is_some() {
+        out.unreadable(MANIFEST.into());
+    }
+    // Packages from Git or another registry, which Unity keeps in the Library.
+    let cache = Path::new("Library/PackageCache");
+    for name in crate::templates::packages_only_in_library(project) {
+        let kept = payload.roots[0].entries(cache).unwrap_or_default();
+        let folder = kept.iter().find(|e| matches!(e.kind, Kind::Dir) && e.name.to_string_lossy().split('@').next() == Some(name.as_str()));
+        let Some(folder) = folder else {
+            out.unreadable(name);
+            continue;
+        };
+        let root = ReadRoot::open(&payload.roots[0].shown.join(cache).join(&folder.name))?;
+        let (id, protected) = (root.id, root.protected());
+        let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
+        scan.folder(0, Path::new(""), &Path::new("Packages").join(&name), 2, false)?; // i18n: not shown (a folder's name)
+        out.add(scan.out.content(cancel)?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

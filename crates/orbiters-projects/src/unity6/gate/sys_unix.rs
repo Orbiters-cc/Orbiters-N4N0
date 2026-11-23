@@ -19,6 +19,7 @@ pub enum Want {
     NewFile,
     Append,
     Lock,
+    Alone,
     Delete { dir: bool },
 }
 
@@ -52,12 +53,14 @@ pub fn open_at(dir: &File, name: &OsStr, want: Want, follow: bool) -> io::Result
         Want::NewFile => libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
         Want::Append => libc::O_RDWR | libc::O_APPEND | libc::O_CREAT,
         Want::Lock => libc::O_RDWR | libc::O_CREAT,
+        // Nothing here keeps a file from others: its contents are compared right before it is replaced.
+        Want::Alone => libc::O_RDWR | libc::O_NONBLOCK,
         Want::Delete { dir } => libc::O_RDONLY | libc::O_NONBLOCK | if dir { libc::O_DIRECTORY } else { 0 },
     };
     // SAFETY: a live descriptor and a null-terminated name; the mode is used only when a file is made.
     let file = fd(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | stay | libc::O_CLOEXEC, 0o666 as libc::c_uint) })?;
     let is_dir = file.metadata()?.is_dir();
-    if matches!(want, Want::File | Want::NewFile | Want::Append | Want::Lock) && is_dir {
+    if matches!(want, Want::File | Want::NewFile | Want::Append | Want::Lock | Want::Alone) && is_dir {
         return Err(io::Error::from(io::ErrorKind::IsADirectory));
     }
     Ok(file)
@@ -137,7 +140,6 @@ pub struct Listed {
     pub link: bool,
     pub special: bool,
     pub len: u64,
-    pub modified: u64,
 }
 
 pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
@@ -157,20 +159,31 @@ pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
         return Err(e);
     }
     let mut names = vec![];
-    loop {
-        // SAFETY: a live stream; the entry is read before the next call.
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            break;
+    // `readdir_r` tells an error from the end of the folder (a listing cut short is never taken for a whole one).
+    let failed = loop {
+        // SAFETY: a zeroed entry is a valid out-value.
+        let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
+        let mut got: *mut libc::dirent = std::ptr::null_mut();
+        // SAFETY: a live stream and live out-values.
+        #[allow(deprecated)]
+        let code = unsafe { libc::readdir_r(stream, &mut entry, &mut got) };
+        if code != 0 {
+            break Some(io::Error::from_raw_os_error(code));
+        }
+        if got.is_null() {
+            break None;
         }
         // SAFETY: the system ends the name with a zero.
-        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes().to_vec();
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.d_name.as_ptr()) }.to_bytes().to_vec();
         if name != b"." && name != b".." {
             names.push(OsString::from_vec(name));
         }
-    }
+    };
     // SAFETY: the stream opened above.
     unsafe { libc::closedir(stream) };
+    if let Some(e) = failed {
+        return Err(e);
+    }
     let mut out = vec![];
     for name in names {
         let at = c(&name)?;
@@ -182,24 +195,59 @@ pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
         }
         let kind = s.st_mode as u32 & libc::S_IFMT as u32;
         let (folder, link, regular) = (kind == libc::S_IFDIR as u32, kind == libc::S_IFLNK as u32, kind == libc::S_IFREG as u32);
-        out.push(Listed { name, dir: folder, link, special: !folder && !link && !regular, len: s.st_size as u64, modified: s.st_mtime as u64 });
+        out.push(Listed { name, dir: folder, link, special: !folder && !link && !regular, len: s.st_size as u64 });
     }
     Ok(out)
 }
 
-/// Removes the file or (empty) folder `name` under `dir` when it is the very object `id` names.
+/// Removes the file or (empty) folder `name` under `dir` when it is the very object `id` names. Here nothing holds a name, so
+/// it is first moved to a folder of this call's own, where nobody else puts anything, and looked at there: what is not the
+/// object meant goes back to where it was (or, when its name was taken again meanwhile, stays there, whole).
 pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Result<bool> {
-    let file = open_at(dir, name, Want::Delete { dir: is_dir }, false)?;
-    let m = file.metadata()?;
-    if (FileId { volume: m.dev(), index: m.ino() }) != id {
+    let before = open_at(dir, name, Want::Delete { dir: is_dir }, false)?.metadata()?;
+    if (FileId { volume: before.dev(), index: before.ino() }) != id {
         return Ok(false);
     }
-    let name = c(name)?;
-    // SAFETY: a live descriptor and a null-terminated name; looked at right above to be the object meant.
-    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), if is_dir { libc::AT_REMOVEDIR } else { 0 }) } != 0 {
+    let own = OsString::from(format!(".orbiters-removing-{}", uuid::Uuid::new_v4().simple()));
+    let (aside, at, inner) = (c(&own)?, c(name)?, c(OsStr::new("x"))?);
+    // SAFETY: a live descriptor and null-terminated names throughout.
+    unsafe {
+        if libc::mkdirat(dir.as_raw_fd(), aside.as_ptr(), 0o700) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let room = open_at(dir, &own, Want::Dir { hold: false }, false)?;
+        if libc::renameat(dir.as_raw_fd(), at.as_ptr(), room.as_raw_fd(), inner.as_ptr()) != 0 {
+            let e = io::Error::last_os_error();
+            libc::unlinkat(dir.as_raw_fd(), aside.as_ptr(), libc::AT_REMOVEDIR);
+            return Err(e);
+        }
+        let moved = open_at(&room, OsStr::new("x"), Want::Delete { dir: is_dir }, false).and_then(|f| f.metadata());
+        let mine = moved.is_ok_and(|m| (FileId { volume: m.dev(), index: m.ino() }) == id);
+        let gone = mine && libc::unlinkat(room.as_raw_fd(), inner.as_ptr(), if is_dir { libc::AT_REMOVEDIR } else { 0 }) == 0;
+        let failed = (mine && !gone).then(io::Error::last_os_error);
+        if !gone {
+            // Back where it was, never over what is there now.
+            let mut there: libc::stat = std::mem::zeroed();
+            if libc::fstatat(dir.as_raw_fd(), at.as_ptr(), &mut there, libc::AT_SYMLINK_NOFOLLOW) != 0 {
+                libc::renameat(room.as_raw_fd(), inner.as_ptr(), dir.as_raw_fd(), at.as_ptr());
+            }
+        }
+        libc::unlinkat(dir.as_raw_fd(), aside.as_ptr(), libc::AT_REMOVEDIR);
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(gone),
+        }
+    }
+}
+
+/// Takes away the file or link `name` itself under `dir` (never what a link leads to): for Orbiters' own staging folder.
+pub fn unlink_at(dir: &File, name: &OsStr, _is_dir: bool) -> io::Result<()> {
+    let at = c(name)?;
+    // SAFETY: a live descriptor and a null-terminated name.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), at.as_ptr(), 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Puts the file `from` under `dir` at `name` under `dir`, in place of what is there.
@@ -221,4 +269,10 @@ pub fn set_executable_like(to: &File, from: &File) -> io::Result<()> {
         to.set_permissions(permissions)?;
     }
     Ok(())
+}
+
+/// [`publish_at`]: nothing here keeps what is replaced from others.
+pub fn publish_held(dir: &File, file: &File, from: &OsStr, name: &OsStr, held: Option<File>) -> io::Result<()> {
+    drop(held);
+    publish_at(dir, file, from, name)
 }

@@ -116,6 +116,9 @@ pub struct Job {
     /// The copy Creator Companion made itself (`<trial>-Migrated`) when its migration made one and the person took it.
     #[serde(default)]
     pub migrated: Option<Place>,
+    /// The same, chosen and checked but not on the list yet: taken once it is.
+    #[serde(default)]
+    pub adopting: Option<Place>,
     /// The folders beside the trial when it was handed over (`None`: they could not all be read, so nothing is offered as
     /// Creator Companion's copy by itself).
     #[serde(default)]
@@ -129,6 +132,9 @@ pub struct Job {
     /// The content IDs (avatars, worlds) the original had: uploading one from Unity 6 ends its uploads from Unity 2022.
     #[serde(default)]
     pub content: Vec<String>,
+    /// Its files that may carry a content ID Orbiters cannot read.
+    #[serde(default)]
+    pub content_unsure: Vec<String>,
     /// The trial's own product GUID, so that what its settings must hold is known.
     #[serde(default)]
     pub guid: String,
@@ -162,10 +168,16 @@ impl Job {
     }
 
     fn validate(&self) -> Result<(), String> {
-        let places = [Some(&self.source), Some(&self.trial), self.migrated.as_ref()];
-        let absolute = places.iter().flatten().all(|p| p.path.is_absolute() && !p.path.components().any(|c| matches!(c, std::path::Component::ParentDir)));
-        let (s, t) = (crate::discovery::key(&self.source.path), crate::discovery::key(&self.trial.path));
-        let disjoint = s != t && !t.starts_with(&format!("{s}\\")) && !s.starts_with(&format!("{t}\\"));
+        let copies = [Some(&self.trial), self.migrated.as_ref(), self.adopting.as_ref()];
+        let absolute = copies.iter().flatten().chain([&&self.source]).all(|p| p.path.is_absolute() && !p.path.components().any(|c| matches!(c, std::path::Component::ParentDir)));
+        let s = crate::discovery::key(&self.source.path);
+        // By their paths (as this computer compares them) and by what they are.
+        let disjoint = copies.iter().flatten().all(|copy| {
+            let t = crate::discovery::key(&copy.path);
+            let same = copy.id.is_some() && copy.id == self.source.id;
+            let exact = cfg!(windows) || copy.path == self.source.path;
+            !same && !(s == t && exact) && !t.starts_with(&format!("{s}\\")) && !s.starts_with(&format!("{t}\\"))
+        });
         if !is_id(&self.id) {
             return Err(tr!("a trial's id is not one Orbiters makes ({id})", id = self.id));
         }
@@ -229,6 +241,9 @@ pub struct Record {
     pub error: Option<String>,
     /// Where each job's last line is.
     at: HashMap<String, usize>,
+    /// Folders of jobs no line tells of any more, when some line cannot be read: known by the file each job's folders are kept
+    /// in besides ([`PLACES`]).
+    lost: Vec<Place>,
 }
 
 impl Record {
@@ -253,6 +268,16 @@ impl Record {
         let key = crate::discovery::key(path);
         let squeeze = |text: &str| text.to_lowercase().replace('/', "\\").replace("\\\\", "\\").replace("\\\\", "\\");
         self.unread.iter().find(|u| squeeze(&u.text).contains(&key)).map(|u| u.why.clone())
+    }
+
+    /// Why nothing is known of the folder at `path` (`id`): it is a trial's whose only line cannot be read.
+    pub fn lost(&self, path: &Path, id: Option<FileId>) -> Option<String> {
+        let key = crate::discovery::key(path);
+        let is = |p: &Place| match (p.id, id) {
+            (Some(a), Some(b)) => a == b,
+            _ => crate::discovery::key(&p.path) == key,
+        };
+        self.lost.iter().any(is).then(|| self.unread.first().map(|u| u.why.clone()).unwrap_or_default())
     }
 
     pub fn job(&self, id: &str) -> Option<&Job> {
@@ -290,7 +315,7 @@ fn about(text: &str) -> Option<String> {
 
 /// The record in `dir` (app data): missing is an empty record.
 pub fn read(dir: &Path) -> Record {
-    let mut record = Record { jobs: vec![], unread: vec![], error: None, at: HashMap::new() };
+    let mut record = Record { jobs: vec![], unread: vec![], error: None, at: HashMap::new(), lost: vec![] };
     let bytes = match AppRoot::existing(dir).and_then(|app| app.read(Path::new(JOURNAL))) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return record,
@@ -340,6 +365,9 @@ pub fn read(dir: &Path) -> Record {
         }
     }
     record.unread.retain(|u| !aside.contains(&u.sha));
+    if !record.unread.is_empty() {
+        record.lost = lost(dir, &record.jobs);
+    }
     for j in &mut record.jobs {
         let folder = dir.join(j.logs());
         for a in &mut j.attempts {
@@ -347,6 +375,23 @@ pub fn read(dir: &Path) -> Record {
         }
     }
     record
+}
+
+/// A job's folders, kept beside its logs as well as in its lines: where they are is never known from one place only.
+#[derive(Serialize, Deserialize)]
+struct Places {
+    folders: Vec<Place>,
+}
+
+/// The file of [`Places`], among the job's logs.
+pub const PLACES: &str = "folders.json";
+
+/// The folders of the jobs that have [`PLACES`] and no line among `jobs`.
+fn lost(dir: &Path, jobs: &[Job]) -> Vec<Place> {
+    let Ok(app) = AppRoot::existing(dir) else { return vec![] };
+    let ids = app.folders(Path::new(LOGS)).into_iter().filter_map(|n| n.into_string().ok()).filter(|id| is_id(id) && !jobs.iter().any(|j| j.id == *id));
+    let places = ids.filter_map(|id| serde_json::from_slice::<Places>(&app.read(&Path::new(LOGS).join(id).join(PLACES)).ok()?).ok());
+    places.flat_map(|p| p.folders).collect()
 }
 
 pub fn log_name(n: u32) -> String {
@@ -363,6 +408,10 @@ fn lock(app: &AppRoot) -> anyhow::Result<Lock> {
 }
 
 fn append(app: &AppRoot, body: &Body) -> anyhow::Result<()> {
+    if let Body::Put(job) = body {
+        let folders = [Some(&job.trial), job.migrated.as_ref(), job.adopting.as_ref()].into_iter().flatten().cloned().collect();
+        app.replace_json(&job.logs().join(PLACES), &Places { folders })?;
+    }
     let body = serde_json::to_string(body)?;
     let line = serde_json::to_string(&Line { v: VERSION, crc: format!("{:08x}", crc32(body.as_bytes())), body })?;
     let torn = match app.read(Path::new(JOURNAL)) {

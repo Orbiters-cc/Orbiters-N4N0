@@ -663,7 +663,7 @@ fn unity6_target_json(matrix: &unity6::matrix::Matrix) -> Value {
 fn unity6_facts() -> (unity6::matrix::Matrix, Vec<(unity6::trial::Job, unity6::trial::Status)>) {
     let dir = orbiters_projects::data_dir();
     let matrix = unity6::matrix::load(&dir, unity6::key().as_ref());
-    let record = unity6::journal::read(&dir);
+    let record = unity6::trial::read(&dir);
     let trials = record.jobs.iter().map(|j| (j.clone(), unity6::trial::status(&dir, &record, j))).filter(|(_, s)| !matches!(s, unity6::trial::Status::Abandoned)).collect();
     (matrix, trials)
 }

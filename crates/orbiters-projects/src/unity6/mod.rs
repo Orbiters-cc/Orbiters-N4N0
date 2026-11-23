@@ -7,12 +7,13 @@
 pub mod authority;
 pub mod budget;
 pub mod compat;
+pub(crate) mod content;
 pub mod editors;
-pub mod gate;
-pub mod journal;
+pub(crate) mod gate;
+pub(crate) mod journal;
 pub mod matrix;
 pub mod outcome;
-pub mod payload;
+pub(crate) mod payload;
 pub mod standing;
 pub mod trial;
 pub mod vcc;

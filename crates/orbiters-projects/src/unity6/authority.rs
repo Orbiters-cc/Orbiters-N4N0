@@ -4,6 +4,8 @@
 //! actions, the Toolkit's and My Avatar's, the bridge's tools, whatever comes next). What cannot be read is refused, never
 //! taken for "not a trial".
 //!
+//! What it was told is never enough for later: whoever acts asks again when it does.
+//!
 //! The upload warning follows the **content IDs**, not the folder: a duplicate of a trial, or a restored copy of one, has the
 //! IDs of the original and gets the same answer.
 
@@ -31,7 +33,9 @@ pub enum TrialState {
     Migrated(Job),
     /// The first copy, once the copy Creator Companion made was taken in its place: it stays on Unity 2022, unused.
     Superseded(Job),
-    /// Taken off by the person. `whole`: it was verified, so it is an ordinary project now.
+    /// Taken off by the person, and not on Unity 6. `whole`: it was verified, so it is an ordinary project now; else it never was
+    /// complete. (One on Unity 6 stays [`TrialState::Migrated`], and the first copy of an adopted pair `Superseded`: taking a
+    /// trial off takes none of its protections off.)
     Abandoned { job: Job, whole: bool },
     /// It cannot be told, and why.
     Unknown(String),
@@ -61,7 +65,10 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
         },
         Err(_) => None,
     };
-    let mut found: Option<(&Job, bool)> = None;
+    if let Some(why) = record.lost(path, id) {
+        return TrialState::Unknown(journal::uncertain_text(&why));
+    }
+    let mut found: Option<(&Job, Which)> = None;
     for job in &record.jobs {
         // By identity (whatever its spelling or name now); by path only when its identity was never recorded.
         let is = |place: &journal::Place| match (place.id, id) {
@@ -71,31 +78,44 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
             (None, _) => crate::discovery::key(&place.path) == key,
         };
         if job.migrated.as_ref().is_some_and(is) {
-            found = Some((job, false));
+            found = Some((job, Which::Migrated));
+        } else if job.adopting.as_ref().is_some_and(is) {
+            found = Some((job, Which::Adopting));
         } else if is(&job.trial) {
-            found = Some((job, true));
+            found = Some((job, Which::Trial));
         }
     }
-    let Some((job, first)) = found else { return TrialState::NotATrial };
+    let Some((job, which)) = found else { return TrialState::NotATrial };
     if let Some(why) = record.uncertain(&job.id) {
         return TrialState::Unknown(journal::uncertain_text(&why));
     }
     let job = job.clone();
-    if let Phase::Abandoned { whole } = job.phase {
-        return TrialState::Abandoned { job, whole };
-    }
+    let first = which == Which::Trial && job.migrated.is_some();
+    let on_unity6 = || standing::read(path, &super::matrix::Matrix::built_in()).state == State::OnUnity6;
     match job.phase {
+        Phase::Abandoned { whole: false } => TrialState::Abandoned { job, whole: false },
+        Phase::Abandoned { whole: true } if first => TrialState::Superseded(job),
+        // Known to be on Unity 2022, as it was copied: an ordinary project. Anything else keeps a trial's protections.
+        Phase::Abandoned { whole: true } if unity6_line(path) == Some(false) && !on_unity6() => TrialState::Abandoned { job, whole: true },
+        Phase::Abandoned { whole: true } => TrialState::Migrated(job),
         Phase::Planned | Phase::Copying if journal::Lease::held(dir, &job.id) => TrialState::Copying(job),
         // Nobody works on it: it was cut short, and is never taken up again.
         Phase::Planned | Phase::Copying | Phase::Failed => TrialState::CopyFailed(job),
         Phase::Verified => TrialState::CopiedVerified(job),
-        Phase::Listed if first && job.migrated.is_some() => TrialState::Superseded(job),
-        Phase::Listed => match standing::read(&job.unity6().path, &super::matrix::Matrix::built_in()).state {
-            State::OnUnity6 => TrialState::Migrated(job),
-            _ => TrialState::WaitingForMigration(job),
-        },
-        Phase::Abandoned { .. } => unreachable!(),
+        // Not on the list yet, as the copy taken in the trial's place.
+        Phase::Listed if which == Which::Adopting => TrialState::CopiedVerified(job),
+        Phase::Listed if first => TrialState::Superseded(job),
+        Phase::Listed if standing::read(&job.unity6().path, &super::matrix::Matrix::built_in()).state == State::OnUnity6 => TrialState::Migrated(job),
+        Phase::Listed => TrialState::WaitingForMigration(job),
     }
+}
+
+/// Which of a job's folders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Trial,
+    Migrated,
+    Adopting,
 }
 
 /// Who asks.
@@ -117,6 +137,10 @@ pub enum Action {
     Storage,
     /// Copy it into another project.
     Duplicate,
+    /// Put it on the list VCC and ALCOM share.
+    List,
+    /// Take it off that list (the folder stays).
+    Unlist,
 }
 
 /// How an allowed opening goes.
@@ -169,6 +193,13 @@ pub fn allow_on(dir: &Path, path: &Path, action: Action, mac: bool) -> Result<Wa
         (TrialState::NotATrial | TrialState::Abandoned { whole: true, .. }, _) => Ok(Way::Plain),
         (TrialState::Migrated(_), Action::Open(_)) if mac => Err(tr("On the Mac a Unity 6 trial is opened from Unity Hub: Orbiters shows where it is and what VRChat's guide says.").into()),
         (TrialState::Migrated(job), Action::Open(_)) => Ok(Way::Trial(Box::new(job.clone()))),
+        // A trial comes off the list where its record is: in its own card.
+        (TrialState::Migrated(job) | TrialState::WaitingForMigration(job) | TrialState::Superseded(job), Action::Unlist) => match job.phase {
+            Phase::Abandoned { .. } => Ok(Way::Plain),
+            _ => Err(tr("This is a Unity 6 trial: take it off in its own card, under Unity 6.").into()),
+        },
+        (TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::List) => Ok(Way::Plain),
+        (TrialState::Abandoned { whole: false, .. }, Action::Unlist) => Ok(Way::Plain),
         (TrialState::Migrated(_), _) => Ok(Way::Plain),
         // A copy of a waiting trial is an ordinary project; what its content IDs mean is asked at each upload.
         (TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::Duplicate) => Ok(Way::Plain),
@@ -177,19 +208,29 @@ pub fn allow_on(dir: &Path, path: &Path, action: Action, mac: bool) -> Result<Wa
     }
 }
 
-/// Leave to prepare an upload of the project at [`Handoff::project`] from VRChat's SDK panel. Made by [`upload`] only, so
-/// nothing that ends in the panel can be reached without it.
+/// Leave to prepare an upload of one project from VRChat's SDK panel. Made by [`upload`] only, so nothing that ends in the panel
+/// can be reached without it, and asked again when it is used ([`Handoff::still`]).
 #[derive(Debug)]
 pub struct Handoff {
+    dir: PathBuf,
     project: PathBuf,
+    /// The very folder it is for.
+    id: owned::FileId,
     /// What the person is told before and with the upload, when there is something to tell.
     pub warning: Option<String>,
 }
 
 impl Handoff {
-    /// Whether it is leave for the project at `path`.
-    pub fn is_for(&self, path: &Path) -> bool {
-        crate::discovery::key(&self.project) == crate::discovery::key(path)
+    /// Whether it is still leave for the project at `path`: the same folder, and the same answer now.
+    pub fn still(&self, path: &Path) -> Result<(), String> {
+        if crate::discovery::key(&self.project) != crate::discovery::key(path) {
+            return Err(tr("Orbiters has no leave to prepare an upload from this project.").into());
+        }
+        let now = upload(&self.dir, path)?;
+        if now.id != self.id || now.warning != self.warning {
+            return Err(tr("This project, or what it uploads, changed since its upload was prepared: start again.").into());
+        }
+        Ok(())
     }
 }
 
@@ -209,34 +250,45 @@ pub fn upload(dir: &Path, path: &Path) -> Result<Handoff, String> {
         return Err(refused(&state));
     }
     let line = unity6_line(path);
+    let id = owned::id_of(path).map_err(|e| tr!("{path} cannot be identified on its disk: {error}", path = path.display(), error = e))?;
+    let leave = |warning: Option<String>| Ok(Handoff { dir: dir.to_path_buf(), project: path.to_path_buf(), id, warning });
     let known: BTreeSet<String> = record.jobs.iter().flat_map(|j| j.content.iter().cloned()).collect();
     // The original itself, on Unity 2022, is where its content is uploaded from.
-    let own = owned::id_of(path).ok();
-    let original = own.is_some() && line == Some(false) && record.jobs.iter().any(|j| j.source.id == own);
-    if original {
-        return Ok(Handoff { project: path.to_path_buf(), warning: None });
+    if line == Some(false) && record.jobs.iter().any(|j| j.source.id == Some(id)) {
+        return leave(None);
     }
-    if line == Some(false) && known.is_empty() && record.unread.is_empty() {
-        return Ok(Handoff { project: path.to_path_buf(), warning: None });
+    // Files of a trial that may carry an ID, and parts of the record that may name one.
+    let unsure: Vec<&String> = record.jobs.iter().flat_map(|j| &j.content_unsure).chain(record.unread.iter().map(|u| &u.why)).collect();
+    if line == Some(false) && known.is_empty() && unsure.is_empty() {
+        return leave(None);
     }
     let content = super::payload::content_of(path, &AtomicBool::new(false)).map_err(|e| {
         tr!("Orbiters could not read which content this project uploads ({error}), so it prepares no upload from it.", error = format!("{e:#}"))
     })?;
-    let shared: BTreeSet<String> = content.intersection(&known).cloned().collect();
+    let shared: BTreeSet<String> = content.ids.intersection(&known).cloned().collect();
+    let may = content.unsure.iter().chain(unsure.iter().copied()).next().map(|what| {
+        tr!(
+            "Orbiters cannot read everything that may name this project's content ({what}): it may be the content of a Unity 6 trial or its original, whose uploads from Unity 2022 end once it is uploaded from Unity 6.",
+            what = what
+        )
+    });
     let warning = match line {
         // A line that cannot be read may be Unity 6.
         None => return Err(tr("This project does not say which Unity version it uses, so Orbiters prepares no upload from it.").into()),
         Some(true) if !shared.is_empty() || matches!(state, TrialState::Migrated(_)) => return Err(locked_out(&shared)),
         // Part of the record cannot be read: whether its content is a trial's cannot be told.
         Some(true) if !record.unread.is_empty() => return Err(journal::uncertain_text(&record.unread[0].why)),
-        Some(true) => Some(tr("This project is on Unity 6: once its content is uploaded from Unity 6, VRChat no longer lets it be uploaded from Unity 2022.").to_string()),
+        Some(true) => {
+            let always = tr("This project is on Unity 6: once its content is uploaded from Unity 6, VRChat no longer lets it be uploaded from Unity 2022.");
+            Some(may.map_or(always.to_string(), |may| format!("{always} {may}")))
+        }
         Some(false) if !shared.is_empty() => Some(tr!(
             "This project has the content IDs of a Unity 6 trial or its original ({ids}): once one of them is uploaded from Unity 6, VRChat no longer lets it be uploaded from Unity 2022.",
             ids = shared.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
         )),
-        Some(false) => None,
+        Some(false) => may,
     };
-    Ok(Handoff { project: path.to_path_buf(), warning })
+    leave(warning)
 }
 
 #[cfg(test)]

@@ -53,34 +53,48 @@ impl Keys {
         orbiters_core::paths::config_dir().join("vrchat-bridge.dat")
     }
 
-    /// The saved ones, or new ones, saved.
-    pub fn load_or_create(file: &std::path::Path) -> Self {
-        let saved = std::fs::read(file)
-            .ok()
-            .and_then(|sealed| orbiters_core::open_for_user(&sealed, ENTROPY).ok())
-            .and_then(|plain| serde_json::from_slice::<Keys>(&plain).ok());
-        match saved {
-            Some(keys) if !keys.token.is_empty() => keys,
-            _ => {
+    /// The saved ones: `Ok(None)` when there are none yet (no file), `Err` when a file is there and could not be read or
+    /// opened (Windows' protection unavailable, a file being written, another user's): that is not "none", and new keys
+    /// must not replace them, or every agent given the old token would be refused.
+    pub fn load(file: &std::path::Path) -> Result<Option<Self>, String> {
+        let sealed = match std::fs::read(file) {
+            Ok(sealed) => sealed,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let plain = orbiters_core::open_for_user(&sealed, ENTROPY).map_err(|e| format!("{e:#}"))?;
+        match serde_json::from_slice::<Keys>(&plain) {
+            Ok(keys) if !keys.token.is_empty() => Ok(Some(keys)),
+            Ok(_) => Err("no token in it".into()), // i18n: not shown (log detail)
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The saved ones, or, when there are none yet, new ones once they are saved: keys that could not be kept are never
+    /// handed out (the next start would make others).
+    pub fn load_or_create(file: &std::path::Path) -> Result<Self, String> {
+        match Self::load(file)? {
+            Some(keys) => Ok(keys),
+            None => {
                 let keys = Keys { port: FIRST_PORT, token: Self::new_token() };
-                keys.save(file);
-                keys
+                keys.save(file)?;
+                Ok(keys)
             }
         }
     }
 
-    pub fn save(&self, file: &std::path::Path) {
-        let written =
-            serde_json::to_vec(self).map_err(anyhow::Error::from).and_then(|plain| orbiters_core::seal_for_user(&plain, ENTROPY)).and_then(|sealed| {
+    pub fn save(&self, file: &std::path::Path) -> Result<(), String> {
+        serde_json::to_vec(self)
+            .map_err(anyhow::Error::from)
+            .and_then(|plain| orbiters_core::seal_for_user(&plain, ENTROPY))
+            .and_then(|sealed| {
                 if let Some(dir) = file.parent() {
                     std::fs::create_dir_all(dir)?;
                 }
                 orbiters_core::write_atomic_private(file, &sealed)?;
                 Ok(())
-            });
-        if let Err(e) = written {
-            eprintln!("the bridge's keys were not saved: {e:#}");
-        }
+            })
+            .map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -152,16 +166,23 @@ impl Keeper {
         keeper
     }
 
-    /// What an agent's entry should say now.
-    fn wanted(&self) -> Wanted {
-        let open = self.inner.lock().unwrap().open.as_ref().map(|o| o.server.port());
-        let keys = Keys::load_or_create(&self.keys_file);
-        Wanted { address: address_of(open.unwrap_or(keys.port)), token: keys.token, listening: open.is_some() }
+    /// What an agent's entry should say now: the open listener's own port and token, else the saved keys; none while they
+    /// cannot be read (an entry is never given a token nothing listens with).
+    fn wanted(&self) -> Option<Wanted> {
+        let open = self.inner.lock().unwrap().open.as_ref().map(|o| (o.server.port(), o.token.clone()));
+        let (port, token, listening) = match open {
+            Some((port, token)) => (port, token, true),
+            None => {
+                let keys = Keys::load_or_create(&self.keys_file).ok()?;
+                (keys.port, keys.token, false)
+            }
+        };
+        Some(Wanted { address: address_of(port), token, listening })
     }
 
     fn clients(&self, act: impl FnOnce(&Arc<Registrations>, Wanted)) {
-        if let Some(registrations) = self.registrations.get() {
-            act(registrations, self.wanted());
+        if let (Some(registrations), Some(wanted)) = (self.registrations.get(), self.wanted()) {
+            act(registrations, wanted);
         }
     }
 
@@ -225,7 +246,14 @@ impl Keeper {
     }
 
     fn open(&self, inner: &mut Inner) {
-        let mut keys = Keys::load_or_create(&self.keys_file);
+        let mut keys = match Keys::load_or_create(&self.keys_file) {
+            Ok(keys) => keys,
+            Err(e) => {
+                // Tried again at the next look (the computer unlocked, the file written whole).
+                inner.problem = Some(tr!("The bridge's keys could not be read ({error}), so it stays closed until they can be.", error = e));
+                return;
+            }
+        };
         let Some(listener) = (self.hear)(&self.bridge) else {
             inner.problem = Some(tr("Windows would not let the bridge hear the keyboard and mouse, so it stays closed: an agent that cannot tell the person is here may not run.").into());
             return;
@@ -239,7 +267,9 @@ impl Keeper {
             // Something else has that port: another, kept for next time, and told in Settings.
             let server = Server::start(self.bridge.clone(), 0, keys.token.clone())?;
             keys.port = server.port();
-            keys.save(&self.keys_file);
+            if let Err(e) = keys.save(&self.keys_file) {
+                eprintln!("the bridge's port was not saved: {e}");
+            }
             Ok::<Server, std::io::Error>(server)
         });
         match server {
@@ -292,9 +322,15 @@ impl Keeper {
             Command::Pause => self.bridge.hold(true),
             Command::Resume => self.bridge.hold(false),
             Command::NewToken => {
-                let mut keys = Keys::load_or_create(&self.keys_file);
-                keys.token = Keys::new_token();
-                keys.save(&self.keys_file);
+                // Only a token that was kept replaces the old one.
+                let renewed = Keys::load(&self.keys_file).map(|keys| keys.unwrap_or(Keys { port: FIRST_PORT, token: String::new() })).and_then(|mut keys| {
+                    keys.token = Keys::new_token();
+                    keys.save(&self.keys_file)
+                });
+                if let Err(e) = renewed {
+                    self.bridge.log(false, tr!("The bridge's keys could not be read ({error}), so it stays closed until they can be.", error = e));
+                    return;
+                }
                 let mut inner = self.inner.lock().unwrap();
                 if inner.open.is_some() {
                     self.close(&mut inner, tr("A new token: the agents it was added to are updated, others have to be given it again."), false);
@@ -362,17 +398,26 @@ mod tests {
     fn the_keys_last_and_are_not_written_in_the_clear() {
         let dir = std::env::temp_dir().join(format!("orbiters-bridge-keys-{}", uuid::Uuid::new_v4().simple()));
         let file = dir.join("vrchat-bridge.dat");
-        let keys = Keys::load_or_create(&file);
+        let keys = Keys::load_or_create(&file).unwrap();
         assert_eq!(keys.port, FIRST_PORT);
         assert_eq!(keys.token.len(), 64);
-        assert_eq!(Keys::load_or_create(&file), keys, "the same across restarts");
+        assert_eq!(Keys::load_or_create(&file).unwrap(), keys, "the same across restarts");
         if cfg!(windows) {
             let on_disk = std::fs::read(&file).unwrap();
             assert!(!String::from_utf8_lossy(&on_disk).contains(&keys.token));
         }
-        // A file that cannot be read gets new ones rather than none.
+        // The verifier's case: a file that cannot be read (Windows' protection unavailable, a file half written) is not
+        // "no keys": nothing replaces it, nothing new is handed out, and once readable the old keys are there.
+        let before = std::fs::read(&file).unwrap();
         std::fs::write(&file, b"nonsense").unwrap();
-        assert_ne!(Keys::load_or_create(&file).token, keys.token);
+        assert!(Keys::load_or_create(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"nonsense", "left as it was");
+        std::fs::write(&file, &before).unwrap();
+        assert_eq!(Keys::load_or_create(&file).unwrap(), keys);
+        // Keys that cannot be saved are never handed out.
+        let nowhere = dir.join("a-file-not-a-folder");
+        std::fs::write(&nowhere, b"x").unwrap();
+        assert!(Keys::load_or_create(&nowhere.join("vrchat-bridge.dat")).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

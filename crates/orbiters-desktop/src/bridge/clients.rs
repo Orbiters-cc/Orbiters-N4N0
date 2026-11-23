@@ -327,6 +327,56 @@ fn find_program(name: &str, known: &[PathBuf]) -> Option<PathBuf> {
     std::env::split_paths(&search_path()).map(|dir| dir.join(name)).chain(known.iter().cloned()).find(executable)
 }
 
+/// What the person's login shell says of `PATH` and `CODEX_HOME` (asked once, at most [`LOGIN_SHELL_LIMIT`]: a profile that
+/// stalls gives nothing rather than holding every caller).
+#[cfg(unix)]
+fn login_environment() -> &'static (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
+    static ASKED: std::sync::OnceLock<(Option<std::ffi::OsString>, Option<std::ffi::OsString>)> = std::sync::OnceLock::new();
+    ASKED.get_or_init(|| {
+        if cfg!(test) {
+            return (None, None);
+        }
+        let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let said = ask_shell(&shell, LOGIN_SHELL_LIMIT).unwrap_or_default();
+        login_values(&said)
+    })
+}
+
+/// How long the login shell may take to say its environment.
+#[cfg(unix)]
+const LOGIN_SHELL_LIMIT: Duration = Duration::from_secs(5);
+
+/// The login shell `shell`'s `PATH` and `CODEX_HOME`, NUL-separated, within `limit`.
+#[cfg(unix)]
+fn ask_shell(shell: &std::ffi::OsStr, limit: Duration) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut child = std::process::Command::new(shell)
+        .args(["-l", "-c", "printf '%s\\0%s' \"$PATH\" \"$CODEX_HOME\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = out.read_to_end(&mut bytes);
+        bytes
+    });
+    let status = super::mac::wait_until(&mut child, limit).ok()?;
+    // A process the profile left behind may hold the output open: it is not waited for.
+    let bytes = status.success().then(|| reader.join().ok()).flatten()?;
+    Some(bytes)
+}
+
+/// `PATH` and `CODEX_HOME` from what [`ask_shell`] printed; an empty value is none.
+#[cfg(unix)]
+fn login_values(said: &[u8]) -> (Option<std::ffi::OsString>, Option<std::ffi::OsString>) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut parts = said.splitn(2, |b| *b == 0).map(|p| std::ffi::OsStr::from_bytes(p.trim_ascii()).to_os_string()).map(|v| Some(v).filter(|v| !v.is_empty()));
+    (parts.next().flatten(), parts.next().flatten())
+}
+
 /// The search path the person's own terminal has: an app started from the Dock or at sign-in gets launchd's
 /// `/usr/bin:/bin:/usr/sbin:/sbin` only, where neither `claude` nor `node` is. Their login shell is asked once (it reads
 /// their profile, as a new terminal does), and the usual places of Homebrew, npm and the clients' installers are added.
@@ -335,11 +385,8 @@ fn search_path() -> std::ffi::OsString {
     static PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
         let mut dirs: Vec<PathBuf> = Vec::new();
-        let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
-        if !cfg!(test) {
-            if let Ok(out) = std::process::Command::new(&shell).args(["-l", "-c", "printf %s \"$PATH\""]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
-                dirs.extend(std::env::split_paths(&std::ffi::OsString::from(String::from_utf8_lossy(&out.stdout).trim().to_string())));
-            }
+        if let Some(path) = &login_environment().0 {
+            dirs.extend(std::env::split_paths(path));
         }
         dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
         if let Some(home) = home() {
@@ -351,6 +398,14 @@ fn search_path() -> std::ffi::OsString {
         std::env::join_paths(dirs).unwrap_or_default()
     })
     .clone()
+}
+
+/// `CODEX_HOME` as the person's own terminal has it: this process's, else what their login shell exports.
+fn codex_home() -> Option<PathBuf> {
+    let own = std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty());
+    #[cfg(unix)]
+    let own = own.or_else(|| login_environment().1.clone());
+    own.map(PathBuf::from)
 }
 
 /// A folder of this user's that Windows names in the environment.
@@ -458,7 +513,7 @@ impl CodexCli {
 
     /// The settings file Codex reads: `CODEX_HOME`, else `.codex` in the home folder.
     fn config_file(&self) -> Option<PathBuf> {
-        let dir = self.home.clone().or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from)).or_else(|| home().map(|h| h.join(".codex")))?;
+        let dir = self.home.clone().or_else(codex_home).or_else(|| home().map(|h| h.join(".codex")))?;
         Some(dir.join("config.toml"))
     }
 
@@ -776,6 +831,27 @@ impl Registrations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verifier's case: a profile that stalls gives nothing within the limit, and what a shell says is read, both values.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_shell_is_held_to_its_time_and_says_both_values() {
+        let dir = std::env::temp_dir().join(format!("orbiters-login-shell-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stalls = dir.join("stalls");
+        std::fs::write(&stalls, "#!/bin/sh\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stalls, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let begun = std::time::Instant::now();
+        assert_eq!(ask_shell(stalls.as_os_str(), Duration::from_millis(400)), None);
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        let said = ask_shell(std::ffi::OsStr::new("/bin/sh"), Duration::from_secs(10)).expect("sh answers");
+        assert!(login_values(&said).0.is_some(), "a PATH");
+        let (path, codex) = login_values(b"/a:/b\0/Users/x/.codex-home");
+        assert_eq!((path.as_deref(), codex.as_deref()), (Some(std::ffi::OsStr::new("/a:/b")), Some(std::ffi::OsStr::new("/Users/x/.codex-home"))));
+        assert_eq!(login_values(b"/a\0"), (Some("/a".into()), None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_program_given_up_on_says_so_in_the_language_now() {

@@ -428,6 +428,26 @@ struct CachedInfo {
     page: Option<WorldPage>,
 }
 
+/// A world's picture address as the Map explorer's page kept on this computer says it, reading nothing but that file
+/// (never Orbiters): what a list that must not send world ids before a choice shows (verify-r21 Major 6).
+pub fn kept_thumbnail(world_id: &str) -> Option<String> {
+    let server = Server::current();
+    let file = cache_dir().join("worlds").join(server.cache_name()).join(format!("{world_id}.json"));
+    let cached: CachedInfo = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+    let page = cached.page?;
+    page.world.thumbnail_url.or(page.world.image_url).filter(|u| u.starts_with("https://"))
+}
+
+/// Tests: every world id this process asked Orbiters or VRChat about (a page, a picture), to count what a view sends.
+#[cfg(test)]
+pub static OUTBOUND: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn note_outbound(world_id: &str) {
+    #[cfg(test)]
+    OUTBOUND.lock().unwrap_or_else(|e| e.into_inner()).push(world_id.to_string());
+    let _ = world_id;
+}
+
 /// Listed worlds are fetched again after three days, unlisted ones after one.
 const LISTED_FOR: u64 = 3 * 86_400;
 const UNLISTED_FOR: u64 = 86_400;
@@ -501,6 +521,7 @@ impl Infos {
         let e = env_index(server);
         if !self.asked[e].contains(id) {
             self.asked[e].insert(id.to_string());
+            note_outbound(id);
             let _ = self.tx.send((server, id.to_string()));
         }
         self.known.lock().unwrap()[e].get(id).cloned()
@@ -535,6 +556,8 @@ pub enum Picture {
     Session(PathBuf),
     /// A world's picture on VRChat (as Orbiters lists it): its thumbnail, or the full picture when `large`.
     Remote { world_id: String, url: String, large: bool },
+    /// A world's thumbnail only if it is already kept on this computer: never fetched (verify-r21 Major 6).
+    RemoteKept { world_id: String, url: String },
     /// An event's cover on Orbiters, read with the account's credential when signed in (members-only covers need it).
     EventCover { development: bool, id: String },
     /// Another picture a few pixels wide, to draw large and soft as its light (behind an event, its window).
@@ -1004,6 +1027,7 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             let (w, h, rgba) = match kept {
                 Some(picture) => picture,
                 None => {
+                    note_outbound(world_id);
                     let b = api.image(url).ok()?;
                     if keep {
                         let _ = std::fs::create_dir_all(file.parent()?);
@@ -1012,6 +1036,11 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                     decode_image(&b)?
                 }
             };
+            Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+        }
+        Picture::RemoteKept { world_id, url } => {
+            let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
+            let (w, h, rgba) = decode_image(&std::fs::read(&file).ok()?)?;
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }

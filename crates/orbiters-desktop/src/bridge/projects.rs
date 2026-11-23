@@ -262,8 +262,60 @@ fn lexical_or_absolute_local(path: &Path) -> bool {
     if !path.is_absolute() {
         return false;
     }
+    // From the mount table first, without touching the path: a network share that stopped answering would hold `exists`
+    // and `canonicalize` for minutes.
+    if mount_is_local(path, &mounts()) == Some(false) {
+        return false;
+    }
     let Some(existing) = path.ancestors().find(|p| p.exists()) else { return true };
     local_volume(existing).unwrap_or(false)
+}
+
+/// Whether the volume `path` is on, by its mount point alone (the longest one it is under), is local; `None` when no mount
+/// is known for it.
+pub(crate) fn mount_is_local(path: &Path, mounts: &[(PathBuf, bool)]) -> Option<bool> {
+    mounts.iter().filter(|(point, _)| path.starts_with(point)).max_by_key(|(point, _)| point.as_os_str().len()).map(|(_, local)| *local)
+}
+
+/// The mounted volumes, each with whether the system calls it local (`getmntinfo` without waiting on any of them).
+#[cfg(target_os = "macos")]
+fn mounts() -> Vec<(PathBuf, bool)> {
+    use std::os::unix::ffi::OsStrExt;
+    const MNT_LOCAL: u32 = 0x0000_1000;
+    const MNT_NOWAIT: i32 = 2;
+    let mut list: *mut libc::statfs = std::ptr::null_mut();
+    // SAFETY: the system fills a pointer to its own array of `count` entries, valid until the next call on this thread.
+    let count = unsafe { libc::getmntinfo(&mut list, MNT_NOWAIT) };
+    if count <= 0 || list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: as above.
+    let entries = unsafe { std::slice::from_raw_parts(list, count as usize) };
+    entries
+        .iter()
+        .map(|e| {
+            let name = e.f_mntonname.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect::<Vec<u8>>();
+            (PathBuf::from(std::ffi::OsStr::from_bytes(&name)), e.f_flags & MNT_LOCAL != 0)
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn mounts() -> Vec<(PathBuf, bool)> {
+    Vec::new()
+}
+
+#[cfg(test)]
+#[test]
+fn a_path_on_a_network_mount_is_told_from_the_mount_table_alone() {
+    let table = [(PathBuf::from("/"), true), (PathBuf::from("/Volumes/Share"), false), (PathBuf::from("/Volumes/Share/Inner"), true)];
+    assert_eq!(mount_is_local(Path::new("/Volumes/Share/Projects/MyWorld"), &table), Some(false));
+    assert_eq!(mount_is_local(Path::new("/Volumes/Share/Inner/x"), &table), Some(true), "the longest mount point holds it");
+    assert_eq!(mount_is_local(Path::new("/Users/me/Projects"), &table), Some(true));
+    assert_eq!(mount_is_local(Path::new("/Volumes/Shared"), &table), Some(true), "a name that only begins like a mount point is not under it");
+    assert_eq!(mount_is_local(Path::new("/x"), &[]), None);
+    #[cfg(target_os = "macos")]
+    assert!(mounts().iter().any(|(point, local)| point == Path::new("/") && *local), "this Mac's own disk");
 }
 
 #[cfg(target_os = "macos")]

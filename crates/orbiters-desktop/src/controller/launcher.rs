@@ -177,6 +177,8 @@ pub struct MacMachine {
     play: Arc<super::obelisk_cli::Play>,
     /// Steam refused the saved sign-in at the last start: the set-up is offered again until it ran.
     signed_out: AtomicBool,
+    /// Home's own last start: its failure is told by its launch id, never another start's (the bridge's).
+    home_launch: std::sync::Mutex<Option<u64>>,
 }
 
 impl MacMachine {
@@ -193,8 +195,9 @@ impl MacMachine {
         MacMachine {
             tools: orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir()),
             library: orbiters_core::obelisk::library(home),
-            play: Arc::default(),
+            play: Arc::new(super::obelisk_cli::Play::new(orbiters_core::paths::config_dir().join("obelisk-start-gate.json"))),
             signed_out: AtomicBool::new(false),
+            home_launch: std::sync::Mutex::new(None),
         }
     }
 }
@@ -203,6 +206,11 @@ impl MacMachine {
     /// The start shared by Home's Play and the VRChat bridge (the bridge's `controller/bridge_mac.rs`).
     pub fn play(&self) -> &Arc<super::obelisk_cli::Play> {
         &self.play
+    }
+
+    /// The program's library (the engine's records).
+    pub fn library(&self) -> &std::path::Path {
+        &self.library
     }
 
     /// The program to start the game with, when it is there.
@@ -258,7 +266,9 @@ impl Machine for MacMachine {
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
-        self.start_launch(args).map(drop).map_err(|refused| refused.words())
+        let id = self.start_launch(args).map_err(|refused| refused.words())?;
+        *self.home_launch.lock().unwrap() = Some(id);
+        Ok(())
     }
 
     fn starting(&self) -> bool {
@@ -266,7 +276,8 @@ impl Machine for MacMachine {
     }
 
     fn start_failure(&self) -> Option<String> {
-        let failure = self.play.failure()?;
+        let id = (*self.home_launch.lock().unwrap())?;
+        let failure = self.play.take_failure(id)?;
         if matches!(failure.code.as_str(), "not_signed_in" | "sign_in_expired" | "not_installed") {
             self.signed_out.store(true, Ordering::Relaxed);
         }

@@ -152,14 +152,13 @@ pub fn listen(_own: Arc<OwnInput>, heard: impl Fn(Heard) + Send + 'static) -> Op
     std::thread::Builder::new()
         .name("bridge-person".into())
         .spawn(move || {
-            let mut last = super::mac::idle_seconds();
+            let begun = Instant::now();
+            let mut clock = IdleClock::default();
             while !ending.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-                let idle = super::mac::idle_seconds();
-                if is_new_input(last, idle) {
+                if clock.sample(begun.elapsed().as_secs_f64(), super::mac::idle_seconds()) {
                     heard(Heard::PersonInput);
                 }
-                last = idle;
+                std::thread::sleep(Duration::from_millis(100));
             }
         })
         .ok()?;
@@ -173,9 +172,32 @@ impl Drop for Listener {
     }
 }
 
-/// Whether the idle time read now after `before` says an input came between: it went back rather than on.
-pub fn is_new_input(before: f64, now: f64) -> bool {
-    now + 0.05 < before
+/// The person's last input, on this listener's own monotonic clock, from the HID system's idle time sampled again and
+/// again: each sample places the last event at `now - idle`. An event later than the last one known is new input, so a
+/// mouse that never stops moving (every sample near 0 s idle) is heard at every sample, not once. The first sample counts
+/// an event within [`RESUME_AFTER`]: a listener started while the person is at the computer hears them at once.
+#[derive(Debug, Default)]
+pub struct IdleClock {
+    last_event: Option<f64>,
+}
+
+impl IdleClock {
+    /// How far apart two readings of one event may land (the idle time's own granularity).
+    const JITTER: f64 = 0.02;
+
+    /// One sample at `now` (seconds on a monotonic clock) of the idle time `idle` (seconds): whether it says input came.
+    pub fn sample(&mut self, now: f64, idle: f64) -> bool {
+        if !idle.is_finite() || idle < 0.0 {
+            return false;
+        }
+        let event = now - idle;
+        let new = match self.last_event {
+            None => idle < RESUME_AFTER.as_secs_f64(),
+            Some(last) => event > last + Self::JITTER,
+        };
+        self.last_event = Some(self.last_event.map_or(event, |last| last.max(event)));
+        new
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -337,10 +359,45 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_time_that_goes_back_is_new_input() {
-        assert!(is_new_input(3.0, 0.1), "someone touched the trackpad");
-        assert!(!is_new_input(3.0, 3.1), "nobody: the idle time goes on");
-        assert!(!is_new_input(3.0, 2.98), "a reading's jitter is not input");
+    fn an_event_later_than_the_last_one_is_new_input() {
+        let mut clock = IdleClock::default();
+        assert!(!clock.sample(0.0, 600.0), "nobody for ten minutes");
+        assert!(!clock.sample(0.1, 600.1), "nobody: the idle time goes on");
+        assert!(clock.sample(0.2, 0.05), "someone touched the trackpad");
+        assert!(!clock.sample(0.3, 0.14), "the same event read again, jitter included");
+        assert!(!clock.sample(0.4, f64::NAN));
+    }
+
+    /// The verifier's case: a mouse moving without a break gives an idle time near 0 at every sample. The person stays
+    /// heard for as long as it moves, well past the pause's 30 s, and the pause ends 30 s after it stops.
+    #[test]
+    fn continuous_input_longer_than_the_pause_keeps_the_agent_paused() {
+        let start = Instant::now();
+        let mut clock = IdleClock::default();
+        let mut presence = Presence::default();
+        let mut paused_every_sample = true;
+        for step in 0..450 {
+            let at = step as f64 * 0.1;
+            // Idle between 0 and 8 ms: always moving.
+            if clock.sample(at, (step % 9) as f64 * 0.001) {
+                presence.person_input(start + Duration::from_secs_f64(at));
+            }
+            paused_every_sample &= presence.paused(start + Duration::from_secs_f64(at)).is_some();
+        }
+        assert!(paused_every_sample, "45 s of movement: paused all along");
+        let stopped = start + Duration::from_secs(45);
+        assert!(presence.paused(stopped + Duration::from_secs(29)).is_some());
+        assert_eq!(presence.paused(stopped + Duration::from_secs(31)), None);
+    }
+
+    #[test]
+    fn a_listener_started_while_the_person_moves_hears_them_at_once() {
+        let mut clock = IdleClock::default();
+        assert!(clock.sample(0.0, 0.004), "the first reading is presence");
+        let mut later = IdleClock::default();
+        assert!(later.sample(0.0, 12.0), "an event 12 s ago is within the pause: still the person's time");
+        let mut away = IdleClock::default();
+        assert!(!away.sample(0.0, 31.0), "31 s ago: they had left");
     }
 
     #[cfg(target_os = "macos")]

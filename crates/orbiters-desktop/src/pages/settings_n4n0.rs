@@ -55,8 +55,9 @@ pub fn n4n0_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mu
         });
         if draft.n4n0.afk_message_enabled {
             widgets::separator(ui);
-            widgets::field(ui, tr("Message"), Some(tr("What the panel says while you are away.")), 440.0, |ui| {
-                if let Some(text) = form::text_row(ui, texts, "n4n0-afk-text", &base.n4n0.afk_message, tr("Getting food, back in 10!"), 360.0, false) {
+            let (room, field) = form::text_row_width(ui, ui.available_width(), 360.0);
+            widgets::field(ui, tr("Message"), Some(tr("What the panel says while you are away.")), room, |ui| {
+                if let Some(text) = form::text_row(ui, texts, "n4n0-afk-text", &base.n4n0.afk_message, tr("Getting food, back in 10!"), field, false) {
                     draft.n4n0.afk_message = text;
                     apply = true;
                 }
@@ -325,12 +326,12 @@ pub fn ears_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, mic: 
         widgets::field(ui, tr("Microphone"), Some(tr("The one N4N0 listens to.")), 0.0, |_| {});
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            if source_chip(ui, super::settings::default_mic(), draft.n4n0.mic_device.is_empty()).clicked() {
+            if source_chip(ui, "n4n0-mic", super::settings::default_mic(), draft.n4n0.mic_device.is_empty()).clicked() {
                 draft.n4n0.mic_device.clear();
                 apply = true;
             }
             for m in &snap.mics {
-                if source_chip(ui, &m.name, draft.n4n0.mic_device == m.id).clicked() {
+                if source_chip(ui, "n4n0-mic", &m.name, draft.n4n0.mic_device == m.id).clicked() {
                     draft.n4n0.mic_device = m.id.clone();
                     apply = true;
                 }

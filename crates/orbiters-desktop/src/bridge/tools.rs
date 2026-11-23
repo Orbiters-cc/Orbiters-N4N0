@@ -169,6 +169,58 @@ fn number(args: &Value, key: &str, default: f64) -> f64 {
 }
 
 /// The tools this computer offers (caps.rs), as `tools/list` gives them: on Windows every one, as [`list`].
+/// Why `args` do not fit the tool's input schema `schema` (as `tools/list` gives it on this computer): an argument it does
+/// not name, of another type, or outside its enum or minimum, or a required one missing. `None` when they fit.
+pub fn schema_refusal(name: &str, schema: &Value, args: &Value) -> Option<Failure> {
+    let bad = |why: String| Some(Failure::new("bad_arguments", format!("{name}: {why}, so nothing was done."), "Pass the arguments tools/list gives for this tool on this computer, with their types.")); // i18n: not shown (an AI client reads it)
+    let given = match args {
+        Value::Null => return None,
+        Value::Object(given) => given,
+        _ => return bad("the arguments are not an object".into()),
+    };
+    let properties = schema["properties"].as_object().cloned().unwrap_or_default();
+    for required in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if given.get(required).is_none_or(Value::is_null) {
+            return bad(format!("{required} is required"));
+        }
+    }
+    for (key, value) in given {
+        let Some(spec) = properties.get(key) else {
+            return bad(format!("{key} is not an argument it takes here"));
+        };
+        if value.is_null() {
+            continue;
+        }
+        let fits = match spec["type"].as_str() {
+            Some("string") => value.is_string(),
+            Some("integer") => value.is_u64() || value.is_i64(),
+            Some("number") => value.is_number(),
+            Some("boolean") => value.is_boolean(),
+            Some("array") => value.is_array(),
+            Some("object") => value.is_object(),
+            _ => true,
+        };
+        if !fits {
+            return bad(format!("{key} must be of type {}", spec["type"].as_str().unwrap_or("?")));
+        }
+        if let Some(choices) = spec["enum"].as_array() {
+            if !choices.contains(value) {
+                return bad(format!("{key} must be one of {}", Value::Array(choices.clone())));
+            }
+        }
+        if let (Some(least), Some(v)) = (spec["minimum"].as_f64(), value.as_f64()) {
+            if v < least {
+                return bad(format!("{key} must be at least {least}"));
+            }
+        }
+    }
+    None
+}
+
+/// How long go_to_world waits, after closing the bridge's own game, for the next start to be allowed (its end finalized, the
+/// 80 s after an early end): past it, the start is asked for all the same and says why it was refused.
+const START_READY_LIMIT: Duration = Duration::from_secs(100);
+
 pub fn list_for(caps: &super::caps::Capabilities) -> Value {
     if caps.all() {
         return list();
@@ -180,9 +232,14 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
         .into_iter()
         .filter(|tool| caps.offers(tool["name"].as_str().unwrap_or_default()))
         .map(|mut tool| {
+            // A Unity tool's `session` is a capture's folder, not a bridge session: it stays.
+            let bridge_tool = !super::projects::NAMES.contains(&tool["name"].as_str().unwrap_or_default());
+            if tool["name"] == "wait_for" {
+                tool["inputSchema"]["properties"]["until"]["enum"] = json!(caps.waits());
+            }
             let properties = &mut tool["inputSchema"]["properties"];
             if let Some(properties) = properties.as_object_mut() {
-                if !caps.side_sessions {
+                if !caps.side_sessions && bridge_tool {
                     properties.remove("session");
                     properties.remove("relaunch");
                 }
@@ -487,7 +544,13 @@ impl Bridge {
     pub fn call(&self, name: &str, args: &Value, call: &Call) -> Result<Answer, Failure> {
         let acts = !matches!(name, "get_state" | "wait_for" | "find_worlds" | "list_sessions" | "world_labels" | "map_plan" | "map_check") && !super::projects::reads(name) && !super::tour::reads(name);
         // What this computer cannot do is refused before anything else: no instance made, no game started or closed.
-        let refused = self.capabilities().refusal(name, args);
+        let caps = self.capabilities();
+        let mut refused = caps.refusal(name, args);
+        // Where the tool list is this computer's own (a Mac), the arguments are held to it before anything else: none it
+        // does not name, none of another type (a number for `session` read as the main one, a text for `profile` ignored).
+        if refused.is_none() && !caps.all() {
+            refused = list_for(&caps).as_array().and_then(|tools| tools.iter().find(|t| t["name"] == name).cloned()).and_then(|tool| schema_refusal(name, &tool["inputSchema"], args));
+        }
         let result = match name {
             _ if refused.is_some() => Err(refused.unwrap_or_else(|| Failure::new("not_on_this_computer", "", ""))),
             "vr_sandbox" => {
@@ -856,7 +919,9 @@ impl Bridge {
                 // the first real run), and the player only exists once it loaded.
                 // A start that ended before the game was up, or whose graphics went before it arrived (a Mac's engine,
                 // 2026-11-22: a join in the log is no working game): said at once, not after the start's whole time.
-                let crashed = if run.pid.is_none() { seen.start_failed.clone() } else { None }
+                // The start's own end, said by what started it, counts whether or not a process was seen first (a Mac's launcher
+                // runs for minutes before its game is lost; Windows' game never says one).
+                let crashed = seen.start_failed.clone()
                     .or_else(|| (itself && seen.renderer_lost).then(|| "The game's graphics stopped before it arrived (the engine's graphics server dropped it): it runs on without a picture.".to_string())); // i18n: not shown (an AI client reads it)
                 let arrived = crashed.is_none()
                     && itself
@@ -1312,6 +1377,9 @@ impl Bridge {
         if !matches!(seen.capture.state.as_str(), "idle" | "") {
             return Err(Failure::new("picture_under_way", "A recording is under way.", "Call wait_for with until picture_saved first."));
         }
+        // Nothing is made for a start the game's gate refuses now (a start of the person's under way, the wait after an
+        // early end): checked before VRChat's API is asked for an instance.
+        s.game.admit_start(pid.is_some())?;
         let every = self.timing.instance_every;
         if let Some(wait) = s.run.lock().unwrap().last_instance.map(|at| at.elapsed()).filter(|e| *e < every).map(|e| every - e) {
             let seconds = wait.as_secs() + 1;
@@ -1396,6 +1464,18 @@ impl Bridge {
             if let Some(pid) = pid {
                 self.release_session(s);
                 self.close_and_wait(s, pid, call)?;
+                // The same destination, once the game's end is finalized and any wait after an early end is over (a Mac's
+                // shared start; nothing to wait for on Windows): this call goes on rather than failing with a made instance.
+                let until = Instant::now() + START_READY_LIMIT;
+                while let Some(wait) = s.game.start_ready() {
+                    if Instant::now() >= until {
+                        break;
+                    }
+                    let _ = self.wait_until(wait.min(Duration::from_secs(2)), call, || false)?;
+                    if self.paused_in(s).is_some() || self.stopped_since(call) {
+                        break;
+                    }
+                }
             }
             if self.paused_in(s).is_some() || self.stopped_since(call) {
                 return Err(self.paused_in(s).map_or_else(|| self.stopped_failure(), |p| paused_failure(&p)));
@@ -1651,9 +1731,16 @@ impl Bridge {
         }
         let seen = s.game.seen();
         let pid = self.ours(s, &seen)?;
-        // Between worlds there is nobody to see; in a world, only in a private one.
+        // Between worlds there is nobody to see; in a world, only in a private one. Where the bridge cannot prove what lies
+        // between (a Mac), only once it arrived in a private one.
         if seen.in_world {
             Self::in_private_instance(&seen)?;
+        } else if self.capabilities().screenshot_needs_arrival {
+            return Err(Failure::new(
+                "not_in_world",
+                "VRChat is not in its private instance yet (or its log could no longer be followed), so its window is not looked at.", // i18n: not shown (an AI client reads it)
+                "Call wait_for with until in_world, then take the screenshot.", // i18n: not shown
+            ));
         }
         let max_width = args["max_width"].as_u64().unwrap_or(WINDOW_WIDTH as u64).clamp(320, 2560) as u32;
         if let Some(rig) = s.vr() {
@@ -2610,7 +2697,11 @@ impl Bridge {
             "vrchats": opener.as_ref().map(|o| o.vrchats()).unwrap_or(Value::Array(Vec::new())),
             "limit": opener.as_ref().map(|o| o.limit()),
             "keyboard_and_mouse_turn": self.focus.lock().unwrap().holder().map(short_id),
-            "next": "Your own session's full id is the one open_session gave you: pass it as session. Ids are not shown here, so that nobody drives another agent's session by accident.",
+            "next": if self.capabilities().side_sessions {
+                "Your own session's full id is the one open_session gave you: pass it as session. Ids are not shown here, so that nobody drives another agent's session by accident."
+            } else {
+                "This computer runs one VRChat, the main session's: there is no other session to open. A VRChat listed here that is not the main session's is the person's: leave it alone."
+            },
         })
     }
 

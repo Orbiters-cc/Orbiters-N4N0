@@ -40,6 +40,10 @@ pub struct Capabilities {
     pub vr_sandbox: bool,
     /// A hotkey that pauses the agent (Windows' Ctrl+Alt+F12).
     pub hotkey: bool,
+    /// A screenshot only once the game is in a world, a private one of the account's (a Mac: its game's log can be lost
+    /// or replaced, and nothing between worlds is proven to be the instance made for it). Windows also takes the loading
+    /// screens between worlds.
+    pub screenshot_needs_arrival: bool,
 }
 
 impl Default for Capabilities {
@@ -60,6 +64,7 @@ impl Capabilities {
         capture_3d: true,
         vr_sandbox: true,
         hotkey: true,
+        screenshot_needs_arrival: false,
     };
 
     /// A Mac: observe and travel (Phase 1 of docs/vrchat-bridge.md's Mac plan).
@@ -73,6 +78,7 @@ impl Capabilities {
         capture_3d: false,
         vr_sandbox: false,
         hotkey: false,
+        screenshot_needs_arrival: true,
     };
 
     /// This computer's.
@@ -123,7 +129,11 @@ impl Capabilities {
                 }
             }
             "open_session" if args["vr"].as_bool() == Some(true) && !self.vr_sandbox => Some("the VR sandbox"),
-            "go_to_world" if args["profile"].as_u64().is_some_and(|p| p > 0) && !self.profiles => Some("VRChat profiles"),
+            // The default profile (0) is no other; anything else, a text included, is.
+            "go_to_world" if !args["profile"].is_null() && args["profile"].as_u64() != Some(0) && !self.profiles => Some("VRChat profiles"),
+            // Waits for what this computer's game never reports would end at once or never.
+            "wait_for" if args["until"] == "signed_in" && !self.side_sessions => Some("a side session's sign-in"),
+            "wait_for" if args["until"] == "picture_saved" && !self.capture_3d => Some("3D pictures"),
             "go_to_world" if args["relaunch"].as_bool() == Some(true) && !self.side_sessions => Some("sessions beside the main one"),
             _ => None,
         };
@@ -134,6 +144,18 @@ impl Capabilities {
                 "Use what tools/list offers here: get_state, find_worlds, go_to_world, screenshot, wait_for and close_vrchat. Tell the person what you could not do.", // i18n: not shown (an AI client reads it in the tool's answer)
             )
         })
+    }
+
+    /// The `until` values of `wait_for` this computer can wait for.
+    pub fn waits(&self) -> Vec<&'static str> {
+        ["in_world", "closed", "picture_saved", "reconstructions_done", "not_paused", "signed_in"]
+            .into_iter()
+            .filter(|until| match *until {
+                "signed_in" => self.side_sessions,
+                "picture_saved" => self.capture_3d,
+                _ => true,
+            })
+            .collect()
     }
 
     fn platform_name(&self) -> &'static str {

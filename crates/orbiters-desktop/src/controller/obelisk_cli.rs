@@ -109,8 +109,14 @@ pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl Fn
             }
         }
     }
-    let _ = child.wait();
-    Ok(())
+    // Its output ended; the program itself gets what is left of the time, and only its success is one.
+    let status = crate::bridge::mac::wait_until(&mut child, until.saturating_duration_since(std::time::Instant::now()).max(Duration::from_millis(100)))
+        .map_err(|_| tr!("It did not answer within {seconds} s.", seconds = limit.as_secs()))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(tr!("It ended with {status}.", status = status.to_string()))
+    }
 }
 
 fn spawn(program: &Path, args: &[&str]) -> std::io::Result<Child> {
@@ -183,9 +189,16 @@ fn sign_in(program: &Path, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) ->
 /// A VRChat being started, or running, by this N4N0: the program stays attached until the game ends. Home's Play and the
 /// VRChat bridge start through the same one (`MacMachine::play`): one start at a time, none for [`obelisk::AFTER_EARLY_END`]
 /// after a start that ended early, and each start's outcome kept by its launch id for whoever made it.
+///
+/// The wait after an early end has three sources, the longest wins: the moment this run saw one end (a monotonic clock,
+/// at once, before the engine's record is written), a deadline kept in a file on the clock since the Mac booted (a
+/// restart of N4N0 keeps it, a wall clock set forward does not shorten it, a reboot ends it), and the engine's own records.
+/// Records that cannot be read are not "nothing ended early": the start is refused as [`Refused::Unknown`].
 #[derive(Default)]
 pub struct Play {
     now: Mutex<Now>,
+    /// Where the boot-relative deadline is kept (none in a test that wants none).
+    gate_file: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -194,14 +207,14 @@ struct Now {
     attached: bool,
     /// The game was seen running by the program, under this process when it said which.
     running: Option<Option<u32>>,
-    /// Why the last start failed, until Home told it (Home's toast: once).
-    failure: Option<Failure>,
     /// The program's own process: once it is gone the game is neither starting nor running by its word, whoever
     /// still holds its output open (the game's supervisor inherits it).
     program: Option<u32>,
     /// The launches made, newest last (a few kept): what each came to, read by its launch id without being used up.
     launches: Vec<Launch>,
     made: u64,
+    /// No start before this (a start seen ending early, this run).
+    cooldown: Option<std::time::Instant>,
 }
 
 /// What became of one start, as the program said it.
@@ -219,6 +232,8 @@ pub struct Launch {
     pub failure: Option<Failure>,
     /// The program is no longer attached to it.
     pub over: bool,
+    /// Its failure was told to the one who started it (Home's toast: once).
+    pub told: bool,
 }
 
 /// Why a start was not made.
@@ -228,6 +243,8 @@ pub enum Refused {
     Busy,
     /// A start ended early this long ago: Easy Anti-Cheat fails a start this soon after one.
     Wait(Duration),
+    /// Whether a start ended early could not be told (the engine's records could not be read): no start until it can.
+    Unknown,
     /// The program could not be run.
     Failed(String),
 }
@@ -238,6 +255,7 @@ impl Refused {
         match self {
             Refused::Busy => tr("VRChat is already starting.").into(),
             Refused::Wait(wait) => tr!("VRChat ended early a moment ago: it can be started again in {seconds} s.", seconds = wait.as_secs().max(1)),
+            Refused::Unknown => tr("VRChat's last start could not be checked yet. Try again in a moment.").into(),
             Refused::Failed(why) => why.clone(),
         }
     }
@@ -245,6 +263,9 @@ impl Refused {
 
 /// How many launches' outcomes are kept.
 const LAUNCHES_KEPT: usize = 8;
+/// How long the program's output may stay open after the program itself ended (a process it started holds it): then the
+/// start is over all the same.
+const OUTPUT_AFTER_EXIT: Duration = Duration::from_secs(3);
 
 /// Whether the process `pid` still runs (one that ended and was not yet waited for does not).
 fn alive(pid: u32) -> bool {
@@ -254,6 +275,33 @@ fn alive(pid: u32) -> bool {
     system.process(pid).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
+/// The clock since this Mac booted, which goes on while it sleeps: (when it booted, Unix seconds; seconds since).
+fn boot_clock() -> Option<(u64, f64)> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: a plain query into a timespec of ours. CLOCK_MONOTONIC on macOS counts while asleep.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+            return None;
+        }
+        Some((sysinfo::System::boot_time(), time.tv_sec as f64 + time.tv_nsec as f64 / 1e9))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The boot-relative deadline in `text` (`{"boot":<Unix s>,"until":<s since boot>}`): how long is left at `clock`. A
+/// deadline of another boot is over.
+fn gate_left(text: &str, clock: (u64, f64)) -> Option<Duration> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let boot = value.get("boot")?.as_u64()?;
+    let until = value.get("until")?.as_f64()?;
+    // A boot time read twice may differ by a second.
+    (boot.abs_diff(clock.0) <= 2 && until > clock.1).then(|| Duration::from_secs_f64((until - clock.1).min(obelisk::AFTER_EARLY_END.as_secs_f64())))
+}
+
 impl Now {
     fn launch(&mut self, id: u64) -> Option<&mut Launch> {
         self.launches.iter_mut().find(|l| l.id == id)
@@ -261,10 +309,23 @@ impl Now {
 }
 
 impl Play {
+    /// The start shared by Home and the bridge, keeping its boot-relative deadline in `gate_file`.
+    pub fn new(gate_file: PathBuf) -> Self {
+        Play { now: Mutex::default(), gate_file: Some(gate_file) }
+    }
+
     /// Starts VRChat with `args` from the library `library` (whose records say when a start last ended early); the events
     /// are followed on a thread of their own. The launch's id, or why it was not made.
     pub fn start(self: &Arc<Self>, program: &Path, library: &Path, args: &[String]) -> Result<u64, Refused> {
         self.start_at(program, library, args, std::time::SystemTime::now())
+    }
+
+    /// How long a start must still wait (the longest of the three sources), or [`Refused::Unknown`].
+    fn wait(&self, now: &Now, library: &Path, now_is: std::time::SystemTime) -> Result<Option<Duration>, Refused> {
+        let memory = now.cooldown.and_then(|until| until.checked_duration_since(std::time::Instant::now()));
+        let kept = self.gate_file.as_ref().and_then(|file| std::fs::read_to_string(file).ok()).zip(boot_clock()).and_then(|(text, clock)| gate_left(&text, clock));
+        let records = obelisk::start_wait(obelisk::early_end_in_records(library).map_err(|_| Refused::Unknown)?, now_is);
+        Ok([memory, kept, records].into_iter().flatten().max().filter(|wait| !wait.is_zero()))
     }
 
     pub(crate) fn start_at(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime) -> Result<u64, Refused> {
@@ -272,7 +333,7 @@ impl Play {
         if now.attached {
             return Err(Refused::Busy);
         }
-        if let Some(wait) = obelisk::start_wait(obelisk::last_early_end(library), now_is) {
+        if let Some(wait) = self.wait(&now, library, now_is)? {
             return Err(Refused::Wait(wait));
         }
         let mut command: Vec<&str> = vec!["steam", "play", obelisk::STEAM_APP];
@@ -281,30 +342,92 @@ impl Play {
             command.extend(args.iter().map(String::as_str));
         }
         let mut child = spawn(program, &command).map_err(|e| Refused::Failed(e.to_string()))?;
+        let Some(out) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
+        };
         now.made += 1;
         let id = now.made;
         now.attached = true;
         now.running = None;
-        now.failure = None;
         now.program = Some(child.id());
         now.launches.push(Launch { id, ..Default::default() });
         let drop_old = now.launches.len().saturating_sub(LAUNCHES_KEPT);
         now.launches.drain(..drop_old);
         drop(now);
+        // The program's output, followed on a thread; the program's own end, waited for on another: a process the program
+        // started may hold its output open long after it is gone.
         let play = self.clone();
-        let library = library.to_path_buf();
+        let library_for = library.to_path_buf();
         let followed = std::thread::Builder::new().name("obelisk-play".into()).spawn(move || {
-            let out = child.stdout.take().expect("piped");
-            play.follow(id, &library, BufReader::new(out).lines().map_while(Result::ok));
-            let _ = child.wait();
-            play.finish(id);
+            play.follow(id, &library_for, BufReader::new(out).lines().map_while(Result::ok));
+            play.finish(id, &library_for);
         });
         if followed.is_err() {
-            let mut now = self.now.lock().unwrap();
-            now.attached = false;
+            let _ = child.kill();
+            let _ = child.wait();
+            self.abandon(id);
+            return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
+        }
+        let child = Arc::new(Mutex::new(Some(child)));
+        let waited = child.clone();
+        let play = self.clone();
+        let library_for = library.to_path_buf();
+        let reaped = std::thread::Builder::new().name("obelisk-play-exit".into()).spawn(move || {
+            if let Some(mut child) = waited.lock().unwrap().take() {
+                let _ = child.wait();
+            }
+            // The output gets a moment to tell its last lines, then the start is over whoever holds it.
+            std::thread::sleep(OUTPUT_AFTER_EXIT);
+            play.finish(id, &library_for);
+        });
+        if reaped.is_err() {
+            // Nothing would wait for the program: it is ended now, and the start was not made.
+            if let Some(mut child) = child.lock().unwrap().take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            self.abandon(id);
             return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
         }
         Ok(id)
+    }
+
+    /// How long a start must still wait now, `Err(Refused::Unknown)` when it cannot be told.
+    pub fn gate(&self, library: &Path) -> Result<Option<Duration>, Refused> {
+        let now = self.now.lock().unwrap();
+        self.wait(&now, library, std::time::SystemTime::now())
+    }
+
+    /// The launch the program is attached to now, if one is (a start under way, a game running, or its end finalizing).
+    pub fn attached(&self) -> Option<u64> {
+        let now = self.now.lock().unwrap();
+        now.attached.then(|| now.launches.last().map(|l| l.id)).flatten()
+    }
+
+    /// A start that could not be followed: as if it was never made.
+    fn abandon(&self, id: u64) {
+        let mut now = self.now.lock().unwrap();
+        now.attached = false;
+        now.program = None;
+        now.running = None;
+        now.launches.retain(|l| l.id != id);
+    }
+
+    /// Notes that a start ended early: no start for [`obelisk::AFTER_EARLY_END`], at once and across a restart.
+    fn cool_down(&self, now: &mut Now) {
+        now.cooldown = Some(std::time::Instant::now() + obelisk::AFTER_EARLY_END);
+        if let (Some(file), Some((boot, since))) = (&self.gate_file, boot_clock()) {
+            let text = serde_json::json!({ "boot": boot, "until": since + obelisk::AFTER_EARLY_END.as_secs_f64() }).to_string();
+            if let Some(folder) = file.parent() {
+                let _ = std::fs::create_dir_all(folder);
+            }
+            let part = file.with_extension("part");
+            if std::fs::write(&part, text).is_ok() {
+                let _ = std::fs::rename(&part, file);
+            }
+        }
     }
 
     /// What the program says of launch `id`, line by line.
@@ -325,23 +448,17 @@ impl Play {
                         launch.running = true;
                     }
                 }
-                Event::Exited { code, seconds, frames } => {
+                Event::Exited { code, seconds, frames, session } => {
+                    // Another session's end is not this launch's.
+                    let ours = now.launch(id).is_some_and(|l| l.session.is_none() || session.is_none() || l.session == session);
+                    if !ours {
+                        continue;
+                    }
                     now.running = None;
                     if !cfg!(test) {
                         note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s, {frames:?} frames shown")); // i18n: not shown (for the log)
                     }
-                    let early = seconds.is_some_and(|s| s < TOO_SHORT) || frames == Some(0);
-                    let failure = early.then(|| Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
-                    if let Some(failure) = &failure {
-                        now.failure = Some(failure.clone());
-                    }
-                    if let Some(launch) = now.launch(id) {
-                        launch.running = false;
-                        launch.ended = Some((seconds, frames));
-                        if launch.failure.is_none() {
-                            launch.failure = failure;
-                        }
-                    }
+                    self.ended(&mut now, id, seconds, frames);
                 }
                 // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
                 Event::Error { code, message } => {
@@ -350,10 +467,8 @@ impl Play {
                     }
                     let ran = now.launch(id).is_some_and(|l| l.running || l.ended.is_some());
                     if !ran {
-                        let failure = Failure::new(&code, words(&code, &message));
-                        now.failure = Some(failure.clone());
                         if let Some(launch) = now.launch(id) {
-                            launch.failure = Some(failure);
+                            launch.failure = Some(Failure::new(&code, words(&code, &message)));
                         }
                     }
                 }
@@ -362,11 +477,52 @@ impl Play {
         }
     }
 
-    fn finish(&self, id: u64) {
+    /// Launch `id`'s game ended after `seconds` with `frames` shown (each `None` when not known).
+    fn ended(&self, now: &mut Now, id: u64, seconds: Option<u64>, frames: Option<u64>) {
+        let early = seconds.is_some_and(|s| s < TOO_SHORT) || frames == Some(0);
+        if early {
+            self.cool_down(now);
+        }
+        let failure = early.then(|| Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
+        if let Some(launch) = now.launch(id) {
+            launch.running = false;
+            launch.ended = Some((seconds, frames));
+            if launch.failure.is_none() {
+                launch.failure = failure;
+            }
+        }
+    }
+
+    /// The program is gone (or its output ended): the start is over. A program that ended without saying how the game
+    /// did is asked of the engine's record of its session; without one, the start failed.
+    fn finish(&self, id: u64, library: &Path) {
         let mut now = self.now.lock().unwrap();
-        now.attached = false;
-        now.running = None;
-        now.program = None;
+        let Some(launch) = now.launch(id).cloned() else { return };
+        if launch.over {
+            return;
+        }
+        if launch.ended.is_none() {
+            let record = launch.session.as_deref().and_then(|s| obelisk::session_record_of(library, s).ok().flatten());
+            match record {
+                Some(record) if record.over() => self.ended(&mut now, id, record.seconds, record.frames),
+                // Still running by the engine's word (`MacMachine::running` reads the records): only this N4N0 lost it.
+                Some(_) => {}
+                None if launch.failure.is_none() => {
+                    if let Some(launch) = now.launch(id) {
+                        launch.running = false;
+                        launch.failure = Some(Failure::new("internal", tr("What runs VRChat on this Mac stopped without saying why.")));
+                    }
+                    // Not known to have ended late: as a start that ended early.
+                    self.cool_down(&mut now);
+                }
+                None => {}
+            }
+        }
+        if now.launches.last().is_some_and(|l| l.id == id) {
+            now.attached = false;
+            now.running = None;
+            now.program = None;
+        }
         if let Some(launch) = now.launch(id) {
             launch.over = true;
             launch.running = false;
@@ -392,9 +548,16 @@ impl Play {
         now.program.filter(|p| alive(*p))
     }
 
-    /// Why the last start failed: told once, to Home (the bridge reads its own launch's by [`Play::launch`]).
-    pub fn failure(&self) -> Option<Failure> {
-        self.now.lock().unwrap().failure.take()
+    /// Why launch `id` failed, told once to whoever started it (Home's toast); `None` before it failed or once told.
+    pub fn take_failure(&self, id: u64) -> Option<Failure> {
+        let mut now = self.now.lock().unwrap();
+        let launch = now.launch(id)?;
+        if launch.told {
+            return None;
+        }
+        let failure = launch.failure.clone()?;
+        launch.told = true;
+        Some(failure)
     }
 
     /// What became of launch `id`, as often as asked.
@@ -550,20 +713,27 @@ mod tests {
         );
         let play = Arc::new(Play::default());
         let id = play.start(&program, &library, &[]).expect("starts");
+        // Seen ending early by this run: no start for 80 s at once, before any record says so.
         let launch = wait_for(&play, id, |l| l.over);
+        assert!(matches!(play.start(&program, &library, &[]), Err(Refused::Wait(_))), "the exit just seen holds the next start");
+        play.now.lock().unwrap().cooldown = None;
         assert_eq!((launch.launcher, launch.session.as_deref()), (Some(83030), Some("6da7c40d-9fd2-4f3b-8770-aadffa2d0088")));
         assert_eq!(launch.ended, Some((Some(100), Some(0))));
         assert_eq!(launch.failure.as_ref().map(|f| f.code.as_str()), Some("ended_at_once"), "no frame shown: a start that did not work");
-        // Home's toast takes it once; the bridge still reads its own launch's.
-        assert!(play.failure().is_some());
-        assert!(play.failure().is_none(), "told once");
+        // Its starter's toast takes it once, by its id; the launch's own outcome stays for whoever reads it.
+        assert!(play.take_failure(id).is_some());
+        assert!(play.take_failure(id).is_none(), "told once");
         assert!(play.launch(id).unwrap().failure.is_some(), "the launch's own outcome is not used up");
 
         // One start at a time, for whoever asks.
         let slow = fake_program(&dir.join("slow"), &[r#"{"event":"starting","app_id":438100}"#], 3);
         let first = play.start(&slow, &library, &[]).expect("starts");
         assert_eq!(play.start(&slow, &library, &[]), Err(Refused::Busy));
-        wait_for(&play, first, |l| l.over);
+        let gone = wait_for(&play, first, |l| l.over);
+        // It ended without a word of the game: a failed start, and the same wait as after an early end.
+        assert_eq!(gone.failure.map(|f| f.code), Some("internal".into()));
+        assert!(matches!(play.start(&program, &library, &[]), Err(Refused::Wait(_))));
+        play.now.lock().unwrap().cooldown = None;
 
         // An early end in the engine's records holds every start for 80 s, from the records (a restart of N4N0 keeps it).
         std::fs::create_dir_all(library.join("SteamSessions")).unwrap();
@@ -573,6 +743,71 @@ mod tests {
         assert!(refused.words().contains("s."));
         let later = std::time::SystemTime::now() + Duration::from_secs(81);
         assert!(play.start_at(&program, &library, &[], later).is_ok(), "80 s on, it starts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The verifier's cases: the program ends while a process it started keeps its output open (the game's supervisor
+    /// inherits it): the start is over all the same, and having said nothing of the game it is a failure of its own launch,
+    /// never another's; Home is told its own launch's failure once, by its id.
+    #[test]
+    fn a_program_gone_while_its_output_stays_open_ends_its_start_with_its_own_failure() {
+        let dir = std::env::temp_dir().join(format!("orbiters-play-survivor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let survivor = fake_program(&dir, &[], 0);
+        std::fs::write(&survivor, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"starting\",\"app_id\":438100}'\n(sleep 30) &\nexit 0\n").unwrap();
+        let play = Arc::new(Play::default());
+        let id = play.start(&survivor, &library, &[]).expect("starts");
+        let begun = std::time::Instant::now();
+        let launch = wait_for(&play, id, |l| l.over);
+        assert!(launch.over && begun.elapsed() < Duration::from_secs(10), "not held by the survivor: {launch:?}");
+        assert_eq!(play.attached(), None, "the next start is not blocked");
+        assert_eq!(launch.failure.as_ref().map(|f| f.code.as_str()), Some("internal"));
+        assert_eq!(play.take_failure(id).map(|f| f.code), Some("internal".into()));
+        assert_eq!(play.take_failure(id), None, "told once");
+        assert_eq!(play.take_failure(id + 1), None, "another launch's is not this one's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_wait_kept_on_the_boot_clock_outlives_a_restart_and_a_wall_clock_set_forward() {
+        let kept = r#"{"boot":1795380000,"until":5080.0}"#;
+        // 30 s after the early end, the same boot: 50 s left, whatever the wall clock says.
+        assert_eq!(gate_left(kept, (1795380000, 5030.0)), Some(Duration::from_secs(50)));
+        assert_eq!(gate_left(kept, (1795380001, 5030.0)), Some(Duration::from_secs(50)), "a boot time read a second apart");
+        assert_eq!(gate_left(kept, (1795380000, 5081.0)), None, "over");
+        assert_eq!(gate_left(kept, (1795390000, 20.0)), None, "another boot: long over");
+        assert_eq!(gate_left("not json", (1795380000, 5030.0)), None);
+        // And the file a start that ended early writes is read back by the next run.
+        let file = std::env::temp_dir().join(format!("orbiters-gate-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let play = Play::new(file.clone());
+        play.cool_down(&mut play.now.lock().unwrap());
+        let next_run = Play::new(file.clone());
+        let library = std::env::temp_dir().join(format!("orbiters-gate-library-{}", std::process::id()));
+        #[cfg(target_os = "macos")]
+        assert!(matches!(next_run.gate(&library), Ok(Some(wait)) if wait > Duration::from_secs(70)), "{:?}", next_run.gate(&library));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_short_command_is_held_to_its_time_and_to_its_success() {
+        let dir = std::env::temp_dir().join(format!("orbiters-run-for-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Says nothing on its output, closes it, and goes on: the time still counts after the output ended.
+        let closes = fake_program(&dir.join("closes"), &[], 0);
+        std::fs::write(&closes, "#!/bin/sh\nexec 1>&-\nsleep 30\n").unwrap();
+        let begun = std::time::Instant::now();
+        assert!(run_for(&closes, &[], Duration::from_millis(500), |_| {}).is_err());
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        // Fails without a word: not a success.
+        let fails = fake_program(&dir.join("fails"), &[], 0);
+        std::fs::write(&fails, "#!/bin/sh\nexit 3\n").unwrap();
+        assert!(run_for(&fails, &[], Duration::from_secs(5), |_| {}).is_err());
+        let fine = fake_program(&dir.join("fine"), &[r#"{"event":"done"}"#], 0);
+        let mut heard = 0;
+        assert!(run_for(&fine, &[], Duration::from_secs(5), |_| heard += 1).is_ok());
+        assert_eq!(heard, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

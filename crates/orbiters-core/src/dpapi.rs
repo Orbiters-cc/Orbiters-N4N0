@@ -52,7 +52,7 @@ mod mac {
     use orbiters_i18n::tr;
     use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
     use ring::rand::{SecureRandom, SystemRandom};
-    use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
+    use security_framework::passwords::{delete_generic_password, get_generic_password};
 
     const SERVICE: &str = "Orbiters - N4N0";
     /// The second of its name: the first ("session key") was made by builds signed ad hoc, whose item the keychain
@@ -62,6 +62,8 @@ mod mac {
     const KEY_LEN: usize = 32;
     /// The Keychain's "item not found" (`errSecItemNotFound`).
     const NOT_FOUND: i32 = -25300;
+    /// The Keychain's "already there" (`errSecDuplicateItem`): another process made the key first.
+    const DUPLICATE: i32 = -25299;
 
     /// The key file of builds the keychain cannot know again, in the settings' folder.
     const KEY_FILE: &str = "session-key";
@@ -86,7 +88,8 @@ mod mac {
             return found.clone().map_err(|e| anyhow::anyhow!(e));
         }
         let file = crate::paths::config_dir().join(KEY_FILE);
-        let found = if signed() { keychain_key_after(&file) } else { file_key(&file).map_err(|e| NoKey { message: format!("{e:#}"), again: false }) };
+        // A key file that could not be read or made now (another process writing it) is asked again at the next need.
+        let found = if signed() { keychain_key_after(&file) } else { file_key(&file).map_err(|e| NoKey { message: format!("{e:#}"), again: true }) };
         match found {
             Ok(key) => {
                 *kept = Some(Ok(key));
@@ -129,23 +132,58 @@ mod mac {
         described.lines().filter_map(|l| l.strip_prefix("TeamIdentifier=")).any(|team| team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric()))
     }
 
-    /// The key in a file only the person reads, made when there is none yet.
+    /// The key in a file only the person reads, made when there is none yet. A new key is written whole into a file of its
+    /// own, then linked to the key file's name, which fails when another process put its key there first: then theirs is
+    /// the key. A key file is never removed while it may be another process's being made; one of another length that has
+    /// not changed for a minute is damage, set aside (never deleted) and replaced.
     pub(super) fn file_key(file: &std::path::Path) -> anyhow::Result<[u8; KEY_LEN]> {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
-        if let Ok(bytes) = std::fs::read(file) {
-            if let Ok(key) = <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
-                return Ok(key);
-            }
+        if let Some(key) = read_key_file(file)? {
+            return Ok(key);
         }
-        let mut key = [0u8; KEY_LEN];
-        SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
         if let Some(folder) = file.parent() {
             std::fs::create_dir_all(folder)?;
         }
-        let _ = std::fs::remove_file(file);
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(file)?.write_all(&key)?;
-        Ok(key)
+        let mut key = [0u8; KEY_LEN];
+        SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
+        let made = file.with_file_name(format!(".{KEY_FILE}.{}.{}", std::process::id(), next_part()));
+        let written = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&made).and_then(|mut f| {
+            f.write_all(&key)?;
+            f.sync_all()
+        });
+        let published = written.and_then(|()| std::fs::hard_link(&made, file));
+        let _ = std::fs::remove_file(&made);
+        match published {
+            Ok(()) => Ok(key),
+            // Someone else's key got there first: it is the one.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_key_file(file)?.ok_or_else(|| anyhow::anyhow!("{}", tr("the key file is being written: try again"))),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// A number for each key file this process makes.
+    fn next_part() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The key file's key; `None` when there is none (or only damage, now set aside). A file of another length that changed
+    /// in the last minute may be another process's being written: an error, asked again later.
+    fn read_key_file(file: &std::path::Path) -> anyhow::Result<Option<[u8; KEY_LEN]>> {
+        match std::fs::read(file) {
+            Ok(bytes) => match <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
+                Ok(key) => Ok(Some(key)),
+                Err(_) => {
+                    let age = std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+                    anyhow::ensure!(age >= std::time::Duration::from_secs(60), "{}", tr("the key file is being written: try again"));
+                    std::fs::rename(file, file.with_file_name(format!("{KEY_FILE}.damaged")))?;
+                    Ok(None)
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// What a signed build does with the keychain's answer and a key file an unsigned build may have left.
@@ -186,28 +224,54 @@ mod mac {
                 .map_err(|_| NoKey { message: tr("the keychain holds a key of another length").to_string(), again: false }),
             Ok(Plan::FileIntoKeychain) => {
                 let key = file_key.unwrap_or_default();
-                let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
-                if set_generic_password(SERVICE, ACCOUNT, &key).is_ok() {
+                let kept = add_or_adopt(key, add_item, || get_generic_password(SERVICE, ACCOUNT).map_err(|e| e.code())).map_err(keychain_refused)?;
+                if kept == key {
+                    let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
                     let _ = std::fs::remove_file(file);
                 }
-                Ok(key)
+                Ok(kept)
             }
-            Ok(Plan::New) | Err(_) => keychain_key().map_err(|e| NoKey { message: format!("{e:#}"), again: false }),
+            Ok(Plan::New) | Err(_) => keychain_key().map_err(keychain_refused),
         }
     }
 
-    /// The key from the login keychain, made and kept there when there is none yet.
-    pub(super) fn keychain_key() -> anyhow::Result<[u8; KEY_LEN]> {
+    /// Why the keychain gave no key: asked again later when it was locked (the person's screen), else not this run.
+    fn keychain_refused(code: i32) -> NoKey {
+        NoKey { again: code == LOCKED, message: tr!("the keychain did not give the key: {error}", error = security_framework::base::Error::from_code(code)) }
+    }
+
+    /// Adds `key` to the keychain only where there is none (`add`: `Err(DUPLICATE)` when another process's is there); then
+    /// that one, the winner's, read back by `get`, is the key, whichever process made it.
+    pub(super) fn add_or_adopt(key: [u8; KEY_LEN], add: impl Fn(&[u8; KEY_LEN]) -> Result<(), i32>, get: impl Fn() -> Result<Vec<u8>, i32>) -> Result<[u8; KEY_LEN], i32> {
+        match add(&key) {
+            Ok(()) => Ok(key),
+            Err(DUPLICATE) => <[u8; KEY_LEN]>::try_from(get()?.as_slice()).map_err(|_| DUPLICATE),
+            Err(code) => Err(code),
+        }
+    }
+
+    /// The key as a new generic password of this app's, never over an existing one.
+    fn add_item(key: &[u8; KEY_LEN]) -> Result<(), i32> {
+        use security_framework::item::{ItemAddOptions, ItemAddValue, ItemClass};
+        ItemAddOptions::new(ItemAddValue::Data { class: ItemClass::generic_password(), data: core_foundation::data::CFData::from_buffer(key) })
+            .set_service(SERVICE)
+            .set_account_name(ACCOUNT)
+            .add()
+            .map_err(|e| e.code())
+    }
+
+    /// The key from the login keychain, made and kept there when there is none yet (`Err` the keychain's code).
+    pub(super) fn keychain_key() -> Result<[u8; KEY_LEN], i32> {
         match get_generic_password(SERVICE, ACCOUNT) {
-            Ok(bytes) => <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| anyhow::anyhow!("{}", tr("the keychain holds a key of another length"))),
+            Ok(bytes) => <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| DUPLICATE),
             Err(e) if e.code() == NOT_FOUND => {
                 let mut key = [0u8; KEY_LEN];
-                SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
-                set_generic_password(SERVICE, ACCOUNT, &key).map_err(|e| anyhow::anyhow!("{}", tr!("the keychain did not keep the key: {error}", error = e)))?;
+                SystemRandom::new().fill(&mut key).map_err(|_| NOT_FOUND)?;
+                let kept = add_or_adopt(key, add_item, || get_generic_password(SERVICE, ACCOUNT).map_err(|e| e.code()))?;
                 let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
-                Ok(key)
+                Ok(kept)
             }
-            Err(e) => anyhow::bail!("{}", tr!("the keychain did not give the key: {error}", error = e)),
+            Err(e) => Err(e.code()),
         }
     }
 
@@ -270,10 +334,63 @@ mod mac {
             let first = file_key(&file).unwrap();
             assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
             assert_eq!(file_key(&file).unwrap(), first, "the same key at the next start: the session still opens");
+            // A file of another length may be another process's being written: left alone, asked again later.
             std::fs::write(&file, b"cut short").unwrap();
-            assert_ne!(file_key(&file).unwrap(), first, "a damaged file is replaced, not an error for ever");
+            assert!(file_key(&file).is_err(), "not replaced while it may be someone's being written");
+            assert_eq!(std::fs::read(&file).unwrap(), b"cut short");
+            // One that has not changed for a minute is damage: set aside, never deleted, and replaced.
+            let old = std::fs::File::options().write(true).open(&file).unwrap();
+            old.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+            assert_ne!(file_key(&file).unwrap(), first);
             assert_eq!(std::fs::read(&file).unwrap().len(), KEY_LEN);
+            assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"cut short");
             let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        /// The verifier's case: two first uses at once (two processes, here threads) each make a key; one key file results,
+        /// and both use the key in it.
+        #[test]
+        fn two_first_uses_at_once_end_with_one_key_for_both() {
+            for round in 0..20 {
+                let folder = std::env::temp_dir().join(format!("orbiters-key-race-{}-{round}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&folder);
+                let file = folder.join(KEY_FILE);
+                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
+                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
+                        if let Ok(key) = file_key(&file) {
+                            break key;
+                        }
+                    })).collect();
+                    racers.into_iter().map(|r| r.join().unwrap()).collect()
+                });
+                let on_disk = std::fs::read(&file).unwrap();
+                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one key for all");
+                assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "nothing left beside it");
+                let _ = std::fs::remove_dir_all(&folder);
+            }
+        }
+
+        /// Two signed processes at their first use: the keychain item is added, never set over another's; the one that
+        /// finds it there takes the winner's key. A locked keychain stays a reason to ask again.
+        #[test]
+        fn the_keychain_s_first_key_is_the_one_every_process_keeps() {
+            let keychain = std::sync::Mutex::new(None::<[u8; KEY_LEN]>);
+            let add = |key: &[u8; KEY_LEN]| {
+                let mut item = keychain.lock().unwrap();
+                if item.is_some() {
+                    return Err(DUPLICATE);
+                }
+                *item = Some(*key);
+                Ok(())
+            };
+            let get = || keychain.lock().unwrap().map(|k| k.to_vec()).ok_or(NOT_FOUND);
+            let first = add_or_adopt([1; KEY_LEN], add, get).unwrap();
+            let second = add_or_adopt([2; KEY_LEN], add, get).unwrap();
+            assert_eq!((first, second), ([1; KEY_LEN], [1; KEY_LEN]), "the second process uses the first one's key");
+            assert_eq!(*keychain.lock().unwrap(), Some([1; KEY_LEN]), "never replaced");
+            assert_eq!(add_or_adopt([3; KEY_LEN], |_| Err(LOCKED), get), Err(LOCKED));
+            assert!(keychain_refused(LOCKED).again, "locked while making it: asked again later");
+            assert!(!keychain_refused(-25293).again);
         }
 
         #[test]

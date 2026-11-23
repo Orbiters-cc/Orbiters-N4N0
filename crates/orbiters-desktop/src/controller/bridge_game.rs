@@ -466,6 +466,10 @@ impl Controller {
         #[cfg(not(target_os = "macos"))]
         let game = Arc::new(RealGame::new(Arc::downgrade(self), exe.clone()));
         let bridge = Bridge::new(game, Some(exe.clone()));
+        // A Mac's roster is the engine's (bridge_mac.rs); Windows' opener counts VRChat.exe and probes Easy Anti-Cheat.
+        #[cfg(target_os = "macos")]
+        bridge.set_opener(Arc::new(super::bridge_mac::MacOpener::new(Arc::downgrade(self))));
+        #[cfg(not(target_os = "macos"))]
         bridge.set_opener(Arc::new(super::bridge_side::RealOpener::new(Arc::downgrade(self), exe)));
         bridge.set_feedback(Arc::new(super::world_feedback::RealFeedback { ctl: Arc::downgrade(self) }));
         bridge.set_publish(Arc::new(super::bridge_publish::RealPublish::new(Arc::downgrade(self))));

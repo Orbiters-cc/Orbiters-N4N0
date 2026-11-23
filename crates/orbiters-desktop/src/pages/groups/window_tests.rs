@@ -102,7 +102,7 @@ fn a_lost_reply_is_unknown_and_recovered_through_the_link() {
     assert_eq!(between.lost(), 1, "the reply was lost on the link");
     between.hang_up();
     assert!(w.until(|s| s.flow.is_none()), "the window takes the end of the link");
-    assert_eq!(w.state.drafts.uncertain.iter().map(|u| u.op.clone()).collect::<Vec<_>>(), [op.clone()], "the post is uncertain, not refused");
+    assert_eq!(w.state.drafts.uncertain.iter().map(|u| u.op.as_str()).collect::<Vec<_>>(), [op.as_str()], "the post is uncertain, not refused");
     assert_ne!(w.state.said, Some(failure_text(Failure::Api(GroupFailure::Unavailable))));
     // The same post is not prepared again before its check.
     w.prepare(post());

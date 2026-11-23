@@ -21,6 +21,7 @@ pub mod storage;
 pub mod suggestions;
 pub mod templates;
 pub mod updates;
+mod vcc_store;
 pub mod vpm;
 mod vpm_http;
 

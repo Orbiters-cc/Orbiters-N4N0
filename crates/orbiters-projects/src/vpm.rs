@@ -96,29 +96,42 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(projects)
 }
 
+/// Puts the project at `path` on the list VCC and ALCOM share (`add`), or takes it off ([`crate::vcc_store`]).
 pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(root)?;
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    let mut settings = Settings::load(&io).await?;
+    // Their own lock of the database, before anything is read: what they save while this waits for it is read after it.
     let mut db = VccDatabaseConnection::connect(&io).await?;
+    crate::vcc_store::database_is_whole(root)?;
+    let text = path.to_str().with_context(|| tr("Project path is not Unicode"))?;
+    let (others, found) = (!db.get_projects().is_empty(), db.find_project(text)?);
+    let mut changed = true;
     if add {
         if !crate::discovery::is_project(path) {
             bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
         }
         let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-        if db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)?.is_none() {
-            db.add_project(&project).await?;
+        match found {
+            None => db.add_project(&project).await?,
+            Some(_) => changed = false,
         }
-        settings.add_user_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?);
     } else {
-        if let Some(p) = db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)? {
-            db.remove_project(&p);
+        match &found {
+            Some(p) => db.remove_project(p),
+            None => changed = false,
         }
-        settings.retain_user_projects(|p| crate::discovery::key(Path::new(p)) != crate::discovery::key(path));
     }
-    db.save(&io).await?;
-    settings.save(&io).await?;
+    let key = crate::discovery::key(path);
+    let mut settings = crate::vcc_store::Settings::plan(root, text, add, others, |p| crate::discovery::key(Path::new(p)) == key)?;
+    // The list first: a stop between the two leaves what both programs bring into the database themselves.
+    settings.write()?;
+    if changed {
+        if let Err(e) = db.save(&io).await {
+            settings.put_back()?;
+            return Err(e.into());
+        }
+    }
     Ok(())
 }
 

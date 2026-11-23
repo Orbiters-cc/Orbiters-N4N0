@@ -1,0 +1,6 @@
+{
+  "it is not a whole database": "ce n’est pas une base de données entière",
+  "it was not closed: open and close Creator Companion once": "elle n’a pas été fermée : ouvre puis ferme Creator Companion une fois",
+  "{file} of Creator Companion is not in a form Orbiters knows ({why}). Nothing was changed: add or remove the project in Creator Companion or ALCOM.": "{file} de Creator Companion n’est pas dans une forme qu’Orbiters connaît ({why}). Rien n’a été modifié : ajoute ou retire le projet dans Creator Companion ou ALCOM.",
+  "{file} of Creator Companion or ALCOM is in use: close them, then try again. Nothing was changed.": "{file} de Creator Companion ou d’ALCOM est utilisé : ferme-les, puis réessaie. Rien n’a été modifié."
+}

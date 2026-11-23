@@ -3244,6 +3244,59 @@ mod tests {
         assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_some());
     }
 
+    /// verify3-r21 M3 (the verifier's own fixture): the friend left before the window takes the answer Play waits for, in
+    /// the same frame: nothing starts.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify3_friend_departure_before_consuming_open_cancels_play() {
+        use orbiters_core::launcher::{Presence, Whereabouts};
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        open_profile_of(&mut h, "Nova Sample");
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Select");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        h.state.launcher_mut().places.desk.age_check(Duration::from_secs(65));
+        h.recorder.alive_by.lock().unwrap().insert(place.instance_id.clone(), (Some(true), Duration::from_millis(1000)));
+        click(&mut h, "Play in VR");
+        assert!(h.state.launcher_mut().places.desk.rechecking(), "fixture armed");
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        for f in data.friends.iter_mut().filter(|f| f.name == "Nova Sample") {
+            (f.presence, f.whereabouts) = (Presence::InGame, Whereabouts::Private);
+        }
+        h.state.launcher_mut().set_data(Arc::new(data));
+        std::thread::sleep(Duration::from_millis(1200));
+        h.frame(Vec::new());
+        assert!(starts(&h).is_empty(), "a launch was sent in the departure frame: {:?}", starts(&h));
+    }
+
+    /// verify3-r21 M1: a destination verified for an account goes to the service bound to that account, also while the
+    /// friends list is not read yet: the service can tell a switch on the way.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify3_a_verified_destination_keeps_its_account_to_the_service() {
+        use orbiters_core::launcher::{Action, Source};
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(1101, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        let Source::SignedIn { user_id: me, .. } = h.state.launcher_mut().data.source.clone() else { panic!() };
+        // Signed in, its list still to come.
+        let mut data = (*h.state.launcher_mut().data).clone();
+        data.source = Source::Nothing;
+        data.friends.clear();
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        click(&mut h, "Play in VR");
+        let sent = h.recorder.launcher.lock().unwrap().clone();
+        assert!(matches!(sent.last(), Some(Action::As { account, action }) if *account == me && matches!(&**action, Action::PlayAt { destination, .. } if destination.instance_id == visit.instance)), "{sent:?}");
+    }
+
     /// REQUEST23: while VRChat's session is restored, Select holds the friend's instance (nothing chosen, nothing asked)
     /// until VRChat says who is signed in; with VRChat running on the profile chosen (Where hidden), the profile keeps
     /// Request invite as before.

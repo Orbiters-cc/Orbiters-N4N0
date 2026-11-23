@@ -194,6 +194,27 @@ pub(super) struct Runtime {
     /// What every publish said of the sign-in (tests: no state any window could see is missed).
     #[cfg(test)]
     pub(super) presences: Vec<Presence>,
+    /// What every publish paired: the Orbiters member installed and what of VRChat it showed (tests, verify3-r21 B6).
+    #[cfg(test)]
+    pub(super) pairs: Vec<Pair>,
+    /// Run by a producer at a named point, between what it read and its writing it (tests: whatever can happen there).
+    #[cfg(test)]
+    pub(super) between: Option<Between>,
+}
+
+#[cfg(test)]
+pub(super) type Between = Box<dyn FnMut(&Shared, &'static str) + Send>;
+
+/// One publish: who is signed in to Orbiters, and what of VRChat goes out with it.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Pair {
+    pub member: Option<String>,
+    pub epoch: u64,
+    pub status: bool,
+    pub list: bool,
+    /// What they say they were verified for (the epoch and the member's key), each with its VRChat account.
+    pub text: String,
 }
 
 /// A wake-up for a thread that looks every so often: it looks at once when rung.
@@ -231,7 +252,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, shown_for: None, at_launch: None, cache_path: account_cache_path(), cache_generation: 0, #[cfg(test)] presences: Vec::new() }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, shown_for: None, at_launch: None, cache_path: account_cache_path(), cache_generation: 0, #[cfg(test)] presences: Vec::new(), #[cfg(test)] pairs: Vec::new(), #[cfg(test)] between: None }
     }
 }
 impl Runtime {
@@ -498,7 +519,7 @@ impl Controller {
     }
     /// What the session is, said in the status: usable, waiting for Orbiters, ended by VRChat, or not for this account.
     /// Never touches what a command under way will say.
-    fn settle_vrchat_status(&self, orbiters_gone: bool) {
+    fn settle_vrchat_status(self: &Shared, orbiters_gone: bool) {
         let (granted, waiting, busy, pending, client, signed_bell) = {
             let mut rt = self.vrchat_login.lock().unwrap();
             let granted = rt.identity.clone().is_some_and(|id| rt.allowed_for(&id));
@@ -515,6 +536,8 @@ impl Controller {
         let user = c.signed_in_user();
         let ended = c.ended_user().cloned();
         drop(c);
+        #[cfg(test)]
+        self.test_point("settle");
         self.update_if(|s| {
             let owner = self.vrchat_owner_of(&s.account);
             let st = &mut s.vrchat_login;
@@ -672,7 +695,7 @@ impl Controller {
             ctl.finish_vrchat_text(generation, &identity, result, picture, clear_session, recovery);
         });
     }
-    fn finish_vrchat(&self, generation: u64, identity: &(String, String), result: orbiters_core::vrchat_api::Result<Option<Login>>, picture: Option<Picture>) {
+    fn finish_vrchat(self: &Shared, generation: u64, identity: &(String, String), result: orbiters_core::vrchat_api::Result<Option<Login>>, picture: Option<Picture>) {
         let recovery = match &result {
             Err(Error::Unavailable | Error::RateLimited(_) | Error::Storage) => Recovery::Resume,
             _ => Recovery::None,
@@ -681,7 +704,7 @@ impl Controller {
         self.finish_vrchat_text(generation, identity, result.map_err(|e| e.to_string()), picture, clear_session, recovery);
     }
     fn finish_vrchat_text(
-        &self,
+        self: &Shared,
         generation: u64,
         identity: &(String, String),
         result: Result<Option<Login>, String>,
@@ -692,6 +715,8 @@ impl Controller {
         if !self.same_vrchat_identity(identity) {
             return;
         }
+        #[cfg(test)]
+        self.test_point("finish");
         self.update(|s| {
             let owner = self.vrchat_owner_of(&s.account);
             let mut rt = self.vrchat_login.lock().unwrap();
@@ -737,6 +762,18 @@ impl Controller {
                 Err(e) => status.error = Some(e),
             }
         });
+    }
+    /// Tests: whatever `between` does, at the point `at` of a producer (nothing of it locked).
+    #[cfg(test)]
+    pub(super) fn test_point(self: &Shared, at: &'static str) {
+        let hook = self.vrchat_login.lock().unwrap().between.take();
+        if let Some(mut hook) = hook {
+            hook(self, at);
+            let mut rt = self.vrchat_login.lock().unwrap();
+            if rt.between.is_none() {
+                rt.between = Some(hook);
+            }
+        }
     }
     /// The signed-in session's client while the feature is allowed for this Orbiters account (the launcher's calls).
     pub(super) fn vrchat_signed_client(&self) -> Option<Arc<Mutex<Client>>> {
@@ -881,6 +918,18 @@ pub(super) fn follow_orbiters_and_record(s: &mut crate::state::Snapshot, rt: &mu
     follow_orbiters(s, rt, owner);
     #[cfg(test)]
     rt.presences.push(s.vrchat_login.presence());
+    #[cfg(test)]
+    {
+        let (login, list) = (&s.vrchat_login, &s.launcher);
+        let signed = matches!(list.source, orbiters_core::launcher::Source::SignedIn { .. });
+        rt.pairs.push(Pair {
+            member: owner.map(|o| o.member.clone().unwrap_or_else(|| o.credential.clone())),
+            epoch: 0,
+            status: login.user.is_some() || login.known.is_some() || login.picture.is_some() || login.upload.is_some(),
+            list: signed || (list.me.is_some() || list.profile.is_some() || list.mine.is_some()) && !matches!(list.source, orbiters_core::launcher::Source::Database { .. }),
+            text: format!("user {:?} known {:?} list {:?}", login.user.as_ref().map(|u| &u.id), login.known.as_ref().map(|u| &u.id), list.source),
+        });
+    }
 }
 
 /// The last VRChat account signed in here, its name and picture (r21): shown while its saved session is restored at the
@@ -1517,6 +1566,214 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    // --- verify3-r21 B6: no publish pairs one member's VRChat identity with another's Orbiters account. ---
+
+    fn signed(name: &str) -> AccountState {
+        AccountState::SignedIn { username: name.into() }
+    }
+
+    /// What was published of VRChat while another member than `key` (or nobody) was signed in to Orbiters.
+    fn wrong_pairs(c: &Controller, key: &str) -> Vec<Pair> {
+        let rt = c.vrchat_login.lock().unwrap();
+        rt.pairs.iter().filter(|p| (p.status || p.list) && p.member.as_deref() != Some(key)).cloned().collect()
+    }
+
+    /// Member 1 of this environment, signed in to VRChat, with their list on show; the key their publishes have.
+    fn first_member(replies: Vec<(u16, serde_json::Value)>) -> (Shared, String) {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        c.test_vrchat(replies);
+        member(&c, Server::current(), "fake", "1", "tester", signed("tester"));
+        c.test_signed_in();
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        let key = owner_now(&c).unwrap();
+        c.vrchat_login.lock().unwrap().pairs.clear();
+        (c, key)
+    }
+
+    fn their_list() -> orbiters_core::launcher::LauncherState {
+        use orbiters_core::launcher::{Friend, LauncherState, MyProfile, Source};
+        LauncherState {
+            source: Source::SignedIn { user_id: "usr_test".into(), name: "Tester".into() },
+            me: Some(Friend { id: "usr_test".into(), name: "Tester".into(), ..Default::default() }),
+            friends: vec![Friend { id: "usr_friend".into(), name: "Their friend".into(), ..Default::default() }],
+            mine: Some(MyProfile { bio: "theirs".into(), ..Default::default() }),
+            ..LauncherState::default()
+        }
+    }
+
+    /// At `point`, member 2 (known by name, or with no name at all) signs in to Orbiters, as the account thread publishes it.
+    fn switches_at(c: &Shared, point: &'static str, name: &'static str) {
+        let mut done = false;
+        c.vrchat_login.lock().unwrap().between = Some(Box::new(move |c, at| {
+            if at == point && !std::mem::replace(&mut done, true) {
+                member(c, Server::current(), "another-token", "2", name, checking(name));
+            }
+        }));
+    }
+
+    /// verify3-r21 B6, its exact scenario: the status read for member 1 (granted, their VRChat user) is written after
+    /// member 2 took over: it is dropped, and no publish shows it under member 2's name.
+    #[test]
+    fn verify3_a_late_status_is_never_published_under_another_member() {
+        for name in ["someone-else", "tester", ""] {
+            let (c, key) = first_member(vec![]);
+            switches_at(&c, "settle", name);
+            c.vrchat_feature_tick();
+            assert!(owner_now(&c).unwrap() != key, "switched");
+            assert_eq!(wrong_pairs(&c, &key), Vec::new(), "{name:?}");
+            let status = c.view().vrchat_login.clone();
+            assert!(status.user.is_none() && status.known.is_none() && !status.allowed, "{name:?}: {status:?}");
+        }
+    }
+
+    /// The same for a sign-in or a restore that finishes late.
+    #[test]
+    fn verify3_a_late_sign_in_is_never_published_under_another_member() {
+        let me = serde_json::json!({"id": "usr_test", "displayName": "Tester"});
+        let (c, key) = first_member(vec![(200, me)]);
+        switches_at(&c, "finish", "someone-else");
+        c.vrchat_command(Command::Resume);
+        for _ in 0..400 {
+            if owner_now(&c).is_some_and(|k| k != key) && c.vrchat_login.lock().unwrap().between.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(60));
+        c.update(|_| {});
+        assert_eq!(wrong_pairs(&c, &key), Vec::new());
+        assert!(c.view().vrchat_login.user.is_none());
+    }
+
+    /// The friends list, the account's own card and the picture being uploaded go with the member, in the first publish.
+    #[test]
+    fn verify3_the_list_and_the_card_go_with_the_member_at_once() {
+        for state in [checking("someone-else"), signed("someone-else"), AccountState::SignedOut] {
+            let (c, key) = first_member(vec![]);
+            c.test_list(their_list());
+            c.update(|s| s.vrchat_login.upload = Some(PictureUpload { serial: 1, id: "avtr_theirs".into(), step: None, outcome: None }));
+            assert_eq!(c.view().launcher.friends.len(), 1, "on show");
+            member(&c, Server::current(), "another-token", "2", "someone-else", state.clone());
+            let view = c.view();
+            assert!(view.launcher.friends.is_empty() && view.launcher.me.is_none() && view.launcher.mine.is_none(), "{state:?}: {:?}", view.launcher.source);
+            assert!(view.vrchat_login.upload.is_none(), "{state:?}");
+            assert_eq!(wrong_pairs(&c, &key), Vec::new(), "{state:?}");
+        }
+    }
+
+    /// A read of member 1's list that ends after member 2 took over (VRChat's session handed on to them, the same account
+    /// of VRChat's even) is nobody's: member 2's own is read for them.
+    #[test]
+    fn verify3_a_late_list_is_never_published_under_another_member() {
+        let (c, key) = first_member(vec![]);
+        switches_at(&c, "commit", "someone-else");
+        c.test_list(their_list());
+        c.update(|_| {});
+        assert_eq!(wrong_pairs(&c, &key), Vec::new());
+        assert!(c.view().launcher.friends.is_empty());
+    }
+
+    /// The random walk's numbers (a xorshift: the same each run).
+    struct Dice(u64);
+    impl Dice {
+        fn roll(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 11) % n
+        }
+    }
+
+    /// verify3-r21: account switches, environment switches, sign-outs of either account and back, interleaved with looks,
+    /// commands and late completions of every kind (each producer is stopped between what it read and its writing it): no
+    /// publish ever pairs what is member 1's of VRChat with anybody else's Orbiters account.
+    #[test]
+    fn verify3_no_interleaving_pairs_one_members_vrchat_with_another_account() {
+        let (mut looked, mut shown) = (0usize, 0usize);
+        for seed in 1..=60u64 {
+            let (c, key) = first_member(Vec::new());
+            let orbiters = servers(&c);
+            // Orbiters allows member 1 here only: whatever anyone else sees of VRChat is member 1's.
+            orbiters.answers.lock().unwrap().insert(Api::new(Server::current()).url(""), false);
+            let dice = Arc::new(Mutex::new(Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)));
+            let change = {
+                let dice = dice.clone();
+                move |c: &Shared| {
+                    let roll = dice.lock().unwrap().roll(8);
+                    match roll {
+                        0 | 1 => member(c, Server::current(), "fake", "1", "tester", signed("tester")),
+                        2 => member(c, Server::current(), "another-token", "2", "tester", signed("tester")),
+                        3 => member(c, Server::current(), "a-third-token", "3", "", checking("")),
+                        4 => member(c, other_server(), "fake", "1", "tester", signed("tester")),
+                        5 => switching(c),
+                        6 => c.update(|s| s.account.state = AccountState::SignedOut),
+                        _ => {}
+                    }
+                }
+            };
+            {
+                let (dice, change) = (dice.clone(), change.clone());
+                c.vrchat_login.lock().unwrap().between = Some(Box::new(move |c, _| {
+                    if dice.lock().unwrap().roll(2) == 0 {
+                        change(c);
+                    }
+                }));
+            }
+            for _ in 0..40 {
+                let roll = dice.lock().unwrap().roll(8);
+                match roll {
+                    0..=2 => change(&c),
+                    3 | 4 => c.vrchat_feature_tick(),
+                    5 => c.test_list(their_list()),
+                    6 => c.test_finish(Ok(Some(Login::SignedIn(User { id: "usr_test".into(), ..Default::default() })))),
+                    _ => c.update(|_| {}),
+                }
+            }
+            let rt = c.vrchat_login.lock().unwrap();
+            looked += rt.pairs.len();
+            shown += rt.pairs.iter().filter(|p| p.status || p.list).count();
+            drop(rt);
+            assert_eq!(wrong_pairs(&c, &key), Vec::new(), "seed {seed}");
+        }
+        assert!(looked > 2000 && shown > 100, "the walk went through it: {looked} published, {shown} with VRChat's");
+    }
+
+    /// verify3-r21 M4: VRChat could not be told, and part of the session was left here: cleaning that up later does not
+    /// say VRChat was told.
+    #[test]
+    fn verify3_a_cleanup_retry_keeps_what_vrchat_was_not_told() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (client, calls) = c.test_vrchat(vec![(503, serde_json::json!({}))]);
+        c.vrchat_feature_tick();
+        let dir = crate::pages::test_root().join("vrchat-sign-out-retry");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = dir.join(orbiters_core::vrchat_api::SESSION_FILE);
+        std::fs::write(&session, b"made-up").unwrap();
+        let copy = dir.join(orbiters_core::vrchat_api::SESSION_BACKUP);
+        as_folder(&copy);
+        orbiters_core::vrchat_api::set_test_store(&mut client.lock().unwrap(), &session);
+        let finished = |c: &Shared| {
+            c.vrchat_command(Command::SignOut);
+            for _ in 0..600 {
+                if !c.view().vrchat_login.busy {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            c.view().vrchat_login.error.clone().unwrap_or_default()
+        };
+        let first = finished(&c);
+        assert!(first.contains("could not be fully removed") && first.contains("until it expires"), "{first}");
+        // The copy can be removed by now: "Remove the saved session" again.
+        std::fs::remove_dir_all(&copy).unwrap();
+        let again = finished(&c);
+        assert!(!again.contains("could not be fully removed"), "{again}");
+        assert!(again.contains("until it expires"), "VRChat was never told: {again:?}");
+        assert_eq!(calls.lock().unwrap().iter().filter(|(_, url)| url.ends_with("/logout")).count(), 1, "nothing left to tell it with");
+    }
+
     /// r21: a launch with a session saved here, as the service's `start()` makes it: the account file read (Checking),
     /// the sign-in's first state, then the looks. `vrchat` answers VRChat's requests; Orbiters says `orbiters`.
     fn launch(vrchat: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static, orbiters: Option<bool>, saved: bool) -> Shared {
@@ -1663,6 +1920,26 @@ impl Controller {
         rt.restored = false;
         rt.saved = Some(true);
         rt.ask = Arc::new(ask);
+    }
+    /// VRChat's session is this Orbiters member's grant and shows as signed in, as after a look.
+    pub(super) fn test_signed_in(&self) {
+        let (api, token) = self.vrchat_identity().unwrap();
+        let id = (api.url(""), token);
+        let owner = self.vrchat_owner();
+        let mut rt = self.vrchat_login.lock().unwrap();
+        rt.identity = Some(id.clone());
+        rt.grants.entry(id).or_insert_with(new_grant).answered(&Ok(true), Instant::now());
+        rt.shown_for = owner;
+    }
+    /// A read of the list that ends.
+    pub(super) fn test_list(self: &Shared, list: orbiters_core::launcher::LauncherState) {
+        self.launcher_commit_read(list);
+    }
+    /// A sign-in (or a restore) that ends with `result`.
+    pub(super) fn test_finish(self: &Shared, result: orbiters_core::vrchat_api::Result<Option<Login>>) {
+        let Some((api, token)) = self.vrchat_identity() else { return };
+        let generation = self.vrchat_login.lock().unwrap().generation;
+        self.finish_vrchat(generation, &(api.url(""), token), result, None);
     }
     pub(super) fn test_vrchat(&self, replies: Vec<(u16, serde_json::Value)>) -> (Arc<Mutex<Client>>, Arc<Mutex<Vec<(String, String)>>>) {
         self.test_account();

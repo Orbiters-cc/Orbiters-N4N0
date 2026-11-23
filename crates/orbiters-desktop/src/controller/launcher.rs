@@ -1452,7 +1452,9 @@ impl Controller {
     }
 
     /// A full read's list into the state: published only when it differs from what is on show.
-    pub(super) fn launcher_commit_read(&self, mut state: LauncherState) {
+    pub(super) fn launcher_commit_read(self: &Shared, mut state: LauncherState) {
+        #[cfg(test)]
+        self.test_point("commit");
         self.update_if(|s| {
             state.game = s.launcher.game.clone();
             state.possible.play = s.launcher.possible.play;

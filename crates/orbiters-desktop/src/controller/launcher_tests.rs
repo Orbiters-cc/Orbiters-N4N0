@@ -2181,3 +2181,22 @@ fn a_program_too_old_starts_no_vrchat() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+
+/// verify3-r21 M1: a destination verified for an account starts for that very account, its friends list read or not; for
+/// another login it starts nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn verify3_a_bound_destination_needs_its_account_not_its_list() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    c.test_vrchat(vec![]);
+    let there = || Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::FriendsPlus, region: "eu".into() };
+    let play = || Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: there() };
+    let other = c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(play()) });
+    assert!(matches!(other, Some(Notice::Error(_))), "{other:?}");
+    assert!(machine.started.lock().unwrap().is_empty());
+    assert!(!matches!(c.view().launcher.source, Source::SignedIn { .. }), "its list is not read yet");
+    let sent = c.launcher_do(mine(play()));
+    assert!(matches!(sent, Some(Notice::Sent { .. })), "{sent:?}");
+    assert_eq!(machine.started.lock().unwrap().len(), 1);
+}

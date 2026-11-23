@@ -2,7 +2,7 @@
 //! (create, change, delete) and Posts (write, delete; changed on vrchat.com). One scrolling region; what VRChat gives is shown as it
 //! answered, and each control is offered only when `orbiters_core::groups::can` allows it on the data read (VRChat still
 //! decides).
-use super::{abilities_line, authority_text, deliberate, failure_text, short_code, tail as id_tail, warning_text, Kind, State};
+use super::{abilities_line, authority_text, failure_text, short_code, tail as id_tail, warning_text, Kind, State};
 use super::art::Drafts;
 use crate::controller::groups::{Done, Failure, Outcome, Page, Reply, Request, Sealed, Write};
 use crate::pages::Cx;
@@ -850,7 +850,7 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
             note(ui, tr("The picture is in your VRChat inventory. The group is unchanged until you apply it."), theme::FG_2);
             let label = if slot == ArtSlot::Icon { tr("Apply as the icon") } else { tr("Apply as the banner") };
             let resp = widgets::Button::new(label).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(!busy && art).id_salt(("look-apply-uploaded", file.as_str())).show(ui);
-            if deliberate(&resp) {
+            if widgets::activated_fresh(&resp) {
                 acts.push(Act::ApplyUploaded(slot, file.clone(), resp.rect));
             }
         });
@@ -1136,7 +1136,7 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
         }
         // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
         // alone (Major 3, Blocker 6).
-        if verdict.allowed() && deliberate(&resp) {
+        if verdict.allowed() && widgets::activated_fresh(&resp) {
             acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), role: r.id.clone(), add: !has }, cr));
         }
     }
@@ -1220,7 +1220,7 @@ fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
         let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
         if deletable.allowed() {
             let resp = widgets::Button::new(tr("Delete")).icon(icons::TRASH).variant(widgets::Variant::Danger).size(widgets::Size::Sm).enabled(!busy).id_salt(("role-delete", r.id.as_str())).show_at(ui, del);
-            if deliberate(&resp) {
+            if widgets::activated_fresh(&resp) {
                 acts.push(Act::Write(Write::DeleteRole { group: o.id.clone(), role: r.id.clone() }, resp.rect));
             }
         }
@@ -1303,7 +1303,7 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
         }
         button_row(ui, |ui| {
             let resp = widgets::Button::new(tr("Save")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(verdict.as_ref().is_some_and(|v| v.allowed()) && !busy).id_salt("role-save").show(ui);
-            if deliberate(&resp) {
+            if widgets::activated_fresh(&resp) {
                 save = Some(resp.rect);
             }
             if widgets::Button::new(tr("Cancel")).variant(widgets::Variant::Ghost).id_salt("role-cancel").show(ui).clicked() {
@@ -1442,7 +1442,7 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
             if post.complete {
                 let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
                 let resp = widgets::Button::new(tr("Delete")).icon(icons::TRASH).variant(widgets::Variant::Danger).size(widgets::Size::Sm).enabled(!busy).id_salt(("post-delete", post.id.as_str())).show_at(ui, del);
-                if deliberate(&resp) {
+                if widgets::activated_fresh(&resp) {
                     acts.push(Act::Write(Write::DeletePost { group: o.id.clone(), post: post.clone() }, resp.rect));
                 }
             }
@@ -1508,7 +1508,7 @@ fn composer(ui: &mut Ui, o: &mut Open, busy: bool, kept: bool, acts: &mut Vec<Ac
         let ready = !c.draft.title.trim().is_empty() && !c.draft.text.trim().is_empty();
         button_row(ui, |ui| {
             let resp = widgets::Button::new(tr("Review the post")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(ready && !busy).id_salt("post-review").show(ui);
-            if deliberate(&resp) {
+            if widgets::activated_fresh(&resp) {
                 send = Some(resp.rect);
             }
             if widgets::Button::new(tr("Cancel")).variant(widgets::Variant::Ghost).id_salt("post-cancel").show(ui).clicked() {

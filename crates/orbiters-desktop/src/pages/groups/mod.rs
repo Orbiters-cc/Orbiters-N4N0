@@ -935,31 +935,6 @@ pub(crate) fn warning_text(w: Warning) -> &'static str {
     }
 }
 
-/// A press of the person's own, of a control that asks for something hard to take back: never a held key's repeats, and
-/// never a key that was already down when the control came. It is armed only once it was drawn with Enter and Space up, and
-/// a press that another of these took in the same pass is not its own. (Groups' own until the shared `Button::confirm` does
-/// exactly this: verify3 Major 7.)
-pub(crate) fn deliberate(resp: &egui::Response) -> bool {
-    let ctx = &resp.ctx;
-    let pass = ctx.cumulative_pass_nr();
-    let up = ctx.input(|i| !i.key_down(egui::Key::Enter) && !i.key_down(egui::Key::Space));
-    let id = resp.id.with("group-armed");
-    // Armed at an earlier pass, and drawn without a break since.
-    let armed = ctx.data(|d| d.get_temp::<(bool, u64)>(id)).is_some_and(|(armed, at)| armed && at + 1 >= pass);
-    ctx.data_mut(|d| d.insert_temp(id, (armed || up, pass)));
-    if !widgets::activated_fresh(resp) {
-        return false;
-    }
-    let keyed = !resp.clicked_by(egui::PointerButton::Primary) && !ctx.input(|i| i.has_accesskit_action_request(resp.id, egui::accesskit::Action::Click));
-    if keyed && !armed {
-        return false;
-    }
-    let taken = Id::unique("group-press-taken");
-    let already = ctx.data(|d| d.get_temp::<u64>(taken)) == Some(pass);
-    ctx.data_mut(|d| d.insert_temp(taken, pass));
-    !already
-}
-
 /// The last six of an id, to tell one from another.
 fn tail(id: &str) -> String {
     let from = id.char_indices().rev().nth(5).map_or(0, |(i, _)| i);
@@ -1011,7 +986,7 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
         let mut on = false;
         warn_card(ui, tr("Records of earlier group changes on this computer cannot be read: what they were of may have been done, or not. Look on vrchat.com first. They are kept aside if you go on."), w, |ui, rect| {
             let r = widgets::Button::new(tr("I looked: go on")).variant(widgets::Variant::Warn).size(widgets::Size::Sm).enabled(!telling).id_salt("group-set-aside").show_at(ui, rect);
-            on = deliberate(&r);
+            on = widgets::activated_fresh(&r);
         });
         if let Some(scope) = state.scope.clone().filter(|_| on) {
             state.jobs.ask(ctx, ctl, &scope, Kind::SetAside, Request::SetAside);
@@ -1050,7 +1025,7 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                 for (label, what, salt) in offered {
                     let r = widgets::Button::new(label).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-decide", salt, e.op.as_str())).show(ui);
-                    if deliberate(&r) {
+                    if widgets::activated_fresh(&r) {
                         state.origin = r.rect;
                         choice = Some(what);
                     }
@@ -1072,7 +1047,7 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
         let mut over = false;
         warn_card(ui, &format!("{} {}", uncertain_words(kind), tr("Its answer was lost, and its record here cannot be read: look on vrchat.com before doing it again.")), w, |ui, rect| {
             let r = widgets::Button::new(tr("Drop it")).variant(widgets::Variant::Warn).size(widgets::Size::Sm).id_salt(("group-lost", op.as_str())).show_at(ui, rect);
-            over = deliberate(&r);
+            over = widgets::activated_fresh(&r);
         });
         if over {
             state.lost.retain(|l| l.op != op);
@@ -1130,7 +1105,7 @@ fn candidate_row(ui: &mut Ui, op: &str, c: &Candidate, thumb: Option<&egui::Text
     widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::FG_2), rect.right() - bw - 28.0 - x);
     let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let r = widgets::Button::new(tr("This is it")).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
-    if deliberate(&r) {
+    if widgets::activated_fresh(&r) {
         *choice = Some(Choice::Shows { made: Some(c.id.clone()) });
     }
 }
@@ -1413,7 +1388,7 @@ fn confirmation(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         orbiters_ui::dialog::Part::Footer => {
             let variant = if danger { widgets::Variant::Danger } else { widgets::Variant::Primary };
             let button = widgets::Button::new(&action).variant(variant).enabled(shown).id_salt("group-confirm-send").show(ui);
-            if deliberate(&button) {
+            if widgets::activated_fresh(&button) {
                 send = true;
             }
             ui.add_space(8.0);

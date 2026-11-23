@@ -706,50 +706,6 @@ fn a_key_held_from_the_opener_confirms_nothing() {
     }
 }
 
-/// The local guard by itself: armed only after the key was seen up, once per press, whatever the pointer does.
-#[test]
-fn a_press_is_one_controls_own() {
-    let key = |pressed: bool| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
-    let ctx = egui::Context::default();
-    let mut t = 0.0;
-    let mut frame = |shown: &[&str], focus: &str, events: Vec<egui::Event>| {
-        t += 0.05;
-        let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))), time: Some(t), ..Default::default() };
-        input.events = events;
-        let mut hit = Vec::new();
-        let mut out = ctx.run_ui(input, |ui| {
-            for (i, name) in shown.iter().enumerate() {
-                let r = Rect::from_min_size(egui::pos2(10.0, 10.0 + 50.0 * i as f32), egui::vec2(100.0, 40.0));
-                let resp = ui.interact(r, Id::unique(("control", *name)), Sense::click());
-                if *name == focus {
-                    resp.request_focus();
-                }
-                if deliberate(&resp) {
-                    hit.push(name.to_string());
-                }
-            }
-        });
-        out.textures_delta.clear();
-        hit
-    };
-    for _ in 0..3 {
-        assert!(frame(&["a"], "a", vec![]).is_empty());
-    }
-    assert_eq!(frame(&["a"], "a", vec![key(true)]), ["a"]);
-    // "b" comes while the key is down, and takes the focus.
-    for _ in 0..3 {
-        assert!(frame(&["a", "b"], "b", vec![key(true)]).is_empty(), "never armed under a key already down");
-    }
-    assert!(frame(&["a", "b"], "b", vec![key(false)]).is_empty());
-    assert!(frame(&["a", "b"], "b", vec![]).is_empty());
-    assert_eq!(frame(&["a", "b"], "b", vec![key(true)]), ["b"], "its own press");
-    assert!(frame(&["a", "b"], "b", vec![key(false)]).is_empty());
-    // Gone and back while the key is down: to be armed anew.
-    assert!(frame(&["a"], "a", vec![]).is_empty());
-    assert_eq!(frame(&["a"], "a", vec![key(true)]), ["a"]);
-    assert!(frame(&["a", "b"], "b", vec![key(true)]).is_empty());
-}
-
 /// The panel: which write it is, what the check saw now, and the person's way out, from the real service; nothing offered
 /// to decide before a check, and something always after (verify3 Major 3).
 #[test]

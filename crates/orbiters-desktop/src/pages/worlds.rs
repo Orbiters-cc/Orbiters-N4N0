@@ -1574,7 +1574,7 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
                 Some(h) => share.enabled(false).hint(h),
                 None => share,
             };
-            if share.show_at(ui, sr).clicked() {
+            if share.confirm_at(ui, sr) {
                 action = Some(BarAction::Share);
             }
             right = sr.left() - 8.0;

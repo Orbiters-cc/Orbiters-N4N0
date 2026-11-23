@@ -383,11 +383,13 @@ impl RealProjectsHost {
 
 impl crate::bridge::projects::Host for RealProjectsHost {
     fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) -> Result<(), String> {
-        self.ctl()?.upload_pictures(world_id, world_name, paths).map_err(|e| format!("{e:#}"))
+        let ctl = self.ctl()?;
+        ctl.upload_pictures(world_id, world_name, paths, ctl.identity_epoch()).map_err(|e| format!("{e:#}"))
     }
 
     fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) -> Result<(), String> {
-        self.ctl()?.upload_preview(world_id, world_name, session).map_err(|e| format!("{e:#}"))
+        let ctl = self.ctl()?;
+        ctl.upload_preview(world_id, world_name, session, ctl.identity_epoch()).map_err(|e| format!("{e:#}"))
     }
 
     fn uploads(&self, world_id: &str) -> serde_json::Value {

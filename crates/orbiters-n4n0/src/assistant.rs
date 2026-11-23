@@ -6,7 +6,7 @@
 //! The offline path ([`orbiters_n4n0_core::intents::quick`]) runs here too: the most common short commands, from the
 //! person's own sentence alone, at once and with no network.
 
-use crate::fence::{Fence, Ticket};
+use crate::fence::{Fence, Permit, Ticket};
 use crate::runtime::Shared;
 use crate::status::{N4n0Who, NoticeKind};
 use orbiters_core::slice::Slice;
@@ -291,7 +291,7 @@ impl Fence<'_> {
 
     /// Runs `intent` (its gate said so, or the owner said yes): counted against the rate limits, said, logged, its undo
     /// kept. The result is for the model.
-    pub(crate) fn intent_run(&self, intent: Intent, via: Via) -> Result<Value, String> {
+    pub(crate) fn intent_run(&self, permit: &Permit, intent: Intent, via: Via) -> Result<Value, String> {
         let risk = intent.risk();
         let limited = self.n4n0.lock().unwrap().assistant.limiter.take(if risk == Risk::Confirm { Risk::Confirm } else { Risk::Act }, Instant::now());
         if let Err(why) = limited {
@@ -301,7 +301,7 @@ impl Fence<'_> {
         }
         self.intent_doing(Some(intent.says()));
         self.publish();
-        let outcome = self.intent_do(&intent);
+        let outcome = self.intent_do(permit, &intent);
         self.intent_doing(None);
         match outcome {
             Ok((value, undo)) => {
@@ -351,7 +351,7 @@ impl Fence<'_> {
     }
 
     /// Does `intent`, by the same path its menu or page takes. Its result for the model, and what undoes it.
-    fn intent_do(&self, intent: &Intent) -> Result<(Value, Option<UndoStep>), String> {
+    fn intent_do(&self, permit: &Permit, intent: &Intent) -> Result<(Value, Option<UndoStep>), String> {
         let done = || json!({ "done": true });
         let settings = self.settings();
         let item = self.item(intent)?;
@@ -643,10 +643,10 @@ impl Fence<'_> {
                 match step {
                     UndoStep::Effects(effects) => self.screen_effects(effects),
                     UndoStep::Action(Action::App(i)) => {
-                        self.intent_do(&i)?;
+                        self.intent_do(permit, &i)?;
                     }
                     UndoStep::Action(action) => {
-                        self.run_action_undo(action)?;
+                        self.run_action_for_assistant(permit, action)?;
                     }
                 }
                 (json!({ "undone": undone.what() }), None)
@@ -688,11 +688,6 @@ impl Fence<'_> {
         }
     }
 
-    /// An undo of one of the older tools' actions (the music, the light).
-    fn run_action_undo(&self, action: Action) -> Result<(), String> {
-        self.run_action_for_assistant(action).map(|_| ())
-    }
-
     /// The world the owner is in, for its feedback.
     fn here(&self) -> Result<String, String> {
         let w = self.host.world();
@@ -705,6 +700,14 @@ impl Fence<'_> {
         said.iter()
             .map(|s| pick_person(s, friends.iter().map(|f| (f.id.as_str(), f.name.as_str()))).map(|(id, name)| orbiters_n4n0_core::captures::Friend { id, name }))
             .collect()
+    }
+
+    /// The page where the person does it themselves opens (the account's actions are off for them).
+    pub(crate) fn open_instead(&self, page: Page) {
+        self.open_page(page, None);
+        if page.on_window() {
+            let _ = self.host.assistant_intent(&Intent::OpenPage { page }, None);
+        }
     }
 
     /// Asks the interfaces to open `page` (each opens a request once); the window's pages through the app as well.
@@ -790,7 +793,7 @@ impl Fence<'_> {
         for action in actions {
             match action {
                 Action::App(intent) => match intents::gate(&intent, &facts, false) {
-                    Gate::Run => match self.intent_run(intent.clone(), Via::Quick) {
+                    Gate::Run => match self.permit_said(&Action::App(intent.clone())).ok_or_else(String::new).and_then(|permit| self.intent_run(&permit, intent.clone(), Via::Quick)) {
                         Ok(_) => {
                             said.push(intent.says());
                             said_en.push(intent.what());
@@ -809,11 +812,16 @@ impl Fence<'_> {
                         asked.push(Action::App(intent));
                     }
                     Gate::Offer(_) => refused.push(intent.says()),
+                    Gate::Instead(page) => {
+                        self.intent_log(&intent, Outcome::Refused, Some(tr("Not from your account yet: its page opened instead.").into()), Via::Quick);
+                        self.open_instead(page);
+                        refused.push(format!("{} ({})", intent.says(), tr("not from your account yet")));
+                    }
                 },
                 other => {
                     let words = crate::runtime::action_says(&other);
                     let english = orbiters_i18n::in_language(orbiters_i18n::Language::En, || crate::runtime::action_says(&other));
-                    match self.run_action_for_assistant(other) {
+                    match self.permit_said(&other).ok_or_else(String::new).and_then(|permit| self.run_action_for_assistant(&permit, other)) {
                         Ok(_) => {
                             // The music and the light say what they did in the conversation themselves: the panel says it.
                             self.log_line("quick", words.clone(), Risk::Act, Outcome::Done, None, Via::Quick);
@@ -854,6 +862,7 @@ impl Fence<'_> {
             self.ask_owner(asked);
         }
         self.publish();
+        self.keep_conversation();
     }
 }
 

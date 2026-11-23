@@ -1046,6 +1046,8 @@ pub struct Panels {
     hidden: bool,
     /// Talk is held.
     talking: bool,
+    /// The question said to N4N0 as shown on the Ask page (and whose).
+    asked_shown: Option<(u64, u64)>,
     started: Instant,
     /// The time its pictures are painted at, when not the clock's: the headless bench's ([`paint_bench`]), whose turns must paint the same from one run to the next.
     clock: Option<f64>,
@@ -1189,6 +1191,7 @@ impl Panels {
             worlds_here,
             hidden: false,
             talking: false,
+            asked_shown: None,
             started: Instant::now(),
             clock: None,
             bloom: Bloom::default(),
@@ -2649,6 +2652,7 @@ impl Panels {
             // Its number goes with the Yes or No pressed on it: a late press answers nothing newer (verify-r21 1).
             talk_question_id: snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
             talk_epoch: snap.n4n0.account_epoch,
+            talk_conversation: snap.n4n0.conversation,
             talk_retry: snap.n4n0.assistant.failure.as_ref().filter(|f| f.retry && !snap.n4n0.thinking && self.facts.sheet == Some(Sheet::Talk)).map(|f| {
                 let now = orbiters_n4n0::unix_ms();
                 (f.id, f.label(now), f.waits(now) == 0)
@@ -2933,6 +2937,26 @@ impl Panels {
         self.pressed_facts.as_ref().or_else(|| self.stage.presented.as_ref().map(|(_, f, _)| f)).unwrap_or(&self.facts)
     }
 
+    /// The question on the Ask page's picture that shows, and whose it is.
+    fn ask_presented(&self) -> Option<(u64, u64)> {
+        let page = self.takeover.as_ref().filter(|p| p.shown && self.facts.sheet == Some(Sheet::Talk))?;
+        let facts = page.displayed.as_ref().or_else(|| self.stage.presented.as_ref().map(|(_, f, _)| f))?;
+        (facts.sheet == Some(Sheet::Talk)).then_some(facts.talk_question_id.map(|q| (facts.talk_epoch, q)))?
+    }
+
+    /// N4N0 is told, once, of a question whose card is on the picture the last turn showed: from here on what is said or
+    /// pressed on the Ask page can answer it (verify3-r21 B3).
+    fn say_presented(&mut self) {
+        let shown = self.ask_presented();
+        if shown.is_some() && shown != self.asked_shown {
+            if let Some((epoch, question)) = shown {
+                let stamp = orbiters_n4n0::Stamp { epoch, question: Some(question), surface: orbiters_n4n0::Surface::Overlay, seq: orbiters_n4n0::next_input() };
+                self.backend.n4n0(N4n0Command::Presented { stamp: Some(stamp) });
+            }
+        }
+        self.asked_shown = shown;
+    }
+
     /// The stamp of a press on the Ask page: what the picture pressed showed.
     fn ask_stamp(&self) -> Option<orbiters_n4n0::Stamp> {
         let facts = self.action_facts();
@@ -3194,6 +3218,8 @@ impl Panels {
     /// What a press on `action` does.
     fn act(&mut self, action: Action, snap: &Snapshot, out: &mut Pressed) {
         out.clicked = action != Action::Idle;
+        // Whatever it sends is for the member the picture pressed showed.
+        self.backend.shown(self.action_facts().talk_epoch, orbiters_n4n0::Surface::Overlay);
         // Going to another screen: the one that was is on the way back.
         if Self::opens_a_screen(action) {
             if let Some(here) = self.here.filter(|here| *here != action && self.facts.sheet.is_some() && !self.going_back) {
@@ -3453,7 +3479,12 @@ impl Panels {
                     self.backend.n4n0(N4n0Command::AskTalk { down, stamp });
                 }
             },
-            Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
+            // The conversation on the picture that was pressed, never one begun since.
+            Action::NewConversation => {
+                let conversation = Some(self.action_facts().talk_conversation);
+                let stamp = self.ask_stamp();
+                self.backend.n4n0(N4n0Command::NewConversation { conversation, stamp });
+            }
             // The question's Yes or No, as saying it (REQUEST20 6).
             // For the question on the picture that was pressed, never the one that came since (verify2-r21 B1).
             Action::AskAnswer(yes) => {
@@ -4102,6 +4133,8 @@ impl Panels {
     pub(super) fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
 
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
+        // Of the picture handed over last turn, and shown.
+        self.say_presented();
         // What may be put back ([`Panel::not_presented`]) is this turn's hand-over only.
         for panel in &mut self.list {
             panel.acknowledged = None;
@@ -4732,6 +4765,7 @@ fn talk_now(snap: &Snapshot) -> panels::TalkNow {
     // What stops it is said first, before a word (F23): the runtime checks the same before it opens the microphone.
     match voice.readiness {
         VoiceReadiness::SignIn => return panels::TalkNow::SignIn,
+        VoiceReadiness::SigningIn => return panels::TalkNow::Off(mark("Signing in to Orbiters…")),
         VoiceReadiness::AssistantOff => return panels::TalkNow::Off(mark("Turn on N4N0's assistant in Orbiters")),
         VoiceReadiness::ModelsDownloading => return panels::TalkNow::Off(mark("Its speech models are downloading")),
         VoiceReadiness::ModelsMissing => return panels::TalkNow::Off(mark("Install its speech in Orbiters, N4N0")),

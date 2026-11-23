@@ -266,7 +266,11 @@ impl super::Controller {
 
     /// A share a menu asked: the capture as Photos & captures lists it (its upload, if any, reused), shared at once when
     /// its 3D view is made, else once it is (queued for reconstruction when nothing makes it).
-    pub(super) fn menu_capture_share(self: &Shared, ask: ShareAsk) -> Result<(), String> {
+    /// As the member of `epoch`, whom what asked it showed.
+    pub(super) fn menu_capture_share(self: &Shared, ask: ShareAsk, epoch: u64) -> Result<(), String> {
+        let Some(_acting) = self.n4n0.acting(epoch) else {
+            return Err(tr_latin("That was for the Orbiters account signed in before: nothing was done.").into());
+        };
         if ask.recipients.len() > RECIPIENTS_MAX {
             return Err(fill(tr_latin("A capture goes to at most {max} friends at a time"), &[("max", &RECIPIENTS_MAX)]));
         }
@@ -274,7 +278,6 @@ impl super::Controller {
             return Err(tr_latin("Choose who to share it with").into());
         }
         let name = folder_of(&ask.key);
-        let epoch = self.identity_epoch();
         let snap = self.view();
         if snap.capture.session_dir.as_deref().is_some_and(|d| folder(d) == name) && (snap.is_capturing() || snap.capture.state == CaptureState::Stopping) {
             return Err(tr_latin("It is still being recorded: share it once it is saved").into());
@@ -336,7 +339,7 @@ impl super::Controller {
         let share = orbiters_core::shares::Share { public: ask.public, recipients, acknowledge_explicit: ask.acknowledge_explicit, message: String::new() };
         let request = Request { id: id.clone(), server: server(development), entry, extra: Vec::new(), operation: Operation::Share(share) };
         // The tray owns it from here (its work runs on a thread of its own).
-        self.capture_share_as(request, self.account_api_of(epoch));
+        self.capture_share(request, epoch);
         Asked::Job { id, ask, since: Instant::now() }
     }
 

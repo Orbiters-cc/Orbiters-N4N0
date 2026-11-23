@@ -5,3 +5,6 @@ crates/orbiters-desktop/src/chat_bar/panel.rs
 crates/orbiters-desktop/src/chat_bar/layout.rs
 crates/orbiters-desktop/src/chat_bar/morph.rs
 crates/orbiters-n4n0/src/fence.rs
+crates/orbiters-core/src/origin.rs
+crates/orbiters-n4n0/src/conversation.rs
+crates/orbiters-desktop/src/controller/assistant_access.rs

@@ -6,7 +6,7 @@ use super::*;
 use orbiters_n4n0_core::intents::{Facts, Intent};
 
 fn full() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
 }
 
 fn ready() -> (Arc<TestHost>, Shared, Device) {
@@ -97,18 +97,28 @@ fn stamp(question: Option<u64>, epoch: u64) -> Option<Stamp> {
     Some(Stamp { epoch, question, surface: Surface::Window, seq: crate::next_input() })
 }
 
+/// The window shows `question` (its card came into view).
+fn showing(n: &Shared, question: Option<u64>, epoch: u64) {
+    if question.is_some() {
+        n.command(Command::Presented { stamp: stamp(question, epoch) });
+    }
+}
+
 /// A surface's Yes or No pressed while it showed `question`, for the account epoch it showed.
 fn press_answer(n: &Shared, yes: bool, question: Option<u64>, epoch: u64) {
+    showing(n, question, epoch);
     n.command(Command::AskAnswer { yes, stamp: stamp(question, epoch) });
 }
 
 /// A sentence typed and sent while the surface showed `question`, for the account epoch it showed.
 fn typed(n: &Shared, text: &str, question: Option<u64>, epoch: u64) {
+    showing(n, question, epoch);
     n.command(Command::Ask { text: text.into(), stamp: stamp(question, epoch) });
 }
 
 /// The window's Talk pressed while it showed `question`.
 fn talk_pressed(n: &Shared, question: Option<u64>, epoch: u64) {
+    showing(n, question, epoch);
     n.app_talk(true, false, stamp(question, epoch));
 }
 
@@ -402,7 +412,7 @@ fn what_a_left_waiting_does_nothing_once_b_took_over() {
         rt.screen.photo_at = Some(Instant::now() + Duration::from_millis(150));
         rt.send_at(Instant::now() + Duration::from_secs(20), [("/usercamera/Capture".to_string(), OscType::Bool(true))]);
     }
-    n.acts().intent_run(Intent::ShareCapture { which: orbiters_n4n0_core::intents::Which::Next, public: true, friends: vec![] }, orbiters_n4n0_core::intents::Via::Model).unwrap();
+    n.acts().intent_run(&crate::fence::Permit::for_test(), Intent::ShareCapture { which: orbiters_n4n0_core::intents::Which::Next, public: true, friends: vec![] }, orbiters_n4n0_core::intents::Via::Model).unwrap();
     let off = n.acts().later();
     let (base_b, bodies_b) = orbiters(vec![]);
     switch_member(&t, &n, base_b, "orbit-b");
@@ -479,7 +489,7 @@ fn every_side_effect_of_the_assistant_is_behind_the_fence() {
             assert_eq!(runtime.matches(&format!("fn {name}(")).count(), 1, "{name} is nowhere else");
         }
     }
-    for name in ["intent_log", "log_line", "intent_doing", "intent_run", "keep_list", "intent_do", "run_action_undo", "open_page", "quick"] {
+    for name in ["intent_log", "log_line", "intent_doing", "intent_run", "keep_list", "intent_do", "open_page", "open_instead", "quick"] {
         assert!(acts_assistant.contains(&format!("fn {name}(&self")), "{name} is the fence's");
         assert_eq!(assistant.matches(&format!("fn {name}(")).count(), 1, "{name} is nowhere else");
     }
@@ -500,10 +510,13 @@ fn every_side_effect_of_the_assistant_is_behind_the_fence() {
     assert_eq!(fence.matches("fn admitted(").count(), 1);
     assert_eq!(runtime.matches("fn answer_with(").count(), 1);
     // Work a menu or a tool starts as the member asks for the account of its own epoch, never for whoever is signed in.
-    for name in ["runtime.rs", "assistant.rs", "screen.rs", "captures.rs", "feedback.rs"] {
+    for name in ["runtime.rs", "assistant.rs", "screen.rs", "captures.rs", "feedback.rs", "conversation.rs", "voice.rs"] {
         let source = read(name);
         for (n, line) in source.lines().enumerate().filter(|(_, l)| l.contains("host.account()")) {
             assert!(line.contains("Server::current()"), "{name}:{}: {line}", n + 1);
         }
     }
 }
+
+#[path = "tests_fix3.rs"]
+mod fix3;

@@ -22,6 +22,17 @@ const RECHECK_OFFLINE: Duration = Duration::from_secs(60);
 const RECHECK_REFUSED: Duration = Duration::from_secs(600);
 const RECHECK_REFUSED_MAX: Duration = Duration::from_secs(6 * 3600);
 
+/// An account file that could not be read is tried again at once this many times, this far apart (another tool may be
+/// writing it), then every [`REREAD`].
+const READ_TRIES: u32 = 5;
+const READ_APART: Duration = Duration::from_millis(100);
+const REREAD: Duration = Duration::from_secs(2);
+
+/// What the account shows while its file cannot be read.
+fn unreadable_text() -> &'static str {
+    tr("Your Orbiters account could not be read on this computer, so you are signed out for now. Orbiters keeps trying; if this stays, sign in again.")
+}
+
 /// When a credential refused `refusals` times in a row is asked about again.
 fn refused_recheck(refusals: u32) -> Duration {
     RECHECK_REFUSED.saturating_mul(1 << refusals.clamp(1, 16).saturating_sub(1)).min(RECHECK_REFUSED_MAX)
@@ -34,6 +45,13 @@ pub struct AccountRuntime {
     pub(super) account: Option<Account>,
     /// The server and the account file's change time last read, to notice another tool signing in or out.
     pub(super) read: Option<(Server, Option<SystemTime>)>,
+    /// The saved account could not be read, or the environment is being switched and the next one's is not read yet: who it
+    /// is is unknown (controller/identity.rs).
+    pub(super) unknown: bool,
+    /// The file that could not be read, its change time then, and when that was.
+    unreadable: Option<(Server, Option<SystemTime>, Instant)>,
+    /// The service just started: the account's file is not read yet.
+    pub(super) starting: bool,
     signing_in: Option<SignIn>,
     /// Bumped by every sign-in, cancel and sign-out, so an answer for an older attempt is dropped.
     generation: u64,
@@ -55,6 +73,43 @@ struct SignIn {
 }
 
 impl AccountRuntime {
+    /// Whose all this is; `None` while nothing was read at all.
+    pub(super) fn identity(&self) -> Option<super::identity::Identity> {
+        use super::identity::Identity;
+        if self.unknown {
+            return Some(Identity::Unknown { key: None });
+        }
+        self.read.map(|(server, _)| Identity::of(server, self.account.as_ref()))
+    }
+
+    pub(super) fn signed_as(&self) -> orbiters_n4n0::status::SignedAs {
+        if self.starting {
+            return orbiters_n4n0::status::SignedAs::Unknown;
+        }
+        self.identity().map_or(orbiters_n4n0::status::SignedAs::Nobody, |i| i.signed_as())
+    }
+
+    /// `account` (or nobody) is what `server`'s file said, changed last at `modified`.
+    fn settled(&mut self, server: Server, modified: Option<SystemTime>, account: Option<Account>) {
+        self.read = Some((server, modified));
+        self.account = account;
+        self.unknown = false;
+        self.unreadable = None;
+        self.starting = false;
+        self.offline_since = None;
+        self.refused = None;
+    }
+
+    /// Nobody is installed, and who it is is unknown: no credential is kept for any server.
+    fn unsettled(&mut self) {
+        self.read = None;
+        self.account = None;
+        self.unknown = true;
+        self.starting = false;
+        self.offline_since = None;
+        self.refused = None;
+    }
+
     /// What the account shows when no sign-in waits: signed in with the account saved, or signed out.
     fn resting(&self) -> AccountState {
         self.account.as_ref().map_or(AccountState::SignedOut, |a| AccountState::SignedIn { username: a.username.clone().unwrap_or_default() })
@@ -65,6 +120,13 @@ impl Drop for SignIn {
     /// Cancelled, replaced, signed out, ended: its listener goes.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The account's file was read: what was said of one that could not be goes.
+fn readable_again(s: &mut crate::state::Snapshot) {
+    if s.account.error.as_deref() == Some(unreadable_text()) {
+        s.account.error = None;
     }
 }
 
@@ -109,6 +171,7 @@ impl Controller {
         // What the saved account is shows before any window asks (r21): "checking", never "not signed in" while nothing
         // was read yet. Its file only; Orbiters is asked on the thread.
         let server = Server::current();
+        self.account_runtime.lock().unwrap().starting = true;
         if let Ok(saved) = account::read_saved(server) {
             self.vrchat_login.lock().unwrap().at_launch = saved.as_ref().map(|a| super::vrchat_login::Owner::of(server, a));
             self.account_at_launch(server, saved.map(|a| a.username));
@@ -125,8 +188,10 @@ impl Controller {
         let modified = account::modified(server);
         let (changed, offline_due, refused_due) = {
             let rt = self.account_runtime.lock().unwrap();
+            // One that could not be read: again now and then, or as soon as it changes.
+            let waits = rt.unreadable.is_some_and(|(s, m, at)| (s, m) == (server, modified) && at.elapsed() < REREAD);
             (
-                rt.read != Some((server, modified)),
+                (rt.read != Some((server, modified)) || rt.unknown) && !waits,
                 rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE),
                 rt.refused.is_some_and(|(t, n)| t.elapsed() > refused_recheck(n)),
             )
@@ -134,6 +199,7 @@ impl Controller {
         if changed || offline_due || refused_due {
             self.read_account(server, modified, !changed && refused_due);
         }
+        self.assistant_access_refresh();
     }
 
     /// The account as its file says at launch (`Some(username)`: one is saved), while it is still `Unknown`.
@@ -154,7 +220,32 @@ impl Controller {
     /// Reads the saved account for `server` and asks Orbiters whether it still works. `again_refused`: asking again
     /// about a credential that was refused, which shows as refused until an answer says otherwise.
     fn read_account(self: &Shared, server: Server, modified: Option<SystemTime>, again_refused: bool) {
-        self.read_account_from(server, modified, again_refused, || account::read_saved(server));
+        self.read_account_from(server, modified, again_refused, || {
+            let mut tries = 1;
+            loop {
+                match account::read_saved(server) {
+                    Err(_) if tries < READ_TRIES => {
+                        tries += 1;
+                        std::thread::sleep(READ_APART);
+                    }
+                    read => return read,
+                }
+            }
+        });
+    }
+
+    /// The environment was switched (settings): nobody is signed in on the next one until its own account is read, and
+    /// nothing of the last one's credential stays (verify3-r21 B2).
+    pub(super) fn account_environment_changed(&self) {
+        self.leave_unless_same(None);
+        self.install_account(|rt| {
+            // A read under way of the last environment is not installed.
+            rt.generation += 1;
+            self.account_generation.store(rt.generation, Ordering::SeqCst);
+            rt.signing_in = None;
+            rt.unreadable = None;
+            rt.unsettled();
+        });
     }
 
     /// [`Controller::read_account`] with the saved account read by `read` (tests: no file of the person's).
@@ -196,12 +287,39 @@ impl Controller {
         let before = self.account_runtime.lock().unwrap().generation;
         let saved = match read() {
             Ok(saved) => saved,
-            // Could not be read now (another tool writing it): nothing changes, it is read again when the file does.
+            // Could not be read (another tool may be writing it): whose it is is not known, and it is tried again soon. On the
+            // environment it was last read for, the account installed stays with its own server (a call goes on), but is
+            // nobody's for N4N0 until it is read; on any other (the environment was switched), nobody is signed in.
             Err(e) => {
                 eprintln!("account file: {e:#}");
-                let mut rt = self.account_runtime.lock().unwrap();
-                if rt.generation == before {
-                    rt.read = Some((server, modified));
+                let stays = {
+                    let rt = self.account_runtime.lock().unwrap();
+                    rt.generation == before && rt.account.is_some() && rt.read.is_some_and(|(s, _)| s == server)
+                };
+                if !stays && self.account_runtime.lock().unwrap().generation == before {
+                    self.leave_unless_same(None);
+                }
+                let generation = self.install_account(|rt| {
+                    (rt.generation == before).then(|| {
+                        if stays {
+                            rt.unknown = true;
+                        } else {
+                            rt.unsettled();
+                        }
+                        rt.unreadable = Some((server, modified, Instant::now()));
+                        rt.generation
+                    })
+                });
+                if let Some(generation) = generation.filter(|_| !stays) {
+                    self.update_if(|s| {
+                        if self.account_generation.load(Ordering::SeqCst) != generation || s.account.state == AccountState::SigningIn {
+                            return false;
+                        }
+                        s.account.development = server == Server::Development;
+                        s.account.state = AccountState::SignedOut;
+                        s.account.error = Some(unreadable_text().into());
+                        true
+                    });
                 }
                 return;
             }
@@ -216,11 +334,8 @@ impl Controller {
                 return None;
             }
             let previous_token = rt.account.as_ref().map(|a| a.token.clone());
-            rt.read = Some((server, modified));
-            rt.account = saved.clone();
-            rt.offline_since = None;
             let refusals = if again_refused { rt.refused.map_or(0, |(_, n)| n) } else { 0 };
-            rt.refused = None;
+            rt.settled(server, modified, saved.clone());
             Some((previous_token, rt.generation, refusals))
         });
         let Some((previous_token, generation, refusals)) = installed else { return };
@@ -235,6 +350,7 @@ impl Controller {
                 if s.account.state != AccountState::SigningIn {
                     s.account.state = AccountState::SignedOut;
                 }
+                readable_again(s);
                 true
             });
             return;
@@ -246,6 +362,7 @@ impl Controller {
                 if !current() {
                     return false;
                 }
+                readable_again(s);
                 let same_server = s.account.development == development;
                 s.account.development = development;
                 // The same account checked again (another Orbiters tool rewrote the shared file): it stays signed in while
@@ -397,10 +514,7 @@ impl Controller {
                     rt.signing_in = None;
                     // Tests never touch the Unity tools' account.
                     let saved = if cfg!(test) { Ok(()) } else { account::save(server, &account) };
-                    rt.account = Some(account);
-                    rt.read = Some((server, account::modified(server)));
-                    rt.offline_since = None;
-                    rt.refused = None;
+                    rt.settled(server, account::modified(server), Some(account));
                     Some(saved)
                 });
                 let Some(saved) = saved else { return cancelled() };
@@ -503,8 +617,7 @@ impl Controller {
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in = None;
-            rt.account = None;
-            rt.read = Some((server, None));
+            rt.settled(server, None, None);
         });
         self.update(|s| {
             s.account.state = AccountState::SignedOut;
@@ -640,7 +753,7 @@ mod tests {
             ("the environment switched (the same id on another server)", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Development, Some(member("orbit-d", "1")), None), true),
             ("another tool signed out (the file gone)", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, None, None), true),
             ("signed out here", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| c.sign_out_with(Server::Production, || Ok(())).unwrap(), true),
-            ("the file unreadable for a moment", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| c.read_account_with(Server::Production, None, false, || Err(anyhow::anyhow!("being written")), |_| Err(anyhow::anyhow!("offline"))), false),
+            ("the file unreadable", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| c.read_account_with(Server::Production, None, false, || Err(anyhow::anyhow!("being written")), |_| Err(anyhow::anyhow!("offline"))), true),
             ("anonymous, the environment switched with nobody saved", |_| {}, |c| reread(c, Server::Development, None, None), false),
         ];
         let _ = prod;
@@ -661,6 +774,87 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Verify3 B1: a credential without a member id inherits nothing by its name, and neither does the id that comes after it;
+    /// while it is unknown nobody's account is had for what N4N0 does.
+    #[test]
+    fn a_credential_without_an_id_inherits_nothing_by_its_name() {
+        use orbiters_n4n0::status::SignedAs;
+        let c = Controller::new(Settings::default());
+        reread(&c, Server::Production, Some(member("fake-a", "1")), None);
+        say(&c);
+        assert!(lines(&c) > 0);
+        let epoch = c.identity_epoch();
+        let mut b = member("fake-b", "2");
+        (b.user, b.username) = (None, Some("member 1".into()));
+        reread(&c, Server::Production, Some(b.clone()), None);
+        assert_eq!((lines(&c), c.identity_epoch()), (0, epoch + 1), "entering it is another identity");
+        assert_eq!(c.signed_as(), SignedAs::Unknown);
+        assert_eq!(c.snapshot.lock().unwrap().n4n0.signed_as, SignedAs::Unknown, "the windows are told");
+        assert!(c.account_api_of(epoch + 1).is_none() && c.account_api_of(epoch).is_none());
+        say(&c);
+        assert!(!c.snapshot.lock().unwrap().n4n0.lines.iter().any(|l| l.text.contains("fast walk")), "nothing is done for it");
+        // Read again (the same file, still without one): the same.
+        reread(&c, Server::Production, Some(b.clone()), None);
+        assert_eq!(c.identity_epoch(), epoch + 1);
+        // Orbiters says who it is: another identity again, whoever that is.
+        reread(&c, Server::Production, Some(b.clone()), Some(member("fake-b", "1")));
+        assert_eq!((c.identity_epoch(), c.signed_as()), (epoch + 2, SignedAs::Member));
+        assert_eq!(lines(&c), 0);
+        assert!(c.account_api_of(epoch + 2).is_some_and(|(_, token)| token == "fake-b"));
+    }
+
+    /// Verify3 B2: the environment switched, its account file cannot be read: signed out there, with why; the credential of
+    /// the environment before is paired with nothing, and what N4N0 had of its member is gone. Readable again: signed in.
+    #[test]
+    fn an_unreadable_file_after_an_environment_switch_signs_out() {
+        use orbiters_n4n0::status::SignedAs;
+        let c = Controller::new(Settings::default());
+        reread(&c, Server::Production, Some(member("fake-a", "1")), None);
+        say(&c);
+        let old = c.identity_epoch();
+        c.account_environment_changed();
+        let nothing = |what: &str| {
+            for pair in [c.account_api_of(old), c.account_api_of(c.identity_epoch()), c.account_api(), c.account_api_for().0, c.language_account().flatten()] {
+                assert!(pair.is_none(), "{what}: the previous credential, at {}", pair.unwrap().0.url(""));
+            }
+            assert!(c.account_with_api().is_none() && c.usage_account().is_none() && c.calls_identity().is_none() && c.vrchat_owner().is_none(), "{what}");
+            assert_eq!((lines(&c), c.signed_as()), (0, SignedAs::Unknown), "{what}");
+        };
+        nothing("between the two");
+        let epoch = c.identity_epoch();
+        assert_eq!(epoch, old + 1);
+        for _ in 0..3 {
+            c.read_account_with(Server::Development, None, false, || Err(anyhow::anyhow!("fixture")), |_| unreachable!("nothing is checked"));
+            nothing("unreadable");
+            assert_eq!(c.identity_epoch(), epoch, "still unknown: the same");
+            let view = c.view();
+            assert!(view.account.development && view.account.state == AccountState::SignedOut, "{:?}", view.account);
+            assert_eq!(view.account.error.as_deref(), Some(unreadable_text()), "and why");
+        }
+        reread(&c, Server::Development, Some(member("fake-d", "1")), Some(member("fake-d", "1")));
+        assert_eq!((c.identity_epoch(), c.signed_as()), (epoch + 1, SignedAs::Member));
+        assert!(c.account_api_of(epoch + 1).is_some_and(|(api, token)| token == "fake-d" && api.url("") == Api::new(Server::Development).url("")));
+        assert!(c.view().account.error.is_none());
+        // Without a switch: it is nobody's for N4N0 until it is read, what is installed staying with its own server (a call).
+        say(&c);
+        let epoch = c.identity_epoch();
+        c.read_account_with(Server::Development, None, false, || Err(anyhow::anyhow!("fixture")), |_| unreachable!());
+        assert_eq!((c.signed_as(), c.identity_epoch(), lines(&c)), (SignedAs::Unknown, epoch + 1, 0));
+        assert!(c.account_api_of(epoch).is_none() && c.account_api_of(epoch + 1).is_none());
+        assert!(c.account_api().is_some_and(|(api, token)| token == "fake-d" && api.url("") == Api::new(Server::Development).url("")));
+        // And readable with nobody in it: signed out, the note gone.
+        reread(&c, Server::Development, None, None);
+        assert_eq!((c.signed_as(), c.view().account.error.clone()), (SignedAs::Nobody, None));
+    }
+
+    /// An account being read as the environment is switched is not installed after it.
+    #[test]
+    fn a_read_under_way_at_a_switch_is_not_installed() {
+        let c = Controller::new(Settings::default());
+        c.read_account_with(Server::Production, None, false, || { c.account_environment_changed(); Ok(Some(member("fake-a", "1"))) }, |_| Err(anyhow::anyhow!("offline")));
+        assert!(c.account_api().is_none() && c.account_runtime.lock().unwrap().account.is_none());
     }
 
     /// A refused credential is asked about again, later each time, never more often than every ten minutes.

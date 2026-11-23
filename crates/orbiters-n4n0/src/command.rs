@@ -108,8 +108,20 @@ pub enum Command {
         text: String,
     },
     HidePanel,
-    /// Starts a new conversation (N4N0 forgets the current one).
-    NewConversation,
+    /// Starts a new conversation (N4N0 forgets the current one): the one the surface showed (`N4n0Status::conversation`),
+    /// never one begun since (verify3-r21 M8).
+    NewConversation {
+        #[serde(default)]
+        conversation: Option<u64>,
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
+    /// A surface shows N4N0's question its stamp names, whole and in view, for the first time: from here on that surface's
+    /// answers can name it (verify3-r21 B3).
+    Presented {
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
     SaveVideo,
     RemoveVideo {
         url: String,
@@ -124,6 +136,8 @@ pub enum Command {
     /// Opens a page of the Orbiters website (an approval).
     OpenLink {
         url: String,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// Downloads the speech models.
     InstallVoice,
@@ -138,9 +152,14 @@ pub enum Command {
     /// Calls a friend (a contact id from the calls status).
     Call {
         contact: String,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// Answers the ringing call.
-    AnswerCall,
+    AnswerCall {
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
     /// Declines the ringing call or hangs up.
     EndCall,
     MuteCall {
@@ -214,6 +233,8 @@ pub enum Command {
     Suggest {
         text: String,
         voice: bool,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// N4N0 listens to the next sentence for the menu (Suggest features' Talk).
     Dictate,
@@ -227,6 +248,8 @@ pub enum Command {
         title: String,
         /// The thumbnail's key (the video id).
         video: Option<String>,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// The link card out in the world taken back (as when its time is up): from N4N0's menu, the overlay or the window.
     TakeBack,
@@ -234,6 +257,8 @@ pub enum Command {
     /// Previous instances): its answer is the status' `invite`.
     InviteMe {
         location: String,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// The QR code scanner reads VRChat's stream camera (`on`: its page opened, Scan again) or no longer (its page closed):
     /// what it does is the status' `qr`.
@@ -256,11 +281,15 @@ pub enum Command {
     /// A 3D capture shared from the overlay's menu: how it goes comes in its row of the status' `captures`.
     ShareCapture {
         share: orbiters_n4n0_core::captures::ShareAsk,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// World feedback the overlay's menu asked (read a world's, like, label, comment): what the app knows comes in the
     /// status' `feedback`.
     Feedback {
         ask: orbiters_n4n0_core::feedback::FeedbackAsk,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// A controller's trigger pulled or let go (the SteamVR overlay reads it): on a screen of version 7 it presses where
     /// that hand's index finger points.
@@ -273,6 +302,78 @@ pub enum Command {
     Input {
         pads: crate::input::Pads,
     },
+}
+
+impl Command {
+    /// The stamp of a command that acts for the person: it is sent, or acts on an account, or answers or asks N4N0. Every
+    /// command is told here which it is (a new one does not compile until it is): `None` is one that only concerns this
+    /// computer and what it shows, whoever is signed in.
+    pub fn stamp_mut(&mut self) -> Option<&mut Option<Stamp>> {
+        match self {
+            Command::AskTalk { down: true, stamp }
+            | Command::Talk { down: true, stamp }
+            | Command::RetryTurn { stamp, .. }
+            | Command::AskAnswer { stamp, .. }
+            | Command::Ask { stamp, .. }
+            | Command::NewConversation { stamp, .. }
+            | Command::Presented { stamp }
+            | Command::OpenLink { stamp, .. }
+            | Command::Call { stamp, .. }
+            | Command::AnswerCall { stamp }
+            | Command::Suggest { stamp, .. }
+            | Command::Drop { stamp, .. }
+            | Command::InviteMe { stamp, .. }
+            | Command::ShareCapture { stamp, .. }
+            | Command::Feedback { stamp, .. } => Some(stamp),
+            // Letting go, or ending: what a press began (which was stamped).
+            Command::AskTalk { down: false, .. } | Command::Talk { down: false, .. } | Command::EndCall | Command::MuteCall { .. } => None,
+            // This computer's, its settings', the worn avatar's or the menus' own.
+            Command::AskPage { .. }
+            | Command::AskPlayback { .. }
+            | Command::WakeOffer { .. }
+            | Command::Assistant { .. }
+            | Command::AskRetry
+            | Command::Say { .. }
+            | Command::HidePanel
+            | Command::SaveVideo
+            | Command::RemoveVideo { .. }
+            | Command::Photo { .. }
+            | Command::CopyText { .. }
+            | Command::InstallVoice
+            | Command::CancelVoiceInstall
+            | Command::Photo3D
+            | Command::Photo3DOf { .. }
+            | Command::TestFace { .. }
+            | Command::TestCycle
+            | Command::TestAfk { .. }
+            | Command::TestTouch
+            | Command::ShowBot { .. }
+            | Command::TestPictures { .. }
+            | Command::MenuState { .. }
+            | Command::ToggleScreen
+            | Command::Photo3DIn { .. }
+            | Command::Photo3DWhenCamera { .. }
+            | Command::Light { .. }
+            | Command::States { .. }
+            | Command::Tracking { .. }
+            | Command::Dictate
+            | Command::Watch { .. }
+            | Command::TakeBack
+            | Command::Qr { .. }
+            | Command::Captures
+            | Command::Friends { .. }
+            | Command::Trigger { .. }
+            | Command::Input { .. } => None,
+        }
+    }
+
+    /// The same command, stamped `stamp` when it acts for the person and its surface did not stamp it itself.
+    pub fn stamped(mut self, stamp: Stamp) -> Self {
+        if let Some(own) = self.stamp_mut() {
+            own.get_or_insert(stamp);
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -292,14 +393,17 @@ mod tests {
             r#"{"kind":"states","action":{"do":"save","name":null,"size":true,"pose":false,"default":false}}"#
         );
         let back: Command = serde_json::from_str(r#"{"kind":"drop","link":"https://x.y/","title":"t","video":null}"#).unwrap();
-        assert_eq!(back, Command::Drop { link: "https://x.y/".into(), title: "t".into(), video: None });
+        assert_eq!(back, Command::Drop { link: "https://x.y/".into(), title: "t".into(), video: None, stamp: None });
         // Another avatar's states: the avatar named; the worn one's read as before.
         let other = Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: Some("avtr_b".into()) };
         assert_eq!(json(&other), r#"{"kind":"states","action":{"do":"delete","id":"s1"},"avatar":"avtr_b"}"#);
         let worn: Command = serde_json::from_str(r#"{"kind":"states","action":{"do":"delete","id":"s1"}}"#).unwrap();
         assert_eq!(worn, Command::States { action: StateAction::Delete { id: "s1".into() }, avatar: None });
         assert_eq!(json(&Command::TakeBack), r#"{"kind":"take_back"}"#);
-        assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into() }), r#"{"kind":"invite_me","location":"wrld_a:1"}"#);
+        assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into(), stamp: None }), r#"{"kind":"invite_me","location":"wrld_a:1","stamp":null}"#);
+        // What had no fields before still reads.
+        assert_eq!(serde_json::from_str::<Command>(r#"{"kind":"new_conversation"}"#).unwrap(), Command::NewConversation { conversation: None, stamp: None });
+        assert_eq!(serde_json::from_str::<Command>(r#"{"kind":"answer_call"}"#).unwrap(), Command::AnswerCall { stamp: None });
         assert_eq!(json(&Command::Qr { on: true, holder: MenuHolder::Overlay }), r#"{"kind":"qr","on":true,"holder":"overlay"}"#);
         assert_eq!(json(&Command::Friends { on: false, holder: MenuHolder::Window }), r#"{"kind":"friends","on":false,"holder":"window"}"#);
         // An older sender's command, without a holder.
@@ -312,6 +416,7 @@ mod tests {
                 recipients: vec![orbiters_n4n0_core::captures::Friend { id: "usr_a".into(), name: "A".into() }],
                 acknowledge_explicit: false,
             },
+            stamp: None,
         };
         let back: Command = serde_json::from_str(&json(&share)).unwrap();
         assert_eq!(back, share);

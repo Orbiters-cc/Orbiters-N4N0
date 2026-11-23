@@ -20,8 +20,9 @@
 
 use crate::command::{Stamp, Surface};
 use crate::runtime::N4n0;
-use crate::status::N4n0Who;
+use crate::status::{N4n0Who, SignedAs};
 use orbiters_i18n::tr;
+use orbiters_n4n0_core::tools::Action;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +84,57 @@ impl Fence<'_> {
     }
 }
 
+/// Leave for one action of the assistant's, given by the gate ([`Fence::permit`]), by the owner's yes or by the person's own
+/// sentence: what acts ([`Fence::action`], [`Fence::intent_run`]) takes one, so no tool, old or new, acts without it.
+pub(crate) struct Permit(());
+
+impl Fence<'_> {
+    /// The one taint rule, for every tool (verify3-r21 B4): `action` may be done at once, on a turn that read other people's
+    /// text (`tainted`) only when it changes nothing; what is sent from an account never is.
+    pub(crate) fn permit(&self, action: &Action, tainted: bool) -> Option<Permit> {
+        let effect = action.effect();
+        (!(tainted && effect.changes) && !effect.from_account).then_some(Permit(()))
+    }
+
+    /// The owner said yes to `action`: the account's actions still need their switch now.
+    pub(crate) fn permit_yes(&self, action: &Action) -> Option<Permit> {
+        self.switched_on(action).then_some(Permit(()))
+    }
+
+    /// The person's own sentence asked for `action` (the offline path): what is sent from an account is asked about first.
+    pub(crate) fn permit_said(&self, action: &Action) -> Option<Permit> {
+        (!action.effect().from_account).then_some(Permit(()))
+    }
+
+    /// Whether the account's actions are on for this member, when `action` is one.
+    pub(crate) fn switched_on(&self, action: &Action) -> bool {
+        !action.effect().from_account || self.assistant_facts().actions
+    }
+}
+
+#[cfg(test)]
+impl Permit {
+    /// Tests: as the gate would give it.
+    pub(crate) fn for_test() -> Self {
+        Permit(())
+    }
+}
+
+/// The member of `epoch` is signed in, for as long as this lives: what the app does for them ([`N4n0::acting`]) is theirs
+/// or is not done.
+pub struct Acting<'a>(Fence<'a>);
+
+impl Acting<'_> {
+    pub fn epoch(&self) -> u64 {
+        self.0.epoch()
+    }
+
+    /// Their account.
+    pub fn account(&self) -> Option<(orbiters_core::account::Api, String)> {
+        self.0.account()
+    }
+}
+
 /// Who holds a fence may do what N4N0 does.
 impl std::ops::Deref for Fence<'_> {
     type Target = Arc<N4n0>;
@@ -98,6 +150,8 @@ pub(crate) enum Refusal {
     Unstamped,
     /// It was captured for another Orbiters identity than the one signed in now.
     OtherIdentity,
+    /// Who is signed in is not known yet: nothing is anyone's.
+    Unidentified,
     /// The same press or sentence, delivered again.
     Again,
 }
@@ -158,8 +212,20 @@ impl N4n0 {
     fn admitted(self: &Arc<Self>, stamp: Option<Stamp>, fresh: bool) -> Result<(Fence<'_>, Stamp), Refusal> {
         let Some(stamp) = stamp else { return Err(Refusal::Unstamped) };
         let fence = self.fence(&Ticket::input(stamp.epoch)).ok_or(Refusal::OtherIdentity)?;
-        if fresh && !fence.n4n0.lock().unwrap().inputs.take(&stamp) {
-            return Err(Refusal::Again);
+        if self.host.signed_as() == SignedAs::Unknown {
+            return Err(Refusal::Unidentified);
+        }
+        let mut stamp = stamp;
+        if fresh {
+            let mut rt = fence.n4n0.lock().unwrap();
+            if !rt.inputs.take(&stamp) {
+                return Err(Refusal::Again);
+            }
+            // The question waiting is named only by a surface it was presented on (verify3-r21 B3): named otherwise, the input
+            // names none, and answers nothing.
+            if stamp.question.is_some() && stamp.question == rt.question() && !rt.presented.contains(&stamp.surface) {
+                stamp.question = None;
+            }
         }
         Ok((fence, stamp))
     }
@@ -168,6 +234,7 @@ impl N4n0 {
         let text = match why {
             Refusal::Unstamped => tr("That came from an older part of Orbiters - N4N0: nothing was done. Send it again."),
             Refusal::OtherIdentity => tr("That was for the Orbiters account signed in before: nothing was done."),
+            Refusal::Unidentified => tr("Orbiters is still signing you in: nothing was done. Try again in a moment."),
             Refusal::Again => return,
         };
         self.n4n0.lock().unwrap().line(N4n0Who::Note, text.to_string());
@@ -175,10 +242,30 @@ impl N4n0 {
     }
 
     /// The stamp of an input N4N0 itself captures now (the avatar's menu, hands-free, the wake word): the identity signed
-    /// in, and the question it asked, if one waits.
+    /// in, and the question that waits if it was presented on `surface`, where the person is.
     pub(crate) fn own_stamp(&self, surface: Surface) -> Stamp {
         let rt = self.n4n0.lock().unwrap();
-        Stamp { epoch: rt.account_epoch, question: rt.question(), surface, seq: next_input() }
+        let question = rt.question().filter(|_| rt.presented.contains(&surface));
+        Stamp { epoch: rt.account_epoch, question, surface, seq: next_input() }
+    }
+
+    /// Acts for `surface` as it stands now, through the gate (what the avatar's own menu asks).
+    pub(crate) fn as_now(self: &Arc<Self>, surface: Surface, act: impl FnOnce(&Fence<'_>)) {
+        let stamp = self.own_stamp(surface);
+        if let Some((fence, _)) = self.let_in(Some(stamp)) {
+            act(&fence);
+        }
+    }
+
+    /// The member of `epoch`, while they are the one signed in: the app's own way to act for them (what it resolves under
+    /// this is theirs, and a handover waits for what it does).
+    pub fn acting(self: &Arc<Self>, epoch: u64) -> Option<Acting<'_>> {
+        self.fence(&Ticket::input(epoch)).map(Acting)
+    }
+
+    /// What a surface asked was for another identity (or had no stamp): said calmly.
+    pub fn refuse_other_identity(&self) {
+        self.refused(Refusal::OtherIdentity);
     }
 
     /// The fence of `ticket`'s work, while it may act; `None` once it may not (another identity is signed in, or its
@@ -222,5 +309,10 @@ impl Paused<'_> {
     /// asked, its action log, the turn under way or the sentence being listened to belongs to the next one.
     pub fn forget_account(&self, epoch: u64) {
         self.n4n0.forget_account(epoch);
+    }
+
+    /// The member of `epoch` is known to be signed in again after a start: their conversation goes on (verify3-r21 M5).
+    pub fn resume_account(&self, epoch: u64) {
+        self.n4n0.resume_account(epoch);
     }
 }

@@ -640,7 +640,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.ask_feedback();
         self.follow_go();
         for ask in self.outbox.drain(..) {
-            backend.n4n0(N4n0Command::Feedback { ask });
+            backend.n4n0(N4n0Command::Feedback { ask, stamp: None });
         }
     }
 
@@ -1995,7 +1995,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         opened |= bar_opened;
         clicked |= bar_clicked;
         for ask in self.outbox.drain(..) {
-            backend.n4n0(N4n0Command::Feedback { ask });
+            backend.n4n0(N4n0Command::Feedback { ask, stamp: None });
         }
         (opened, clicked)
     }

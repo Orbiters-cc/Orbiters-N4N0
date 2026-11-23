@@ -68,6 +68,62 @@ pub enum Action {
     },
 }
 
+/// What a tool call does to the world around it, declared for every tool: the one taint rule
+/// (verify3-r21 B4: after reading other people's text, a turn changes nothing without the person's own yes) and the switch of the
+/// account's actions read it, whatever the tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Effect {
+    /// It changes something: the avatar, the computer, the settings, a file, what others see.
+    pub changes: bool,
+    /// Its answer holds text other people wrote (a title, a label, a name).
+    pub reads_others: bool,
+    /// It is sent from, or acts on, the VRChat or the Orbiters account, or joins or starts somewhere (risk class b).
+    pub from_account: bool,
+}
+
+const fn effect(changes: bool, reads_others: bool) -> Effect {
+    Effect { changes, reads_others, from_account: false }
+}
+
+/// The tools that are not the app's intents, each with its effect (one of them for every call of it). The catalogue's other
+/// half is [`crate::intents::CATALOGUE`]. A tool offered to the model and not declared fails a test; an action without
+/// an effect does not compile ([`Action::effect`]).
+pub const TOOLS: &[(&str, Effect)] = &[
+    (MORE, effect(false, false)),
+    ("set_avatar_control", effect(true, true)),
+    ("find_avatar_controls", effect(false, true)),
+    ("hold_avatar_control", effect(true, true)),
+    ("set_avatar_parameter", effect(true, true)),
+    ("take_photo", effect(true, false)),
+    ("save_video", effect(true, true)),
+    ("list_saved_videos", effect(false, true)),
+    ("copy_to_clipboard", effect(true, false)),
+    ("set_afk_message", effect(true, false)),
+    ("control_media", effect(true, true)),
+    ("n4n0_light", effect(true, false)),
+    ("n4n0_mood", effect(true, false)),
+];
+
+impl Action {
+    /// What this call does. (A tool's own line in [`TOOLS`] is the most any of its calls does: asking what plays changes
+    /// nothing.)
+    pub fn effect(&self) -> Effect {
+        match self {
+            Action::SetControl { .. } | Action::SetParameter { .. } | Action::Hold { .. } => effect(true, true),
+            Action::FindControls { .. } | Action::ListSavedVideos => effect(false, true),
+            Action::TakePhoto { .. } | Action::CopyToClipboard { .. } | Action::SetAfkMessage { .. } | Action::Light { .. } | Action::Mood { .. } => effect(true, false),
+            Action::SaveVideo => effect(true, true),
+            Action::Media { command: None, volume_change: None } => effect(false, true),
+            Action::Media { .. } => effect(true, true),
+            Action::OpenTools { .. } => effect(false, false),
+            Action::App(intent) => {
+                let spec = intent.spec();
+                Effect { changes: spec.changes, reads_others: spec.reads_others, from_account: spec.risk == crate::intents::Risk::Confirm }
+            }
+        }
+    }
+}
+
 /// The name of the tool that opens more of the app's tools.
 pub const MORE: &str = "orbiters_more";
 
@@ -84,15 +140,16 @@ pub fn more_spec(open: &std::collections::BTreeSet<crate::intents::route::ToolGr
 }
 
 /// The client tools of a turn that carries `groups` (r23): `orbiters_more` first, then the tools of those groups only.
-pub fn specs_for(bare_parameters: bool, groups: &std::collections::BTreeSet<crate::intents::route::ToolGroup>) -> Vec<Value> {
+/// `actions`: what is sent from an account is offered too (`orbiters_core::features::N4N0_ASSISTANT_ACTIONS`).
+pub fn specs_for(bare_parameters: bool, groups: &std::collections::BTreeSet<crate::intents::route::ToolGroup>, actions: bool) -> Vec<Value> {
     let mut out = vec![more_spec(groups)];
-    out.extend(specs(bare_parameters).into_iter().filter(|t| t["name"].as_str().and_then(crate::intents::route::group_of).is_some_and(|g| groups.contains(&g))));
+    out.extend(specs(bare_parameters, actions).into_iter().filter(|t| t["name"].as_str().and_then(crate::intents::route::group_of).is_some_and(|g| groups.contains(&g))));
     out
 }
 
 /// The client tools, for `tools` of a turn. `bare_parameters`: the avatar has no manifest, so its parameters are
-/// offered by name too.
-pub fn specs(bare_parameters: bool) -> Vec<Value> {
+/// offered by name too. `actions`: as in [`specs_for`].
+pub fn specs(bare_parameters: bool, actions: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "set_avatar_control",
@@ -170,7 +227,7 @@ pub fn specs(bare_parameters: bool) -> Vec<Value> {
         }),
     ];
     // The app's own features, a tool per domain (REQUEST20 6).
-    tools.extend(crate::intents::specs());
+    tools.extend(crate::intents::specs(actions));
     if bare_parameters {
         tools.push(json!({
             "name": "set_avatar_parameter",
@@ -269,7 +326,7 @@ mod tests {
     #[test]
     fn every_spec_parses_back() {
         for bare in [false, true] {
-            let specs = specs(bare);
+            let specs = specs(bare, true);
             // The catalogue's tools have tests of their own (`intents::tests`).
             for spec in specs.iter().filter(|s| crate::intents::Group::of_tool(s["name"].as_str().unwrap()).is_none()) {
                 let name = spec["name"].as_str().unwrap();

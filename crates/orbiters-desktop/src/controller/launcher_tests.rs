@@ -1888,7 +1888,7 @@ fn launch_times(orbiters: Duration, vrchat: Duration) -> (Option<Duration>, Opti
     {
         let mut rt = c.account_runtime.lock().unwrap();
         rt.read = Some((orbiters_core::account::Server::current(), None));
-        rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+        rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: Some("1".into()), username: Some("tester".into()), avatar_url: None, features: None });
     }
     let development = orbiters_core::account::Server::current() == orbiters_core::account::Server::Development;
     c.update(|s| {
@@ -2253,7 +2253,8 @@ fn a_program_too_old_starts_no_vrchat() {
 }
 
 /// verify3-r21 M1: a destination verified for an account starts for that very account, its friends list read or not; for
-/// another login it starts nothing.
+/// another login it starts nothing. A private one, on a profile proven to be that account's only (AGENTS.md): on a profile
+/// whose account is not known, or is another's, it is refused as what it is.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn verify3_a_bound_destination_needs_its_account_not_its_list() {
@@ -2261,7 +2262,18 @@ fn verify3_a_bound_destination_needs_its_account_not_its_list() {
     let c = controller(machine.clone());
     c.test_vrchat(vec![]);
     let there = || Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::FriendsPlus, region: "eu".into() };
-    let play = || Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: there() };
+    let play_on = |profile: u32| Action::PlayAt { mode: LaunchMode::Vr, profile, destination: there() };
+    let play = || play_on(0);
+    let said = |n: &Option<Notice>, text: &str| matches!(n, Some(Notice::Error(t)) if t == text);
+    // Whose the profile is is not known: refused, its account signed in or not.
+    let unknown = c.launcher_do(mine(play()));
+    assert!(said(&unknown, "Sign in on this profile first: its VRChat account is not known yet."), "{unknown:?}");
+    // Another account's profile.
+    c.update_settings(|s| drop(s.launch.profile_ids.insert(1, "usr_other".into())));
+    let others = c.launcher_do(mine(play_on(1)));
+    assert!(said(&others, "This profile's VRChat account is not the one this place is for: choose its profile."), "{others:?}");
+    // Proven to be its account's: for that account alone, its list read or not.
+    proven(&c, &[0]);
     let other = c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(play()) });
     assert!(matches!(other, Some(Notice::Error(_))), "{other:?}");
     assert!(machine.started.lock().unwrap().is_empty());

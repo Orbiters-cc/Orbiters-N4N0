@@ -1066,7 +1066,9 @@ mod tests {
         {
             let mut rt = c.account_runtime.lock().unwrap();
             rt.read = Some((server, None));
-            rt.account = Some(orbiters_core::account::Account { token: token.into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+            // (The same member on both environments; whoever else signs in is another.)
+            let id = if matches!(token, "fake" | "there-token") { "1" } else { "9" };
+            rt.account = Some(orbiters_core::account::Account { token: token.into(), user: Some(id.into()), username: Some("tester".into()), avatar_url: None, features: None });
         }
         c.update(|s| {
             s.account.state = state;
@@ -1416,6 +1418,18 @@ mod tests {
     fn checking(name: &str) -> AccountState {
         AccountState::Checking { username: Some(name.into()) }
     }
+    /// A readable account with no member id (an older file), as the account thread installs it, shown as `state`.
+    fn without_id(c: &Controller, token: &str, name: &str, state: AccountState) {
+        c.install_account(|rt| {
+            rt.read = Some((Server::current(), None));
+            rt.account = Some(orbiters_core::account::Account { token: token.into(), user: None, username: Some(name.into()), avatar_url: None, features: None });
+            rt.unknown = false;
+        });
+        c.update(|s| {
+            s.account.state = state;
+            s.account.development = Server::current() == Server::Development;
+        });
+    }
     /// Whose name the member `id` called `name` sees at launch from a cache kept for the member `kept_id` called `kept_name`.
     fn cache_seen_by(file: &str, kept_id: &str, kept_name: &str, id: &str, name: &str) -> Option<String> {
         let user: User = serde_json::from_value(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
@@ -1674,25 +1688,86 @@ mod tests {
         assert!(c.publish_launcher(&c.vrchat_session().unwrap().by, |l| l.friends.clear()), "their own, now");
     }
 
-    /// While whose the account installed is is unknown (its file cannot be read: controller/identity.rs), nothing of VRChat is
-    /// anybody's: not shown, not used; read for the member again once they are known.
+    /// While whose the account installed is is unknown (its file cannot be read, or names no member: controller/identity.rs),
+    /// nothing of VRChat is anybody's: not shown, not used; read for the member again once they are known. `allowed`: what
+    /// Orbiters says of the credential, asked or not.
     #[test]
     fn verify3_nothing_of_vrchat_is_anybodys_while_the_member_is_unknown() {
-        let (c, _) = first_member(vec![]);
-        c.test_list(their_list());
-        c.install_account(|rt| rt.unknown = true);
-        c.update(|_| {});
-        for _ in 0..2 {
-            let view = c.view();
-            assert!(c.vrchat_now().is_none() && c.vrchat_session().is_none());
-            assert!(view.vrchat_login.shown_user().is_none() && view.vrchat_login.verified_for.is_none(), "{:?}", view.vrchat_login);
-            assert!(view.launcher.friends.is_empty(), "{:?}", view.launcher.source);
-            assert_eq!(view.vrchat_login.presence(), Presence::Connecting, "kept, not signed out");
-            c.vrchat_feature_tick();
+        type Unknown = fn(&Controller);
+        let cases: [(&str, Unknown); 6] = [
+            ("the file cannot be read", |c| {
+                c.install_account(|rt| rt.unknown = true);
+                c.update(|_| {});
+            }),
+            // Readable, with no member id: the very credential VRChat was granted to, then another.
+            ("no id, signed in", |c| without_id(c, "fake", "tester", signed("tester"))),
+            ("no id, being checked", |c| without_id(c, "fake", "tester", checking("tester"))),
+            ("no id, Orbiters out of reach", |c| without_id(c, "fake", "tester", AccountState::Offline { username: Some("tester".into()) })),
+            ("no id, another credential", |c| without_id(c, "an-older-file", "tester", signed("tester"))),
+            // A new sign-in on its way over one with no id: it is not nobody either.
+            ("no id, signing in", |c| without_id(c, "fake", "tester", AccountState::SigningIn)),
+        ];
+        let mut wrong = Vec::new();
+        for (what, unknown) in cases {
+            for allowed in [true, false] {
+                let (c, key) = first_member(vec![]);
+                let orbiters = servers(&c);
+                orbiters.answers.lock().unwrap().insert(Api::new(Server::current()).url(""), allowed);
+                c.test_list(their_list());
+                unknown(&c);
+                for look in 0..3 {
+                    let view = c.view();
+                    let st = &view.vrchat_login;
+                    let held = c.vrchat_now().is_none() && c.vrchat_ready().is_none() && c.vrchat_session().is_none() && c.vrchat_signed_client().is_none();
+                    if !held || st.shown_user().is_some() || st.user.is_some() || st.verified_for.is_some() || st.allowed || !view.launcher.friends.is_empty() || st.presence() != Presence::Connecting {
+                        wrong.push(format!("{what}, allowed {allowed}, look {look}: held {held}, {st:?}, {:?}", view.launcher.source));
+                    }
+                    c.vrchat_command(Command::Resume);
+                    c.vrchat_feature_tick();
+                }
+                if !wrong_pairs(&c, &key).is_empty() || !orbiters.asked.lock().unwrap().is_empty() {
+                    wrong.push(format!("{what}, allowed {allowed}: {:?}, asked {:?}", wrong_pairs(&c, &key), orbiters.asked.lock().unwrap()));
+                }
+                member(&c, Server::current(), "fake", "1", "tester", signed("tester"));
+                c.vrchat_feature_tick();
+                if signed_in_as(&c) != tester() {
+                    wrong.push(format!("{what}, allowed {allowed}: known again, {:?}", c.view().vrchat_login));
+                }
+            }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// verify4-r21 P5, at start-up: a saved account with no member id is "connecting" from the first state on, with no name
+    /// and nothing asked of VRChat, whatever Orbiters would say of its credential; once the member is known, signed in.
+    #[test]
+    fn verify4_a_saved_account_without_an_id_is_connecting_until_its_member_is_known() {
+        let (c, asked) = launch_as(None);
+        let older = || orbiters_core::account::Account { user: None, ..tester_account() };
+        let nothing = |c: &Shared, what: &str| {
+            let st = c.view().vrchat_login.clone();
+            assert_eq!(st.presence(), Presence::Connecting, "{what}: {st:?}");
+            assert!(c.vrchat_now().is_none() && c.vrchat_ready().is_none() && st.shown_user().is_none() && st.verified_for.is_none() && !st.allowed, "{what}: {st:?}");
+            assert!(asked.lock().unwrap().is_empty(), "{what}: nothing asked of VRChat: {:?}", asked.lock().unwrap());
+        };
+        nothing(&c, "the first state");
+        c.vrchat_feature_tick();
+        nothing(&c, "before the file is installed");
+        for state in [checking("tester"), AccountState::Offline { username: Some("tester".into()) }, signed("tester")] {
+            c.install_account(|rt| {
+                rt.read = Some((Server::current(), None));
+                rt.account = Some(older());
+            });
+            c.update(|s| s.account.state = state.clone());
+            nothing(&c, "installed");
+            c.vrchat_feature_tick();
+            nothing(&c, "after a look");
+        }
+        // Orbiters' check names the member.
         member(&c, Server::current(), "fake", "1", "tester", signed("tester"));
         c.vrchat_feature_tick();
-        assert_eq!(signed_in_as(&c), tester(), "known again");
+        assert_eq!(signed_in_as(&c), tester(), "{:?}", c.view().vrchat_login);
+        assert!(c.view().vrchat_login.verified_for.is_some());
     }
 
     /// The random walk's numbers (a xorshift: the same each run).
@@ -1721,7 +1796,7 @@ mod tests {
             let change = {
                 let dice = dice.clone();
                 move |c: &Shared| {
-                    let roll = dice.lock().unwrap().roll(12);
+                    let roll = dice.lock().unwrap().roll(14);
                     match roll {
                         0..=2 | 10 => member(c, Server::current(), "fake", "1", "tester", signed("tester")),
                         9 => member(c, Server::current(), "another-token", "2", "tester", signed("tester")),
@@ -1732,6 +1807,9 @@ mod tests {
                         // The account's file cannot be read: whose it is is unknown until it can.
                         7 => c.install_account(|rt| rt.unknown = true),
                         8 => c.account_environment_changed(),
+                        // Readable, with no member id: member 1's own credential, and another.
+                        11 => without_id(c, "fake", "tester", signed("tester")),
+                        12 => without_id(c, "an-older-file", "tester", checking("tester")),
                         _ => {}
                     }
                 }
@@ -1847,22 +1925,27 @@ mod tests {
     /// r21: a launch with a session saved here, as the service's `start()` makes it: the account file read (Checking),
     /// the sign-in's first state, then the looks. `vrchat` answers VRChat's requests; Orbiters says `orbiters`.
     fn launch(vrchat: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static, orbiters: Option<bool>, saved: bool) -> Shared {
+        launch_of(vrchat, orbiters, saved, tester_account()).0
+    }
+    /// [`launch`] with a session saved, of the Orbiters account with the member id `id`; and what is asked of VRChat.
+    fn launch_as(id: Option<&str>) -> (Shared, Arc<Mutex<Vec<(String, String)>>>) {
+        launch_of(me, Some(true), true, orbiters_core::account::Account { user: id.map(str::to_owned), ..tester_account() })
+    }
+    fn launch_of(vrchat: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static, orbiters: Option<bool>, saved: bool, account: orbiters_core::account::Account) -> (Shared, Arc<Mutex<Vec<(String, String)>>>) {
         let c = Controller::new(orbiters_core::settings::Settings::default());
         let gate = Arc::new(Gate::default());
-        let (client, _) = orbiters_core::vrchat_api::test_server(gate.clone(), Duration::ZERO, vrchat);
+        let (client, asked) = orbiters_core::vrchat_api::test_server(gate.clone(), Duration::ZERO, vrchat);
         let client = if saved { client } else { orbiters_core::vrchat_api::offline_client(gate) };
         c.test_saved_vrchat(client, move |_: &Api, _: &str| orbiters.ok_or_else(|| anyhow::anyhow!("connection refused")));
         c.vrchat_login.lock().unwrap().saved = Some(saved);
-        c.account_at_launch(Server::current(), Some(Some("tester".into())));
+        c.account_saved_at_launch(Server::current(), Some(account));
         let cached = serde_json::from_value(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
-        let saved = tester_account();
-        c.vrchat_login.lock().unwrap().at_launch = Some(Owner::of(Server::current(), &saved));
         let owner = owner_now(&c);
         c.vrchat_at_launch(Some((cached, None, owner)));
         // From here a window can be connected (the service listens once `start()` returned).
         c.vrchat_login.lock().unwrap().presences.clear();
         c.update(|_| {});
-        c
+        (c, asked)
     }
     /// The account file's credential installed (the account thread's read), still being checked by Orbiters.
     fn account_read(c: &Controller) {

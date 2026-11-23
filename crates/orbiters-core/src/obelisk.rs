@@ -214,6 +214,8 @@ pub struct SessionRecord {
     /// When the session's supervisor accepted a Quit of its game, on the boot clock (obelisk-cli 0.1.8): the boot's
     /// session UUID and the milliseconds since it.
     pub quit_accepted: Option<(String, u64)>,
+    /// The Steam account it runs for.
+    pub account: Option<u64>,
 }
 
 /// The frames a running game has shown so far, as its record says them (`shown`, obelisk-cli 0.1.5).
@@ -278,6 +280,7 @@ pub fn session_record(text: &str) -> Option<SessionRecord> {
             Some(Shown { frames: s.get("frames")?.as_u64()?, at: s.get("at")?.as_u64()?, continuous: s.get("continuous")?.as_bool()? })
         }),
         quit_accepted: record.get("quit_accepted").and_then(boot_instant).map(|at| (at.boot, (at.seconds * 1000.0) as u64)),
+        account: record.get("account_id").and_then(serde_json::Value::as_u64),
     })
 }
 
@@ -500,6 +503,24 @@ pub fn renderer_lost(engine_log: &str) -> bool {
     engine_log.contains("VTEST_CLIENT_ERROR_CONTEXT_LOST") || engine_log.contains("npt: destroying Neptune context") // i18n: not shown (the engine's log lines)
 }
 
+/// What a line of the engine's log says of the game's graphics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsLine {
+    /// The guest's driver presented this many frames on its current swapchain (each counts from its own 0).
+    Presents(u64),
+    /// The graphics server dropped the game.
+    Dropped,
+}
+
+/// What the lines of `text` say of the game's graphics, in order.
+pub fn graphics_lines(text: &str) -> Vec<GraphicsLine> {
+    text.lines()
+        // what the engine's own log writer counts is not said again
+        .filter(|line| !line.starts_with("[obelisk-log:")) // i18n: not shown (the engine's log lines)
+        .filter_map(|line| if renderer_lost(line) { Some(GraphicsLine::Dropped) } else { presents_last(line).map(GraphicsLine::Presents) })
+        .collect()
+}
+
 /// The most presents the guest driver's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
 /// `… alive: 6452 presents, …`): frames the game submitted, which grow behind a lock screen or a covered window too. Each
 /// swapchain counts from its own 0.
@@ -536,6 +557,17 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.9: one complete set of engine files, held for the whole session, and
+/// `engine repair`).
+pub const LEAST: (u32, u32, u32) = (0, 1, 9);
+
+/// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
+/// release is not known to be.
+pub fn too_old(program: &Path) -> bool {
+    let version = program.parent().and_then(|f| f.file_name()).and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("obelisk-cli-")?.strip_suffix("-arm64"));
+    version.and_then(numbers).is_some_and(|v| v < vec![LEAST.0, LEAST.1, LEAST.2])
+}
+
 /// What a Mac has of what VRChat needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {
@@ -570,7 +602,7 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// `status`: the Steam account signed in, if one is.
-    Status { account: Option<String> },
+    Status { account: Option<String>, steam_id: Option<String> },
     /// The address to show as a QR code, for the Steam app on the person's phone.
     Challenge { qr_url: String },
     SignedIn { account: String },
@@ -583,10 +615,43 @@ pub enum Event {
     /// The game ended, after this many seconds and with this many frames shown, when the program knows; the Game session
     /// that held it (0.1.3 and later say it).
     Exited { code: Option<i64>, seconds: Option<u64>, frames: Option<u64>, session: Option<String> },
-    /// The command failed: its stable code, and a sentence in English for a log.
-    Error { code: String, message: String },
+    /// The command failed: its stable code, a sentence in English for a log, and the engine files no game starts on when
+    /// that is why (0.1.9 and later say it).
+    Error { code: String, message: String, engine: Option<EngineProblem> },
+    /// `engine repair`: the release downloads, or is being put in place; then it is there, whole.
+    Repairing { fraction: Option<f32> },
+    Repaired,
     /// Anything else the program tells.
     Other,
+}
+
+/// What ends an [`EngineProblem`], as the program says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineAction {
+    /// Its release installed again (`engine repair`).
+    Repair,
+    /// The game that runs on them quit, then a new start.
+    QuitGame,
+    /// The library's folder cannot be written, or its disk takes no locks.
+    CheckStorage,
+    /// Anything a later program says: told as it is, with nothing to press.
+    #[serde(other)]
+    Other,
+}
+
+/// The engine files no game starts on (`error`'s `engine`, obelisk-cli 0.1.9; the fork's `docs/CLI.md`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EngineProblem {
+    /// The files, by their path in the engine; none when they are not known.
+    pub paths: Vec<String>,
+    /// Why, in English, for a log.
+    pub reason: String,
+    pub action: EngineAction,
+}
+
+fn engine_problem(value: &serde_json::Value) -> Option<EngineProblem> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 /// Reads one line; a line that is not an event of the program gives none.
@@ -594,7 +659,10 @@ pub fn event(line: &str) -> Option<Event> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
     Some(match value.get("event")?.as_str()? {
-        "status" => Event::Status { account: value.get("account").and_then(|a| a.get("account_name")).and_then(serde_json::Value::as_str).map(str::to_owned) },
+        "status" => {
+            let account = |field: &str| value.get("account").and_then(|a| a.get(field)).and_then(serde_json::Value::as_str).map(str::to_owned);
+            Event::Status { account: account("account_name"), steam_id: account("steam_id") }
+        }
         "challenge" => Event::Challenge { qr_url: Some(text("qr_url")).filter(|url| url.starts_with("https://"))? },
         "signed_in" => Event::SignedIn { account: text("account_name") },
         "progress" => Event::Progress {
@@ -617,7 +685,9 @@ pub fn event(line: &str) -> Option<Event> {
             frames: value.get("frames").and_then(serde_json::Value::as_u64),
             session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned),
         },
-        "error" => Event::Error { code: text("code"), message: text("message") },
+        "error" => Event::Error { code: text("code"), message: text("message"), engine: value.get("engine").and_then(engine_problem) },
+        "engine_repairing" => Event::Repairing { fraction: value.get("fraction").and_then(serde_json::Value::as_f64).map(|f| (f as f32).clamp(0.0, 1.0)) },
+        "engine_repaired" => Event::Repaired,
         _ => Event::Other,
     })
 }
@@ -701,6 +771,17 @@ mod tests {
         assert_eq!(effective_percent(25, (1920, 1080), (1920, 1080)), 44);
         assert_eq!(render_size(25, backing, panel), (738, 480));
         assert_eq!(render_size(58, (1920, 1080), (1920, 1080)), (1114, 626), "above the floor: as asked");
+    }
+
+    #[test]
+    fn an_obelisk_cli_before_0_1_9_starts_no_vrchat() {
+        let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
+        for old in ["obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+            assert!(too_old(&at(old)), "{old}");
+        }
+        for fit in ["obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+            assert!(!too_old(&at(fit)), "{fit}");
+        }
     }
 
     #[test]
@@ -984,6 +1065,14 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_s_log_is_read_in_the_order_it_says_things() {
+        use GraphicsLine::{Dropped, Presents};
+        let text = "neptune unixlib wsi (wsd): 60 presents (0 shown events)\nsomething else\nnpt: destroying Neptune context 1\n[obelisk-log: 3 lines like this: VTEST_CLIENT_ERROR_CONTEXT_LOST]\nneptune unixlib wsi (wsd): alive: 61 presents, x\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n";
+        assert_eq!(graphics_lines(text), [Presents(60), Dropped, Presents(61), Dropped]);
+        assert_eq!(graphics_lines(""), []);
+    }
+
+    #[test]
     fn the_engine_s_log_says_when_the_graphics_went() {
         assert!(renderer_lost("neptune: ring fatal error\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n"));
         assert!(renderer_lost("Nov 22 20:53:33  virgl_render_server[19563] <Debug>: npt: destroying Neptune context 1"));
@@ -994,8 +1083,8 @@ mod tests {
 
     #[test]
     fn the_program_s_lines_are_read_as_what_n4n0_acts_on() {
-        assert_eq!(event(r#"{"event":"status","version":"0.1.0","account":null,"keychain":"ok"}"#), Some(Event::Status { account: None }));
-        assert_eq!(event(r#"{"event":"status","account":{"steam_id":"7656","account_name":"someone"}}"#), Some(Event::Status { account: Some("someone".into()) }));
+        assert_eq!(event(r#"{"event":"status","version":"0.1.0","account":null,"keychain":"ok"}"#), Some(Event::Status { account: None, steam_id: None }));
+        assert_eq!(event(r#"{"event":"status","account":{"steam_id":"7656","account_name":"someone"}}"#), Some(Event::Status { account: Some("someone".into()), steam_id: Some("7656".into()) }));
         assert_eq!(event(r#"{"event":"challenge","qr_url":"https://s.team/q/1/2"}"#), Some(Event::Challenge { qr_url: "https://s.team/q/1/2".into() }));
         assert_eq!(event(r#"{"event":"challenge","qr_url":"javascript:alert(1)"}"#), None, "only a web address is ever shown as a code");
         assert_eq!(event(r#"{"event":"signed_in","steam_id":"7656","account_name":"someone"}"#), Some(Event::SignedIn { account: "someone".into() }));
@@ -1010,7 +1099,15 @@ mod tests {
         assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: None, session: None }));
         assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":0,"exit_code":0,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: Some(0), session: Some("x".into()) }));
         assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":null,"exit_code":0,"seconds":900}"#), Some(Event::Exited { code: Some(0), seconds: Some(900), frames: None, session: Some("x".into()) }), "0.1.5: an unknown count is null");
-        assert_eq!(event(r#"{"event":"error","code":"not_signed_in","message":"No Steam account is signed in.","key":null}"#), Some(Event::Error { code: "not_signed_in".into(), message: "No Steam account is signed in.".into() }));
+        assert_eq!(event(r#"{"event":"error","code":"not_signed_in","message":"No Steam account is signed in.","key":null}"#), Some(Event::Error { code: "not_signed_in".into(), message: "No Steam account is signed in.".into(), engine: None }));
+        let refused = r#"{"event":"error","code":"engine_files","message":"m","key":"backend.runtime.engineFiles","engine":{"paths":["engine/wsd"],"reason":"why","action":"repair"}}"#;
+        let problem = |action| EngineProblem { paths: vec!["engine/wsd".into()], reason: "why".into(), action };
+        assert_eq!(event(refused), Some(Event::Error { code: "engine_files".into(), message: "m".into(), engine: Some(problem(EngineAction::Repair)) }));
+        assert!(matches!(event(&refused.replace("repair\"", "quit_game\"")), Some(Event::Error { engine: Some(p), .. }) if p == problem(EngineAction::QuitGame)));
+        assert!(matches!(event(&refused.replace("repair\"", "something_new\"")), Some(Event::Error { engine: Some(p), .. }) if p == problem(EngineAction::Other)));
+        assert!(matches!(event(r#"{"event":"error","code":"engine_files","message":"m","engine":"half"}"#), Some(Event::Error { engine: None, .. })));
+        assert_eq!(event(r#"{"event":"engine_repairing","bytes_done":1,"bytes_total":2,"fraction":0.5}"#), Some(Event::Repairing { fraction: Some(0.5) }));
+        assert_eq!(event(r#"{"event":"engine_repaired","voile":"v1","keyboard_layout":"mac","engine_files":[]}"#), Some(Event::Repaired));
         assert_eq!(event(r#"{"event":"voile_update","version":"v1"}"#), Some(Event::Other));
         assert_eq!(event("warning: something on the wrong stream"), None);
         assert_eq!(event(r#"{"no":"event"}"#), None);

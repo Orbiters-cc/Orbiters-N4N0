@@ -1,0 +1,89 @@
+{
+ "label": "58",
+ "when": "2026-11-23T11:51:03",
+ "command": [
+  "steam",
+  "play",
+  "438100",
+  "--render-percent",
+  "58",
+  "--",
+  "-screen-fullscreen",
+  "1",
+  "-window-mode",
+  "borderless",
+  "<link>"
+ ],
+ "power": {
+  "pmset_custom": "Battery Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         180\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         0\n womp                 1\n networkoversleep     0\n sleep                1\n tcpkeepalive         1\n disksleep            10\n",
+  "batt": [
+   "Now drawing from 'AC Power'",
+   " -InternalBattery-0 (id=23134307)\t100%; charged; 0:00 remaining present: true"
+  ],
+  "thermal_start": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+  "thermal_end": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n"
+ },
+ "not_measured": [
+  "GPU frequency and command-buffer start/end (powermetrics and Metal counters need root or the game's process)",
+  "queue depth",
+  "host-thread runnable and wake-up intervals"
+ ],
+ "outcome": "did not start: []",
+ "windows": [],
+ "session": "26ff3bdc-5f59-4805-93e8-cee1e4bf5d18",
+ "quit": "{\"event\":\"quit_requested\",\"app_id\":438100,\"forced\":false}\n{\"event\":\"exited\",\"app_id\":438100,\"session_id\":\"26ff3bdc-5f59-4805-93e8-cee1e4bf5d18\",\"frames\":28371,\"exit_code\":0,\"exit_signal\":null,\"seconds\":897,\"ended_by_request\":true}\n",
+ "terminal": {
+  "phase": "Finished",
+  "exit_code": 0,
+  "played": {
+   "seconds": 897,
+   "frames": {
+    "count": 28371,
+    "measured": true,
+    "median_us": 33330,
+    "slowest_percent_us": 83330,
+    "hitches": 32
+   },
+   "ended": {
+    "boot": "11466E1D-BF8E-4060-A996-1C47BE650634",
+    "seconds": 1597585
+   },
+   "exit_code": 0,
+   "exit_signal": null,
+   "ended_by_obelisk": true,
+   "engine": "Linux",
+   "graphics": "Dxmt",
+   "voile": "v26.3.0-27.beta1"
+  },
+  "error": null
+ },
+ "swapchains": [],
+ "render": [],
+ "engine_trace": [],
+ "events": [
+  {
+   "event": "preparing",
+   "app_id": 438100
+  },
+  {
+   "event": "starting",
+   "app_id": 438100
+  },
+  {
+   "event": "running",
+   "app_id": 438100,
+   "pid": 2774,
+   "session_id": "26ff3bdc-5f59-4805-93e8-cee1e4bf5d18"
+  },
+  {
+   "event": "exited",
+   "app_id": 438100,
+   "session_id": "26ff3bdc-5f59-4805-93e8-cee1e4bf5d18",
+   "frames": 28371,
+   "exit_code": 0,
+   "exit_signal": null,
+   "seconds": 897,
+   "ended_by_request": true
+  }
+ ]
+}

@@ -1,0 +1,84 @@
+{
+ "label": "58",
+ "when": "2026-11-23T11:26:39",
+ "command": [
+  "steam",
+  "play",
+  "438100",
+  "--render-percent",
+  "58",
+  "--",
+  "-screen-fullscreen",
+  "1",
+  "-window-mode",
+  "borderless",
+  "<link>"
+ ],
+ "power": {
+  "pmset_custom": "Battery Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         180\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n lowpowermode         1\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         0\n womp                 1\n networkoversleep     0\n sleep                1\n tcpkeepalive         1\n disksleep            10\n",
+  "batt": [
+   "Now drawing from 'AC Power'",
+   " -InternalBattery-0 (id=23134307)\t100%; charged; 0:00 remaining present: true"
+  ],
+  "thermal_start": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+  "thermal_end": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n"
+ },
+ "not_measured": [
+  "GPU frequency and command-buffer start/end (powermetrics and Metal counters need root or the game's process)",
+  "queue depth",
+  "host-thread runnable and wake-up intervals"
+ ],
+ "outcome": "did not arrive (no OnPlayerJoinComplete in this start's own log): nothing scored",
+ "windows": [],
+ "session": "07383d26-6854-4281-98d9-62fb9f596283",
+ "arrived_after_s": null,
+ "swapchains": [
+  {
+   "at_s": 14.5,
+   "size": "1705x1109",
+   "fmt": "28",
+   "buffers": "2"
+  }
+ ],
+ "render": [
+  [
+   "58",
+   "58",
+   "1705",
+   "1109"
+  ]
+ ],
+ "engine_trace": [
+  "lkd: ptrace: attach 1: tracer tid 4 -> pid 77 tid 96, link 0 gen 2, wake 0, SIGSTOP 0",
+  "lkd: ptrace: POKEUSER DR7 enabling a hardware breakpoint: unsupported by the engine (EIO)",
+  "lkd: ptrace: attach 2: tracer tid 4 -> pid 77 tid 96, link 0 gen 3, wake 0, SIGSTOP 0",
+  "lkd: ptrace: attach 3: tracer tid 4 -> pid 77 tid 96, link 0 gen 4, wake 0, SIGSTOP 0",
+  "lkd: ptrace: attach 4: tracer tid 4 -> pid 77 tid 96, link 0 gen 5, wake 0, SIGSTOP 0"
+ ],
+ "events": [
+  {
+   "event": "preparing",
+   "app_id": 438100
+  },
+  {
+   "event": "starting",
+   "app_id": 438100
+  },
+  {
+   "event": "running",
+   "app_id": 438100,
+   "pid": 63382,
+   "session_id": "07383d26-6854-4281-98d9-62fb9f596283"
+  },
+  {
+   "event": "exited",
+   "app_id": 438100,
+   "session_id": "07383d26-6854-4281-98d9-62fb9f596283",
+   "frames": 0,
+   "exit_code": 0,
+   "exit_signal": null,
+   "seconds": 38,
+   "ended_by_request": false
+  }
+ ]
+}

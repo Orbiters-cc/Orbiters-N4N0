@@ -114,5 +114,21 @@
   "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "El modo de bajo consumo está activado mientras este Mac está enchufado: VRChat puede ir más lento.",
   "Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.": "Pide a VRChat que se cierre, como su propio Salir, y luego lo vuelve a iniciar como lo inició Inicio.",
   "Restart VRChat": "Reiniciar VRChat",
-  "VRChat's picture stopped on this Mac and will not come back: restart it.": "La imagen de VRChat se detuvo en este Mac y no volverá: reinícialo."
+  "VRChat's picture stopped on this Mac and will not come back: restart it.": "La imagen de VRChat se detuvo en este Mac y no volverá: reinícialo.",
+  "What runs VRChat on this Mac is not whole: press Repair on Home.": "Lo que ejecuta VRChat en este Mac no está completo: pulsa Reparar en Inicio.",
+  "An update of what runs VRChat was cut short while a game runs on it: quit that game, then press Play.": "Una actualización de lo que ejecuta VRChat se interrumpió mientras un juego lo usa: cierra ese juego y pulsa Jugar.",
+  "What runs VRChat on this Mac cannot be locked while it plays: check that its folder can be written and that its disk is not full.": "Lo que ejecuta VRChat en este Mac no se puede bloquear mientras se juega: comprueba que se puede escribir en su carpeta y que su disco no está lleno.",
+  "There is nothing to repair on this computer.": "No hay nada que reparar en este ordenador.",
+  "What runs VRChat on this Mac is too old and its new version could not be downloaded. Check the connection and try again.": "Lo que ejecuta VRChat en este Mac es demasiado antiguo y no se pudo descargar su nueva versión. Comprueba la conexión e inténtalo de nuevo.",
+  "The account VRChat was started with is no longer the one signed in: press Play to start it on this one.": "La cuenta con la que se inició VRChat ya no es la que tiene la sesión iniciada: pulsa Jugar para iniciarlo con esta.",
+  "It is being repaired already.": "Ya se está reparando.",
+  "A game runs on what runs VRChat: quit it, then press Repair.": "Un juego usa lo que ejecuta VRChat: ciérralo y pulsa Reparar.",
+  "What runs VRChat could not be downloaded again. Check the connection and the free space, and try again: nothing was changed.": "No se pudo volver a descargar lo que ejecuta VRChat. Comprueba la conexión y el espacio libre, e inténtalo de nuevo: no se ha cambiado nada.",
+  "VRChat is being started again already.": "VRChat ya se está reiniciando.",
+  "What runs VRChat was repaired: press Play.": "Lo que ejecuta VRChat se ha reparado: pulsa Jugar.",
+  "Repairing what runs VRChat: {percent} %": "Reparando lo que ejecuta VRChat: {percent} %",
+  "Repairing what runs VRChat…": "Reparando lo que ejecuta VRChat…",
+  "What runs VRChat on this Mac is not whole, so it was not started.": "Lo que ejecuta VRChat en este Mac no está completo, así que no se inició.",
+  "Downloads what runs VRChat again and puts it in place once it is whole: your games, sign-in and settings stay.": "Vuelve a descargar lo que ejecuta VRChat y lo instala cuando está completo: tus juegos, tu sesión y tus ajustes se conservan.",
+  "Repair": "Reparar"
 }

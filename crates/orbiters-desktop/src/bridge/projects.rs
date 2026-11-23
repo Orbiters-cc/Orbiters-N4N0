@@ -1775,14 +1775,14 @@ pub fn list() -> Vec<Value> {
             "title": "VPM repositories",
             "description": "The VPM repositories VCC, ALCOM and the tab share: list; add a listing by its URL (with headers if it needs them); remove one of the person's; enable or disable one (disabled ones stay in VCC's settings, their packages are left out); refresh downloads every repository again; suggest searches Orbiters' catalog of known repositories.",
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "enum": ["list", "add", "remove", "enable", "disable", "refresh", "suggest"] },
+                "action": { "type": "string", "enum": ["list", "add", "remove", "enable", "disable", "refresh", "suggest"], "description": "Default list." },
                 "url": { "type": "string", "description": "For add: the listing's URL (index.json)." },
                 "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "For add: HTTP headers the repository needs." },
                 "id": { "type": "string", "description": "For remove, enable, disable: the repository's id or URL from list." },
                 "query": { "type": "string", "description": "For suggest: words in a repository's name, owner or packages." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "wait_s": wait,
-            }, "required": ["action"], "additionalProperties": false },
+            }, "additionalProperties": false },
             "annotations": acts,
         }),
         json!({
@@ -1791,9 +1791,9 @@ pub fn list() -> Vec<Value> {
             "description": "A project in Unity: status (whether Unity has it open, and is waiting on a dialog); open (in its own Unity version, as Open in Unity: a Library on a full disk that barely exists moves first; refused while the person uses the computer); show (brings it forward); save_and_exit (asks Unity to quit as its close button does: it offers to save modified scenes); kill (ends it at once, unsaved work lost: needs confirm).",
             "inputSchema": { "type": "object", "properties": {
                 "path": path,
-                "action": { "type": "string", "enum": ["status", "open", "show", "save_and_exit", "kill"] },
+                "action": { "type": "string", "enum": ["status", "open", "show", "save_and_exit", "kill"], "description": "Default status." },
                 "confirm": { "type": "boolean", "description": "For kill: the person agreed." },
-            }, "required": ["path", "action"], "additionalProperties": false },
+            }, "required": ["path"], "additionalProperties": false },
             "annotations": destructive,
         }),
         json!({

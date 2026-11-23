@@ -8,7 +8,8 @@
 # after each start ended (Easy Anti-Cheat fails a start too soon after an early end). Before each start it refuses to go
 # on while the screen is locked (only the owner can unlock it) and says Low Power Mode's state; each window is scored
 # only when the screen stayed unlocked, VRChat was in front and frames were shown (bench.py). Nobody touches the game
-# while it runs: each start takes about 6 minutes. Stop with Ctrl-C: the running start is quit by its session.
+# while it runs: each start takes about 6 minutes. A start that fails, or whose session is not known to have ended, stops the
+# series. Stop with Ctrl-C: the running start is quit by its session.
 set -u
 LINK="${1:?usage: session.sh '<private instance link of the owner>'}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,6 +30,14 @@ for percent in $PLAN; do
     echo "== start $n: engine $percent % =="
     /usr/bin/python3 -I "$HERE/bench.py" --percent "$percent" --label "$percent" --link "$LINK" \
         --warm 90 --window 60 --windows 3 --out "$OUT/$stamp-$percent.json"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        # Nothing is started after a run that did not go as planned: its game may still run (5), or the next start would
+        # fail the same way.
+        echo "start $n failed (status $status, see $OUT/$stamp-$percent.json): stopping" >&2
+        [ "$status" -eq 5 ] && echo "its session had not ended: check that VRChat is closed before anything else" >&2
+        exit "$status"
+    fi
     echo "waiting 90 s before the next start"
     sleep 90
 done

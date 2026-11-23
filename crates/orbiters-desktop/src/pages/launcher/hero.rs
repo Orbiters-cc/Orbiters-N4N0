@@ -47,9 +47,14 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| start_trouble(ui, cx, state, rect, &trouble));
     }
     // A Mac whose VRChat (Home's own) lost its graphics for good: said under the line that it runs, with a restart.
-    if state.data.picture_lost && matches!(play, PlayState::Running(_)) {
+    if let Some(session) = state.data.picture_lost.clone().filter(|_| matches!(play, PlayState::Running(_))) {
         hero_play(ui, cx, state, index, play);
-        return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| picture_lost(ui, cx, state, rect));
+        return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| picture_lost(ui, cx, state, rect, &session));
+    }
+    // A Mac whose engine's files no game starts on: said under the Play button, with what ends it.
+    if let Some(trouble) = state.data.engine_trouble.clone().filter(|_| !matches!(play, PlayState::Running(_))) {
+        hero_play(ui, cx, state, index, play);
+        return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| engine_trouble(ui, cx, state, rect, &trouble));
     }
     // A Mac about to start VRChat in Low Power Mode while on power: said, with where to change it (never changed here).
     #[cfg(target_os = "macos")]
@@ -61,8 +66,9 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
 }
 
 /// Home's VRChat runs and its graphics went for good (confirmed: R1 of the performance review): a line and a restart,
-/// which quits that very session and starts it again through the one start (checked again on the click).
-fn picture_lost(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
+/// which quits that very session, the one shown here, and starts it again through the one start (checked again on the
+/// click).
+fn picture_lost(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, session: &str) {
     let button = widgets::Button::new(tr("Restart VRChat")).variant(widgets::Variant::Primary).id_salt("launcher-restart-lost");
     let bw = button.desired_width(ui);
     let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
@@ -73,7 +79,37 @@ fn picture_lost(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
     widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
     let clicked = button.show_at(ui, at).on_hover_text(tr("Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.")).clicked();
     if clicked {
-        state.act(cx, anim::time(ui.ctx()), Action::RestartLostGame);
+        state.act(cx, anim::time(ui.ctx()), Action::RestartLostGame { session: session.to_owned() });
+    }
+}
+
+/// The files of the Mac's engine no game starts on: what ends it, the files on hover, and Repair when that is what does
+/// (it installs them again; while it does, how far it is).
+fn engine_trouble(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, trouble: &orbiters_core::launcher::EngineTrouble) {
+    use orbiters_core::obelisk::EngineAction;
+    let repairs = trouble.action == EngineAction::Repair;
+    let line: String = match (trouble.repairing, trouble.percent, trouble.action) {
+        (true, Some(percent), _) => tr!("Repairing what runs VRChat: {percent} %", percent = percent),
+        (true, None, _) => tr("Repairing what runs VRChat…").into(),
+        (false, _, EngineAction::QuitGame) => tr("An update of what runs VRChat was cut short while a game runs on it: quit that game, then press Play.").into(),
+        (false, _, EngineAction::CheckStorage) => tr("What runs VRChat on this Mac cannot be locked while it plays: check that its folder can be written and that its disk is not full.").into(),
+        (false, _, _) => tr("What runs VRChat on this Mac is not whole, so it was not started.").into(),
+    };
+    let button = (repairs && !trouble.repairing).then(|| widgets::Button::new(tr("Repair")).variant(widgets::Variant::Primary).id_salt("launcher-repair-engine"));
+    let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
+    let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), if trouble.repairing { icons::INFO } else { icons::WARNING_CIRCLE }, 17.0, if trouble.repairing { theme::FG_3 } else { theme::WARN });
+    let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::FG_2), text.width());
+    let told = if trouble.paths.is_empty() { line } else { trouble.paths.join("\n") };
+    ui.interact(text, Id::unique("launcher-engine-files"), Sense::hover()).on_hover_text(told);
+    if let Some(button) = button {
+        let clicked = button.show_at(ui, at).on_hover_text(tr("Downloads what runs VRChat again and puts it in place once it is whole: your games, sign-in and settings stay.")).clicked();
+        if clicked {
+            state.act(cx, anim::time(ui.ctx()), Action::RepairEngine);
+        }
     }
 }
 

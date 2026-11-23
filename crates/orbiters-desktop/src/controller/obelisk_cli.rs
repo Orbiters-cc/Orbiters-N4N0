@@ -22,11 +22,28 @@ const SIGN_INS: u32 = 8;
 pub struct Failure {
     pub code: String,
     pub words: String,
+    /// The engine's files no game starts on, when that is why.
+    pub engine: Option<obelisk::EngineProblem>,
 }
 
 impl Failure {
     fn new(code: &str, words: impl Into<String>) -> Self {
-        Failure { code: code.into(), words: words.into() }
+        Failure { code: code.into(), words: words.into(), engine: None }
+    }
+
+    /// What a command said as it failed.
+    fn said(code: &str, message: &str, engine: Option<&obelisk::EngineProblem>) -> Self {
+        Failure { code: code.into(), words: engine.map_or_else(|| words(code, message), engine_words), engine: engine.cloned() }
+    }
+}
+
+/// What the person reads for the engine's files: what ends it, as Home offers it.
+pub fn engine_words(problem: &obelisk::EngineProblem) -> String {
+    match problem.action {
+        obelisk::EngineAction::Repair => tr("What runs VRChat on this Mac is not whole: press Repair on Home.").into(),
+        obelisk::EngineAction::QuitGame => tr("An update of what runs VRChat was cut short while a game runs on it: quit that game, then press Play.").into(),
+        obelisk::EngineAction::CheckStorage => tr("What runs VRChat on this Mac cannot be locked while it plays: check that its folder can be written and that its disk is not full.").into(),
+        obelisk::EngineAction::Other => problem.reason.clone(),
     }
 }
 
@@ -57,9 +74,9 @@ pub fn run(program: &Path, args: &[&str], stop: &AtomicBool, mut each: impl FnMu
             break;
         }
         let Some(event) = obelisk::event(&line) else { continue };
-        if let Event::Error { code, message } = &event {
+        if let Event::Error { code, message, engine } = &event {
             note(args, code, message);
-            failed = Some(Failure::new(code, words(code, message)));
+            failed = Some(Failure::said(code, message, engine.as_ref()));
         }
         each(&event);
     }
@@ -192,7 +209,7 @@ pub fn set_up(tools: &Path, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) -
     progress(EngineSetup::Checking);
     let mut account = None;
     run(&program, &["status"], stop, |event| {
-        if let Event::Status { account: a } = event {
+        if let Event::Status { account: a, .. } = event {
             account = a.clone();
         }
     })?;
@@ -281,6 +298,9 @@ struct Now {
     /// Failures not told yet to whoever started them, by launch id: kept apart from the launches (a few kept), so that later
     /// starts never push them out.
     unread: Vec<(u64, Failure)>,
+    /// The engine's files no game starts on, as the last start that failed for it said: shown on Home until a game runs or
+    /// they were installed again, whoever that start was for.
+    engine: Option<obelisk::EngineProblem>,
 }
 
 /// How many untold failures are kept.
@@ -867,6 +887,7 @@ impl Play {
                 if current {
                     now.running = Some(pid);
                 }
+                now.engine = None;
                 // Before 0.1.3 the program does not name the session: the engine's record of the game does.
                 let session = session.or_else(|| {
                     pid.and_then(|pid| obelisk::session_records(library).into_iter().find(|(r, _)| r.game == Some(pid) && !r.over()).map(|(r, _)| r.id))
@@ -892,13 +913,19 @@ impl Play {
                 self.ended(&mut now, id, seconds, frames);
             }
             // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
-            Event::Error { code, message } => {
+            Event::Error { code, message, engine } => {
                 if !cfg!(test) {
                     note(&["steam", "play"], &code, &message);
+                    if let Some(engine) = &engine {
+                        note(&["steam", "play"], &code, &format!("{} ({})", engine.reason, engine.paths.join(", "))); // i18n: not shown (for the log)
+                    }
                 }
                 let ran = now.launch(id).is_some_and(|l| l.running || l.ended.is_some());
                 if !ran {
-                    let failure = Failure::new(&code, words(&code, &message));
+                    let failure = Failure::said(&code, &message, engine.as_ref());
+                    if engine.is_some() {
+                        now.engine = engine;
+                    }
                     if let Some(launch) = now.launch(id) {
                         launch.failure = Some(failure);
                     }
@@ -1025,6 +1052,36 @@ impl Play {
             launch.told = true;
         }
         Some(failure)
+    }
+
+    /// The engine's files no game starts on, as a start here last said.
+    pub fn engine_problem(&self) -> Option<obelisk::EngineProblem> {
+        self.now.lock().unwrap().engine.clone()
+    }
+
+    /// Installs what the engine is made of again (`engine repair`), which the program does under the lock every launch
+    /// holds, with what is there kept until the new one is whole: `progress` hears how far it is.
+    pub fn repair(&self, program: &Path, stop: &AtomicBool, progress: &dyn Fn(Option<u8>)) -> Result<(), Failure> {
+        let mut repaired = false;
+        let done = run(program, &["engine", "repair"], stop, |event| match event {
+            Event::Repairing { fraction } => progress(fraction.map(|f| (f * 100.0).round() as u8)),
+            Event::Repaired => repaired = true,
+            _ => {}
+        });
+        match done {
+            Ok(()) if repaired => {
+                self.now.lock().unwrap().engine = None;
+                Ok(())
+            }
+            Ok(()) => Err(Failure::new("internal", tr("What runs VRChat on this Mac stopped without saying why."))),
+            Err(failure) => {
+                // What is there now is what it says.
+                if failure.engine.is_some() {
+                    self.now.lock().unwrap().engine = failure.engine.clone();
+                }
+                Err(failure)
+            }
+        }
     }
 
     /// What became of launch `id`, as often as asked.
@@ -1256,7 +1313,7 @@ mod tests {
         let library = work.join("library");
         let mut status = None;
         run(&program, &["--library", library.to_str().unwrap(), "status"], &AtomicBool::new(false), |event| status = Some(event.clone())).unwrap();
-        assert_eq!(status, Some(Event::Status { account: None }));
+        assert_eq!(status, Some(Event::Status { account: None, steam_id: None }));
         let failure = run(&program, &["--library", library.to_str().unwrap(), "steam", "play", obelisk::STEAM_APP], &AtomicBool::new(false), |_| {}).unwrap_err();
         assert_eq!(failure.code, "not_signed_in");
         // A program someone else signed is refused.

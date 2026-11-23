@@ -11,7 +11,8 @@
 //!   mounted folder or any reparse point is refused, and so is one whose opened object is not (by its final path) below the
 //!   root, on the root's own volume. Nothing is ever written over: files are only made anew, and only what the same run made
 //!   is ever removed.
-//! - [`ListRoot`] is Creator Companion's own folder, where one entry of its list is put in or taken out (`crate::vcc_list`).
+//! - Nothing here, and nothing of the Unity 6 transition, writes a file of Creator Companion's or ALCOM's: their list of projects
+//!   is theirs, and the person's in them.
 //! - [`AppRoot`] is Orbiters' app data: the journal, the leases, the logs, the kept release list, a restore's staging folder.
 //!
 //! A test (`no_other_module_writes`) keeps every other module of the feature, and the copier of projects, to a list of calls
@@ -256,7 +257,7 @@ pub enum Refused {
     Exists(PathBuf),
     Name(String),
     Unreadable(String),
-    /// The original links to a folder Orbiters or Creator Companion keeps its own files in.
+    /// The original links to a folder Orbiters keeps its own files in (or a duplicate's, Creator Companion).
     Own(PathBuf),
 }
 
@@ -450,8 +451,6 @@ pub enum Role {
     Trial,
     /// The copy Creator Companion made of it, taken in its place.
     Migrated,
-    /// The same, being taken.
-    Adopting,
 }
 
 /// A folder made during a copy, held while this lives.
@@ -496,13 +495,12 @@ impl WriteRoot {
         let place = match role {
             Role::Trial => Some(&job.trial),
             Role::Migrated => job.migrated.as_ref(),
-            Role::Adopting => job.adopting.as_ref(),
         };
         let Some(place) = place else { anyhow::bail!("{}", journal::gone_text()) };
         let not_it = || anyhow::anyhow!("{}", tr!("The folder at {path} is not the trial Orbiters made.", path = place.path.display()));
         let allowed = match role {
             Role::Trial => !matches!(job.phase, Phase::Planned),
-            Role::Migrated | Role::Adopting => matches!(job.phase, Phase::Listed | Phase::Abandoned { .. }),
+            Role::Migrated => matches!(job.phase, Phase::Ready | Phase::Abandoned { .. }),
         };
         let recorded = place.id.ok_or_else(not_it)?;
         // Never the original, whatever the record says.
@@ -584,85 +582,9 @@ impl WriteRoot {
     pub fn free(&self) -> Option<u64> {
         sys::free_space(&self.dir)
     }
-
-    /// Puts the project on VCC's and ALCOM's list (`on`) or takes it off by its identity, the very folder held meanwhile. No
-    /// byte of it is written (`crate::vcc_list`).
-    pub fn list(&self, vcc: &Path, on: bool) -> anyhow::Result<()> {
-        let which = crate::vcc_list::Which::folder(&self.path, self.id);
-        crate::runtime()?.block_on(crate::vpm::list_entry(vcc, &self.path, &which, on))
-    }
 }
 
-/// Creator Companion's and ALCOM's own folder, where one entry of their list is put in or taken out.
-pub struct ListRoot {
-    dir: File,
-}
-
-impl ListRoot {
-    pub fn open(root: &Path) -> io::Result<Self> {
-        std::fs::create_dir_all(root)?;
-        Ok(Self { dir: sys::open_root(root, true)? })
-    }
-
-    /// The file `name` as it is; `None` when there is none.
-    pub fn read(&self, name: &Path) -> io::Result<Option<Vec<u8>>> {
-        let (_, name) = split(name)?;
-        match sys::open_at(&self.dir, name, Want::File, true) {
-            Ok(mut file) => {
-                let mut out = vec![];
-                file.read_to_end(&mut out)?;
-                Ok(Some(out))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Replaces each file (its name, what it was read as, what it becomes) whole, at once. Every one of them is held first: it
-    /// must be what it was read as, and nobody else may have it open; else none is replaced.
-    pub fn replace(&self, edits: &[(&str, Option<Vec<u8>>, Vec<u8>)]) -> anyhow::Result<()> {
-        let busy = |name: &str| anyhow::anyhow!("{}", tr!("Creator Companion or ALCOM is using {file}: close it, then try again. Nothing was changed.", file = name));
-        let mut held = vec![];
-        for (name, before, _) in edits {
-            let (_, leaf) = split(Path::new(name))?;
-            let alone = match before {
-                Some(before) => {
-                    let mut now = sys::open_at(&self.dir, leaf, Want::Alone, false).map_err(|_| busy(name))?;
-                    anyhow::ensure!(!sys::is_link(&now)?, "{}", tr!("{path} is a link: Orbiters does not write through it.", path = name));
-                    let mut bytes = vec![];
-                    now.read_to_end(&mut bytes)?;
-                    anyhow::ensure!(bytes == *before, "{}", busy(name));
-                    Some(now)
-                }
-                None => {
-                    anyhow::ensure!(self.read(Path::new(name))?.is_none(), "{}", busy(name));
-                    None
-                }
-            };
-            held.push(alone);
-        }
-        for ((name, _, after), alone) in edits.iter().zip(held) {
-            let (_, leaf) = split(Path::new(name))?;
-            let temp = OsString::from(format!("{name}.{}.tmp", uuid::Uuid::new_v4().simple())); // i18n: not shown (a file's name)
-            let mut file = sys::open_at(&self.dir, &temp, Want::NewFile, false)?;
-            let done = (|| -> anyhow::Result<()> {
-                file.write_all(after)?;
-                file.sync_all()?;
-                sys::publish_held(&self.dir, &file, &temp, leaf, alone).map_err(|_| busy(name))
-            })();
-            if done.is_err() {
-                if let Ok(id) = id_of_file(&file) {
-                    drop(file);
-                    let _ = sys::remove_at(&self.dir, &temp, id, false);
-                }
-                return done;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Orbiters' own folders (`own`: its app data, VCC's list) are nothing the original can see: else what is written there would
+/// Folders written besides a copy (`own`: Orbiters' app data; VCC's, for a duplicate, which it is added to) are nothing the original can see: else what is written there would
 /// be written in the original. A folder that is not there yet is asked by the nearest one above it.
 pub fn apart(own: &[&Path], protected: &[Protected]) -> Result<(), Refused> {
     for folder in own {

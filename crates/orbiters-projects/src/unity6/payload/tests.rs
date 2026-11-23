@@ -193,11 +193,51 @@ fn the_content_of_a_project_is_read_now() {
     let of = || content_of(&e.source, &AtomicBool::new(false));
     assert_eq!(of().unwrap().ids.into_iter().collect::<Vec<_>>(), [crate::unity6::trial::tests::CONTENT]);
     std::fs::create_dir_all(e.source.join("Packages/com.mine")).unwrap();
-    std::fs::write(e.source.join("Packages/com.mine/Avatar.prefab"), "%YAML 1.1\n  blueprintId: avtr_77777777-2222-4333-8444-555555555555\n").unwrap();
+    std::fs::write(e.source.join("Packages/com.mine/Avatar.prefab"), crate::unity6::trial::tests::scene("avtr_77777777-2222-4333-8444-555555555555")).unwrap();
     assert_eq!(of().unwrap().ids.len(), 2);
     {
         let _kept = kept_from_all(&e.source.join("Packages/com.mine/Avatar.prefab"));
         assert!(of().is_err());
     }
     assert!(content_of(&e.root.join("Nowhere"), &AtomicBool::new(false)).is_err());
+}
+
+/// Fourth verification, Major 4: a package only the Library holds is the copy's own, as it is installed, and no other one of its
+/// name; one that is not surely there is told.
+#[test]
+fn packages_only_the_library_holds_become_the_copys_own() {
+    let e = env();
+    let lock = r#"{"dependencies":{
+        "com.git":{"version":"https://example.invalid/x.git","depth":0,"source":"git","hash":"12ab34cd56ef12ab34cd56ef12ab34cd56ef12ab"},
+        "com.scoped":{"version":"2.0.0","depth":1,"source":"registry","url":"https://npm.example.invalid"},
+        "com.gone":{"version":"https://example.invalid/y.git","depth":0,"source":"git","hash":"99"},
+        "com.unity.x":{"version":"1.0.0","source":"registry","url":"https://packages.unity.com"}}}"#;
+    std::fs::write(e.source.join("Packages/packages-lock.json"), lock).unwrap();
+    // (Its Library on another disk.)
+    let library = e.root.join("Elsewhere/Library");
+    std::fs::remove_dir_all(e.source.join("Library")).unwrap();
+    let put = |folder: &str, version: &str| {
+        let at = library.join("PackageCache").join(folder);
+        std::fs::create_dir_all(at.join("Runtime")).unwrap();
+        std::fs::write(at.join("package.json"), format!(r#"{{"name":"x","version":"{version}"}}"#)).unwrap();
+        std::fs::write(at.join("Runtime/a.prefab"), version).unwrap();
+    };
+    put("com.git@0000000000", "old");
+    put("com.git@12ab34cd56", "mine");
+    put("com.scoped@2.0.0", "two");
+    put("com.unity.x@1.0.0", "unity's");
+    link(&library, &e.source.join("Library"));
+    let how = |installed| Making { installed, ..Default::default() };
+    let p = scan(&e.source, how(true), &AtomicBool::new(false)).unwrap();
+    let read = |at: &str| p.read(Path::new(at)).unwrap().map(|b| String::from_utf8(b).unwrap());
+    assert_eq!(read("Packages/com.git/Runtime/a.prefab").as_deref(), Some("mine"));
+    assert_eq!(read("Packages/com.scoped/Runtime/a.prefab").as_deref(), Some("two"));
+    assert!(read("Packages/com.unity.x/package.json").is_none());
+    assert_eq!(p.absent, ["com.gone"]);
+    assert!(p.bytes > scan(&e.source, how(false), &AtomicBool::new(false)).unwrap().bytes, "counted");
+    // Two that cannot be told apart: neither is guessed at.
+    std::fs::remove_dir_all(library.join("PackageCache/com.git@12ab34cd56")).unwrap();
+    put("com.git@1111111111", "other");
+    let p = scan(&e.source, how(true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(p.absent, ["com.git", "com.gone"]);
 }

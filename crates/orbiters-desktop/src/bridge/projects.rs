@@ -438,6 +438,48 @@ fn a_link_into_a_share_is_refused_without_touching_the_share() {
     assert_eq!(resolve_locally(Path::new("/Users/me/New/../../me/Linked"), &table, &fs), Some(PathBuf::from("/Users/me/Linked")), "past a missing part, the rest is taken as written, never looked at");
 }
 
+/// The listed project `given` names: the one of that very path; else, of the one alike (another case, other separators), only when
+/// it is the only one and is the same folder (or neither is there, and nothing tells them apart).
+fn the_listed_one<'a>(listed: &'a [PathBuf], given: &Path) -> Option<&'a PathBuf> {
+    if let Some(exact) = listed.iter().find(|p| p.as_path() == given) {
+        return Some(exact);
+    }
+    let mut alike = listed.iter().filter(|p| discovery::key(p) == discovery::key(given));
+    let (one, more) = (alike.next()?, alike.next().is_some());
+    let same = match (orbiters_projects::owned::id_of(one), orbiters_projects::owned::id_of(given)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Where a disk keeps names apart by case, one that is there is not one that is not.
+        (Err(_), Err(_)) => true,
+        _ => false,
+    };
+    (!more && same).then_some(one)
+}
+
+#[cfg(test)]
+#[test]
+fn a_project_to_take_off_is_the_very_one_named() {
+    let temp = std::env::temp_dir().join(format!("orbiters-bridge-listed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let (a, b) = (temp.join("Avatar"), temp.join("Other"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let upper = PathBuf::from(a.to_string_lossy().replace("Avatar", "AVATAR"));
+    let listed = vec![a.clone(), b.clone()];
+    assert_eq!(the_listed_one(&listed, &a), Some(&a));
+    // Another spelling of it, where that is the same folder; on a disk that keeps them apart it names nothing.
+    assert_eq!(the_listed_one(&listed, &upper), upper.exists().then_some(&a));
+    // Two that differ by case only: neither is guessed at by a third spelling.
+    let mixed = PathBuf::from(a.to_string_lossy().replace("Avatar", "aVATAR"));
+    let both = vec![a.clone(), upper.clone()];
+    assert_eq!(the_listed_one(&both, &mixed), None);
+    assert_eq!(the_listed_one(&both, &upper), Some(&upper));
+    // Not there any more: by the only spelling like it.
+    let gone = temp.join("Gone");
+    assert_eq!(the_listed_one(std::slice::from_ref(&gone), &temp.join("GONE")), Some(&gone));
+    assert_eq!(the_listed_one(&listed, &temp.join("Nothing")), None);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
 /// B2: the mount table is read by each thread into its own buffer: many at once give the same table.
 #[cfg(all(test, target_os = "macos"))]
 #[test]
@@ -632,7 +674,7 @@ fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, 
         "path": project.path,
         "unity": project.unity,
         "kind": kind_name(project.kind),
-        "listed": project.registered,
+        "listed": project.registered && !project.own,
         "folder_missing": project.missing,
         "hidden": hidden::contains(hidden, &project.path),
         "modified": project.modified,
@@ -1476,8 +1518,7 @@ impl Projects {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
         }
         let listed = block_on(vpm::registered(root)).map_err(|e| failed("vpm_failed", e, "Try again."))?;
-        // The very path first: where a disk keeps names of another case apart, they are other projects.
-        let Some(exact) = listed.iter().find(|p| p.as_path() == given).or_else(|| listed.iter().find(|p| discovery::key(p) == discovery::key(given))) else {
+        let Some(exact) = the_listed_one(&listed, given) else {
             return Err(Failure::new("not_listed", format!("{} is not in the project list.", given.display()), "unity_list_projects says which projects are listed."));
         };
         let name = exact.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -2277,13 +2318,12 @@ mod unity6_tests {
             created: 1_763_800_000,
             source: place(&original, "Avatar"),
             trial: place(&trial, "Avatar (Unity 6)"),
-            phase: Phase::Listed,
+            phase: Phase::Ready,
             target: Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
             error: None,
             differences: vec![],
             attempts: vec![],
             migrated: None,
-            adopting: None,
             beside: None,
             localized: vec![],
             linked: vec![],
@@ -2339,7 +2379,7 @@ mod unity6_tests {
         let target = Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() };
         let dir = orbiters_projects::data_dir();
         let job = unity6::trial::prepare(
-            unity6::trial::Prepare { dir: &dir, vcc: &root(), source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_, _| Ok(0), recorded: &|_| {} },
+            unity6::trial::Prepare { dir: &dir, source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_, _| Ok(0), recorded: &|_| {} },
             &AtomicBool::new(false),
             &Default::default(),
         )
@@ -2364,7 +2404,7 @@ mod unity6_tests {
             assert!(said.contains("refused") && said.contains("Creator Companion"), "{what}: {said}");
         }
         assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
-        unity6::trial::abandon(&dir, &root(), &job.id).unwrap();
+        unity6::trial::abandon(&dir, &job.id).unwrap();
         let _ = std::fs::remove_dir_all(&temp);
     }
 

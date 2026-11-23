@@ -512,6 +512,8 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
             }
             None => None,
         },
+        // From a template: the place alone.
+        (Some(_), false) if !state.duplicate && valid && !state.new_location.is_empty() && !state.running() => super::duplicate::place_problem(&ctx, state),
         _ => None,
     };
     // Said once known (not while the size is being measured).

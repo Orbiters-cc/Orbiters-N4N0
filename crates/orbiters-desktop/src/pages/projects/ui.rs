@@ -299,6 +299,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // Unity 6 trials not (yet) projects: being made, stopped, or not where they were (AGENTS.md: a retained copy is
     // visible). Last in the gallery, so a row arriving later never moves the cards or rows above it (verification's major 6).
     super::unity6_card::job_rows(ui, state);
+    super::unity6_card::copy_rows(ui, state);
 }
 
 fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {

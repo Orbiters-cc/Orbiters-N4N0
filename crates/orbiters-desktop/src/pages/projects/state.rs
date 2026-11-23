@@ -49,7 +49,9 @@ pub(super) struct Dup {
     pub library: bool,
     /// The (location, name) last checked: whether that folder exists already, and the room on its disk.
     pub checked: Option<(String, String, bool, Option<u64>)>,
-    pub check: Job<(String, String, bool, Option<u64>)>,
+    pub check: Job<((String, String, bool, Option<u64>), Option<String>)>,
+    /// Why no copy can be made at the place last checked (a share, inside another project).
+    pub refused: Option<String>,
     /// The folder dialog of its location.
     pub pick: Job<Option<PathBuf>>,
 }
@@ -215,6 +217,9 @@ pub struct State {
     pub(super) repo_headers: String,
     pub(super) new_name: String,
     pub(super) new_location: String,
+    /// Why no new project can be made at (location, name), as looked at on a worker.
+    pub(super) new_place: Job<((String, String), Option<String>)>,
+    pub(super) new_refused: Option<((String, String), Option<String>)>,
     pub(super) new_unity: String,
     pub(super) template_index: usize,
     pub(super) duplicate: bool,
@@ -402,6 +407,8 @@ impl Default for State {
             repo_headers: String::new(),
             new_name: String::new(),
             new_location: String::new(),
+            new_place: Job::default(),
+            new_refused: None,
             new_unity: String::new(),
             template_index: 0,
             duplicate: false,
@@ -1073,8 +1080,9 @@ impl State {
                 cx.ctl.upload_pictures(id, name, paths);
             }
         }
-        if let Some(checked) = self.dup.check.take() {
+        if let Some((checked, refused)) = self.dup.check.take() {
             self.dup.checked = Some(checked);
+            self.dup.refused = refused;
         }
     }
     /// Looks up (then, when it changed or is old, measures) the size of the project in `path`, once per visit of the
@@ -1331,6 +1339,7 @@ impl State {
                     })
                     .collect();
                 Project {
+                    own: false,
                     path: PathBuf::from(format!("{STAND_IN_PROJECTS}/{label}")),
                     name: label,
                     unity: if i == 5 { "2019.4.31f1".into() } else { "2022.3.22f1".into() },

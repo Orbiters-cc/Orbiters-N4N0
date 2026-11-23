@@ -53,10 +53,10 @@ pub enum Phase {
     Copying,
     /// The copy failed, was stopped, or is not what the original holds.
     Failed,
-    /// Every byte compared with the original's; not on VCC's and ALCOM's list yet.
+    /// Every byte compared with the original's; the marker of a copy in progress is still in it.
     Verified,
-    /// Verified and listed: Creator Companion's migration comes next.
-    Listed,
+    /// Verified and whole: the person adds it in Creator Companion, whose migration comes next. (Orbiters does not add it.)
+    Ready,
     /// The person took it off; kept so that its folder and its content IDs are still known. `whole`: it was verified.
     Abandoned { whole: bool },
 }
@@ -116,9 +116,6 @@ pub struct Job {
     /// The copy Creator Companion made itself (`<trial>-Migrated`) when its migration made one and the person took it.
     #[serde(default)]
     pub migrated: Option<Place>,
-    /// The same, chosen and checked but not on the list yet: taken once it is.
-    #[serde(default)]
-    pub adopting: Option<Place>,
     /// The folders beside the trial when it was handed over (`None`: they could not all be read, so nothing is offered as
     /// Creator Companion's copy by itself).
     #[serde(default)]
@@ -168,7 +165,7 @@ impl Job {
     }
 
     fn validate(&self) -> Result<(), String> {
-        let copies = [Some(&self.trial), self.migrated.as_ref(), self.adopting.as_ref()];
+        let copies = [Some(&self.trial), self.migrated.as_ref()];
         let absolute = copies.iter().flatten().chain([&&self.source]).all(|p| p.path.is_absolute() && !p.path.components().any(|c| matches!(c, std::path::Component::ParentDir)));
         let s = crate::discovery::key(&self.source.path);
         // By their paths (as this computer compares them) and by what they are.
@@ -409,7 +406,7 @@ fn lock(app: &AppRoot) -> anyhow::Result<Lock> {
 
 fn append(app: &AppRoot, body: &Body) -> anyhow::Result<()> {
     if let Body::Put(job) = body {
-        let folders = [Some(&job.trial), job.migrated.as_ref(), job.adopting.as_ref()].into_iter().flatten().cloned().collect();
+        let folders = [Some(&job.trial), job.migrated.as_ref()].into_iter().flatten().cloned().collect();
         app.replace_json(&job.logs().join(PLACES), &Places { folders })?;
     }
     let body = serde_json::to_string(body)?;

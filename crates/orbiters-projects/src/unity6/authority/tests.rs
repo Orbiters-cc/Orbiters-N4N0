@@ -1,5 +1,5 @@
 use super::*;
-use crate::unity6::trial::tests::{again, at_step, copy_tree, env, kept_from_all, last, link, ok, run, run_at, unlink, vcc_migrates, Env, CONTENT};
+use crate::unity6::trial::tests::{again, at_step, copy_tree, env, kept_from_all, last, link, ok, run, run_at, scene, store, their_store, unlink, vcc_migrates, Env, CONTENT};
 use crate::copying::Step;
 use crate::unity6::trial::{abandon, adopt_vcc_copy};
 
@@ -54,12 +54,12 @@ fn each_state_lets_exactly_what_it_should() {
     // Waiting.
     again(&e, &last(&e).0.id).unwrap();
     assert!(matches!(state(&e.app, &verified), TrialState::WaitingForMigration(_)));
-    assert_eq!(may(&e, &verified), [false, false, false, true, true, true, false]);
+    assert_eq!(may(&e, &verified), [false, false, false, true, true, false, false]);
     assert!(upload(&e.app, &verified).is_err());
     // Migrated.
     vcc_migrates(&verified);
     assert!(matches!(state(&e.app, &verified), TrialState::Migrated(_)));
-    assert_eq!(may(&e, &verified), [true, false, true, true, true, true, false], "never from the bridge");
+    assert_eq!(may(&e, &verified), [true, false, true, true, true, false, false], "never from the bridge");
     assert!(matches!(allow_on(&e.app, &verified, Action::Open(Caller::Window), false), Ok(Way::Trial(_))));
     assert!(allow_on(&e.app, &verified, Action::Open(Caller::Window), true).is_err(), "on the Mac, from Unity Hub");
     assert!(upload(&e.app, &verified).unwrap_err().contains("Unity 2022"));
@@ -68,17 +68,17 @@ fn each_state_lets_exactly_what_it_should() {
     let beside = e.root.join("Projects/S-Migrated");
     copy_tree(&job.trial.path, &beside);
     vcc_migrates(&beside);
-    adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).unwrap();
+    adopt_vcc_copy(&e.app, &job.id, &beside).unwrap();
     assert!(matches!(state(&e.app, &job.trial.path), TrialState::Superseded(_)));
-    assert_eq!(may(&e, &job.trial.path), [false, false, false, false, true, true, false]);
+    assert_eq!(may(&e, &job.trial.path), [false, false, false, false, true, false, false]);
     assert!(upload(&e.app, &job.trial.path).is_err());
     assert!(matches!(state(&e.app, &beside), TrialState::Migrated(_)));
     // Abandoned, whole and not.
     let failed_job = crate::unity6::journal::jobs(&e.app).into_iter().find(|j| j.trial.path == failed).unwrap();
-    abandon(&e.app, &e.vcc, &failed_job.id).unwrap();
-    assert_eq!(may(&e, &failed), [false, false, false, false, false, false, true], "only off the list");
+    abandon(&e.app, &failed_job.id).unwrap();
+    assert_eq!(may(&e, &failed), no);
     let whole = run_at(&e, &e.root.join("Projects"), "W", &|_| false, &ok).unwrap();
-    abandon(&e.app, &e.vcc, &whole.id).unwrap();
+    abandon(&e.app, &whole.id).unwrap();
     assert_eq!(may(&e, &whole.trial.path), [true; 7]);
 }
 
@@ -120,7 +120,7 @@ fn the_upload_warning_follows_the_content_ids() {
     assert!(upload(&e.app, &copy).unwrap_err().contains(CONTENT));
     assert!(h.still(&copy).is_err(), "leave given before does not count any more");
     // The trial taken off, its folder gone: the copy is still recognised.
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
+    abandon(&e.app, &job.id).unwrap();
     std::fs::remove_dir_all(&job.trial.path).unwrap();
     assert!(upload(&e.app, &copy).is_err());
     // The original, on 2022.
@@ -131,7 +131,7 @@ fn the_upload_warning_follows_the_content_ids() {
     vcc_migrates(&own);
     assert!(upload(&e.app, &own).is_err());
     // Other content on Unity 6: allowed, and warned.
-    std::fs::write(own.join("Assets/Avatar.unity"), "%YAML 1.1\n  blueprintId: avtr_99999999-2222-4333-8444-555555555555\n").unwrap();
+    std::fs::write(own.join("Assets/Avatar.unity"), scene("avtr_99999999-2222-4333-8444-555555555555")).unwrap();
     assert!(upload(&e.app, &own).unwrap().warning.unwrap().contains("Unity 2022"));
     // A line that cannot be told, scenes that cannot be read.
     std::fs::write(own.join("ProjectSettings/ProjectVersion.txt"), "nothing\n").unwrap();
@@ -149,14 +149,14 @@ fn leave_to_upload_is_for_that_very_folder_and_answer() {
     let plain = e.root.join("Projects/Plain");
     copy_tree(&e.source, &plain);
     let other = "avtr_88888888-2222-4333-8444-555555555555";
-    std::fs::write(plain.join("Assets/Avatar.unity"), format!("%YAML 1.1\n  blueprintId: {other}\n")).unwrap();
+    std::fs::write(plain.join("Assets/Avatar.unity"), scene(other)).unwrap();
     let leave = upload(&e.app, &plain).unwrap();
     assert!(leave.warning.is_none() && leave.still(&plain).is_ok());
     let avatar = crate::avatars::Avatar { id: CONTENT.into(), ..Default::default() };
     let request = crate::setup::request(avatar, 1, "https://orbiters.cc/api/", "0.0.0").unwrap();
     // A package put in meanwhile brings the trial's content: the answer is another one now.
     std::fs::create_dir_all(plain.join("Packages/com.new")).unwrap();
-    std::fs::write(plain.join("Packages/com.new/A.prefab"), format!("%YAML 1.1\n  blueprintId: {CONTENT}\n")).unwrap();
+    std::fs::write(plain.join("Packages/com.new/A.prefab"), scene(CONTENT)).unwrap();
     assert!(leave.still(&plain).is_err() && crate::setup::write(&plain, &request, &leave).is_err());
     std::fs::remove_dir_all(plain.join("Packages/com.new")).unwrap();
     assert!(leave.still(&plain).is_ok());
@@ -182,6 +182,7 @@ fn every_entry_point_of_the_library_asks() {
     let _tidy = Tidy;
     let mut e = env();
     e.app = crate::data_dir();
+    their_store(&e);
     let job = run(&e).unwrap();
     let at = job.trial.path.clone();
     let rt = crate::runtime().unwrap();
@@ -192,10 +193,11 @@ fn every_entry_point_of_the_library_asks() {
     assert_eq!(std::fs::read(e.vcc.join("settings.json")).unwrap_or_default(), repos, "no repository added for it");
     let project = crate::discovery::Project { path: at.clone(), name: "T".into(), unity: "2022.3.22f1".into(), ..Default::default() };
     // The gallery's and the bridge's Add and Remove, and a plan of changes.
-    let settings = || (std::fs::read(e.vcc.join("settings.json")).unwrap(), std::fs::read(e.vcc.join("vcc.liteDb")).unwrap());
-    let listed_before = settings();
-    assert!(said(rt.block_on(crate::vpm::register(&e.vcc, &at, false))).contains("its own card"));
-    assert_eq!(settings(), listed_before);
+    let listed_before = store(&e);
+    for add in [true, false] {
+        assert!(said(rt.block_on(crate::vpm::register(&e.vcc, &at, add))).contains("yourself"));
+    }
+    assert!(store(&e) == listed_before);
     assert!(said(rt.block_on(crate::coherent::solve(&e.vcc, &at, &[], &[], false)).map(|_| ())).contains("Creator Companion"));
     assert!(said(crate::open_project(&project).map(|_| ())).contains("Creator Companion"));
     assert!(said(crate::open_project_as_is(&project).map(|_| ())).contains("Creator Companion"));
@@ -220,9 +222,27 @@ fn every_entry_point_of_the_library_asks() {
     }
     let f = e.root.join("Projects/F");
     assert!(rt.block_on(crate::vpm::register(&e.vcc, &f, true)).is_err() && rt.block_on(crate::vpm::register(&e.vcc, &f, false)).is_err());
+    assert!(store(&e) == listed_before);
     let cancel = AtomicBool::new(false);
     assert!(crate::storage::repair(&f, &Default::default(), &cancel).is_err());
     let before = std::fs::read_dir(e.root.join("Projects")).unwrap().count();
     assert!(rt.block_on(crate::templates::duplicate(&e.vcc, &f, &e.root.join("Projects"), "F2", Default::default(), &cancel, &Default::default())).is_err());
     assert_eq!(std::fs::read_dir(e.root.join("Projects")).unwrap().count(), before);
+}
+
+/// Fourth verification: on the Mac no action changes a trial, asked through the generic entry points too.
+#[test]
+fn no_action_changes_a_trial_on_a_mac() {
+    let e = env();
+    let job = run(&e).unwrap();
+    let no = |what: &str| {
+        for action in [Action::Open(Caller::Window), Action::Open(Caller::Bridge), Action::Packages, Action::Storage, Action::List, Action::Unlist] {
+            assert!(allow_on(&e.app, &job.trial.path, action, true).is_err(), "{what}, {action:?}");
+        }
+        assert!(allow_on(&e.app, &job.trial.path, Action::Duplicate, true).is_ok(), "{what}: it only reads");
+    };
+    no("waiting");
+    vcc_migrates(&job.trial.path);
+    no("migrated");
+    assert_eq!(EVERY.map(|a| allow_on(&e.app, &e.source, a, true).is_ok()), [true; 7], "another project is what it is");
 }

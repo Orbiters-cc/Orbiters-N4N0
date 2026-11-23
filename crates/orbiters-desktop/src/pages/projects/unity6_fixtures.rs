@@ -79,7 +79,6 @@ fn job(id: &str, original: &str, name: &str, at: &str, phase: trial::Phase, erro
         differences: vec![],
         attempts: vec![],
         migrated: None,
-        adopting: None,
         beside: None,
         localized: vec![],
         linked: vec![],
@@ -160,7 +159,7 @@ impl State {
             })
         };
         let standings: Vec<(PathBuf, standing::Standing)> = self.scan.projects.iter().filter_map(|p| by_name(&p.name).map(|s| (p.path.clone(), s))).collect();
-        let mut mine = job("trial-1", "My avatars", "My avatars (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Listed, None); // i18n: not shown (sample data of the screenshot scenes)
+        let mut mine = job("trial-1", "My avatars", "My avatars (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Ready, None); // i18n: not shown (sample data of the screenshot scenes)
         let other_disk = if cfg!(target_os = "macos") { "/Volumes/Archive/Unity projects" } else { "E:/Unity projects" }; // i18n: not shown (sample data of the screenshot scenes)
         let mut trials = vec![];
         let status = match name {
@@ -199,10 +198,10 @@ impl State {
         if matches!(name, "projects-u6-gallery" | "projects-u6-jobs" | "projects-u6-damaged") {
             trials.push((job("trial-2", "Club outfits", "Club outfits (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Copying, None), trial::Status::Interrupted)); // i18n: not shown (sample data of the screenshot scenes)
             trials.push((
-                job("trial-3", "Test world", "Test world (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Verified, Some("The trial is at H:/Unity projects/Test world (Unity 6), but it could not be listed: settings.json is locked by another program.")), // i18n: not shown (sample data of the screenshot scenes)
-                trial::Status::Unlisted,
+                job("trial-3", "Test world", "Test world (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Verified, Some("The trial is at H:/Unity projects/Test world (Unity 6), but it could not be finished: a file of it is in use by another program.")), // i18n: not shown (sample data of the screenshot scenes)
+                trial::Status::Unfinished,
             ));
-            trials.push((job("trial-4", "Avatar backup", "Avatar backup (Unity 6)", other_disk, trial::Phase::Listed, None), trial::Status::Missing)); // i18n: not shown (sample data of the screenshot scenes)
+            trials.push((job("trial-4", "Avatar backup", "Avatar backup (Unity 6)", other_disk, trial::Phase::Ready, None), trial::Status::Missing)); // i18n: not shown (sample data of the screenshot scenes)
             let mut failed = job("trial-5", "Weekend avatar", "Weekend avatar (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Failed, Some("The copy at H:/Unity projects/Weekend avatar (Unity 6) is not what the original holds (2 differences):")); // i18n: not shown (sample data of the screenshot scenes)
             failed.differences = vec!["Assets/Weekend/Body.png: not the same contents".into(), "Assets/Weekend/Notes.txt: missing".into()]; // i18n: not shown (sample data of the screenshot scenes)
             trials.push((failed, trial::Status::Failed { kept: true }));
@@ -216,7 +215,20 @@ impl State {
         } else {
             trial::Health::Fine
         };
-        self.u6.look = Some(unity6::Look { matrix: m.clone(), projects: vec![], standings, index, trials, pairs, health, present });
+        let copies = match n {
+            "projects-u6-jobs" => [
+                ("c1", "Club outfits", orbiters_projects::copies::State::Whole, "The copy is at H:/Unity projects/Club outfits copy, but registration failed: settings.json of Creator Companion or ALCOM is in use: close them, then try again. Nothing was changed."), // i18n: not shown (sample data of the screenshot scenes)
+                ("c2", "Test world", orbiters_projects::copies::State::Copying, ""), // i18n: not shown (sample data of the screenshot scenes)
+            ]
+            .map(|(id, name, state, error)| {
+                let copy = orbiters_projects::copies::Copy { id: id.into(), source: PathBuf::from(format!("{STAND_IN_PROJECTS}/{name}")), destination: PathBuf::from(format!("{STAND_IN_PROJECTS}/{name} copy")), folder: None, started: discovery::now(), state, error: (!error.is_empty()).then(|| error.to_string()) };
+                let status = if state == orbiters_projects::copies::State::Whole { orbiters_projects::copies::Status::Unlisted } else { orbiters_projects::copies::Status::Incomplete };
+                (copy, status)
+            })
+            .into(),
+            _ => vec![],
+        };
+        self.u6.look = Some(unity6::Look { matrix: m.clone(), projects: vec![], standings, index, trials, pairs, health, copies, present });
         self.u6.fixture = Some(Fixture { mac: name == "projects-u6-mac" });
 
         // Editors and Creator Companions.
@@ -291,7 +303,7 @@ impl State {
                 let outside = if n == "projects-u6-try-budget" { vec![tr!("{link} is a link to {folder}: the trial gets its files, not the link.", link = "Assets/Shared", folder = "D:/Shared assets")] } else { vec![] };
                 let mut sheet = Sheet { step, name: trial_name.clone(), location: location.clone(), checked: Some(((location.clone(), trial_name.clone()), Ok(CheckedPlace { plan, blockers, outside }))), ..Default::default() };
                 sheet.done = match n {
-                    "projects-u6-try-done" => Some(Ok(job("trial-1", "My avatars", "My avatars (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Listed, None))), // i18n: not shown (sample data of the screenshot scenes)
+                    "projects-u6-try-done" => Some(Ok(job("trial-1", "My avatars", "My avatars (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Ready, None))), // i18n: not shown (sample data of the screenshot scenes)
                     "projects-u6-try-failed" => Some(Err("Could not copy Assets/MasculineCanine/Textures/Body_Albedo.png: There is not enough space on the disk. (os error 112)".into())), // i18n: not shown (sample data of the screenshot scenes)
                     _ => None,
                 };

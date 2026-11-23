@@ -55,6 +55,8 @@ pub struct Look {
     pub pairs: Vec<Pair>,
     /// Whether the record can be trusted.
     pub health: trial::Health,
+    /// Copies of projects being made or not on the list yet, whatever they are copies for.
+    pub copies: Vec<(crate::copies::Copy, crate::copies::Status)>,
     /// Keys of trial folders that are there now (the page never asks the disk while drawing).
     pub present: HashSet<String>,
 }
@@ -86,7 +88,7 @@ pub fn look(dir: &Path, projects: &[PathBuf]) -> Look {
         .filter(|p| p.path.exists())
         .map(|p| crate::discovery::key(&p.path))
         .collect();
-    Look { matrix, projects: projects.to_vec(), standings, index, trials, pairs, health: record.health(), present }
+    Look { matrix, projects: projects.to_vec(), standings, index, trials, pairs, health: record.health(), copies: crate::copies::shown(dir), present }
 }
 
 /// Where the original of `job` is now: lineage needs a positive match (verification's major 10), the original where it was

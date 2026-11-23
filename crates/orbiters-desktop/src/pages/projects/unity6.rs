@@ -418,7 +418,6 @@ impl State {
         let job = Job::spawn(ctx, move || {
             let _working = working;
             let dir = orbiters_projects::data_dir();
-            let vcc = orbiters_projects::vcc_dir();
             let library = orbiters_projects::size::lookup(&from).size.map(|s| s.library);
             let budget = |place: &Path, copy: u64| -> anyhow::Result<u64> {
                 let (plan, high) = plan_for(&from, place, copy, library, &target);
@@ -431,7 +430,7 @@ impl State {
             };
             let open = |p: &Path| trial::is_open(p);
             let t = trial::Target { sdk: target.sdk.clone(), unity: target.unity.clone(), changeset: target.changeset.clone() };
-            trial::prepare(trial::Prepare { dir: &dir, vcc: &vcc, source: &from, parent: &parent, name: &name, target: t, open: &open, budget: &budget, recorded: &recorded }, &stop, &prog)
+            trial::prepare(trial::Prepare { dir: &dir, source: &from, parent: &parent, name: &name, target: t, open: &open, budget: &budget, recorded: &recorded }, &stop, &prog)
                 .map_err(|e| format!("{e:#}"))
         });
         self.u6.run = Some(Run { shown: false, recorded, job, cancel, progress });
@@ -463,6 +462,7 @@ mod tests {
             trials: vec![],
             pairs: vec![],
             health: trial::Health::Fine,
+            copies: vec![],
             present: Default::default(),
         }
     }
@@ -513,7 +513,7 @@ mod tests {
         assert!(!state.action.running() && state.error.as_deref().is_some_and(|e| e.contains("Creator Companion")));
         // Not finished, or the first copy once Creator Companion's own copy was taken: the same.
         let mut l = look(&[]);
-        l.trials = vec![(trial_job(&path, None), trial::Status::Unlisted)];
+        l.trials = vec![(trial_job(&path, None), trial::Status::Unfinished)];
         state.u6.apply(2, 0, l);
         assert!(state.u6.waiting(&path));
         let mut l = look(&[]);
@@ -529,13 +529,12 @@ mod tests {
             created: 0,
             source: trial::Place { path: PathBuf::from("H:/Unity projects/My avatars"), id: None, name: "My avatars".into() },
             trial: trial::Place { path: path.to_path_buf(), id: None, name: "My avatars (Unity 6)".into() },
-            phase: trial::Phase::Listed,
+            phase: trial::Phase::Ready,
             target: trial::Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
             error: None,
             differences: vec![],
             attempts: vec![],
             migrated: migrated.map(|p| trial::Place { name: "x".into(), path: p, id: None }),
-            adopting: None,
             beside: None,
             localized: vec![],
             linked: vec![],
@@ -602,7 +601,7 @@ mod tests {
         let arrivals = [
             (trial::Status::Running, trial::Health::Fine),
             (trial::Status::Failed { kept: true }, trial::Health::Fine),
-            (trial::Status::Unlisted, trial::Health::Damaged { lines: 1, why: "x".into(), newer: false }),
+            (trial::Status::Unfinished, trial::Health::Damaged { lines: 1, why: "x".into(), newer: false }),
         ];
         for (i, (status, health)) in arrivals.into_iter().enumerate() {
             let mut l = look(&[("Q:/Not/Here/P0", standing::State::On2022)]);

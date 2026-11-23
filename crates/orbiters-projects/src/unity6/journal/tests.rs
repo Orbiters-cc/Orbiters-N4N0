@@ -37,7 +37,7 @@ fn an_unreadable_line_hides_only_itself_and_is_never_written_over() {
     // The first job's last line altered in one character: it is not what it was before, and not taken for it either.
     let last_of_one = lines.len() - 2;
     let mut all: Vec<Vec<u8>> = lines.iter().map(|l| l.to_vec()).collect();
-    let at = String::from_utf8_lossy(&all[last_of_one]).find("Listed").unwrap();
+    let at = String::from_utf8_lossy(&all[last_of_one]).find("Ready").unwrap();
     all[last_of_one][at] = b'X';
     let damaged = joined(&all);
     put(&e, &damaged);
@@ -62,7 +62,7 @@ fn an_unreadable_line_hides_only_itself_and_is_never_written_over() {
     }
     // Set aside: kept beside and in the journal, not asked about again; the last good line counts.
     let aside = set_aside(&e.app).unwrap();
-    assert!(std::fs::read_to_string(aside).unwrap().contains("Xisted"));
+    assert!(std::fs::read_to_string(aside).unwrap().contains("Xeady"));
     assert!(text(&e).starts_with(&damaged));
     let r = read(&e.app);
     assert_eq!(r.health(), Health::Fine);

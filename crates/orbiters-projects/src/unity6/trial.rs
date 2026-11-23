@@ -1,6 +1,7 @@
-//! A Unity 6 trial of a project: a copy Orbiters makes beside the original, verifies byte for byte, lists, and hands to
-//! Creator Companion, which migrates it. The original stays on Unity 2022, is only ever read (`payload`), and nothing
-//! Orbiters writes goes anywhere but the trial's own folder and app data (`gate`).
+//! A Unity 6 trial of a project: a copy Orbiters makes beside the original, verifies byte for byte, and hands to the person,
+//! who adds it in Creator Companion, which migrates it. The original stays on Unity 2022, is only ever read (`payload`), and
+//! nothing Orbiters writes goes anywhere but the trial's own folder and app data (`gate`): **no file of Creator Companion's or
+//! ALCOM's is ever written for a trial**, neither its list nor its database.
 //!
 //! What a trial is now is told by [`super::authority`] from the journal and the folder's identity; nothing in the trial's
 //! folder is authority. Orbiters never changes a trial's packages or editor version: those are Creator Companion's
@@ -72,9 +73,9 @@ pub enum Status {
     Interrupted,
     /// The copy failed, was stopped, or is not what the original holds; `kept`: a folder of it is still there.
     Failed { kept: bool },
-    /// Verified, not on VCC's and ALCOM's list.
-    Unlisted,
-    /// Listed and verified; Creator Companion has not migrated it yet. `vcc_copy`: a migrated copy VCC made beside it.
+    /// Verified; its last step (the copy's marker) is left.
+    Unfinished,
+    /// Verified and whole; Creator Companion has not migrated it yet. `vcc_copy`: a migrated copy VCC made beside it.
     Waiting { vcc_copy: Option<PathBuf> },
     /// Its files show Unity 6 with an SDK that needs it.
     OnUnity6,
@@ -93,7 +94,7 @@ pub enum Status {
 impl Status {
     /// Whether the gallery shows it as a job rather than a project card.
     pub fn is_job(&self) -> bool {
-        matches!(self, Status::Running | Status::Interrupted | Status::Failed { .. } | Status::Unlisted | Status::Missing | Status::Replaced | Status::Uncertain(_))
+        matches!(self, Status::Running | Status::Interrupted | Status::Failed { .. } | Status::Unfinished | Status::Missing | Status::Replaced | Status::Uncertain(_))
     }
 
     /// A stable name for machines (the bridge).
@@ -102,7 +103,7 @@ impl Status {
             Status::Running => "preparing",
             Status::Interrupted => "interrupted",
             Status::Failed { .. } => "copy_failed",
-            Status::Unlisted => "copied_verified",
+            Status::Unfinished => "copied_verified",
             Status::Waiting { .. } => "waiting_for_creator_companion",
             Status::OnUnity6 => "on_unity6",
             Status::Unexpected(_) => "unexpected",
@@ -143,7 +144,7 @@ pub fn status(dir: &Path, record: &Record, job: &Job) -> Status {
         return Status::Replaced;
     }
     if job.phase == Phase::Verified {
-        return Status::Unlisted;
+        return Status::Unfinished;
     }
     match standing::read(&at.path, &super::matrix::Matrix::built_in()).state {
         State::OnUnity6 => Status::OnUnity6,
@@ -158,10 +159,6 @@ pub fn status(dir: &Path, record: &Record, job: &Job) -> Status {
 fn vcc_copy(job: &Job) -> Option<PathBuf> {
     if job.migrated.is_some() {
         return None;
-    }
-    // Chosen already, and not on the list yet: it is the one to take.
-    if let Some(chosen) = job.adopting.as_ref().filter(|p| p.verified() == Some(true)) {
-        return Some(chosen.path.clone());
     }
     let before = job.beside.as_ref()?;
     let beside = job.trial.path.with_file_name(format!("{}-Migrated", job.trial.path.file_name()?.to_string_lossy()));
@@ -312,7 +309,7 @@ fn folder_name(source: &Path) -> Option<String> {
     source.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// Looks at making a trial of `source` at `parent`/`name`, by reading only. `own`: where Orbiters and VCC keep their files.
+/// Looks at making a trial of `source` at `parent`/`name`, by reading only. `own`: where Orbiters keeps its files.
 pub fn look(dir: &Path, own: &[&Path], source: &Path, parent: &Path, name: &str, open: bool, cancel: &AtomicBool) -> Look {
     let standing = standing::read(source, &super::matrix::Matrix::built_in());
     match payload::scan(source, making(name, folder_name(source).as_deref(), ""), cancel) {
@@ -335,8 +332,6 @@ pub fn look(dir: &Path, own: &[&Path], source: &Path, parent: &Path, name: &str,
 pub struct Prepare<'a> {
     /// App data: the record and the logs.
     pub dir: &'a Path,
-    /// VCC's and ALCOM's environment (the project list).
-    pub vcc: &'a Path,
     pub source: &'a Path,
     pub parent: &'a Path,
     pub name: &'a str,
@@ -350,7 +345,7 @@ pub struct Prepare<'a> {
     pub recorded: &'a dyn Fn(&Job),
 }
 
-/// Makes the trial: checks again, records, copies, compares every byte, lists it. Every failure after the record leaves it in
+/// Makes the trial: checks again, records, copies, compares every byte. Every failure after the record leaves it in
 /// a phase [`status`] shows; the error says where the trial is. Nothing is made before every check passed.
 pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<Job> {
     capable()?;
@@ -362,8 +357,8 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
     let standing = standing::read(p.source, &super::matrix::Matrix::built_in());
     let blocked = blockers(p.dir, p.source, &standing, (p.open)(p.source), Some(&payload));
     anyhow::ensure!(blocked.is_empty(), "{}", super::describe_blockers(&blocked));
-    // Nothing is written anywhere the original can see: not the trial, not the record, not VCC's list.
-    gate::apart(&[p.dir, p.vcc], &payload.protected)?;
+    // Nothing is written anywhere the original can see: not the trial, not the record.
+    gate::apart(&[p.dir], &payload.protected)?;
     let destination = Destination::check(p.parent, p.name, &payload.protected, Parents::Exist)?;
     let path = destination.path();
     let content = payload.content(cancel)?;
@@ -379,7 +374,6 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
         differences: vec![],
         attempts: vec![],
         migrated: None,
-        adopting: None,
         beside: None,
         localized: payload.localized.clone(),
         linked: payload.linked.iter().map(|l| format!("{} → {}", l.at, l.to.display())).collect(),
@@ -482,8 +476,8 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
     })?;
     drop(made);
     between(Step::Verified)?;
-    // `new` is held until it is listed: the folder verified is the folder listed.
-    list(p.dir, p.vcc, &job, &root, &wanted, progress)
+    // `new` is held until it is handed over: the folder verified is the folder handed over.
+    hand_over(p.dir, &job, &root, &wanted, progress)
 }
 
 /// The progress of a comparison of `total` entries, one step at a time.
@@ -513,12 +507,12 @@ fn altered(dir: &Path, job: &Job, differences: Vec<String>) -> anyhow::Error {
     anyhow::anyhow!("{text}")
 }
 
-/// From a verified copy (`wanted`: what it is, byte for byte): it becomes a project (its marker goes), is put on VCC's and
-/// ALCOM's list, and is compared once more, since a list is another program's. Only then is it handed to Creator Companion.
-fn list(dir: &Path, vcc: &Path, job: &Job, root: &WriteRoot, wanted: &payload::Digests, progress: &SharedProgress) -> anyhow::Result<Job> {
+/// From a verified copy (`wanted`: what it is, byte for byte): its marker goes, and it is compared once more. Only then is it
+/// handed to the person, for Creator Companion.
+fn hand_over(dir: &Path, job: &Job, root: &WriteRoot, wanted: &payload::Digests, progress: &SharedProgress) -> anyhow::Result<Job> {
     anyhow::ensure!(job.phase == Phase::Verified && job.trial.id == Some(root.id), "{}", tr!("The folder at {path} is not the trial Orbiters made.", path = job.trial.path.display()));
-    let unlisted = |error: String| -> anyhow::Error {
-        let text = tr!("The trial is at {path}, but it could not be listed: {error}", path = job.trial.path.display(), error = error);
+    let unfinished = |error: String| -> anyhow::Error {
+        let text = tr!("The trial is at {path}, but it could not be finished: {error}", path = job.trial.path.display(), error = error);
         let _ = journal::set(dir, &job.id, |j| j.error = Some(text.clone()));
         anyhow::anyhow!("{text}")
     };
@@ -531,36 +525,27 @@ fn list(dir: &Path, vcc: &Path, job: &Job, root: &WriteRoot, wanted: &payload::D
             drop(file);
             let ours = serde_json::from_slice::<Marker>(&bytes).is_ok_and(|m| m.copy == job.id);
             if !ours {
-                return Err(unlisted(tr!("{path} could not be removed.", path = job.trial.path.join(INCOMPLETE).display())));
+                return Err(unfinished(tr!("{path} could not be removed.", path = job.trial.path.join(INCOMPLETE).display())));
             }
-            copying::unmark(root, id).map_err(|e| unlisted(format!("{e:#}")))?;
+            copying::unmark(root, id).map_err(|e| unfinished(format!("{e:#}")))?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(unlisted(e.to_string())),
+        Err(e) => return Err(unfinished(e.to_string())),
     }
     if let Err(e) = between(Step::MarkerGone) {
-        return Err(unlisted(format!("{e:#}")));
+        return Err(unfinished(format!("{e:#}")));
     }
-    progress.lock().unwrap().phase = mark("Registering project").into();
-    if let Err(e) = root.list(vcc, true).and_then(|()| between(Step::Listed)) {
-        return Err(unlisted(format!("{e:#}")));
-    }
-    let (found, odd) = payload::trial_digests(root, &AtomicBool::new(false), comparing(progress, wanted.len())).map_err(|e| unlisted(format!("{e:#}")))?;
+    let (found, odd) = payload::trial_digests(root, &AtomicBool::new(false), comparing(progress, wanted.len())).map_err(|e| unfinished(format!("{e:#}")))?;
     let differences = payload::differences(wanted, &found, &odd);
     if !differences.is_empty() {
-        let said = altered(dir, job, differences);
-        // Off the list again: what is there is not what was verified.
-        return Err(match root.list(vcc, false) {
-            Ok(()) => said,
-            Err(e) => said.context(tr!("It is still on Creator Companion's list: {error}", error = format!("{e:#}"))),
-        });
+        return Err(altered(dir, job, differences));
     }
     if let Err(e) = between(Step::Checked) {
-        return Err(unlisted(format!("{e:#}")));
+        return Err(unfinished(format!("{e:#}")));
     }
     let beside = job.trial.path.parent().and_then(folders_in);
     journal::set(dir, &job.id, |j| {
-        j.phase = Phase::Listed;
+        j.phase = Phase::Ready;
         j.error = None;
         j.beside = beside;
     })
@@ -575,9 +560,9 @@ fn folders_in(folder: &Path) -> Option<Vec<crate::owned::FileId>> {
     Some(out)
 }
 
-/// Lists a verified trial that could not be listed, after comparing every one of its files again, by content, with what was
+/// Finishes a verified trial whose last step was cut short, after comparing every one of its files again, by content, with what was
 /// verified (its packages included): anything altered, added or missing since makes it a failed copy, never a ready one.
-pub fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<Job> {
+pub fn finish(dir: &Path, id: &str, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<Job> {
     capable()?;
     let _lease = Lease::take(dir, id)?;
     let job = job_of(dir, id)?;
@@ -594,27 +579,19 @@ pub fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &
     if !differences.is_empty() {
         return Err(altered(dir, &job, differences));
     }
-    list(dir, vcc, &job, &root, &wanted, progress)
+    hand_over(dir, &job, &root, &wanted, progress)
 }
 
 /// Takes the copy Creator Companion made of the trial, at `path`, as the trial on Unity 6: chosen by the person, and checked
-/// to be the same project ([`candidate`]). It is recorded as chosen first and as taken once it is listed, so that a list that
-/// cannot be written now only has to be tried again.
-pub fn adopt_vcc_copy(dir: &Path, vcc: &Path, id: &str, path: &Path) -> anyhow::Result<Job> {
+/// to be the same project ([`candidate`]).
+pub fn adopt_vcc_copy(dir: &Path, id: &str, path: &Path) -> anyhow::Result<Job> {
     capable()?;
     let _lease = Lease::take(dir, id)?;
     let job = job_of(dir, id)?;
-    anyhow::ensure!(job.phase == Phase::Listed && job.migrated.is_none(), "{}", tr("This trial does not wait for Creator Companion."));
+    anyhow::ensure!(job.phase == Phase::Ready && job.migrated.is_none(), "{}", tr("This trial does not wait for Creator Companion."));
     drop(WriteRoot::of_job(dir, id, Role::Trial)?);
     let place = candidate(&job, path)?;
-    if job.adopting.as_ref() != Some(&place) {
-        journal::set(dir, id, |j| j.adopting = Some(place.clone()))?;
-    }
-    WriteRoot::of_job(dir, id, Role::Adopting)?.list(vcc, true)?;
-    journal::set(dir, id, |j| {
-        j.migrated = Some(place.clone());
-        j.adopting = None;
-    })
+    journal::set(dir, id, |j| j.migrated = Some(place.clone()))
 }
 
 /// What taking a trial off left.
@@ -623,48 +600,36 @@ pub struct Forgotten {
     /// Where the trial's folder is.
     pub at: PathBuf,
     pub there: bool,
-    /// Folders whose entry on VCC's and ALCOM's list was left: they are not there now (a disk not connected), or another folder
-    /// is at their place, so it cannot be told whose entry it is.
-    pub still_listed: Vec<PathBuf>,
 }
 
-/// Takes a trial off: off VCC's and ALCOM's list and out of what Orbiters shows, never deleting any of it. Its folders and its
-/// content IDs stay known, with their protections. Everything is checked before anything is written: its record, its lease,
-/// what its folders are. An entry of the list goes only by the identity of the very folder it names.
-pub fn abandon(dir: &Path, vcc: &Path, id: &str) -> anyhow::Result<Forgotten> {
+/// Takes a trial off what Orbiters shows, never deleting any of it, and changing nothing of Creator Companion's: where the person
+/// added it there, it stays on its list. Its folders and its content IDs stay known, with their protections.
+pub fn abandon(dir: &Path, id: &str) -> anyhow::Result<Forgotten> {
     capable()?;
     let _lease = Lease::take(dir, id)?;
     let job = job_of(dir, id)?;
-    let trial = WriteRoot::of_job(dir, id, Role::Trial);
     let whole = match job.phase {
-        Phase::Listed => true,
+        Phase::Ready => true,
         // It may have been changed since: an ordinary project only when it is still what was verified.
-        Phase::Verified => verified(dir, &job).zip(trial.as_ref().ok()).is_some_and(|(wanted, root)| {
-            let found = payload::trial_digests(root, &AtomicBool::new(false), |_| {});
+        Phase::Verified => verified(dir, &job).zip(WriteRoot::of_job(dir, id, Role::Trial).ok()).is_some_and(|(wanted, root)| {
+            let found = payload::trial_digests(&root, &AtomicBool::new(false), |_| {});
             found.is_ok_and(|(found, odd)| payload::differences(&wanted, &found, &odd).is_empty())
         }),
         Phase::Abandoned { whole } => whole,
         Phase::Planned | Phase::Copying | Phase::Failed => false,
     };
-    let mut still_listed = vec![];
-    let migrated = job.migrated.as_ref().map(|m| (m, WriteRoot::of_job(dir, id, Role::Migrated)));
-    for (place, root) in [Some((&job.trial, trial)), migrated].into_iter().flatten() {
-        match root {
-            // Off the list first: an unlisted trial that is still recorded is better than a listed one nobody guards.
-            Ok(root) => root.list(vcc, false)?,
-            Err(_) if place.id.is_some() => still_listed.push(place.path.clone()),
-            // Its folder was never made.
-            Err(_) => {}
-        }
-    }
-    let job = journal::set(dir, id, |j| {
-        j.phase = Phase::Abandoned { whole };
-        // Chosen and not taken: it stays a project of its own, guarded by its content.
-        j.adopting = None;
-    })?;
+    let job = journal::set(dir, id, |j| j.phase = Phase::Abandoned { whole })?;
     let at = job.unity6().path.clone();
     let there = at.exists();
-    Ok(Forgotten { at, there, still_listed })
+    Ok(Forgotten { at, there })
+}
+
+/// The folders of the trials shown as projects (whole, wherever they are): the gallery has them without any list of Creator
+/// Companion's.
+pub fn folders(dir: &Path) -> Vec<PathBuf> {
+    let record = journal::read(dir);
+    let shown = record.jobs.iter().filter(|j| j.phase == Phase::Ready && record.uncertain(&j.id).is_none());
+    shown.flat_map(|j| [Some(&j.trial), j.migrated.as_ref()]).flatten().filter(|p| p.verified() == Some(true)).map(|p| p.path.clone()).collect()
 }
 
 /// What a launch needs: the editor's program, the project, the attempt's log; answers the process id when it has one.

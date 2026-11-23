@@ -19,7 +19,6 @@ pub enum Want {
     NewFile,
     Append,
     Lock,
-    Alone,
     Delete { dir: bool },
 }
 
@@ -53,14 +52,12 @@ pub fn open_at(dir: &File, name: &OsStr, want: Want, follow: bool) -> io::Result
         Want::NewFile => libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
         Want::Append => libc::O_RDWR | libc::O_APPEND | libc::O_CREAT,
         Want::Lock => libc::O_RDWR | libc::O_CREAT,
-        // Nothing here keeps a file from others: its contents are compared right before it is replaced.
-        Want::Alone => libc::O_RDWR | libc::O_NONBLOCK,
         Want::Delete { dir } => libc::O_RDONLY | libc::O_NONBLOCK | if dir { libc::O_DIRECTORY } else { 0 },
     };
     // SAFETY: a live descriptor and a null-terminated name; the mode is used only when a file is made.
     let file = fd(unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | stay | libc::O_CLOEXEC, 0o666 as libc::c_uint) })?;
     let is_dir = file.metadata()?.is_dir();
-    if matches!(want, Want::File | Want::NewFile | Want::Append | Want::Lock | Want::Alone) && is_dir {
+    if matches!(want, Want::File | Want::NewFile | Want::Append | Want::Lock) && is_dir {
         return Err(io::Error::from(io::ErrorKind::IsADirectory));
     }
     Ok(file)
@@ -226,11 +223,8 @@ pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Resu
         let gone = mine && libc::unlinkat(room.as_raw_fd(), inner.as_ptr(), if is_dir { libc::AT_REMOVEDIR } else { 0 }) == 0;
         let failed = (mine && !gone).then(io::Error::last_os_error);
         if !gone {
-            // Back where it was, never over what is there now.
-            let mut there: libc::stat = std::mem::zeroed();
-            if libc::fstatat(dir.as_raw_fd(), at.as_ptr(), &mut there, libc::AT_SYMLINK_NOFOLLOW) != 0 {
-                libc::renameat(room.as_raw_fd(), inner.as_ptr(), dir.as_raw_fd(), at.as_ptr());
-            }
+            // Back where it was, never over what is there now (decided by the system, in one step); else it stays there, whole.
+            put_back(&room, &inner, dir, &at);
         }
         libc::unlinkat(dir.as_raw_fd(), aside.as_ptr(), libc::AT_REMOVEDIR);
         match failed {
@@ -238,6 +232,22 @@ pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Resu
             None => Ok(gone),
         }
     }
+}
+
+/// Puts `from` of `room` at `to` of `dir` when nothing is there.
+fn put_back(room: &File, from: &std::ffi::CStr, dir: &File, to: &std::ffi::CStr) {
+    // SAFETY: live descriptors and null-terminated names.
+    #[cfg(target_vendor = "apple")]
+    unsafe {
+        libc::renameatx_np(room.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr(), libc::RENAME_EXCL);
+    }
+    // SAFETY: as above; 1 is RENAME_NOREPLACE.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::syscall(libc::SYS_renameat2, room.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr(), 1u32);
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+    let _ = (room, from, dir, to);
 }
 
 /// Takes away the file or link `name` itself under `dir` (never what a link leads to): for Orbiters' own staging folder.
@@ -269,10 +279,4 @@ pub fn set_executable_like(to: &File, from: &File) -> io::Result<()> {
         to.set_permissions(permissions)?;
     }
     Ok(())
-}
-
-/// [`publish_at`]: nothing here keeps what is replaced from others.
-pub fn publish_held(dir: &File, file: &File, from: &OsStr, name: &OsStr, held: Option<File>) -> io::Result<()> {
-    drop(held);
-    publish_at(dir, file, from, name)
 }

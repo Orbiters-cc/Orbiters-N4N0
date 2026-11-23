@@ -27,7 +27,7 @@ fn tree(root: &Path, skip: &[PathBuf], times: bool) -> Tree {
         let e = e.unwrap();
         let m = std::fs::symlink_metadata(e.path()).unwrap();
         let what = if crate::owned::is_link(&m) {
-            format!("link {:?}", std::fs::canonicalize(e.path()).ok())
+            format!("link {:?} {:?} {:?}", std::fs::canonicalize(e.path()).ok(), times.then(|| m.modified().unwrap()), m.created().ok())
         } else {
             let id = crate::owned::id_of(e.path()).unwrap();
             #[cfg(unix)]
@@ -36,7 +36,7 @@ fn tree(root: &Path, skip: &[PathBuf], times: bool) -> Tree {
             let mode = std::os::windows::fs::MetadataExt::file_attributes(&m);
             let changed = (m.is_file() || times).then(|| m.modified().unwrap());
             let bytes = if m.is_dir() { "folder".to_string() } else { journal::sha256(&std::fs::read(e.path()).unwrap()) };
-            format!("{id:?} {mode:x} {changed:?} {bytes}")
+            format!("{id:?} {mode:x} {changed:?} {:?} {bytes}", m.created().ok())
         };
         out.insert(e.path().strip_prefix(root).unwrap().display().to_string(), what);
     }
@@ -56,8 +56,6 @@ struct World {
     /// What its local package links to.
     nested: PathBuf,
     other: PathBuf,
-    /// A project one of whose packages is not installed.
-    incomplete: PathBuf,
     good: PathBuf,
 }
 
@@ -69,7 +67,6 @@ fn world() -> World {
         library: e.root.join("Cache/Library"),
         nested: e.root.join("Shared by a package"),
         other: e.root.join("Projects/Other"),
-        incomplete: e.root.join("Projects/Incomplete"),
         good: e.root.join("Good"),
         e,
     };
@@ -81,8 +78,6 @@ fn world() -> World {
     std::fs::write(w.e.root.join("a file"), "x").unwrap();
     std::fs::write(w.nested.join("Deep/nested.mat"), "n").unwrap();
     project(&w.other, Some(U2022), &[], &[]);
-    project(&w.incomplete, Some(U2022), &[("gone.package", "1.0.0")], &[]);
-    std::fs::write(w.incomplete.join("Packages/manifest.json"), "{}").unwrap();
     link(&w.shared, &w.e.source.join("Assets/Shared"));
     link(&w.nested, &w.external.join("Nested"));
     std::fs::remove_dir_all(w.e.source.join("Library")).unwrap();
@@ -99,15 +94,30 @@ fn world() -> World {
     w
 }
 
+/// The same world, whose original names a package that is not installed.
+fn incomplete_world() -> World {
+    let w = world();
+    let manifest = w.e.source.join("Packages/vpm-manifest.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    v["locked"]["gone.package"] = serde_json::json!({ "version": "1.0.0", "dependencies": {} });
+    std::fs::write(&manifest, v.to_string()).unwrap();
+    w
+}
+
 impl World {
-    /// All of it but app data, VCC's list and what is at `trial`.
+    /// All of it but app data, VCC's folder and what is at `trial`.
     fn tree(&self, trial: &Path) -> Tree {
         tree(&self.e.root, &[self.e.app.clone(), self.e.vcc.clone(), self.e.root.join("vcc-file"), trial.to_path_buf(), self.e.root.join("Editors")], false)
     }
 
-    /// What nothing may be written in, the times of its folders included: the original, and everything it uses outside it.
-    fn guarded(&self) -> Vec<Tree> {
-        [&self.e.source, &self.shared, &self.external, &self.nested, &self.library, &self.other, &self.incomplete].map(|p| tree(p, &[], true)).into()
+    /// VCC's folder: nothing of a trial's is ever in it.
+    fn store(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        store(&self.e)
+    }
+
+    /// What nothing may be written in, the times of its folders included (`times`): the original, and everything it uses outside it.
+    fn guarded(&self, times: bool) -> Vec<Tree> {
+        [&self.e.source, &self.shared, &self.external, &self.nested, &self.library, &self.other].map(|p| tree(p, &[], times)).into()
     }
 }
 
@@ -245,6 +255,7 @@ enum Act {
     Stop,
     Fail,
     Crash,
+    /// VCC's folder is a file: nothing can be listed.
     NoList,
     NoAppData,
     Locked,
@@ -267,8 +278,8 @@ fn troubles() -> Vec<Trouble> {
     fn gone(s: &Status) -> bool {
         matches!(s, Status::Failed { kept: false })
     }
-    fn unlisted(s: &Status) -> bool {
-        matches!(s, Status::Unlisted)
+    fn unfinished(s: &Status) -> bool {
+        matches!(s, Status::Unfinished)
     }
     fn cut(s: &Status) -> bool {
         matches!(s, Status::Interrupted)
@@ -286,7 +297,7 @@ fn troubles() -> Vec<Trouble> {
         t("stopped, folder made", Some(Step::Made), Stop, Some(gone)),
         t("stopped, copied", Some(Step::Copied), Stop, Some(gone)),
         t("stopped too late", Some(Step::Compared), Stop, Some(waiting)),
-        t("no list to write", None, NoList, Some(unlisted)),
+        t("no list to write (a trial needs none)", None, NoList, Some(waiting)),
         t("no app data", None, NoAppData, None),
         t("a file that cannot be read", None, Locked, Some(kept)),
         t("the trial altered at the same size", Some(Step::Copied), TrialAltered, Some(kept)),
@@ -302,10 +313,9 @@ fn troubles() -> Vec<Trouble> {
         t("a file added to the original before the copy", Some(Step::Recorded), OriginalAdded, Some(kept)),
         // Third verification: what changes between verifying and the end of listing.
         t("altered once verified", Some(Step::Verified), TrialAltered, Some(kept)),
-        t("altered before listing", Some(Step::MarkerGone), TrialAltered, Some(kept)),
-        t("altered while listed", Some(Step::Listed), TrialAltered, Some(kept)),
-        t("a file added while listed", Some(Step::Listed), TrialAdded, Some(kept)),
-        t("a file removed while listed", Some(Step::Listed), TrialRemoved, Some(kept)),
+        t("altered before the end", Some(Step::MarkerGone), TrialAltered, Some(kept)),
+        t("a file added before the end", Some(Step::MarkerGone), TrialAdded, Some(kept)),
+        t("a file removed before the end", Some(Step::MarkerGone), TrialRemoved, Some(kept)),
     ];
     for (step, failed, crashed) in [
         (Step::Recorded, gone as fn(&Status) -> bool, gone as fn(&Status) -> bool),
@@ -313,10 +323,9 @@ fn troubles() -> Vec<Trouble> {
         (Step::Folders, kept, cut),
         (Step::Copied, kept, cut),
         (Step::Compared, kept, cut),
-        (Step::Verified, unlisted, unlisted),
-        (Step::MarkerGone, unlisted, unlisted),
-        (Step::Listed, unlisted, unlisted),
-        (Step::Checked, unlisted, unlisted),
+        (Step::Verified, unfinished, unfinished),
+        (Step::MarkerGone, unfinished, unfinished),
+        (Step::Checked, unfinished, unfinished),
     ] {
         out.push(Trouble { what: "an error", at: Some(step), act: Fail, then: Some(failed) });
         out.push(Trouble { what: "a crash", at: Some(step), act: Crash, then: Some(crashed) });
@@ -331,11 +340,17 @@ fn one(w: &World, place: &Place, trouble: &Trouble) -> (bool, Option<Status>) {
         .unwrap_or_else(|_| w.e.root.join("no such place"));
     let trial = if place.good { trial } else { w.e.root.join("no such place") };
     let before = w.tree(&trial);
-    let guarded = w.guarded();
+    let edits = matches!(trouble.act, Act::OriginalEdited | Act::OriginalAdded | Act::OriginalRemoved);
+    // What the test itself edits of the original is put back: its folders then have new times.
+    let guarded = w.guarded(!edits);
+    let theirs = w.store();
     let cancel = Arc::new(AtomicBool::new(trouble.act == Act::StopFirst));
     let mine: Rc<Cell<Option<&'static str>>> = Rc::default();
     let (src, t, c, at, act, m) = (w.e.source.clone(), trial.clone(), cancel.clone(), trouble.at, trouble.act, mine.clone());
+    let aside = w.e.root.join("Good/aside");
+    let aside_too = aside.clone();
     let kept = std::fs::read(src.join("Assets/Avatar.unity")).unwrap();
+    let time = std::fs::metadata(src.join("Assets/Avatar.unity")).unwrap().modified().unwrap();
     let hook = move |step: Step| -> anyhow::Result<()> {
         if Some(step) != at {
             return Ok(());
@@ -363,8 +378,8 @@ fn one(w: &World, place: &Place, trouble: &Trouble) -> (bool, Option<Status>) {
                 std::fs::write(src.join("Assets/Theirs.txt"), "x").unwrap();
             }
             Act::OriginalRemoved => {
-                m.set(Some("Assets/Avatar.unity"));
-                std::fs::remove_file(src.join("Assets/Avatar.unity")).unwrap();
+                m.set(Some("aside"));
+                std::fs::rename(src.join("Assets/Avatar.unity"), &aside_too).unwrap();
             }
             _ => {}
         }
@@ -379,13 +394,16 @@ fn one(w: &World, place: &Place, trouble: &Trouble) -> (bool, Option<Status>) {
     let budget = |_: &Path, _: u64| if trouble.act == Act::NoRoom { Err(anyhow::anyhow!("no room")) } else { Ok(10) };
     let blocked = w.e.root.join("vcc-file");
     std::fs::write(&blocked, "x").unwrap();
-    let vcc = if trouble.act == Act::NoList { &blocked } else { &w.e.vcc };
+    if trouble.act == Act::NoList {
+        // Where VCC's folder would be.
+        std::fs::write(&w.e.vcc, "x").unwrap();
+    }
     let nowhere = w.e.root.join("a file");
     let app = if trouble.act == Act::NoAppData { &nowhere } else { &w.e.app };
     let _held = (trouble.act == Act::Locked).then(|| kept_from_all(&w.e.source.join("Assets/Big.bin")));
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         prepare(
-            Prepare { dir: app, vcc, source: &w.e.source, parent: &place.parent, name: &place.name, target: target(), open: &open, budget: &budget, recorded: &|_| {} },
+            Prepare { dir: app, source: &w.e.source, parent: &place.parent, name: &place.name, target: target(), open: &open, budget: &budget, recorded: &|_| {} },
             &cancel,
             &Default::default(),
         )
@@ -394,34 +412,36 @@ fn one(w: &World, place: &Place, trouble: &Trouble) -> (bool, Option<Status>) {
     drop(_held);
     // What the test itself changed of the original, put back before comparing.
     match mine.get() {
-        Some("Assets/Avatar.unity") => std::fs::write(w.e.source.join("Assets/Avatar.unity"), &kept).unwrap(),
+        Some("aside") => std::fs::rename(&aside, w.e.source.join("Assets/Avatar.unity")).unwrap(),
+        Some("Assets/Avatar.unity") => {
+            std::fs::write(w.e.source.join("Assets/Avatar.unity"), &kept).unwrap();
+            std::fs::File::options().write(true).open(w.e.source.join("Assets/Avatar.unity")).unwrap().set_modified(time).unwrap();
+        }
         Some(added) => std::fs::remove_file(w.e.source.join(added)).unwrap(),
         None => {}
     }
-    // What the test changed itself has new times (and, removed, a new identity).
-    if mine.get().is_none() {
-        let changed = differences(&before, &w.tree(&trial));
-        assert!(changed.is_empty(), "{} × {} ({:?}): {changed:?}", place.form, trouble.what, trouble.at);
-        assert_eq!(w.guarded(), guarded, "{} × {} ({:?})", place.form, trouble.what, trouble.at);
+    let changed = differences(&before, &w.tree(&trial));
+    assert!(changed.is_empty(), "{} × {} ({:?}): {changed:?}", place.form, trouble.what, trouble.at);
+    assert_eq!(w.guarded(!edits), guarded, "{} × {} ({:?})", place.form, trouble.what, trouble.at);
+    if trouble.act == Act::NoList {
+        assert_eq!(std::fs::read(&w.e.vcc).unwrap(), b"x");
+        std::fs::remove_file(&w.e.vcc).unwrap();
+    } else {
+        assert!(w.store() == theirs && w.e.vcc.exists() != theirs.is_empty(), "{} × {}: Creator Companion's files", place.form, trouble.what);
     }
     let record = journal::read(&w.e.app);
     let status = record.jobs.last().map(|j| status(&w.e.app, &record, j));
     // Tidied for the next run: the trial's folder (through no link of it), the job.
     if let Some(j) = record.jobs.last() {
         assert!(super::authority::allow(&w.e.app, &trial, super::authority::Action::Packages).is_err() || !trial.exists(), "{} × {}: a trial nothing guards", place.form, trouble.what);
-        let listed_now = listed(&w.e, &j.trial.path);
         let ready = matches!(status, Some(Status::Waiting { .. }));
-        // Listed only when ready, or when it stopped between the list and the record of it.
-        assert!(!ready || listed_now, "{} × {}", place.form, trouble.what);
-        let between = matches!(trouble.at, Some(Step::Listed | Step::Checked)) && matches!(trouble.act, Act::Fail | Act::Crash);
-        assert!(ready || !listed_now || between, "{} × {}: listed and not ready", place.form, trouble.what);
+        assert_eq!(super::trial::folders(&w.e.app).contains(&j.trial.path), ready, "{} × {}: in the gallery", place.form, trouble.what);
     }
     if std::fs::symlink_metadata(trial.join("Assets")).is_ok_and(|m| crate::owned::is_link(&m)) {
         unlink(&trial.join("Assets"));
     }
     let _ = std::fs::remove_dir_all(&trial);
     let _ = std::fs::remove_dir_all(&w.e.app);
-    let _ = std::fs::remove_dir_all(&w.e.vcc);
     (went, status)
 }
 
@@ -441,11 +461,11 @@ fn quietly<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-#[test]
-fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
-    let w = world();
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut all = places(&w);
+/// [`places`] of `w`, and (Windows) those a substituted drive makes, with what keeps those drives.
+#[cfg_attr(not(windows), allow(unused_mut))]
+fn all_places(w: &World) -> (Vec<Place>, Vec<Box<dyn std::any::Any>>) {
+    let mut all = places(w);
+    let mut kept: Vec<Box<dyn std::any::Any>> = vec![];
     #[cfg(windows)]
     let drives = [Subst::of(&w.e.source), Subst::of(&w.e.root), Subst::of(&w.shared)];
     #[cfg(windows)]
@@ -462,7 +482,15 @@ fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
         if let Some(d) = &drives[2] {
             add("inside a folder it links to, by a substituted drive", d.path(), false);
         }
+        kept.push(Box::new(drives));
     }
+    (all, kept)
+}
+
+#[test]
+fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
+    let w = world();
+    let (all, drives) = all_places(&w);
     let troubles = troubles();
     let mut rows: Vec<String> = vec![];
     let (mut runs, mut hostile) = (0, 0);
@@ -491,36 +519,44 @@ fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
             });
         }
     });
+    drop(drives);
+    // Duplicate, as the page's and the bridge's call it: of a whole project, and of one whose packages are not all there, each in a
+    // world of its own with every place of it. Counted where it is called.
     let mut copies: Vec<String> = vec![];
-    let (mut duplicates, mut refused) = (0, 0);
+    let mut calls = Calls::default();
     quietly(|| {
-        for place in &all {
-            let mut answers: Vec<&str> = vec![];
-            for trouble in duplicate_troubles() {
-                duplicates += 1;
-                if !place.duplicate {
-                    refused += 1;
+        for lacking in [false, true] {
+            let w = if lacking { incomplete_world() } else { world() };
+            let (all, _drives) = all_places(&w);
+            for place in &all {
+                let mut answers: Vec<&str> = vec![];
+                for trouble in duplicate_troubles().iter().filter(|t| t.incomplete == lacking) {
+                    answers.push(one_duplicate(&w, place, trouble, &mut calls));
                 }
-                answers.push(one_duplicate(&w, place, &trouble));
+                let of = if lacking { "packages missing" } else { "whole" };
+                copies.push(match place.duplicate {
+                    true => format!("| {} | {of} | made | {} |", place.form, answers.join("; ")),
+                    false => format!("| {} | {of} | refused, nothing made, listed or written | in all {} calls |", place.form, answers.len()),
+                });
             }
-            copies.push(match place.duplicate {
-                true => format!("| {} | made | {} |", place.form, answers.join("; ")),
-                false => format!("| {} | refused, nothing made, listed or written | in all {} runs |", place.form, answers.len()),
-            });
         }
     });
+    assert_eq!(calls.made + calls.refused, calls.all);
     if let Some(out) = std::env::var_os("ORBITERS_MATRIX_OUT") {
         let mut text = format!(
-            "{} places × {} troubles = {runs} runs of a trial ({hostile} at hostile places); {} places × {} troubles = {duplicates} runs of Duplicate ({refused} at hostile places). After every run the original, what it links to, its Library elsewhere, its local package, what that links to and another project were what they were: identity, bytes, times, permissions of every entry, an entry that cannot be looked at being an error.\n\n## Trial\n\nTroubles, in the order of the answers: {}\n\n| Place | Result | Job state for each trouble |\n|---|---|---|\n",
+            "{} places × {} troubles = {runs} runs of a trial ({hostile} at hostile places); Duplicate was called {} times ({} at hostile places, all refused; {} at good ones), counted at the call: {} troubles of a whole project and {} of one with packages missing, each at every place of a world of its own. After every run the original, what it links to, its Library elsewhere, its local package, what that links to and another project were what they were: identity, bytes, times (of change and creation), permissions of every entry, a link's own times and where it leads, an entry that cannot be looked at being an error.\n\n## Trial\n\nTroubles, in the order of the answers: {}\n\n| Place | Result | Job state for each trouble |\n|---|---|---|\n",
             all.len(),
             troubles.len(),
-            all.len(),
-            duplicate_troubles().len(),
+            calls.all,
+            calls.refused,
+            calls.made,
+            duplicate_troubles().iter().filter(|t| !t.incomplete).count(),
+            duplicate_troubles().iter().filter(|t| t.incomplete).count(),
             troubles.iter().map(|t| t.at.map_or(t.what.to_string(), |s| format!("{} ({s:?})", t.what))).collect::<Vec<_>>().join("; ")
         );
         text.push_str(&rows.join("\n"));
-        let names = duplicate_troubles().iter().map(|t| t.at.map_or(t.what.to_string(), |s| format!("{} ({s:?})", t.what))).collect::<Vec<_>>().join("; ");
-        text.push_str(&format!("\n\n## Duplicate\n\nTroubles, in the order of the answers: {names}\n\n| Place | Result | What is there after each trouble |\n|---|---|---|\n{}\n", copies.join("\n")));
+        let names = |lacking: bool| duplicate_troubles().iter().filter(|t| t.incomplete == lacking).map(|t| t.at.map_or(t.what.to_string(), |s| format!("{} ({s:?})", t.what))).collect::<Vec<_>>().join("; ");
+        text.push_str(&format!("\n\n## Duplicate\n\nTroubles of a whole project, in the order of the answers: {}\n\nOf one with packages missing: {}\n\n| Place | Project | Result | What is there after each trouble |\n|---|---|---|---|\n{}\n", names(false), names(true), copies.join("\n")));
         std::fs::write(out, text).unwrap();
     }
 }
@@ -542,6 +578,14 @@ const CUT: &str = "listed, the run cut after that";
 const WHOLE: &str = "whole, not listed, said";
 const GONE: &str = "nothing";
 
+/// The calls of Duplicate, counted where it is called.
+#[derive(Default)]
+struct Calls {
+    all: usize,
+    refused: usize,
+    made: usize,
+}
+
 fn duplicate_troubles() -> Vec<DuplicateTrouble> {
     use Act::*;
     let t = |what, at, act, incomplete, then| DuplicateTrouble { what, at, act, incomplete, then };
@@ -555,37 +599,35 @@ fn duplicate_troubles() -> Vec<DuplicateTrouble> {
         t("a file that cannot be read", None, Locked, false, PART),
         t("its Assets made a link to the original before the copy", Some(Step::Made), TrialLinked, false, PART),
         t("packages that cannot be restored", None, Nothing, true, LISTED),
-        t("packages that cannot be restored, stopped", Some(Step::Restored), Stop, true, GONE),
-        t("an error", Some(Step::Restored), Fail, true, GONE),
-        t("a crash", Some(Step::Restored), Crash, true, GONE),
+        t("packages that cannot be restored, stopped too late", Some(Step::Listed), Stop, true, LISTED),
+        t("packages that cannot be restored, stopped", Some(Step::Folders), Stop, true, GONE),
+        t("packages that cannot be restored, no list to write", None, NoList, true, WHOLE),
+        t("packages that cannot be restored, a file that cannot be read", None, Locked, true, PART),
+        t("restored packages, then an error", Some(Step::Restored), Fail, true, LISTED),
+        t("restored packages, then a crash", Some(Step::Restored), Crash, true, CUT),
     ];
     for (step, then) in [(Step::Made, PART), (Step::Folders, PART), (Step::Copied, PART), (Step::MarkerGone, WHOLE), (Step::Listed, CUT)] {
         for incomplete in [false, true] {
-            let what = if incomplete { "an error, packages not restored" } else { "an error" };
-            out.push(t(what, Some(step), Fail, incomplete, then));
-            out.push(t(if incomplete { "a crash, packages not restored" } else { "a crash" }, Some(step), Crash, incomplete, then));
+            out.push(t("an error", Some(step), Fail, incomplete, then));
+            out.push(t("a crash", Some(step), Crash, incomplete, then));
         }
     }
     out
 }
 
 /// One Duplicate, as the page's and the bridge's is made: what is there after.
-fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'static str {
+fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &mut Calls) -> &'static str {
     let name = format!("Duplicate at {} × {} at {:?}", place.form, trouble.what, trouble.at);
-    let source = if trouble.incomplete { &w.incomplete } else { &w.e.source };
-    // Beside and inside are the original's own; for the other project those are ordinary places.
+    let source = &w.e.source;
     let copy = match place.duplicate {
         true => place.parent.join(&place.name),
         false => w.e.root.join("no such place"),
     };
     let made = std::fs::canonicalize(&place.parent).map(|p| p.join(&place.name)).unwrap_or_else(|_| copy.clone());
     let made = PathBuf::from(made.to_string_lossy().trim_start_matches(r"\\?\").to_string());
-    if trouble.incomplete && !place.duplicate {
-        return "refused";
-    }
     let nowhere = w.e.root.join("Nowhere");
     let skip = if place.duplicate { if place.parent == nowhere { nowhere.clone() } else { made.clone() } } else { copy.clone() };
-    let (before, guarded) = (w.tree(&skip), w.guarded());
+    let (before, guarded) = (w.tree(&skip), w.guarded(true));
     let cancel = Arc::new(AtomicBool::new(trouble.act == Act::StopFirst));
     let (c, t, src, at, act) = (cancel.clone(), copy.clone(), w.e.source.clone(), trouble.at, trouble.act);
     let _stepping = at_step(move |step| {
@@ -605,19 +647,31 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'stat
     std::fs::write(&blocked, "x").unwrap();
     let vcc = if trouble.act == Act::NoList { &blocked } else { &w.e.vcc };
     let held = (trouble.act == Act::Locked).then(|| kept_from_all(&w.e.source.join("Assets/Big.bin")));
-    crate::templates::OFFLINE.with(|o| o.set(true));
+    // Nothing is downloaded in a test: a restore fails, or (its own step's trouble) puts one package there.
+    let restores = trouble.at == Some(Step::Restored);
+    crate::templates::OFFLINE.with(|o| o.set(!restores));
+    crate::templates::RESTORES.with(|r| *r.borrow_mut() = restores.then(|| ("gone.package".to_string(), "1.0.0".to_string())));
     let rt = crate::runtime().unwrap();
+    calls.all += 1;
+    if place.duplicate {
+        calls.made += 1;
+    } else {
+        calls.refused += 1;
+    }
     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.block_on(crate::templates::duplicate(vcc, source, &place.parent, &place.name, Default::default(), &cancel, &Default::default()))
     }));
     crate::templates::OFFLINE.with(|o| o.set(false));
+    crate::templates::RESTORES.with(|r| *r.borrow_mut() = None);
     drop(held);
     let changed = differences(&before, &w.tree(&skip));
     assert!(changed.is_empty(), "{name}: {changed:?}");
-    assert_eq!(w.guarded(), guarded, "{name}");
+    assert_eq!(w.guarded(true), guarded, "{name}");
     // Nothing of a restore is left, whatever happened.
     assert!(std::fs::read_dir(crate::data_dir().join("project-stage")).map_or(true, |d| d.flatten().next().is_none()), "{name}");
     let listed_now = listed(&w.e, &copy);
+    // AGENTS.md: what stays and is not on the list is in Orbiters' own record, with where it is; nothing else is.
+    let mine: Vec<_> = crate::copies::shown(&crate::data_dir()).into_iter().filter(|(c, _)| c.destination == copy || c.destination == made).collect();
     let is = crate::discovery::is_project(&copy);
     let there = std::fs::symlink_metadata(&copy).is_ok();
     let said = match &done {
@@ -635,6 +689,18 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'stat
         (false, false, false, false) => GONE,
         other => panic!("{name}: {other:?} {said}"),
     };
+    match found {
+        PART => assert!(matches!(mine[..], [(_, crate::copies::Status::Incomplete)]), "{name}: {mine:?}"),
+        WHOLE => {
+            // (A crash right after its marker went leaves it whole and unlisted too.)
+            assert!(matches!(mine[..], [(_, crate::copies::Status::Unlisted)]), "{name}: {mine:?}");
+            assert!(crate::copies::folders(&crate::data_dir()).contains(&copy), "{name}: in the gallery");
+        }
+        _ => assert!(mine.is_empty(), "{name}: {mine:?}"),
+    }
+    for (c, _) in mine {
+        crate::copies::dismiss(&crate::data_dir(), &c.id).unwrap();
+    }
     if place.duplicate {
         assert_eq!(found, trouble.then, "{name}: {said}");
         if matches!(found, LISTED | WHOLE | PART) && trouble.act != Act::Crash {
@@ -642,7 +708,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'stat
         }
         if found == READY {
             let settings = std::fs::read_to_string(copy.join("ProjectSettings/ProjectSettings.asset")).unwrap_or_default();
-            assert!(trouble.incomplete || (settings.contains("\"T\"") && copy.join("Packages/com.example.tool/Nested/Deep/nested.mat").is_file()), "{name}: {settings}");
+            assert!((settings.contains("\"T\"") && copy.join("Packages/com.example.tool/Nested/Deep/nested.mat").is_file()), "{name}: {settings}");
         }
     } else {
         assert!(matches!(done, Ok(Err(_))), "{name}: made");
@@ -668,15 +734,13 @@ fn every_later_step_leaves_the_original_as_it_was() {
     let job = run_at(&w.e, &w.good, "T", &|_| false, &ok).unwrap();
     let trial = job.trial.path.clone();
     let before = w.tree(&trial);
-    let guarded = w.guarded();
+    let guarded = w.guarded(true);
     let inside = tree(&trial, &[], true);
     let same = |what: &str| {
         assert_eq!(w.tree(&trial), before, "{what}");
-        assert_eq!(w.guarded(), guarded, "{what}");
+        assert_eq!(w.guarded(true), guarded, "{what}");
         assert_eq!(tree(&trial, &[], true), inside, "{what}: the trial's own files");
     };
-    let blocked = w.e.root.join("vcc-file");
-    std::fs::write(&blocked, "x").unwrap();
     assert!(again(&w.e, &job.id).is_err());
     same("finishing what is finished");
     let _ = super::look(&w.e.app, &[w.e.source.clone(), trial.clone()]);
@@ -686,21 +750,14 @@ fn every_later_step_leaves_the_original_as_it_was() {
     assert!(launch(&w.e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("started")).is_err());
     same("opening before the migration");
     for junk in [w.e.source.clone(), w.other.clone(), trial.clone(), w.shared.clone(), w.e.root.join("Nowhere")] {
-        assert!(adopt_vcc_copy(&w.e.app, &w.e.vcc, &job.id, &junk).is_err(), "{}", junk.display());
+        assert!(adopt_vcc_copy(&w.e.app, &job.id, &junk).is_err(), "{}", junk.display());
     }
     same("taking something else for the migrated copy");
-    assert!(abandon(&w.e.app, &blocked, &job.id).is_err());
-    same("taking it off a list that cannot be written");
     let copy = w.good.join("T-Migrated");
     copy_tree(&trial, &copy);
     vcc_migrates(&copy);
     let before = w.tree(&trial);
-    // A list that cannot be written, twice, then one that can.
-    for _ in 0..2 {
-        assert!(adopt_vcc_copy(&w.e.app, &blocked, &job.id, &copy).is_err());
-        assert_eq!(w.tree(&trial), before, "taking the migrated copy with no list");
-    }
-    adopt_vcc_copy(&w.e.app, &w.e.vcc, &job.id, &copy).unwrap();
+    adopt_vcc_copy(&w.e.app, &job.id, &copy).unwrap();
     assert_eq!(w.tree(&trial), before, "taking the migrated copy");
     let log = Cell::new(false);
     launch(&w.e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, at, l| {
@@ -710,9 +767,9 @@ fn every_later_step_leaves_the_original_as_it_was() {
     .unwrap();
     assert!(log.get());
     assert_eq!(w.tree(&trial), before, "opening it");
-    abandon(&w.e.app, &w.e.vcc, &job.id).unwrap();
+    abandon(&w.e.app, &job.id).unwrap();
     assert_eq!(w.tree(&trial), before, "taking it off");
     assert_eq!(tree(&trial, &[], true), inside, "nothing of it deleted");
-    assert!(!listed(&w.e, &trial) && !listed(&w.e, &copy));
-    assert_eq!(w.guarded(), guarded);
+    assert!(!w.e.vcc.exists(), "nothing of Creator Companion's, from the first step to the last");
+    assert_eq!(w.guarded(true), guarded);
 }

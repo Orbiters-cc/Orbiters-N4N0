@@ -1,6 +1,7 @@
 pub use crate::bundled_templates::builtins;
 use crate::copying::{self, between, Made, Step};
 use crate::unity6::gate::{self, AppRoot, Destination, Parents};
+use crate::unity6::budget::{self, Demand, Need, Room};
 use crate::unity6::payload::{self, Making, Own, Payload};
 use anyhow::{bail, Context};
 use orbiters_i18n::{mark, tr};
@@ -177,8 +178,8 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     let stopped = |e| before_anything(e, destination, cancel);
     let payload = payload::scan(source_folder(source)?, Making { keep, ..Default::default() }, cancel).map_err(stopped)?;
     let place = Destination::check(parent, &name.to_string_lossy(), &payload.protected, Parents::Make)?;
-    let (_held, root, marker) = fill(&payload, place, destination, cancel, progress)?;
-    copying::unmark(&root, marker)
+    let filled = fill(&payload, place, destination, cancel, progress, &mut |_| Ok(()))?;
+    copying::unmark(&filled.root, filled.marker)
 }
 
 fn source_folder(source: &Path) -> anyhow::Result<&Path> {
@@ -194,26 +195,61 @@ fn before_anything(e: anyhow::Error, destination: &Path, cancel: &AtomicBool) ->
     e
 }
 
-/// Makes the folder and puts `payload` in it. Until the marker whose identity is answered is taken away, it is not a project.
-fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<(gate::NewFolder, gate::WriteRoot, crate::owned::FileId)> {
+/// A folder made and filled.
+struct Filled {
+    /// Held for the whole of the operation.
+    new: gate::NewFolder,
+    root: gate::WriteRoot,
+    made: Made,
+    /// Until it is taken away, it is not a project.
+    marker: crate::owned::FileId,
+}
+
+/// Makes the folder and puts `payload` in it. `on_made`: told of the folder before anything is put in it. An error says whether
+/// anything of it is left ([`Nothing`]: not).
+fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress, on_made: &mut dyn FnMut(&gate::NewFolder) -> anyhow::Result<()>) -> anyhow::Result<Filled> {
     if cancel.load(Ordering::Relaxed) {
-        return Err(before_anything(anyhow::anyhow!("{}", tr("Stopped.")), destination, cancel));
+        return Err(before_anything(anyhow::anyhow!("{}", tr("Stopped.")), destination, cancel).context(Nothing));
     }
-    let new = place.make().with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
-    let root = new.root()?;
-    if payload.protected.iter().any(|p| p.id == Some(new.id)) {
-        bail!("{}", tr("Create the copy outside the source project."));
-    }
+    let new = place.make().map_err(|e| anyhow::Error::new(e).context(tr("The destination already exists or cannot be created; choose a new project name.")).context(Nothing))?;
+    let begun = new.root().map_err(anyhow::Error::new).and_then(|root| {
+        anyhow::ensure!(!payload.protected.iter().any(|p| p.id == Some(new.id)), "{}", tr("Create the copy outside the source project."));
+        on_made(&new).map(|()| root)
+    });
+    let root = match begun {
+        Ok(root) => root,
+        // Empty still: it goes.
+        Err(e) if new.remove().unwrap_or(false) => return Err(e.context(Nothing)),
+        Err(e) => return Err(e),
+    };
     let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now(), folder: Some(new.id) };
     let mut made = Made::default();
     let filled = between(Step::Made).and_then(|()| copying::fill(payload, &root, &marker, &mut made, cancel, progress));
     match (filled, made.marker()) {
-        // What this copy made is held until here; its folder is, until the caller is done.
-        (Ok(()), Some(id)) => Ok((new, root, id)),
-        (Err(_), _) if cancel.load(Ordering::Relaxed) => Err(anyhow::anyhow!("{}", copying::undo(root, new, made))),
+        (Ok(()), Some(marker)) => Ok(Filled { new, root, made, marker }),
+        (Err(_), _) if cancel.load(Ordering::Relaxed) => {
+            let said = anyhow::anyhow!("{}", copying::undo(root, new, made));
+            Err(if std::fs::symlink_metadata(destination).is_err() { said.context(Nothing) } else { said })
+        }
         (Err(e), _) => Err(e.context(tr!("The copy could not be finished: what was copied is kept at {path}, and is not listed as a project", path = destination.display()))),
         (Ok(()), None) => bail!("{}", tr("Stopped.")),
     }
+}
+
+/// Nothing of the copy was made, or nothing of it is left.
+#[derive(Debug)]
+struct Nothing;
+
+impl std::fmt::Display for Nothing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(tr("Nothing of the copy is left."))
+    }
+}
+
+/// Why a copy or a new project cannot be made in `parent`/`name`, as far as the place alone says (the source's own rules are asked
+/// when it is made): for a window, before it offers to. Reads only.
+pub fn refused_place(parent: &Path, name: &str) -> Option<String> {
+    Destination::check(parent, name, &[], Parents::Make).err().map(|e| e.text())
 }
 
 /// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
@@ -270,13 +306,16 @@ async fn make(
         use crate::unity6::authority::{allow, Action};
         allow(&app, source, Action::Duplicate).map_err(|why| anyhow::anyhow!("{why}"))?;
     }
+    Stage::sweep(&app);
     // Everything is read first, and the source (with what it links to and takes packages from) is only ever read.
     let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     let guid = uuid::Uuid::new_v4().simple().to_string();
-    let how = Making { keep: copy.unwrap_or_default(), own: Some(Own { name, from: from.as_deref(), guid: &guid }), strict: false, unity: Some(unity) };
+    let keep = copy.unwrap_or_default();
+    // A copy without its Library has the packages only the Library holds as its own (AGENTS.md: installed dependencies, without
+    // their repositories).
+    let installed = copy.is_some() && !keep.library;
+    let how = Making { keep, own: Some(Own { name, from: from.as_deref(), guid: &guid }), unity: Some(unity), installed, ..Default::default() };
     let destination = parent.join(name);
-    // Outlives what reads it.
-    let mut stage: Option<Stage> = None;
     let mut payload = payload::scan(source_folder(source)?, how, cancel).map_err(|e| before_anything(e, &destination, cancel))?;
     if let Some((name, path)) = payload.missing.first() {
         bail!("{}", tr!("Required local package {name} is unavailable at {path}", name = name, path = path.display()));
@@ -288,52 +327,64 @@ async fn make(
     // Nothing is written anywhere the source can see: not the copy, not what Orbiters and VCC keep.
     gate::apart(&[&app, root], &payload.protected)?;
     let place = Destination::check(parent, name, &payload.protected, Parents::Make)?;
-    let room = |place: &Destination, payload: &Payload| -> anyhow::Result<()> {
-        let free = place.free().with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
-        anyhow::ensure!(free >= payload.bytes, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = payload.bytes.saturating_sub(free)));
-        Ok(())
-    };
-    room(&place, &payload)?;
-    // Duplication preserves installed package contents and exact locked versions, including packages whose repositories are no
-    // longer available. Only genuinely missing packages (a template's) are restored, and not in the copy: in a folder of
-    // Orbiters' own first, so that the copy is written once, whole, through its proof.
-    let mut unrestored = None;
-    if copy.is_none() || !payload.packages_complete().unwrap_or(false) {
-        progress.lock().unwrap().phase = mark("Restoring missing packages").into();
-        match Stage::restore(root, &app, &payload).await {
-            Ok(s) => {
-                payload = payload.with_restored(&s.path, &s.names, cancel).map_err(|e| before_anything(e, &destination, cancel))?;
-                stage = Some(s);
-            }
-            Err(e) => unrestored = Some(e),
+    let free = place.free().with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
+    anyhow::ensure!(free >= payload.bytes, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = payload.bytes.saturating_sub(free)));
+    // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
+    let mut record = crate::copies::Held::begin(&app, source, &destination)?;
+    let filled = fill(&payload, place, &destination, cancel, progress, &mut |new| record.made(new.id));
+    let Filled { new, root: held, mut made, marker } = match filled {
+        Ok(f) => f,
+        Err(e) if e.downcast_ref::<Nothing>().is_some() => {
+            record.done();
+            // Its own words, without the mark.
+            return Err(anyhow::anyhow!("{}", e.chain().skip(1).map(|c| c.to_string()).collect::<Vec<_>>().join(": ")));
         }
-        between(Step::Restored)?;
-        room(&place, &payload)?;
-    }
-    let (new, held, marker) = fill(&payload, place, &destination, cancel, progress)?;
-    let (late, complete) = (payload.late.take(), payload.packages_complete().unwrap_or(false));
-    // The source is let go; the new folder is held to the end.
-    drop(payload);
-    drop(stage);
+        Err(e) => {
+            record.failed(&e);
+            return Err(e);
+        }
+    };
     // Every file is in: a Stop pressed now no longer leaves a whole copy unlisted (AGENTS.md: a retained project is
-    // visible); it is registered like any other.
+    // visible); it is registered like any other, before anything that can fail.
     let path = if crate::owned::is_same(&destination, new.id) { destination } else { new.path.clone() };
-    let unlisted = || tr!("The copy is at {path}, but registration failed", path = path.display());
-    between(Step::Copied).with_context(unlisted)?;
-    copying::unmark(&held, marker).and_then(|()| between(Step::MarkerGone)).with_context(unlisted)?;
-    progress.lock().unwrap().phase = mark("Registering project").into();
-    crate::vpm::list_entry(root, &path, &crate::vcc_list::Which::folder(&path, new.id), true).await.with_context(unlisted)?;
+    let listed: anyhow::Result<()> = async {
+        record.whole()?;
+        between(Step::Copied)?;
+        copying::unmark(&held, marker)?;
+        between(Step::MarkerGone)?;
+        progress.lock().unwrap().phase = mark("Registering project").into();
+        crate::vpm::register(root, &path, true).await
+    }
+    .await;
+    if let Err(e) = listed {
+        let e = e.context(tr!("The copy is at {path}, but registration failed", path = path.display()));
+        record.failed(&e);
+        return Err(e);
+    }
+    record.done();
     between(Step::Listed)?;
     // From here on every failure leaves a project the gallery lists, and says where it is.
-    if let Some(why) = late {
+    if let Some(why) = payload.late.take() {
         return Err(anyhow::anyhow!("{why}").context(tr!("The copy is listed at {path}, but its local packages could not be copied", path = path.display())));
     }
-    let missing = || tr!("The copy is listed at {path}, but missing packages could not be restored", path = path.display());
-    if let Some(e) = unrestored {
-        return Err(e.context(missing()));
+    // Duplication preserves installed package contents and exact locked versions, including packages whose repositories are no
+    // longer available. Only genuinely missing packages (a template's) are restored: in a folder of Orbiters' own, and put in
+    // the copy from there through its proof.
+    if copy.is_none() || !payload.packages_complete().unwrap_or(false) {
+        let missing = || tr!("The copy is listed at {path}, but missing packages could not be restored", path = path.display());
+        progress.lock().unwrap().phase = mark("Restoring missing packages").into();
+        let restored: anyhow::Result<()> = async {
+            let stage = Stage::restore(root, &app, &path, &payload, &budget::Disks).await?;
+            // The source is let go; the new folder is held to the end.
+            copying::take_restored(&stage.path, &stage.names, &held, &mut made, progress)?;
+            between(Step::Restored)
+        }
+        .await;
+        restored.with_context(missing)?;
+        // Never called ready unless what it needs is in it.
+        anyhow::ensure!(installed_dependencies_complete(&path).unwrap_or(false), "{}", missing());
     }
-    // Never called ready unless what it needs is in it.
-    anyhow::ensure!(complete, "{}", missing());
+    drop(new);
     Ok(path)
 }
 
@@ -341,10 +392,44 @@ async fn make(
 thread_local! {
     /// A test's network that is not there.
     pub(crate) static OFFLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's package that a restore brings, without VPM.
+    pub(crate) static RESTORES: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Where missing packages are restored before a copy is made: a folder of Orbiters' own, laid out as a project that has the
-/// copy's package lists and nothing else. It goes when this is dropped; one a crash left goes at the next.
+/// What one missing package may take at most, in the folder it is restored in (downloaded and unpacked), in VCC's cache, and in the
+/// copy: the largest of VRChat's and the community's are well below. (No list says how large a package is.)
+const RESTORED: u64 = 384 * 1024 * 1024;
+const CACHED: u64 = 128 * 1024 * 1024;
+/// A template names a package or two, and those name others.
+const FEWEST: u64 = 4;
+
+/// Room on every disk a restore writes on, before anything is downloaded: app data, VCC's cache and the copy's own.
+fn restore_room(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &dyn Room) -> anyhow::Result<()> {
+    let manifest: serde_json::Value = payload.read(Path::new("Packages/vpm-manifest.json"))?.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut names: Vec<&String> = ["dependencies", "locked"].iter().flat_map(|s| manifest[*s].as_object().into_iter().flatten()).map(|(n, _)| n).collect();
+    names.sort();
+    names.dedup();
+    let missing = names.iter().filter(|n| !payload.items.contains_key(&Path::new("Packages").join(n).join("package.json"))).count() as u64; // i18n: not shown (a folder's name)
+    let count = missing.max(FEWEST);
+    let demand = |need, at: &Path, bytes| Demand { need, at: at.to_path_buf(), bytes, low: None };
+    let demands = vec![demand(Need::Download, app, count * RESTORED), demand(Need::Download, root, count * CACHED), demand(Need::Copy, copy, count * RESTORED)];
+    for v in budget::plan(demands, room, false).volumes {
+        anyhow::ensure!(
+            v.fits(),
+            "{}",
+            tr!(
+                "Restoring missing packages may need {need} MB on the disk of {path}, which has {free} MB free.",
+                need = v.total() / 1_000_000,
+                path = v.at.display(),
+                free = v.free.map_or_else(|| tr("unknown").to_string(), |f| (f / 1_000_000).to_string())
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Where missing packages are restored: a folder of Orbiters' own, laid out as a project that has the copy's package lists and
+/// nothing else. It goes when this is dropped; one a crash left goes at the next.
 struct Stage {
     app: PathBuf,
     name: String,
@@ -361,8 +446,9 @@ impl Stage {
         Path::new(STAGES).join(format!("{name}.lock"))
     }
 
-    fn make(app: &Path) -> anyhow::Result<Self> {
-        let held = AppRoot::open(app)?;
+    /// Takes away what runs that are gone left.
+    fn sweep(app: &Path) {
+        let Ok(held) = AppRoot::existing(app) else { return };
         for left in held.files(Path::new(STAGES)) {
             let Some(name) = left.to_str().and_then(|n| n.strip_suffix(".lock")) else { continue };
             // Nobody holds it: the process that made it is gone.
@@ -370,6 +456,10 @@ impl Stage {
                 drop(Stage { app: app.into(), name: name.into(), path: PathBuf::new(), lock: Some(lock), names: vec![] });
             }
         }
+    }
+
+    fn make(app: &Path) -> anyhow::Result<Self> {
+        let held = AppRoot::open(app)?;
         let name = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let lock = held.lock(&Self::lock_of(&name))?;
         held.make_dir(&Path::new(STAGES).join(&name))?;
@@ -377,11 +467,24 @@ impl Stage {
     }
 
     /// The packages `payload` is missing, restored.
-    async fn restore(root: &Path, app: &Path, payload: &Payload) -> anyhow::Result<Self> {
+    async fn restore(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &dyn Room) -> anyhow::Result<Self> {
+        restore_room(root, app, copy, payload, room)?;
         #[cfg(test)]
         if OFFLINE.with(|o| o.get()) {
             let _made = Self::make(app)?;
             bail!("offline");
+        }
+        #[cfg(test)]
+        if let Some((name, version)) = RESTORES.with(|r| r.borrow().clone()) {
+            // What VPM would leave there, without it.
+            let mut stage = Self::make(app)?;
+            let held = AppRoot::existing(app)?;
+            let at = Path::new(STAGES).join(&stage.name).join("Packages");
+            held.write_new(&at.join(&name).join("package.json"), serde_json::json!({ "name": name, "version": version }).to_string().as_bytes())?;
+            held.write_new(&at.join(&name).join("Runtime/new.txt"), b"new")?;
+            held.write_new(&at.join("vpm-manifest.json"), &payload.read(Path::new("Packages/vpm-manifest.json"))?.unwrap_or_default())?;
+            stage.names.push(name.into());
+            return Ok(stage);
         }
         let mut stage = Self::make(app)?;
         let held = AppRoot::existing(app)?;
@@ -417,9 +520,12 @@ impl Stage {
 impl Drop for Stage {
     fn drop(&mut self) {
         let Ok(held) = AppRoot::existing(&self.app) else { return };
-        let _ = held.remove_tree(&Path::new(STAGES).join(&self.name));
+        let gone = held.remove_tree(&Path::new(STAGES).join(&self.name));
         drop(self.lock.take());
-        let _ = held.remove_file(&Self::lock_of(&self.name));
+        // What could not go is tried again at the next copy: its lock names it.
+        if gone.is_ok() || !self.app.join(STAGES).join(&self.name).exists() {
+            let _ = held.remove_file(&Self::lock_of(&self.name));
+        }
     }
 }
 
@@ -982,6 +1088,7 @@ mod tests {
         };
         let made = stepping(hook, || rt.block_on(duplicate(&root, &source, copy.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())))).unwrap();
         assert_eq!(*seen.borrow(), [Step::Made, Step::Folders, Step::Copied, Step::MarkerGone, Step::Listed]);
+        assert!(crate::copies::shown(&crate::data_dir()).iter().all(|(c, _)| c.destination != copy), "on the list: no record of it left");
         assert!(made == copy && is_registered(&rt, &root, &copy));
         // Everything of its own was written once, with the rest.
         let settings = std::fs::read_to_string(copy.join("ProjectSettings/ProjectSettings.asset")).unwrap();
@@ -1024,30 +1131,108 @@ mod tests {
         assert_eq!(AppRoot::existing(&crate::data_dir()).map(|a| a.folders(Path::new(STAGES)).len()).unwrap_or(0), 0);
     }
 
-    /// Packages restored beside the copy take the place of what it had of them, with the list that goes with them; everything
-    /// else is the project's own.
+    /// AGENTS.md: a copy is listed before anything of it is restored; then packages restored in Orbiters' own folder take the place of
+    /// what it had of them, with the list that goes with them. Everything else is the project's own.
     #[test]
-    fn restored_packages_are_part_of_the_copy_when_it_is_made() {
+    fn a_copy_is_listed_and_then_its_packages_are_restored() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({}));
-        std::fs::create_dir_all(source.join("Packages/kept")).unwrap();
-        std::fs::write(source.join("Packages/kept/package.json"), "{}").unwrap();
-        std::fs::write(source.join("Packages/kept/mine.txt"), "mine").unwrap();
-        std::fs::create_dir_all(source.join("Packages/half")).unwrap();
-        std::fs::write(source.join("Packages/half/old.txt"), "old").unwrap();
-        let stage = temp.path().join("stage");
-        std::fs::create_dir_all(stage.join("Packages/half/Runtime")).unwrap();
-        std::fs::write(stage.join("Packages/half/package.json"), "{\"new\":1}").unwrap();
-        std::fs::write(stage.join("Packages/half/Runtime/new.txt"), "new").unwrap();
-        std::fs::write(stage.join("Packages/vpm-manifest.json"), "{\"locked\":{}}").unwrap();
-        let p = payload::scan(&source, Making::default(), &AtomicBool::new(false)).unwrap().with_restored(&stage, &["half".into()], &AtomicBool::new(false)).unwrap();
-        let read = |at: &str| p.read(Path::new(at)).unwrap().map(|b| String::from_utf8(b).unwrap());
+        for (at, text) in [("Packages/kept/package.json", "{}"), ("Packages/kept/mine.txt", "mine"), ("Packages/half/package.json", r#"{"name":"half","version":"0.9.0"}"#), ("Packages/half/old.txt", "old")] {
+            std::fs::create_dir_all(source.join(at).parent().unwrap()).unwrap();
+            std::fs::write(source.join(at), text).unwrap();
+        }
+        crate::write_json(&source.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"half":{"version":"1.0.0"}},"locked":{"half":{"version":"1.0.0","dependencies":{}}}})).unwrap();
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        let copy = temp.path().join("Copy");
+        RESTORES.with(|r| *r.borrow_mut() = Some(("half".into(), "1.0.0".into())));
+        let steps = std::cell::RefCell::new(vec![]);
+        let made = stepping(
+            |step| {
+                steps.borrow_mut().push((step, copy.join("Packages/half/old.txt").is_file()));
+                Ok(())
+            },
+            || rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))),
+        );
+        RESTORES.with(|r| *r.borrow_mut() = None);
+        assert_eq!(made.unwrap(), copy);
+        let at = |s: Step| steps.borrow().iter().position(|(x, _)| *x == s).unwrap();
+        assert!(at(Step::Listed) < at(Step::Restored));
+        assert_eq!((steps.borrow()[at(Step::Listed)].1, steps.borrow()[at(Step::Restored)].1), (true, false), "what it had, then what was restored");
+        let read = |at: &str| std::fs::read_to_string(copy.join(at)).ok();
         assert_eq!(read("Packages/kept/mine.txt").as_deref(), Some("mine"));
-        assert_eq!(read("Packages/half/old.txt"), None);
         assert_eq!(read("Packages/half/Runtime/new.txt").as_deref(), Some("new"));
-        assert_eq!(read("Packages/vpm-manifest.json").as_deref(), Some("{\"locked\":{}}"));
-        assert_eq!(read("Assets/a.txt").as_deref(), Some("a"));
+        assert!(installed_dependencies_complete(&copy).unwrap() && is_registered(&rt, &root, &copy));
+        assert_eq!(std::fs::read(source.join("Packages/half/old.txt")).unwrap(), b"old", "the source is the source's");
+    }
+
+    /// Room for a restore is asked of every disk it writes on, before anything is downloaded.
+    #[test]
+    fn a_restore_needs_room_on_every_disk_it_writes_on() {
+        struct Disks(u64, u64, u64);
+        impl Room for Disks {
+            fn of(&self, path: &Path) -> Option<(String, u64)> {
+                match path.to_str()? {
+                    "app" => Some(("a".into(), self.0)),
+                    "vcc" => Some(("v".into(), self.1)),
+                    _ => Some(("c".into(), self.2)),
+                }
+            }
+        }
+        struct One(u64);
+        impl Room for One {
+            fn of(&self, _: &Path) -> Option<(String, u64)> {
+                Some(("one".into(), self.0))
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let locked: serde_json::Map<_, _> = (0..6).map(|i| (format!("gone{i}"), serde_json::json!({"version":"1.0.0"}))).collect();
+        crate::write_json(&source.join("Packages/vpm-manifest.json"), &serde_json::json!({ "locked": locked })).unwrap();
+        let payload = payload::scan(&source, Making::default(), &AtomicBool::new(false)).unwrap();
+        let ask = |room: &dyn Room| restore_room(Path::new("vcc"), Path::new("app"), Path::new("copy"), &payload, room);
+        let (r, c) = (6 * RESTORED, 6 * CACHED);
+        assert!(ask(&Disks(r, c, r)).is_ok());
+        for short in [Disks(r - 1, c, r), Disks(r, c - 1, r), Disks(r, c, r - 1)] {
+            assert!(ask(&short).unwrap_err().to_string().contains("MB"));
+        }
+        // One disk for all three: their sum.
+        assert!(ask(&One(2 * r + c)).is_ok() && ask(&One(2 * r + c - 1)).is_err());
+    }
+
+    /// A restore's folder that could not be taken away stays named by its lock, and goes at the next copy.
+    #[cfg(windows)]
+    #[test]
+    fn a_restore_s_folder_that_could_not_go_goes_at_the_next_copy() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let stage = Stage::make(&app).unwrap();
+        let (path, name) = (stage.path.clone(), stage.name.clone());
+        std::fs::write(path.join("in use.txt"), "x").unwrap();
+        let held = std::fs::File::options().read(true).share_mode(1).open(path.join("in use.txt")).unwrap();
+        drop(stage);
+        assert!(path.exists() && app.join(Stage::lock_of(&name)).is_file());
+        drop(held);
+        // One that is in use is left to its run.
+        let mine = Stage::make(&app).unwrap();
+        Stage::sweep(&app);
+        assert!(!path.exists() && !app.join(Stage::lock_of(&name)).exists() && mine.path.is_dir());
+    }
+
+    /// Where no copy can be made, said for a window before it offers to: a share, inside a project, a name or a folder taken.
+    #[test]
+    fn a_place_that_is_refused_is_said_before() {
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("Project");
+        project(&inside, serde_json::json!({}));
+        assert_eq!(refused_place(temp.path(), "New"), None);
+        assert_eq!(refused_place(&temp.path().join("not/there/yet"), "New"), None);
+        assert!(refused_place(&inside.join("Assets"), "New").unwrap().contains("Unity project"));
+        assert!(refused_place(temp.path(), "Project").is_some() && refused_place(temp.path(), "a:b").is_some() && refused_place(Path::new("relative"), "New").is_some());
+        assert!(!cfg!(windows) || refused_place(Path::new(r"\\server\share"), "New").unwrap().contains("network share"));
     }
 
     #[test]

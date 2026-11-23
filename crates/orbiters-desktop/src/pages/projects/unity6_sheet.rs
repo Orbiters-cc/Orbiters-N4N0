@@ -66,7 +66,7 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
     state.u6.sheet.check = Job::spawn(ctx, move || {
         let checked: Checked = (|| -> anyhow::Result<_> {
             // The same look the copy starts with, by reading only: the place is refused here as it would be there.
-            let l = trial::look(&dir, &[&dir, &orbiters_projects::vcc_dir()], &source, Path::new(&key.0), &key.1, trial::is_open(&source), &Default::default());
+            let l = trial::look(&dir, &[&dir], &source, Path::new(&key.0), &key.1, trial::is_open(&source), &Default::default());
             let place = match l.place {
                 Ok(p) => p,
                 // What is in the way of any trial comes before what is wrong with this place.

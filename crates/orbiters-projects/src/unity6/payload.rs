@@ -60,6 +60,9 @@ pub struct Making<'a> {
     pub strict: bool,
     /// The Unity version of a project that does not say one.
     pub unity: Option<&'a str>,
+    /// Packages only its Library holds (from Git, another registry) become packages of the copy's own, as they are installed: a
+    /// copy without the Library has them without the place they came from.
+    pub installed: bool,
 }
 
 /// A copy's own settings.
@@ -89,6 +92,9 @@ pub struct Payload {
     pub missing: Vec<(String, PathBuf)>,
     /// Why a local package is not in a copy that is made without it (not [`Making::strict`]).
     pub late: Option<String>,
+    /// Packages only its Library should hold, and does not (or not one that is surely theirs): whoever opens the copy downloads
+    /// them.
+    pub absent: Vec<String>,
 }
 
 /// What a copy leaves out, at any depth ([`crate::templates`]' rules).
@@ -216,6 +222,9 @@ pub fn scan(original: &Path, how: Making, cancel: &AtomicBool) -> anyhow::Result
         local_packages(&mut scan, original)?;
         settings(&mut scan, own)?;
     }
+    if how.installed {
+        installed(&mut scan, original)?;
+    }
     if let (Some(unity), false) = (how.unity, scan.out.items.contains_key(Path::new(VERSION_FILE))) {
         scan.out.items.entry(PathBuf::from("ProjectSettings")).or_insert(Item::Dir); // i18n: not shown (a folder's name)
         scan.out.items.insert(PathBuf::from(VERSION_FILE), Item::Made(format!("m_EditorVersion: {unity}\n").into_bytes()));
@@ -229,6 +238,56 @@ pub fn scan(original: &Path, how: Making, cancel: &AtomicBool) -> anyhow::Result
     scan.out.problems.sort();
     scan.out.problems.dedup();
     Ok(scan.out)
+}
+
+const CACHE: &str = "PackageCache";
+
+/// The folder of the `library`'s package cache that is surely `name` as its lock has it: the only one of that name, or the one
+/// its lock's version or Git commit names.
+fn cached(library: &ReadRoot, lock: &serde_json::Value, name: &str) -> Option<PathBuf> {
+    let kept = library.entries(Path::new(CACHE)).ok()?;
+    let mine: Vec<&Entry> = kept.iter().filter(|e| e.kind == Kind::Dir && e.name.to_string_lossy().split('@').next() == Some(name)).collect();
+    let entry = &lock["dependencies"][name];
+    let is = |e: &&&Entry| {
+        let full = e.name.to_string_lossy();
+        let Some((_, suffix)) = full.split_once('@') else { return false };
+        let named = |field: &str| entry[field].as_str().is_some_and(|v| v == suffix || (suffix.len() >= 8 && v.starts_with(suffix)));
+        named("version") || named("hash")
+    };
+    let one = match mine.len() {
+        1 => mine.first(),
+        _ => mine.iter().find(is),
+    }?;
+    Some(Path::new(CACHE).join(&one.name))
+}
+
+/// [`Making::installed`].
+fn installed(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
+    let names = crate::templates::packages_only_in_library(original);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let lock = scan.read(Path::new("Packages/packages-lock.json"))?.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    for name in names {
+        let target = PathBuf::from("Packages").join(&name);
+        // (The Library may be a link to another disk: it is opened as what it is.)
+        let found = ReadRoot::open(&original.join("Library")).ok().and_then(|library| {
+            let rel = cached(&library, &lock, &name)?;
+            ReadRoot::open(&library.shown.join(rel)).ok()
+        });
+        let Some(root) = found.filter(|r| r.entries(Path::new("")).is_ok_and(|e| e.iter().any(|e| e.name == "package.json"))) else {
+            scan.out.absent.push(name);
+            continue;
+        };
+        let id = root.id;
+        scan.out.roots.push(root);
+        let new = scan.out.roots.len() - 1;
+        scan.put(target.clone(), Item::Dir);
+        scan.open.push(id);
+        scan.folder(new, Path::new(""), &target, 1, false)?;
+        scan.open.pop();
+    }
+    Ok(())
 }
 
 /// `rel` (below `Packages`) without its `..`, as a path of the project; `None` when it leaves the project.
@@ -500,6 +559,7 @@ impl Payload {
             problems: vec![],
             missing: vec![],
             late: None,
+            absent: vec![],
         }
     }
 
@@ -524,6 +584,17 @@ impl Payload {
     /// The content IDs of everything in it: the copy has the same.
     pub fn content(&self, cancel: &AtomicBool) -> anyhow::Result<Content> {
         let mut out = Content::default();
+        let manifest = self.read(Path::new(MANIFEST))?;
+        for (name, at) in archives(manifest.as_deref()) {
+            match at.as_ref().and_then(|at| Some((at, self.items.get(at)?))) {
+                Some((at, Item::File(o))) => {
+                    let read = self.open(o).and_then(|f| out.read_archive(at, f));
+                    read.map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = at.display(), error = e)))?;
+                }
+                Some((_, Item::Dir)) => {}
+                _ => out.unreadable(name),
+            }
+        }
         for (at, item) in &self.items {
             if cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("{}", tr("Stopped."));
@@ -537,27 +608,21 @@ impl Payload {
         Ok(out)
     }
 
-    /// With the packages restored in the folder `stage` (a project's own layout) in the place of what it had of them, and the
-    /// package list that goes with them. Nothing else of it changes.
-    pub fn with_restored(self, stage: &Path, names: &[std::ffi::OsString], cancel: &AtomicBool) -> anyhow::Result<Payload> {
+    /// What was restored in the folder `stage` (a project's own layout): the packages `names`, and the package lists.
+    pub fn restored(stage: &Path, names: &[std::ffi::OsString], cancel: &AtomicBool) -> anyhow::Result<Payload> {
         let root = ReadRoot::open(stage)?;
-        let id = root.id;
-        let mut scan = Scan { cancel, how: Making::default(), out: self, open: vec![id] };
-        scan.out.roots.push(root);
-        let new = scan.out.roots.len() - 1;
+        let (id, protected) = (root.id, root.protected());
+        let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
         for name in names {
             let at = Path::new("Packages").join(name); // i18n: not shown (a folder's name)
-            let low = at.to_string_lossy().to_lowercase();
-            scan.out.items.retain(|k, _| {
-                let k = k.to_string_lossy().to_lowercase().replace('/', "\\");
-                let low = low.replace('/', "\\");
-                k != low && !k.starts_with(&format!("{low}\\"))
-            });
             scan.put(at.clone(), Item::Dir);
-            scan.folder(new, &at, &at, 2, false)?;
+            scan.folder(0, &at, &at, 2, false)?;
         }
-        let manifest = scan.out.roots[new].read(Path::new(VPM_MANIFEST))?;
-        scan.out.items.insert(PathBuf::from(VPM_MANIFEST), Item::Made(manifest));
+        for list in [VPM_MANIFEST, MANIFEST] {
+            if let Ok(bytes) = scan.out.roots[0].read(Path::new(list)) {
+                scan.out.items.insert(PathBuf::from(list), Item::Made(bytes));
+            }
+        }
         Ok(scan.out)
     }
 
@@ -655,9 +720,34 @@ pub fn from_text(text: &str) -> Option<Digests> {
     Some(out)
 }
 
+/// The local (`file:`) packages a package list names, and where each is below the project (`None`: not inside it).
+fn archives(manifest: Option<&[u8]>) -> Vec<(String, Option<PathBuf>)> {
+    let manifest: serde_json::Value = manifest.and_then(|m| serde_json::from_slice(m).ok()).unwrap_or_default();
+    let named = manifest["dependencies"].as_object().into_iter().flatten();
+    named.filter_map(|(name, v)| Some((name.clone(), lexical(v.as_str()?.strip_prefix("file:")?)))).collect()
+}
+
 /// The content IDs of everything in a copy as it is now, read through the proof of its folder.
 pub fn copy_content(root: &WriteRoot, cancel: &AtomicBool) -> anyhow::Result<Content> {
     let mut out = Content::default();
+    let mut manifest = vec![];
+    match root.file(Path::new(MANIFEST)) {
+        Ok(mut file) => drop(file.read_to_end(&mut manifest)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    for (name, at) in archives(Some(&manifest)) {
+        let Some(at) = at else {
+            out.unreadable(name);
+            continue;
+        };
+        match root.file(&at) {
+            Ok(file) => out.read_archive(&at, file)?,
+            // A folder: looked at with the rest.
+            Err(_) if root.entries(&at).is_ok() => {}
+            Err(_) => out.unreadable(name),
+        }
+    }
     let mut folders = vec![PathBuf::new()];
     while let Some(folder) = folders.pop() {
         for e in root.entries(&folder)? {
@@ -694,20 +784,24 @@ pub fn content_of(project: &Path, cancel: &AtomicBool) -> anyhow::Result<Content
     if payload.late.is_some() {
         out.unreadable(MANIFEST.into());
     }
-    // Packages from Git or another registry, which Unity keeps in the Library.
-    let cache = Path::new("Library/PackageCache");
-    for name in crate::templates::packages_only_in_library(project) {
-        let kept = payload.roots[0].entries(cache).unwrap_or_default();
-        let folder = kept.iter().find(|e| matches!(e.kind, Kind::Dir) && e.name.to_string_lossy().split('@').next() == Some(name.as_str()));
-        let Some(folder) = folder else {
+    // Packages from Git or another registry, which Unity keeps in the Library: every one of that name, the one in use among them.
+    let names = crate::templates::packages_only_in_library(project);
+    let library = if names.is_empty() { None } else { ReadRoot::open(&project.join("Library")).ok() };
+    for name in names {
+        let kept = library.as_ref().and_then(|l| l.entries(Path::new(CACHE)).ok()).unwrap_or_default();
+        let folders: Vec<_> = kept.iter().filter(|e| e.kind == Kind::Dir && e.name.to_string_lossy().split('@').next() == Some(name.as_str())).collect();
+        if folders.is_empty() {
             out.unreadable(name);
             continue;
-        };
-        let root = ReadRoot::open(&payload.roots[0].shown.join(cache).join(&folder.name))?;
-        let (id, protected) = (root.id, root.protected());
-        let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
-        scan.folder(0, Path::new(""), &Path::new("Packages").join(&name), 2, false)?; // i18n: not shown (a folder's name)
-        out.add(scan.out.content(cancel)?);
+        }
+        for folder in folders {
+            let Some(library) = &library else { continue };
+            let root = ReadRoot::open(&library.shown.join(CACHE).join(&folder.name))?;
+            let (id, protected) = (root.id, root.protected());
+            let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
+            scan.folder(0, Path::new(""), &Path::new("Packages").join(&name), 2, false)?; // i18n: not shown (a folder's name)
+            out.add(scan.out.content(cancel)?);
+        }
     }
     Ok(out)
 }

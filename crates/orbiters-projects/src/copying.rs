@@ -15,8 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) enum Step {
     /// A trial is recorded.
     Recorded,
-    /// A duplicate's missing packages were restored, beside it.
-    Restored,
     /// Its folder is made.
     Made,
     /// Its folders are made, its files are not.
@@ -25,8 +23,11 @@ pub(crate) enum Step {
     Compared,
     Verified,
     MarkerGone,
+    /// A duplicate is on the list.
     Listed,
-    /// Listed, and looked at again.
+    /// A duplicate's missing packages were restored, and put in it.
+    Restored,
+    /// A trial, looked at again.
     Checked,
 }
 
@@ -67,6 +68,12 @@ pub(crate) fn fill(payload: &Payload, root: &WriteRoot, marker: &Marker, made: &
     drop(file);
     let total = payload.files();
     progress.lock().unwrap().total = total;
+    put(payload, root, made, cancel, progress)
+}
+
+/// Puts everything of `payload` in the folder: its folders, then its files. Each is new.
+fn put(payload: &Payload, root: &WriteRoot, made: &mut Made, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+    let total = payload.files();
     let stop = || anyhow::anyhow!("{}", tr("Stopped."));
     let wrote = |at: &Path, e: std::io::Error| anyhow::anyhow!("{}", tr!("Could not copy {path}: {error}", path = at.display(), error = e));
     for at in payload.items.iter().filter(|(_, i)| matches!(i, Item::Dir)).map(|(at, _)| at) {
@@ -114,6 +121,26 @@ pub(crate) fn fill(payload: &Payload, root: &WriteRoot, marker: &Marker, made: &
         *progress.lock().unwrap() = Progress { copied, total, file: at.display().to_string(), phase: mark("Copying project").into() };
     }
     Ok(())
+}
+
+/// Puts the packages restored in `stage` (a project's own layout) in the copy, in the place of what this run put there of them, with
+/// the package lists that go with them. Only what this run made is taken away; a package somebody else put something in is an
+/// error, and stays.
+pub(crate) fn take_restored(stage: &Path, names: &[std::ffi::OsString], root: &WriteRoot, made: &mut Made, progress: &SharedProgress) -> anyhow::Result<()> {
+    let never = AtomicBool::new(false);
+    let payload = Payload::restored(stage, names, &never)?;
+    let replaced = |at: &Path| payload.items.keys().any(|k| at == k) || names.iter().any(|n| at.starts_with(Path::new("Packages").join(n))); // i18n: not shown (a folder's name)
+    // The last made first: what is in a folder before it.
+    for i in (0..made.items.len()).rev() {
+        if !replaced(&made.items[i].0) {
+            continue;
+        }
+        let (rel, id, held) = made.items.remove(i);
+        let dir = held.is_some();
+        drop(held);
+        anyhow::ensure!(root.remove(&rel, id, dir).unwrap_or(false), "{}", tr!("{path} could not be removed.", path = root.path.join(&rel).display()));
+    }
+    put(&payload, root, made, &never, progress)
 }
 
 /// Takes away the copy's own marker: from here on it is a project.

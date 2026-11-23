@@ -91,39 +91,47 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(paths) = settings.user_projects() {
         projects.extend(paths.iter().map(|s| PathBuf::from(s.as_ref())));
     }
-    // Once each, however it is spelled; two folders whose names differ only by case (where a disk keeps those apart) are two.
-    let mut seen: HashMap<String, PathBuf> = HashMap::new();
-    projects.retain(|p| match seen.get(&crate::discovery::key(p)) {
-        Some(first) => first != p && crate::owned::id_of(first).ok().zip(crate::owned::id_of(p).ok()).is_some_and(|(a, b)| a != b),
-        None => seen.insert(crate::discovery::key(p), p.clone()).is_none(),
-    });
+    let mut seen = HashSet::new();
+    projects.retain(|p| seen.insert(crate::discovery::key(p)));
     Ok(projects)
 }
 
-/// Puts the project at `path` on the list VCC and ALCOM share (`add`), or takes it off: the one entry every window, tool and
-/// page goes through. Where it stands as a Unity 6 trial is asked first.
+/// Puts the project at `path` on the list VCC and ALCOM share, or takes it off: the gallery's, the bridge's, Duplicate's and New
+/// project's. Never a Unity 6 trial's: where it stands as one is asked first, before anything is opened.
 pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
     use crate::unity6::authority::{allow, Action};
     allow(&crate::data_dir(), path, if add { Action::List } else { Action::Unlist }).map_err(|why| anyhow::anyhow!("{why}"))?;
-    list_entry(root, path, &crate::vcc_list::Which::of(path), add).await
+    register_any(root, path, add).await?;
+    if add {
+        crate::copies::listed(&crate::data_dir(), path);
+    }
+    Ok(())
 }
 
-/// The one entry `which` of the list, put in for the project at `path` or taken out. **No byte of the project is read through
-/// VPM or written** (`crate::vcc_list`). For whoever asked the authority already.
-pub(crate) async fn list_entry(root: &Path, path: &Path, which: &crate::vcc_list::Which, add: bool) -> anyhow::Result<()> {
-    if add && !crate::discovery::is_project(path) {
-        bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
-    }
-    let list = crate::unity6::gate::ListRoot::open(root)?;
+async fn register_any(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
+    std::fs::create_dir_all(root)?;
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    // Held: Creator Companion's and ALCOM's own lock of the database.
-    let _database = VccDatabaseConnection::connect(&io).await?;
+    let mut settings = Settings::load(&io).await?;
+    let mut db = VccDatabaseConnection::connect(&io).await?;
     if add {
-        crate::vcc_list::add(&list, path, which)
+        if !crate::discovery::is_project(path) {
+            bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
+        }
+        let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+        if db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)?.is_none() {
+            db.add_project(&project).await?;
+        }
+        settings.add_user_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?);
     } else {
-        crate::vcc_list::remove(&list, which)
+        if let Some(p) = db.find_project(path.to_str().with_context(|| tr("Project path is not Unicode"))?)? {
+            db.remove_project(&p);
+        }
+        settings.retain_user_projects(|p| crate::discovery::key(Path::new(p)) != crate::discovery::key(path));
     }
+    db.save(&io).await?;
+    settings.save(&io).await?;
+    Ok(())
 }
 
 /// Whether VPM's project loader leaves the project as it is: vrc-get's `UnityProject::load` rewrites a manifest holding the

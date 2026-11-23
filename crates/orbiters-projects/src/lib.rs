@@ -5,6 +5,7 @@ mod builtin_templates;
 mod bundled_templates;
 pub mod coherent;
 mod copying;
+pub mod copies;
 pub mod discovery;
 pub mod editor;
 pub mod git;
@@ -24,7 +25,6 @@ pub mod suggestions;
 pub mod templates;
 pub mod unity6;
 pub mod updates;
-mod vcc_list;
 pub mod vpm;
 mod vpm_http;
 

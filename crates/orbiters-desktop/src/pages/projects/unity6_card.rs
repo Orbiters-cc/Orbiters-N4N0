@@ -506,15 +506,10 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
         ),
         (None, None) => tr!("Get Creator Companion {needed} or later from VRChat's guide (its beta comes as a portable folder), then open it.", needed = needed),
     };
-    let listed = able.is_some_and(|v| !v.portable);
     let name = trial.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let steps = [
         first,
-        if listed {
-            tr!("In Projects, find {name}: Orbiters listed it for Creator Companion.", name = name)
-        } else {
-            tr!("In Projects, add the existing project at {path}.", path = trial.display())
-        },
+        tr!("Add this folder in Creator Companion, with its Add Existing Project: {path}. Orbiters adds nothing to Creator Companion's list.", path = trial.display()),
         tr!("Click the Unity column beside {name}, then Migrate to Unity 6000.", name = name),
         tr("Choose to migrate this project itself: it is already a copy. If Creator Companion makes a migrated copy beside it instead, Orbiters can take that one.").to_string(),
         tr!("Let it finish: it opens the project in Unity {unity}, where VRChat's Upgrade Wizard asks you about the changes.", unity = target.unity),
@@ -524,12 +519,16 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
     }
     let list = [
         (tr("Copy the trial's path"), icons::COPY, true, "copy-path"),
+        (tr("Show the trial's folder"), icons::FOLDER_OPEN, true, "show-folder"),
         (tr("Locate Creator Companion…"), icons::FOLDER_OPEN, state.u6.busy().is_none(), "locate-vcc"),
         (tr("Look again"), icons::ARROW_COUNTER_CLOCKWISE, true, "look"),
     ];
     match buttons(ui, &list, false) {
         Some(0) => ctx.copy_text(trial.display().to_string()),
         Some(1) => {
+            let _ = orbiters_projects::reveal(trial);
+        }
+        Some(2) => {
             state.u6.vccs = None;
             state.u6.act(&ctx, tr("Locating Creator Companion…"), move || {
                 let Some(file) = rfd::FileDialog::new().set_title(tr("Locate Creator Companion")).pick_file() else { return Ok(String::new()) };
@@ -537,7 +536,7 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
                 Ok(tr!("Creator Companion {version} located.", version = v.version.unwrap_or_default()))
             });
         }
-        Some(2) => {
+        Some(3) => {
             state.u6.act(&ctx, "", || Ok(String::new()));
         }
         _ => {}
@@ -622,7 +621,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                 if buttons(ui, &[(tr("Use the migrated copy"), icons::CHECK, state.u6.busy().is_none(), "adopt")], true).is_some() {
                     let (id, beside) = (job.id.clone(), beside.clone());
                     state.u6.act(&ctx, tr("Taking the migrated copy…"), move || {
-                        trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &beside)?;
+                        trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &id, &beside)?;
                         Ok(tr("The migrated copy is the trial now.").to_string())
                     });
                 }
@@ -634,7 +633,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                         d = d.set_directory(start);
                     }
                     let Some(folder) = d.pick_folder() else { return Ok(String::new()) };
-                    trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &folder)?;
+                    trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &id, &folder)?;
                     Ok(tr("The migrated copy is the trial now.").to_string())
                 });
             }
@@ -701,7 +700,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
     let list = [
         (tr("Show the original"), icons::ARROW_LEFT, original.is_some(), "original"),
         (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"),
-        (tr("Unregister the trial"), icons::X, state.u6.busy().is_none(), "unregister"),
+        (tr("Forget the trial"), icons::X, state.u6.busy().is_none(), "forget-trial"),
     ];
     // Where trials are only shown, nothing is changed of them.
     let list = if state.u6.mac() { &list[..2] } else { &list[..] };
@@ -716,24 +715,23 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         }
         Some(2) => {
             let id = job.id.clone();
-            state.u6.act(&ctx, tr("Unregistering the trial…"), move || {
-                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
-                Ok(forgotten(&left, &tr!("The trial stays at {path}; it is no longer listed. Add existing brings it back.", path = left.at.display())))
+            state.u6.act(&ctx, tr("Forgetting the trial…"), move || {
+                let left = trial::abandon(&orbiters_projects::data_dir(), &id)?;
+                Ok(forgotten(&left))
             });
         }
         _ => {}
     }
 }
 
-/// What taking a trial off did: `gone` when its entries went; else which ones stay, and why.
-fn forgotten(left: &trial::Forgotten, gone: &str) -> String {
-    if left.still_listed.is_empty() {
-        return gone.to_string();
+/// What taking a trial off did, and what it did not.
+fn forgotten(left: &trial::Forgotten) -> String {
+    let kept = tr("If you added it in Creator Companion, it is still on its list: remove it there yourself.");
+    if left.there {
+        format!("{} {kept}", tr!("Orbiters does not show it as a trial any more. Its folder stays at {path}.", path = left.at.display()))
+    } else {
+        format!("{} {kept}", tr("Orbiters does not show it as a trial any more."))
     }
-    tr!(
-        "It is not shown here any more. Creator Companion's list still names {paths}: that folder is not there now (or another one is), so Orbiters does not remove an entry it cannot tell apart. Remove it there yourself when you no longer need it.",
-        paths = left.still_listed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-    )
 }
 
 /// The gallery's rows for trials that are not projects (yet): being made, stopped, not where they were.
@@ -804,7 +802,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 }
                 (icons::X_CIRCLE, theme::DANGER, text)
             }
-            trial::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied and compared, but it could not be listed.").to_string())),
+            trial::Status::Unfinished => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied and compared; its last step is left.").to_string())),
             trial::Status::Uncertain(why) => (icons::PROHIBIT, theme::WARN, orbiters_projects::unity6::trial::uncertain_text(why)),
             trial::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
             trial::Status::Replaced => (icons::PROHIBIT, theme::FG_3, tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
@@ -813,8 +811,8 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         item(&mut inner, glyph, tint, &tr!("{name}, a Unity 6 trial of {original}", name = job.trial.name, original = job.source.name), Some(&format!("{}\n{text}", job.trial.path.display())));
         let mut list: Vec<(&str, &str, bool, &str)> = vec![];
         let mac = state.u6.mac();
-        if matches!(status, trial::Status::Unlisted) && !mac {
-            list.push((tr("List it"), icons::PLUS, state.u6.busy().is_none(), "list"));
+        if matches!(status, trial::Status::Unfinished) && !mac {
+            list.push((tr("Finish it"), icons::CHECK, state.u6.busy().is_none(), "list"));
         }
         if matches!(status, trial::Status::Running) {
             if mine.is_some() {
@@ -841,9 +839,9 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             Some("list") => {
                 let (stop, progress): (std::sync::Arc<std::sync::atomic::AtomicBool>, orbiters_projects::templates::SharedProgress) = Default::default();
                 state.u6.finishing = Some((id.clone(), stop.clone(), progress.clone()));
-                state.u6.act(&ctx, tr("Listing the trial…"), move || {
-                    trial::finish(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &stop, &progress)?;
-                    Ok(tr("The trial is listed.").to_string())
+                state.u6.act(&ctx, tr("Finishing the trial…"), move || {
+                    trial::finish(&orbiters_projects::data_dir(), &id, &stop, &progress)?;
+                    Ok(tr("The trial is ready for Creator Companion.").to_string())
                 });
             }
             Some("stop") => {
@@ -854,10 +852,75 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             Some("reveal") => {
                 let _ = orbiters_projects::reveal(&job.trial.path);
             }
-            // Off VCC's list too when it is on it; its folder stays, and stays known.
+            // Its folder stays, and stays known.
             Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
-                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
-                Ok(forgotten(&left, &if left.there { tr!("It is off the lists. Its folder stays at {path}.", path = left.at.display()) } else { tr("It is off the lists.").to_string() }))
+                let left = trial::abandon(&orbiters_projects::data_dir(), &id)?;
+                Ok(forgotten(&left))
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// The gallery's rows for copies of projects (Duplicate, a new project) that are not on the list: cut short, or whole and not
+/// listed (AGENTS.md: a retained copy is visible and actionable, with where it is and what is wrong).
+pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
+    use orbiters_projects::copies;
+    let ctx = ui.ctx().clone();
+    let rows: Vec<(copies::Copy, copies::Status)> = state.u6.look.as_ref().map(|l| l.copies.clone()).unwrap_or_default();
+    // The one this window is making shows its progress in its dialog.
+    let rows: Vec<_> = rows.into_iter().filter(|(_, s)| *s != copies::Status::Running).collect();
+    if rows.is_empty() {
+        return;
+    }
+    ui.add_space(28.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
+    widgets::text(ui.painter(), pos2(r.left(), r.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(tr("Copies to look at"), 16.0).weight(weight::SEMIBOLD));
+    ui.add_space(6.0);
+    for (copy, status) in rows {
+        let w = ui.available_width();
+        let top = ui.cursor().min;
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(top + vec2(16.0, 14.0), vec2(w - 32.0, 10_000.0))).id_salt(("copy-row", &copy.id)));
+        inner.spacing_mut().item_spacing = vec2(0.0, 8.0);
+        let bg = ui.painter().add(egui::Shape::Noop);
+        let said = copy.error.clone().unwrap_or_default();
+        let (glyph, tint, text) = match status {
+            copies::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, format!("{} {said}", tr("Every file of the copy is there, but it is not on the project list."))),
+            copies::Status::Incomplete => (icons::X_CIRCLE, theme::DANGER, format!("{} {said}", tr("The copy was cut short: this folder is not a project, and nothing was deleted. Remove it yourself when you no longer need it."))),
+            copies::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, format!("{} {said}", tr("Not found at this path: its disk may not be connected, or another folder is there."))),
+            copies::Status::Running => continue,
+        };
+        let name = copy.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        item(&mut inner, glyph, tint, &tr!("A copy of {name}", name = name), Some(&format!("{}\n{}", copy.destination.display(), text.trim())));
+        let free = state.u6.busy().is_none() && !state.running();
+        let mut list: Vec<(&str, &str, bool, &str)> = vec![];
+        if status == copies::Status::Unlisted {
+            list.push((tr("List it"), icons::PLUS, free, "list"));
+        }
+        if status != copies::Status::Missing {
+            list.push((tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"));
+        }
+        list.push((tr("Dismiss"), icons::X, free, "dismiss"));
+        let salted: Vec<(&str, &str, bool, String)> = list.iter().map(|(l, g, e, s)| (*l, *g, *e, format!("copy-{}-{s}", copy.id))).collect();
+        let refs: Vec<(&str, &str, bool, &str)> = salted.iter().map(|(l, g, e, s)| (*l, *g, *e, s.as_str())).collect();
+        let pressed = buttons(&mut inner, &refs, false).map(|i| list[i].3);
+        let h = inner.min_rect().height() + 28.0;
+        let rect = Rect::from_min_size(top, vec2(w, h));
+        ui.painter().set(bg, egui::Shape::mesh(orbiters_ui::paint::squircle_mesh(rect, theme::squircle(theme::CARD_RADIUS), theme::surface(), 1.0 / ctx.pixels_per_point())));
+        ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        ui.add_space(10.0);
+        let id = copy.id.clone();
+        match pressed {
+            Some("list") => state.u6.act(&ctx, tr("Listing the copy…"), move || {
+                let at = copies::list(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                Ok(tr!("The copy at {path} is listed.", path = at.display()))
+            }),
+            Some("reveal") => {
+                let _ = orbiters_projects::reveal(&copy.destination);
+            }
+            Some("dismiss") => state.u6.act(&ctx, tr("Dismissing the copy…"), move || {
+                let at = copies::dismiss(&orbiters_projects::data_dir(), &id)?;
+                Ok(tr!("Dismissed. The folder stays at {path}.", path = at.display()))
             }),
             _ => {}
         }

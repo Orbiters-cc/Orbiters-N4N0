@@ -20,7 +20,7 @@ fn only_a_folder_made_now_or_recorded_is_written_in() {
     let job = run(&e).unwrap();
     let of = |role| WriteRoot::of_job(&e.app, &job.id, role);
     assert!(of(Role::Trial).is_ok());
-    assert!(of(Role::Migrated).is_err() && of(Role::Adopting).is_err(), "no such folder in it");
+    assert!(of(Role::Migrated).is_err(), "no such folder in it");
     assert!(WriteRoot::of_job(&e.app, "nobody", Role::Trial).is_err() && WriteRoot::of_job(&e.root, &job.id, Role::Trial).is_err());
     // Another folder at its path, a link to it, no identity recorded.
     let away = e.root.join("away");
@@ -37,22 +37,21 @@ fn only_a_folder_made_now_or_recorded_is_written_in() {
     let kept = std::fs::read(e.app.join(journal::JOURNAL)).unwrap();
     let with = |f: &dyn Fn(&mut journal::Job)| {
         let changed = journal::set(&e.app, &job.id, f).is_ok();
-        let r = (of(Role::Trial).is_ok(), of(Role::Migrated).is_ok(), of(Role::Adopting).is_ok());
+        let r = (of(Role::Trial).is_ok(), of(Role::Migrated).is_ok());
         std::fs::write(e.app.join(journal::JOURNAL), &kept).unwrap();
         (changed, r)
     };
-    assert_eq!(with(&|j| j.trial.id = None), (true, (false, false, false)));
-    assert_eq!(with(&|j| j.phase = Phase::Planned), (true, (false, false, false)));
+    assert_eq!(with(&|j| j.trial.id = None), (true, (false, false)));
+    assert_eq!(with(&|j| j.phase = Phase::Planned), (true, (false, false)));
     // A record that names the original for the trial, by its path or by its identity, is not taken (or not even written).
     let source = Place::of(&e.source).unwrap();
-    for role in 0..3 {
+    for role in 0..2 {
         let s = source.clone();
         let (_, r) = with(&move |j| match role {
             0 => j.trial = s.clone(),
-            1 => j.migrated = Some(s.clone()),
-            _ => j.adopting = Some(s.clone()),
+            _ => j.migrated = Some(s.clone()),
         });
-        assert!(!r.1 && !r.2 && (role != 0 || WriteRoot::of_job(&e.app, &job.id, Role::Trial).unwrap().id != source.id.unwrap()));
+        assert!(!r.1 && (role != 0 || WriteRoot::of_job(&e.app, &job.id, Role::Trial).unwrap().id != source.id.unwrap()));
     }
     // The phase each part is written in.
     let place = job.trial.clone();
@@ -552,20 +551,22 @@ const READS: &[&str] = &[
     "std::io::Error::", "std::path::", "std::collections::", "std::sync::", "std::ffi::", "std::time::", "std::ops::", "std::fmt::", "std::cell::", "std::mem::", "std::ptr::", "std::env::temp_dir", "std::env::var_os", "std::env::consts::",
     "std::str::", "std::thread::", "std::os::unix::fs::MetadataExt", "std::os::windows::ffi::", "std::iter::", "std::cmp::", "std::process::id", "std::borrow::", "std::slice::", "std::io::Seek", "std::io::SeekFrom", "std::io::SeekFrom::", "clippy::",
     "anyhow::", "serde::", "serde_json::", "orbiters_i18n::", "ring::digest::", "ring::signature::", "uuid::", "time::", "url::", "base64::", "walkdir::", "sysinfo::", "flate2::read::", "regex::",
-    "vrc_get_vpm::version::", "vrc_get_vpm::ProjectType", "vrc_get_vpm::ProjectType::", "vrc_get_litedb::bson::", "vrc_get_litedb::expression::", "vrc_get_litedb::file_io::LiteDBFile", "vrc_get_litedb::file_io::LiteDBFile::", "vrc_get_litedb::file_io::BsonAutoId", "vrc_get_litedb::file_io::BsonAutoId::",
+    "vrc_get_vpm::version::",
     // This app's own, which read.
     "crate::owned::FileId", "crate::owned::id_of", "crate::owned::id_of_file", "crate::owned::is_same", "crate::owned::is_link", "crate::owned",
     "crate::discovery::key", "crate::discovery::is_project", "crate::discovery::now", "crate::discovery::parse_version", "crate::discovery::is_link", "crate::discovery::Project", "crate::discovery::database_editors", "crate::discovery::editor_hints",
     "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
     "crate::templates::Keep", "crate::templates::Keep::", "crate::templates::left_out", "crate::templates::retarget_with", "crate::templates::packages_only_in_library", "crate::templates::installed_dependencies_complete",
     "crate::templates::dependencies_complete", "crate::templates::Marker", "crate::templates::Marker::", "crate::templates::INCOMPLETE", "crate::templates::Progress", "crate::templates::SharedProgress", "crate::templates::validate_name",
-    "crate::builtin_templates::", "crate::copying", "crate::copying::", "crate::unity6::", "crate::vcc_list::", "crate::find_editors", "crate::network::", "orbiters_core::app_version", "orbiters_core::account::", "orbiters_update::",
+    "crate::builtin_templates::", "crate::copying", "crate::copying::", "crate::copies::", "crate::unity6::", "crate::find_editors", "crate::network::", "orbiters_core::app_version", "orbiters_core::account::", "orbiters_update::",
 ];
 
 /// What one file alone may use besides, and why.
 const ALONE: &[(&str, &[&str])] = &[
-    // A restore's staging folder, in app data, is filled by VPM; the one entry of the list; the bundled templates' own cache.
-    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::vpm::list_entry", "crate::bundled_templates::builtins"]),
+    // Not the Unity 6 feature's: a duplicate's or a new project's own. A restore's staging folder, in app data, is filled by VPM;
+    // it is put on the list VCC and ALCOM share; the bundled templates' own cache.
+    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::vpm::register", "crate::bundled_templates::builtins"]),
+    ("copies.rs", &["crate::vpm::register"]),
     // Asking a disk and an editor's program what they are.
     ("budget.rs", &["windows::core::PCWSTR", "windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW", "windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW", "windows::Win32::Storage::FileSystem::GetVolumePathNameW"]),
     ("editors.rs", &["windows::", "winreg::", "plist::"]),
@@ -595,6 +596,39 @@ fn refused(name: &str, read: &source::Read) -> Vec<String> {
     out
 }
 
+/// The paths of `read` that can write Creator Companion's or ALCOM's files.
+fn theirs(read: &source::Read) -> Vec<String> {
+    let reaches = |p: &str| {
+        p.starts_with("vrc_get_vpm::") && !p.starts_with("vrc_get_vpm::version::") || p == "vrc_get_vpm" || p.starts_with("vrc_get_litedb") || p.starts_with("crate::vpm") || p.starts_with("super::super::vpm") || p.starts_with("crate::copies::list")
+            || p.starts_with("crate::templates::make") || p.starts_with("crate::templates::duplicate") || p.starts_with("crate::templates::create")
+    };
+    read.paths.iter().filter(|p| reaches(p)).cloned().collect()
+}
+
+/// The test of it: each call that reaches VPM's environment is seen, however it is named.
+#[test]
+fn no_call_into_creator_companions_files_is_missed() {
+    let reaches = |text: &str| !theirs(&source::read(&source::production(&source::tokens(text)))).is_empty();
+    for writes in [
+        "async fn f() { crate::vpm::register(r, p, true).await; }",
+        "use crate::vpm; async fn f() { vpm::register(r, p, false).await; }",
+        "use crate::vpm::register as keep; async fn f() { keep(r, p, true).await; }",
+        "use crate::{owned, vpm::{self as v}}; async fn f() { v::change(r, p, c).await; }",
+        "use vrc_get_vpm::environment::{Settings as S, VccDatabaseConnection}; async fn f() { S::load(io).await; }",
+        "use vrc_get_vpm as v; async fn f() { v::environment::Settings::load(io).await; }",
+        "async fn f() { vrc_get_vpm::environment::VccDatabaseConnection::connect(io).await; }",
+        "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::parse(b); }",
+        "fn f() { crate::copies::list(a, b, c); }",
+        "fn f() { crate::templates::duplicate(a); }",
+        "fn f() { anyhow::ensure!(crate::vpm::register(r, p, true).is_ok()); }",
+    ] {
+        assert!(reaches(writes), "{writes}");
+    }
+    for fine in ["fn f() { v.parse::<vrc_get_vpm::version::Version>(); }", "use vrc_get_vpm::version::UnityVersion; fn f() { UnityVersion::parse(t); }", "fn f() { crate::templates::validate_name(n); } // crate::vpm::register"] {
+        assert!(!reaches(fine), "{fine}");
+    }
+}
+
 #[test]
 fn no_other_module_writes() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -604,7 +638,7 @@ fn no_other_module_writes() {
     let mut all = vec![];
     source::files(&src.join("unity6"), &mut all);
     all.retain(|p| !p.starts_with(src.join("unity6/gate")));
-    all.extend(["templates.rs", "copying.rs", "vcc_list.rs"].map(|f| src.join(f)));
+    all.extend(["templates.rs", "copying.rs", "copies.rs"].map(|f| src.join(f)));
     // The modules of the feature, whatever folder they are in, are all looked at.
     for needed in ["authority.rs", "journal.rs", "payload.rs", "content.rs", "trial.rs", "matrix.rs", "budget.rs"] {
         assert!(all.iter().any(|p| p.ends_with(needed)), "{needed}");
@@ -614,7 +648,13 @@ fn no_other_module_writes() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let tokens = source::production(&source::tokens(&std::fs::read_to_string(&path).unwrap()));
         assert!(tokens.len() > 50, "{name} is not read");
-        out.extend(refused(&name, &source::read(&tokens)));
+        let read = source::read(&tokens);
+        out.extend(refused(&name, &read));
+        // Decision A: nothing of the Unity 6 feature reaches what writes Creator Companion's or ALCOM's files, by any name: VPM's
+        // environment (its settings, its database), this crate's own module that uses it, or the database's crate.
+        if path.starts_with(src.join("unity6")) || name == "copying.rs" {
+            out.extend(theirs(&read).into_iter().map(|p| format!("{name}: {p} writes Creator Companion's files")));
+        }
     }
     assert!(out.is_empty(), "outside the gate:\n{}", out.join("\n"));
 }

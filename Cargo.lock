@@ -4416,7 +4416,6 @@ dependencies = [
  "ufbx",
  "url",
  "uuid",
- "vrc-get-litedb",
  "vrc-get-vpm",
  "walkdir",
  "windows 0.62.2",

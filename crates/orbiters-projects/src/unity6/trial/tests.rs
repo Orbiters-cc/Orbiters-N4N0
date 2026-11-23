@@ -14,7 +14,7 @@ pub(crate) fn source(root: &Path) -> PathBuf {
     std::fs::write(p.join("Packages/manifest.json"), r#"{"dependencies":{"com.unity.timeline":"1.7.5"}}"#).unwrap();
     std::fs::write(p.join("Packages/packages-lock.json"), r#"{"dependencies":{"com.unity.timeline":{"version":"1.7.5","source":"registry","url":"https://packages.unity.com"}}}"#).unwrap();
     std::fs::create_dir_all(p.join("Assets/Empty")).unwrap();
-    std::fs::write(p.join("Assets/Avatar.unity"), format!("%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  blueprintId: {CONTENT}\n")).unwrap();
+    std::fs::write(p.join("Assets/Avatar.unity"), scene(CONTENT)).unwrap();
     std::fs::write(p.join("Assets/Avatar.unity.meta"), "fileFormatVersion: 2\nguid: 0123456789abcdef0123456789abcdef\n").unwrap();
     std::fs::create_dir_all(p.join("Library")).unwrap();
     std::fs::write(p.join("Library/ArtifactDB"), "cache").unwrap();
@@ -110,7 +110,7 @@ pub(crate) fn ok(_: &Path, _: u64) -> anyhow::Result<u64> {
 
 pub(crate) fn run_at(e: &Env, parent: &Path, name: &str, open: &dyn Fn(&Path) -> bool, budget: &dyn Fn(&Path, u64) -> anyhow::Result<u64>) -> anyhow::Result<Job> {
     let recorded = |_: &Job| {};
-    prepare(Prepare { dir: &e.app, vcc: &e.vcc, source: &e.source, parent, name, target: target(), open, budget, recorded: &recorded }, &AtomicBool::new(false), &Default::default())
+    prepare(Prepare { dir: &e.app, source: &e.source, parent, name, target: target(), open, budget, recorded: &recorded }, &AtomicBool::new(false), &Default::default())
 }
 
 pub(crate) fn run(e: &Env) -> anyhow::Result<Job> {
@@ -118,7 +118,7 @@ pub(crate) fn run(e: &Env) -> anyhow::Result<Job> {
 }
 
 pub(crate) fn again(e: &Env, id: &str) -> anyhow::Result<Job> {
-    finish(&e.app, &e.vcc, id, &AtomicBool::new(false), &Default::default())
+    finish(&e.app, id, &AtomicBool::new(false), &Default::default())
 }
 
 /// The job recorded last, and where it stands.
@@ -132,6 +132,27 @@ pub(crate) fn last(e: &Env) -> (Job, Status) {
 pub(crate) fn listed(e: &Env, path: &Path) -> bool {
     let all = crate::runtime().unwrap().block_on(crate::vpm::registered(&e.vcc)).unwrap_or_default();
     all.iter().any(|p| crate::discovery::key(p) == crate::discovery::key(path))
+}
+
+/// Every file of VCC's folder, by its bytes.
+pub(crate) fn store(e: &Env) -> Vec<(PathBuf, Vec<u8>)> {
+    let walk = walkdir::WalkDir::new(&e.vcc).sort_by_file_name().into_iter().flatten().filter(|f| f.file_type().is_file());
+    walk.map(|f| (f.path().to_path_buf(), std::fs::read(f.path()).unwrap())).collect()
+}
+
+/// A store of Creator Companion's with two projects of the person's, in both files.
+pub(crate) fn their_store(e: &Env) {
+    std::fs::create_dir_all(&e.vcc).unwrap();
+    for name in ["Theirs A", "Theirs B"] {
+        let at = e.root.join("Theirs").join(name);
+        copy_tree(&e.source, &at);
+        crate::runtime().unwrap().block_on(crate::vpm::register(&e.vcc, &at, true)).unwrap();
+    }
+}
+
+/// A whole scene of Unity's with one object uploaded as `id`.
+pub(crate) fn scene(id: &str) -> String {
+    format!("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!114 &1\nMonoBehaviour:\n  blueprintId: {id}\n  completedSDKPipeline: 1\n")
 }
 
 /// Does `f` between two steps.
@@ -198,15 +219,16 @@ pub(crate) fn external(e: &Env, payload: &str) -> PathBuf {
 }
 
 #[test]
-fn a_trial_is_recorded_copied_compared_listed_and_waits_for_creator_companion() {
+fn a_trial_is_recorded_copied_compared_and_waits_for_creator_companion() {
     let e = env();
     let before = guarded(&e.source);
     let job = run(&e).unwrap();
-    assert_eq!(job.phase, Phase::Listed);
+    assert_eq!(job.phase, Phase::Ready);
     assert!(job.trial.id.is_some() && job.source.id.is_some(), "both bound to their identity");
     assert_eq!(job.content, [CONTENT]);
     assert!(e.app.join(JOURNAL).is_file() && e.app.join(LOGS).join(&job.id).join(VERIFIED).is_file());
-    assert!(listed(&e, &job.trial.path));
+    assert!(store(&e).is_empty() && !e.vcc.exists(), "nothing of Creator Companion's");
+    assert_eq!(folders(&e.app), [job.trial.path.clone()], "in the gallery by Orbiters' own record");
     assert_eq!(guarded(&job.trial.path), before);
     assert_eq!(guarded(&e.source), before, "the original untouched");
     assert!(job.trial.path.join("Assets/Empty").is_dir() && !job.trial.path.join("Library").exists() && !job.trial.path.join(INCOMPLETE).exists());
@@ -260,7 +282,7 @@ fn a_copy_that_differs_by_a_byte_is_a_failed_copy() {
         assert_eq!((job.phase, s), (Phase::Failed, Status::Failed { kept: true }), "{name}: {err:#}");
         let named = name.replace('/', std::path::MAIN_SEPARATOR_STR);
         assert!(job.differences.iter().any(|d| d.starts_with(&named)), "{name}: {:?}", job.differences);
-        assert!(!listed(&e, &job.trial.path) && !crate::discovery::is_project(&job.trial.path), "never a project");
+        assert!(folders(&e.app).is_empty() && !crate::discovery::is_project(&job.trial.path), "never a project");
         assert!(again(&e, &job.id).is_err(), "never finished");
     }
 }
@@ -276,28 +298,24 @@ fn finish_compares_every_byte_again() {
     ] {
         let e = env();
         external(&e, "AAAA");
-        let blocked = e.root.join("vcc-file");
-        std::fs::write(&blocked, "x").unwrap();
-        // Verified, but it cannot be listed.
-        let failed = prepare(
-            Prepare { dir: &e.app, vcc: &blocked, source: &e.source, parent: &e.root.join("Projects"), name: "T", target: target(), open: &|_| false, budget: &ok, recorded: &|_| {} },
-            &AtomicBool::new(false),
-            &Default::default(),
-        );
-        assert!(failed.is_err());
+        // Verified, and cut short before its last step.
+        {
+            let _s = at_step(|s| if s == Step::Verified { Err(anyhow::anyhow!("cut short")) } else { Ok(()) });
+            assert!(run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).is_err());
+        }
         let (job, s) = last(&e);
-        assert_eq!((job.phase, &s), (Phase::Verified, &Status::Unlisted));
-        assert!(job.error.is_some());
+        assert_eq!((job.phase, &s), (Phase::Verified, &Status::Unfinished));
+        assert!(!crate::discovery::is_project(&job.trial.path), "its marker is there");
         change(&job.trial.path);
         let done = again(&e, &job.id);
         let (after, s) = last(&e);
         if name == "nothing" {
-            assert!(done.is_ok() && s == Status::Waiting { vcc_copy: None } && listed(&e, &job.trial.path));
+            assert!(done.is_ok() && s == Status::Waiting { vcc_copy: None } && crate::discovery::is_project(&job.trial.path));
             // Done once: not again.
             assert!(again(&e, &job.id).is_err());
         } else {
             assert!(done.is_err() && matches!(s, Status::Failed { kept: true }), "{name}: {s:?}");
-            assert!(!after.differences.is_empty() && !listed(&e, &job.trial.path), "{name}");
+            assert!(!after.differences.is_empty() && !crate::discovery::is_project(&job.trial.path), "{name}");
         }
     }
 }
@@ -429,28 +447,31 @@ fn the_record_is_bound_to_identity_and_a_copied_marker_is_inert() {
     // Another folder at its path is not the trial, whatever it holds.
     copy_tree(&moved, &job.trial.path);
     assert_eq!(last(&e).1, Status::Replaced);
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &moved).is_err());
+    assert!(adopt_vcc_copy(&e.app, &job.id, &moved).is_err());
     assert_eq!(authority::state(&e.app, &job.trial.path), TrialState::NotATrial, "the folder put there is not it");
     assert!(matches!(authority::state(&e.app, &moved), TrialState::WaitingForMigration(_)), "the trial is, wherever it is");
-    // Taking it off does not touch what is there now.
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert!(listed(&e, &job.trial.path), "someone else's folder keeps its place on the list");
+    // Not in the gallery as the trial, and taking it off does not touch what is there now.
+    assert!(folders(&e.app).is_empty());
+    abandon(&e.app, &job.id).unwrap();
+    assert!(job.trial.path.join("Assets/Avatar.unity").is_file());
 }
 
-/// Second verification N2: taking a trial off never leaves it listed and unguarded, whatever state it is in, and deletes none
-/// of it.
+/// Second verification N2, fourth's decision A: taking a trial off changes Orbiters' record alone, whatever state it is in: nothing
+/// of Creator Companion's, none of its folder, and its guard stays.
 #[test]
-fn taking_a_trial_off_unlists_it_and_keeps_its_folder_known() {
-    // Waiting.
+fn taking_a_trial_off_changes_orbiters_record_alone() {
+    // Waiting, and added in Creator Companion by the person.
     let e = env();
+    their_store(&e);
     let job = run(&e).unwrap();
-    assert!(listed(&e, &job.trial.path));
-    let left = abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert_eq!(left, Forgotten { at: job.trial.path.clone(), there: true, still_listed: vec![] });
-    assert!(!listed(&e, &job.trial.path) && job.trial.path.join("Assets/Avatar.unity").is_file());
+    crate::runtime().unwrap().block_on(crate::vpm::registered(&e.vcc)).unwrap();
+    let before = store(&e);
+    let left = abandon(&e.app, &job.id).unwrap();
+    assert_eq!(left, Forgotten { at: job.trial.path.clone(), there: true });
+    assert!(store(&e) == before && job.trial.path.join("Assets/Avatar.unity").is_file());
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Abandoned { whole: true, .. }));
     assert!(authority::allow(&e.app, &job.trial.path, authority::Action::Packages).is_ok(), "a verified copy is an ordinary project now");
-    assert!(crate::unity6::look(&e.app, &[]).trials.is_empty(), "not shown any more");
+    assert!(crate::unity6::look(&e.app, &[]).trials.is_empty() && folders(&e.app).is_empty(), "not shown any more");
     // Failed.
     let trial = e.root.join("Projects/F");
     {
@@ -463,23 +484,20 @@ fn taking_a_trial_off_unlists_it_and_keeps_its_folder_known() {
         });
         assert!(run_at(&e, &e.root.join("Projects"), "F", &|_| false, &ok).is_err());
     }
-    // Someone put it on the list by hand.
-    std::fs::remove_file(trial.join(INCOMPLETE)).unwrap();
-    crate::runtime().unwrap().block_on(crate::vpm::register(&e.vcc, &trial, true)).unwrap();
     let (job, _) = last(&e);
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert!(!listed(&e, &trial) && trial.join("Assets/Avatar.unity").is_file());
+    abandon(&e.app, &job.id).unwrap();
+    assert!(store(&e) == before && trial.join("Assets/Avatar.unity").is_file());
     let state = authority::state(&e.app, &trial);
     assert!(matches!(state, TrialState::Abandoned { whole: false, .. }));
-    for action in [authority::Action::Open(authority::Caller::Window), authority::Action::Packages, authority::Action::Duplicate, authority::Action::Storage] {
+    use authority::{Action, Caller};
+    for action in [Action::Open(Caller::Window), Action::Packages, Action::Duplicate, Action::Storage, Action::List, Action::Unlist] {
         assert!(authority::allow(&e.app, &trial, action).is_err(), "{action:?} on a copy that was never verified");
     }
-    // A list that cannot be written: nothing is dropped.
+    // Not there (a disk taken out), another folder at its place: the same.
     let job = run_at(&e, &e.root.join("Projects"), "G", &|_| false, &ok).unwrap();
-    let blocked = e.root.join("vcc-file");
-    std::fs::write(&blocked, "x").unwrap();
-    assert!(abandon(&e.app, &blocked, &job.id).is_err());
-    assert_eq!(last(&e).0.phase, Phase::Listed);
+    std::fs::rename(&job.trial.path, e.root.join("away")).unwrap();
+    assert_eq!(abandon(&e.app, &job.id).unwrap(), Forgotten { at: job.trial.path.clone(), there: false });
+    assert!(store(&e) == before);
 }
 
 /// A stop removes exactly what the copy made; a file somebody else put there stays, and is named.
@@ -500,7 +518,7 @@ fn a_stop_removes_only_what_the_copy_made() {
             Ok(())
         });
         let r = prepare(
-            Prepare { dir: &e.app, vcc: &e.vcc, source: &e.source, parent: &e.root.join("Projects"), name: "T", target: target(), open: &|_| false, budget: &ok, recorded: &|_| {} },
+            Prepare { dir: &e.app, source: &e.source, parent: &e.root.join("Projects"), name: "T", target: target(), open: &|_| false, budget: &ok, recorded: &|_| {} },
             &cancel,
             &Default::default(),
         );
@@ -679,7 +697,7 @@ fn only_the_same_project_is_taken_as_the_migrated_copy() {
     std::fs::create_dir_all(&beside).unwrap();
     vcc_migrates(&beside);
     assert_eq!(last(&e).1, Status::Waiting { vcc_copy: None });
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).is_err());
+    assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err());
     // The same file names with other GUIDs: another project's.
     copy_tree(&job.trial.path, &beside);
     vcc_migrates(&beside);
@@ -690,7 +708,7 @@ fn only_the_same_project_is_taken_as_the_migrated_copy() {
         std::fs::write(job.trial.path.join(format!("Assets/{i}.txt.meta")), format!("guid: {i:032x}\n")).unwrap();
         std::fs::write(beside.join(format!("Assets/{i}.txt.meta")), format!("guid: {i:032x}\n")).unwrap();
     }
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).is_err());
+    assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err());
     for i in 0..30 {
         std::fs::remove_file(job.trial.path.join(format!("Assets/{i}.txt.meta"))).unwrap();
     }
@@ -701,22 +719,22 @@ fn only_the_same_project_is_taken_as_the_migrated_copy() {
     let settings = std::fs::read_to_string(beside.join("ProjectSettings/ProjectSettings.asset")).unwrap();
     std::fs::write(beside.join("ProjectSettings/ProjectSettings.asset"), settings.replace(&job.guid, "ffffffffffffffffffffffffffffffff")).unwrap();
     assert_eq!(last(&e).1, Status::Waiting { vcc_copy: None });
-    assert!(format!("{:#}", adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).unwrap_err()).contains("GUID"));
+    assert!(format!("{:#}", adopt_vcc_copy(&e.app, &job.id, &beside).unwrap_err()).contains("GUID"));
     // The very copy: offered, and taken.
     std::fs::remove_dir_all(&beside).unwrap();
     copy_tree(&job.trial.path, &beside);
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).is_err(), "not migrated yet");
+    assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err(), "not migrated yet");
     vcc_migrates(&beside);
     assert_eq!(last(&e).1, Status::Waiting { vcc_copy: Some(beside.clone()) });
     // The trial itself or its original is not it.
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &job.trial.path).is_err());
-    let job = adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).unwrap();
+    assert!(adopt_vcc_copy(&e.app, &job.id, &job.trial.path).is_err());
+    let job = adopt_vcc_copy(&e.app, &job.id, &beside).unwrap();
     assert_eq!(job.unity6().path, beside);
-    assert!(listed(&e, &beside));
+    assert_eq!(folders(&e.app), [job.trial.path.clone(), beside.clone()]);
     assert_eq!(last(&e).1, Status::OnUnity6);
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Superseded(_)), "the first copy keeps its guard");
     assert!(matches!(authority::state(&e.app, &beside), TrialState::Migrated(_)));
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).is_err(), "once");
+    assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err(), "once");
 }
 
 /// A folder that was beside the trial when it was handed over is never offered, and none is when they could not all be read.
@@ -774,15 +792,82 @@ fn one_lease_at_a_time_on_a_trial() {
     let job = run(&e).unwrap();
     let lease = Lease::take(&e.app, &job.id).unwrap();
     assert_eq!(last(&e).1, Status::Running);
-    assert!(again(&e, &job.id).is_err() && abandon(&e.app, &e.vcc, &job.id).is_err());
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &e.root).is_err());
+    assert!(again(&e, &job.id).is_err() && abandon(&e.app, &job.id).is_err());
+    assert!(adopt_vcc_copy(&e.app, &job.id, &e.root).is_err());
     drop(lease);
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
+    abandon(&e.app, &job.id).unwrap();
 }
 
-/// Third verification R2: listing a trial changes no byte of it, the manifest vrc-get's own loader rewrites included.
+/// Fourth verification, decision A: a trial's whole life writes no byte of Creator Companion's or ALCOM's, whatever is there (nothing,
+/// their store with projects, one that cannot be read, one in use), whatever fails and is cut short.
 #[test]
-fn listing_changes_no_byte_of_the_trial() {
+fn a_trials_whole_life_writes_nothing_of_creator_companion() {
+    for store_is in ["none", "theirs", "a database alone", "unreadable", "in use"] {
+        let e = env();
+        match store_is {
+            "theirs" | "in use" => their_store(&e),
+            "a database alone" => {
+                their_store(&e);
+                std::fs::write(e.vcc.join("settings.json"), r#"{"showPrereleasePackages":true}"#).unwrap();
+            }
+            "unreadable" => {
+                std::fs::create_dir_all(&e.vcc).unwrap();
+                std::fs::write(e.vcc.join("settings.json"), "{").unwrap();
+                std::fs::write(e.vcc.join("vcc.liteDb"), "x").unwrap();
+            }
+            _ => {}
+        }
+        let before = store(&e);
+        let _held = (store_is == "in use").then(|| kept_from_all(&e.vcc.join("settings.json")));
+        let same = |what: &str| {
+            let names: Vec<_> = walkdir::WalkDir::new(&e.vcc).into_iter().flatten().filter(|f| f.file_type().is_file()).map(|f| f.path().to_path_buf()).collect();
+            assert_eq!(names.len(), before.len(), "{store_is}: {what}: {names:?}");
+            if store_is != "in use" {
+                assert!(store(&e) == before, "{store_is}: {what}");
+            }
+        };
+        for step in [Step::Recorded, Step::Made, Step::Folders, Step::Copied, Step::Compared, Step::Verified, Step::MarkerGone, Step::Checked] {
+            let _s = at_step(move |s| if s == step { Err(anyhow::anyhow!("made to fail")) } else { Ok(()) });
+            assert!(run_at(&e, &e.root.join("Projects"), &format!("{step:?}"), &|_| false, &ok).is_err());
+            same(&format!("{step:?}"));
+            let (job, s) = last(&e);
+            if s == Status::Unfinished {
+                drop(_s);
+                again(&e, &job.id).unwrap();
+                same("finished");
+            }
+            abandon(&e.app, &job.id).unwrap();
+            same("taken off");
+        }
+        let job = run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).unwrap();
+        let beside = e.root.join("Projects/T-Migrated");
+        copy_tree(&job.trial.path, &beside);
+        vcc_migrates(&beside);
+        adopt_vcc_copy(&e.app, &job.id, &beside).unwrap();
+        same("taken");
+        let good = exact(&e.root, "6000.0.67f1", Some("78a1c2bbeb6a"));
+        launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &|_, _, _| Ok(None)).unwrap();
+        let _ = crate::unity6::look(&e.app, &[e.source.clone(), beside.clone()]);
+        same("opened, looked at");
+        // The gallery's, the bridge's and the menus' own Add and Remove, on any folder of it.
+        let rt = crate::runtime().unwrap();
+        for at in [&job.trial.path, &beside] {
+            for add in [true, false] {
+                assert!(authority::allow(&e.app, at, if add { authority::Action::List } else { authority::Action::Unlist }).is_err());
+            }
+            assert!(rt.block_on(crate::coherent::solve(&e.vcc, &job.trial.path, &[], &[], false)).is_err());
+        }
+        same("asked");
+        abandon(&e.app, &job.id).unwrap();
+        same("taken off");
+        assert!(!e.vcc.exists() == (store_is == "none"));
+    }
+}
+
+/// Third verification R2: nothing of a trial's own is written by anything but its copy: the manifest vrc-get's own loader rewrites
+/// included; and a plan of changes is only looked at.
+#[test]
+fn no_byte_of_the_trial_changes() {
     let e = env();
     let p = e.source.join("Packages/vpm-manifest.json");
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
@@ -790,28 +875,17 @@ fn listing_changes_no_byte_of_the_trial() {
     std::fs::write(&p, v.to_string()).unwrap();
     let before = std::fs::read(&p).unwrap();
     let job = run(&e).unwrap();
-    assert!(listed(&e, &job.trial.path));
     assert_eq!(std::fs::read(job.trial.path.join("Packages/vpm-manifest.json")).unwrap(), before);
-    assert_eq!(std::fs::read(&p).unwrap(), before);
-    // The gallery's and the bridge's Add and Remove, on an ordinary project with it.
-    let of = |path: &Path| walkdir::WalkDir::new(path).sort_by_file_name().into_iter().flatten().filter(|f| f.file_type().is_file()).map(|f| (f.path().to_path_buf(), std::fs::read(f.path()).unwrap(), f.metadata().unwrap().modified().unwrap())).collect::<Vec<_>>();
-    let whole = of(&e.source);
     let rt = crate::runtime().unwrap();
-    rt.block_on(crate::vpm::register(&e.vcc, &e.source, true)).unwrap();
-    assert!(listed(&e, &e.source));
-    rt.block_on(crate::vpm::register(&e.vcc, &e.source, false)).unwrap();
-    assert!(!listed(&e, &e.source) && listed(&e, &job.trial.path));
-    assert_eq!(of(&e.source), whole);
-    // A plan of changes is only looked at: refused where VPM's loader would write.
-    assert!(rt.block_on(crate::coherent::solve(&e.vcc, &e.source, &[], &[], false)).is_err());
-    assert!(rt.block_on(crate::coherent::solve(&e.vcc, &job.trial.path, &[], &[], false)).is_err(), "and for a waiting trial");
-    assert_eq!(of(&e.source), whole);
+    assert!(rt.block_on(crate::coherent::solve(&e.vcc, &e.source, &[], &[], false)).is_err(), "VPM's loader would write");
+    assert!(rt.block_on(crate::coherent::solve(&e.vcc, &job.trial.path, &[], &[], false)).is_err(), "a waiting trial");
+    assert_eq!(std::fs::read(&p).unwrap(), before);
 }
 
-/// Third verification, specification 2: what changed between verifying and the end of listing is found, told, and not listed.
+/// What changed between verifying and the end is found, told, and the copy is a failed one.
 #[test]
-fn a_trial_changed_while_it_is_listed_is_not_listed() {
-    for step in [Step::Verified, Step::MarkerGone, Step::Listed] {
+fn a_trial_changed_before_it_is_handed_over_is_a_failed_copy() {
+    for step in [Step::Verified, Step::MarkerGone] {
         let e = env();
         let trial = e.root.join("Projects/T");
         let t = trial.clone();
@@ -826,88 +900,74 @@ fn a_trial_changed_while_it_is_listed_is_not_listed() {
         let (job, s) = last(&e);
         assert_eq!((job.phase, s), (Phase::Failed, Status::Failed { kept: true }), "{step:?}");
         assert!(job.differences.iter().any(|d| d.contains("vpm-manifest.json")));
-        assert!(!listed(&e, &trial) && authority::allow(&e.app, &trial, authority::Action::Packages).is_err(), "{step:?}");
+        assert!(authority::allow(&e.app, &trial, authority::Action::Packages).is_err(), "{step:?}");
     }
 }
 
-/// Third verification R6: an adoption whose listing failed waits, guarded and shown, and is tried again.
+/// Third verification R6: taking the migrated copy is one line of the record: done, or not done and done again.
 #[test]
-fn an_adoption_that_could_not_be_listed_is_tried_again() {
+fn taking_the_migrated_copy_is_done_or_done_again() {
     let e = env();
     let job = run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).unwrap();
     let beside = e.root.join("Projects/T-Migrated");
     copy_tree(&job.trial.path, &beside);
     vcc_migrates(&beside);
-    let blocked = e.root.join("vcc-file");
-    std::fs::write(&blocked, "x").unwrap();
-    for _ in 0..2 {
-        assert!(adopt_vcc_copy(&e.app, &blocked, &job.id, &beside).is_err());
-        let (now, s) = last(&e);
-        assert!(now.migrated.is_none() && now.adopting.as_ref().is_some_and(|p| p.path == beside));
-        assert_eq!(s, Status::Waiting { vcc_copy: Some(beside.clone()) }, "still offered");
-        assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::WaitingForMigration(_)), "the first copy is not superseded yet");
-        assert!(matches!(authority::state(&e.app, &beside), TrialState::CopiedVerified(_)));
-        assert!(authority::allow(&e.app, &beside, authority::Action::Open(authority::Caller::Window)).is_err());
+    // The record cannot be written: nothing is taken, and it is still offered.
+    {
+        let lease = Lease::take(&e.app, &job.id).unwrap();
+        assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err());
+        drop(lease);
+        assert!(last(&e).0.migrated.is_none());
+        assert_eq!(last(&e).1, Status::Waiting { vcc_copy: Some(beside.clone()) });
     }
-    let done = adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).unwrap();
-    assert!(done.adopting.is_none() && done.unity6().path == beside && listed(&e, &beside));
+    let done = adopt_vcc_copy(&e.app, &job.id, &beside).unwrap();
+    assert!(done.unity6().path == beside);
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Superseded(_)));
-    // Another one may be chosen while none is taken.
-    let job = run_at(&e, &e.root.join("Projects"), "U", &|_| false, &ok).unwrap();
-    let (a, b) = (e.root.join("Projects/A"), e.root.join("Projects/B"));
-    for at in [&a, &b] {
-        copy_tree(&job.trial.path, at);
-        vcc_migrates(at);
-    }
-    assert!(adopt_vcc_copy(&e.app, &blocked, &job.id, &a).is_err());
-    assert_eq!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &b).unwrap().unity6().path, b);
-    assert_eq!(authority::state(&e.app, &a), TrialState::NotATrial);
+    assert!(adopt_vcc_copy(&e.app, &job.id, &beside).is_err(), "once");
 }
 
-/// Third verification R5: Forget asks the record and the lease before it touches the list, and takes no protection off: an
-/// altered copy never becomes an ordinary project, a superseded one stays superseded, one on Unity 6 stays a trial.
+/// Third verification R5: Forget asks the record and the lease first, and takes no protection off: an altered copy never becomes an
+/// ordinary project, a superseded one stays superseded, one on Unity 6 stays a trial.
 #[test]
 fn forgetting_checks_first_and_keeps_every_protection() {
     use authority::{allow_on, Action, Caller};
     let e = env();
-    // Part of the record cannot be read: the list is not touched.
+    // Part of the record cannot be read: nothing is changed.
     let job = run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).unwrap();
     let journal_file = e.app.join(JOURNAL);
     let whole = std::fs::read(&journal_file).unwrap();
-    let settings = std::fs::read(e.vcc.join("settings.json")).unwrap();
-    std::fs::write(&journal_file, [&whole[..], b"{torn"].concat()).unwrap();
-    assert!(abandon(&e.app, &e.vcc, &job.id).is_err());
-    assert!(listed(&e, &job.trial.path));
-    assert_eq!(std::fs::read(e.vcc.join("settings.json")).unwrap(), settings);
+    let torn = [&whole[..], b"{torn"].concat();
+    std::fs::write(&journal_file, &torn).unwrap();
+    assert!(abandon(&e.app, &job.id).is_err());
+    assert_eq!(std::fs::read(&journal_file).unwrap(), torn);
     std::fs::write(&journal_file, &whole).unwrap();
-    // Verified, not listed, changed since: never an ordinary project.
+    // Verified, not finished, changed since: never an ordinary project.
     for changed in [false, true] {
         let name = if changed { "Changed" } else { "Same" };
         {
-            let _s = at_step(|s| if s == Step::MarkerGone { Err(anyhow::anyhow!("no list")) } else { Ok(()) });
+            let _s = at_step(|s| if s == Step::MarkerGone { Err(anyhow::anyhow!("cut short")) } else { Ok(()) });
             assert!(run_at(&e, &e.root.join("Projects"), name, &|_| false, &ok).is_err());
         }
         let (job, s) = last(&e);
-        assert_eq!(s, Status::Unlisted);
+        assert_eq!(s, Status::Unfinished);
         if changed {
             std::fs::write(job.trial.path.join("Assets/new.txt"), "x").unwrap();
         }
-        abandon(&e.app, &e.vcc, &job.id).unwrap();
+        abandon(&e.app, &job.id).unwrap();
         assert_eq!(last(&e).0.phase, Phase::Abandoned { whole: !changed });
         assert_eq!(authority::allow(&e.app, &job.trial.path, Action::Packages).is_ok(), !changed);
-        assert_eq!(authority::allow(&e.app, &job.trial.path, Action::List).is_ok(), !changed);
+        assert_eq!(authority::allow(&e.app, &job.trial.path, Action::List).is_ok(), !changed, "the gallery's own Add, once it is an ordinary project");
     }
     // An adopted pair: the first copy stays superseded, the migrated one a trial on Unity 6.
     let job = run_at(&e, &e.root.join("Projects"), "P", &|_| false, &ok).unwrap();
     let beside = e.root.join("Projects/P-Migrated");
     copy_tree(&job.trial.path, &beside);
     vcc_migrates(&beside);
-    adopt_vcc_copy(&e.app, &e.vcc, &job.id, &beside).unwrap();
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert!(!listed(&e, &job.trial.path) && !listed(&e, &beside));
+    adopt_vcc_copy(&e.app, &job.id, &beside).unwrap();
+    abandon(&e.app, &job.id).unwrap();
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Superseded(_)));
     assert!(matches!(authority::state(&e.app, &beside), TrialState::Migrated(_)));
-    for action in [Action::Open(Caller::Window), Action::Packages] {
+    for action in [Action::Open(Caller::Window), Action::Packages, Action::List] {
         assert!(allow_on(&e.app, &job.trial.path, action, false).is_err(), "{action:?}");
     }
     let open = Action::Open(Caller::Window);
@@ -919,39 +979,11 @@ fn forgetting_checks_first_and_keeps_every_protection() {
     launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &|_, _, _| Ok(None)).unwrap();
     // Forgotten on 2022, migrated afterwards by the person: a trial again by what it is.
     let job = run_at(&e, &e.root.join("Projects"), "L", &|_| false, &ok).unwrap();
-    abandon(&e.app, &e.vcc, &job.id).unwrap();
+    abandon(&e.app, &job.id).unwrap();
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Abandoned { whole: true, .. }));
     vcc_migrates(&job.trial.path);
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Migrated(_)));
     assert!(allow_on(&e.app, &job.trial.path, open, true).is_err());
-}
-
-/// Third verification R7: an entry goes by the folder it names: not another project of a like name, not a folder that is not
-/// there, not one put in its place.
-#[test]
-fn forgetting_removes_only_the_entry_of_the_very_folder() {
-    let e = env();
-    let rt = crate::runtime().unwrap();
-    rt.block_on(crate::vpm::register(&e.vcc, &e.source, true)).unwrap();
-    let job = run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).unwrap();
-    let other = e.root.join("Elsewhere/T");
-    copy_tree(&e.source, &other);
-    rt.block_on(crate::vpm::register(&e.vcc, &other, true)).unwrap();
-    // Not there (a disk taken out): what its entry names cannot be told.
-    let away = e.root.join("away");
-    std::fs::rename(&job.trial.path, &away).unwrap();
-    let left = abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert_eq!(left, Forgotten { at: job.trial.path.clone(), there: false, still_listed: vec![job.trial.path.clone()] });
-    assert!(listed(&e, &job.trial.path) && listed(&e, &e.source) && listed(&e, &other));
-    // Another folder there now: not its entry either.
-    copy_tree(&e.source, &job.trial.path);
-    assert_eq!(abandon(&e.app, &e.vcc, &job.id).unwrap().still_listed, [job.trial.path.clone()]);
-    assert!(listed(&e, &job.trial.path));
-    std::fs::remove_dir_all(&job.trial.path).unwrap();
-    // Back: now its own entry goes, and no other.
-    std::fs::rename(&away, &job.trial.path).unwrap();
-    assert!(abandon(&e.app, &e.vcc, &job.id).unwrap().still_listed.is_empty());
-    assert!(!listed(&e, &job.trial.path) && listed(&e, &e.source) && listed(&e, &other));
 }
 
 /// Third verification R8: where a folder cannot be held, every step that makes or changes a trial refuses at its entry, whatever
@@ -964,14 +996,14 @@ fn where_trials_are_not_available_every_step_refuses() {
     AVAILABLE.with(|a| a.set(Some(false)));
     assert!(run_at(&e, &e.root.join("Projects"), "N", &|_| false, &ok).is_err());
     assert!(again(&e, &job.id).is_err());
-    assert!(adopt_vcc_copy(&e.app, &e.vcc, &job.id, &e.root).is_err());
-    assert!(abandon(&e.app, &e.vcc, &job.id).is_err());
+    assert!(adopt_vcc_copy(&e.app, &job.id, &e.root).is_err());
+    assert!(abandon(&e.app, &job.id).is_err());
     let none = |_: &str, _: &str| Found::Missing { wrong: vec![] };
     assert!(launch(&e.app, &job.id, &none, &|_| false, &|_| false, &|_, _, _| panic!("started")).is_err());
     AVAILABLE.with(|a| a.set(None));
     assert_eq!(available(), cfg!(windows));
     assert_eq!(std::fs::read(e.app.join(JOURNAL)).unwrap(), record);
-    assert!(listed(&e, &job.trial.path) && !e.root.join("Projects/N").exists());
+    assert!(!e.root.join("Projects/N").exists());
 }
 
 /// Third verification M5: a run that ended between starting the editor and recording it leaves an attempt that is bound to
@@ -1003,6 +1035,43 @@ fn an_interrupted_start_is_reconciled_with_its_editor() {
     assert!(of_log_none(&e.app));
 }
 
+/// A `.tgz` of `members`.
+pub(crate) fn archive(at: &Path, members: &[(&str, String)]) {
+    use std::io::Write;
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let mut tar = vec![];
+    let mut put = |name: &str, kind: u8, body: &[u8]| {
+        let mut head = [0u8; 512];
+        head[..name.len().min(100)].copy_from_slice(&name.as_bytes()[..name.len().min(100)]);
+        head[124..135].copy_from_slice(format!("{:011o}", body.len()).as_bytes());
+        head[156] = kind;
+        head[257..262].copy_from_slice(b"ustar");
+        head[148..156].copy_from_slice(b"        ");
+        let sum: u32 = head.iter().map(|b| u32::from(*b)).sum();
+        head[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+        tar.extend(head);
+        tar.extend(body);
+        tar.resize(tar.len().div_ceil(512) * 512, 0);
+    };
+    for (i, (name, body)) in members.iter().enumerate() {
+        if name.len() > 100 {
+            // Both ways of a long name.
+            if i % 2 == 0 {
+                put("././@LongLink", b'L', format!("{name}\0").as_bytes());
+            } else {
+                let record = format!(" path={name}\n");
+                let n = record.len() + 3;
+                put("pax", b'x', format!("{n}{record}").as_bytes());
+            }
+        }
+        put(name, b'0', body.as_bytes());
+    }
+    tar.extend([0u8; 1024]);
+    let mut gz = flate2::write::GzEncoder::new(std::fs::File::create(at).unwrap(), flate2::Compression::fast());
+    gz.write_all(&tar).unwrap();
+    gz.finish().unwrap();
+}
+
 fn of_log_none(app: &Path) -> bool {
     super::of_log(&app.join("no such log")).is_none()
 }
@@ -1011,17 +1080,20 @@ fn of_log_none(app: &Path) -> bool {
 #[test]
 fn nothing_is_kept_where_the_original_can_see_it() {
     for (inside, at) in [("app", "Assets/Orbiters"), ("vcc", "Assets/Vcc"), ("app/unity6-logs", "Assets/Logs")] {
+        // (VCC's folder: a duplicate is added to its list; a trial writes nothing there.)
         let e = env();
         let target = e.root.join(inside);
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("theirs.txt"), "theirs").unwrap();
         link(&target, &e.source.join(at));
         let before: Vec<_> = walkdir::WalkDir::new(&e.root).into_iter().flatten().map(|f| f.path().to_path_buf()).collect();
-        let err = format!("{:#}", run(&e).unwrap_err());
-        assert!(err.contains("keeps its own files"), "{inside}: {err}");
-        assert!(super::look(&e.app, &[&e.app, &e.vcc], &e.source, &e.root.join("Projects"), "T", false, &AtomicBool::new(false)).place.is_err());
-        let after: Vec<_> = walkdir::WalkDir::new(&e.root).into_iter().flatten().map(|f| f.path().to_path_buf()).collect();
-        assert_eq!(before, after, "{inside}");
+        if inside != "vcc" {
+            let err = format!("{:#}", run(&e).unwrap_err());
+            assert!(err.contains("keeps its own files"), "{inside}: {err}");
+            assert!(super::look(&e.app, &[&e.app], &e.source, &e.root.join("Projects"), "T", false, &AtomicBool::new(false)).place.is_err());
+            let after: Vec<_> = walkdir::WalkDir::new(&e.root).into_iter().flatten().map(|f| f.path().to_path_buf()).collect();
+            assert_eq!(before, after, "{inside}");
+        }
         // Nor a duplicate of it.
         if inside == "vcc" {
             let rt = crate::runtime().unwrap();
@@ -1038,7 +1110,7 @@ fn nothing_is_kept_where_the_original_can_see_it() {
 fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     let e = env();
     let id = |n: u32| format!("avtr_{n:08}-2222-4333-8444-555555555555");
-    let prefab = |n: u32| format!("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!114 &1\nMonoBehaviour:\n  blueprintId: {}\n", id(n));
+    let prefab = |n: u32| scene(&id(n));
     let variant = |n: u32| format!("%YAML 1.1\n--- !u!1001 &1\nPrefabInstance:\n  m_Modification:\n    m_Modifications:\n    - target: {{fileID: 1, guid: 2, type: 3}}\n      propertyPath: blueprintId\n      value: {}\n      objectReference: {{fileID: 0}}\n", id(n));
     let ext = external(&e, "x");
     std::fs::create_dir_all(ext.join("Deep")).unwrap();
@@ -1054,6 +1126,16 @@ fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     std::fs::write(e.source.join("Assets/Variant of variant.prefab"), variant(4)).unwrap();
     std::fs::write(e.source.join("Assets/Broken.asset"), "version https://git-lfs.github.com/spec/v1\n").unwrap();
     let src = e.source.clone();
+    // Fourth verification: a package archive, one as npm packs it and one with a long name; a package named like VRChat's.
+    let tgz = e.root.join("External/com.arc.tgz");
+    archive(&tgz, &[("package/package.json", r#"{"name":"com.arc","version":"1.0.0"}"#.into()), ("package/Deep/A.prefab", prefab(6)), (&format!("package/{}/B.unity", "long".repeat(40)), prefab(7))]);
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(e.source.join("Packages/manifest.json")).unwrap()).unwrap();
+    let mut manifest = manifest;
+    manifest["dependencies"]["com.arc"] = format!("file:{}", slash(&tgz)).into();
+    std::fs::write(e.source.join("Packages/manifest.json"), manifest.to_string()).unwrap();
+    std::fs::create_dir_all(e.source.join("Packages/com.vrchat.personal")).unwrap();
+    std::fs::write(e.source.join("Packages/com.vrchat.personal/package.json"), r#"{"name":"com.vrchat.personal","version":"1.0.0"}"#).unwrap();
+    std::fs::write(e.source.join("Packages/com.vrchat.personal/A.prefab"), prefab(8)).unwrap();
     let late = prefab(5);
     let s = at_step(move |s| {
         if s == Step::Recorded {
@@ -1063,7 +1145,7 @@ fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     });
     let job = run(&e).unwrap();
     drop(s);
-    for n in 1..=5 {
+    for n in 1..=8 {
         assert!(job.content.contains(&id(n)), "{n}: {:?}", job.content);
     }
     assert_eq!(job.content_unsure, [Path::new("Assets").join("Broken.asset").display().to_string()]);
@@ -1072,13 +1154,36 @@ fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     let rt = crate::runtime().unwrap();
     let copy = rt.block_on(crate::templates::duplicate(&e.vcc, &e.source, &e.root.join("Projects"), "Copy", Default::default(), &cancel, &Default::default())).unwrap();
     let all = payload::content_of(&copy, &cancel).unwrap();
-    assert!((1..=5).all(|n| all.ids.contains(&id(n))), "{all:?}");
+    assert!((1..=8).all(|n| all.ids.contains(&id(n))), "{all:?}");
     assert_eq!(all.unsure.len(), 1);
     let same_package = e.root.join("Projects/Other");
     project(&same_package, Some(U6), &[], &[]);
     std::fs::create_dir_all(same_package.join("Packages")).unwrap();
     std::fs::write(same_package.join("Packages/manifest.json"), std::fs::read(e.source.join("Packages/manifest.json")).unwrap()).unwrap();
     assert!(authority::upload(&e.app, &same_package).unwrap_err().contains(&id(1)), "its package from outside has the content");
+    // Each alone is enough: the archive, the package named like VRChat's.
+    for n in [6, 7, 8] {
+        let one = e.root.join(format!("Projects/One {n}"));
+        project(&one, Some(U6), &[], &[]);
+        if n == 8 {
+            std::fs::create_dir_all(one.join("Packages/com.vrchat.personal")).unwrap();
+            std::fs::write(one.join("Packages/com.vrchat.personal/A.prefab"), prefab(8)).unwrap();
+        } else {
+            std::fs::create_dir_all(one.join("Packages")).unwrap();
+            std::fs::write(one.join("Packages/manifest.json"), format!(r#"{{"dependencies":{{"com.arc":"file:{}"}}}}"#, slash(&tgz))).unwrap();
+        }
+        assert!(authority::upload(&e.app, &one).unwrap_err().contains(&id(n)), "{n}");
+    }
+    // An archive that cannot be opened, cut short, or of something else.
+    let broken = e.root.join("Projects/Broken");
+    project(&broken, Some(U2022), &[], &[]);
+    std::fs::create_dir_all(broken.join("Packages")).unwrap();
+    std::fs::write(broken.join("Packages/manifest.json"), r#"{"dependencies":{"com.bad":"file:bad.tgz"}}"#).unwrap();
+    let whole = std::fs::read(&tgz).unwrap();
+    for bad in [b"not an archive".to_vec(), vec![], whole[..whole.len() / 2].to_vec(), whole[..whole.len() - 9].to_vec()] {
+        std::fs::write(broken.join("Packages/bad.tgz"), &bad).unwrap();
+        assert!(authority::upload(&e.app, &broken).unwrap().warning.unwrap().contains("bad.tgz"), "{} bytes", bad.len());
+    }
     // Nothing in common, and a file of it or of the trial that cannot be read: it may be.
     let apart = e.root.join("Projects/Apart");
     project(&apart, Some(U2022), &[], &[]);

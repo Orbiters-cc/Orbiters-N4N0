@@ -35,7 +35,11 @@ pub struct Project {
     pub unity: String,
     pub kind: Kind,
     pub modified: u64,
+    /// In the gallery's own list: on the one VCC and ALCOM share, or Orbiters' own ([`Project::own`]).
     pub registered: bool,
+    /// In it by Orbiters' own record alone (a Unity 6 trial): nothing says VCC lists it.
+    #[serde(default)]
+    pub own: bool,
     pub missing: bool,
     pub avatars: Vec<Avatar>,
     /// The worlds its scenes were uploaded as (`wrld_…` blueprint IDs), with My World's thumbnail when it keeps one.
@@ -154,6 +158,7 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         .unwrap_or(0);
     let avatars = vec![];
     Project {
+        own: false,
         name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         missing: !is_project(&path),
         path,
@@ -334,10 +339,21 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             scan.projects.iter().filter(|p| p.registered).map(|p| p.path.clone()).collect()
         }
     };
-    let known: HashSet<_> = registered.iter().map(|p| key(p)).collect();
-    let mut found: HashMap<String, PathBuf> = scan.projects.iter().map(|p| (key(&p.path), p.path.clone())).collect();
+    let mut known = Known::default();
+    let mut found = HashMap::new();
     for p in &registered {
-        found.insert(key(p), p.clone());
+        known.listed.insert(put(&mut found, p.clone()));
+    }
+    for p in &scan.projects {
+        keep(&mut found, p.path.clone());
+    }
+    // Orbiters' own records: the Unity 6 trials, and copies that are not on the list, wherever they are.
+    let app = crate::data_dir();
+    for p in crate::unity6::trial::folders(&app) {
+        known.trials.insert(keep(&mut found, p));
+    }
+    for p in crate::copies::folders(&app) {
+        known.copies.insert(keep(&mut found, p));
     }
     rebuild(&mut scan, &found, &known);
     scan.status = tr("Finding nearby projects").into();
@@ -346,7 +362,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     let mut roots = HashSet::new();
     for p in &seeds {
         if is_project(p) {
-            found.insert(key(p), p.clone());
+            keep(&mut found, p.clone());
         }
         if let Some(parent) = p.parent() {
             roots.insert(parent.to_path_buf());
@@ -367,7 +383,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         #[cfg(target_os = "macos")]
         {
             for p in if orbiters_core::paths::roots().is_none() { spotlight_projects() } else { Vec::new() } {
-                found.insert(key(&p), p);
+                keep(&mut found, p);
             }
             rebuild(&mut scan, &found, &known);
             publish(&scan);
@@ -421,15 +437,58 @@ fn in_dot_folder(path: &Path) -> bool {
     path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
 
-fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, registered: &HashSet<String>) {
-    let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
+/// What is shown wherever it is, by its place among what was found.
+#[derive(Default)]
+struct Known {
+    /// On the list VCC and ALCOM share.
+    listed: HashSet<String>,
+    /// Unity 6 trials, in the gallery by Orbiters' own record.
+    trials: HashSet<String>,
+    /// Copies that could not be listed yet.
+    copies: HashSet<String>,
+}
+
+/// Where `p` is among what was found: by its name whatever its case, or, where a disk keeps two folders apart whose names differ
+/// by case only, by its very name.
+fn place(found: &HashMap<String, PathBuf>, p: &Path) -> String {
+    let k = key(p);
+    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
+    let apart = |other: &PathBuf| plain(other) != plain(p) && crate::owned::id_of(other).ok().zip(crate::owned::id_of(p).ok()).is_some_and(|(a, b)| a != b);
+    match found.get(&k) {
+        Some(other) if apart(other) => format!("={}", plain(p)),
+        _ => k,
+    }
+}
+
+/// Puts `p` among what was found, in the place of another spelling of it.
+fn put(found: &mut HashMap<String, PathBuf>, p: PathBuf) -> String {
+    let k = place(found, &p);
+    found.insert(k.clone(), p);
+    k
+}
+
+/// The same, keeping the spelling that is there.
+fn keep(found: &mut HashMap<String, PathBuf>, p: PathBuf) -> String {
+    let k = place(found, &p);
+    found.entry(k.clone()).or_insert(p);
+    k
+}
+
+fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
+    let mut old: HashMap<String, _> = HashMap::new();
+    for p in &scan.projects {
+        // (A folder that differs by case only has its own, under its very name.)
+        old.insert(place(found, &p.path), (p.avatars.clone(), p.worlds.clone()));
+    }
     scan.projects = found
         .iter()
         // A project found earlier inside a dot-folder (a cache from before PROJECTS-9, a seed) is not proposed again;
         // one the person registered stays wherever it is.
-        .filter(|(k, p)| registered.contains(*k) || (is_project(p) && !in_dot_folder(p)))
+        .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && (known.trials.contains(*k) || known.copies.contains(*k) || !in_dot_folder(p))))
         .map(|(k, p)| {
-            let mut project = describe(p.clone(), registered.contains(k), &mut scan.scenes);
+            let listed = known.listed.contains(k);
+            let mut project = describe(p.clone(), listed || known.trials.contains(k), &mut scan.scenes);
+            project.own = known.trials.contains(k) && !listed;
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
         })
@@ -485,7 +544,7 @@ fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(DiskEvent::Found(p)) => {
-                found.insert(key(&p), p);
+                keep(found, p);
             }
             Ok(DiskEvent::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 finished = true;
@@ -542,7 +601,7 @@ fn walk(
             if let Some(tx) = events {
                 let _ = tx.send(DiskEvent::Found(p.clone()));
             }
-            found.insert(key(&p), p);
+            keep(found, p);
             continue;
         }
         if depth.is_some_and(|max| d >= max) {
@@ -922,9 +981,9 @@ mod retained_lists {
         let mine = make(".hidden/Mine");
         let plain = make("Projects/Plain");
         let found: HashMap<String, PathBuf> = [&stand_in, &mine, &plain].into_iter().map(|p| (key(p), p.clone())).collect();
-        let registered: HashSet<String> = [key(&mine)].into_iter().collect();
+        let known = Known { listed: [key(&mine)].into_iter().collect(), ..Default::default() };
         let mut scan = Scan::default();
-        rebuild(&mut scan, &found, &registered);
+        rebuild(&mut scan, &found, &known);
         let mut kept: Vec<PathBuf> = scan.projects.iter().map(|p| p.path.clone()).collect();
         kept.sort();
         let mut wanted = vec![mine.clone(), plain.clone()];

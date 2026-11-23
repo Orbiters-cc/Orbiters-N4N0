@@ -25,9 +25,9 @@ pub enum TrialState {
     Copying(Job),
     /// The copy failed, stopped, or is not what the original holds: kept, never used.
     CopyFailed(Job),
-    /// Every byte compared; not on the list yet.
+    /// Every byte compared; its last step is left.
     CopiedVerified(Job),
-    /// Listed; Creator Companion has not migrated it.
+    /// Ready; Creator Companion has not migrated it.
     WaitingForMigration(Job),
     /// Its files show the reviewed line of Unity 6.
     Migrated(Job),
@@ -79,8 +79,6 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
         };
         if job.migrated.as_ref().is_some_and(is) {
             found = Some((job, Which::Migrated));
-        } else if job.adopting.as_ref().is_some_and(is) {
-            found = Some((job, Which::Adopting));
         } else if is(&job.trial) {
             found = Some((job, Which::Trial));
         }
@@ -102,11 +100,9 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
         // Nobody works on it: it was cut short, and is never taken up again.
         Phase::Planned | Phase::Copying | Phase::Failed => TrialState::CopyFailed(job),
         Phase::Verified => TrialState::CopiedVerified(job),
-        // Not on the list yet, as the copy taken in the trial's place.
-        Phase::Listed if which == Which::Adopting => TrialState::CopiedVerified(job),
-        Phase::Listed if first => TrialState::Superseded(job),
-        Phase::Listed if standing::read(&job.unity6().path, &super::matrix::Matrix::built_in()).state == State::OnUnity6 => TrialState::Migrated(job),
-        Phase::Listed => TrialState::WaitingForMigration(job),
+        Phase::Ready if first => TrialState::Superseded(job),
+        Phase::Ready if standing::read(&job.unity6().path, &super::matrix::Matrix::built_in()).state == State::OnUnity6 => TrialState::Migrated(job),
+        Phase::Ready => TrialState::WaitingForMigration(job),
     }
 }
 
@@ -115,7 +111,6 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
 enum Which {
     Trial,
     Migrated,
-    Adopting,
 }
 
 /// Who asks.
@@ -157,7 +152,7 @@ fn refused(state: &TrialState) -> String {
         TrialState::Unknown(why) => why.clone(),
         TrialState::Copying(_) => tr("This Unity 6 trial is still being made.").into(),
         TrialState::CopyFailed(job) => tr!("This folder is a Unity 6 trial whose copy failed, not a project: it stays at {path}. Start a new trial.", path = job.trial.path.display()),
-        TrialState::CopiedVerified(_) => tr("This Unity 6 trial is not on the project list yet: list it in the Unity projects tab first.").into(),
+        TrialState::CopiedVerified(_) => tr("This Unity 6 trial is not finished: finish it in the Unity projects tab first.").into(),
         TrialState::WaitingForMigration(_) => tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").into(),
         TrialState::Superseded(_) => tr("Creator Companion's migrated copy is this trial's Unity 6 copy now; this first copy stays on Unity 2022 and is not changed from here.").into(),
         TrialState::Abandoned { job, .. } => tr!("This folder is a Unity 6 trial that was taken off before it was complete: it stays at {path}, and is not a project to open.", path = job.trial.path.display()),
@@ -191,15 +186,16 @@ pub fn allow_on(dir: &Path, path: &Path, action: Action, mac: bool) -> Result<Wa
     }
     match (&state, action) {
         (TrialState::NotATrial | TrialState::Abandoned { whole: true, .. }, _) => Ok(Way::Plain),
+        // Creator Companion's list is the person's, in it: no action here puts a trial on it or takes one off.
+        (state, Action::List | Action::Unlist) if !matches!(state, TrialState::Unknown(_)) => {
+            Err(tr("This is a Unity 6 trial: Orbiters does not change Creator Companion's list for it. Add it there, or take it off, yourself.").into())
+        }
+        // Where trials are only shown, nothing changes one.
+        (TrialState::Migrated(_) | TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::Packages | Action::Storage) if mac => {
+            Err(tr("On the Mac Orbiters only shows a Unity 6 trial: it does not change one.").into())
+        }
         (TrialState::Migrated(_), Action::Open(_)) if mac => Err(tr("On the Mac a Unity 6 trial is opened from Unity Hub: Orbiters shows where it is and what VRChat's guide says.").into()),
         (TrialState::Migrated(job), Action::Open(_)) => Ok(Way::Trial(Box::new(job.clone()))),
-        // A trial comes off the list where its record is: in its own card.
-        (TrialState::Migrated(job) | TrialState::WaitingForMigration(job) | TrialState::Superseded(job), Action::Unlist) => match job.phase {
-            Phase::Abandoned { .. } => Ok(Way::Plain),
-            _ => Err(tr("This is a Unity 6 trial: take it off in its own card, under Unity 6.").into()),
-        },
-        (TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::List) => Ok(Way::Plain),
-        (TrialState::Abandoned { whole: false, .. }, Action::Unlist) => Ok(Way::Plain),
         (TrialState::Migrated(_), _) => Ok(Way::Plain),
         // A copy of a waiting trial is an ordinary project; what its content IDs mean is asked at each upload.
         (TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::Duplicate) => Ok(Way::Plain),

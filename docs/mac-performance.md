@@ -34,8 +34,10 @@ from then on), waits `--warm`
 seconds and then until 20 s pass without a frame held over 250 ms (within 180 s, else nothing is scored), records `--windows` windows of `--window` seconds
 with nobody touching the game, takes 3 s stack samples only after them, and in every case (an arrival that never came, a
 failed start, an interruption) quits by session (`steam quit --session --wait 60`, never forced) and writes its results
-file with its `outcome`. The session is the one **the program started here names** (its `starting` event, obelisk-cli 0.1.10),
-the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A run
+file with its `outcome`. The session is the one **the program started here names in its own `starting` event** (obelisk-cli 0.1.10),
+the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A
+`running` event that names another session (the program found somebody else's again) is an error: nothing is asked to quit, and
+the series stops. A run
 whose session is not known to have ended, or that may have started one it was never told the name of, exits with 5, and `session.sh` stops the series there, as it does after any
 run that failed.
 
@@ -185,6 +187,31 @@ work costs frame rate even where the GPU is the limit**. N4N0 itself used 22 to 
 window open). Every row above and every earlier VRChat row is at whatever clock the Mac then had; a comparison of two builds or
 settings has to be interleaved and at one thermal state, and the bench should record `NSProcessInfo.thermalState` and the
 CPU of everything else beside each window (it records neither yet).
+
+### What N4N0's own window cost (2026-11-23, fixed)
+
+The 22 to 28 % of a core was the window drawing at the display's rate for as long as it was open: on a Mac it asked, in every
+pass, for a paint of the hidden window, and egui answers anything asked of a window with a frame. Covered, where no display
+holds the rate back, it was far worse. It now draws only when something asks and it can be seen (`mac_cover.rs`: while
+eframe holds it hidden it looks at the windows macOS lists, every second, every three beside a game). Measured with a release
+build over made-up state in a temporary folder (`orbiters-desktop --link-smoke --no-panels --hold 48`, CPU time of the
+window's process over 10 s, nobody touching it, the Mac busy with builds):
+
+| Window | before | after |
+|---|---|---|
+| shown, behind another app, nothing changing | 22 % of a core | 4.8 % |
+| the same, the service saying something new five times a second | 23 % | 6.9 % |
+| covered, nothing changing | 137 % | 0.0 % |
+| covered, five times a second | 137 % | 1.3 % |
+
+Since the ninth verification (2026-11-23, not measured again) "covered" is only what is certain: the window is not on screen, or
+a full-screen game's is over it. Where that cannot be told (no list of windows, another app's window over it, which may be clear in
+places) it is drawn once a second; and once, at once, when macOS says something that may have it show (in front, back from the
+Dock, the Space, the displays) or what it shows of the service's state changes, at most four times a second.
+
+The service's own looks (3 to 5 % of a core with nothing open, seen by thread on the running app, not measured again) are fewer:
+the engine's session records once a second instead of ten times, every process on the Mac every 30 s instead of 3, and beside
+a game the network every 2 s instead of twice a second and the processes' CPU every 15 s instead of 3.
 
 ### Next (not done)
 

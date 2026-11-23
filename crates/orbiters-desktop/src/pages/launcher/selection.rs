@@ -30,7 +30,7 @@ pub const PLAY_WAIT: Duration = Duration::from_secs(30);
 const ONE_PRESS: f64 = 0.4;
 
 /// Who a thing is asked for: the VRChat account verified as signed in (none: nobody, or another account's profile is
-/// chosen) and the profile Play would start (none on a Mac).
+/// chosen) and the profile Play would start (none: VRChat's own default).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Asker {
     pub account: Option<String>,

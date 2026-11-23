@@ -503,6 +503,8 @@ struct PretendMac {
     /// still under way, why the last one failed.
     direct: bool,
     starts: Mutex<Vec<Vec<String>>>,
+    /// The VRChats that run, as their own logs say them.
+    players: Mutex<Vec<crate::state::VrchatRunShown>>,
     still_starting: std::sync::atomic::AtomicBool,
     failure: Mutex<Option<String>>,
     opened: Mutex<u32>,
@@ -547,6 +549,12 @@ impl Machine for PretendMac {
     }
     fn running(&self) -> Vec<(u32, bool)> {
         self.running.lock().unwrap().clone()
+    }
+    fn roster(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
+        Some(self.players.lock().unwrap().clone())
+    }
+    fn newest_profile(&self) -> Option<u32> {
+        self.starts.lock().unwrap().last().map(|args| orbiters_core::vrchat_launch::profile_of(args))
     }
     fn installed(&self) -> bool {
         !self.engine_missing() && (self.vrchat || self.got_vrchat.load(Ordering::Relaxed))
@@ -1680,7 +1688,7 @@ fn install_and_play_on_a_mac_sets_up_then_starts_the_game_itself() {
     let c = mac(machine.clone());
     c.launcher_game(machine.as_ref());
     assert_eq!(c.view().launcher.game, Game::NoEngine);
-    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(c.launcher_do(Action::InstallEngine { profile: 0 }), None);
     assert_eq!(*machine.installs.lock().unwrap(), 1);
     assert_eq!(*machine.opened.lock().unwrap(), 0, "no other app is ever opened");
     let until = Instant::now() + Duration::from_secs(5);
@@ -1745,21 +1753,21 @@ fn play_before_the_set_up_on_a_mac_sets_up_first_and_an_install_that_fails_can_b
     let machine = Arc::new(PretendMac { direct: true, cannot_install: true, ..Default::default() });
     let c = mac(machine.clone());
     c.launcher_game(machine.as_ref());
-    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::InstallEngine { profile: 0 }), Some(Notice::Error(_))));
     assert_eq!(c.view().launcher.engine_setup, Some(EngineSetup::Failed("no network".into())));
     c.launcher_game(machine.as_ref());
     assert_eq!(c.view().launcher.game, Game::NoEngine, "the button is there again");
-    assert!(matches!(c.launcher_do(Action::InstallEngine), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::InstallEngine { profile: 0 }), Some(Notice::Error(_))));
     assert_eq!(*machine.installs.lock().unwrap(), 2);
     // While one is under way, a second press starts no second set-up.
     c.update(|s| s.launcher.engine_setup = Some(EngineSetup::SignIn { qr_url: "https://s.team/q/1/2".into() }));
-    assert_eq!(c.launcher_do(Action::InstallEngine), None);
+    assert_eq!(c.launcher_do(Action::InstallEngine { profile: 0 }), None);
     assert_eq!(*machine.installs.lock().unwrap(), 2);
     assert!(machine.starts.lock().unwrap().is_empty());
     // On a PC the button does not exist, and its action does nothing.
     let pc = Controller::new(Settings::default());
     pc.launcher_machine(Arc::new(Pretend::default()));
-    assert_eq!(pc.launcher_do(Action::InstallEngine), None);
+    assert_eq!(pc.launcher_do(Action::InstallEngine { profile: 0 }), None);
     assert_eq!(pc.view().launcher.engine_setup, None);
 }
 
@@ -1945,12 +1953,12 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
     assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| !t.repairing));
 }
 
-/// A program in `root` that answers as obelisk-cli 0.1.10 does: `steam play` runs a game until `stop` is written, its session
+/// A program in `root` that answers as obelisk-cli 0.1.12 does: `steam play` runs a game until `stop` is written, its session
 /// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
 #[cfg(target_os = "macos")]
 fn pretend_program(root: &std::path::Path) -> MacMachine {
     use std::os::unix::fs::PermissionsExt;
-    let folder = root.join("tools/obelisk-cli-0.1.10-arm64");
+    let folder = root.join("tools/obelisk-cli-0.1.12-arm64");
     std::fs::create_dir_all(folder.join("SteamNative")).unwrap();
     std::fs::create_dir_all(root.join("library/SteamSessions")).unwrap();
     std::fs::write(folder.join("SteamNative/obelisk-steam-host"), "").unwrap();
@@ -2175,9 +2183,256 @@ fn a_program_too_old_starts_no_vrchat() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let machine = pretend_program(&root);
-    std::fs::rename(root.join("tools/obelisk-cli-0.1.10-arm64"), root.join("tools/obelisk-cli-0.1.9-arm64")).unwrap();
+    std::fs::rename(root.join("tools/obelisk-cli-0.1.12-arm64"), root.join("tools/obelisk-cli-0.1.11-arm64")).unwrap();
     assert!(machine.start(&[]).is_err());
     assert!(!root.join("asked").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// --- One VRChat at a time on a Mac, on the profile chosen on Home ---
+
+fn ready_mac() -> (Arc<PretendMac>, Shared) {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    (machine, c)
+}
+
+/// VRChat runs on `profile` as process 42, the account its own log names when it does.
+fn plays(machine: &PretendMac, profile: Option<u32>, account: Option<&str>) {
+    *machine.running.lock().unwrap() = vec![(42, true)];
+    *machine.players.lock().unwrap() =
+        vec![crate::state::VrchatRunShown { pid: 42, profile: profile.unwrap_or(0), profile_known: profile.is_some(), account: account.map(str::to_owned), desktop: Some(true), ..Default::default() }];
+}
+
+fn quit(machine: &PretendMac) {
+    machine.running.lock().unwrap().clear();
+    machine.players.lock().unwrap().clear();
+}
+
+/// What the profile choice shows: number, account, running, starting.
+fn choice(c: &Shared) -> Vec<(u32, Option<String>, bool, bool)> {
+    c.view().launcher.profiles.iter().map(|p| (p.profile, p.account.clone(), p.running.is_some(), p.starting.is_some())).collect()
+}
+
+fn profile_args(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).filter(|a| a.contains("profile")).collect()
+}
+
+/// Every way Home starts VRChat on a Mac gives it exactly `--profile=N`, nothing for profile 0, and none of the PC's options.
+#[test]
+fn every_start_on_a_mac_is_on_the_profile_chosen() {
+    let started = |go: &dyn Fn(&Arc<PretendMac>, &Shared)| {
+        let (machine, c) = ready_mac();
+        go(&machine, &c);
+        let starts = machine.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 1, "one start");
+        assert!(!starts[0].iter().any(|a| a.starts_with("--") && !a.starts_with("--profile=")), "{:?}", starts[0]);
+        assert_eq!(starts[0][..4], ["-screen-fullscreen", "1", "-window-mode", "borderless"]);
+        starts[0].clone()
+    };
+    for profile in [0, 1, 2, 15] {
+        let own: Vec<String> = (profile != 0).then(|| format!("--profile={profile}")).into_iter().collect();
+        // Play.
+        let args = started(&|_, c| assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch })));
+        assert_eq!(args[4..], own);
+        // A destination: the profile, then its link, last.
+        let args = started(&|_, c| {
+            assert_eq!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile, destination: place() }), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
+            assert_eq!(choice(c).iter().filter(|p| p.3).map(|p| p.0).collect::<Vec<_>>(), [profile], "shown at once");
+        });
+        assert_eq!(args[4..], [own.clone(), vec![orbiters_core::vrchat_launch::link(W, &place().instance_id)]].concat());
+        // An invite, accepted on it.
+        let args = started(&|_, c| {
+            let (_, _) = c.test_vrchat(vec![(200, json!({}))]);
+            signed_in_list(c);
+            c.update(|s| s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Sample".into(), from_icon: String::new(), place: Some(place()), message: String::new(), received_at: 1 }]);
+            assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile })), Some(Notice::Sent { .. })));
+        });
+        assert_eq!(args[4..], [own.clone(), vec![orbiters_core::vrchat_launch::link(W, &place().instance_id)]].concat());
+        // Install & play, and Play before the set-up: the start that follows it.
+        for install in [true, false] {
+            let machine = Arc::new(PretendMac { direct: true, ..Default::default() });
+            let c = mac(machine.clone());
+            c.launcher_game(machine.as_ref());
+            if install {
+                assert_eq!(c.launcher_do(Action::InstallEngine { profile }), None);
+            } else {
+                assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile }), Some(Notice::Sent { .. })));
+            }
+            let until = Instant::now() + Duration::from_secs(5);
+            while machine.starts.lock().unwrap().is_empty() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let starts = machine.starts.lock().unwrap().clone();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0][4..], own, "the delayed first start, pressed {install}");
+        }
+    }
+    // Play as anything else asks for it (no profile named): the default one, as on a PC.
+    let args = started(&|_, c| assert!(matches!(c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }), Some(Notice::Sent { .. }))));
+    assert!(profile_args(&args).is_empty());
+    // No profile VRChat's main start has none of.
+    let (machine, c) = ready_mac();
+    for profile in [16, 99, u32::MAX] {
+        assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile }), Some(Notice::Error(_))));
+        assert!(matches!(c.launcher_do(Action::InstallEngine { profile }), Some(Notice::Error(_))));
+    }
+    assert!(machine.starts.lock().unwrap().is_empty());
+}
+
+/// The set-up plays the profile last asked for, when another one is asked for while it runs.
+#[test]
+fn a_profile_asked_for_during_the_set_up_is_the_one_played() {
+    let machine = Arc::new(PretendMac { direct: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    c.update(|s| s.launcher.engine_setup = Some(EngineSetup::Checking));
+    c.launcher.lock().unwrap().play_when_ready_on = 1;
+    assert_eq!(c.launcher_do(Action::InstallEngine { profile: 3 }), None);
+    assert_eq!(*machine.installs.lock().unwrap(), 0, "one set-up at a time");
+    assert_eq!(c.launcher.lock().unwrap().play_when_ready_on, 3);
+}
+
+/// One VRChat at a time: while it starts or runs on profile 1, no other profile is started on, nothing goes to its account
+/// for a press made on another's, and Home says why.
+#[test]
+fn no_other_profile_starts_while_vrchat_starts_or_runs_on_a_mac() {
+    let (machine, c) = ready_mac();
+    let (_, calls) = c.test_vrchat(vec![(200, json!({})); 4]);
+    signed_in_list(&c);
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { .. })));
+    machine.still_starting.store(true, Ordering::Relaxed);
+    let refused = |profile: u32| {
+        let there = Action::PlayAt { mode: LaunchMode::Desktop, profile, destination: place() };
+        [c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile }), c.launcher_do(mine(there))]
+    };
+    for looked in [false, true] {
+        if looked {
+            c.launcher_game(machine.as_ref());
+        }
+        assert_eq!(choice(&c), [(0, None, false, false), (1, None, false, true)], "it starts on 1");
+        for profile in [0, 2] {
+            assert!(refused(profile).iter().all(|n| matches!(n, Some(Notice::Error(t)) if t == "Starting VRChat…")), "{profile}");
+        }
+        assert!(c.launcher.lock().unwrap().pending.is_none(), "no destination of another profile waits for this one's game");
+    }
+    // Again on its own: it goes on, as ever.
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Sent { .. })));
+    // It runs.
+    machine.still_starting.store(false, Ordering::Relaxed);
+    plays(&machine, Some(1), None);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Running(LaunchMode::Desktop));
+    assert_eq!(choice(&c), [(0, None, false, false), (1, None, true, false)]);
+    for profile in [0, 2] {
+        assert!(refused(profile).iter().all(|n| matches!(n, Some(Notice::Error(t)) if t == ONE_GAME)), "{profile}");
+    }
+    assert!(refused(1).iter().all(|n| matches!(n, Some(Notice::Error(t)) if t == "VRChat is already running.")));
+    // Its profile not known (yet): no profile is taken for it, and none starts.
+    plays(&machine, None, None);
+    c.launcher_game(machine.as_ref());
+    assert!(choice(&c).iter().all(|p| !p.2));
+    for profile in [0, 1, 2] {
+        assert!(refused(profile).iter().all(|n| matches!(n, Some(Notice::Error(t)) if t == ONE_GAME)), "{profile}");
+    }
+    assert!(calls.lock().unwrap().is_empty(), "and nothing was sent for any of them");
+    assert_eq!(machine.starts.lock().unwrap().len(), 1);
+    // Quit, however soon after its start: another profile starts.
+    quit(&machine);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::NotRunning);
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { .. })));
+    assert_eq!(profile_args(&machine.starts.lock().unwrap()[1]), ["--profile=2"]);
+}
+
+/// The profile choice on a Mac: the default one, those seen before with the account last seen, the one that runs or starts;
+/// an account is learnt only of a profile its own log said, and what is not known stays so.
+#[test]
+fn the_profile_choice_on_a_mac_says_what_each_profile_s_own_log_said() {
+    let (machine, c) = ready_mac();
+    assert_eq!(choice(&c), [(0, None, false, false)], "nothing known: the default one");
+    // Its log did not say yet who signed in: nobody is named.
+    plays(&machine, Some(2), None);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(choice(&c), [(0, None, false, false), (2, None, true, false)]);
+    assert!(c.view().settings.launch.profiles.is_empty());
+    plays(&machine, Some(2), Some("Sample Alt"));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(choice(&c), [(0, None, false, false), (2, Some("Sample Alt".into()), true, false)]);
+    quit(&machine);
+    c.launcher_game(machine.as_ref());
+    assert_eq!(choice(&c), [(0, None, false, false), (2, Some("Sample Alt".into()), false, false)], "remembered");
+    // An account said where the profile is not known names no profile.
+    plays(&machine, None, Some("Sample Nobody"));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().settings.launch.profiles, [(2, "Sample Alt".to_string())].into());
+    // Back on the default one, another account.
+    plays(&machine, Some(0), Some("Sample Me"));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(choice(&c), [(0, Some("Sample Me".into()), true, false), (2, Some("Sample Alt".into()), false, false)]);
+    // A profile the main start has none of is shown while it runs, never learnt.
+    plays(&machine, Some(40), Some("Sample Side"));
+    c.launcher_game(machine.as_ref());
+    assert!(!c.view().settings.launch.profiles.contains_key(&40));
+    // The bridge's is the assistant's, as on a PC.
+    machine.players.lock().unwrap()[0] = crate::state::VrchatRunShown { pid: 42, profile: 0, profile_known: true, driver: crate::state::VrchatDriverShown::Agent { session: "main".into() }, ..Default::default() };
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().launcher.profiles.iter().any(|p| p.profile == 0 && p.assistant && p.running.is_some()));
+    // A Mac whose game the person starts by hand in another app gives it no profile: no choice there.
+    let by_hand = Arc::new(PretendMac { obelisk: true, vrchat: true, ..Default::default() });
+    let c = mac(by_hand.clone());
+    c.launcher_game(by_hand.as_ref());
+    assert!(choice(&c).is_empty());
+    assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 1 }), Some(Notice::Error(_))));
+    assert_eq!(*by_hand.opened.lock().unwrap(), 0);
+}
+
+/// The launch keeps the profile it was made on: what runs is on it, a start on another is refused over it, and a restart
+/// after a lost picture is of it, for the accounts it was for.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_restart_is_on_the_profile_its_launch_was_made_on() {
+    use super::super::picture;
+    let _publishing = picture::PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("orbiters-restart-profile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    let session = |n: u32| format!("5e551011-0000-4000-8000-00000000000{n}");
+    let plays = || std::fs::read_to_string(root.join("asked")).unwrap_or_default().lines().filter(|l| l.starts_with("steam play")).map(str::to_owned).collect::<Vec<_>>();
+    let args = |profile: u32, link: &str| {
+        let mut args = vec!["-screen-fullscreen".to_string()];
+        args.extend(orbiters_core::vrchat_launch::profile_arg(profile));
+        args.push(link.to_string());
+        args
+    };
+    let ended = || machine.play.attached().is_none();
+    let (mut started, mut live) = (0, vec![("", 0)]);
+    for (account, profile) in [("usr_a", 2), ("usr_b", 0)] {
+        live[0] = (account, profile);
+        machine.start_for(&args(profile, "vrchat://x"), Some(account)).unwrap();
+        started += 1;
+        eventually(|| machine.home_session_running(&session(started)));
+        let launch = machine.play.newest().unwrap();
+        assert_eq!((launch.profile, machine.newest_profile()), (profile, Some(profile)));
+        assert_eq!(machine.running_profiles(), [(launch.launcher.unwrap(), true, Some(profile))], "the running state's profile");
+        // Another profile over it: the one start refuses it, and nothing is asked of the program.
+        assert!(machine.start_for(&args(profile + 1, "vrchat://y"), Some(account)).is_err());
+        assert_eq!(plays().len() as u32, started);
+        // Lost and restarted: the same profile, the same destination; not for another account.
+        picture::publish(Some((session(started), picture::Picture::Lost)));
+        assert!(machine.restart_lost(&session(started), &|who| who != account).is_err());
+        machine.restart_lost(&session(started), &|who| who == account).unwrap();
+        started += 1;
+        eventually(|| machine.home_session_running(&session(started)));
+        assert_eq!(machine.newest_profile(), Some(profile));
+        let tail = format!("-- {}", args(profile, "vrchat://x").join(" "));
+        let last = plays().last().cloned().unwrap();
+        assert!(last.ends_with(&tail) && last.matches("--profile").count() == usize::from(profile != 0), "{last}");
+        picture::publish(None);
+        std::fs::write(root.join(format!("stop-{}", session(started))), "").unwrap();
+        eventually(ended);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

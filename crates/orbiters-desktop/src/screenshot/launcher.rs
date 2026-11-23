@@ -519,18 +519,24 @@ fn data(name: &str) -> LauncherState {
     }
     // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
     let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };
+    // A Mac has the desktop game alone, one at a time: the same choice, none startable beside it.
+    let mode = if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop };
     match name {
         "launcher-running-one" => {
-            s.game = Game::Running(LaunchMode::Vr);
-            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None)];
+            s.game = Game::Running(mode);
+            s.profiles = vec![profile(0, "Sample Me", Some(mode), None)];
         }
         "launcher-profiles" | "launcher-small-profiles" | "launcher-where-other-profile" => {
-            s.game = Game::Running(LaunchMode::Vr);
-            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
+            s.game = Game::Running(mode);
+            s.profiles = vec![profile(0, "Sample Me", Some(mode), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
         }
-        "launcher-profile-starting" => {
+        "launcher-profile-starting" if orbiters_core::vrchat_launch::SEVERAL_HERE => {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, Some(LaunchMode::Desktop))];
+        }
+        "launcher-profile-starting" => {
+            s.game = Game::Starting(mode);
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", None, Some(mode))];
         }
         _ => {}
     }

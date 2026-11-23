@@ -515,6 +515,8 @@ pub fn renderer_lost(engine_log: &str) -> bool {
 pub enum GraphicsLine {
     /// The guest's driver presented this many frames on its current swapchain (each counts from its own 0).
     Presents(u64),
+    /// The game made a swapchain: its counting begins.
+    Swapchain,
     /// The graphics server dropped the game.
     Dropped,
 }
@@ -524,7 +526,11 @@ pub fn graphics_lines(text: &str) -> Vec<GraphicsLine> {
     text.lines()
         // what the engine's own log writer counts is not said again
         .filter(|line| !line.starts_with("[obelisk-log:")) // i18n: not shown (the engine's log lines)
-        .filter_map(|line| if renderer_lost(line) { Some(GraphicsLine::Dropped) } else { presents_last(line).map(GraphicsLine::Presents) })
+        .filter_map(|line| match line {
+            line if renderer_lost(line) => Some(GraphicsLine::Dropped),
+            line if line.contains("guest swapchain: created") => Some(GraphicsLine::Swapchain), // i18n: not shown (the engine's log lines)
+            line => presents_last(line).map(GraphicsLine::Presents),
+        })
         .collect()
 }
 
@@ -564,9 +570,11 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
-/// The first obelisk-cli N4N0 starts VRChat with (0.1.10: no engine file replaced while anything of it runs, a repair that
-/// is whole or nothing, a log that never disturbs the game, and `steam play --steam-id`).
-pub const LEAST: (u32, u32, u32) = (0, 1, 10);
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.12: a lock file that cannot be written is held all the same, a release that
+/// lost its Wine says so; 0.1.11: one lock for the whole library between every launch and every change
+/// of its runtimes, a look at what runs that takes no failure for nothing, a repair compared with its archive byte for byte, and
+/// every file a start needs looked at; 0.1.10: `steam play --steam-id`, the session named in `starting`).
+pub const LEAST: (u32, u32, u32) = (0, 1, 12);
 
 /// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
 /// release is not known to be.
@@ -700,13 +708,13 @@ pub fn event(line: &str) -> Option<Event> {
 }
 
 /// VRChat's arguments for a start on a Mac, from those of a desktop start on a PC: the whole screen (Unity's own
-/// options: without them the game opens in a small window, as it does at its first start anywhere), then the
-/// destination's link. `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way
+/// options: without them the game opens in a small window, as it does at its first start anywhere), then the profile
+/// (`--profile=N`, none for the default one) and the destination's link, in that order. `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way
 /// report starts that hang with it), and so are the PC's performance options (process priorities, video decoding by
 /// the graphics card: tuned for Windows, never tried under the engine, and not offered in a Mac's settings).
 pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     let whole_screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"].map(String::from);
-    whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://"))).collect()
+    whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://") || crate::vrchat_launch::is_profile_arg(a))).collect()
 }
 
 /// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
@@ -781,12 +789,12 @@ mod tests {
     }
 
     #[test]
-    fn an_obelisk_cli_before_0_1_9_starts_no_vrchat() {
+    fn an_obelisk_cli_older_than_the_least_starts_no_vrchat() {
         let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
-        for old in ["obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+        for old in ["obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
             assert!(too_old(&at(old)), "{old}");
         }
-        for fit in ["obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.11-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+        for fit in ["obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.13-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
             assert!(!too_old(&at(fit)), "{fit}");
         }
     }
@@ -1073,9 +1081,10 @@ mod tests {
 
     #[test]
     fn the_engine_s_log_is_read_in_the_order_it_says_things() {
-        use GraphicsLine::{Dropped, Presents};
+        use GraphicsLine::{Dropped, Presents, Swapchain};
         let text = "neptune unixlib wsi (wsd): 60 presents (0 shown events)\nsomething else\nnpt: destroying Neptune context 1\n[obelisk-log: 3 lines like this: VTEST_CLIENT_ERROR_CONTEXT_LOST]\nneptune unixlib wsi (wsd): alive: 61 presents, x\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n";
         assert_eq!(graphics_lines(text), [Presents(60), Dropped, Presents(61), Dropped]);
+        assert_eq!(graphics_lines("neptune: guest swapchain: created 1705x1109 fmt=28 buffers=2 hwnd=0000000000030070\nneptune unixlib wsi (wsd): 1 presents (0 shown events), last 1\n"), [Swapchain, Presents(1)]);
         assert_eq!(graphics_lines(""), []);
     }
 
@@ -1126,6 +1135,26 @@ mod tests {
         let whole = ["-screen-fullscreen", "1", "-window-mode", "borderless"];
         assert_eq!(game_arguments(args(&["--no-vr", "--process-priority=1", "--fps=90", "vrchat://launch?ref=vrchat.com&id=wrld_1:2"])), args(&[whole.as_slice(), &["vrchat://launch?ref=vrchat.com&id=wrld_1:2"]].concat()));
         assert_eq!(game_arguments(args(&["--no-vr"])), args(&whole));
+    }
+
+    /// One profile at a time on a Mac: VRChat gets exactly `--profile=N` for one that is not the default, nothing for the
+    /// default, before the link; none of the PC's options with it.
+    #[test]
+    fn a_mac_s_arguments_are_the_whole_screen_the_profile_and_the_link() {
+        use crate::vrchat_launch::{arguments_on, LaunchMode, LaunchSettings, PROFILE_MAX};
+        let (world, instance) = ("wrld_00000000-0000-4000-8000-0000000000aa", "7~friends(usr_x)");
+        let screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"].map(String::from).to_vec();
+        for profile in 0..=PROFILE_MAX {
+            let own: Vec<String> = (profile != 0).then(|| format!("--profile={profile}")).into_iter().collect();
+            let plain = game_arguments(arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), Vec::new(), profile, None));
+            assert_eq!(plain, [screen.clone(), own.clone()].concat());
+            let window = vec!["-screen-width".to_string(), "1280".into()];
+            let there = game_arguments(arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), window, profile, Some((world, instance))));
+            assert_eq!(there, [screen.clone(), own, vec![crate::vrchat_launch::link(world, instance)]].concat());
+        }
+        // Whatever else is handed in is not passed on, however much it looks like a profile.
+        let odd = ["--no-vr", "--profile=0", "--profile=16", "--profile=1 --osc=1:2:3", "--profile", "--fps=90"].map(String::from).to_vec();
+        assert_eq!(game_arguments(odd), screen);
     }
 
     /// Finding 10 and R1: the size the game renders now is its last swapchain's; presents restart with each swapchain.

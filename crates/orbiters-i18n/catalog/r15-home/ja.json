@@ -65,5 +65,7 @@
   "Another VRChat account": "別のVRChatアカウント",
   "The friends list was the previous account's: it is put away until this account's is read.": "フレンドリストは前のアカウントのものなので、このアカウントのリストを読み込むまでしまいました。",
   "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "{m}分前から動いているVRChatのプロフィールがわかりません。プロフィール{n}でなければ、もう一度プレイを押すと起動します。",
-  "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "VRChatのプロフィールがまだわかりません。プレイは1分待ち、そのあと別のVRChatを起動する前に確認します。"
+  "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "VRChatのプロフィールがまだわかりません。プレイは1分待ち、そのあと別のVRChatを起動する前に確認します。",
+  "One VRChat runs at a time on a Mac: quit it to start on another profile.": "Macで動くVRChatは一度に1つです。別のプロフィールで起動するには、今のVRChatを終了してください。",
+  "Quit the VRChat running now first": "先に今動いているVRChatを終了してください"
 }

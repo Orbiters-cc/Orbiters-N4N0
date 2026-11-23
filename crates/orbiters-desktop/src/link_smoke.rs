@@ -1,4 +1,4 @@
-//! `orbiters-desktop --link-smoke [--no-window] [--no-panels] [--keep]`: the link between the service and the real
+//! `orbiters-desktop --link-smoke [--no-window] [--no-panels] [--keep] [--hold <seconds> [--change-every <ms>]]`: the link between the service and the real
 //! processes that show its state, seen working without the installed app and without a headset (architecture review
 //! 2026-11-10, DRT-1's second review).
 //!
@@ -12,6 +12,10 @@
 //! and drops the connections. After each step it reads from each process, which prints a digest of the state its link
 //! holds whenever that changes (`--say-state`), that it holds the service's state, whole. It never looks at the screen,
 //! sends no key or pointer event, and the window is asked not to take the foreground (`--no-focus`), which it checks.
+//!
+//! With `--hold` it does none of that: the window stays open that long, over the same made-up state (a value of it
+//! changing every `--change-every` milliseconds, when asked), and its process is named, so that what an open window costs
+//! can be measured from outside (`ps -o cputime`), covered or not.
 //!
 //! It refuses to start while VRChat or SteamVR runs: the window is a GPU program beside the game, and the panels'
 //! process would find the game's window. The overlay in the headset needs SteamVR and is not part of this.
@@ -263,6 +267,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     run.step("linked, the first state (a process starting)", &ctl, &shown, Duration::from_secs(25), &|_| {});
     for s in &shown {
         anyhow::ensure!(service.linked(s.role) == 1, "the {} is not linked to the service", s.name);
+    }
+    let number = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok());
+    if let Some(seconds) = number("--hold") {
+        for s in &shown {
+            println!("held {}: pid {}", s.name, s.process.id());
+        }
+        let (until, every) = (Instant::now() + Duration::from_secs(seconds), number("--change-every").map(Duration::from_millis));
+        while Instant::now() < until {
+            std::thread::sleep(every.unwrap_or(Duration::from_millis(500)).min(until.saturating_duration_since(Instant::now())));
+            if every.is_some() {
+                ctl.update(|s| s.projects_changed += 1);
+            }
+        }
+        return Ok(());
     }
     run.step("a plain value changes", &ctl, &shown, soon, &|_| ctl.update(|s| s.projects_changed += 1));
     run.step("N4N0's panel text changes", &ctl, &shown, soon, &|_| ctl.update(|s| s.n4n0.panel = Some("Seen by a real process".into())));

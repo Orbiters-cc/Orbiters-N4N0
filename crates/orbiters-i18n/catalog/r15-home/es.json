@@ -65,5 +65,7 @@
   "Another VRChat account": "Otra cuenta de VRChat",
   "The friends list was the previous account's: it is put away until this account's is read.": "La lista de amigos era de la cuenta anterior: se ha guardado hasta que se lea la de esta cuenta.",
   "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Un VRChat abierto desde hace {m} min no ha dicho su perfil. Si no está en el perfil {n}, pulsa Jugar otra vez para abrir de todos modos.",
-  "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "Un VRChat aún no ha dicho su perfil: Jugar lo espera un minuto y luego te pregunta antes de abrir otro."
+  "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "Un VRChat aún no ha dicho su perfil: Jugar lo espera un minuto y luego te pregunta antes de abrir otro.",
+  "One VRChat runs at a time on a Mac: quit it to start on another profile.": "En un Mac solo funciona un VRChat a la vez: ciérralo para abrirlo en otro perfil.",
+  "Quit the VRChat running now first": "Cierra primero el VRChat abierto"
 }

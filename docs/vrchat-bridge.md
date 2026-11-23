@@ -193,7 +193,19 @@ game started or closed). Settings shows the bridge's section on a Mac too, with 
 | --- | --- | --- |
 | `walk`, `turn`, `press`, `mouse`, `focus_game`, `wear_avatar`, `aim_camera` | Person first: no synthetic input until a guard can release it after a crash and the engine has an input interface with targets, units and releases. OSC reaches the game (Phase 0 below), but nothing proves a datagram to port 9000 is this session's game rather than a headset's on the network. | Phase 2: OSC bound to the verified session's own `--osc` ports; clicks and keys through `wsd` (below). |
 | `take_3d_picture`, `open_camera` | No Spout under the engine: the capture kit's strip lives in the stream camera's render target, and the window shows a scaled viewfinder. | Phase 3: an engine-side export of the stream camera's render target. |
-| `open_session`, `close_session`, profiles, VR sessions, travel by link | One Steam game per engine library; no SteamVR; no link pipe into a running game. | Out of scope. |
+| `open_session`, `close_session`, profiles, VR sessions, travel by link | One Steam game per engine library; no SteamVR; no link pipe into a running game. The bridge's own start is the default profile's (Home's Play takes another, below): it would have to verify whose account and private destination a profile's are. | Out of scope. |
+
+**VRChat's profiles on a Mac are Home's** (2026-11-23): its Play has the profile choice of Windows' Home (0 to 15,
+`vrchat_launch::main_profile`), for one game at a time (`vrchat_launch::SEVERAL_HERE`). A nonzero one adds exactly `--profile=N` to
+the game's arguments, before the destination's link (`obelisk::game_arguments`, which lets nothing else of a PC's through), on every
+start of Home's: Play, Where's destination, an invite, a friend's Join, the first start after the set-up, and a restart after a lost
+picture, which is of the very arguments of the launch it is shown for. The launch keeps its profile (`obelisk_cli::Launch::profile`);
+what runs is on the profile its launcher's own command line says (whoever started it), else its launch's, else unknown. Who is signed
+in on it comes only from the log of that launch (`incident::SignedIn`: the one made since its launcher was born that begins with its
+launcher's very arguments, held open; none of two that say the same), and the bridge is told none of it: without one the profile's
+last known account is shown, or none. While a game starts or runs, whoever started it, no other profile starts: the one start refuses it
+as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
+`get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
 How it is one verified game (`controller/bridge_mac.rs`):
 
@@ -227,11 +239,20 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `start_wait` with `retry_after_s`, and the instance already made is **kept** (`Run::kept`, 15 minutes) with any failure before
   the launch (a `close_timeout`, a refused start): the next `go_to_world` to the same world and region resumes it instead of making
   another. Each start has a launch id; its outcome is kept by that id for whoever made it. The bridge starts nothing with an
-  obelisk-cli older than 0.1.10 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
-  complete set of engine files from 0.1.9, and from 0.1.10 no file of them replaced while anything of the engine runs and `steam
-  play --steam-id`); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
-  slot is a lock beside the gate's file, held while a start is reserved or followed, so that two N4N0s (a cold start of both) never
-  both reserve and neither creates an instance for a start the other makes.
+  obelisk-cli older than 0.1.12 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
+  complete set of engine files from 0.1.9, from 0.1.10 no file of them replaced while anything of the engine runs and `steam
+  play --steam-id`, from 0.1.11 one lock for the whole library and a repair compared with its archive, and from 0.1.12 a lock file that cannot be
+  written held like any other and a release that lost its Wine named); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
+  slot is a lock beside the gate's file, held from before a start is decided (the gate read again from its file, added to what this
+  run knows) until how its game ended is known and kept there, so that two N4N0s (a cold start of both) never both reserve, neither
+  creates an instance for a start the other makes, and neither decides on a gate the other has since closed. A launch whose program
+  was lost keeps it until its record says how it ended, or until neither its supervisor nor its game is there (an early end then):
+  this N4N0 starts nothing either meanwhile, and reserves only to close that very game, for as long as the slot is held for it: a
+  launch that has ended since it was looked at admits nothing. A wait after an early end that cannot be
+  written keeps it too, until it is written at a later look or is over. The lock's own file says a start from before it is made
+  (its boot and time, then its session, then the end of a wait that could not be written): a holder that dies leaves it there, and the
+  next to take the slot reads it. Over by its session's record, it is what the record says; still running, nothing is started over
+  it; else it counts as an early end from when it was found, once.
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
 - **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose
@@ -244,7 +265,8 @@ How it is one verified game (`controller/bridge_mac.rs`):
   first, `LogWatcher::held`, which must be the one whose arguments were verified: replaced, cut, unreadable or gone, the follower is
   lost for good, what it said is forgotten, the place with it, and a screenshot is refused): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
-  Mac still follow the VRChat on the network: they are not changed by this.
+  Mac still follow the VRChat on the network (Home's profile choice alone reads this log, only for who is signed in): they are not
+  changed by this.
 - **Arrival** is the local player in this launch's own destination (the world and instance of its launch link exactly) after the
   last `Joining` line (`WorldState::arrived`: never between the join and VRChat's "is local" line, the loading and spawning of
   01:06:33 to 01:07:02), in its own held log, **while the game draws** (renderer evidence): its window on screen **and its frames
@@ -322,8 +344,13 @@ How it is one verified game (`controller/bridge_mac.rs`):
   executable, what was sampled, the wrapper's `obelisk-wait:` lines), `processes.txt` (the launcher's tree and the processes whose
   executable is the engine's, by `ps -o comm=`: never a process that only names the library in its arguments, and never anyone's
   arguments), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
-  each, every line with what could be a credential cut and with every `vrchat://` link, an instance's `~private(...)`,
-  `~nonce(...)` and the like, and `usr_` ids taken out), and two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
+  each; a line that holds what could be a credential, a `vrchat://` link, a place, an instance's `~private(...)`, `~nonce(...)` and
+  the like, or a `usr_`/`grp_` id is replaced whole, keeping only its time, its level and the frame counts it says: since the seventh
+  verification nothing before the field stays either, and since the eighth no count from inside quotes, since the ninth curly ones and their encodings too). VRChat's own log is the one that begins with the command line this launch's
+  launcher starts the game with (`Launching with args: <n>` and its `Arg:` lines, compared one by one, kept nowhere); of two that say
+  the same none is held, nor (since the eighth) any while that command line cannot be read. The engine's ring (`LKD_EVENT_RING`) has one path per game, not one
+  per session: the shipped engine makes none (voile-lkd `bf0af9b` is held back), and a path per session would change the game's
+  environment, so it stays told by its launcher's birth and life. Also two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
   (the largest in memory), the render server, `wsd` and the busiest, each process's birth checked before each round (a pid used
   again is not sampled) and each sample redacted the same way once written. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`,
   six kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`). Since 0.3.9-dev.30 (the third
@@ -385,7 +412,10 @@ How it is one verified game (`controller/bridge_mac.rs`):
   on its way and proves nothing); a reading that failed confirms nothing, however long; a count of shown frames taken before the
   drop and read after it ends no loss, nor confirms one (since the sixth: a confirmation is the log read then, or a count taken that
   long after the drop; a log its supervisor does not write says nothing); a count repeated is no frame: only one that grew in its own
-  swapchain ends a loss; a game that says its presents more slowly is given twice its own pace (60 s at most); a
+  swapchain ends a loss, and once a loss is confirmed (since the seventh) the first count of a new swapchain is only where its
+  counting begins: an increase after it is the frame (since the eighth, as the log says a swapchain made: a first count above another
+  swapchain's last is no increase; since the ninth, the lines naming none, as many counts as there are swapchains not known to have
+  begun are taken for firsts); a game that says its presents more slowly is given twice its own pace (60 s at most); a
   loss the driver repeats without end is one, from its first word. It is **one decision per session** (`picture::of`, published by
   the follower every 5 s, stale after 30 s), which Home, the bridge's `renderer_lost` (before, its own rule, blind to an accepted
   quit) and the incident capture all use. Home offers **Restart VRChat** under its running line only for a confirmed loss
@@ -411,7 +441,8 @@ How it is one verified game (`controller/bridge_mac.rs`):
   **Repair** (`obelisk-cli engine repair`: the release downloaded, checked and exchanged for the one in place in one step, nothing
   in place going before), with how far it is, or what else ends it (quit the game that runs on them; the folder's permissions or
   disk). From 0.1.10 whatever notices that a file is gone says it so, and a repair is refused while anything of the engine runs or
-  on a disk that is not APFS (with its path). The paths are on hover and in Settings' Log. Nobody is told to delete a file.
+  on a disk that is not APFS (with its path). From 0.1.11 every file the chosen graphics backend starts from is looked at before a
+  start (a render server's broker gone was found only by the launch script), with the same error and Repair. The paths are on hover and in Settings' Log. Nobody is told to delete a file.
 
 ### Live run, 0.3.9-dev.27 with obelisk-cli 0.1.6 (2026-11-23, 03:42 to 04:07)
 
@@ -456,8 +487,8 @@ Mac) and never under the 640 x 480 the window server keeps (25 % of a 1920 x 108
 `--render-percent 100`** (from the fourth verification, finding 10: without it the engine applied a percentage saved for the
 installation while the bridge measured at 100 %; `start_reserved`, tested), and `GameWindow` is the size the game renders now,
 read from this start's own engine log (its last `guest swapchain: created WxH`), else the content's backing pixels at 100 %; the
-window's title bar comes from that size and the frame (none for a borderless window, whatever its size), else from whether the
-frame covers its display. A capture is always the window's backing pixels; at 58 % Home's full-screen game draws 1705 x 1109 in a 2940 x 1912 capture (tested at both scales). When Low Power
+window's title bar comes from that size and the frame (none for a borderless window, whatever its size); where neither tells,
+nothing is cut. A capture is always the window's backing pixels; at 58 % Home's full-screen game draws 1705 x 1109 in a 2940 x 1912 capture (tested at both scales). When Low Power
 Mode is on while the Mac is on power, Home says so under Play with a **Battery settings** button (`mac_display.rs`); N4N0 never
 changes it (ruling 3).
 

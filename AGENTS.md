@@ -5,7 +5,9 @@
   there; one that goes over OSC talks with the VRChat on the network (`orbiters_core::lan`). Native code goes behind
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
   `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
-  VRChat itself does run on a Mac, started by N4N0 through Obelisk's engine without its window: `obelisk-cli`, built
+  VRChat itself does run on a Mac, one game at a time on the profile chosen on Home (`vrchat_launch::SEVERAL_HERE`; every start of
+  Home's carries it, a restart included, and an account is learnt only from that launch's own log), started by N4N0 through
+  Obelisk's engine without its window: `obelisk-cli`, built
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
@@ -17,7 +19,10 @@
   Home's Play shares (`obelisk_cli::Play`: one at a time, reserved by the bridge before it makes an instance, none within 80 s
   of an early end, by this run's exit, a deadline on the boot clock (`kern.bootsessionuuid`) and the engine's records; a record
   that cannot be read holds starts 80 s from first sight, then is history, except the current session's, which Home names with a
-  **Set aside** button: never a lock for ever, never "nothing"; one slot for the computer, a lock beside the gate's file), only with obelisk-cli 0.1.10 or later (the record's `shown` frames
+  **Set aside** button: never a lock for ever, never "nothing"; one slot for the computer, a lock beside the gate's file, held from
+  before the gate is read again and the start decided until how its game ended is known and kept, also against this very N4N0, and
+  while the wait after an early end cannot be written, until that wait is over; the lock's own file says a start from before it is
+  made, so that an N4N0 that dies leaves it as an early end to whoever takes the slot next), only with obelisk-cli 0.1.12 or later (the record's `shown` frames
   are its renderer evidence; Home's Play holds to the same `obelisk::LEAST`), arrives only once the local player is in its own destination in its own held log, closes with
   `steam quit --session` and never `--force`. A stall, a quit that does not finish or a lost renderer of any session the engine
   runs is captured once (`controller/incident.rs`, `<logs>/incidents/`, Settings' Log says where): look there before guessing. VRChat's freeze about 5 s after the
@@ -28,20 +33,28 @@
   when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 
 - **A game starts on one complete released set of engine files or not at all, and they never change under it** (obelisk-cli
-  0.1.10, its `docs/CLI.md`, Keyboard layout): the exact digests of every file (the manifest's `generations`) proven under the
-  runtime's lock on every path that lets a launch go on; that lock (`<library>/Voile.locks/`, outside what an install replaces) is
-  one open file from the launch's preparation to its game's exit, inherited by its supervisor, and the installer, `engine repair`
-  and the removal of replaced releases take it too. No pin, no launch. The lock is the fast path, never the proof: nothing is
-  replaced, put back or removed before the session records and the processes running a file of the library's runtimes
-  (`voile/live.rs`) show that nothing of its engine runs. Only APFS: a repair is one atomic exchange or is refused, with no other way
-  to make it. A refusal is the CLI's `engine_files` error, which Home shows
+  0.1.11, its `docs/CLI.md`, Keyboard layout): the exact digests of every file (the manifest's `generations`) proven on every path
+  that lets a launch go on, and every other file a start needs looked at (there, a file, its size, can be run). One lock for the
+  whole library (`<library>/Voile.locks/library.lock`, outside what an install replaces): every launch, Rosetta's too, holds it
+  shared as one open file from before its runtime is picked to its game's exit, inherited by its supervisor; every change (patch,
+  recovery, install, repair, removal) holds it alone from before its look to its last check. No pin, no launch. The lock is the fast
+  path, never the proof: nothing is replaced, put back or removed before the session records and the processes running a file of the
+  library's runtimes (`voile/live.rs`) show that nothing of its engine runs; a look that failed or is not whole is never "nothing". A
+  release is laid only once every member of it is what its archive holds (type, size, mode, link, SHA-256), before its place and in
+  it. Only APFS: a repair is one atomic exchange or is refused, with no other way to make it, and nothing is laid anew there either. A refusal is the CLI's `engine_files` error, which Home shows
   with **Repair**: never tell anyone to delete a file of it. What a guest writes goes to its log through the supervisor
   (`game_log.rs`), by a blocking pipe that is always read: nothing of logging may ever block, refuse or end the game. voile-lkd `bf0af9b` (the attach stop as link state, the
   event ring) is **held back**: one start of five on it got Easy Anti-Cheat's "Debugger detected" (`docs/vrchat-bridge.md`,
-  2026-11-23 08:06); never ship it before that is explained. Home offers
+  2026-11-23 08:06); never ship it before that is explained. **Accepted limits** (the architect's rulings after the seventh
+  verification, 2026-11-23: not to be reopened without new evidence): a supervisor suspended by a debugger or `SIGSTOP` stalls the
+  game's standard error once the pipe fills (as in 0.1.8; it takes someone to stop it, and a drainer of its own would change the
+  process tree around the game): no new process for it, and no stopped-reader test; an unrelated process that maps a file under the
+  library makes a repair refuse (the refusal names the process and the path where it can); the host-side helpers' output
+  (`metal-HUD:`, `wsd`) is outside the guest's byte cap, bounded by their own counters; a start by 0.1.10 or older knows no library
+  lock: what it races is covered by the look at what runs, and by the one release's locks it knows, and no further. Home offers
   **Restart VRChat** only for a confirmed lost picture of its own running session, the one it names (`controller/picture.rs`, R1;
   one decision per session, shared with the bridge and the incident capture; confirmed only by evidence dated after the drop, ended
-  only by a counter that grew): never make a covered, locked or slow game look lost,
+  only by a counter that grew, and once confirmed never by the first count of a new swapchain): never make a covered, locked or slow game look lost,
   nor one that could not be read. Benchmarks: `tools/mac-bench/session.sh` (the screen must be unlocked; only valid
   windows are scored).
 - **The engine patch (obelisk-cli's files over Voile's) must replace every earlier build's files.** Each manifest entry lists

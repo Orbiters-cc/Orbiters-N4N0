@@ -30,6 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 const ENGINE_LOG_LOOK: usize = 8 << 20;
 /// How often the windows and the engine's log are looked at, at most: `seen` is asked many times a second while waiting.
 const LOOK_EVERY: Duration = Duration::from_millis(700);
+/// How often the bridge looks for a VRChat that is not its own, while none of its own runs.
+const OTHERS_EVERY: Duration = Duration::from_secs(1);
 /// How long the program may take to say a quit was taken.
 const QUIT_LIMIT: Duration = Duration::from_secs(20);
 /// The game draws while the frames it presented or showed grew within this (the engine counts shown frames every 2 s; its
@@ -378,11 +380,13 @@ pub(super) struct MacGame {
     mine: Mutex<Mine>,
     /// The shared start reserved by [`Game::admit_start`] for the next launch, until it is made or given back.
     reserved: Mutex<Option<u64>>,
+    /// Another's VRChat as it was last looked for, and when.
+    others: Mutex<Option<(Instant, Option<u32>)>>,
 }
 
 impl MacGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default() }
+        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), others: Mutex::default() }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -440,6 +444,20 @@ impl MacGame {
         mine.forget_game();
         mine.ident = Some(Ident { session, launcher: pid, birth: now.birth, wsd: None, verified: Instant::now() });
         Some(pid)
+    }
+
+    /// [`Self::others_game`] for the bridge's own look, ten times a second while nobody plays through it: every session
+    /// record the engine ever wrote is read for it, so at most every [`OTHERS_EVERY`]. Whoever decides on a start asks anew.
+    fn others_game_lately(&self) -> Option<u32> {
+        let mut lately = self.others.lock().unwrap();
+        match *lately {
+            Some((at, found)) if at.elapsed() < OTHERS_EVERY => found,
+            _ => {
+                let found = self.others_game(None);
+                *lately = Some((Instant::now(), found));
+                found
+            }
+        }
     }
 
     /// A VRChat that is not the bridge's: Home's, the person's own, one left from before a restart of the service.
@@ -555,18 +573,12 @@ impl MacGame {
     }
 
     /// The title bar of the game's window `window`, in points: the window's own, as its window server says it; else from
-    /// the size the game renders (`swapchain`) and the frame when they say it; else none for a window covering its display or
-    /// one macOS gives no title, and the engine's 32 otherwise.
+    /// the size the game renders (`swapchain`) and the frame when they say it; else none.
     fn title_of(&self, window: &MacWindow, swapchain: Option<(u32, u32)>) -> f64 {
         let (scale, display) = (native::scale_of(window), native::display_frame(window));
         let covers = native::title_points(window, display) == 0.0;
         let said = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.windows.title((window.width, window.height), scale, covers));
-        if let Some(title) = said {
-            return title;
-        }
-        swapchain
-            .and_then(|(_, h)| native::title_from_guest(window.height, scale, h))
-            .unwrap_or_else(|| if window.titled { native::title_points(window, display) } else { 0.0 })
+        native::title_cut(said, swapchain.and_then(|(_, h)| native::title_from_guest(window.height, scale, h)))
     }
 
     /// Asks the program to quit the bridge's own game session, as the game's own Quit does: never forced.
@@ -721,7 +733,7 @@ impl Game for MacGame {
                         launch.ended.map(|(seconds, frames)| format!("VRChat ended after {} s with {} frames shown.", seconds.map_or("?".into(), |s| s.to_string()), frames.map_or("?".into(), |f| f.to_string()))) // i18n: not shown (an AI client reads it)
                     });
                 }
-                if let Some(pid) = self.others_game(None) {
+                if let Some(pid) = self.others_game_lately() {
                     // The person's (or one this run of the service did not start): running, and nothing else read.
                     seen.running = true;
                     seen.pid = Some(pid);
@@ -949,6 +961,11 @@ impl MacOpener {
     fn running(&self) -> Vec<u32> {
         self.ctl.upgrade().map(|c| c.launcher_machine_now().running().into_iter().map(|(pid, _)| pid).collect()).unwrap_or_default()
     }
+
+    /// The profile of each VRChat here (Home starts one on any; the bridge's own is the default one), where it is known.
+    fn profiles(&self) -> Vec<Option<u32>> {
+        self.ctl.upgrade().map(|c| c.launcher_machine_now().running_profiles().into_iter().map(|(_, _, profile)| profile).collect()).unwrap_or_default()
+    }
 }
 
 impl crate::bridge::game::Opener for MacOpener {
@@ -965,8 +982,7 @@ impl crate::bridge::game::Opener for MacOpener {
     }
 
     fn others_profiles(&self) -> Vec<u32> {
-        // One engine library, one Steam game: every VRChat here runs on the default profile.
-        self.running().iter().map(|_| 0).collect()
+        self.profiles().into_iter().flatten().collect()
     }
 
     fn eac(&self) -> crate::bridge::sessions::Eac {
@@ -998,9 +1014,9 @@ impl crate::bridge::game::Opener for MacOpener {
 
     fn vrchats(&self) -> serde_json::Value {
         serde_json::Value::Array(
-            self.running()
+            self.profiles()
                 .into_iter()
-                .map(|_| serde_json::json!({ "profile": 0, "account": null, "world_name": null, "desktop": true, "camera_open": null, "driven_by": null, "pictures_here": false }))
+                .map(|profile| serde_json::json!({ "profile": profile, "account": null, "world_name": null, "desktop": true, "camera_open": null, "driven_by": null, "pictures_here": false }))
                 .collect(),
         )
     }
@@ -1085,7 +1101,7 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.10", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.9", CLI_LEAST));
+        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);

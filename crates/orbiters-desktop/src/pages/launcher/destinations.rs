@@ -1114,6 +1114,8 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
             // Square below, as a picture is: the placeholder's lower corners are past the edge.
             let clip = p.clip_rect().intersect(pic);
             orbiters_ui::feedback::shimmer(&p.with_clip_rect(clip), Rect::from_min_max(pic.min, pic.max + vec2(0.0, RADIUS * 2.0)), RADIUS);
+            // The sweep is faint on a card: the spinner says it is on its way.
+            orbiters_ui::feedback::spinner(&p, pic.center(), 11.0, 2.2, theme::FG_3);
         }
         Shown::None => {
             // No picture: the name's colour as a soft wash, and what the card is.

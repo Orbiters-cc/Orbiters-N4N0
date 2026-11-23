@@ -737,12 +737,12 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             ui.add_space(28.0);
             notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &tr!("The Unity 6 trials record cannot be read ({why}): Orbiters opens and changes no project until it can, since one of them may be a trial.", why = why));
         }
-        trial::Health::Damaged { lines, why, newer } => {
+        trial::Health::Damaged { why, newer, .. } => {
             ui.add_space(28.0);
             let text = if newer {
                 tr!("A newer version of Orbiters wrote part of the Unity 6 trials record: this version does not act on the trials it is about ({why}).", why = why)
             } else {
-                tr!("Part of the Unity 6 trials record cannot be read ({count} lines: {why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.", count = lines, why = why)
+                tr!("Part of the Unity 6 trials record cannot be read ({why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.", why = why)
             };
             notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &text);
             if !newer && buttons(ui, &[(tr("Set the damaged record aside"), icons::ARROW_COUNTER_CLOCKWISE, state.u6.busy().is_none(), "set-aside")], false).is_some() {

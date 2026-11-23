@@ -134,7 +134,7 @@
   "Package Maker": "Package Maker",
   "Part of it cannot be read: {why}": "Una parte no se puede leer: {why}",
   "Part of its SDK is missing or not at the version its lock names: {packages}. Restore its packages first.": "Falta parte de su SDK o no está en la versión que indica su bloqueo: {packages}. Restaura primero sus paquetes.",
-  "Part of the Unity 6 trials record cannot be read ({count} lines: {why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.": "Una parte del registro de pruebas de Unity 6 no se puede leer ({count} líneas: {why}). Las demás pruebas se muestran; Orbiters no actúa sobre las que puedan verse afectadas hasta que se aparte.",
+  "Part of the Unity 6 trials record cannot be read ({why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.": "Una parte del registro de pruebas de Unity 6 no se puede leer ({why}). Las demás pruebas se muestran; Orbiters no actúa sobre las que puedan verse afectadas hasta que se aparte.",
   "Part of the Unity 6 trials record cannot be read ({why}): nothing is done with this trial until that part is set aside in the Unity projects tab.": "Una parte del registro de pruebas de Unity 6 no se puede leer ({why}): no se hace nada con esta prueba hasta que esa parte se aparte en la pestaña Proyectos de Unity.",
   "Part of the copy is still in this folder.": "Parte de la copia sigue en esta carpeta.",
   "Particles set to Loop Until Replaced": "Partículas en Loop Until Replaced",

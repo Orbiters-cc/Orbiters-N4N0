@@ -48,6 +48,18 @@ fn an_unreadable_line_hides_only_itself_and_is_never_written_over() {
     // Work on the other goes on, after it.
     set(&e.app, &two.id, |j| j.error = Some("x".into())).unwrap();
     assert!(text(&e).starts_with(&damaged), "append only");
+    // One cut before it names any folder still makes the job it is about uncertain.
+    {
+        let mut all: Vec<Vec<u8>> = lines.iter().map(|l| l.to_vec()).collect();
+        let cut = String::from_utf8_lossy(&all[last_of_one]).find("created").unwrap();
+        all[last_of_one].truncate(cut);
+        put(&e, &joined(&all));
+        let r = read(&e.app);
+        assert!(r.named(&one.trial.path).is_none() && r.uncertain(&one.id).is_some());
+        assert!(matches!(crate::unity6::authority::state(&e.app, &one.trial.path), crate::unity6::authority::TrialState::Unknown(_)));
+        put(&e, &damaged);
+        set(&e.app, &two.id, |j| j.error = Some("x".into())).unwrap();
+    }
     // Set aside: kept beside and in the journal, not asked about again; the last good line counts.
     let aside = set_aside(&e.app).unwrap();
     assert!(std::fs::read_to_string(aside).unwrap().contains("Xisted"));

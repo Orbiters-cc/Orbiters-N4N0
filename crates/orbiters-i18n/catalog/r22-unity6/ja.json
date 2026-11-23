@@ -134,7 +134,7 @@
   "Package Maker": "Package Maker",
   "Part of it cannot be read: {why}": "一部が読めません: {why}",
   "Part of its SDK is missing or not at the version its lock names: {packages}. Restore its packages first.": "SDK の一部がないか、ロックにあるバージョンではありません: {packages}。先にパッケージを復元してください。",
-  "Part of the Unity 6 trials record cannot be read ({count} lines: {why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.": "Unity 6 のお試しの記録の一部が読めません ({count} 行: {why})。ほかのお試しは表示されます。関係しうるお試しには、その部分を脇に置くまで Orbiters は何もしません。",
+  "Part of the Unity 6 trials record cannot be read ({why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.": "Unity 6 のお試しの記録の一部が読めません ({why})。ほかのお試しは表示されます。関係しうるお試しには、その部分を脇に置くまで Orbiters は何もしません。",
   "Part of the Unity 6 trials record cannot be read ({why}): nothing is done with this trial until that part is set aside in the Unity projects tab.": "Unity 6 のお試しの記録の一部が読めません ({why})。Unity プロジェクトのタブでその部分を脇に置くまで、このお試しには何もしません。",
   "Part of the copy is still in this folder.": "コピーの一部がこのフォルダーに残っています。",
   "Particles set to Loop Until Replaced": "Loop Until Replaced のパーティクル",

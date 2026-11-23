@@ -186,7 +186,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
-    let mut layers = false;
+    let mut layers = None;
     let mut frames = Frames::default();
     let mut text_report = None;
     crate::audio_devices::made_up_mics();
@@ -199,8 +199,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             "--raw" => settings.raw_captures_dir = PathBuf::from(it.next().context("--raw <folder>")?),
             "--scale" => scale = it.next().context("--scale <factor>")?.parse()?,
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
-            // No pictures and no GPU: every frame of every scene laid out, and its layers looked at.
-            "--layers" => layers = true,
+            // No pictures and no GPU: every frame of every scene laid out, and its layers looked at; a part of the scenes
+            // (`1/4`: those of every fourth).
+            "--layers" => layers = Some(it.next().and_then(|part| part.split_once('/').map(|(n, of)| (n.parse::<usize>(), of.parse::<usize>()))).context("--layers <n>/<of>")?),
             "--height" => height = it.next().context("--height <points>")?.parse()?,
             "--width" => width = it.next().context("--width <points>")?.parse()?,
             "--extend" => frames.extend = it.next().context("--extend <frames>")?.parse()?,
@@ -2580,9 +2581,16 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
     });
 
-    let mut gpu = if layers { None } else { Some(Offscreen::new()?) };
+    let layers = match layers {
+        Some((n, of)) => Some((n?, of?.max(1))),
+        None => None,
+    };
+    let mut gpu = if layers.is_some() { None } else { Some(Offscreen::new()?) };
     let mut missing = std::collections::BTreeSet::new();
-    for sc in scenarios {
+    for (at, mut sc) in scenarios.into_iter().enumerate() {
+        if layers.is_some_and(|(n, of)| at % of != n) {
+            continue;
+        }
         // `--only a,b,c`: several scenarios in one run (the scenarios are made once).
         if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
             o != sc.name
@@ -2599,12 +2607,22 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if only.is_none() && sc.name.starts_with("projects-preview-native") && std::env::var_os("ORBITERS_PREVIEW_PROJECT").is_none() {
             continue;
         }
-        // Walked for their layers with nothing of the network's.
-        if layers && sc.name.ends_with("-live") {
+        // Walked for their layers: nothing of the network's or of this computer's.
+        if layers.is_some() && (sc.name.ends_with("-live") || sc.name.starts_with("real-")) {
             continue;
         }
+        let mut size = vec2(width, height);
+        if layers.is_some() {
+            // The narrow windows' scenes, in one.
+            match sc.name {
+                name if name.starts_with("launcher-small") => size.x = 880.0,
+                "projects-preview-sheet" => size.x = 1040.0,
+                _ => {}
+            }
+            sc.snapshot.settings.picture_folders = vec![out.join("unplugged")];
+        }
         let path = out.join(format!("{}.png", sc.name));
-        missing.extend(render(gpu.as_mut(), &sc, scale, vec2(width, height), &path, frames)?);
+        missing.extend(render(gpu.as_mut(), &sc, scale, size, &path, frames)?);
         println!("{}", path.display());
     }
     // Whatever shows over the page says so as it is shown (`orbiters_ui::front`).
@@ -2984,6 +3002,9 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             capture,
         )?;
         missing.extend(orbiters_ui::front::missing(&ctx).into_iter().map(|layer| format!("{} (frame {f}): {}", sc.name, layer.short_debug_format()))); // i18n: not shown
+        if gpu.is_none() && f + 1 == sc.frames {
+            println!("scene {}: the foreground is held: {}", sc.name, orbiters_ui::front::held(&ctx)); // i18n: not shown
+        }
         if let Some(image) = image {
             if f + run.sequence >= total {
                 save_png(&path.with_file_name(format!("{}-{f:03}.png", sc.name)), &image)?;
@@ -4199,21 +4220,50 @@ mod dashboard_tests {
     /// stand for a whole process.
     #[test]
     fn every_layer_over_the_page_says_it_is_shown() {
-        let out = std::env::temp_dir().join(format!("orbiters-layers-{}", std::process::id()));
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", "screenshot::dashboard_tests::the_layers_walk", "--ignored", "--nocapture"]).env("ORBITERS_LAYERS_OUT", &out).env("RUST_MIN_STACK", (32 << 20).to_string());
-        for name in ["ORBITERS_HARNESS_FIXTURES", "ORBITERS_SCREENSHOT_SCROLL", "ORBITERS_SCREENSHOT_PICTURE_FOLDERS", "ORBITERS_SCREENSHOT_KEEP_SANDBOX"] {
-            child.env_remove(name);
-        }
-        let done = child.output().unwrap();
-        let _ = std::fs::remove_dir_all(&out);
-        let (said, wrong) = (String::from_utf8_lossy(&done.stdout).to_string(), String::from_utf8_lossy(&done.stderr).to_string());
+        // Each quarter of the scenes in a process.
+        const PARTS: usize = 4;
+        let walks: Vec<_> = (0..PARTS).map(|part| {
+            let out = std::env::temp_dir().join(format!("orbiters-layers-{}-{part}", std::process::id()));
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "screenshot::dashboard_tests::the_layers_walk", "--ignored", "--nocapture"]).env("ORBITERS_LAYERS_OUT", &out).env("ORBITERS_LAYERS_PART", format!("{part}/{PARTS}")).env("RUST_MIN_STACK", (32 << 20).to_string());
+            // Nothing of the network's: whatever a page asks for goes to a proxy that is not there.
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                child.env(name, "http://127.0.0.1:9");
+            }
+            for name in ["NO_PROXY", "no_proxy", "ORBITERS_HARNESS_FIXTURES", "ORBITERS_SCREENSHOT_SCROLL", "ORBITERS_SCREENSHOT_PICTURE_FOLDERS", "ORBITERS_SCREENSHOT_KEEP_SANDBOX"] {
+                child.env_remove(name);
+            }
+            std::thread::spawn(move || {
+                let done = child.output().unwrap();
+                let _ = std::fs::remove_dir_all(&out);
+                done
+            })
+        }).collect();
+        let done: Vec<_> = walks.into_iter().map(|w| w.join().unwrap()).collect();
         let end = |t: &str| t.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("
 ");
-        assert!(done.status.success(), "{}
-{}", end(&said), end(&wrong));
+        let wrong: Vec<String> = done.iter().filter(|d| !d.status.success()).map(|d| format!("{}
+{}", end(&String::from_utf8_lossy(&d.stdout)), end(&String::from_utf8_lossy(&d.stderr)))).collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("
+
+"));
+        let said: String = done.iter().map(|d| String::from_utf8_lossy(&d.stdout).to_string()).collect();
         let scenes = said.lines().filter(|l| l.ends_with(".png")).count();
         assert!(scenes > 200, "{scenes} scenes walked: {}", end(&said));
+        // What holds the foreground in its scene, verify2's table of owners among them; and what does not.
+        let held = [
+            "launcher-small-drawer", "launcher-modal", "launcher-mine-icons", "videos-picker", "gallery-folders", "gallery-folders-click", "projects-preview-open",
+            "projects-preview-sheet", "projects-menu", "projects-new-covers", "gallery-open", "gallery-requests", "gallery-instance", "usage-notice",
+        ];
+        let free = ["launcher-list", "projects-panel", "videos", "gallery-mixed", "gallery-select", "events", "settings"];
+        let wrong: Vec<String> = held.iter().map(|n| (n, true)).chain(free.iter().map(|n| (n, false))).filter_map(|(name, holds)| {
+            let line = format!("scene {name}: the foreground is held: ");
+            match said.lines().find_map(|l| l.strip_prefix(line.as_str())) {
+                Some(is) if is == holds.to_string() => None,
+                is => Some(format!("{name}: {is:?}, not {holds}")),
+            }
+        }).collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// The walk of [`every_layer_over_the_page_says_it_is_shown`], alone in its process.
@@ -4221,7 +4271,8 @@ mod dashboard_tests {
     #[ignore]
     fn the_layers_walk() {
         let out = std::env::var("ORBITERS_LAYERS_OUT").expect("ORBITERS_LAYERS_OUT");
-        let args: Vec<String> = ["--screenshot", out.as_str(), "--layers"].iter().map(|a| a.to_string()).collect();
+        let part = std::env::var("ORBITERS_LAYERS_PART").expect("ORBITERS_LAYERS_PART");
+        let args: Vec<String> = ["--screenshot", out.as_str(), "--layers", part.as_str()].iter().map(|a| a.to_string()).collect();
         let _roots = crate::harness::prepare(&args).unwrap();
         run(&args[1..]).unwrap();
     }

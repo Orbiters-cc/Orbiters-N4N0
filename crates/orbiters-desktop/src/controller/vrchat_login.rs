@@ -1674,6 +1674,27 @@ mod tests {
         assert!(c.publish_launcher(&c.vrchat_session().unwrap().by, |l| l.friends.clear()), "their own, now");
     }
 
+    /// While whose the account installed is is unknown (its file cannot be read: controller/identity.rs), nothing of VRChat is
+    /// anybody's: not shown, not used; read for the member again once they are known.
+    #[test]
+    fn verify3_nothing_of_vrchat_is_anybodys_while_the_member_is_unknown() {
+        let (c, _) = first_member(vec![]);
+        c.test_list(their_list());
+        c.install_account(|rt| rt.unknown = true);
+        c.update(|_| {});
+        for _ in 0..2 {
+            let view = c.view();
+            assert!(c.vrchat_now().is_none() && c.vrchat_session().is_none());
+            assert!(view.vrchat_login.shown_user().is_none() && view.vrchat_login.verified_for.is_none(), "{:?}", view.vrchat_login);
+            assert!(view.launcher.friends.is_empty(), "{:?}", view.launcher.source);
+            assert_eq!(view.vrchat_login.presence(), Presence::Connecting, "kept, not signed out");
+            c.vrchat_feature_tick();
+        }
+        member(&c, Server::current(), "fake", "1", "tester", signed("tester"));
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "known again");
+    }
+
     /// The random walk's numbers (a xorshift: the same each run).
     struct Dice(u64);
     impl Dice {

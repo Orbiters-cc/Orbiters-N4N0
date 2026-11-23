@@ -504,7 +504,7 @@ fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
                 answers.push(one_duplicate(&w, place, &trouble));
             }
             copies.push(match place.duplicate {
-                true => format!("| {} | made | {} |", place.form, answers.join(", ")),
+                true => format!("| {} | made | {} |", place.form, answers.join("; ")),
                 false => format!("| {} | refused, nothing made, listed or written | in all {} runs |", place.form, answers.len()),
             });
         }
@@ -538,6 +538,7 @@ struct DuplicateTrouble {
 const READY: &str = "ready and listed";
 const LISTED: &str = "listed, and what is missing said";
 const PART: &str = "kept, never a project";
+const CUT: &str = "listed, the run cut after that";
 const WHOLE: &str = "whole, not listed, said";
 const GONE: &str = "nothing";
 
@@ -558,7 +559,7 @@ fn duplicate_troubles() -> Vec<DuplicateTrouble> {
         t("an error", Some(Step::Restored), Fail, true, GONE),
         t("a crash", Some(Step::Restored), Crash, true, GONE),
     ];
-    for (step, then) in [(Step::Made, PART), (Step::Folders, PART), (Step::Copied, PART), (Step::MarkerGone, WHOLE), (Step::Listed, READY)] {
+    for (step, then) in [(Step::Made, PART), (Step::Folders, PART), (Step::Copied, PART), (Step::MarkerGone, WHOLE), (Step::Listed, CUT)] {
         for incomplete in [false, true] {
             let what = if incomplete { "an error, packages not restored" } else { "an error" };
             out.push(t(what, Some(step), Fail, incomplete, then));
@@ -628,7 +629,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'stat
         (true, true, true, true) => READY,
         // An error after the list was written: the copy is whole, listed, and said where it is (a crash says nothing).
         (false, true, true, true) if said.contains("could not be restored") => LISTED,
-        (false, true, true, true) => READY,
+        (false, true, true, true) => CUT,
         (false, true, true, false) => WHOLE,
         (false, true, false, false) => PART,
         (false, false, false, false) => GONE,

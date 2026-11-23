@@ -124,13 +124,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
                     widgets::field(ui, &title, Some(&line), 260.0, |ui| {
                         let ringing = call.incoming && call.phase == CallPhase::Ringing;
                         let end = if ringing { tr("Decline") } else { tr("Hang up") };
-                        if Button::new(end).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+                        if Button::new(end).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).confirm(ui) {
                             cx.ctl.n4n0(N4n0Command::EndCall);
                         }
                         ui.add_space(8.0);
                         if ringing {
-                            if Button::new(tr("Answer")).icon(icons::MICROPHONE).variant(Variant::Primary).size(Size::Sm).show(ui).clicked() {
-                                cx.ctl.n4n0(N4n0Command::AnswerCall);
+                            if Button::new(tr("Answer")).icon(icons::MICROPHONE).variant(Variant::Primary).size(Size::Sm).confirm(ui) {
+                                cx.ctl.n4n0(N4n0Command::AnswerCall { stamp: None });
                             }
                         } else {
                             let label = if call.muted { tr_ctx("call", "Unmute") } else { tr_ctx("call", "Mute") };
@@ -144,8 +144,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
                     for contact in &calls.contacts {
                         widgets::separator(ui);
                         widgets::field(ui, &contact.name, Some(tr("Has Orbiters and N4N0 on now")), 100.0, |ui| {
-                            if Button::new(tr("Call")).icon(icons::BROADCAST).size(Size::Sm).enabled(calls.call.is_none()).show(ui).clicked() {
-                                cx.ctl.n4n0(N4n0Command::Call { contact: contact.id.clone() });
+                            if Button::new(tr("Call")).icon(icons::BROADCAST).size(Size::Sm).enabled(calls.call.is_none()).confirm(ui) {
+                                cx.ctl.n4n0(N4n0Command::Call { contact: contact.id.clone(), stamp: None });
                             }
                         });
                     }
@@ -172,7 +172,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
                     let when = super::local_time(&v.saved_utc);
                     let desc = match &v.world { Some(w) => format!("{w} · {when}"), None => when };
                     widgets::field(ui, &title, Some(&desc), 236.0, |ui| {
-                        if Button::new("").icon(icons::TRASH).variant(Variant::Ghost).size(Size::Sm).hint(tr("Remove")).show(ui).clicked() {
+                        if Button::new("").icon(icons::TRASH).variant(Variant::Ghost).size(Size::Sm).hint(tr("Remove")).confirm(ui) {
                             cx.ctl.n4n0(N4n0Command::RemoveVideo { url: v.url.clone() });
                         }
                         ui.add_space(4.0);

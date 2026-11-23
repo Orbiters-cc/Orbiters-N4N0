@@ -8,10 +8,71 @@ use crate::state::{AccountState, MapsMine, Snapshot};
 use orbiters_contracts::performance::calibration::Calibration;
 use orbiters_core::settings::Settings;
 use orbiters_i18n::tr;
+use orbiters_n4n0::{Stamp, Surface};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// What a process's surface showed last: the Orbiters identity's epoch (0: nothing yet), and which surface it is. What it
+/// sends is for that identity, or for none.
+#[derive(Default)]
+pub struct Shown {
+    epoch: AtomicU64,
+    overlay: AtomicBool,
+}
+
+impl Shown {
+    fn set(&self, epoch: u64, surface: Surface) {
+        self.epoch.store(epoch, Ordering::Relaxed);
+        self.overlay.store(surface == Surface::Overlay, Ordering::Relaxed);
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// `command`, stamped with what is shown when it acts for the person and was not stamped as it was captured.
+    fn stamp(&self, command: N4n0Command, epoch: u64) -> N4n0Command {
+        let surface = if self.overlay.load(Ordering::Relaxed) { Surface::Overlay } else { Surface::Window };
+        command.stamped(Stamp { epoch, question: None, surface, seq: orbiters_n4n0::next_input() })
+    }
+}
+
+/// The identity the pictures of a surface that paints them on other threads show: another one's only once they had the time
+/// to be painted again.
+#[derive(Default)]
+pub struct Settling {
+    shown: u64,
+    next: Option<(u64, std::time::Instant)>,
+}
+
+impl Settling {
+    /// The service's is `epoch` now.
+    pub fn turn(&mut self, epoch: u64, now: std::time::Instant) -> u64 {
+        if epoch == self.shown {
+            self.next = None;
+        } else {
+            match self.next {
+                Some((next, since)) if next == epoch => {
+                    if now.duration_since(since) >= std::time::Duration::from_millis(300) {
+                        (self.shown, self.next) = (epoch, None);
+                    }
+                }
+                _ => self.next = Some((epoch, now)),
+            }
+        }
+        self.shown
+    }
+}
+
 pub trait Backend: Send + Sync {
+    /// The frame now on show is `surface`'s, for the Orbiters identity of `epoch`: what is pressed from here on was pressed on
+    /// it. Said once a frame is drawn, so that what handles a press sees the frame that was pressed.
+    fn shown(&self, _epoch: u64, _surface: Surface) {}
+    /// The epoch of the frame on show.
+    fn shown_epoch(&self) -> u64 {
+        0
+    }
     fn view(&self) -> Arc<Snapshot>;
     fn take_notices(&self) -> Vec<Notice>;
     /// Bumped when the session library changes.
@@ -169,11 +230,17 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn shown(&self, epoch: u64, surface: Surface) {
+        self.0.shown.set(epoch, surface);
+    }
+    fn shown_epoch(&self) -> u64 {
+        self.0.shown.epoch()
+    }
     fn camera_qr(&self, active: bool) { self.0.send(&ToService::CameraQr { active }); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.0.send(&ToService::WindowRest { offer }); }
     fn window_rest_shown(&self, id: Option<u64>) { self.0.send(&ToService::WindowRestShown { id }); }
     fn keep_window_open(&self, id: u64) { self.0.send(&ToService::KeepWindowOpen { id }); }
-    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.0.send(&ToService::SharedView { command }); }
+    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.0.send(&ToService::SharedView { command, epoch: self.shown_epoch() }); }
     fn switch_demo_avatar(&self) { self.0.send(&ToService::SwitchDemoAvatar); }
     fn show_window(&self) {
         self.0.send(&ToService::ShowWindow);
@@ -329,11 +396,11 @@ impl Backend for Remote {
     }
 
     fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) {
-        self.0.send(&ToService::UploadPictures { world_id, world_name, paths });
+        self.0.send(&ToService::UploadPictures { world_id, world_name, paths, epoch: self.shown_epoch() });
     }
 
     fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) {
-        self.0.send(&ToService::UploadPreview { world_id, world_name, session });
+        self.0.send(&ToService::UploadPreview { world_id, world_name, session, epoch: self.shown_epoch() });
     }
 
     fn request_maps(&self) {
@@ -345,7 +412,7 @@ impl Backend for Remote {
     }
 
     fn capture_share(&self, request: controller::shares::Request) {
-        self.0.send(&ToService::CaptureShare { request: Box::new(request) });
+        self.0.send(&ToService::CaptureShare { request: Box::new(request), epoch: self.shown_epoch() });
     }
 
     fn prepare_share(&self, session: PathBuf) {
@@ -397,11 +464,11 @@ impl Backend for Remote {
     }
 
     fn n4n0(&self, command: N4n0Command) {
-        self.0.send(&ToService::N4n0 { command });
+        self.0.send(&ToService::N4n0 { command: self.0.shown.stamp(command, self.shown_epoch()) });
     }
 
     fn explorer(&self, command: controller::explorer::Command) {
-        self.0.send(&ToService::Explorer { command });
+        self.0.send(&ToService::Explorer { command, epoch: self.shown_epoch() });
     }
 
     fn updates(&self, action: UpdateAction) {
@@ -432,11 +499,12 @@ impl Backend for Remote {
 pub struct Local {
     ctl: controller::Shared,
     log: Mutex<Option<Vec<String>>>,
+    shown: Shown,
 }
 
 impl Local {
     pub fn new(ctl: controller::Shared) -> Self {
-        Self { ctl, log: Mutex::new(None) }
+        Self { ctl, log: Mutex::new(None), shown: Shown::default() }
     }
 
     fn report(&self, r: anyhow::Result<()>) {
@@ -447,11 +515,21 @@ impl Local {
 }
 
 impl Backend for Local {
+    fn shown(&self, epoch: u64, surface: Surface) {
+        self.shown.set(epoch, surface);
+    }
+    /// (Before anything was drawn, a test's or a screenshot's own asking is for whoever is signed in.)
+    fn shown_epoch(&self) -> u64 {
+        match self.shown.epoch() {
+            0 => self.ctl.identity_epoch(),
+            epoch => epoch,
+        }
+    }
     fn camera_qr(&self, active: bool) { self.ctl.camera_qr(active); }
     fn window_rest(&self, offer: Option<crate::state::RestOffer>) { self.ctl.window_rest(offer); }
     fn window_rest_shown(&self, id: Option<u64>) { self.ctl.window_rest_shown(id); }
     fn keep_window_open(&self, id: u64) { self.ctl.keep_window_open(id); }
-    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.ctl.shared_view(command); }
+    fn shared_view(&self, command: crate::ipc::SharedViewCommand) { self.ctl.shared_view(command, self.shown_epoch()); }
     fn translate_status(&self, status: crate::state::TranslateStatus) { self.ctl.set_translate_status(status); }
     fn translate(&self, batch: orbiters_translate::provider::Batch) -> controller::translate::Answer { self.ctl.translate_remote(&batch, false) }
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
@@ -584,11 +662,11 @@ impl Backend for Local {
     }
 
     fn upload_pictures(&self, world_id: String, world_name: String, paths: Vec<PathBuf>) {
-        self.report(self.ctl.upload_pictures(world_id, world_name, paths));
+        self.report(self.ctl.upload_pictures(world_id, world_name, paths, self.shown_epoch()));
     }
 
     fn upload_preview(&self, world_id: String, world_name: String, session: PathBuf) {
-        self.report(self.ctl.upload_preview(world_id, world_name, session));
+        self.report(self.ctl.upload_preview(world_id, world_name, session, self.shown_epoch()));
     }
 
     fn request_maps(&self) {
@@ -600,7 +678,7 @@ impl Backend for Local {
     }
 
     fn capture_share(&self, request: controller::shares::Request) {
-        self.ctl.capture_share(request);
+        self.ctl.capture_share(request, self.shown_epoch());
     }
 
     fn prepare_share(&self, session: PathBuf) {
@@ -636,11 +714,11 @@ impl Backend for Local {
     }
 
     fn n4n0(&self, command: N4n0Command) {
-        self.ctl.n4n0_command(command);
+        self.ctl.n4n0_command(self.shown.stamp(command, self.shown_epoch()));
     }
 
     fn explorer(&self, command: controller::explorer::Command) {
-        self.ctl.explorer_command(command);
+        self.ctl.explorer_command(command, self.shown_epoch());
     }
 
     fn updates(&self, action: UpdateAction) {
@@ -649,5 +727,35 @@ impl Backend for Local {
 
     fn quit(&self) {
         self.ctl.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The identity of pictures painted on other threads: a new one's once they had the time to be painted again.
+    #[test]
+    fn pictures_are_a_new_identitys_a_moment_after_it_is_one() {
+        let mut s = Settling::default();
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        assert_eq!((s.turn(3, at(0)), s.turn(3, at(200)), s.turn(3, at(301))), (0, 0, 3));
+        assert_eq!((s.turn(4, at(400)), s.turn(4, at(600))), (3, 3), "a press now was on the last one's picture");
+        assert_eq!((s.turn(5, at(650)), s.turn(5, at(800)), s.turn(5, at(960))), (3, 3, 5), "another meanwhile starts its own moment");
+        assert_eq!(s.turn(5, at(2000)), 5);
+    }
+
+    /// What a process sends for the person carries what it shows, and what a surface stamped itself stays.
+    #[test]
+    fn what_is_sent_carries_what_is_shown() {
+        let shown = Shown::default();
+        shown.set(7, Surface::Overlay);
+        let sent = shown.stamp(N4n0Command::AnswerCall { stamp: None }, shown.epoch());
+        assert!(matches!(sent, N4n0Command::AnswerCall { stamp: Some(Stamp { epoch: 7, question: None, surface: Surface::Overlay, .. }) }), "{sent:?}");
+        let own = Stamp { epoch: 3, question: Some(2), surface: Surface::Window, seq: 1 };
+        assert_eq!(shown.stamp(N4n0Command::AskAnswer { yes: true, stamp: Some(own) }, 7), N4n0Command::AskAnswer { yes: true, stamp: Some(own) });
+        assert_eq!(shown.stamp(N4n0Command::TakeBack, 7), N4n0Command::TakeBack);
     }
 }

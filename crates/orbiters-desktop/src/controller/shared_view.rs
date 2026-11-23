@@ -547,8 +547,14 @@ impl Controller {
         local.account.map(|(id, _)| (id, local.friends))
     }
 
-    /// What a surface asks (`crate::ipc::SharedViewCommand`).
-    pub fn shared_view(self: &Shared, command: SharedViewCommand) {
+    /// What a surface asks (`crate::ipc::SharedViewCommand`), while it showed the member of `epoch`: what begins something
+    /// with a friend is theirs, or is not done.
+    pub fn shared_view(self: &Shared, command: SharedViewCommand, epoch: u64) {
+        let begins = matches!(command, SharedViewCommand::Share { .. } | SharedViewCommand::Answer { accept: true, .. });
+        let acting = self.n4n0.acting(epoch);
+        if begins && acting.is_none() {
+            return self.n4n0.refuse_other_identity();
+        }
         let mut rt = self.shared_view.lock().unwrap();
         let acts = match command {
             SharedViewCommand::Share { contact, capture, revision, reach, moved } => {

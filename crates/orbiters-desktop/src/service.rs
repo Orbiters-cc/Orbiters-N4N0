@@ -432,6 +432,17 @@ impl Service {
         }
     }
 
+    /// Tests: `msg` as a link of `role` brings it.
+    #[cfg(test)]
+    pub(crate) fn handle_for_test(&self, role: Role, msg: ToService) {
+        self.handle(1, role, msg);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn controller(&self) -> &controller::Shared {
+        &self.ctl
+    }
+
     fn handle(&self, link: u64, role: Role, msg: ToService) {
         self.handle_in(link, role, msg, None);
     }
@@ -452,7 +463,7 @@ impl Service {
             ToService::WindowRest { offer } => ctl.window_rest(offer),
             ToService::WindowRestShown { id } => ctl.window_rest_shown(id),
             ToService::KeepWindowOpen { id } => ctl.keep_window_open(id),
-            ToService::SharedView { command } => ctl.shared_view(command),
+            ToService::SharedView { command, epoch } => ctl.shared_view(command, epoch),
             ToService::SwitchDemoAvatar => ctl.switch_demo_avatar(),
             ToService::StopCapture => report(ctl.stop_capture(controller::StopOf::Person)),
             ToService::Pause { paused } => report(ctl.pause_capture(paused)),
@@ -553,9 +564,9 @@ impl Service {
                     l.mailbox.post(ToClient::WorkerLog { lines });
                 }
             }
-            ToService::UploadPictures { world_id, world_name, paths } => report(ctl.upload_pictures(world_id, world_name, paths)),
-            ToService::UploadPreview { world_id, world_name, session } => report(ctl.upload_preview(world_id, world_name, session)),
-            ToService::CaptureShare { request } => ctl.capture_share(*request),
+            ToService::UploadPictures { world_id, world_name, paths, epoch } => report(ctl.upload_pictures(world_id, world_name, paths, epoch)),
+            ToService::UploadPreview { world_id, world_name, session, epoch } => report(ctl.upload_preview(world_id, world_name, session, epoch)),
+            ToService::CaptureShare { request, epoch } => ctl.capture_share(*request, epoch),
             ToService::PrepareShare { session } => ctl.prepare_share(session),
             ToService::Maps => ctl.refresh_maps(),
             ToService::Calibrated { calibration } => ctl.calibrated(*calibration),
@@ -591,7 +602,7 @@ impl Service {
                 ctl.n4n0_command(N4n0Command::AskPage { open })
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
-            ToService::Explorer { command } => ctl.explorer_command(command),
+            ToService::Explorer { command, epoch } => ctl.explorer_command(command, epoch),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             // Quickly, on this thread: Stop is the person taking control back.

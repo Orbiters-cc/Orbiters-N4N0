@@ -212,7 +212,7 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
                 .size(size)
                 .width(r[0].width())
                 .id_salt((salt, "kill-confirm"));
-            if widgets::activated(&kill.show_at(ui, r[0]).on_hover_text(tr("Ends this project's Unity at once: what was not saved is lost. Other Unity windows stay."))) {
+            if widgets::pressed_fresh(&kill.show_at(ui, r[0]).on_hover_text(tr("Ends this project's Unity at once: what was not saved is lost. Other Unity windows stay."))) {
                 state.kill_editor(&ctx, project);
             }
             if widgets::activated(&Button::new(tr("Cancel")).variant(Variant::Secondary).size(size).width(r[1].width()).id_salt((salt, "kill-cancel")).show_at(ui, r[1])) {

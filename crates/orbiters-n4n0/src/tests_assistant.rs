@@ -7,7 +7,7 @@ use super::*;
 use orbiters_n4n0_core::intents::{self, model, Facts, Intent, Outcome, Page, Via, CATALOGUE};
 
 fn full() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
 }
 
 /// N4N0 in a stand-in app that has every feature.
@@ -179,7 +179,7 @@ fn a_world_named_like_a_command_gets_nothing_done() {
 }
 
 /// The sample parameters of an intent, as a model would give them.
-fn sample(name: &str) -> Value {
+pub(super) fn sample(name: &str) -> Value {
     let mut input = serde_json::Map::new();
     input.insert("intent".into(), json!(name));
     for p in model::parameters(name) {
@@ -231,7 +231,7 @@ fn every_intent_runs_by_its_own_path() {
     // Every intent once, far more than a minute allows (its limit has a test of its own).
     let run = |intent: Intent| {
         n.n4n0.lock().unwrap().assistant.limiter = Default::default();
-        n.acts().intent_run(intent, Via::Model)
+        n.acts().intent_run(&crate::fence::Permit::for_test(), intent, Via::Model)
     };
     for query in ["instances", "invites", "world_search", "video_history", "places"] {
         let spec = intents::spec_of(query).unwrap();
@@ -289,7 +289,7 @@ fn actions_are_limited_in_a_minute() {
     let (t, n) = ready();
     let mut refused = 0;
     for i in 0..(intents::ACTS_PER_MINUTE + 3) {
-        if n.acts().intent_run(Intent::FastWalk { on: i % 2 == 0 }, Via::Quick).is_err() {
+        if n.acts().intent_run(&crate::fence::Permit::for_test(), Intent::FastWalk { on: i % 2 == 0 }, Via::Quick).is_err() {
             refused += 1;
         }
     }
@@ -304,7 +304,7 @@ fn the_next_capture_is_shared_once_it_is_ready() {
     *t.friends.lock().unwrap() = Some(Ok(vec![Friend { id: "usr_a".into(), name: "Kira".into() }, Friend { id: "usr_b".into(), name: "Sam".into() }]));
     let row = |key: &str, phase: CapturePhase| CaptureRow { key: key.into(), world: "W".into(), taken: 1, phase, ..Default::default() };
     n.set_captures(CapturesView { latest: Some(row("old", CapturePhase::Ready)), ..Default::default() });
-    n.acts().intent_run(Intent::ShareCapture { which: intents::Which::Next, public: false, friends: vec!["sam".into()] }, Via::Model).unwrap();
+    n.acts().intent_run(&crate::fence::Permit::for_test(), Intent::ShareCapture { which: intents::Which::Next, public: false, friends: vec!["sam".into()] }, Via::Model).unwrap();
     // Not the one before, nor the new one while its 3D view is made.
     n.set_captures(CapturesView { latest: Some(row("new", CapturePhase::Making { percent: 10 })), ..Default::default() });
     std::thread::sleep(Duration::from_millis(100));
@@ -510,7 +510,7 @@ fn asking_something_else_takes_the_automatic_retry_away() {
     t.sign_in(base, "orbit-test");
     n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
-    n.command(Command::NewConversation);
+    n.command(Command::NewConversation { conversation: Some(t.view().conversation), stamp: n.stamped() });
     assert!(t.view().assistant.failure.is_none());
     n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 2);

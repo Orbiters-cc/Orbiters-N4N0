@@ -158,9 +158,16 @@ impl Controller {
         self.refresh_maps();
     }
 
+    /// The account of the member of `epoch`, whom the window showed as it was asked: the whole upload is theirs.
+    fn uploading_as(self: &Shared, epoch: u64) -> anyhow::Result<(orbiters_core::account::Api, String)> {
+        let acting = self.n4n0.acting(epoch);
+        let Some(acting) = acting else { anyhow::bail!("{}", tr("That was for the Orbiters account signed in before: nothing was done.")) };
+        acting.account().ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters first.")))
+    }
+
     /// Shares pictures of a world: VRChat screenshots, sent as they are, 12 per request.
-    pub fn upload_pictures(self: &Shared, world_id: String, world_name: String, paths: Vec<PathBuf>) -> anyhow::Result<()> {
-        let Some((api, token)) = self.account_api() else { anyhow::bail!("{}", tr("Sign in to Orbiters first.")) };
+    pub fn upload_pictures(self: &Shared, world_id: String, world_name: String, paths: Vec<PathBuf>, epoch: u64) -> anyhow::Result<()> {
+        let (api, token) = self.uploading_as(epoch)?;
         anyhow::ensure!(!paths.is_empty(), "{}", tr("Choose pictures to share."));
         let id = self.start_upload(&world_id, &world_name, UploadKind::Pictures, paths.clone())?;
         let c = self.clone();
@@ -219,8 +226,8 @@ impl Controller {
     }
 
     /// Shares a session's reconstruction as the world's 3D preview (replacing this member's earlier one).
-    pub fn upload_preview(self: &Shared, world_id: String, world_name: String, session: PathBuf) -> anyhow::Result<()> {
-        let Some((api, token)) = self.account_api() else { anyhow::bail!("{}", tr("Sign in to Orbiters first.")) };
+    pub fn upload_preview(self: &Shared, world_id: String, world_name: String, session: PathBuf, epoch: u64) -> anyhow::Result<()> {
+        let (api, token) = self.uploading_as(epoch)?;
         anyhow::ensure!(reconstruction::read_report(&session).is_some(), "{}", tr("Reconstruct this session first."));
         let id = self.start_upload(&world_id, &world_name, UploadKind::Preview, vec![session.clone()])?;
         let c = self.clone();

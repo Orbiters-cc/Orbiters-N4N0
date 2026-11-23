@@ -12,6 +12,10 @@ pub const VRCHAT_BRIDGE: &str = "n4n0-vrchat-bridge";
 /// N4N0 calls (contracts `Docs/n4n0-calls.md`, "Who has calls"): off for everyone until an administrator switches an
 /// account on. Without it Call shows as "Coming soon" and the calls API refuses the account (`not_enabled`).
 pub const N4N0_CALLS: &str = "n4n0-calls";
+/// What N4N0's assistant may do from an account: everything sent from or acting on the VRChat or the Orbiters account, joining or
+/// starting somewhere (its intents of risk class b). Without it those are not offered to it, are refused when asked for, and the
+/// page where the person does it opens instead. Off for everyone until an administrator switches an account on (owners pass).
+pub const N4N0_ASSISTANT_ACTIONS: &str = "n4n0-assistant-actions";
 pub const REFRESH: Duration = Duration::from_secs(3 * 60 * 60);
 #[derive(Deserialize)]
 struct Reply {

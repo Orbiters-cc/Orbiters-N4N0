@@ -17,6 +17,8 @@
 
 use crate::media::Watcher;
 use crate::platform::{CallRequest, Locale, Mouse, NoMouse};
+use crate::command::Surface;
+use crate::fence::Fence;
 use crate::runtime::{N4n0, N4n0Runtime, Shared, Source};
 use crate::status::{CallsStatus, CardView, NoticeKind};
 use orbiters_contracts::n4n0::{self, params, thumbnail};
@@ -241,6 +243,9 @@ pub(crate) struct ScreenRuntime {
     /// What N4N0 says while the menu is open: on Home, a line at a time, the next once the last was read.
     answer: VecDeque<String>,
     answer_next: Option<Instant>,
+    /// The question whose words are the end of what Home shows, and the one it has shown whole.
+    pub(crate) answer_question: Option<u64>,
+    pub(crate) answer_presented: Option<u64>,
     done_tx: mpsc::Sender<Done>,
     done_rx: mpsc::Receiver<Done>,
     pub(crate) last_activity: Instant,
@@ -385,6 +390,8 @@ impl Default for ScreenRuntime {
             suggest: SuggestQueue::default(),
             answer: VecDeque::new(),
             answer_next: None,
+            answer_question: None,
+            answer_presented: None,
             done_tx,
             done_rx,
             last_activity: now,
@@ -1561,79 +1568,6 @@ impl N4n0 {
         false
     }
 
-    /// Sends a feature suggestion to Orbiters as the signed-in account, on a thread of its own: from the avatar's
-    /// screen (`screen`: its menu hears how it went), or from the overlay's or the window's (numbered in the status).
-    pub(crate) fn suggestion_send(self: &Shared, text: String, voice: bool, screen: bool) {
-        let later = self.later();
-        let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
-            // As the member who sent it or not at all; and how it went is told to them only.
-            let Some(fence) = later.fence() else { return };
-            let about = orbiters_n4n0_core::suggestions::About {
-                source: "menu",
-                app_version: fence.host.app_version(),
-                n4n0_version: fence.n4n0.lock().unwrap().n4n0_version.clone(),
-                voice,
-            };
-            let account = fence.account();
-            drop(fence);
-            let result = match account {
-                Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
-                None => Err(signed_out_message()),
-            };
-            let Some(n) = later.fence() else { return };
-            {
-                let mut rt = n.n4n0.lock().unwrap();
-                if screen {
-                    rt.screen.menu.suggestion_sent(result.clone());
-                    rt.screen.last_activity = Instant::now();
-                } else {
-                    let number = rt.suggestion.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
-                    rt.suggestion = Some((number, result.clone().err()));
-                }
-            }
-            match result {
-                Ok(()) => n.notify(NoticeKind::Info, tr("Your suggestion reached Orbiters: thank you!")),
-                Err(e) => n.notify(NoticeKind::Warning, tr!("The suggestion was not sent: {error}", error = e)),
-            }
-            n.publish();
-        });
-    }
-
-    /// Previous instances' Invite me to `location`, from the screen's menu (`screen`) or another's (the answer then goes
-    /// in the status' `invite`); a toast says how it went. The person's own VRChat account sends it when one is
-    /// connected in the app (REQUEST20 4: Orbiters' account "always fails"); else Orbiters' VRChat account is asked,
-    /// and what it could not do says to connect one ([`invite_route`]).
-    pub(crate) fn invite_send(self: &Shared, location: String, screen: bool) {
-        use orbiters_n4n0_core::menu::InviteAnswer;
-        let later = self.later();
-        let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
-            let Some(n) = later.fence() else { return };
-            let (host, epoch) = (n.host.clone(), n.epoch());
-            drop(n);
-            let answer = invite_route(host.as_ref(), epoch, &location);
-            let Some(n) = later.fence() else { return };
-            {
-                let mut rt = n.n4n0.lock().unwrap();
-                if screen {
-                    rt.screen.menu.invite_answered(answer.clone());
-                    rt.screen.last_activity = Instant::now();
-                } else {
-                    let number = rt.invite.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
-                    rt.invite = Some((number, answer.clone()));
-                }
-            }
-            match &answer {
-                InviteAnswer::Sent => n.notify(NoticeKind::Success, tr("Invite sent: look at your VRChat notifications")),
-                InviteAnswer::NeedsFriend { account, .. } => {
-                    n.notify(NoticeKind::Info, tr!("Add {name} as a friend on VRChat, then try again.", name = account.name))
-                }
-                InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
-                InviteAnswer::NeedsVrchat { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
-            }
-            n.publish();
-        });
-    }
-
     /// A 3D picture now. What stops it (VRChat's camera closed: [`crate::platform::CAMERA_CLOSED`]) is told, and shown on
     /// every menu's 3D picture page.
     pub(crate) fn photo_3d_now(self: &Shared) {
@@ -1771,52 +1705,6 @@ impl N4n0 {
         self.publish();
     }
 
-    /// Drops a link card in the world (contracts `Docs/n4n0.md`, Link card): the avatar's card of its own shows it where it
-    /// appears and stays (contracts `n4n0::card`); Orbiters is told, so that whoever grabs it in this instance copies its link.
-    /// From N4N0's menu on the screen, the overlay's or the window's Home.
-    pub(crate) fn card_drop(self: &Shared, link: String, title: String, video: Option<String>) {
-        if !orbiters_n4n0_core::drops::copyable(&link) {
-            self.notify(NoticeKind::Warning, tr("Only web links can be dropped as cards."));
-            return;
-        }
-        let fetch = {
-            let mut rt = self.n4n0.lock().unwrap();
-            if !rt.screen.card_ready() {
-                drop(rt);
-                self.notify(NoticeKind::Info, tr("This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again."));
-                return;
-            }
-            let now = Instant::now();
-            let s = &mut rt.screen;
-            s.put_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: n4n0::card::LIFE_SECONDS }, now);
-            s.last_activity = now;
-            let fetch = video.filter(|id| !matches!(s.pictures.get(id), Some(Thumb::Ready(_))));
-            rt.wake();
-            fetch
-        };
-        if let Some(id) = fetch {
-            self.screen_thumbnails(vec![id]);
-        }
-        // Orbiters keeps it for whoever grabs it in this instance (a member's card only).
-        let instance = self.host.world().instance_hash();
-        let epoch = self.host.identity_epoch();
-        match (self.host.account_for(epoch), instance) {
-            (Some((api, token)), Some(instance)) => {
-                let later = self.later();
-                std::thread::spawn(move || {
-                    let posted = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title);
-                    let Some(n) = later.fence() else { return };
-                    if let Err(e) = posted {
-                        n.notify(NoticeKind::Warning, tr!("People around cannot copy your card's link: {error}", error = format!("{e:#}")));
-                    }
-                });
-            }
-            (None, Some(_)) => self.notify(NoticeKind::Info, tr("Sign in to Orbiters so that people around can copy your card's link too.")),
-            _ => {}
-        }
-        self.publish();
-    }
-
     /// A hand on a dropped card (on the OSC action queue): the owner's own card's link is copied; with none out, someone
     /// else's card was grabbed, and Orbiters gives the newest dropped in this instance.
     pub(crate) fn card_grab(self: &Shared) {
@@ -1945,12 +1833,20 @@ impl N4n0 {
                 Effect::Assistant(on) => self.assistant_switch(on),
                 Effect::StayHere(on) => self.send_parameter(params::SCREEN_PINNED, OscType::Bool(on)),
                 Effect::CallContact { id } => {
-                    let n = self.clone();
-                    std::thread::spawn(move || n.host.call(CallRequest::Contact(id)));
+                    let later = self.later();
+                    std::thread::spawn(move || {
+                        if let Some(fence) = later.fence() {
+                            fence.host.call(CallRequest::Contact(id));
+                        }
+                    });
                 }
                 Effect::Answer => {
-                    let n = self.clone();
-                    std::thread::spawn(move || n.host.call(CallRequest::Answer));
+                    let later = self.later();
+                    std::thread::spawn(move || {
+                        if let Some(fence) = later.fence() {
+                            fence.host.call(CallRequest::Answer);
+                        }
+                    });
                 }
                 Effect::HangUp => {
                     let n = self.clone();
@@ -1975,14 +1871,14 @@ impl N4n0 {
                 }
                 Effect::SaveState { name, size, pose, default } => self.states_save(Some(name), crate::states::SaveOptions { size, pose, default }),
                 Effect::ApplyState { id, .. } => self.states_apply(id, false),
-                Effect::Drop { link, title, video } => self.card_drop(link, title, video),
+                Effect::Drop { link, title, video } => self.as_now(Surface::Avatar, |fence| fence.card_drop(link, title, video)),
                 Effect::TakeBack => self.card_take_back(),
                 Effect::Tracking { on, ms } => self.update_settings(|s| {
                     s.tracking.enabled = on;
                     s.tracking.ms = ms;
                 }),
                 Effect::Dictate => self.menu_listen(),
-                Effect::SendSuggestion { text, voice } => self.suggestion_send(text, voice, true),
+                Effect::SendSuggestion { text, voice } => self.as_now(Surface::Avatar, |fence| fence.suggestion_send(text, voice, true)),
                 // The overlay's switch alone: the avatar's screen has none (its menu's `mismatch_buttons` stays `None`).
                 Effect::MismatchButtons(_) => {}
                 Effect::WatchVideo { link } => {
@@ -1999,15 +1895,15 @@ impl N4n0 {
                         n.publish();
                     });
                 }
-                Effect::InviteMe { location } => self.invite_send(location, true),
+                Effect::InviteMe { location } => self.as_now(Surface::Avatar, |fence| fence.invite_send(location, true)),
                 Effect::QrScan(on) => {
                     let n = self.clone();
                     std::thread::spawn(move || n.qr_scan(on, crate::MenuHolder::Screen));
                 }
                 Effect::Captures => self.captures_list(),
                 Effect::Friends(on) => self.friends(on, crate::MenuHolder::Screen),
-                Effect::ShareCapture(ask) => self.share_capture(ask),
-                Effect::Feedback(ask) => self.feedback_ask(ask),
+                Effect::ShareCapture(ask) => self.as_now(Surface::Avatar, |fence| fence.share_capture(ask)),
+                Effect::Feedback(ask) => self.as_now(Surface::Avatar, |fence| fence.feedback_ask(ask)),
                 Effect::Mirror(ask) => {
                     let mut rt = self.n4n0.lock().unwrap();
                     rt.mirror.ask(ask, Instant::now());
@@ -2094,12 +1990,16 @@ pub(crate) fn tick(
         if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
             rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
             rt.screen.answer_next = Some(now);
+            rt.screen.answer_question = rt.take_panel_question();
         }
     } else if !rt.screen.answer.is_empty() {
         // The menu closed before N4N0's answer was read: the rest goes on the panel.
         let rest = std::mem::take(&mut rt.screen.answer).into_iter().collect::<Vec<_>>().join(" ");
         rt.screen.answer_next = None;
-        rt.show(&rest);
+        match rt.screen.answer_question.take() {
+            Some(question) => rt.show_question(question, &rest),
+            None => rt.show(&rest),
+        }
     }
     let listening = rt.listening.is_some();
     let thinking = rt.thinking();
@@ -2184,7 +2084,10 @@ pub(crate) fn tick(
                 s.menu.heard = Some(line);
                 s.menu.heard_private = false;
             }
-            None => s.answer_next = None,
+            None => {
+                s.answer_next = None;
+                s.answer_presented = s.answer_question.take();
+            }
         }
     }
     // What the menu shows from elsewhere.
@@ -2418,6 +2321,127 @@ fn thumbnail(pictures: &HashMap<String, Thumb>, id: &str) -> Option<Picture> {
     match pictures.get(id) {
         Some(Thumb::Ready(picture)) => Some(picture.clone()),
         _ => None,
+    }
+}
+
+/// What N4N0's menus send as the member signed in: only with the fence of an input let in, theirs.
+impl Fence<'_> {
+    /// Sends a feature suggestion to Orbiters as the signed-in account, on a thread of its own: from the avatar's
+    /// screen (`screen`: its menu hears how it went), or from the overlay's or the window's (numbered in the status).
+    pub(crate) fn suggestion_send(&self, text: String, voice: bool, screen: bool) {
+        let later = self.later();
+        let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
+            // As the member who sent it or not at all; and how it went is told to them only.
+            let Some(fence) = later.fence() else { return };
+            let about = orbiters_n4n0_core::suggestions::About {
+                source: "menu",
+                app_version: fence.host.app_version(),
+                n4n0_version: fence.n4n0.lock().unwrap().n4n0_version.clone(),
+                voice,
+            };
+            // The fence is held until it is sent: as the member who sent it, or not at all.
+            let result = match fence.account() {
+                Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
+                None => Err(signed_out_message()),
+            };
+            let n = fence;
+            {
+                let mut rt = n.n4n0.lock().unwrap();
+                if screen {
+                    rt.screen.menu.suggestion_sent(result.clone());
+                    rt.screen.last_activity = Instant::now();
+                } else {
+                    let number = rt.suggestion.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
+                    rt.suggestion = Some((number, result.clone().err()));
+                }
+            }
+            match result {
+                Ok(()) => n.notify(NoticeKind::Info, tr("Your suggestion reached Orbiters: thank you!")),
+                Err(e) => n.notify(NoticeKind::Warning, tr!("The suggestion was not sent: {error}", error = e)),
+            }
+            n.publish();
+        });
+    }
+
+    /// Previous instances' Invite me to `location`, from the screen's menu (`screen`) or another's (the answer then goes
+    /// in the status' `invite`); a toast says how it went. The person's own VRChat account sends it when one is
+    /// connected in the app (REQUEST20 4: Orbiters' account "always fails"); else Orbiters' VRChat account is asked,
+    /// and what it could not do says to connect one ([`invite_route`]).
+    pub(crate) fn invite_send(&self, location: String, screen: bool) {
+        use orbiters_n4n0_core::menu::InviteAnswer;
+        let later = self.later();
+        // The VRChat account it is for, as it is accepted: the one connected when it goes must still be that one.
+        let account = self.host.invite_account();
+        let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
+            // Held until it is sent: the member who asked is the one signed in, or nothing goes.
+            let Some(n) = later.fence() else { return };
+            let answer = invite_route(n.host.as_ref(), n.epoch(), account.as_deref(), &location);
+            {
+                let mut rt = n.n4n0.lock().unwrap();
+                if screen {
+                    rt.screen.menu.invite_answered(answer.clone());
+                    rt.screen.last_activity = Instant::now();
+                } else {
+                    let number = rt.invite.as_ref().map_or(1, |(k, _)| k.wrapping_add(1));
+                    rt.invite = Some((number, answer.clone()));
+                }
+            }
+            match &answer {
+                InviteAnswer::Sent => n.notify(NoticeKind::Success, tr("Invite sent: look at your VRChat notifications")),
+                InviteAnswer::NeedsFriend { account, .. } => {
+                    n.notify(NoticeKind::Info, tr!("Add {name} as a friend on VRChat, then try again.", name = account.name))
+                }
+                InviteAnswer::Failed { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
+                InviteAnswer::NeedsVrchat { message } => n.notify(NoticeKind::Warning, tr!("No invite: {message}", message = message)),
+            }
+            n.publish();
+        });
+    }
+
+    /// Drops a link card in the world (contracts `Docs/n4n0.md`, Link card): the avatar's card of its own shows it where it
+    /// appears and stays (contracts `n4n0::card`); Orbiters is told, so that whoever grabs it in this instance copies its link.
+    /// From N4N0's menu on the screen, the overlay's or the window's Home.
+    pub(crate) fn card_drop(&self, link: String, title: String, video: Option<String>) {
+        if !orbiters_n4n0_core::drops::copyable(&link) {
+            self.notify(NoticeKind::Warning, tr("Only web links can be dropped as cards."));
+            return;
+        }
+        let fetch = {
+            let mut rt = self.n4n0.lock().unwrap();
+            if !rt.screen.card_ready() {
+                drop(rt);
+                self.notify(NoticeKind::Info, tr("This avatar's N4N0 cannot drop cards: update N4N0 in My Avatar, then upload the avatar again."));
+                return;
+            }
+            let now = Instant::now();
+            let s = &mut rt.screen;
+            s.put_card(Card { link: link.clone(), title: title.clone(), video: video.clone(), left: n4n0::card::LIFE_SECONDS }, now);
+            s.last_activity = now;
+            let fetch = video.filter(|id| !matches!(s.pictures.get(id), Some(Thumb::Ready(_))));
+            rt.wake();
+            fetch
+        };
+        if let Some(id) = fetch {
+            self.screen_thumbnails(vec![id]);
+        }
+        // Orbiters keeps it for whoever grabs it in this instance (a member's card only).
+        let instance = self.host.world().instance_hash();
+        match (self.account().is_some(), instance) {
+            (true, Some(instance)) => {
+                let later = self.later();
+                std::thread::spawn(move || {
+                    // Posted with the fence held, with the account of the member who dropped it.
+                    let Some(n) = later.fence() else { return };
+                    let Some((api, token)) = n.account() else { return };
+                    if let Err(e) = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title) {
+                        n.notify(NoticeKind::Warning, tr!("People around cannot copy your card's link: {error}", error = format!("{e:#}")));
+                    }
+                });
+            }
+            (false, Some(_)) => self.notify(NoticeKind::Info, tr("Sign in to Orbiters so that people around can copy your card's link too.")),
+            _ => {}
+        }
+        self.publish();
     }
 }
 
@@ -3137,10 +3161,11 @@ mod tests {
 /// account when the app has one connected ([`Host::invite_self`]); else Orbiters' VRChat account, through Orbiters. That
 /// one can invite only an account that befriended it, to an instance it may invite to: what it could not do becomes the
 /// way that works, connecting the person's own VRChat account (Add Orbiters as a friend stays, it can work).
-pub(crate) fn invite_route(host: &dyn crate::Host, epoch: u64, location: &str) -> orbiters_n4n0_core::menu::InviteAnswer {
+pub(crate) fn invite_route(host: &dyn crate::Host, epoch: u64, account: Option<&str>, location: &str) -> orbiters_n4n0_core::menu::InviteAnswer {
     use orbiters_n4n0_core::menu::InviteAnswer;
-    if let Some(answer) = host.invite_self(location) {
-        return answer;
+    if let Some(account) = account {
+        // Their own VRChat account, as it was when they asked: gone since, nothing is sent instead.
+        return host.invite_self(location, account).unwrap_or_else(|| InviteAnswer::Failed { message: tr("Your VRChat account changed meanwhile: nothing was sent.").into() });
     }
     // As the member who asked, or not at all.
     let answer = match host.account_for(epoch) {

@@ -105,12 +105,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut translations = super::desk_translate::Host::default();
     // "No 3D picture of this world yet" in the bottom right corner (Request20).
     let mut notice = super::desk_notice::Card::default();
+    let mut settling = crate::backend::Settling::default();
     loop {
         let turn = Instant::now();
         let dt = turn.duration_since(last_turn).as_secs_f32();
         last_turn = turn;
         pump();
         let snap = backend.view();
+        // What is pressed this turn was pressed on pictures of the member shown before it.
+        backend.shown(settling.turn(snap.n4n0.account_epoch, turn), orbiters_n4n0::Surface::Overlay);
         if client.should_close() || !super::wanted_on_desktop(&snap) {
             return Ok(());
         }

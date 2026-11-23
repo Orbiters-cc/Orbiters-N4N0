@@ -2632,9 +2632,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         println!("{}", path.display());
     }
     // Whatever shows over the page says so as it is shown (`orbiters_ui::front`).
-    anyhow::ensure!(missing.is_empty(), "layers over the page that do not say they are shown:
-{}", missing.into_iter().collect::<Vec<_>>().join("
-")); // i18n: not shown
+    anyhow::ensure!(missing.is_empty(), "layers over the page that do not say they are shown:\n{}", missing.into_iter().collect::<Vec<_>>().join("\n")); // i18n: not shown
     Ok(())
 }
 
@@ -4246,13 +4244,9 @@ mod dashboard_tests {
             })
         }).collect();
         let done: Vec<_> = walks.into_iter().map(|w| w.join().unwrap()).collect();
-        let end = |t: &str| t.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("
-");
-        let wrong: Vec<String> = done.iter().filter(|d| !d.status.success()).map(|d| format!("{}
-{}", end(&String::from_utf8_lossy(&d.stdout)), end(&String::from_utf8_lossy(&d.stderr)))).collect();
-        assert!(wrong.is_empty(), "{}", wrong.join("
-
-"));
+        let end = |t: &str| t.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        let wrong: Vec<String> = done.iter().filter(|d| !d.status.success()).map(|d| format!("{}\n{}", end(&String::from_utf8_lossy(&d.stdout)), end(&String::from_utf8_lossy(&d.stderr)))).collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
         let said: String = done.iter().map(|d| String::from_utf8_lossy(&d.stdout).to_string()).collect();
         let scenes = said.lines().filter(|l| l.ends_with(".png")).count();
         assert!(scenes > 200, "{scenes} scenes walked: {}", end(&said));
@@ -4315,8 +4309,7 @@ mod dashboard_tests {
                 }
             }
         }
-        assert!(wrong.is_empty(), "{}", wrong.join("
-"));
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// Enzo (F15): with nothing to stop, the dashboard's recorder starts nothing, and its button looks so: no bright red dot that reads as Record.

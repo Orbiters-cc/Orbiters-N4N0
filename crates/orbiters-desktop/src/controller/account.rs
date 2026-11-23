@@ -659,8 +659,7 @@ mod tests {
                 wrong.push(format!("{name}: {said} lines before, {after} after (expected {})", if clears { "none" } else { "kept" }));
             }
         }
-        assert!(wrong.is_empty(), "{}", wrong.join("
-"));
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A refused credential is asked about again, later each time, never more often than every ten minutes.

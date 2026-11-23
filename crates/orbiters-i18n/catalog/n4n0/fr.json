@@ -105,7 +105,7 @@
   "N4N0's ears could not start: a library they need is missing next to Orbiters - N4N0 (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters - N4N0.": "Les oreilles de N4N0 n’ont pas pu démarrer : une bibliothèque nécessaire manque à côté d’Orbiters - N4N0 (onnxruntime.dll ou sherpa-onnx-c-api.dll). Réinstalle Orbiters - N4N0.",
   "N4N0's ears stopped (exit code {code}).": "Les oreilles de N4N0 se sont arrêtées (code de sortie {code}).",
   "N4N0's ears stopped (exit code {code}): {line}.": "Les oreilles de N4N0 se sont arrêtées (code de sortie {code}) : {line}.",
-  "N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again on the N4N0 page.": "Les oreilles de N4N0 se sont arrêtées deux fois pendant le chargement des modèles vocaux : ils sont peut-être abîmés. Installe-les à nouveau depuis la page N4N0.",
+  "N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again in Orbiters - N4N0 › Settings › Voice & assistant.": "Les oreilles de N4N0 se sont arrêtées deux fois pendant le chargement des modèles vocaux : ils sont peut-être abîmés. Installe-les à nouveau dans Orbiters - N4N0 › Paramètres › Voix et assistant.",
   "N4N0's ears stopped.": "Les oreilles de N4N0 se sont arrêtées.",
   "N4N0's ears stopped: {line}.": "Les oreilles de N4N0 se sont arrêtées : {line}.",
   "N4N0's light: off": "Lumière de N4N0 : éteinte",

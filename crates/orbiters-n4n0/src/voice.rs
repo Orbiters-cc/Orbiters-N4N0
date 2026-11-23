@@ -124,7 +124,7 @@ impl VoiceRuntime {
         let message = if code.map(|c| c as u32) == Some(DLL_NOT_FOUND) {
             tr("N4N0's ears could not start: a library they need is missing next to Orbiters - N4N0 (onnxruntime.dll or sherpa-onnx-c-api.dll). Reinstall Orbiters - N4N0.").to_string()
         } else if damaged {
-            tr("N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again on the N4N0 page.").to_string()
+            tr("N4N0's ears stopped twice while loading the speech models: they may be damaged. Install them again in Orbiters - N4N0 › Settings › Voice & assistant.").to_string()
         } else {
             // Whole sentences: where the code and the worker's last line go differs by language.
             let code = code.map(|c| format!("{:#x}", c as u32));

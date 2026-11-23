@@ -41,7 +41,7 @@ fn failed(f: Failure) -> Result<Sealed, Reply> {
     Err(Reply::Failed(f))
 }
 fn entry(c: &Shared, op: &str) -> Entry {
-    c.groups_book().get(&Key::of(&scope(c)).unwrap(), op).unwrap()
+    c.groups_book().get(&c.groups_key(&scope(c)).unwrap(), op).unwrap()
 }
 fn check(c: &Shared, op: &str) -> Observation {
     match ask(c, Request::Check { op: op.into() }) {
@@ -437,6 +437,34 @@ fn a_role_change_is_for_one_membership() {
     assert!(writes(&sent).is_empty());
     let s = prepare(&c, own(true)).unwrap();
     assert_eq!(s.member.unwrap().membership_id, "gmem_me_again", "looked at again: the new one");
+}
+
+/// The record is the Orbiters member's, by their id: renamed, what they sent is still held and shown; another member with
+/// the name they had sees and is held by nothing of it.
+#[test]
+fn the_record_follows_the_member_not_the_name() {
+    let as_member = |c: &Shared, id: &str, name: &str| {
+        {
+            let mut rt = c.account_runtime.lock().unwrap();
+            rt.read = Some((orbiters_core::account::Server::current(), None));
+            let account = rt.account.as_mut().unwrap();
+            (account.user, account.username) = (Some(id.into()), Some(name.into()));
+        }
+        c.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: name.into() });
+    };
+    let (c, w, _) = world();
+    as_member(&c, "1", "tester");
+    let op = lost(&c, &w, Kind::CreatePost, false);
+    let shown = |c: &Shared| match ask(c, Request::Ledger { also: vec![] }) {
+        Reply::Ledger { entries, .. } => entries.iter().any(|e| e.op == op),
+        r => panic!("{r:?}"),
+    };
+    as_member(&c, "1", "Renamed");
+    assert!(shown(&c));
+    assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op: op.clone() }));
+    as_member(&c, "2", "tester");
+    assert!(!shown(&c));
+    assert!(prepare(&c, the(&c, Kind::CreatePost)).is_ok());
 }
 
 /// Nothing is sent whose record cannot be kept first.
@@ -870,7 +898,7 @@ fn an_account_switch_drops_a_sealed_write() {
     let commit = |scope: Scope| c.groups(LINK, scope, Request::Commit { op: s.op.clone(), digest: s.digest() });
     assert_eq!(commit(a), Reply::Failed(Failure::AccountChanged));
     assert_eq!(commit(scope(&c)), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::Expired) });
-    let e = c.groups_book().get(&Key::of(&scope(&c)).unwrap(), &s.op).unwrap();
+    let e = c.groups_book().get(&c.groups_key(&scope(&c)).unwrap(), &s.op).unwrap();
     assert_eq!((e.state, e.by), (State::Refused, Some(By::NeverSent)), "the same account, signed in again, sees it was never sent");
     assert!(writes(&sent).is_empty());
 }
@@ -911,7 +939,7 @@ fn the_scope_is_looked_at_again_at_the_send() {
         let Reply::Outcome { outcome, .. } = ask(&c, Request::Commit { op: s.op.clone(), digest: s.digest() }) else { panic!() };
         assert!(!matches!(outcome, Outcome::Done(_)), "{kind:?}: {outcome:?}");
         assert!(writes(&sent).is_empty(), "{kind:?}: nothing goes as the sign-in that ended");
-        let e = c.groups_book().of(&Key::of(&scope(&c)).unwrap()).into_iter().find(|e| e.op == s.op).unwrap();
+        let e = c.groups_book().of(&c.groups_key(&scope(&c)).unwrap()).into_iter().find(|e| e.op == s.op).unwrap();
         assert_eq!(e.state, State::Refused, "{kind:?}: and it is known that nothing went");
     }
 }
@@ -1001,7 +1029,7 @@ fn unknown_entry(c: &Shared, write: &Write, evidence: Evidence) -> String {
     if target.user.is_some() {
         target.membership = Some("m".into());
     }
-    book.prepare(Entry { v: FORMAT, op: op.clone(), key: Key::of(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target, payload: write.payload(), same: write.same(), evidence, state: State::Prepared, by: None, made: None, checked: false, answer: None, looked: false, closed: None, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
+    book.prepare(Entry { v: FORMAT, op: op.clone(), key: c.groups_key(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target, payload: write.payload(), same: write.same(), evidence, state: State::Prepared, by: None, made: None, checked: false, answer: None, looked: false, closed: None, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
     book.dispatch(&op, &[]).unwrap();
     book.end(&op, State::Unknown, None, None);
     later(c);

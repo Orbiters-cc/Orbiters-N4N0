@@ -37,8 +37,8 @@ const RECENT_MS: i64 = 24 * 3600 * 1000;
 /// time limit is 30 s).
 pub const SETTLES_AFTER_MS: i64 = 60 * 1000;
 
-/// Who and where, for good: the environment, the Orbiters account (hashed) and the VRChat account. Not the sign-in's
-/// revision, which changes while the account does not.
+/// Who and where, for good: the environment, the Orbiters account (hashed; by its id where it is known,
+/// `Controller::groups_key`) and the VRChat account. Not the sign-in's revision, which changes while the account does not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
     pub environment: String,

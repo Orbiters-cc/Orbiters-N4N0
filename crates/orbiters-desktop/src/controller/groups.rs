@@ -660,7 +660,7 @@ impl Controller {
             Request::Ledger { also } => self.groups_ledger(&scope, &also),
             Request::Check { op } => self.groups_check(link, &scope, &op).map(|observation| Reply::Checked { op, observation }),
             Request::Decide { op, choice } => self.groups_decide(&scope, &op, choice).map(|_| Reply::Decided { op }),
-            Request::SetAside => Key::of(&scope).ok_or(Failure::SignedOut).and_then(|key| self.groups_book().set_aside(&key).map_err(not)).map(|_| Reply::Cancelled),
+            Request::SetAside => self.groups_key(&scope).and_then(|key| self.groups_book().set_aside(&key).map_err(not)).map(|_| Reply::Cancelled),
             Request::SealedArt { op } => self.groups_sealed_art(link, &scope, &op).map(Reply::Picture),
             Request::Members { group, query, offset } => {
                 let query = query.trim().to_string();
@@ -695,6 +695,15 @@ impl Controller {
         self.groups.lock().unwrap().end_unsent(|i| i.link == link);
     }
 
+    /// Whose the record's entries are: the environment, the Orbiters member (by the id Orbiters gives them: a name can be
+    /// changed, or used again) and the VRChat account.
+    pub(crate) fn groups_key(&self, scope: &Scope) -> Result<Key, Failure> {
+        let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        Ok(match self.vrchat_owner().and_then(|o| o.member_digest().map(str::to_string)) {
+            Some(orbiters) => Key { orbiters, ..key },
+            None => key,
+        })
+    }
     fn groups_book(&self) -> Arc<Ledger> {
         self.groups.lock().unwrap().ledger.clone()
     }
@@ -702,7 +711,7 @@ impl Controller {
     /// What the window shows of the ledger: ids and states, no text. (Asked at each page: what an ended program left staged
     /// goes here too.)
     fn groups_ledger(&self, scope: &Scope, also: &[String]) -> Result<Reply, Failure> {
-        let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        let key = self.groups_key(scope)?;
         self.groups_sweep_staged();
         let book = self.groups_book();
         if !book.owned() {
@@ -865,7 +874,7 @@ impl Controller {
     }
 
     fn groups_seal(&self, link: u64, scope: &Scope, write: Write) -> Result<Reply, Failure> {
-        let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        let key = self.groups_key(scope)?;
         let ready = self.groups_validate(scope, write)?;
         let book = self.groups_book();
         let op = uuid::Uuid::new_v4().to_string();
@@ -1366,7 +1375,7 @@ impl Controller {
 
     /// What VRChat shows now of `op`: never what happened, or who did it (verify3 Blocker 2).
     fn groups_check(&self, link: u64, scope: &Scope, op: &str) -> Result<Observation, Failure> {
-        let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        let key = self.groups_key(scope)?;
         let book = self.groups_book();
         if !book.owned() {
             return Err(Failure::OtherOwner);
@@ -1423,7 +1432,7 @@ impl Controller {
     /// What the person decides of a write no one can tell the end of, kept as theirs. One of those shown is only what they
     /// were shown.
     fn groups_decide(&self, scope: &Scope, op: &str, choice: Choice) -> Result<(), Failure> {
-        let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        let key = self.groups_key(scope)?;
         let book = self.groups_book();
         book.get(&key, op).ok_or(if book.owned() { Failure::Expired } else { Failure::OtherOwner })?;
         let kept = match choice {

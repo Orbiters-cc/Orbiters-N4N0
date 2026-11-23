@@ -804,6 +804,10 @@ impl Owner {
         Self { member: id.map(|id| digest("member", id)), credential: digest("credential", &account.token) }
     }
 
+    /// The member in their environment, hashed, when the account says which.
+    pub(super) fn member_digest(&self) -> Option<&str> {
+        self.member.as_deref()
+    }
     /// The same member: by their ids; by the credential while one of them has no id.
     fn same(&self, other: &Owner) -> bool {
         match (&self.member, &other.member) {

@@ -174,7 +174,7 @@ impl Rig {
     }
     fn entry(&self, op: &str) -> Entry {
         let book = self.service.ctl.groups_book_for_tests();
-        book.get(&crate::controller::groups::Key::of(&Scope::of(&self.service.ctl.view())).unwrap(), op).unwrap()
+        book.get(&self.service.ctl.groups_key(&Scope::of(&self.service.ctl.view())).unwrap(), op).unwrap()
     }
     fn sent_writes(&self) -> usize {
         writes(&self.sent).len()
@@ -283,7 +283,7 @@ fn leaving_a_view_ends_what_it_had_not_sent() {
             r.w.state.open = Some(page::Open::new(GroupCard { id: "grp_00000000-0000-4000-8000-0000000000ff".into(), name: "Another".into(), ..Default::default() }, &r.w.state.drafts));
             r.w.settle();
             assert!(r.w.state.flow.is_none(), "{what}: no confirmation is taken up by another view");
-            assert!(r.service.ctl.groups_book_for_tests().of(&crate::controller::groups::Key::of(&Scope::of(&r.w.snap)).unwrap()).iter().all(|e| e.state == Stands::Refused || what == "the page closed" && while_preparing), "{what}: over, unsent");
+            assert!(r.service.ctl.groups_book_for_tests().of(&r.service.ctl.groups_key(&Scope::of(&r.w.snap)).unwrap()).iter().all(|e| e.state == Stands::Refused || what == "the page closed" && while_preparing), "{what}: over, unsent");
             assert_eq!(r.sent_writes(), 0);
         }
     }
@@ -374,7 +374,7 @@ fn verify2_pending_send_survives_window_drop() {
     let book = r.service.ctl.groups_book_for_tests();
     // (Its lock ends with it: its copy is what the next program finds.)
     let after = crate::controller::groups::Ledger::at(copied(&book.dir()));
-    let key = crate::controller::groups::Key::of(&Scope::of(&r.w.snap)).unwrap();
+    let key = r.service.ctl.groups_key(&Scope::of(&r.w.snap)).unwrap();
     assert_eq!(after.get(&key, &op).unwrap().state, Stands::Unknown, "a program that ended here comes back to 'unknown'");
     hold.let_go();
 }

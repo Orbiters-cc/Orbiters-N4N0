@@ -309,6 +309,23 @@ How it is one verified game (`controller/bridge_mac.rs`):
   (the largest in memory), the render server, `wsd` and the busiest. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`, six
   kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`).
 
+### Live run, 0.3.9-dev.27 with obelisk-cli 0.1.6 (2026-11-23, 03:42 to 04:07)
+
+Five starts, private instances only. 1. `go_to_world` VRChat Home, 03:42: VRChat joined and logged
+`[GC] Ensuring the heap is at least 512MB by allocating 346MB` at 03:43:19, then nothing more: frames and both logs stopped,
+every engine process near 0 % CPU (the M15 hang). The bridge kept waiting (a stall is no loss), and the incident capture kept it at
+03:43:52 (`incidents/2026-11-23_03-43-52-stall-28579cae`). Its stack samples show **every guest thread of the game parked in
+voile-lkd's `lkd_signal_next` (`poll`, the group-stop park loop)** and wineserver idle in `epoll_pwait`: the game's process was in a
+job-control stop nobody continued. The same engine log shows wineserver ptrace-attaching the game (`lkd: ptrace: POKEUSER DR7`):
+the likely cause is an attach's SIGSTOP dequeued before the tracee's flags knew it was traced (Orbiters-cc/voile-lkd branch
+`fix/attach-stop-resync`, not shipped: `fexdarwin-run` is not among obelisk-cli's engine files). `close_vrchat` answered
+`close_timeout` (a stopped process takes no Quit); the session was ended with `steam quit --session --force`. 2. VRChat Home
+again, 03:52: arrived at 03:53:22 (the local player in its own private instance), screenshot of the owner's avatar. 3. travel to
+"1's Optimized Box": `start_wait` (59 s: the previous game ran 70 s, an early end), then the same call again started it, arrived
+03:56:07, screenshot. 4. travel to "The Black Cat", arrived 03:58:50, screenshot; `close_vrchat` closed it in 6 s, the wrapper's
+`obelisk-wait:` lines 50 ms apart. 5. `obelisk-cli steam play 438100` directly: home world, the owner's avatar loaded at 04:01:41
+and the game drew on (`shown` 1,771 to 6,527 frames) for 355 s; `steam quit --session` closed it in 5 s.
+
 ### Phase 0 on this Mac (2026-11-22: VRChat under Voile `v26.3.0-27.beta1`, obelisk-cli 0.1.1, Apple M3, macOS 27)
 
 Three starts, each into a new private instance of the owner's own home world (`wrld_7281543e…:<n>~private(usr_1339e525…)~region(eu)~nonce(<uuid>)`,

@@ -163,9 +163,6 @@ impl Harness {
     }
 }
 
-/// The kinds of control that keep a choice (the others are buttons: actions, or a row's own Save).
-const CHOICES: [&str; 8] = ["toggle", "slider", "segments", "step-slider", "text-field", "dropdown", "chip", "tile"];
-
 /// The gates the harness opens: no window GPU to choose here.
 const HERE: Open = Open { bridge: true, vrchat_login: true, gpu_choice: false, gpu_split: false };
 
@@ -185,11 +182,6 @@ impl Harness {
         self.snap.translate.set(crate::state::TranslateStatus::default());
     }
 
-    /// The rows drawn in `card` last frame, by label, for [`registry::claim`].
-    fn rows_of(&self, card: &str) -> Vec<(String, Rect)> {
-        self.state.seen.iter().filter(|(c, _, _)| *c == card).map(|(_, l, r)| (l.clone(), *r)).collect()
-    }
-
     /// Every row and every control the sub-tab shown drew that no setting claims, and is neither a status row nor an action.
     fn unclaimed(&self, group: Group) -> Vec<String> {
         let mut out = Vec::new();
@@ -204,25 +196,23 @@ impl Harness {
                 out.push(format!("{card} › row {label:?}"));
             }
         }
-        for (card, key, rect) in &self.state.seen_controls {
-            if registry::claim(group, card, key, rect.center(), &self.rows_of(card)) == registry::Claim::Nobody {
+        for (card, key, _) in &self.state.seen_controls {
+            if registry::claim(group, card, key) == registry::Claim::Nobody {
                 out.push(format!("{card} › control {key:?}"));
             }
         }
-        // A row is one setting: its own control is claimed by where it is, but a second control that keeps a choice in
-        // the same row is another setting, which must be named by an entry (claimed by key, not by position).
-        for (card, label, row) in &self.state.seen {
-            let undeclared: Vec<&str> = self
-                .state
-                .seen_controls
-                .iter()
-                .zip(&self.state.seen_kinds)
-                .filter(|((c, _, r), kind)| c == card && row.contains(r.center()) && CHOICES.contains(kind))
-                .map(|((_, k, _), _)| k.as_str())
-                .filter(|k| !ENTRIES.iter().any(|e| e.group == group && e.card == *card && e.controls.contains(k)))
-                .collect();
-            if undeclared.len() > 1 {
-                out.push(format!("{card} › row {label:?} holds {} settings named by no entry: {undeclared:?}", undeclared.len()));
+        // A key drawn more often than settings name it is another control under a name already taken (chips and tiles are
+        // the several choices of one setting).
+        let mut counted = std::collections::BTreeMap::<(&str, &str), usize>::new();
+        for ((card, key, _), kind) in self.state.seen_controls.iter().zip(&self.state.seen_kinds) {
+            if !matches!(*kind, "chip" | "tile") && matches!(registry::claim(group, card, key), registry::Claim::Setting(_)) {
+                *counted.entry((card, key)).or_default() += 1;
+            }
+        }
+        for ((card, key), drawn) in counted {
+            let named = ENTRIES.iter().filter(|e| e.group == group && e.card == card && e.controls.contains(&key)).count();
+            if drawn > named {
+                out.push(format!("{card} › control {key:?} is drawn {drawn} times, named by {named}"));
             }
         }
         out
@@ -257,11 +247,10 @@ fn a_control_missing_from_the_registry_is_caught_on_a_broad_card() {
     h.open("vrchat");
     let (card, key, rect) = h.state.seen_controls.iter().find(|(_, k, _)| k == "booster-level").cloned().expect("the booster's level slider is drawn and recorded");
     assert_eq!(card, "FPS booster");
-    let rows = h.rows_of(card);
-    assert_eq!(registry::claim(Group::Vrchat, card, &key, rect.center(), &rows), registry::Claim::Setting("vrchat.booster"));
+    assert_eq!(registry::claim(Group::Vrchat, card, &key), registry::Claim::Setting("vrchat.booster"));
     // The same control under another name: nobody claims it, and the card being "the FPS booster" does not excuse it.
-    assert_eq!(registry::claim(Group::Vrchat, card, "booster-another-slider", rect.center(), &rows), registry::Claim::Nobody);
-    h.state.seen_controls.push((card, "booster-another-slider".into(), rect));
+    assert_eq!(registry::claim(Group::Vrchat, card, "booster-another-slider"), registry::Claim::Nobody);
+    add_control(&mut h, card, "booster-another-slider", "slider", rect);
     assert_eq!(h.unclaimed(Group::Vrchat), vec!["FPS booster › control \"booster-another-slider\"".to_string()]);
 }
 
@@ -889,28 +878,78 @@ fn every_dependency_in_each_of_its_states() {
 /// me again (a hint muted for good) and I agree (the agreement for translation by Orbiters).
 #[test]
 fn controls_that_keep_a_choice_are_settings() {
-    for (card, key, id) in [("Performance report", "Don't tell me again", "vrchat.perf-hint-mute"), ("Translation in VR", "I agree", "translate.orbiters-agreement")] {
+    for (card, key, id) in [
+        ("Performance report", "Don't tell me again", "vrchat.perf-hint-mute"),
+        ("Translation in VR", "I agree", "translate.orbiters-agreement"),
+        // The booster's question about its last level: both answers write the level.
+        ("FPS booster", "Show me how", "vrchat.booster"),
+        ("FPS booster", "Stay on Picture", "vrchat.booster"),
+    ] {
         assert!(!registry::is_action(card, key), "{key:?} keeps a choice: it is no action");
         let e = registry::entry(id).unwrap_or_else(|| panic!("{id} is no entry"));
-        assert_eq!(registry::claim(e.group, card, key, egui::pos2(0.0, 0.0), &[]), registry::Claim::Setting(id));
+        assert_eq!(registry::claim(e.group, card, key), registry::Claim::Setting(id));
         assert!(registry::search(&e.shown(e.title).to_lowercase(), &HERE).iter().any(|f| f.entry.id == id), "{id} is found by its name");
     }
     assert!(registry::search("don't tell me again", &HERE).iter().any(|f| f.entry.id == "vrchat.perf-hint-mute"));
     assert!(registry::search("agree orbiters", &HERE).iter().any(|f| f.entry.id == "translate.orbiters-agreement"));
 }
 
-/// A second setting put inside a row already claimed by a setting is caught: it needs its own entry, even though it
-/// sits in another setting's row.
+/// Any control put inside a registered row needs its own entry: beside the row's own switch, in a row with only a button,
+/// in a status row, a button that is no known action, or the row's own key a second time.
 #[test]
-fn a_second_setting_inside_a_registered_row_is_caught() {
-    let mut h = Harness::new();
-    h.open("voice");
-    let row = h.row("Wake word");
-    let inside = Rect::from_center_size(pos2(row.right() - 120.0, row.center().y), vec2(48.0, 28.0));
-    assert!(h.unclaimed(Group::Voice).is_empty());
-    add_control(&mut h, "N4N0's ears", "n4n0-wake-sensitivity", "slider", inside);
-    let unclaimed = h.unclaimed(Group::Voice);
-    assert!(unclaimed.iter().any(|u| u.contains("n4n0-wake-sensitivity")), "{unclaimed:?}");
+fn another_control_inside_a_registered_row_needs_its_own_entry() {
+    let mut missed = Vec::new();
+    for (group, card, label, key, kind) in [
+        ("voice", "N4N0's ears", "Wake word", "n4n0-wake-sensitivity", "slider"),
+        ("voice", "N4N0's ears", "Wake word", "Keep listening", "button"),
+        ("n4n0", "N4N0's menu", "Try it", "n4n0-menu-try-often", "toggle"),
+        ("n4n0", "N4N0's menu", "Keyboard", "n4n0-menu-keyboard", "segments"),
+        ("capture", "VRChat and OSC", "VRChat log", "log-keep", "toggle"),
+        ("vr", "Around VRChat's menus", "Right now", "right-now-often", "toggle"),
+        ("app", "About", "Updates", "update-channel", "segments"),
+    ] {
+        let mut h = Harness::new();
+        h.open(group);
+        let shown = h.state.group();
+        assert!(h.unclaimed(shown).is_empty(), "{group}: {:?}", h.unclaimed(shown));
+        let row = h.row(label);
+        add_control(&mut h, card, key, kind, Rect::from_center_size(row.center(), vec2(48.0, 28.0)));
+        if !h.unclaimed(shown).iter().any(|u| u.contains(key)) {
+            missed.push(format!("{card} › {label}: {kind} {key:?}"));
+        }
+    }
+    assert!(missed.is_empty(), "not caught:\n{}", missed.join("\n"));
+}
+
+/// Every key the registry names is drawn somewhere: an id salt or a button's label in the cards' own source (a key with a
+/// slip of the pen would claim nothing, in a state these tests do not draw).
+#[test]
+fn every_key_the_registry_names_is_in_the_cards_source() {
+    let sources = [
+        include_str!("settings.rs"),
+        include_str!("settings_n4n0.rs"),
+        include_str!("vr_audio.rs"),
+        include_str!("mic.rs"),
+        include_str!("mic_grid.rs"),
+        include_str!("form.rs"),
+        include_str!("booster_card.rs"),
+        include_str!("launch_card.rs"),
+        include_str!("translate_card.rs"),
+        include_str!("language_card.rs"),
+        include_str!("beta_feedback.rs"),
+        include_str!("experimental.rs"),
+        include_str!("network.rs"),
+        include_str!("perf_card.rs"),
+    ]
+    .concat();
+    let named = ENTRIES.iter().flat_map(|e| e.controls.iter().copied()).chain(registry::ACTIONS.iter().map(|(_, k)| *k));
+    let lost: Vec<&str> = named
+        .filter(|key| match key.strip_suffix('*') {
+            Some(start) => !sources.contains(&format!("\"{start}")),
+            None => !sources.contains(&format!("\"{key}\"")),
+        })
+        .collect();
+    assert!(lost.is_empty(), "{lost:?}");
 }
 
 /// Tests: a control as if drawn at `rect` in `card` (a second setting slipped into a row).

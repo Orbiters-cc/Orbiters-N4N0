@@ -163,8 +163,8 @@ pub struct Entry {
     pub gate: Gate,
     /// It is the whole card: a link to it lights the card.
     pub whole: bool,
-    /// The keys of its controls drawn outside its rows (`widgets::ControlMark::key`: an id salt, a button's label): a
-    /// slider of its own, chips under its row.
+    /// The keys of its controls, every one of them (`widgets::ControlMark::key`: an id salt, a button's English label),
+    /// in its rows or beside them. A control is a setting's by its key alone, never by where it is drawn.
     pub controls: &'static [&'static str],
     /// What must be so for it to show (a switch on, a choice made): until then the search says so and leads to the
     /// setting that shows it.
@@ -244,35 +244,35 @@ pub const ROW_HELD: &str = mark("Held parameters");
 pub static ENTRIES: &[Entry] = &[
     // Accounts.
     e("account.orbiters", Account, mark("Orbiters account"), mark("Orbiters account"), mark("One sign-in for Orbiters - N4N0 and your Unity tools: MCB, My Avatar, ReFit and the Logger. Uploads to the Map explorer use it."), mark("sign in log in login sign out website MCB My Avatar"))
-        .rows(&[mark("Sign in"), mark("Connect in your browser"), mark("Shared with your Unity tools")]),
+        .rows(&[mark("Sign in"), mark("Connect in your browser"), mark("Shared with your Unity tools")]).controls(&[mark("Sign in"), mark("Cancel"), mark("Open again"), mark("Sign out"), mark("Sign out of every tool")]),
     e("account.explorer-points", Account, mark("Orbiters account"), EXPLORER_POINTS, mark("Your points and title for sharing the first public 3D pictures of worlds."), mark("points title rank score explorer"))
         .needs("account.orbiters", |s| {
             (!matches!(s.account.state, crate::state::AccountState::SignedIn { .. } | crate::state::AccountState::Offline { username: Some(_) })).then_some(mark("Shown once you are signed in to Orbiters"))
         }),
-    e("account.world-notices", Account, mark("Orbiters account"), NOTICES_SWITCH, NOTICES_SWITCH_WHY, mark("notice prompt reminder world 3D picture")),
+    e("account.world-notices", Account, mark("Orbiters account"), NOTICES_SWITCH, NOTICES_SWITCH_WHY, mark("notice prompt reminder world 3D picture")).controls(&["explorer-world-notices"]),
     e("account.vrchat", Account, mark("VRChat account"), mark("VRChat account"), mark("Instead of Orbiters' shared account: friends, instances and pictures come from yours."), mark("login password two-factor 2FA code connect friends instances"))
         .rows(&[mark("Username"), mark("Password"), mark("Authenticator code"), mark("Email code"), mark("Recovery code")])
         .gate(Gate::VrchatLogin)
-        .whole(),
+        .whole().controls(&["vrchat-username", "vrchat-factor-code", mark("Show the password"), mark("Hide the password")]),
     // N4N0 companion.
-    e("n4n0.enabled", N4n0, "N4N0", "N4N0", mark("The panel, the AFK message, carried and held parameters, saved videos."), mark("on off enable disable companion bot")),
-    e("n4n0.show-bot", N4n0, "N4N0", mark("Show N4N0"), mark("The bot beside your head, its beams and its panel, for everyone around. Off, N4N0's menu still opens, before your eyes as ever. Show N4N0 in your Action Menu does the same."), mark("bot hide visible beams")),
-    e("n4n0.afk", N4n0, "N4N0", mark("AFK message"), mark("While VRChat says you are away, the panel tells people around you."), mark("away AFK status message text")),
+    e("n4n0.enabled", N4n0, "N4N0", "N4N0", mark("The panel, the AFK message, carried and held parameters, saved videos."), mark("on off enable disable companion bot")).controls(&["n4n0-enabled"]),
+    e("n4n0.show-bot", N4n0, "N4N0", mark("Show N4N0"), mark("The bot beside your head, its beams and its panel, for everyone around. Off, N4N0's menu still opens, before your eyes as ever. Show N4N0 in your Action Menu does the same."), mark("bot hide visible beams")).controls(&["n4n0-bot"]),
+    e("n4n0.afk", N4n0, "N4N0", mark("AFK message"), mark("While VRChat says you are away, the panel tells people around you."), mark("away AFK status message text")).controls(&["n4n0-afk"]),
     e("n4n0.afk-message", N4n0, "N4N0", mark("Message"), mark("What the panel says while you are away."), mark("away AFK text words"))
-        .needs("n4n0.afk", |s| (!s.settings.n4n0.afk_message_enabled).then_some(mark("Shown when AFK message is on"))),
-    e("n4n0.keep-pose", N4n0, "N4N0", mark("Keep my pose"), mark("GoGoLoco's pose, height and float carry over to the next avatar you wear."), mark("GoGoLoco height float carry avatar change")),
-    e("n4n0.controller-input", N4n0, "N4N0", mark("Controller input"), mark("Your touchpads and sticks reach avatars made to use N4N0's input parameters (Orbiters Toolkit's README tells creators how)."), mark("touchpad stick joystick parameters")),
-    e("n4n0.panel-speed", N4n0, "N4N0", mark("Panel speed"), mark("Time between two blocks of text. Faster than 250 ms, people around you miss blocks."), mark("text speed delay")),
+        .needs("n4n0.afk", |s| (!s.settings.n4n0.afk_message_enabled).then_some(mark("Shown when AFK message is on"))).controls(&["n4n0-afk-text", mark("Save")]),
+    e("n4n0.keep-pose", N4n0, "N4N0", mark("Keep my pose"), mark("GoGoLoco's pose, height and float carry over to the next avatar you wear."), mark("GoGoLoco height float carry avatar change")).controls(&["n4n0-carry"]),
+    e("n4n0.controller-input", N4n0, "N4N0", mark("Controller input"), mark("Your touchpads and sticks reach avatars made to use N4N0's input parameters (Orbiters Toolkit's README tells creators how)."), mark("touchpad stick joystick parameters")).controls(&["n4n0-controller-input"]),
+    e("n4n0.panel-speed", N4n0, "N4N0", mark("Panel speed"), mark("Time between two blocks of text. Faster than 250 ms, people around you miss blocks."), mark("text speed delay")).controls(&["n4n0-test-step"]),
     e("n4n0.held", N4n0, "N4N0", ROW_HELD, mark("Parameters N4N0 puts back whenever VRChat or a world resets them."), mark("pin hold parameter let go")),
-    e("n4n0.menu-where", N4n0, mark("N4N0's menu"), ROW_WHERE, mark("N4N0's own menu, opened by its dedicated button or the watch on your wrist, shows on your avatar's N4N0 screen when it has one, and floats before you when it does not."), mark("avatar screen floating display")).gate(Gate::VrchatHere),
-    e("n4n0.menu-button", N4n0, mark("N4N0's menu"), mark("Controller button"), mark("SteamVR's \"Open N4N0's menu\" binding for Orbiters: two quick taps on the left thumbrest or trackpad (a double press of X on controllers with neither), unless you change it in SteamVR's controller settings. The watch on your wrist opens it too."), mark("thumbrest trackpad double tap binding SteamVR open")),
-    e("n4n0.menu-wake", N4n0, mark("N4N0's menu"), mark("Say \"Nano\""), mark("The wake word on its own opens the menu."), mark("voice wake word open")),
-    e("n4n0.menu-touch", N4n0, mark("N4N0's menu"), mark("Touch N4N0"), mark("A hand on N4N0 opens the menu; touching it again closes it."), mark("hand touch open")),
-    e("n4n0.menu-try", N4n0, mark("N4N0's menu"), mark("Try it"), mark("Opens the menu (or closes it) as the button and N4N0 do."), mark("open test")),
-    e("n4n0.keyboard", N4n0, mark("N4N0's menu"), mark("Keyboard"), mark("The letters of the search keyboard. Automatic follows this computer's keyboard."), mark("QWERTY AZERTY layout letters")),
-    e("n4n0.look", N4n0, mark("N4N0's menu"), "Look", mark("Retro: a green phosphor terminal, as on an old computer. N4N0's screen has its own Look, in My Avatar."), mark("retro modern theme style appearance")).context("appearance"), // i18n: not shown ("Look" is translated in its context, tr_ctx("appearance", "Look"))
-    e("n4n0.screen-size", N4n0, mark("N4N0's menu"), mark("Screen size"), mark("How large N4N0's projected screen is, for you and everyone around."), mark("small large bigger size")),
-    e("n4n0.calls", N4n0, mark("Calls"), mark("Calls"), mark("Your presence and your VRChat friends (as hashes, from VRCX and VRCNext) go to Orbiters, to find friends you can call. Calls go through Orbiters' relay: a friend never sees this computer's address."), mark("call voice friends relay phone")).rows(&[mark("Calls"), CALLS_SOON]),
+    e("n4n0.menu-where", N4n0, mark("N4N0's menu"), ROW_WHERE, mark("N4N0's own menu, opened by its dedicated button or the watch on your wrist, shows on your avatar's N4N0 screen when it has one, and floats before you when it does not."), mark("avatar screen floating display")).gate(Gate::VrchatHere).controls(&["orbit-display"]),
+    e("n4n0.menu-button", N4n0, mark("N4N0's menu"), mark("Controller button"), mark("SteamVR's \"Open N4N0's menu\" binding for Orbiters: two quick taps on the left thumbrest or trackpad (a double press of X on controllers with neither), unless you change it in SteamVR's controller settings. The watch on your wrist opens it too."), mark("thumbrest trackpad double tap binding SteamVR open")).controls(&["n4n0-menu-button"]),
+    e("n4n0.menu-wake", N4n0, mark("N4N0's menu"), mark("Say \"Nano\""), mark("The wake word on its own opens the menu."), mark("voice wake word open")).controls(&["n4n0-menu-wake"]),
+    e("n4n0.menu-touch", N4n0, mark("N4N0's menu"), mark("Touch N4N0"), mark("A hand on N4N0 opens the menu; touching it again closes it."), mark("hand touch open")).controls(&["n4n0-menu-touch"]),
+    e("n4n0.menu-try", N4n0, mark("N4N0's menu"), mark("Try it"), mark("Opens the menu (or closes it) as the button and N4N0 do."), mark("open test")).controls(&[mark("Open the menu")]),
+    e("n4n0.keyboard", N4n0, mark("N4N0's menu"), mark("Keyboard"), mark("The letters of the search keyboard. Automatic follows this computer's keyboard."), mark("QWERTY AZERTY layout letters")).controls(&["n4n0-menu-keyboard"]),
+    e("n4n0.look", N4n0, mark("N4N0's menu"), "Look", mark("Retro: a green phosphor terminal, as on an old computer. N4N0's screen has its own Look, in My Avatar."), mark("retro modern theme style appearance")).context("appearance").controls(&["n4n0-menu-look"]), // i18n: not shown ("Look" is translated in its context, tr_ctx("appearance", "Look"))
+    e("n4n0.screen-size", N4n0, mark("N4N0's menu"), mark("Screen size"), mark("How large N4N0's projected screen is, for you and everyone around."), mark("small large bigger size")).controls(&["n4n0-screen-size"]),
+    e("n4n0.calls", N4n0, mark("Calls"), mark("Calls"), mark("Your presence and your VRChat friends (as hashes, from VRCX and VRCNext) go to Orbiters, to find friends you can call. Calls go through Orbiters' relay: a friend never sees this computer's address."), mark("call voice friends relay phone")).rows(&[mark("Calls"), CALLS_SOON]).controls(&["n4n0-calls"]),
     e("n4n0.direct-calls", N4n0, mark("Calls"), mark("Direct calls"), mark("Connect straight to the friend when your networks allow it: a little faster, but each of you sees the other's IP address."), mark("IP address peer direct faster"))
         .needs("n4n0.calls", |s| {
             // Not open to this account: Calls is greyed whatever it is set to; turning it on is no way to Direct calls.
@@ -281,80 +281,80 @@ pub static ENTRIES: &[Entry] = &[
             } else {
                 (!s.settings.n4n0.calls).then_some(mark("Shown when Calls is on"))
             }
-        }),
+        }).controls(&["n4n0-direct-calls"]),
     // Voice & assistant.
-    e("voice.assistant", Voice, mark("Assistant"), mark("AI assistant"), mark("Off, N4N0 is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."), mark("AI brain chat answers")),
-    e("voice.personality", Voice, mark("Assistant"), mark("Personality and own key"), mark("N4N0's roast level, its language and your own AI key are on the Orbiters website."), mark("roast API key website")),
-    e("voice.models", Voice, mark("N4N0's ears"), mark("Speech models"), mark("Speech to text on this computer, in 25 languages (NVIDIA Parakeet, Silero VAD): about 490 MB to download. Nothing you say leaves it until it is a sentence for N4N0."), mark("speech recognition transcription install download")),
+    e("voice.assistant", Voice, mark("Assistant"), mark("AI assistant"), mark("Off, N4N0 is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."), mark("AI brain chat answers")).controls(&["n4n0-ai"]),
+    e("voice.personality", Voice, mark("Assistant"), mark("Personality and own key"), mark("N4N0's roast level, its language and your own AI key are on the Orbiters website."), mark("roast API key website")).controls(&[mark("Open")]),
+    e("voice.models", Voice, mark("N4N0's ears"), mark("Speech models"), mark("Speech to text on this computer, in 25 languages (NVIDIA Parakeet, Silero VAD): about 490 MB to download. Nothing you say leaves it until it is a sentence for N4N0."), mark("speech recognition transcription install download")).controls(&[mark("Install (490 MB)"), mark("Repair (490 MB)"), mark("Downloading…"), mark("Unpacking…"), mark("Cancel")]),
     e("voice.mic", Voice, mark("N4N0's ears"), mark("Microphone"), mark("The one N4N0 listens to."), mark("mic input device test")).controls(&["n4n0-mic"]),
-    e("voice.wake", Voice, mark("N4N0's ears"), mark("Wake word"), mark("Start a sentence with “Nano” (N4N0 said aloud) and N4N0 hears it, any time. Every sentence is transcribed on this computer to find it; none is kept."), mark("Nano listen voice hands-free")),
-    e("voice.mute", Voice, mark("N4N0's ears"), mark("Mute VRChat while I hold Talk"), mark("The sentence for N4N0 stays out of the world."), mark("mute talk push to talk")),
+    e("voice.wake", Voice, mark("N4N0's ears"), mark("Wake word"), mark("Start a sentence with “Nano” (N4N0 said aloud) and N4N0 hears it, any time. Every sentence is transcribed on this computer to find it; none is kept."), mark("Nano listen voice hands-free")).controls(&["n4n0-wake"]),
+    e("voice.mute", Voice, mark("N4N0's ears"), mark("Mute VRChat while I hold Talk"), mark("The sentence for N4N0 stays out of the world."), mark("mute talk push to talk")).controls(&["n4n0-mute"]),
     e("voice.windows-mics", Voice, mark("Microphones"), mark("Microphones"), mark("Speak: the one that moves is the one hearing you. Press one to make it Windows' default."), mark("default mic input level Windows")).gate(Gate::Windows).whole().controls(&["mic-tile"]),
     // Overlay & VR.
-    e("vr.wheel", Vr, CARD_AROUND, mark("Around the Action Menu's wheel"), mark("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR."), mark("Action Menu wheel ring radial overlay")).gate(Gate::VrchatHere),
-    e("vr.camera", Vr, CARD_AROUND, mark("Around the camera"), mark("3D pictures, Record and the QR code beside VRChat's camera. In a headset they appear where VRChat opens it and move with the hand that holds it; in desktop mode, at the left of its panel."), mark("camera tiles 3D picture QR record")).gate(Gate::VrchatHere),
+    e("vr.wheel", Vr, CARD_AROUND, mark("Around the Action Menu's wheel"), mark("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR."), mark("Action Menu wheel ring radial overlay")).gate(Gate::VrchatHere).controls(&["orbit-wheel"]),
+    e("vr.camera", Vr, CARD_AROUND, mark("Around the camera"), mark("3D pictures, Record and the QR code beside VRChat's camera. In a headset they appear where VRChat opens it and move with the hand that holds it; in desktop mode, at the left of its panel."), mark("camera tiles 3D picture QR record")).gate(Gate::VrchatHere).controls(&["orbit-camera"]),
     e("vr.camera-find", Vr, CARD_AROUND, mark("Find the camera on screen"), mark("Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees."), mark("detect pattern camera panel"))
         .gate(Gate::VrchatHere)
-        .needs("vr.camera", |s| (!s.settings.orbit.camera_tiles).then_some(mark("Shown when Around the camera is on"))),
-    e("vr.turn", Vr, CARD_AROUND, mark("Turn around in a 3D capture"), mark("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to."), mark("turning stick snap smooth rotate")).gate(Gate::VrchatHere),
-    e("vr.quick-menu", Vr, CARD_AROUND, mark("Around the Quick Menu"), mark("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR."), mark("Quick Menu side tiles Esc")).gate(Gate::VrchatHere),
-    e("vr.size", Vr, CARD_AROUND, mark("Panels' size in VR"), mark("If they sit too near or too far from VRChat's menu in your headset."), mark("scale bigger smaller distance")).gate(Gate::VrchatHere),
-    e("vr.motion", Vr, CARD_AROUND, mark("How they follow your hand in VR"), mark("The tiles around VRChat's menus each follow your hand on a little spring of their own."), mark("spring rigid follow hand")).gate(Gate::VrchatHere),
-    e("vr.smoothing-quick-menu", Vr, CARD_AROUND, mark("Smoothing on the Quick Menu"), mark("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat."), mark("latency smooth jitter")).gate(Gate::VrchatHere),
-    e("vr.smoothing-wheel", Vr, CARD_AROUND, mark("Smoothing on the wheel"), mark("The same around VRChat's Action Menu. About 20 ms lines up with VRChat."), mark("latency smooth jitter")).gate(Gate::VrchatHere),
-    e("vr.smoothing-reset", Vr, CARD_AROUND, mark("Reset the smoothing"), mark("Puts both smoothings back to the values measured to match VRChat"), mark("default measured smoothing back")).gate(Gate::VrchatHere),
-    e("vr.dashboard", Vr, CARD_HEADSET, mark("SteamVR dashboard tab"), mark("Orbiters as a tab in SteamVR's dashboard while SteamVR runs."), mark("SteamVR overlay dashboard tab")).gate(Gate::VrchatHere),
+        .needs("vr.camera", |s| (!s.settings.orbit.camera_tiles).then_some(mark("Shown when Around the camera is on"))).controls(&["orbit-camera-pattern"]),
+    e("vr.turn", Vr, CARD_AROUND, mark("Turn around in a 3D capture"), mark("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to."), mark("turning stick snap smooth rotate")).gate(Gate::VrchatHere).controls(&["orbit-immersive-turn"]),
+    e("vr.quick-menu", Vr, CARD_AROUND, mark("Around the Quick Menu"), mark("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR."), mark("Quick Menu side tiles Esc")).gate(Gate::VrchatHere).controls(&["orbit-quick-menu"]),
+    e("vr.size", Vr, CARD_AROUND, mark("Panels' size in VR"), mark("If they sit too near or too far from VRChat's menu in your headset."), mark("scale bigger smaller distance")).gate(Gate::VrchatHere).controls(&["orbit-vr-size"]),
+    e("vr.motion", Vr, CARD_AROUND, mark("How they follow your hand in VR"), mark("The tiles around VRChat's menus each follow your hand on a little spring of their own."), mark("spring rigid follow hand")).gate(Gate::VrchatHere).controls(&["orbit-vr-motion"]),
+    e("vr.smoothing-quick-menu", Vr, CARD_AROUND, mark("Smoothing on the Quick Menu"), mark("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat."), mark("latency smooth jitter")).gate(Gate::VrchatHere).controls(&["orbit-vr-smoothing-quick-menu"]),
+    e("vr.smoothing-wheel", Vr, CARD_AROUND, mark("Smoothing on the wheel"), mark("The same around VRChat's Action Menu. About 20 ms lines up with VRChat."), mark("latency smooth jitter")).gate(Gate::VrchatHere).controls(&["orbit-vr-smoothing-wheel"]),
+    e("vr.smoothing-reset", Vr, CARD_AROUND, mark("Reset the smoothing"), mark("Puts both smoothings back to the values measured to match VRChat"), mark("default measured smoothing back")).gate(Gate::VrchatHere).controls(&[mark("Reset")]),
+    e("vr.dashboard", Vr, CARD_HEADSET, mark("SteamVR dashboard tab"), mark("Orbiters as a tab in SteamVR's dashboard while SteamVR runs."), mark("SteamVR overlay dashboard tab")).gate(Gate::VrchatHere).controls(&["perf-overlay"]),
     e("vr.watch-hand", Vr, CARD_HEADSET, mark("Watch on"), mark("The wrist the watch is on."), mark("wrist hand left right"))
         .gate(Gate::VrchatHere)
-        .needs("vr.watch", |s| (!s.settings.floating.watch).then_some(mark("Shown when Orbiters watch is on"))),
+        .needs("vr.watch", |s| (!s.settings.floating.watch).then_some(mark("Shown when Orbiters watch is on"))).controls(&["floating-watch-hand"]),
     e("vr.watch", Vr, CARD_HEADSET, mark("Orbiters watch"), mark("The N4N0 mark on a wrist in VR, shown as you turn the wrist to look at it. Point at it with the other hand and pull the trigger once: N4N0's menu opens before you (or on your avatar's N4N0 screen), used with your controllers' lasers while VRChat keeps them; pull again to close it. Grip it to move it. The Orbiters panel floats beside you from the SteamVR tab's Float button."), mark("wrist watch hand left right"))
-        .gate(Gate::VrchatHere),
-    e("vr.coverage", Vr, CARD_HEADSET, mark("Coverage while recording"), mark("In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording."), mark("path coverage controller")).gate(Gate::VrchatHere),
+        .gate(Gate::VrchatHere).controls(&["floating-watch"]),
+    e("vr.coverage", Vr, CARD_HEADSET, mark("Coverage while recording"), mark("In VR, the camera path and what it has covered float above a controller while you record, as in the capture options of Photos & captures. SteamVR shows it in your headset only: never in VRChat's camera or the recording."), mark("path coverage controller")).gate(Gate::VrchatHere).controls(&["coverage-overlay"]),
     e("vr.walk", Vr, CARD_HEADSET, mark("Walk boost"), mark("In VR, your walking stick carries you further, so you walk faster in VRChat. Also in the SteamVR tab and N4N0's menu."), mark("fast walk speed strength locomotion OVR Advanced Settings driver"))
-        .gate(Gate::VrchatHere),
+        .gate(Gate::VrchatHere).controls(&["walk-boost"]),
     e("vr.walk-strength", Vr, CARD_HEADSET, mark("Strength"), mark("How much faster than VRChat's own walking."), mark("fast walk speed faster boost"))
         .gate(Gate::VrchatHere)
-        .needs("vr.walk", |s| (!s.settings.walk_boost.enabled).then_some(mark("Shown when Walk boost is on"))),
+        .needs("vr.walk", |s| (!s.settings.walk_boost.enabled).then_some(mark("Shown when Walk boost is on"))).controls(&["walk-strength"]),
     e("vr.walk-driver", Vr, CARD_HEADSET, mark("Through SteamVR's driver"), mark("Moves every device rather than the play space, so OVR Advanced Settings' drag and turn add up with your walk. Turn it off only if Fast walk misbehaves."), mark("driver OVR Advanced Settings play space"))
         .gate(Gate::VrchatHere)
-        .needs("vr.walk", |s| (!s.settings.walk_boost.enabled).then_some(mark("Shown when Walk boost is on"))),
-    e("vr.audio-output", Vr, mark("When SteamVR starts"), mark("Output in VR"), mark("The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own."), mark("headphones speakers sound audio device")).gate(Gate::VrchatHere).controls(&["vr-audio-output"]),
+        .needs("vr.walk", |s| (!s.settings.walk_boost.enabled).then_some(mark("Shown when Walk boost is on"))).controls(&["walk-through-driver"]),
+    e("vr.audio-output", Vr, mark("When SteamVR starts"), mark("Output in VR"), mark("The speakers or headphones Windows makes every app's default when SteamVR starts, set again over its first seconds as Virtual Desktop and SteamVR put their own."), mark("headphones speakers sound audio device")).gate(Gate::VrchatHere).controls(&["vr-audio-output", mark("Test"), mark("Playing…")]),
     e("vr.audio-input", Vr, mark("When SteamVR starts"), mark("Input in VR"), "", mark("microphone mic sound audio device")).gate(Gate::VrchatHere).controls(&["vr-audio-input"]),
-    e("vr.audio-restore", Vr, mark("When SteamVR starts"), mark("Put back the devices before"), mark("When SteamVR closes, the output and input Windows had before it started come back."), mark("restore sound audio device")).gate(Gate::VrchatHere),
+    e("vr.audio-restore", Vr, mark("When SteamVR starts"), mark("Put back the devices before"), mark("When SteamVR closes, the output and input Windows had before it started come back."), mark("restore sound audio device")).gate(Gate::VrchatHere).controls(&["vr-audio-restore"]),
     // Capture & storage.
-    e("capture.kf-distance", Capture, mark("Capture"), mark("Keyframe distance"), mark("A new lossless keyframe after the camera moves this far."), mark("keyframe meters")).gate(Gate::VrchatHere),
-    e("capture.kf-turn", Capture, mark("Capture"), mark("Keyframe turn"), mark("…or after it turns this much."), mark("keyframe degrees rotation")).gate(Gate::VrchatHere),
-    e("capture.kf-interval", Capture, mark("Capture"), mark("Keyframe interval"), mark("…or after this long, whatever happens."), mark("keyframe seconds time")).gate(Gate::VrchatHere),
-    e("capture.split", Capture, mark("Capture"), mark("New session on world change"), mark("Each VRChat world gets its own session while you record."), mark("split session world")).gate(Gate::VrchatHere),
-    e("capture.spout", Capture, mark("Capture"), mark("Spout sender"), mark("Leave empty to pick VRChat's Stream camera automatically."), mark("Spout source stream video input")).gate(Gate::VrchatHere).controls(&["spout-source"]),
-    e("capture.reconstruct-while", Capture, mark("Capture"), mark("Reconstruct while VRChat runs"), mark("On the graphics card training gives way to VRChat's frames; the processor's integrated GPU leaves the game alone but is about 40 times slower."), mark("reconstruction GPU graphics card integrated training splats")).gate(Gate::VrchatHere),
-    e("capture.notice", Capture, mark("Capture"), mark("Capture notice"), mark("The consent reminder shown before the first capture."), mark("consent reminder show again")),
-    e("capture.osc", Capture, mark("VRChat and OSC"), mark("Action Menu control"), mark("Start and stop recording with N4N0 › Record in your avatar's Action Menu, and let N4N0 and its capture kit hear Orbiters (OSCQuery, works next to VRCFT and other OSC apps)."), mark("OSC OSCQuery port record Action Menu")),
-    e("capture.stream-camera", Capture, mark("VRChat and OSC"), mark("Stream camera"), mark("While recording, open VRChat's camera in Stream mode with Spout Stream on (the picture comes from it), then put it back."), mark("camera Spout stream mode")).gate(Gate::VrchatHere),
-    e("capture.rig-views", Capture, mark("VRChat and OSC"), mark("Six more views while recording"), mark("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along."), mark("rig views cube coverage")).gate(Gate::VrchatHere),
-    e("capture.dolly", Capture, mark("VRChat and OSC"), mark("Camera dolly streams (experimental)"), mark("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once."), mark("dolly VRC+ multi stream cameras")).gate(Gate::VrchatHere),
+    e("capture.kf-distance", Capture, mark("Capture"), mark("Keyframe distance"), mark("A new lossless keyframe after the camera moves this far."), mark("keyframe meters")).gate(Gate::VrchatHere).controls(&["kf-distance"]),
+    e("capture.kf-turn", Capture, mark("Capture"), mark("Keyframe turn"), mark("…or after it turns this much."), mark("keyframe degrees rotation")).gate(Gate::VrchatHere).controls(&["kf-turn"]),
+    e("capture.kf-interval", Capture, mark("Capture"), mark("Keyframe interval"), mark("…or after this long, whatever happens."), mark("keyframe seconds time")).gate(Gate::VrchatHere).controls(&["kf-interval"]),
+    e("capture.split", Capture, mark("Capture"), mark("New session on world change"), mark("Each VRChat world gets its own session while you record."), mark("split session world")).gate(Gate::VrchatHere).controls(&["split"]),
+    e("capture.spout", Capture, mark("Capture"), mark("Spout sender"), mark("Leave empty to pick VRChat's Stream camera automatically."), mark("Spout source stream video input")).gate(Gate::VrchatHere).controls(&["spout-source", "spout-sender", mark("Save")]),
+    e("capture.reconstruct-while", Capture, mark("Capture"), mark("Reconstruct while VRChat runs"), mark("On the graphics card training gives way to VRChat's frames; the processor's integrated GPU leaves the game alone but is about 40 times slower."), mark("reconstruction GPU graphics card integrated training splats")).gate(Gate::VrchatHere).controls(&["while-playing"]),
+    e("capture.notice", Capture, mark("Capture"), mark("Capture notice"), mark("The consent reminder shown before the first capture."), mark("consent reminder show again")).controls(&[mark("Show again")]),
+    e("capture.osc", Capture, mark("VRChat and OSC"), mark("Action Menu control"), mark("Start and stop recording with N4N0 › Record in your avatar's Action Menu, and let N4N0 and its capture kit hear Orbiters (OSCQuery, works next to VRCFT and other OSC apps)."), mark("OSC OSCQuery port record Action Menu")).controls(&["osc"]),
+    e("capture.stream-camera", Capture, mark("VRChat and OSC"), mark("Stream camera"), mark("While recording, open VRChat's camera in Stream mode with Spout Stream on (the picture comes from it), then put it back."), mark("camera Spout stream mode")).gate(Gate::VrchatHere).controls(&["osc-camera"]),
+    e("capture.rig-views", Capture, mark("VRChat and OSC"), mark("Six more views while recording"), mark("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along."), mark("rig views cube coverage")).gate(Gate::VrchatHere).controls(&["rig-views"]),
+    e("capture.dolly", Capture, mark("VRChat and OSC"), mark("Camera dolly streams (experimental)"), mark("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once."), mark("dolly VRC+ multi stream cameras")).gate(Gate::VrchatHere).controls(&["dolly-streams"]),
     e("capture.log", Capture, mark("VRChat and OSC"), mark("VRChat log"), mark("Found, waiting for VRChat"), mark("log file output")).gate(Gate::VrchatHere),
-    e("capture.parameters", Capture, mark("Performance"), mark("Face and avatar parameters"), mark("Every parameter VRChat sends over OSC: face tracking from VRCFaceTracking, gestures, visemes, movement."), mark("face tracking VRCFT gestures visemes")).gate(Gate::VrchatHere),
-    e("capture.voice", Capture, mark("Performance"), mark("Your voice"), mark("The microphone, for your avatar's visemes in Mixer."), mark("microphone mic record audio")).gate(Gate::VrchatHere),
+    e("capture.parameters", Capture, mark("Performance"), mark("Face and avatar parameters"), mark("Every parameter VRChat sends over OSC: face tracking from VRCFaceTracking, gestures, visemes, movement."), mark("face tracking VRCFT gestures visemes")).gate(Gate::VrchatHere).controls(&["perf-parameters"]),
+    e("capture.voice", Capture, mark("Performance"), mark("Your voice"), mark("The microphone, for your avatar's visemes in Mixer."), mark("microphone mic record audio")).gate(Gate::VrchatHere).controls(&["perf-mic"]),
     e("capture.voice-mic", Capture, mark("Performance"), mark("Microphone"), mark("The microphone, for your avatar's visemes in Mixer."), mark("mic input device record"))
         .gate(Gate::VrchatHere)
         .controls(&["perf-mic-device"])
         .needs("capture.voice", |s| (!s.settings.performance.record_mic).then_some(mark("Shown when Your voice is on"))),
-    e("capture.game-sound", Capture, mark("Performance"), mark("VRChat sound"), mark("What VRChat plays, world sounds and other players' voices; nothing else on the PC. Ask the people around you first."), mark("game audio sound record")).gate(Gate::VrchatHere),
-    e("capture.tracking", Capture, mark("Performance"), mark("Body tracking"), mark("Headset, controllers and trackers from SteamVR, full-body estimation included."), mark("full body FBT trackers SteamVR")).gate(Gate::VrchatHere),
-    e("capture.tracking-rate", Capture, mark("Performance"), mark("Tracking rate"), mark("Device poses recorded per second."), mark("Hz frequency poses")).gate(Gate::VrchatHere),
-    e("storage.free", Capture, mark("Storage"), mark("Free up space"), mark("What the captures and 3D pictures take, and deleting what they no longer need."), mark("disk space delete clean")),
-    e("storage.limit", Capture, mark("Storage"), mark("Storage limit"), mark("Recording stops when the library reaches it (0 = no limit)."), mark("disk space GB quota library")),
-    e("storage.folder", Capture, mark("Storage"), mark("Captures folder"), "", mark("folder path directory location drive")),
-    e("storage.raw-folder", Capture, mark("Storage"), mark("Raw captures folder"), mark("Where Mixer's capture simulator writes."), mark("folder path directory Mixer")),
+    e("capture.game-sound", Capture, mark("Performance"), mark("VRChat sound"), mark("What VRChat plays, world sounds and other players' voices; nothing else on the PC. Ask the people around you first."), mark("game audio sound record")).gate(Gate::VrchatHere).controls(&["perf-game"]),
+    e("capture.tracking", Capture, mark("Performance"), mark("Body tracking"), mark("Headset, controllers and trackers from SteamVR, full-body estimation included."), mark("full body FBT trackers SteamVR")).gate(Gate::VrchatHere).controls(&["perf-tracking"]),
+    e("capture.tracking-rate", Capture, mark("Performance"), mark("Tracking rate"), mark("Device poses recorded per second."), mark("Hz frequency poses")).gate(Gate::VrchatHere).controls(&["perf-rate"]),
+    e("storage.free", Capture, mark("Storage"), mark("Free up space"), mark("What the captures and 3D pictures take, and deleting what they no longer need."), mark("disk space delete clean")).controls(&[mark("Free up space")]),
+    e("storage.limit", Capture, mark("Storage"), mark("Storage limit"), mark("Recording stops when the library reaches it (0 = no limit)."), mark("disk space GB quota library")).controls(&["limit"]),
+    e("storage.folder", Capture, mark("Storage"), mark("Captures folder"), "", mark("folder path directory location drive")).controls(&[mark("Change")]),
+    e("storage.raw-folder", Capture, mark("Storage"), mark("Raw captures folder"), mark("Where Mixer's capture simulator writes."), mark("folder path directory Mixer")).controls(&[mark("Change")]),
     // VRChat & performance.
-    e("vrchat.booster", Vrchat, mark("FPS booster"), mark("FPS booster"), mark("Spend what helps your frames. Shows what it really gains."), mark("FPS frame rate lag boost faster")).gate(Gate::VrchatHere).controls(&["booster-level"]),
-    e("vrchat.launch-options", Vrchat, mark("Play VRChat"), mark("Performance launch options"), mark("VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back."), mark("launch start Play options CPU")).gate(Gate::VrchatHere),
-    e("vrchat.priority", Vrchat, mark("Play VRChat"), mark("VRChat's priority"), mark("Above normal is enough. High can take time from SteamVR and Virtual Desktop and make the headset stutter."), mark("CPU process priority")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off),
-    e("vrchat.main-thread", Vrchat, mark("Play VRChat"), mark("Main thread priority"), mark("The thread VRChat's world runs on."), mark("CPU thread priority")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off),
-    e("vrchat.frame-cap", Vrchat, mark("Play VRChat"), mark("Frame cap"), mark("Frames per second on the desktop. In VR, the headset sets the pace."), mark("FPS limit cap")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off),
-    e("vrchat.video-decoding", Vrchat, mark("Play VRChat"), mark("Video decoding on the graphics card"), mark("Videos in worlds cost the processor less."), mark("video GPU decoding hardware")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off),
-    e("vrchat.tiny-window", Vrchat, mark("Play VRChat"), mark("Tiny desktop window in VR"), mark("A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window."), mark("window monitor desktop small")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off),
+    e("vrchat.booster", Vrchat, mark("FPS booster"), mark("FPS booster"), mark("Spend what helps your frames. Shows what it really gains."), mark("FPS frame rate lag boost faster")).gate(Gate::VrchatHere).controls(&["booster-level", mark("Show me how"), mark("Stay on Picture")]),
+    e("vrchat.launch-options", Vrchat, mark("Play VRChat"), mark("Performance launch options"), mark("VRChat gets a little more of the processor, a frame cap, video decoding on the graphics card and, in VR, a tiny desktop window. Helps when the processor holds VRChat back."), mark("launch start Play options CPU")).gate(Gate::VrchatHere).controls(&["launch-performance"]),
+    e("vrchat.priority", Vrchat, mark("Play VRChat"), mark("VRChat's priority"), mark("Above normal is enough. High can take time from SteamVR and Virtual Desktop and make the headset stutter."), mark("CPU process priority")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off).controls(&["launch-priority"]),
+    e("vrchat.main-thread", Vrchat, mark("Play VRChat"), mark("Main thread priority"), mark("The thread VRChat's world runs on."), mark("CPU thread priority")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off).controls(&["launch-main-thread"]),
+    e("vrchat.frame-cap", Vrchat, mark("Play VRChat"), mark("Frame cap"), mark("Frames per second on the desktop. In VR, the headset sets the pace."), mark("FPS limit cap")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off).controls(&["launch-fps"]),
+    e("vrchat.video-decoding", Vrchat, mark("Play VRChat"), mark("Video decoding on the graphics card"), mark("Videos in worlds cost the processor less."), mark("video GPU decoding hardware")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off).controls(&["launch-hw-video"]),
+    e("vrchat.tiny-window", Vrchat, mark("Play VRChat"), mark("Tiny desktop window in VR"), mark("A 100 × 100 window on the monitor while you play in VR, so it costs almost nothing. Turn it off to show or record the game on the monitor. Desktop mode keeps its window."), mark("window monitor desktop small")).gate(Gate::VrchatHere).needs("vrchat.launch-options", launch_off).controls(&["launch-small-window"]),
     e("vrchat.perf-report", Vrchat, mark("Performance report"), mark("Performance report"), mark("If VRChat or your computer lags with N4N0, this puts together what N4N0 measured over the last hour with your computer's specifications and the settings that matter. You see it before anything is sent, and it is kept on this computer."), mark("lag slow report diagnostics")).gate(Gate::VrchatHere).whole().controls(&[mark("Make a report"), mark("Making it…")]),
     e("vrchat.perf-hint-mute", Vrchat, mark("Performance report"), mark("Mute a performance hint"), mark("A hint of what slows VRChat or your computer down, put away for good with Don't tell me again."), mark("hint mute don't tell me again advice"))
         .gate(Gate::VrchatHere)
@@ -362,20 +362,20 @@ pub static ENTRIES: &[Entry] = &[
         .needs("vrchat.perf-report", |s| s.perf.hint.is_none().then_some(mark("Shown while N4N0 has a performance hint for you"))),
     e("vrchat.bridge", Vrchat, mark("Experimental"), mark("VRChat bridge"), mark("Lets an agent such as Claude Code start VRChat in desktop mode, go from private instance to private instance, look around and take 3D pictures, through a service on this computer only. Your own keyboard or mouse pauses it."), mark("agent MCP automation bridge"))
         .rows(&[mark("VRChat bridge"), mark("Screen recording"), mark("It stays closed"), mark("Address"), mark("Token"), mark("Taking over")])
-        .gate(Gate::Bridge),
+        .gate(Gate::Bridge).controls(&["vrchat-bridge", mark("Allow screen recording")]),
     e("vrchat.network", Vrchat, mark("VRChat on your network"), mark("VRChat on your network"), mark("When it is not found by itself (some routers keep devices from finding each other)."), mark("network LAN address headset phone PC"))
         .rows(&[mark("Allow the local network"), mark("Address you typed"), mark("VRChat on a headset or a phone"), mark("VRChat on another PC"), mark("Enter its address")])
         .gate(Gate::NotVrchatHere)
-        .whole(),
+        .whole().controls(&["vrchat-address", mark("Open Settings"), mark("Connect"), mark("Find it by itself"), mark("Look again"), mark("Copy")]),
     // Language & translation.
-    e("language.app", Language, mark("Language"), mark("Language"), mark("Saved to your Orbiters account, and used on the website too."), mark("English French Japanese Spanish Portuguese")),
-    e("translate.on", Language, mark("Translation in VR"), mark("Translation"), mark("Reads the text your headset shows, a few times a second. Off, nothing of it runs."), mark("translate signs chat")).gate(Gate::VrchatHere),
-    e("translate.into", Language, mark("Translation in VR"), mark("Into"), mark("The language translations are written in."), mark("target language")).gate(Gate::VrchatHere),
-    e("translate.provider", Language, mark("Translation in VR"), mark("Translator"), mark("Who translates what is read."), mark("provider AI server LM Studio")).gate(Gate::VrchatHere),
+    e("language.app", Language, mark("Language"), mark("Language"), mark("Saved to your Orbiters account, and used on the website too."), mark("English French Japanese Spanish Portuguese")).controls(&["language"]),
+    e("translate.on", Language, mark("Translation in VR"), mark("Translation"), mark("Reads the text your headset shows, a few times a second. Off, nothing of it runs."), mark("translate signs chat")).gate(Gate::VrchatHere).controls(&["translate-on"]),
+    e("translate.into", Language, mark("Translation in VR"), mark("Into"), mark("The language translations are written in."), mark("target language")).gate(Gate::VrchatHere).controls(&["translate-into"]),
+    e("translate.provider", Language, mark("Translation in VR"), mark("Translator"), mark("Who translates what is read."), mark("provider AI server LM Studio")).gate(Gate::VrchatHere).controls(&["translate-provider"]),
     e("translate.server", Language, mark("Translation in VR"), mark("Address"), mark("An OpenAI-compatible server on your network, such as LM Studio's."), mark("server LM Studio AI network"))
         .gate(Gate::VrchatHere)
         // Only for the translator's "AI server" choice (an address on the network), not for "This computer".
-        .needs("translate.provider", |s| (s.settings.translate.provider != orbiters_core::settings::TranslateProvider::Address).then_some(mark("Shown when Translator is “AI server”"))),
+        .needs("translate.provider", |s| (s.settings.translate.provider != orbiters_core::settings::TranslateProvider::Address).then_some(mark("Shown when Translator is “AI server”"))).controls(&["translate-server"]),
     e("translate.model", Language, mark("Translation in VR"), mark("Model"), mark("Of those the AI server offers. Automatic picks one made for translating when there is one."), mark("model AI server LM Studio"))
         .gate(Gate::VrchatHere)
         .needs("translate.provider", |s| {
@@ -384,7 +384,7 @@ pub static ENTRIES: &[Entry] = &[
             } else {
                 s.translate.models.is_empty().then_some(mark("Shown once the AI app or server offers models"))
             }
-        }),
+        }).controls(&["translate-model"]),
     e("translate.orbiters-agreement", Language, mark("Translation in VR"), mark("Translation by Orbiters"), mark("With Orbiters as the translator, the text read is sent to Orbiters: only once you agree, here, for VR and VRChat's window alike."), mark("agree agreement consent notice Orbiters translation"))
         .gate(Gate::VrchatHere)
         .controls(&[mark("I agree")])
@@ -396,22 +396,22 @@ pub static ENTRIES: &[Entry] = &[
                 (t.orbiters_agreed && t.orbiters_agreed_window).then_some(mark("Already agreed to"))
             }
         }),
-    e("translate.english", Language, mark("Translation in VR"), mark("English"), mark("VRChat's menus and most names are in English."), mark("translate English text")).gate(Gate::VrchatHere),
+    e("translate.english", Language, mark("Translation in VR"), mark("English"), mark("VRChat's menus and most names are in English."), mark("translate English text")).gate(Gate::VrchatHere).controls(&["translate-english"]),
     // Privacy & feedback.
-    e("privacy.world-performance", Privacy, CARD_PRIVACY, mark("Share my frame rate per world"), mark("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer."), mark("FPS statistics share world Map explorer")).gate(Gate::VrchatHere),
-    e("privacy.usage", Privacy, CARD_PRIVACY, mark("Beta usage statistics"), mark("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account and deleted with it. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people. Turned off, nothing more is counted and what was waiting to be sent is deleted."), mark("telemetry analytics statistics data tracking")).gate(Gate::VrchatHere),
-    e("privacy.mismatch", Privacy, mark("Beta feedback"), mark("Menu mismatch buttons"), mark("Shows three buttons, always in view: \"Menu should be off\", \"Wheel should be on\" and \"Quick menu should be on\", in VR on your watch's wrist, on the desktop in the bottom left corner of VRChat's window. Press one when N4N0's menus do not match VRChat's. Each press keeps a report on this computer: the controller buttons and keys used for the menus and what N4N0 decided in the 30 seconds before, and VRChat's log lines about menus and worlds. Never what you type or say, nor anyone's name. Turned off, nothing is recorded."), mark("bug report feedback beta")).gate(Gate::VrchatHere),
-    e("privacy.mismatch-picture", Privacy, mark("Beta feedback"), mark("Add a picture of the game"), mark("A small, blurred picture of what VRChat showed at the press goes with the report: the best clue of what its menus did, but it is a picture of your game, and can show the world and the people in it."), mark("screenshot picture report")).gate(Gate::VrchatHere),
+    e("privacy.world-performance", Privacy, CARD_PRIVACY, mark("Share my frame rate per world"), mark("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer."), mark("FPS statistics share world Map explorer")).gate(Gate::VrchatHere).controls(&["world-performance"]),
+    e("privacy.usage", Privacy, CARD_PRIVACY, mark("Beta usage statistics"), mark("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account and deleted with it. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people. Turned off, nothing more is counted and what was waiting to be sent is deleted."), mark("telemetry analytics statistics data tracking")).gate(Gate::VrchatHere).controls(&["usage-statistics"]),
+    e("privacy.mismatch", Privacy, mark("Beta feedback"), mark("Menu mismatch buttons"), mark("Shows three buttons, always in view: \"Menu should be off\", \"Wheel should be on\" and \"Quick menu should be on\", in VR on your watch's wrist, on the desktop in the bottom left corner of VRChat's window. Press one when N4N0's menus do not match VRChat's. Each press keeps a report on this computer: the controller buttons and keys used for the menus and what N4N0 decided in the 30 seconds before, and VRChat's log lines about menus and worlds. Never what you type or say, nor anyone's name. Turned off, nothing is recorded."), mark("bug report feedback beta")).gate(Gate::VrchatHere).controls(&["mismatch-buttons"]),
+    e("privacy.mismatch-picture", Privacy, mark("Beta feedback"), mark("Add a picture of the game"), mark("A small, blurred picture of what VRChat showed at the press goes with the report: the best clue of what its menus did, but it is a picture of your game, and can show the world and the people in it."), mark("screenshot picture report")).gate(Gate::VrchatHere).controls(&["mismatch-picture"]),
     // App & updates.
-    e("app.reduce-motion", App, mark("Interface"), mark("Reduce motion"), mark("Calmer transitions and a still background."), mark("animations accessibility calm")),
-    e("app.close-minimized", App, mark("Interface"), crate::window_rest::SETTING, crate::window_rest::SETTING_HINT, mark("tray memory minimized close")).gate(Gate::VrchatHere),
-    e("app.window-gpu", App, mark("Interface"), mark("Window graphics"), mark("The graphics card draws the window for less than it costs to copy it there from the integrated GPU."), mark("GPU graphics card integrated window")).gate(Gate::GpuChoice),
-    e("app.view-gpu", App, mark("Interface"), mark("3D view on the integrated GPU"), mark("The 3D view's splats draw on the integrated GPU and only their pictures reach the graphics card: orbiting costs a game little, at about half the frame rate."), mark("GPU integrated splats 3D view")).gate(Gate::GpuSplit),
-    e("app.start-windows", App, mark("Start"), mark("Start with Windows"), mark("Waits in the tray, ready when VRChat starts."), mark("startup boot login autostart tray")).rows(&[mark("Start with Windows"), mark("Start at login")]),
-    e("app.start-steamvr", App, mark("Start"), mark("Start with SteamVR"), mark("Opens when SteamVR starts, in its dashboard (SteamVR lists it with its startup overlay apps)."), mark("startup autostart SteamVR overlay")).gate(Gate::VrchatHere),
+    e("app.reduce-motion", App, mark("Interface"), mark("Reduce motion"), mark("Calmer transitions and a still background."), mark("animations accessibility calm")).controls(&["reduce-motion"]),
+    e("app.close-minimized", App, mark("Interface"), crate::window_rest::SETTING, crate::window_rest::SETTING_HINT, mark("tray memory minimized close")).gate(Gate::VrchatHere).controls(&["close-minimized-window"]),
+    e("app.window-gpu", App, mark("Interface"), mark("Window graphics"), mark("The graphics card draws the window for less than it costs to copy it there from the integrated GPU."), mark("GPU graphics card integrated window")).gate(Gate::GpuChoice).controls(&["window-gpu"]),
+    e("app.view-gpu", App, mark("Interface"), mark("3D view on the integrated GPU"), mark("The 3D view's splats draw on the integrated GPU and only their pictures reach the graphics card: orbiting costs a game little, at about half the frame rate."), mark("GPU integrated splats 3D view")).gate(Gate::GpuSplit).controls(&["view-gpu"]),
+    e("app.start-windows", App, mark("Start"), mark("Start with Windows"), mark("Waits in the tray, ready when VRChat starts."), mark("startup boot login autostart tray")).rows(&[mark("Start with Windows"), mark("Start at login")]).controls(&["start-windows"]),
+    e("app.start-steamvr", App, mark("Start"), mark("Start with SteamVR"), mark("Opens when SteamVR starts, in its dashboard (SteamVR lists it with its startup overlay apps)."), mark("startup autostart SteamVR overlay")).gate(Gate::VrchatHere).controls(&["start-steamvr"]),
     e("app.about", App, mark("About"), mark("About"), mark("Copyright © 2026 Enzo DUTRA / blackorbit. Free to use; see the licence for what is allowed."), mark("version licence worker log quit")).whole(),
-    e("app.updates", App, mark("About"), mark("Updates"), mark("Orbiters - N4N0 looks for a newer version shortly after it starts, then every few hours."), mark("update version upgrade new release restart")),
-    e("app.development", App, mark("About"), mark("Development environment"), mark("For testing development builds: the Orbiters server running on this computer instead of orbiters.cc, with its own account and updates."), mark("dev server testing builds")),
+    e("app.updates", App, mark("About"), mark("Updates"), mark("Orbiters - N4N0 looks for a newer version shortly after it starts, then every few hours."), mark("update version upgrade new release restart")).controls(&[mark("Restart now"), mark("Not after all"), mark("Restart when done"), mark("Restart to update"), mark("Look now")]),
+    e("app.development", App, mark("About"), mark("Development environment"), mark("For testing development builds: the Orbiters server running on this computer instead of orbiters.cc, with its own account and updates."), mark("dev server testing builds")).controls(&["development"]),
     e("app.log", App, mark("Log"), mark("Log"), mark("Every notice, warning and error N4N0 showed, kept here"), mark("notices errors warnings history messages")).whole(),
 ];
 
@@ -453,8 +453,6 @@ pub static ACTIONS: &[(&str, &str)] = &[
     (mark("VRChat account"), mark("Retry the saved session")),
     (mark("VRChat account"), mark("Remove the saved session")),
     // The FPS booster's guide and its tests: each a step to take now, not a choice kept.
-    (mark("FPS booster"), mark("Show me how")),
-    (mark("FPS booster"), mark("Stay on Picture")),
     (mark("FPS booster"), mark("Details")),
     (mark("FPS booster"), mark("Hide details")),
     (mark("FPS booster"), mark("Done")),
@@ -473,8 +471,16 @@ pub static ACTIONS: &[(&str, &str)] = &[
     (mark("FPS booster"), mark("Start a test load")),
     (mark("FPS booster"), mark("Stop the test load")),
     (mark("FPS booster"), mark("Write a test report")),
+    // The performance report made: sent, its file shown, closed.
+    (mark("Performance report"), mark("Send to Orbiters")),
+    (mark("Performance report"), mark("Send again")),
+    (mark("Performance report"), mark("Sending…")),
+    (mark("Performance report"), mark("Sent: thank you")),
+    (mark("Performance report"), mark("Show the file")),
+    (mark("Performance report"), mark("Close")),
     // Beta feedback's reports: sent, their folder shown, deleted.
     (mark("Beta feedback"), mark("Send reports")),
+    (mark("Beta feedback"), mark("Sending…")),
     (mark("Beta feedback"), mark("Open folder")),
     (mark("Beta feedback"), mark("Delete all")),
     // A held parameter let go (its row is named by the parameter).
@@ -486,6 +492,8 @@ pub static ACTIONS: &[(&str, &str)] = &[
     (mark("Experimental"), mark("Resume")),
     (mark("Experimental"), mark("Stop: take back control")),
     (mark("Experimental"), mark("Remove")),
+    (mark("Experimental"), mark("Working…")),
+    (mark("Experimental"), mark("Update")),
     (mark("Experimental"), "Add to *"),
     (mark("Experimental"), mark("Copy")),
     (mark("Experimental"), mark("Copied")),
@@ -516,23 +524,14 @@ pub fn is_status_row(card: &str, label: &str) -> bool {
 pub enum Claim {
     Setting(&'static str),
     Action,
-    Status,
     /// Neither: a control no setting claims (a test fails on it).
     Nobody,
 }
 
-/// Who claims a control `key` drawn at `at` in `card` of `group`, given the rows drawn there (English label, rect): the
-/// setting whose row it is in (or the status row's), else the setting that names it, else an action.
+/// Who claims the control `key` of `card` in `group`: the setting that names it, else an action. Where it is drawn says
+/// nothing: a control put inside another setting's row is nobody's until an entry names it.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn claim(group: Group, card: &str, key: &str, at: egui::Pos2, rows: &[(String, egui::Rect)]) -> Claim {
-    if let Some((label, _)) = rows.iter().find(|(_, r)| r.contains(at)) {
-        if let Some(e) = ENTRIES.iter().find(|e| e.group == group && e.card == card && e.row_keys().iter().any(|k| e.shown(k) == label)) {
-            return Claim::Setting(e.id);
-        }
-        if is_status_row(card, label) {
-            return Claim::Status;
-        }
-    }
+pub fn claim(group: Group, card: &str, key: &str) -> Claim {
     if let Some(e) = ENTRIES.iter().find(|e| e.group == group && e.card == card && e.controls.contains(&key)) {
         return Claim::Setting(e.id);
     }

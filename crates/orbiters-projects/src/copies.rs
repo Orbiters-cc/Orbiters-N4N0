@@ -83,28 +83,28 @@ impl Held {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let copy = Copy { id: id.clone(), source: source.into(), destination: destination.into(), folder: None, started: crate::discovery::now(), state: State::Copying, error: None };
         let held = Held { dir: dir.into(), copy, lock: Some(app.lock(&lock(&id))?) };
-        held.save()?;
+        held.put()?;
         Ok(held)
     }
 
-    fn save(&self) -> anyhow::Result<()> {
+    fn put(&self) -> anyhow::Result<()> {
         AppRoot::existing(&self.dir)?.replace_json(&file(&self.copy.id), &self.copy)
     }
 
     pub(crate) fn made(&mut self, folder: FileId) -> anyhow::Result<()> {
         self.copy.folder = Some(folder);
-        self.save()
+        self.put()
     }
 
     pub(crate) fn whole(&mut self) -> anyhow::Result<()> {
         self.copy.state = State::Whole;
-        self.save()
+        self.put()
     }
 
     /// Kept, with why.
     pub(crate) fn failed(mut self, why: &anyhow::Error) {
         self.copy.error = Some(format!("{why:#}"));
-        let _ = self.save();
+        let _ = self.put();
     }
 
     /// It is on the list, or nothing of it is left.

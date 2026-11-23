@@ -87,7 +87,9 @@ const MOST: u64 = 8 * 1024 * 1024 * 1024;
 fn archive(file: impl Read, each: &mut dyn FnMut(&str, &mut dyn Read, u64) -> io::Result<()>) -> io::Result<bool> {
     // An error of the disk is one; an error of the archive is what it is like.
     let mut disk = Disk { file, failed: None };
-    let whole = members(&mut flate2::read::MultiGzDecoder::new(&mut disk).take(MOST), each);
+    let mut tar = flate2::read::MultiGzDecoder::new(&mut disk).take(MOST);
+    // To its very end: its own checksum is there.
+    let whole = members(&mut tar, each).and_then(|whole| Ok(whole && io::copy(&mut tar, &mut io::sink()).is_ok() && tar.limit() > 0));
     match disk.failed {
         Some(e) => Err(e),
         None => Ok(whole.unwrap_or(false)),
@@ -136,7 +138,7 @@ fn members(tar: &mut impl Read, each: &mut dyn FnMut(&str, &mut dyn Read, u64) -
             if bytes.len() as u64 != body {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            bytes.truncate(size as usize);
+            bytes.drain(size as usize..);
             Ok(String::from_utf8(bytes).ok())
         };
         match kind {
@@ -349,7 +351,7 @@ impl Shape {
                     at += colon + 2;
                 }
             }
-            if !matches!(line.get(at), Some(b'{' | b'[' | b'"' | b'\'')) {
+            if !matches!(line.get(at), Some(b'{' | b'[' | b'}' | b']' | b'"' | b'\'')) {
                 // A plain text, which may hold any of them.
                 self.last_is_open = line.ends_with(b":");
                 return;

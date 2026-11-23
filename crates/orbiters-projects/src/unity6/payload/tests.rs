@@ -235,6 +235,7 @@ fn packages_only_the_library_holds_become_the_copys_own() {
     assert!(read("Packages/com.unity.x/package.json").is_none());
     assert_eq!(p.absent, ["com.gone"]);
     assert!(p.bytes > scan(&e.source, how(false), &AtomicBool::new(false)).unwrap().bytes, "counted");
+    drop(p);
     // Two that cannot be told apart: neither is guessed at.
     std::fs::remove_dir_all(library.join("PackageCache/com.git@12ab34cd56")).unwrap();
     put("com.git@1111111111", "other");

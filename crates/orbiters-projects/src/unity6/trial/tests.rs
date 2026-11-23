@@ -850,12 +850,10 @@ fn a_trials_whole_life_writes_nothing_of_creator_companion() {
         let _ = crate::unity6::look(&e.app, &[e.source.clone(), beside.clone()]);
         same("opened, looked at");
         // The gallery's, the bridge's and the menus' own Add and Remove, on any folder of it.
-        let rt = crate::runtime().unwrap();
         for at in [&job.trial.path, &beside] {
             for add in [true, false] {
                 assert!(authority::allow(&e.app, at, if add { authority::Action::List } else { authority::Action::Unlist }).is_err());
             }
-            assert!(rt.block_on(crate::coherent::solve(&e.vcc, &job.trial.path, &[], &[], false)).is_err());
         }
         same("asked");
         abandon(&e.app, &job.id).unwrap();

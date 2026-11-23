@@ -178,7 +178,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     let stopped = |e| before_anything(e, destination, cancel);
     let payload = payload::scan(source_folder(source)?, Making { keep, ..Default::default() }, cancel).map_err(stopped)?;
     let place = Destination::check(parent, &name.to_string_lossy(), &payload.protected, Parents::Make)?;
-    let filled = fill(&payload, place, destination, cancel, progress, &mut |_| Ok(()))?;
+    let filled = fill(&payload, place, destination, cancel, progress, &mut |_| Ok(())).map_err(unmarked)?;
     copying::unmark(&filled.root, filled.marker)
 }
 
@@ -244,6 +244,37 @@ impl std::fmt::Display for Nothing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(tr("Nothing of the copy is left."))
     }
+}
+
+/// An error in its own words, without [`Nothing`].
+fn unmarked(e: anyhow::Error) -> anyhow::Error {
+    if e.downcast_ref::<Nothing>().is_none() {
+        return e;
+    }
+    anyhow::anyhow!("{}", e.chain().skip(1).map(|c| c.to_string()).collect::<Vec<_>>().join(": "))
+}
+
+/// The staging folders of no run at all (other tests' runs have theirs).
+#[cfg(test)]
+pub(crate) fn stages_left(app: &Path) -> Vec<OsString> {
+    let left = || {
+        let Ok(held) = AppRoot::existing(app) else { return vec![] };
+        let free = |name: &OsString| {
+            let lock = Stage::lock_of(&name.to_string_lossy());
+            !app.join(&lock).exists() || held.try_lock(&lock).is_ok_and(|l| l.is_some())
+        };
+        held.folders(Path::new(STAGES)).into_iter().filter(|n| free(n)).collect()
+    };
+    let mut now: Vec<OsString> = left();
+    // One between its folder and its lock going.
+    for _ in 0..20 {
+        if now.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        now = left();
+    }
+    now
 }
 
 /// Why a copy or a new project cannot be made in `parent`/`name`, as far as the place alone says (the source's own rules are asked
@@ -336,8 +367,7 @@ async fn make(
         Ok(f) => f,
         Err(e) if e.downcast_ref::<Nothing>().is_some() => {
             record.done();
-            // Its own words, without the mark.
-            return Err(anyhow::anyhow!("{}", e.chain().skip(1).map(|c| c.to_string()).collect::<Vec<_>>().join(": ")));
+            return Err(unmarked(e));
         }
         Err(e) => {
             record.failed(&e);
@@ -1128,7 +1158,7 @@ mod tests {
         assert!(said.contains("could not be restored") && said.contains(&copy.display().to_string()), "{said}");
         assert!(is_registered(&rt, &root, &copy) && crate::discovery::is_project(&copy));
         assert_eq!(std::fs::read(copy.join("Packages/vpm-manifest.json")).unwrap(), manifest, "its package list is the project's");
-        assert_eq!(AppRoot::existing(&crate::data_dir()).map(|a| a.folders(Path::new(STAGES)).len()).unwrap_or(0), 0);
+        assert!(stages_left(&crate::data_dir()).is_empty());
     }
 
     /// AGENTS.md: a copy is listed before anything of it is restored; then packages restored in Orbiters' own folder take the place of

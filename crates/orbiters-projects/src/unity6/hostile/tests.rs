@@ -668,7 +668,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &m
     assert!(changed.is_empty(), "{name}: {changed:?}");
     assert_eq!(w.guarded(true), guarded, "{name}");
     // Nothing of a restore is left, whatever happened.
-    assert!(std::fs::read_dir(crate::data_dir().join("project-stage")).map_or(true, |d| d.flatten().next().is_none()), "{name}");
+    assert!(crate::templates::stages_left(&crate::data_dir()).is_empty(), "{name}");
     let listed_now = listed(&w.e, &copy);
     // AGENTS.md: what stays and is not on the list is in Orbiters' own record, with where it is; nothing else is.
     let mine: Vec<_> = crate::copies::shown(&crate::data_dir()).into_iter().filter(|(c, _)| c.destination == copy || c.destination == made).collect();

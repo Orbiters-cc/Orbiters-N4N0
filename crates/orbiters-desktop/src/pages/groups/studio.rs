@@ -6,7 +6,7 @@
 //! exported only (B4).
 use super::art::{self, Crop, Look, Saved, Source, Target, Zone};
 use super::{failure_text, Kind, State};
-use crate::controller::groups::{Outcome, Prepared, Reply, Request, Write};
+use crate::controller::groups::{Outcome, Reply, Request, Sealed, Write};
 use crate::pages::Cx;
 use egui::{pos2, vec2, Align2, Color32, Id, Mesh, Rect, Sense, Shape, Stroke, Ui};
 use orbiters_core::groups::{ArtSlot, FileTag, GroupCard, InventoryFile};
@@ -30,9 +30,14 @@ const PHOTOS_MAX: usize = 36;
 struct Loaded {
     full: Arc<image::RgbaImage>,
     texture: egui::TextureHandle,
+    /// Its pixels as one number.
+    pixels: u64,
 }
 
 impl Loaded {
+    fn new(ctx: &egui::Context, img: image::RgbaImage) -> Self {
+        Self { texture: texture_of(ctx, &img), pixels: art::pixels(&img), full: Arc::new(img) }
+    }
     fn size(&self) -> (u32, u32) {
         (self.full.width(), self.full.height())
     }
@@ -68,18 +73,14 @@ pub(crate) struct Studio {
     exporting: Option<mpsc::Receiver<Exported>>,
     /// The upload's PNG being made, then on its way (prepare → confirm → commit).
     making_upload: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
-    /// Uploaded to the gallery, the group not changed yet (M6), with the art revision it was made from (Blocker 5).
-    pub uploaded: Option<(InventoryFile, Option<u64>)>,
-    /// The revision of the upload being prepared, confirmed and sent.
-    upload_revision: Option<u64>,
-    /// The uploaded art as a picture, for the apply's confirmation.
-    uploaded_art: Option<egui::TextureHandle>,
+    /// Uploaded to the gallery, the group not changed yet (M6): the ledger's word, with the art it was made from.
+    pub uploaded: Option<super::Uploaded>,
+    /// A file chosen while another is being opened: the last one only (M5).
+    queued: Option<PathBuf>,
     /// Each picture chosen gets a number; only the latest one's arrives (Blocker 5).
     choice: u64,
     /// The gallery picture asked for in full, when that is the latest choice.
     wanted_source: Option<String>,
-    /// A number for this visit's sources: an upload made from another source is never applied to this art.
-    source_nonce: u64,
     /// The gallery tiles in view at the last frame: only their pictures are asked (Major 6).
     visible_urls: Vec<String>,
     pub applied: bool,
@@ -91,11 +92,9 @@ pub(crate) struct Studio {
 }
 
 impl Studio {
-    pub fn new(card: GroupCard, account: &str, source: Option<image::RgbaImage>, drafts: &art::Drafts) -> Self {
+    pub fn new(card: GroupCard, account: &str, source: Option<image::RgbaImage>) -> Self {
         let staged = source.is_some();
         let saved = if staged { Saved::default() } else { art::load_saved(account, &card.id) };
-        // An upload made earlier and not applied: kept, but its revision ties it to the art it was made from (Major 8).
-        let uploaded = drafts.uploaded(&card.id, ArtSlot::Banner).map(|u| (u.file.clone(), u.revision));
         Self {
             card,
             account: account.to_string(),
@@ -109,12 +108,10 @@ impl Studio {
             exported: Vec::new(),
             exporting: None,
             making_upload: None,
-            uploaded,
-            upload_revision: None,
-            uploaded_art: None,
+            uploaded: None,
+            queued: None,
             choice: 0,
             wanted_source: None,
-            source_nonce: 0,
             visible_urls: Vec::new(),
             applied: false,
             gallery: None,
@@ -126,7 +123,7 @@ impl Studio {
     }
     /// The screenshot review: the studio before any picture.
     pub fn staged_empty(card: GroupCard) -> Self {
-        let mut s = Self::new(card, "", Some(image::RgbaImage::new(1, 1)), &art::Drafts::default());
+        let mut s = Self::new(card, "", Some(image::RgbaImage::new(1, 1)));
         s.pending = None;
         s.asked_source = true;
         s
@@ -185,39 +182,23 @@ impl Studio {
     }
     fn take_source(&mut self, img: image::RgbaImage) {
         self.pending = Some(img);
-        self.source_nonce += 1;
         self.error = None;
     }
-    /// The art as it is now (source and group banner crop): what an upload is bound to (Blocker 5).
-    pub(crate) fn revision(&self) -> u64 {
-        art::revision(self.saved.source.as_ref(), self.saved.crop(Target::GroupBanner)) ^ self.source_nonce.wrapping_mul(0x9e3779b97f4a7c15)
-    }
-    /// The revision of the upload under way, for the uploaded picture's record.
-    pub(crate) fn uploaded_revision(&self) -> Option<u64> {
-        self.upload_revision
+    /// The art as it is now (its pixels and the group banner's crop): what an upload is bound to (Blocker 5). None while
+    /// there is none, or another is being taken in.
+    pub(crate) fn revision(&self) -> Option<u64> {
+        self.source.as_ref().filter(|_| self.pending.is_none()).map(|l| art::revision(l.pixels, self.saved.crop(Target::GroupBanner)))
     }
     /// Whether the uploaded picture is the art shown now: only then is it applied from here.
     pub(crate) fn upload_matches(&self) -> bool {
-        self.uploaded.as_ref().is_some_and(|(_, r)| *r == Some(self.revision()))
+        self.uploaded.as_ref().is_some_and(|u| u.art.is_some() && u.art == self.revision())
     }
-    /// A write that ended: the studio takes its upload and its apply (M6). Whether it was the studio's.
-    pub(crate) fn ended(&mut self, prepared: Option<&Prepared>, outcome: &Outcome) -> bool {
+    /// A write of this group's that ended (what was uploaded is the ledger's to say).
+    pub(crate) fn ended(&mut self, sealed: Option<&Sealed>, outcome: &Outcome) {
         use crate::controller::groups::Done;
-        match (prepared.map(|p| &p.write), outcome) {
-            (Some(Write::Upload { tag: FileTag::Gallery, group, .. }), Outcome::Done(Done::Uploaded(f))) if *group == self.card.id => {
-                self.uploaded = Some((f.clone(), self.upload_revision));
-                self.error = None;
-                true
-            }
-            (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group(g))) => {
-                self.applied = true;
-                self.uploaded = None;
-                self.card.banner_url = g.banner_url.clone();
-                true
-            }
-            // Refusals and unknowns are said by the window's warnings, with their check.
-            (Some(Write::Upload { .. } | Write::ApplyArt { .. }), Outcome::Refused(_) | Outcome::Unknown) | (None, Outcome::Refused(_)) => true,
-            _ => false,
+        if let (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group(g))) = (sealed.map(|p| &p.write), outcome) {
+            self.applied = true;
+            self.card.banner_url = g.banner_url.clone();
         }
     }
     fn crop(&self) -> Crop {
@@ -225,10 +206,15 @@ impl Studio {
     }
 }
 
-/// Picture files on a thread of their own: the full picture, oriented.
-fn load_file(ctx: &egui::Context, studio: &mut Studio, path: PathBuf) -> Loading {
+/// A picture file opened on a thread of its own: the full picture, oriented. One at a time: a choice made meanwhile waits,
+/// and only the last one (M5).
+fn load_file(ctx: &egui::Context, studio: &mut Studio, path: PathBuf) {
     studio.choice += 1;
     studio.wanted_source = None;
+    if studio.loading.iter().any(|l| matches!(l, Loading::Source(..))) {
+        studio.queued = Some(path);
+        return;
+    }
     let choice = studio.choice;
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
@@ -240,7 +226,7 @@ fn load_file(ctx: &egui::Context, studio: &mut Studio, path: PathBuf) -> Loading
         let _ = tx.send(r);
         ctx.request_repaint();
     });
-    Loading::Source(choice, rx)
+    studio.loading.push(Loading::Source(choice, rx));
 }
 
 /// The newest pictures of the person's VRChat pictures folder and the folders added in Settings, with thumbnails.
@@ -389,13 +375,17 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let scope = state.scope.clone();
     let busy = state.flow.is_some();
+    let uploaded = state.studio.as_ref().map(|s| s.card.id.clone()).and_then(|g| state.uploads(&g).into_iter().find(|u| u.slot == ArtSlot::Banner));
+    let staged = state.staged;
     let Some(studio) = state.studio.as_mut() else { return };
+    if !staged {
+        studio.uploaded = uploaded;
+    }
     take_loading(&ctx, studio);
     // A picture dropped on the window.
     let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
     if let Some(path) = dropped.into_iter().next() {
-        let l = load_file(&ctx, studio, path);
-        studio.loading.push(l);
+        load_file(&ctx, studio, path);
     }
     let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
     // The remembered source, once.
@@ -407,8 +397,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     };
     match remembered {
         Some(Source::File(path)) if path.is_file() => {
-            let l = load_file(&ctx, studio, path);
-            studio.loading.push(l);
+            load_file(&ctx, studio, path);
         }
         Some(Source::Inventory { url, .. }) => {
             if let Some(scope) = &scope {
@@ -431,8 +420,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     let Some(studio) = state.studio.as_mut() else { return };
     if let Some(img) = studio.pending.take() {
-        let texture = texture_of(&ctx, &img);
-        studio.source = Some(Loaded { full: Arc::new(img), texture });
+        studio.source = Some(Loaded::new(&ctx, img));
     }
     let mut acts: Vec<Act> = Vec::new();
     let full = ui.max_rect();
@@ -485,6 +473,11 @@ fn take_loading(ctx: &egui::Context, studio: &mut Studio) {
         }
     }
     studio.loading = keep;
+    if !studio.loading.iter().any(|l| matches!(l, Loading::Source(..))) {
+        if let Some(path) = studio.queued.take() {
+            load_file(ctx, studio, path);
+        }
+    }
     if let Some(rx) = &studio.exporting {
         match rx.try_recv() {
             Ok(results) => {
@@ -859,12 +852,12 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
             // The upload applied from here is only the one made from the art shown now (Blocker 5).
             if studio.upload_matches() {
                 let r = widgets::Button::new(tr("Apply as the group's banner")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(art && !busy).id_salt("studio-apply").show(ui);
-                if crate::chat_bar::fresh_activation(ui, &r) {
+                if widgets::activated_fresh(&r) {
                     acts.push(Act::Apply(r.rect));
                 }
             } else {
                 let r = widgets::Button::new(tr("Upload to my gallery, then apply")).icon(icons::UPLOAD_SIMPLE).enabled(art && has && !busy && studio.making_upload.is_none()).id_salt("studio-upload").show(ui);
-                if crate::chat_bar::fresh_activation(ui, &r) {
+                if widgets::activated_fresh(&r) {
                     acts.push(Act::Upload(r.rect));
                 }
             }
@@ -891,12 +884,11 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
     let scope = state.scope.clone();
     let Some(studio) = state.studio.as_mut() else { return };
     match act {
-        Act::Back => state.studio = None,
+        Act::Back => state.close_studio(),
         Act::Target(t) => studio.target = t,
         Act::PickFile => {
             if let Some(path) = rfd::FileDialog::new().set_title(tr("Choose a picture")).add_filter(tr("Pictures"), &["png", "jpg", "jpeg", "webp"]).pick_file() {
-                let l = load_file(ctx, studio, path);
-                studio.loading.push(l);
+                load_file(ctx, studio, path);
             }
         }
         Act::Gallery => {
@@ -936,8 +928,7 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             }
         }
         Act::UsePhoto(path) => {
-            let l = load_file(ctx, studio, path);
-            studio.loading.push(l);
+            load_file(ctx, studio, path);
         }
         Act::Export(all) => {
             let Some(loaded) = studio.source.as_ref() else { return };
@@ -982,22 +973,17 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
                     return;
                 }
             };
-            let thumb = image::imageops::thumbnail(&rendered, 480, 270);
-            let tex = ctx.load_texture("group-upload-preview", egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw()), egui::TextureOptions::LINEAR);
-            studio.upload_revision = Some(studio.revision());
-            studio.uploaded_art = Some(tex.clone());
+            let Some(revision) = studio.revision() else { return };
             let group = studio.card.id.clone();
-            state.confirm_art = Some(tex);
-            state.prepare(ctx, cx.ctl, Write::Upload { tag: FileTag::Gallery, group, staged }, origin);
+            state.prepare(ctx, cx.ctl, Write::Upload { tag: FileTag::Gallery, group, staged, art: Some(revision) }, origin);
         }
         Act::Apply(origin) => {
             if !studio.upload_matches() {
                 return;
             }
-            if let Some((f, _)) = studio.uploaded.clone() {
+            if let Some(up) = studio.uploaded.clone() {
                 let group = studio.card.id.clone();
-                state.confirm_art = studio.uploaded_art.clone();
-                state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot: ArtSlot::Banner, file: f.id }, origin);
+                state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot: ArtSlot::Banner, file: up.file }, origin);
             }
         }
         Act::Web => {
@@ -1015,7 +1001,7 @@ mod tests {
 
     fn studio() -> Studio {
         let card = GroupCard { id: "grp_00000000-0000-4000-8000-0000000000aa".into(), name: "Made-up".into(), ..Default::default() };
-        let mut s = Studio::new(card, "usr_00000000-0000-4000-8000-0000000000e1", Some(image::RgbaImage::new(64, 36)), &art::Drafts::default());
+        let mut s = Studio::new(card, "usr_00000000-0000-4000-8000-0000000000e1", Some(image::RgbaImage::new(64, 36)));
         s.saved.source = Some(Source::File("C:/made-up/a.png".into()));
         s
     }
@@ -1031,7 +1017,7 @@ mod tests {
                 let mut s = studio();
                 s.target = target;
                 let img = image::RgbaImage::new(64, 36);
-                s.source = Some(Loaded { texture: texture_of(&ctx, &img), full: Arc::new(img) });
+                s.source = Some(Loaded::new(&ctx, img));
                 let mut wide = 0.0;
                 for t in 0..2 {
                     let mut toasts = orbiters_ui::toast::Toasts::default();
@@ -1086,6 +1072,7 @@ mod tests {
         let page = |n: usize, raw: usize| orbiters_core::vrchat_api::GroupInventory {
             items: (0..n).map(|i| InventoryFile { id: format!("file_{i}"), url: format!("https://api.vrchat.cloud/api/1/file/file_{i}/1/file") }).collect(),
             raw,
+            details: Vec::new(),
         };
         let full = orbiters_core::vrchat_api::GROUP_PAGE;
         s.answer(Kind::Inventory { tag: FileTag::Gallery, offset: 0 }, Reply::Inventory(page(full - 1, full)));
@@ -1099,23 +1086,111 @@ mod tests {
     /// picture makes it no longer the one applied from here.
     #[test]
     fn an_upload_is_bound_to_its_art() {
+        let ctx = egui::Context::default();
         let mut s = studio();
-        let file = InventoryFile { id: "file_a".into(), url: String::new() };
-        s.upload_revision = Some(s.revision());
-        let prepared = Prepared { op: "op".into(), write: Write::Upload { tag: FileTag::Gallery, group: s.card.id.clone(), staged: crate::controller::groups::Staged { name: "x.png".into(), size: 1, sha256: String::new() } }, confirm: true, role: None, post: None, member: None };
-        s.ended(Some(&prepared), &Outcome::Done(crate::controller::groups::Done::Uploaded(file.clone())));
+        let img = |v: u8| image::RgbaImage::from_pixel(64, 36, image::Rgba([v, 2, 3, 255]));
+        s.pending = None;
+        s.source = Some(Loaded::new(&ctx, img(1)));
+        s.uploaded = Some(super::super::Uploaded { slot: ArtSlot::Banner, file: "file_a".into(), art: s.revision() });
         assert!(s.upload_matches(), "the art it was made from");
         s.set_crop(Target::GroupBanner, Crop { zoom: 2.0, ..Crop::default() });
         assert!(!s.upload_matches(), "a new crop: not this upload");
         s.set_crop(Target::GroupBanner, Crop::default());
         assert!(s.upload_matches());
-        s.take_source(image::RgbaImage::new(64, 36));
-        assert!(!s.upload_matches(), "another picture: not this upload");
-        // An upload done for another group is not this studio's.
-        let other = Prepared { write: Write::Upload { tag: FileTag::Gallery, group: "grp_00000000-0000-4000-8000-0000000000ff".into(), staged: crate::controller::groups::Staged { name: "x.png".into(), size: 1, sha256: String::new() } }, ..prepared };
-        let before = s.uploaded.clone();
-        s.ended(Some(&other), &Outcome::Done(crate::controller::groups::Done::Uploaded(InventoryFile { id: "file_b".into(), url: String::new() })));
-        assert_eq!(s.uploaded, before);
+        s.take_source(img(9));
+        assert!(!s.upload_matches(), "another picture on its way: not this upload");
+        s.pending = None;
+        s.source = Some(Loaded::new(&ctx, img(9)));
+        assert!(!s.upload_matches(), "other pixels, whatever the file is called");
+        // Another visit, the same picture: the same art.
+        let mut again = studio();
+        again.pending = None;
+        again.source = Some(Loaded::new(&ctx, img(1)));
+        again.uploaded = s.uploaded.clone();
+        assert!(again.upload_matches());
+        again.uploaded.as_mut().unwrap().art = None;
+        assert!(!again.upload_matches(), "an upload with no art named is none of this");
+    }
+
+    /// M5: choices made while a picture is being opened wait, and only the last one; one file is open at a time.
+    #[test]
+    fn only_the_last_of_several_quick_choices_is_opened() {
+        let ctx = egui::Context::default();
+        let mut s = studio();
+        s.pending = None;
+        let (tx, rx) = mpsc::channel();
+        s.choice = 1;
+        s.loading = vec![Loading::Source(1, rx)];
+        for i in 0..20 {
+            load_file(&ctx, &mut s, format!("C:/made-up/{i}.png").into());
+        }
+        assert_eq!(s.loading.len(), 1, "one worker");
+        assert_eq!(s.queued.as_deref(), Some(std::path::Path::new("C:/made-up/19.png")));
+        tx.send(Ok((image::RgbaImage::new(10, 10), Source::File("C:/made-up/first.png".into())))).unwrap();
+        take_loading(&ctx, &mut s);
+        assert!(s.pending.is_none(), "an older choice is dropped");
+        assert!(s.queued.is_none() && s.loading.len() == 1, "the last one opens now");
+    }
+
+    /// verify2 B-E, the second verification's own assertion in the new shapes: upload A, start another upload for another
+    /// crop, cancel it, return to A's crop, Apply: what the confirmation can show is file A's own picture, by its sealed
+    /// bytes, and file A is what is sealed.
+    #[test]
+    fn verify2_upload_cancel_restores_the_previous_file_preview() {
+        use crate::controller::groups::world;
+        let (controller, shown, _) = world::world();
+        let ctl: crate::backend::Ctl = Arc::new(crate::backend::Local::new(controller));
+        let snap = ctl.view();
+        let mut toasts = Default::default();
+        let ctx = egui::Context::default();
+        let mut state = State { scope: Some(crate::controller::vrchat_data::Scope::of(&snap)), ..Default::default() };
+        let card = GroupCard { id: world::G.into(), permissions: vec!["*".into()], ..Default::default() };
+        let mut st = Studio::new(card, "usr_test", None);
+        st.source = Some(Loaded::new(&ctx, image::RgbaImage::from_pixel(64, 36, image::Rgba([200, 10, 10, 255]))));
+        state.studio = Some(st);
+        let mut frames = |state: &mut State, done: &dyn Fn(&State) -> bool| {
+            let start = std::time::Instant::now();
+            while !done(state) && start.elapsed() < std::time::Duration::from_secs(10) {
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0., visit: 1, windowed: true, gpu: None, top: 0., go: None };
+                state.take(&ctx, &mut cx);
+                let up = state.uploads(world::G).into_iter().find(|u| u.slot == ArtSlot::Banner);
+                if let Some(s) = state.studio.as_mut() {
+                    s.uploaded = up;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(done(state));
+        };
+        let mut toasts2 = Default::default();
+        macro_rules! act {
+            ($a:expr) => {{
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts2, entered: 0., visit: 1, windowed: true, gpu: None, top: 0., go: None };
+                act_on(&ctx, &mut cx, &mut state, $a);
+            }};
+        }
+        // A goes up.
+        act!(Act::Upload(Rect::NOTHING));
+        frames(&mut state, &|s| matches!(s.flow, Some(super::super::Flow::Confirming { .. })));
+        let Some(super::super::Flow::Confirming { sealed, .. }) = state.flow.take() else { unreachable!() };
+        state.commit(&ctx, &ctl, sealed);
+        frames(&mut state, &|s| s.flow.is_none() && s.studio.as_ref().unwrap().upload_matches());
+        let file_a = state.studio.as_ref().unwrap().uploaded.clone().unwrap().file;
+        // B, another crop, started and cancelled; back to A's crop.
+        let old = state.studio.as_ref().unwrap().saved.group_banner;
+        state.studio.as_mut().unwrap().saved.group_banner.zoom = old.zoom + 0.5;
+        assert!(!state.studio.as_ref().unwrap().upload_matches());
+        act!(Act::Upload(Rect::NOTHING));
+        frames(&mut state, &|s| matches!(s.flow, Some(super::super::Flow::Confirming { .. })));
+        state.cancel();
+        state.studio.as_mut().unwrap().saved.group_banner = old;
+        assert!(state.studio.as_ref().unwrap().upload_matches(), "A is the art shown");
+        act!(Act::Apply(Rect::NOTHING));
+        frames(&mut state, &|s| matches!(&s.flow, Some(super::super::Flow::Confirming { art: Some(_), .. })));
+        let Some(super::super::Flow::Confirming { sealed, .. }) = &state.flow else { unreachable!() };
+        assert_eq!(sealed.write, Write::ApplyArt { group: world::G.into(), slot: ArtSlot::Banner, file: file_a.clone() });
+        let shows = sealed.art.clone().unwrap();
+        assert_eq!((shows.file.as_deref(), shows.sha256), (Some(file_a.as_str()), crate::pages::groups::digest(&world::picture(&file_a))), "the confirmation shows the bytes VRChat serves for file A");
+        assert_eq!(shown.lock().unwrap().files.len(), 3, "B never went up");
     }
 
     /// Blocker 5: a picture chosen earlier and arriving late never replaces the one chosen after it.

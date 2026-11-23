@@ -1415,7 +1415,21 @@ impl Controller {
         rt.ask = Arc::new(ask);
     }
     /// [`Self::test_vrchat`] over a [`orbiters_core::vrchat_api::scripted_client`]: bodies recorded, drops possible.
+    pub(crate) fn test_vrchat_routed(&self, route: Arc<dyn Fn(&orbiters_core::vrchat_api::Sent) -> orbiters_core::vrchat_api::Routed + Send + Sync>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::routed_client(gate, route, false))
+    }
+    pub(crate) fn test_vrchat_routed_paced(&self, route: Arc<dyn Fn(&orbiters_core::vrchat_api::Sent) -> orbiters_core::vrchat_api::Routed + Send + Sync>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::routed_client(gate, route, true))
+    }
+    /// The waits VRChat asked the client for are over.
+    pub(crate) fn groups_forget_waits_for_tests(&self) {
+        let client = self.vrchat_login.lock().unwrap().client.clone();
+        client.lock().unwrap().forget_waits();
+    }
     pub(crate) fn test_vrchat_scripted(&self, replies: Vec<orbiters_core::vrchat_api::Scripted>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::scripted_client(gate, replies))
+    }
+    fn test_vrchat_with(&self, make: impl FnOnce(Arc<orbiters_core::vrchat_api::Gate>) -> (Client, Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>>)) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
         self.test_account();
         let identity = self.vrchat_identity().unwrap();
         let mut rt = self.vrchat_login.lock().unwrap();
@@ -1424,7 +1438,7 @@ impl Controller {
         rt.identity = Some(id.clone());
         rt.grants.entry(id).or_insert_with(new_grant).answered(&Ok(true), Instant::now());
         rt.restored = true;
-        let (client, sent) = orbiters_core::vrchat_api::scripted_client(rt.gate.clone(), replies);
+        let (client, sent) = make(rt.gate.clone());
         rt.client = Arc::new(Mutex::new(client));
         drop(rt);
         self.update(|s| { s.vrchat_login.allowed = true; s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() }); });

@@ -956,11 +956,16 @@ impl Client {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         self.groups.lock().unwrap().insert(id.clone(), tx);
+        // A link already closed: nothing was asked of the service. A line that could not be written whole may have reached
+        // it all the same: lost, not "not asked".
         if self.state.lock().unwrap().closed {
+            self.groups.lock().unwrap().remove(&id);
+            return Reply::Failed(Failure::Offline);
+        }
+        if !self.try_send(&ToService::Groups { id: id.clone(), scope, request }) {
             self.groups.lock().unwrap().remove(&id);
             return Reply::Failed(Failure::Lost);
         }
-        self.send(&ToService::Groups { id: id.clone(), scope, request });
         // No answer (the link closed, the mailbox let it go, the time ran out): the request may have been carried out,
         // so it is "lost", never "unavailable" (verify-r22 Blocker 1).
         let reply = rx.recv_timeout(Duration::from_secs(150)).unwrap_or(Reply::Failed(Failure::Lost));

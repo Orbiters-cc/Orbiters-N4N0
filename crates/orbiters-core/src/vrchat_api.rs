@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 mod groups;
 mod social;
-pub use groups::{art_body, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
+pub use groups::{art_body, file_md5 as group_file_md5, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
 pub use social::{boop_body, own_profile_body, own_status_body};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
@@ -3048,6 +3048,61 @@ pub struct Sent {
     pub url: String,
     pub body: Option<String>,
     pub form: bool,
+    /// A picture's upload: its tag and bytes.
+    pub upload: Option<(String, Vec<u8>)>,
+    /// When it was sent, and when it was answered.
+    pub at: Instant,
+    pub answered: Option<Instant>,
+}
+#[cfg(feature = "test-support")]
+impl Sent {
+    fn of(r: &Request) -> Self {
+        let upload = r.form.as_ref().map(|f| (f.fields.iter().find(|(k, _)| *k == "tag").map(|(_, v)| v.clone()).unwrap_or_default(), f.bytes.clone()));
+        Self { method: r.method.into(), url: r.url.clone(), body: r.body.clone(), form: r.form.is_some(), upload, at: Instant::now(), answered: None }
+    }
+}
+/// What a [`routed_client`]'s made-up VRChat answers.
+#[cfg(feature = "test-support")]
+pub enum Routed {
+    Answer(u16, serde_json::Value),
+    Bytes(u16, Vec<u8>),
+    /// The connection died before the answer.
+    Drop,
+}
+/// A client whose every request is answered by `route`, from its own state (`paced`: with the real spacing of requests).
+#[cfg(feature = "test-support")]
+pub fn routed_client(gate: Arc<Gate>, route: Arc<dyn Fn(&Sent) -> Routed + Send + Sync>, paced: bool) -> (Client, Arc<Mutex<Vec<Sent>>>) {
+    struct Fake { route: Arc<dyn Fn(&Sent) -> Routed + Send + Sync>, sent: Arc<Mutex<Vec<Sent>>> }
+    impl Transport for Fake {
+        fn send(&self, r: Request) -> Result<Response> {
+            let sent = Sent::of(&r);
+            let at = { let mut s = self.sent.lock().unwrap(); s.push(sent.clone()); s.len() - 1 };
+            let routed = (self.route)(&sent);
+            if let Some(s) = self.sent.lock().unwrap().get_mut(at) { s.answered = Some(Instant::now()); }
+            let (status, body) = match routed {
+                Routed::Drop => return Err(Error::Unavailable),
+                Routed::Answer(s, b) => (s, b.to_string().into_bytes()),
+                Routed::Bytes(s, b) => (s, b),
+            };
+            Ok(Response { status, body, cookies: vec![], retry_after: None, location: None })
+        }
+    }
+    let sent = Arc::new(Mutex::new(vec![]));
+    let mut c = Client::new(gate);
+    c.store = None;
+    c.recheck_delay = Duration::ZERO;
+    c.limiter = Arc::new(Mutex::new(Limiter { unpaced: !paced, ..Default::default() }));
+    c.cookies.auth = "fake".into();
+    c.user = Some(User { id: "usr_test".into(), ..Default::default() });
+    c.transport = Arc::new(Fake { route, sent: sent.clone() });
+    (c, sent)
+}
+#[cfg(feature = "test-support")]
+impl Client {
+    /// The waits VRChat asked for are over.
+    pub fn forget_waits(&self) {
+        self.limiter.lock().unwrap().blocked = None;
+    }
 }
 /// [`test_client`] that records bodies and can drop a connection after a request. A request past the script is
 /// recorded and fails as unreachable (never a panic on a service thread).
@@ -3056,7 +3111,7 @@ pub fn scripted_client(gate: Arc<Gate>, replies: Vec<Scripted>) -> (Client, Arc<
     struct Fake { replies: Mutex<std::collections::VecDeque<Scripted>>, sent: Arc<Mutex<Vec<Sent>>> }
     impl Transport for Fake {
         fn send(&self, r: Request) -> Result<Response> {
-            self.sent.lock().unwrap().push(Sent { method: r.method.into(), url: r.url.clone(), body: r.body.clone(), form: r.form.is_some() });
+            self.sent.lock().unwrap().push(Sent::of(&r));
             let next = self.replies.lock().unwrap().pop_front();
             let (status, body) = match next {
                 None | Some(Scripted::Drop) => return Err(Error::Unavailable),

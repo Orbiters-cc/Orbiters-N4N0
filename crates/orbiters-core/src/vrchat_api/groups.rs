@@ -10,7 +10,7 @@
 //! `nameplateId` (B4). Every write goes in the [`WRITES`] family, whose lost answers are "outcome unknown" (B2), through
 //! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]): no server text reaches a notice.
 use super::*;
-use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, Role, RoleChange, RoleDraft, Visibility};
+use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, PostField, Role, RoleChange, RoleDraft, RoleField, Visibility};
 use serde_json::{json, Map, Value};
 
 /// The pacing family of every group write (and of a picture upload).
@@ -88,6 +88,21 @@ pub struct Posts {
 pub struct Inventory {
     pub items: Vec<InventoryFile>,
     pub raw: usize,
+    /// What tells one picture from another, for a check (never sent to the window).
+    #[serde(skip)]
+    pub details: Vec<FileDetail>,
+}
+
+/// A file of the account's with what VRChat says of its latest version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileDetail {
+    pub file: InventoryFile,
+    pub owner: String,
+    pub tags: Option<Vec<String>>,
+    /// Base64, as VRChat's file API gives and takes it.
+    pub md5: Option<String>,
+    pub size: Option<u64>,
+    pub created_at: Option<String>,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -102,6 +117,25 @@ fn count(v: &Value, k: &str) -> Option<u32> {
 fn strings(v: &Value, k: &str, max: usize) -> Vec<String> {
     v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).filter(|x| x.len() <= 128).take(max).collect()).unwrap_or_default()
 }
+/// Every entry of an array of strings, or nothing: one dropped for its form or its length would change what the list says.
+fn whole_strings(v: &Value, k: &str, max: usize) -> Option<Vec<String>> {
+    let a = v.get(k)?.as_array()?;
+    if a.len() > max {
+        return None;
+    }
+    a.iter().map(|x| x.as_str().filter(|s| !s.is_empty() && s.len() <= 1024).map(str::to_string)).collect()
+}
+fn whole_role_ids(v: &Value, k: &str) -> Option<Vec<String>> {
+    whole_strings(v, k, 64).filter(|l| l.iter().all(|r| g::is_role_id(r)))
+}
+/// A picture field: there (a file id, or null for none), or not known.
+fn picture(v: &Value, k: &str) -> (Option<String>, bool) {
+    match v.get(k) {
+        Some(Value::Null) => (None, true),
+        Some(Value::String(s)) if g::is_file_id(s) => (Some(s.clone()), true),
+        _ => (None, false),
+    }
+}
 fn file_id(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(Value::as_str).filter(|id| g::is_file_id(id)).map(str::to_string)
 }
@@ -114,18 +148,21 @@ pub(crate) fn parse_role(v: &Value) -> Option<Role> {
     let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
     // What the rules decide by must all be there, the rights as an array of strings: a missing field is not "none"
     // (verify-r22 Blocker 4).
-    let rights = v.get("permissions").and_then(Value::as_array);
-    let known = rights.is_some_and(|a| a.len() <= 128 && a.iter().all(Value::is_string))
-        && v.get("order").and_then(Value::as_i64).is_some()
-        && ["defaultRole", "isManagementRole", "requiresPurchase"].iter().all(|k| v.get(*k).is_some_and(Value::is_boolean));
+    let rights = whole_strings(v, "permissions", 128);
+    let flags = |k: &[&str]| k.iter().all(|k| v.get(*k).is_some_and(Value::is_boolean));
+    let known = rights.is_some() && v.get("order").and_then(Value::as_i64).is_some() && flags(&["defaultRole", "isManagementRole", "requiresPurchase", "isSelfAssignable"]);
+    let words = ["name", "description"].iter().all(|k| v.get(*k).is_some_and(Value::is_string));
+    let whole = known && words && flags(&["isAddedOnJoin", "requiresTwoFactor"]);
     Some(Role {
         // As VRChat has them (an edit is compared with and sent against these); shown through `groups::label`.
         name: s(v, "name").chars().take(256).collect(),
         description: s(v, "description").chars().take(2048).collect(),
         order: v.get("order").and_then(Value::as_i64),
         // Every right VRChat gives is kept as it is, those this version does not know included (never sent back unasked).
-        permissions: strings(v, "permissions", 128),
+        permissions: rights.unwrap_or_default(),
         known,
+        whole,
+        created_at: v.get("createdAt").and_then(Value::as_str).and_then(g::time),
         default_role: flag("defaultRole"),
         management: flag("isManagementRole"),
         self_assignable: flag("isSelfAssignable"),
@@ -139,22 +176,29 @@ pub(crate) fn parse_role(v: &Value) -> Option<Role> {
 
 fn parse_roles(v: &Value) -> Option<Vec<Role>> {
     let list = v.as_array()?;
-    let roles: Vec<Role> = list.iter().filter_map(parse_role).take(200).collect();
-    // A role VRChat gave that cannot be read makes the list incomplete: then it is not a list to rank against.
-    (roles.len() == list.len().min(200)).then_some(roles)
+    // A role VRChat gave that cannot be read, or more than this reads, makes the list incomplete: then it is not a list
+    // to rank against, nor one a role's absence means anything in.
+    if list.len() > 200 {
+        return None;
+    }
+    list.iter().map(parse_role).collect()
 }
 
 fn parse_my_member(v: &Value) -> Option<MyMember> {
     if !v.is_object() {
         return None;
     }
-    let mut role_ids = strings(v, "roleIds", 64);
-    for m in strings(v, "mRoleIds", 64) {
+    let (ids, managed, rights) = (whole_role_ids(v, "roleIds"), whole_role_ids(v, "mRoleIds"), whole_strings(v, "permissions", 128));
+    let status = s(v, "membershipStatus");
+    let user_id = s(v, "userId");
+    let whole = ids.is_some() && managed.is_some() && rights.is_some() && !status.is_empty() && user_id.starts_with("usr_");
+    let mut role_ids = ids.unwrap_or_default();
+    for m in managed.unwrap_or_default() {
         if !role_ids.contains(&m) {
             role_ids.push(m);
         }
     }
-    Some(MyMember { user_id: s(v, "userId"), role_ids, permissions: strings(v, "permissions", 128), status: s(v, "membershipStatus") })
+    Some(MyMember { user_id, role_ids, permissions: rights.unwrap_or_default(), status, whole, group_id: v.get("groupId").and_then(Value::as_str).map(str::to_string) })
 }
 
 pub(crate) fn parse_group(v: &Value) -> Option<Group> {
@@ -162,18 +206,21 @@ pub(crate) fn parse_group(v: &Value) -> Option<Group> {
     if !g::is_group_id(&id) {
         return None;
     }
+    let ((icon_id, icon_known), (banner_id, banner_known)) = (picture(v, "iconId"), picture(v, "bannerId"));
     Some(Group {
+        icon_id,
+        icon_known,
+        banner_id,
+        banner_known,
         name: g::label(&s(v, "name"), 64),
         short_code: g::label(&s(v, "shortCode"), 12),
         discriminator: g::label(&s(v, "discriminator"), 8),
         description: g::text(&s(v, "description"), 1000),
         rules: g::text(&s(v, "rules"), 4000),
         links: strings(v, "links", 3).iter().filter_map(|l| g::link(l)).collect(),
-        icon_id: file_id(v, "iconId"),
         icon_url: https(v, "iconUrl"),
-        banner_id: file_id(v, "bannerId"),
         banner_url: https(v, "bannerUrl"),
-        member_count: count(v, "memberCount").unwrap_or(0),
+        member_count: count(v, "memberCount"),
         online_count: count(v, "onlineMemberCount"),
         owner_id: s(v, "ownerId"),
         privacy: g::label(&s(v, "privacy"), 16),
@@ -210,11 +257,11 @@ pub(crate) fn parse_member(v: &Value) -> Option<Member> {
         return None;
     }
     let user = v.get("user").filter(|u| u.is_object());
-    // Absent role arrays are unknown roles, not "no role" (Blocker 4).
-    let roles_known = v.get("roleIds").and_then(Value::as_array).is_some_and(|a| a.len() <= 64 && a.iter().all(Value::is_string))
-        && v.get("mRoleIds").is_none_or(|m| m.as_array().is_some_and(|a| a.len() <= 64 && a.iter().all(Value::is_string)));
-    let mut role_ids = strings(v, "roleIds", 64);
-    for m in strings(v, "mRoleIds", 64) {
+    // Both role arrays (the schema requires them): an absent one is unknown roles, not "no role" (Blocker 4, B-D).
+    let (ids, managed) = (whole_role_ids(v, "roleIds"), whole_role_ids(v, "mRoleIds"));
+    let roles_known = ids.is_some() && managed.is_some();
+    let mut role_ids = ids.unwrap_or_default();
+    for m in managed.unwrap_or_default() {
         if !role_ids.contains(&m) {
             role_ids.push(m);
         }
@@ -247,13 +294,13 @@ pub(crate) fn parse_post(v: &Value) -> Option<Post> {
     };
     let roles = v.get("roleIds");
     let role_ids: Vec<String> = roles.and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    // A group post's restriction must be there to be known: absent is not "every member" (verify2 B7). A public one has none.
     let roles_whole = match roles {
-        None | Some(Value::Null) => true,
         Some(Value::Array(a)) => a.len() <= 32 && a.iter().all(|x| x.as_str().is_some_and(g::is_role_id)),
+        None | Some(Value::Null) => visibility == Some(Visibility::Public),
         _ => false,
     };
-    let image = v.get("imageId");
-    let image_whole = image.is_none_or(|i| i.is_null() || i.as_str().is_some_and(g::is_file_id));
+    let image_whole = picture(v, "imageId").1;
     let complete = visibility.is_some()
         && roles_whole
         && image_whole
@@ -278,7 +325,27 @@ pub(crate) fn parse_post(v: &Value) -> Option<Post> {
 pub(crate) fn parse_file(v: &Value) -> Option<InventoryFile> {
     let id = s(v, "id");
     let url = v.get("versions")?.as_array()?.iter().rev().find_map(|version| version.get("file").and_then(|f| f.get("url")).and_then(Value::as_str).map(str::to_string))?;
-    (g::is_file_id(&id) && url.starts_with("https://api.vrchat.cloud/api/1/file/")).then_some(InventoryFile { id, url })
+    // Its address is that file's own: what is shown for a file id is that file (verify2 B-E).
+    (g::is_file_id(&id) && url.starts_with(&format!("https://api.vrchat.cloud/api/1/file/{id}/"))).then_some(InventoryFile { id, url })
+}
+
+pub(crate) fn parse_file_detail(v: &Value) -> Option<FileDetail> {
+    let file = parse_file(v)?;
+    let latest = v.get("versions")?.as_array()?.iter().rev().find(|x| x.get("file").is_some_and(|f| f.get("url").is_some()))?;
+    let data = latest.get("file");
+    Some(FileDetail {
+        file,
+        owner: s(v, "ownerId"),
+        tags: whole_strings(v, "tags", 64),
+        md5: data.and_then(|f| f.get("md5")).and_then(Value::as_str).map(str::to_string),
+        size: data.and_then(|f| f.get("sizeInBytes")).and_then(Value::as_u64),
+        created_at: latest.get("created_at").and_then(Value::as_str).and_then(g::time),
+    })
+}
+
+/// The MD5 of `bytes` as VRChat's file API writes it.
+pub fn file_md5(bytes: &[u8]) -> String {
+    md5_base64(bytes)
 }
 
 // --- Bodies (pure: tested on their own) ---
@@ -336,25 +403,32 @@ pub fn post_create_body(draft: &PostDraft) -> String {
     Value::Object(m).to_string()
 }
 
-/// `updateGroupPost`: title, text, visibility and its roles as edited (they start as the post's own, so they are kept
-/// unless changed), its picture kept unless removed, and never `sendNotification`: an edit notifies nobody again (M7,
-/// as VRCX does).
-pub fn post_edit_body(edit: &PostDraft, baseline: &Post) -> String {
+/// `updateGroupPost`. The spec reuses the create schema, whose title, text and visibility are required: they always go,
+/// as the person left them or, untouched, as `now` (the post read in the same step) has them. The role restriction and
+/// the picture are optional there, and what leaving them out does in this PUT is not documented (kept, or cleared): an
+/// untouched one goes exactly as just read when the post has one (left out, a server that replaces would open the post
+/// to every member), and is left out when it has none (then neither reading of the server changes anything, and one set
+/// by someone else meanwhile is not cleared by us). Never `sendNotification`: an edit notifies nobody again (M7, as
+/// VRCX does). A picture is cleared with null, as VRCX does, only when the person removed it.
+pub fn post_edit_body(edit: &PostDraft, now: &Post, changed: &[PostField]) -> String {
+    let after = now.with(edit);
+    let of = |f: PostField| if changed.contains(&f) { &after } else { now };
     let mut m = Map::new();
-    m.insert("title".into(), json!(edit.title.trim()));
-    m.insert("text".into(), json!(edit.text.trim()));
-    m.insert("visibility".into(), json!(edit.visibility.wire()));
-    let roles: &[String] = if edit.visibility == Visibility::Group { &edit.role_ids } else { &[] };
-    m.insert("roleIds".into(), json!(roles));
-    match (&edit.image_id, &baseline.image_id) {
-        (Some(id), _) => {
+    m.insert("title".into(), json!(of(PostField::Title).title));
+    m.insert("text".into(), json!(of(PostField::Text).text));
+    m.insert("visibility".into(), json!(of(PostField::Visibility).visibility.wire()));
+    let roles = &of(PostField::Roles).role_ids;
+    if changed.contains(&PostField::Roles) || !roles.is_empty() {
+        m.insert("roleIds".into(), json!(roles));
+    }
+    match &of(PostField::Image).image_id {
+        Some(id) => {
             m.insert("imageId".into(), json!(id));
         }
-        // Removed by the person.
-        (None, Some(_)) => {
+        None if changed.contains(&PostField::Image) => {
             m.insert("imageId".into(), Value::Null);
         }
-        (None, None) => {}
+        None => {}
     }
     Value::Object(m).to_string()
 }
@@ -396,6 +470,26 @@ impl Client {
     fn group_write(&mut self, method: &'static str, path: &str, body: Option<String>) -> GroupResult<Value> {
         let answer = self.group_call(method, path, body, None)?;
         body_json(&answer).ok_or(Failure::Unknown)
+    }
+    /// Waits until a group write may go (its family's pacing), so that a read made next is followed by the write without
+    /// waiting on anything else (verify2 B-G). Under the client's lock nothing else writes to groups meanwhile.
+    pub fn ready_to_write(&mut self) -> GroupResult<()> {
+        self.authenticated().map_err(|e| Failure::of(e, false))?;
+        loop {
+            self.permitted().map_err(|e| Failure::of(e, false))?;
+            let wait = {
+                let limiter = self.limiter.lock().unwrap();
+                let now = Instant::now();
+                if let Some(wait) = limiter.blocked.map(|b| b.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
+                    return Err(Failure::RateLimited(wait.as_secs().max(1)));
+                }
+                limiter.wait(WRITES, now)
+            };
+            if wait.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(wait.min(Duration::from_millis(50)));
+        }
     }
     fn me(&self) -> GroupResult<String> {
         self.own_id().map_err(|_| Failure::SignedOut)
@@ -443,25 +537,33 @@ impl Client {
         parse_roles(&v).ok_or(Failure::BadAnswer)
     }
 
-    /// `GET /groups/{g}/permissions`: the rights a role can hold, and which this account may give.
-    pub fn group_permission_catalogue(&mut self, group: &str) -> GroupResult<Vec<PermissionInfo>> {
+    /// `GET /groups/{g}/permissions`: the rights a role can hold, and which this account may give: every entry whole, or
+    /// nothing (a right missing from a list read in part is not "not grantable").
+    pub fn group_permission_catalogue(&mut self, group: &str) -> GroupResult<Option<Vec<PermissionInfo>>> {
         let path = Self::group_path(group)?;
         let v = self.group_read(&format!("{path}/permissions"))?;
         let list = v.as_array().ok_or(Failure::BadAnswer)?;
+        if list.len() > 256 {
+            return Ok(None);
+        }
         Ok(list
             .iter()
-            .filter_map(|p| {
+            .map(|p| {
                 let name = s(p, "name");
-                (!name.is_empty() && name.len() <= 128).then(|| PermissionInfo {
+                let depends_on = match p.get("dependsOn") {
+                    None => Some(Vec::new()),
+                    Some(_) => whole_strings(p, "dependsOn", 64),
+                };
+                (!name.is_empty() && name.len() <= 1024).then_some(())?;
+                Some(PermissionInfo {
                     display_name: g::label(&s(p, "displayName"), 64),
                     help: g::text(&s(p, "help"), 300),
-                    allowed_to_add: p.get("allowedToAdd").and_then(Value::as_bool).unwrap_or(false),
-                    depends_on: strings(p, "dependsOn", 16),
+                    allowed_to_add: p.get("allowedToAdd").and_then(Value::as_bool)?,
+                    depends_on: depends_on?,
                     management: p.get("isManagementPermission").and_then(Value::as_bool).unwrap_or(false),
                     name,
                 })
             })
-            .take(128)
             .collect())
     }
 
@@ -507,14 +609,25 @@ impl Client {
         let v = self.group_write(if add { "PUT" } else { "DELETE" }, &format!("{path}/members/{}/roles/{}", encode(user), encode(role)), None)?;
         // The member's roles now: an answer that is not a plain list of role ids says nothing sure (Major 2).
         let ids = v.as_array().filter(|a| a.len() <= 64 && a.iter().all(|x| x.as_str().is_some_and(g::is_role_id))).ok_or(Failure::Unknown)?;
-        Ok(ids.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        let ids: Vec<String> = ids.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+        // With the change asked: an answer without it contradicts itself, and settles nothing (J2).
+        if ids.iter().any(|r| r == role) != add {
+            return Err(Failure::Unknown);
+        }
+        Ok(ids)
     }
 
     /// `POST G/roles`: the role made.
     pub fn create_role(&mut self, group: &str, draft: &RoleDraft) -> GroupResult<Role> {
         let path = Self::group_path(group)?;
         let v = self.group_write("POST", &format!("{path}/roles"), Some(role_create_body(draft)))?;
-        parse_role(&v).ok_or(Failure::Unknown)
+        // The role asked, in this group (J2).
+        let made = parse_role(&v).ok_or(Failure::Unknown)?;
+        let same = made.digest_of(&RoleField::ALL) == draft.as_role().digest_of(&RoleField::ALL);
+        if !made.whole || !same || v.get("groupId").and_then(Value::as_str).is_some_and(|g| g != group) {
+            return Err(Failure::Unknown);
+        }
+        Ok(made)
     }
 
     /// `PUT G/roles/{r}` with what changed: every role as VRChat now has them.
@@ -524,7 +637,13 @@ impl Client {
             return Err(Failure::NotFound);
         }
         let v = self.group_write("PUT", &format!("{path}/roles/{}", encode(role)), Some(role_update_body(change)))?;
-        parse_roles(&v).ok_or(Failure::Unknown)
+        let roles = parse_roles(&v).ok_or(Failure::Unknown)?;
+        // The role asked, with what was asked of it (J2).
+        let fields = change.fields();
+        match roles.iter().find(|r| r.id == role) {
+            Some(r) if r.whole && r.digest_of(&fields) == r.with(change).digest_of(&fields) => Ok(roles),
+            _ => Err(Failure::Unknown),
+        }
     }
 
     /// `DELETE G/roles/{r}`: the roles left.
@@ -534,7 +653,11 @@ impl Client {
             return Err(Failure::NotFound);
         }
         let v = self.group_write("DELETE", &format!("{path}/roles/{}", encode(role)), None)?;
-        parse_roles(&v).ok_or(Failure::Unknown)
+        let roles = parse_roles(&v).ok_or(Failure::Unknown)?;
+        if roles.iter().any(|r| r.id == role) {
+            return Err(Failure::Unknown);
+        }
+        Ok(roles)
     }
 
     /// `GET G/posts?n&offset`: `{posts,total}`.
@@ -549,23 +672,31 @@ impl Client {
     pub fn create_post(&mut self, group: &str, draft: &PostDraft) -> GroupResult<Post> {
         let path = Self::group_path(group)?;
         let v = self.group_write("POST", &format!("{path}/posts"), Some(post_create_body(draft)))?;
-        // The post made, of this group (Major 2): another answer says nothing sure.
+        // The post asked, whole, by this account, of this group (Major 2, J2): another answer says nothing sure.
         let post = parse_post(&v).ok_or(Failure::Unknown)?;
-        if v.get("groupId").and_then(Value::as_str).is_some_and(|g| g != group) || post.title != draft.title.trim() {
+        let mine = self.me().ok();
+        if !post.complete
+            || post.digest_of(&PostField::ALL) != draft.content()
+            || v.get("groupId").and_then(Value::as_str).is_some_and(|g| g != group)
+            || (!post.author_id.is_empty() && mine.as_deref() != Some(post.author_id.as_str()))
+        {
             return Err(Failure::Unknown);
         }
         Ok(post)
     }
 
-    /// `PUT G/posts/{post}`: the post as edited.
-    pub fn edit_post(&mut self, group: &str, baseline: &Post, edit: &PostDraft) -> GroupResult<Post> {
+    /// `PUT G/posts/{post}`, right after `now` was read: the post as edited. What the person did not change must come
+    /// back as it was (J2).
+    pub fn edit_post(&mut self, group: &str, now: &Post, edit: &PostDraft, changed: &[PostField]) -> GroupResult<Post> {
         let path = Self::group_path(group)?;
-        if !g::is_post_id(&baseline.id) {
+        if !g::is_post_id(&now.id) || !now.complete {
             return Err(Failure::NotFound);
         }
-        let v = self.group_write("PUT", &format!("{path}/posts/{}", encode(&baseline.id)), Some(post_edit_body(edit, baseline)))?;
+        let v = self.group_write("PUT", &format!("{path}/posts/{}", encode(&now.id)), Some(post_edit_body(edit, now, changed)))?;
         let post = parse_post(&v).ok_or(Failure::Unknown)?;
-        if post.id != baseline.id || post.title != edit.title.trim() || post.text != edit.text.trim() {
+        let after = now.with(edit);
+        let kept: Vec<PostField> = PostField::ALL.into_iter().filter(|f| !changed.contains(f)).collect();
+        if post.id != now.id || !post.complete || post.digest_of(changed) != after.digest_of(changed) || post.digest_of(&kept) != now.digest_of(&kept) {
             return Err(Failure::Unknown);
         }
         Ok(post)
@@ -578,9 +709,9 @@ impl Client {
             return Err(Failure::NotFound);
         }
         let answer = self.group_call("DELETE", &format!("{path}/posts/{}", encode(post)), None, None)?;
-        // VRChat's success envelope (`{"success": …}`): anything else says nothing sure (Major 2).
+        // VRChat's success envelope (`{"success":{…,"status_code":200}}`): anything else says nothing sure (Major 2, J2).
         match body_json(&answer) {
-            Some(v) if v.get("success").is_some_and(Value::is_object) => Ok(()),
+            Some(v) if v.get("success").and_then(|s| s.get("status_code")).and_then(Value::as_u64) == Some(200) => Ok(()),
             _ => Err(Failure::Unknown),
         }
     }
@@ -590,7 +721,8 @@ impl Client {
     pub fn inventory(&mut self, tag: FileTag, offset: usize) -> GroupResult<Inventory> {
         let v = self.group_read(&format!("/files?tag={}&n={PAGE}&offset={offset}", tag.wire()))?;
         let list = v.as_array().ok_or(Failure::BadAnswer)?;
-        Ok(Inventory { raw: list.len(), items: list.iter().take(100).filter_map(parse_file).collect() })
+        let details: Vec<FileDetail> = list.iter().take(100).filter_map(parse_file_detail).collect();
+        Ok(Inventory { raw: list.len(), items: details.iter().map(|d| d.file.clone()).collect(), details })
     }
 
     /// `POST /file/image` (multipart: `tag`, `file`): a PNG into the account's own gallery or icons, the file made.
@@ -602,7 +734,12 @@ impl Client {
         self.authenticated().map_err(|e| Failure::of(e, false))?;
         let form = Form { fields: vec![("tag", tag.wire().to_string())], file_name: "orbiters.png", mime: "image/png", bytes: png };
         let answer = self.group_call("POST", "/file/image", None, Some(form))?;
-        body_json(&answer).as_ref().and_then(parse_file).ok_or(Failure::Unknown)
+        // One of this account's, of the kind asked (the schema requires both): another file's answer settles nothing (J2).
+        let made = body_json(&answer).as_ref().and_then(parse_file_detail).ok_or(Failure::Unknown)?;
+        if self.me().ok().as_deref() != Some(made.owner.as_str()) || !made.tags.as_ref().is_some_and(|t| t.iter().any(|t| t == tag.wire())) {
+            return Err(Failure::Unknown);
+        }
+        Ok(made.file)
     }
 
     /// `PUT /groups/{g}` with one picture's file id: the group as VRChat now has it.
@@ -614,11 +751,7 @@ impl Client {
         let v = self.group_write("PUT", &path, Some(art_body(slot, file)))?;
         // The group asked, with the picture asked in the slot asked (Major 2).
         let found = parse_group(&v).ok_or(Failure::Unknown)?;
-        let now = match slot {
-            ArtSlot::Banner => found.banner_id.as_deref(),
-            ArtSlot::Icon => found.icon_id.as_deref(),
-        };
-        if found.id != group || now != Some(file) {
+        if found.id != group || found.art(slot) != Some(Some(file)) {
             return Err(Failure::Unknown);
         }
         Ok(found)
@@ -637,7 +770,11 @@ mod tests {
             "onlineMemberCount": 9, "iconId": "file_icon", "bannerId": "file_banner", "iconUrl": "https://api.vrchat.cloud/api/1/file/file_icon/1/file",
             "nameplateId": null, "links": ["https://example.org", "javascript:alert(1)"],
             "myMember": {"id": "gmem_me", "userId": "usr_test", "roleIds": ["grol_a"], "mRoleIds": ["grol_owner"], "permissions": ["*"], "membershipStatus": "member", "managerNotes": "private"},
-            "roles": [{"id": "grol_owner", "name": "Owner", "order": 0, "permissions": ["*"]}, {"id": "grol_a", "name": "Artists", "order": 3, "permissions": ["group-some-future-right"]}]})
+            "roles": [role_json("grol_owner", "Owner", 0, &["*"]), role_json("grol_a", "Artists", 3, &["group-some-future-right"])]})
+    }
+    fn role_json(id: &str, name: &str, order: i64, rights: &[&str]) -> Value {
+        json!({"id": id, "groupId": G, "name": name, "description": "", "order": order, "permissions": rights, "defaultRole": false, "isManagementRole": false,
+            "requiresPurchase": false, "isSelfAssignable": false, "isAddedOnJoin": false, "requiresTwoFactor": false})
     }
 
     #[test]
@@ -664,7 +801,7 @@ mod tests {
     #[test]
     fn members_come_in_three_shapes() {
         let (mut c, seen) = mock_signed_in(vec![
-            raw_response(200, &json!([{"id": "gmem_1", "userId": U, "roleIds": ["grol_a"], "user": {"displayName": "Nova\u{202E}", "iconUrl": "https://api.vrchat.cloud/i"}}, {"id": "gmem_2", "userId": "usr_00000000-0000-4000-8000-0000000000cc"}, {"id": "gmem_3", "userId": "not-a-user"}]).to_string()),
+            raw_response(200, &json!([{"id": "gmem_1", "userId": U, "roleIds": ["grol_a"], "mRoleIds": [], "user": {"displayName": "Nova\u{202E}", "iconUrl": "https://api.vrchat.cloud/i"}}, {"id": "gmem_2", "userId": "usr_00000000-0000-4000-8000-0000000000cc"}, {"id": "gmem_3", "userId": "not-a-user"}]).to_string()),
             raw_response(200, &json!({"results": [{"id": "gmem_1", "userId": U, "user": {"displayName": "Nova"}}], "total": 1}).to_string()),
             raw_response(200, "null"),
         ]);
@@ -685,12 +822,13 @@ mod tests {
     /// B1: every post write goes to the posts route; the legacy announcement routes are never asked.
     #[test]
     fn post_writes_use_only_the_posts_route() {
-        let post = json!({"id": "gpos_1", "title": "T", "text": "x", "visibility": "group", "roleIds": [], "imageId": "file_img"});
-        let edited = json!({"id": "gpos_1", "title": "T2", "text": "x", "visibility": "group", "roleIds": [], "imageId": "file_img"});
-        let (mut c, seen) = mock_signed_in(vec![raw_response(200, &post.to_string()), raw_response(200, &edited.to_string()), raw_response(200, &json!({"success": {"message": "ok"}}).to_string())]);
+        let post = json!({"id": "gpos_1", "title": "T", "text": "x", "visibility": "group", "roleIds": [], "imageId": null});
+        let edited = json!({"id": "gpos_1", "title": "T2", "text": "x", "visibility": "group", "roleIds": [], "imageId": null});
+        let (mut c, seen) = mock_signed_in(vec![raw_response(200, &post.to_string()), raw_response(200, &edited.to_string()), raw_response(200, &json!({"success": {"message": "ok", "status_code": 200}}).to_string())]);
         let draft = PostDraft { title: "T".into(), text: "x".into(), ..Default::default() };
         let made = c.create_post(G, &draft).unwrap();
-        c.edit_post(G, &made, &PostDraft { title: "T2".into(), image_id: made.image_id.clone(), ..draft.clone() }).unwrap();
+        let made = Post { complete: true, ..made };
+        c.edit_post(G, &made, &PostDraft { title: "T2".into(), image_id: made.image_id.clone(), ..draft.clone() }, &[PostField::Title]).unwrap();
         c.delete_post(G, &made.id).unwrap();
         let seen = seen.lock().unwrap();
         let calls: Vec<String> = seen.iter().map(|r| format!("{} {}", r.method, r.url.trim_start_matches(BASE))).collect();
@@ -701,20 +839,23 @@ mod tests {
         assert_eq!(create["sendNotification"], false);
         let edit: Value = serde_json::from_str(seen[1].body.as_deref().unwrap()).unwrap();
         assert!(edit.get("sendNotification").is_none(), "an edit never notifies again: {edit}");
-        assert_eq!(edit["imageId"], "file_img", "the picture is kept unless removed");
+        assert!(edit.get("imageId").is_none() && edit.get("roleIds").is_none(), "nothing there, nothing touched: nothing said about it: {edit}");
     }
 
+    /// verify2 B-G, B7: an edit says what the person changed; the audience and the picture they did not touch go exactly as
+    /// the post just read has them, or not at all when it has none; a picture is cleared only when removed.
     #[test]
     fn post_edits_keep_restrictions_and_only_clear_a_picture_removed() {
-        let base = Post { id: "gpos_1".into(), role_ids: vec!["grol_a".into()], image_id: Some("file_x".into()), ..Default::default() };
-        let keep = PostDraft { title: "a".into(), text: "b".into(), role_ids: base.role_ids.clone(), image_id: base.image_id.clone(), ..Default::default() };
-        let v: Value = serde_json::from_str(&post_edit_body(&keep, &base)).unwrap();
-        assert_eq!(v["roleIds"], json!(["grol_a"]));
-        assert_eq!(v["imageId"], "file_x");
-        let removed: Value = serde_json::from_str(&post_edit_body(&PostDraft { image_id: None, ..keep.clone() }, &base)).unwrap();
-        assert!(removed["imageId"].is_null() && removed.get("imageId").is_some());
-        let none: Value = serde_json::from_str(&post_edit_body(&PostDraft { image_id: None, ..keep }, &Post { image_id: None, ..base })).unwrap();
-        assert!(none.get("imageId").is_none(), "no picture before, none asked: nothing sent about it");
+        let body = |now: &Post, edit: &PostDraft| -> Value { serde_json::from_str(&post_edit_body(edit, now, &now.changed_by(edit))).unwrap() };
+        let now = Post { id: "gpos_1".into(), title: "a".into(), text: "b".into(), role_ids: vec!["grol_a".into()], image_id: Some("file_x".into()), complete: true, ..Default::default() };
+        let keep = PostDraft { title: "a!".into(), text: "b".into(), role_ids: now.role_ids.clone(), image_id: now.image_id.clone(), send_notification: true, ..Default::default() };
+        assert_eq!(body(&now, &keep), json!({"title": "a!", "text": "b", "visibility": "group", "roleIds": ["grol_a"], "imageId": "file_x"}));
+        let bare = Post { role_ids: vec![], image_id: None, ..now.clone() };
+        assert_eq!(body(&bare, &PostDraft { role_ids: vec![], image_id: None, ..keep.clone() }), json!({"title": "a!", "text": "b", "visibility": "group"}));
+        assert_eq!(body(&now, &PostDraft { image_id: None, ..keep.clone() })["imageId"], Value::Null);
+        assert_eq!(body(&now, &PostDraft { role_ids: vec![], ..keep.clone() })["roleIds"], json!([]), "opened on purpose");
+        // N3: switched to public, the restriction goes with it.
+        assert_eq!(body(&now, &PostDraft { visibility: Visibility::Public, ..keep }), json!({"title": "a!", "text": "b", "visibility": "public", "roleIds": [], "imageId": "file_x"}));
         let public = PostDraft { visibility: Visibility::Public, role_ids: vec!["grol_a".into()], send_notification: true, ..Default::default() };
         let v: Value = serde_json::from_str(&post_create_body(&public)).unwrap();
         assert!(v.get("roleIds").is_none(), "roles restrict only a group post");
@@ -730,7 +871,7 @@ mod tests {
             role_create_body(&RoleDraft::default()),
             role_update_body(&RoleChange { name: Some("x".into()), ..Default::default() }),
             post_create_body(&PostDraft::default()),
-            post_edit_body(&PostDraft::default(), &Post::default()),
+            post_edit_body(&PostDraft::default(), &Post::default(), &PostField::ALL),
         ];
         for b in &bodies {
             assert!(!b.contains("nameplate"), "{b}");
@@ -767,22 +908,45 @@ mod tests {
     /// Blocker 4: a role or member read without what the rules decide by is not taken for a harmless one.
     #[test]
     fn missing_fields_are_unknown_not_empty() {
-        let full = parse_role(&json!({"id": "grol_a", "order": 3, "permissions": [], "defaultRole": false, "isManagementRole": false, "requiresPurchase": false})).unwrap();
-        assert!(full.known && !full.privileged());
+        let full = parse_role(&role_json("grol_a", "Artists", 3, &[])).unwrap();
+        assert!(full.known && full.whole && !full.privileged());
+        // verify2 B-D: a right too long to carry is a right all the same: the role is not a harmless one.
+        let long = parse_role(&role_json("grol_a", "Artists", 3, &[&"r".repeat(2000)])).unwrap();
+        assert!(!long.known && long.privileged());
+        let later = parse_role(&role_json("grol_a", "Artists", 3, &[&"r".repeat(200)])).unwrap();
+        assert!(later.known && later.privileged(), "kept whole");
         let bare = parse_role(&json!({"id": "grol_a", "order": 3})).unwrap();
         assert!(!bare.known && bare.privileged(), "no permission list: unknown, so privileged");
         let odd = parse_role(&json!({"id": "grol_a", "order": 3, "permissions": [7], "defaultRole": false, "isManagementRole": false, "requiresPurchase": false})).unwrap();
         assert!(!odd.known);
         let m = parse_member(&json!({"id": "gmem_1", "userId": U})).unwrap();
         assert!(!m.roles_known, "absent role arrays are not an empty list");
-        assert!(parse_member(&json!({"id": "gmem_1", "userId": U, "roleIds": []})).unwrap().roles_known);
+        assert!(!parse_member(&json!({"id": "gmem_1", "userId": U, "roleIds": []})).unwrap().roles_known, "the schema requires both");
+        let m = parse_member(&json!({"id": "gmem_1", "groupId": G, "userId": U, "roleIds": [], "mRoleIds": []})).unwrap();
+        assert!(m.is_of(G, U) && !m.is_of(G, "usr_00000000-0000-4000-8000-0000000000cc") && !m.is_of("grp_other", U));
+        let mine = |v: Value| parse_my_member(&v).unwrap().whole;
+        let me = json!({"userId": "usr_test", "roleIds": [], "mRoleIds": [], "permissions": [], "membershipStatus": "member"});
+        assert!(mine(me.clone()));
+        for gone in ["userId", "roleIds", "mRoleIds", "permissions", "membershipStatus"] {
+            let mut v = me.clone();
+            v.as_object_mut().unwrap().remove(gone);
+            assert!(!mine(v), "without {gone}");
+        }
+        let g = parse_group(&json!({"id": G, "bannerId": null, "iconId": "https://elsewhere"})).unwrap();
+        assert!(g.banner_known && g.banner_id.is_none() && !g.icon_known, "null is none; another form is not known");
+        assert!(g.member_count.is_none(), "N1: not read is not zero");
     }
 
     /// Blocker 3: a post whose audience or content cannot be carried back whole is read-only here; its text is kept as
     /// VRChat has it (shown through the text policy).
     #[test]
     fn a_post_is_kept_exactly_or_marked_incomplete() {
-        let p = parse_post(&json!({"id": "gpos_1", "title": "Hi\u{202E}", "text": "x", "visibility": "group", "roleIds": ["grol_a"], "createdAt": "not a date"})).unwrap();
+        let p = parse_post(&json!({"id": "gpos_1", "title": "Hi\u{202E}", "text": "x", "visibility": "group", "roleIds": ["grol_a"], "imageId": null, "createdAt": "not a date"})).unwrap();
+        for (gone, why) in [("roleIds", "no restriction given is not every member"), ("imageId", "no picture given is not no picture")] {
+            let mut v = json!({"id": "gpos_1", "title": "t", "text": "x", "visibility": "group", "roleIds": [], "imageId": null});
+            v.as_object_mut().unwrap().remove(gone);
+            assert!(!parse_post(&v).unwrap().complete, "{why}");
+        }
         assert!(p.complete);
         assert_eq!(p.title, "Hi\u{202E}", "the exact remote title, never the display copy");
         assert_eq!(p.created_at, None, "Minor 1: a date that does not parse is not shown as it is");
@@ -792,21 +956,56 @@ mod tests {
         assert!(!parse_post(&json!({"id": "gpos_1", "title": "t", "text": "x", "visibility": "group", "roleIds": many})).unwrap().complete);
     }
 
-    /// Major 2: an answer that does not match what was asked says nothing sure.
+    /// Major 2, J2: an answer that does not match what was asked says nothing sure, for every endpoint.
     #[test]
     fn mismatched_or_malformed_write_answers_are_unknown() {
-        let other = json!({"id": "grp_00000000-0000-4000-8000-0000000000ff", "bannerId": "file_new"});
-        let wrong_slot = json!({"id": G, "bannerId": "file_old", "iconId": "file_new"});
-        let (mut c, _) = mock_signed_in(vec![
-            raw_response(200, &other.to_string()),
-            raw_response(200, &wrong_slot.to_string()),
-            raw_response(200, r#"["grol_a", 5]"#),
-            raw_response(200, "{}"),
-        ]);
-        assert_eq!(c.set_group_art(G, ArtSlot::Banner, "file_new"), Err(Failure::Unknown), "another group's answer");
-        assert_eq!(c.set_group_art(G, ArtSlot::Banner, "file_new"), Err(Failure::Unknown), "the banner is not the file");
-        assert_eq!(c.set_member_role(G, U, "grol_a", true), Err(Failure::Unknown), "a malformed role list");
-        assert_eq!(c.delete_post(G, "gpos_1"), Err(Failure::Unknown), "no success envelope");
+        let file = |id: &str, owner: &str, tag: &str| json!({"id": id, "ownerId": owner, "tags": [tag], "versions": [{"version": 1, "file": {"url": format!("https://api.vrchat.cloud/api/1/file/{id}/1/file")}}]});
+        let post = |id: &str, title: &str, text: &str, roles: Value, image: Value| json!({"id": id, "groupId": G, "authorId": "usr_test", "title": title, "text": text, "visibility": "group", "roleIds": roles, "imageId": image});
+        let draft = RoleDraft { name: "New".into(), ..Default::default() };
+        let rename = RoleChange { name: Some("New".into()), ..Default::default() };
+        let now = Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), role_ids: vec!["grol_a".into()], image_id: Some("file_x".into()), complete: true, ..Default::default() };
+        let edit = PostDraft { title: "t2".into(), text: "x".into(), role_ids: vec!["grol_a".into()], image_id: Some("file_x".into()), ..Default::default() };
+        let new = PostDraft { title: "t".into(), text: "x".into(), ..Default::default() };
+        type Call<'a> = Box<dyn Fn(&mut Client) -> GroupResult<()> + 'a>;
+        let art: Call = Box::new(|c| c.set_group_art(G, ArtSlot::Banner, "file_new").map(drop));
+        let give: Call = Box::new(|c| c.set_member_role(G, U, "grol_a", true).map(drop));
+        let take: Call = Box::new(|c| c.set_member_role(G, U, "grol_a", false).map(drop));
+        let make: Call = Box::new(|c| c.create_role(G, &draft).map(drop));
+        let update: Call = Box::new(|c| c.update_role(G, "grol_a", &rename).map(drop));
+        let drop_role: Call = Box::new(|c| c.delete_role(G, "grol_a").map(drop));
+        let publish: Call = Box::new(|c| c.create_post(G, &new).map(drop));
+        let change: Call = Box::new(|c| c.edit_post(G, &now, &edit, &[PostField::Title]).map(drop));
+        let remove: Call = Box::new(|c| c.delete_post(G, "gpos_1"));
+        let upload: Call = Box::new(|c| c.upload_image(FileTag::Gallery, b"\x89PNG\r\n\x1a\nx".to_vec()).map(drop));
+        let new_role = || role_json("grol_n", "New", 4, &[]);
+        let mut other_group = new_role();
+        other_group["groupId"] = json!("grp_other");
+        // (what, the call, an answer that matches, answers that do not)
+        let table: Vec<(&str, &Call, Value, Vec<Value>)> = vec![
+            ("apply", &art, json!({"id": G, "bannerId": "file_new"}), vec![json!({"id": "grp_00000000-0000-4000-8000-0000000000ff", "bannerId": "file_new"}), json!({"id": G, "bannerId": "file_old", "iconId": "file_new"}), json!({"id": G})]),
+            ("give", &give, json!(["grol_a"]), vec![json!(["grol_b"]), json!([]), json!(["grol_a", 5]), json!({})]),
+            ("take back", &take, json!(["grol_b"]), vec![json!(["grol_a", "grol_b"]), json!(null)]),
+            ("new role", &make, new_role(), vec![role_json("grol_n", "Another", 4, &[]), role_json("grol_n", "New", 4, &["group-data-manage"]), other_group, json!({"id": "grol_n", "name": "New"})]),
+            ("edit role", &update, json!([role_json("grol_a", "New", 3, &[])]), vec![json!([role_json("grol_a", "Old", 3, &[])]), json!([role_json("grol_b", "New", 3, &[])]), json!([]), json!([{"id": "grol_a", "name": "New"}])]),
+            ("delete role", &drop_role, json!([role_json("grol_b", "B", 3, &[])]), vec![json!([role_json("grol_a", "A", 3, &[])]), json!({})]),
+            ("new post", &publish, post("gpos_1", "t", "x", json!([]), json!(null)), vec![post("gpos_1", "t", "another", json!([]), json!(null)), post("gpos_1", "t", "x", json!(["grol_a"]), json!(null)), json!({"id": "gpos_1", "authorId": "usr_test", "title": "t", "text": "x"})]),
+            (
+                "edit post",
+                &change,
+                post("gpos_1", "t2", "x", json!(["grol_a"]), json!("file_x")),
+                vec![post("gpos_1", "t2", "x", json!([]), json!("file_x")), post("gpos_1", "t2", "x", json!(["grol_a"]), json!(null)), post("gpos_2", "t2", "x", json!(["grol_a"]), json!("file_x")), post("gpos_1", "t", "x", json!(["grol_a"]), json!("file_x"))],
+            ),
+            ("delete post", &remove, json!({"success": {"message": "Group Post was deleted!", "status_code": 200}}), vec![json!({}), json!({"success": {}}), json!({"success": {"status_code": 500}})]),
+            ("upload", &upload, file("file_up", "usr_test", "gallery"), vec![file("file_up", "usr_other", "gallery"), file("file_up", "usr_test", "icon"), json!({"id": "file_up"})]),
+        ];
+        for (what, call, right, wrong) in table {
+            let (mut c, _) = mock_signed_in(vec![raw_response(200, &right.to_string())]);
+            assert_eq!(call(&mut c), Ok(()), "{what}");
+            for w in wrong {
+                let (mut c, _) = mock_signed_in(vec![raw_response(200, &w.to_string())]);
+                assert_eq!(call(&mut c), Err(Failure::Unknown), "{what}: {w}");
+            }
+        }
     }
 
     /// Major 2: VRChat deleting the session cookie in its answer to a write that got a 5xx: unknown, not "signed out".
@@ -852,7 +1051,7 @@ mod tests {
 
     #[test]
     fn inventory_and_upload_read_file_ids() {
-        let file = json!({"id": "file_new", "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_new/1/file"}}]});
+        let file = json!({"id": "file_new", "ownerId": "usr_test", "tags": ["icon", "gallery"], "versions": [{"version": 0}, {"version": 1, "file": {"url": "https://api.vrchat.cloud/api/1/file/file_new/1/file"}}]});
         let foreign = json!({"id": "file_bad", "versions": [{"version": 1, "file": {"url": "https://elsewhere.example/x"}}]});
         let (mut c, seen) = mock_signed_in(vec![raw_response(200, &json!([file, foreign]).to_string()), raw_response(200, &file.to_string())]);
         let page = c.inventory(FileTag::Gallery, 0).unwrap();
@@ -958,7 +1157,7 @@ mod tests {
 
         #[test]
         fn a_picture_goes_as_a_multipart_form_with_the_cookie() {
-            let file = r#"{"id":"file_up","versions":[{"version":1,"file":{"url":"https://api.vrchat.cloud/api/1/file/file_up/1/file"}}]}"#;
+            let file = r#"{"id":"file_up","ownerId":"usr_test","tags":["gallery"],"versions":[{"version":1,"file":{"url":"https://api.vrchat.cloud/api/1/file/file_up/1/file"}}]}"#;
             let (mut c, rx) = serve(vec![Script::Answer(200, file, &[])]);
             let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
             png.extend((0..=255u8).cycle().take(4000));

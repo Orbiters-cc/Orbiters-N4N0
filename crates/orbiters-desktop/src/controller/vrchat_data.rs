@@ -29,6 +29,11 @@ impl Scope {
             revision: s.vrchat_login.revision,
         }
     }
+    /// Who it is for good (the environment, the Orbiters account, the VRChat account): not the sign-in's revision, which
+    /// changes while the account does not.
+    pub(crate) fn lasting(&self) -> Option<(bool, Option<&str>, &str)> {
+        Some((self.development, self.member.as_deref(), self.user.as_deref()?))
+    }
     /// The signed-in VRChat account this scope was taken under.
     pub fn vrchat_user(&self) -> Option<&str> {
         self.user.as_deref()

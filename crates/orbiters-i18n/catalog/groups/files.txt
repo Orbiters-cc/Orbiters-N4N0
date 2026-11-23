@@ -4,5 +4,6 @@ crates/orbiters-desktop/src/pages/groups/page.rs
 crates/orbiters-desktop/src/pages/groups/studio.rs
 crates/orbiters-desktop/src/pages/groups/art.rs
 crates/orbiters-desktop/src/controller/groups.rs
+crates/orbiters-desktop/src/controller/groups_ledger.rs
 crates/orbiters-core/src/groups.rs
 crates/orbiters-core/src/vrchat_api/groups.rs

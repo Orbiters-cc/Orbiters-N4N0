@@ -747,6 +747,9 @@ impl Service {
         self.usage.collecting(self.ctl.usage_stamp());
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
+        if role == Role::Window {
+            self.ctl.groups_link_closed(id);
+        }
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
         if role == Role::Window && !still_there {
             // Its offer to close went with it.

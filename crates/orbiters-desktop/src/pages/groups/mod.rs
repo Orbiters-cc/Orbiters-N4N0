@@ -1,15 +1,16 @@
 //! VRChat groups in the window (REQUEST22 1): the Groups section at the bottom of Home (the groups the signed-in account
 //! owns or helps run), each group's page (Look, Members, Roles, Posts) and the banner studio.
 //!
-//! What it shows is asked of the service on demand and answered to this window alone (`controller::groups`); nothing
-//! of others' data is kept on disk. On disk, per account: the studio's own crops and exports, and the operator's own
-//! drafts, uploaded-not-applied pictures and writes whose outcome is not known yet (verify-r22 Major 8). Everything is
-//! bound to the account scope it was asked under: another account (or "Connecting") drops it all, confirmations
-//! included (B3). Pictures of groups and members are kept in memory only, a bounded number, asked for what is in view.
+//! What it shows is asked of the service on demand and answered to this window alone (`controller::groups`). On disk,
+//! per account: the studio's own crops and exports, and the new posts the person is writing (their own words, nothing of
+//! anyone else's; an edit of a post is kept in memory only, and lost with its page, which says so). Everything is bound
+//! to the account scope it was asked under: another account (or "Connecting") drops it all, confirmations included (B3).
+//! Pictures of groups and members are kept in memory only, a bounded number, asked for what is in view.
 //!
-//! A write whose answer did not come back is UNKNOWN here, whatever the cause (the service's reply lost on the link, a
-//! timeout, VRChat's answer lost): it stays listed with "Check VRChat" until a check settles it, across tabs, pages and
-//! restarts, and nothing about its target is prepared again meanwhile (Blockers 1 and 2).
+//! The window owns no write. A press prepares one; the service seals it; the confirmation is drawn from the sealed object
+//! and nothing else; Send names it and the digest of what was drawn. Leaving the view it was asked from ends it unsent.
+//! Once sent it is the ledger's (`controller::groups_ledger`): what may have been done is listed here from there, with its
+//! check, across tabs, pages, windows and restarts (verify2 B-A, B-E, B-F).
 pub mod art;
 mod page;
 mod studio;
@@ -17,12 +18,12 @@ pub(crate) use page::{Composer, RoleEditor, Tab};
 
 use super::Cx;
 use crate::backend::Ctl;
-use crate::controller::groups::{Failure, Observation, Outcome, Prepared, Reply, Request, Write};
+use crate::controller::groups::{Candidate, Entry, Failure, Kind as Wrote, Observation, Outcome, Reply, Request, Said, Sealed, State as Stands, Unclear, Warning, Write};
 use crate::controller::vrchat_data::Scope;
 use crate::controller::vrchat_login::Presence;
-use art::{Drafts, Uncertain};
+use art::Drafts;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
-use orbiters_core::groups::{FileTag, GroupCard, Why};
+use orbiters_core::groups::{ArtSlot, FileTag, GroupCard, Missing, Why};
 use orbiters_core::vrchat_api::GroupFailure;
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
@@ -34,6 +35,9 @@ use std::sync::mpsc;
 
 /// Home's list is read again after this long (seconds), when Home shows.
 const READ_AGAIN: f64 = 300.0;
+/// The ledger is asked for again this long after it could not be read (seconds), and a card's name after it failed.
+const ASK_AGAIN: f64 = 3.0;
+const HYDRATE_AGAIN: f64 = 60.0;
 /// Pictures kept in memory at most, and asked at once.
 const PICTURES_MAX: usize = 120;
 const PICTURES_AT_ONCE: usize = 2;
@@ -54,11 +58,15 @@ pub(crate) enum Kind {
     Picture(String),
     /// A picture of the account's gallery read in full for the banner studio.
     Source(String),
-    Prepare,
-    Commit,
-    Cancel,
+    /// A write asked to be sealed, by its number: an answer to another number is not taken.
+    Prepare(u64),
+    /// The sealed picture of a write, and the SHA-256 it must have.
+    Art { op: String, sha256: String },
+    Commit(String),
+    Cancel(String),
+    Ledger,
     Check(String),
-    Release(String),
+    Said(String),
 }
 
 pub(crate) struct Answer {
@@ -101,7 +109,7 @@ impl Jobs {
     }
     /// Asks `request` unless the same is on its way.
     pub(crate) fn ask(&mut self, ctx: &egui::Context, ctl: &Ctl, scope: &Scope, kind: Kind, request: Request) {
-        if self.running(&kind) && !matches!(kind, Kind::Prepare | Kind::Commit | Kind::Cancel) {
+        if self.running(&kind) {
             return;
         }
         self.running.push((self.generation, kind.clone()));
@@ -113,6 +121,8 @@ impl Jobs {
             let reply = ctl.groups(scope, request);
             let image = match (&kind, &reply) {
                 (Kind::Picture(_), Reply::Picture(bytes)) => decode_picture(bytes),
+                // Exactly the sealed bytes, or nothing (B-E).
+                (Kind::Art { sha256, .. }, Reply::Picture(bytes)) if digest(bytes) == *sha256 => decode_picture(bytes),
                 _ => None,
             };
             let source = match (&kind, &reply) {
@@ -142,6 +152,11 @@ impl Jobs {
         // What ran for older generations no longer counts against anything (their answers are dropped).
         self.running.retain(|(g, _)| *g == self.generation);
     }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A picture as a texture's pixels, at most 640 px a side, decoded within bounds (Major 5).
@@ -212,6 +227,12 @@ impl Pictures {
         self.map.clear();
         self.order.clear();
     }
+    /// What was on its way or failed when the page went is asked again when it is back (J4).
+    fn forget_unread(&mut self) {
+        self.map.retain(|_, p| matches!(p, Pic::Ready(_)));
+        let map = &self.map;
+        self.order.retain(|u| map.contains_key(u));
+    }
 }
 
 #[derive(Default)]
@@ -223,11 +244,20 @@ pub(crate) enum Discovery {
     Failed(Failure, f64),
 }
 
-/// A write on its way: prepared, waiting for the person's yes, sent.
+/// A write on its way: asked to be sealed, shown for the person's yes, sent.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Flow {
-    Preparing,
-    Confirming { prepared: Prepared, serial: u64, origin: Rect },
-    Sending { prepared: Prepared },
+    Preparing { token: u64 },
+    /// `art`: the sealed picture, decoded from the sealed bytes; `None` until it is here.
+    Confirming { sealed: Sealed, serial: u64, origin: Rect, art: Option<egui::TextureHandle> },
+    Sending { sealed: Sealed },
+}
+
+/// A write whose answer did not come, until the ledger can be read: what it is, for the person.
+struct Lost {
+    op: String,
+    group: String,
+    kind: Wrote,
 }
 
 pub struct State {
@@ -236,22 +266,31 @@ pub struct State {
     pub(crate) jobs: Jobs,
     pub(crate) pictures: Pictures,
     pub(crate) discovery: Discovery,
+    /// When a card that could not be read may be asked for again (J8).
+    hydrate_again: HashMap<String, f64>,
     /// A group's page, open in Home's place.
     pub(crate) open: Option<page::Open>,
     /// The banner studio, over the page or straight from a card.
     pub(crate) studio: Option<studio::Studio>,
     pub(crate) flow: Option<Flow>,
+    /// The last write asked to be sealed.
+    token: u64,
     serial: u64,
     /// The screenshot review staged what shows: nothing is asked of the service.
     staged: bool,
     /// Where the last press that prepares a write was (the confirmation grows out of it).
     pub(crate) origin: Rect,
-    /// The account's own drafts, uploads not applied and writes whose outcome is not known (on disk, Major 8).
+    /// The service's ledger, as last read; asked for when due, from `ledger_at` on.
+    pub(crate) ledger: Vec<Entry>,
+    ledger_due: bool,
+    ledger_at: f64,
+    lost: Vec<Lost>,
+    /// What the last check of each operation saw, for the person (memory only).
+    pub(crate) observed: HashMap<String, Observation>,
+    /// Sealed writes to tell the service are over.
+    cancels: Vec<String>,
+    /// The new posts being written (on disk, Major 8), and one that could not be kept.
     pub(crate) drafts: Drafts,
-    /// What was last written to disk, to write only on a change.
-    drafts_written: String,
-    /// The art a picture write puts on VRChat, shown in its confirmation (Blocker 5).
-    pub(crate) confirm_art: Option<egui::TextureHandle>,
     /// What the last refused write said, for the page that shows it.
     pub(crate) said: Option<String>,
     /// The section comes into view at the next frame (N4N0's assistant opened "my groups").
@@ -265,18 +304,40 @@ impl Default for State {
             jobs: Jobs::default(),
             pictures: Pictures::default(),
             discovery: Discovery::default(),
+            hydrate_again: HashMap::new(),
             open: None,
             studio: None,
             flow: None,
+            token: 0,
             serial: 0,
             staged: false,
             origin: Rect::NOTHING,
+            ledger: Vec::new(),
+            ledger_due: true,
+            ledger_at: 0.0,
+            lost: Vec::new(),
+            observed: HashMap::new(),
+            cancels: Vec::new(),
             drafts: Drafts::default(),
-            drafts_written: String::new(),
-            confirm_art: None,
             said: None,
             reveal: false,
         }
+    }
+}
+
+/// A picture the account uploaded for a group and has not applied there (the ledger's word).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Uploaded {
+    pub slot: ArtSlot,
+    pub file: String,
+    /// The studio's art it was made from.
+    pub art: Option<u64>,
+}
+
+impl Uploaded {
+    /// Where VRChat serves it (an upload is its file's first version).
+    pub fn url(&self) -> String {
+        format!("https://api.vrchat.cloud/api/1/file/{}/1/file", self.file)
     }
 }
 
@@ -291,103 +352,129 @@ impl State {
         }
         self.pictures.get(ctx, &mut self.jobs, ctl, scope, url)
     }
-    /// The address of one of the account's own pictures, by its file id, from the chooser it was picked in or the
-    /// uploads kept.
-    fn own_picture(&self, file: &str) -> Option<String> {
-        let picked = self.open.as_ref().and_then(|o| o.picker.as_ref()).and_then(|p| p.files.iter().find(|f| f.id == file));
-        picked.or_else(|| self.drafts.uploaded.iter().map(|u| &u.file).find(|f| f.id == file)).map(|f| f.url.clone())
-    }
     /// A group's page or the studio is open in Home's place.
     pub fn page_open(&self) -> bool {
         self.open.is_some() || self.studio.is_some()
     }
-    /// Back to Home (the sidebar's Home). What the operator was writing is kept on disk first.
-    pub fn close(&mut self) {
-        // A write being sent goes on at the service: its answer would be dropped with the jobs, so it is listed as
-        // uncertain, to check (Blocker 1).
-        if let Some(Flow::Sending { prepared }) = self.flow.take() {
-            self.add_uncertain(prepared.op.clone(), prepared.write.clone());
+    /// A confirmation, the studio, or an editor of a page owns the keyboard: the chat stands aside (J5).
+    pub fn holds(&self) -> bool {
+        matches!(self.flow, Some(Flow::Confirming { .. })) || self.studio.is_some() || self.open.as_ref().is_some_and(|o| o.picker.is_some() || o.composer.is_some() || o.role_editor.is_some())
+    }
+    /// The view a write was asked from goes (its page, its studio, Home, the account): one not sent is over and can not
+    /// be taken up by another view; one sent is the ledger's (B-F).
+    pub fn end_flow(&mut self) {
+        match self.flow.take() {
+            Some(Flow::Confirming { sealed, .. }) => self.cancels.push(sealed.op),
+            // Its answer, when it comes, finds no one waiting and is told over.
+            Some(Flow::Preparing { .. }) => {}
+            Some(Flow::Sending { .. }) => self.ledger_due = true,
+            None => {}
         }
+        self.token += 1;
+    }
+    /// Back to Home (the sidebar's Home). The new post being written is kept on disk first.
+    pub fn close(&mut self) {
+        self.end_flow();
         self.keep_drafts();
         self.open = None;
         self.studio = None;
         self.jobs.reset();
+        self.pictures.forget_unread();
+        self.ledger_due = true;
+    }
+    /// Out of the studio, to the page or Home under it.
+    pub(crate) fn close_studio(&mut self) {
+        self.end_flow();
+        self.studio = None;
     }
     /// Home's Groups section, in view at the next frame: N4N0's assistant's "open my groups" (it opens, nothing more).
     pub fn reveal(&mut self) {
         self.reveal = true;
     }
-    pub(crate) fn account(&self) -> Option<&str> {
-        self.scope.as_ref().and_then(|s| s.vrchat_user())
-    }
     fn signed(cx: &Cx) -> Option<Scope> {
         (cx.snap.vrchat_login.presence() == Presence::SignedIn).then(|| Scope::of(cx.snap))
     }
-    /// Another account, the environment, or not signed in for certain: everything goes (B3); the new account's own
-    /// drafts and pending checks come back from disk.
+    /// Another account, the environment, or not signed in for certain: everything goes (B3); the new account's own draft
+    /// posts come back from disk, its ledger from the service.
     fn sync(&mut self, cx: &Cx) {
         if self.staged {
             return;
         }
         let now = Self::signed(cx);
         if now != self.scope {
-            // A write being sent stays the previous account's to check, with its drafts (Blocker 1).
-            if let Some(Flow::Sending { prepared }) = self.flow.take() {
-                self.add_uncertain(prepared.op.clone(), prepared.write.clone());
-            }
+            self.end_flow();
             self.keep_drafts();
             self.scope = now;
             self.jobs.reset();
             self.pictures.clear();
             self.discovery = Discovery::Idle;
+            self.hydrate_again.clear();
             self.open = None;
             self.studio = None;
-            self.flow = None;
-            self.confirm_art = None;
-            self.drafts = self.account().map(art::load_drafts).unwrap_or_default();
-            self.drafts_written = serde_json::to_string(&self.drafts).unwrap_or_default();
+            self.ledger.clear();
+            self.lost.clear();
+            self.observed.clear();
+            self.ledger_due = true;
+            self.ledger_at = 0.0;
+            // Told over by its scope: the service ended them itself.
+            self.cancels.clear();
+            self.drafts = self.scope.as_ref().map(Drafts::load).unwrap_or_default();
         }
     }
-    /// Writes the drafts when they changed (the composer's text included).
+    /// Keeps the new post being written (the person's own words, nothing of an existing post: B-C).
     pub(crate) fn keep_drafts(&mut self) {
         if self.staged {
             return;
         }
-        if let Some(open) = self.open.as_ref() {
-            self.drafts.set_composer(&open.id, open.composer.as_ref().map(|c| art::ComposerDraft { baseline: c.baseline.clone(), draft: c.draft.clone() }));
-        }
-        let text = serde_json::to_string(&self.drafts).unwrap_or_default();
-        if text != self.drafts_written {
-            if let Some(account) = self.account().map(str::to_string) {
-                art::store_drafts(&account, &self.drafts);
-                self.drafts_written = text;
+        let (Some(open), Some(scope)) = (self.open.as_ref(), self.scope.as_ref()) else { return };
+        let draft = open.composer.as_ref().filter(|c| c.baseline.is_none()).map(|c| c.draft.clone());
+        self.drafts.set(scope, &open.id, draft);
+    }
+    /// The writes of `group` that may have been done and are not settled.
+    pub(crate) fn open_writes(&self, group: &str) -> Vec<Entry> {
+        self.ledger.iter().filter(|e| e.group == group && e.open()).cloned().collect()
+    }
+    /// The pictures uploaded for `group` and not applied there, the newest of each kind.
+    pub(crate) fn uploads(&self, group: &str) -> Vec<Uploaded> {
+        let mut out: Vec<Uploaded> = Vec::new();
+        for e in self.ledger.iter().filter(|e| e.group == group && e.state == Stands::Done) {
+            let slot = match e.kind {
+                Wrote::UploadGallery => ArtSlot::Banner,
+                Wrote::UploadIcon => ArtSlot::Icon,
+                _ => continue,
+            };
+            let Some(file) = e.made.clone() else { continue };
+            let applied = self.ledger.iter().any(|x| x.group == group && x.state == Stands::Done && x.kind.slot() == Some(slot) && x.target.file.as_deref() == Some(file.as_str()) && x.ended_at >= e.ended_at);
+            if !applied && !out.iter().any(|u| u.slot == slot) {
+                out.push(Uploaded { slot, file, art: e.evidence.art });
             }
         }
-    }
-    /// The writes of `group` whose outcome is not known yet.
-    pub(crate) fn uncertain_of(&self, group: &str) -> Vec<Uncertain> {
-        self.drafts.uncertain.iter().filter(|u| u.write.group() == group).cloned().collect()
-    }
-    fn add_uncertain(&mut self, op: String, write: Write) {
-        if !self.drafts.uncertain.iter().any(|u| u.op == op) {
-            self.drafts.uncertain.push(Uncertain { op, write, observation: None });
-        }
-        self.keep_drafts();
-    }
-    fn settle(&mut self, op: &str) {
-        self.drafts.uncertain.retain(|u| u.op != op);
-        self.keep_drafts();
+        out
     }
 
     /// Takes what came back.
     fn take(&mut self, ctx: &egui::Context, cx: &mut Cx) {
+        if let (Some(scope), false) = (self.scope.clone(), self.staged) {
+            for op in std::mem::take(&mut self.cancels) {
+                self.jobs.ask(ctx, cx.ctl, &scope, Kind::Cancel(op.clone()), Request::Cancel { op });
+            }
+            if self.ledger_due && anim::time(ctx) >= self.ledger_at && !self.jobs.running(&Kind::Ledger) {
+                self.ledger_due = false;
+                self.jobs.ask(ctx, cx.ctl, &scope, Kind::Ledger, Request::Ledger);
+            }
+        }
         for a in self.jobs.take() {
             match (a.kind, a.reply) {
                 (Kind::Discover, Reply::Discovered(cards)) => self.discovery = Discovery::Ready(cards, anim::time(ctx)),
                 (Kind::Discover, Reply::Failed(f)) => self.discovery = Discovery::Failed(f, anim::time(ctx)),
                 (Kind::Hydrate, Reply::Hydrated(named)) => {
+                    let again = anim::time(ctx) + HYDRATE_AGAIN;
                     if let Discovery::Ready(cards, _) = &mut self.discovery {
-                        for n in named {
+                        for (id, n) in named {
+                            let Ok(n) = n else {
+                                self.hydrate_again.insert(id, again);
+                                continue;
+                            };
                             if let Some(c) = cards.iter_mut().find(|c| c.id == n.id) {
                                 let (owner, permissions) = (c.owner || n.owner, if c.permissions.is_empty() { n.permissions.clone() } else { c.permissions.clone() });
                                 *c = GroupCard { owner, permissions, ..n };
@@ -401,10 +488,40 @@ impl State {
                         studio.source_arrived(&url, a.source);
                     }
                 }
+                (Kind::Hydrate, _) => {
+                    let again = anim::time(ctx) + HYDRATE_AGAIN;
+                    if let Discovery::Ready(cards, _) = &self.discovery {
+                        self.hydrate_again.extend(cards.iter().filter(|c| !c.named).map(|c| (c.id.clone(), again)));
+                    }
+                }
+                (Kind::Ledger, Reply::Ledger(list)) => self.read_ledger(ctx, cx, list),
+                (Kind::Ledger, _) => {
+                    self.ledger_due = true;
+                    self.ledger_at = anim::time(ctx) + ASK_AGAIN;
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(ASK_AGAIN));
+                }
                 (Kind::Check(op), reply) => self.checked(ctx, cx, op, reply),
-                (Kind::Release(op), Reply::Released) => self.settle(&op),
-                (Kind::Release(_), Reply::Failed(f)) => self.said = Some(failure_text(f)),
-                (kind @ (Kind::Prepare | Kind::Commit | Kind::Cancel), reply) => self.flow_answer(ctx, cx, kind, reply),
+                (Kind::Said(op), Reply::Said { .. }) => {
+                    self.observed.remove(&op);
+                    self.ledger_due = true;
+                    if let Some(open) = self.open.as_mut() {
+                        open.reload();
+                    }
+                }
+                (Kind::Said(_), Reply::Failed(f)) => {
+                    self.said = Some(failure_text(f));
+                    self.ledger_due = true;
+                }
+                (Kind::Cancel(_) | Kind::Said(_), _) => {}
+                (Kind::Prepare(token), reply) => self.prepared(ctx, cx, token, reply),
+                (Kind::Art { op, .. }, _) => {
+                    if let Some(Flow::Confirming { sealed, art, .. }) = self.flow.as_mut().filter(|_| a.image.is_some()) {
+                        if sealed.op == op {
+                            *art = a.image.map(|i| ctx.load_texture("group-sealed-picture", i, egui::TextureOptions::LINEAR));
+                        }
+                    }
+                }
+                (Kind::Commit(op), reply) => self.committed(ctx, cx, op, reply),
                 (kind, reply) => {
                     if let Some(open) = self.open.as_mut() {
                         open.answer(kind.clone(), reply.clone());
@@ -417,45 +534,113 @@ impl State {
         }
     }
 
-    /// Prepares a write; its confirmation (when it needs one) grows out of `origin`. A target with a write whose outcome
-    /// is not known yet is not prepared again: its check comes first (Blocker 2).
+    /// Asks the service to seal a write; its confirmation (when it needs one) grows out of `origin`.
     pub(crate) fn prepare(&mut self, ctx: &egui::Context, ctl: &Ctl, write: Write, origin: Rect) {
         let Some(scope) = self.scope.clone() else { return };
         if self.flow.is_some() {
             return;
         }
-        let target = write.target();
-        if self.drafts.uncertain.iter().any(|u| u.write.target() == target) {
-            self.said = Some(failure_text(Failure::CheckFirst));
-            return;
-        }
         self.said = None;
         self.origin = origin;
-        self.flow = Some(Flow::Preparing);
-        self.jobs.ask(ctx, ctl, &scope, Kind::Prepare, Request::Prepare { write });
+        self.token += 1;
+        self.flow = Some(Flow::Preparing { token: self.token });
+        self.jobs.ask(ctx, ctl, &scope, Kind::Prepare(self.token), Request::Prepare { write });
     }
-    fn commit(&mut self, ctx: &egui::Context, ctl: &Ctl, prepared: Prepared) {
-        let Some(scope) = self.scope.clone() else { return };
-        let op = prepared.op.clone();
-        self.flow = Some(Flow::Sending { prepared });
-        self.jobs.ask(ctx, ctl, &scope, Kind::Commit, Request::Commit { op });
-    }
-    fn cancel(&mut self, ctx: &egui::Context, ctl: &Ctl, op: String) {
-        if let Some(scope) = self.scope.clone() {
-            self.jobs.ask(ctx, ctl, &scope, Kind::Cancel, Request::Cancel { op });
+    fn prepared(&mut self, ctx: &egui::Context, cx: &mut Cx, token: u64, reply: Reply) {
+        let waiting = matches!(self.flow, Some(Flow::Preparing { token: t }) if t == token);
+        match reply {
+            // No one waits for it any more: its view went.
+            Reply::Prepared(sealed) if !waiting => self.cancels.push(sealed.op),
+            _ if !waiting => {}
+            Reply::Prepared(sealed) if sealed.confirm => {
+                if let (Some(art), Some(scope)) = (&sealed.art, self.scope.clone()) {
+                    let kind = Kind::Art { op: sealed.op.clone(), sha256: art.sha256.clone() };
+                    self.jobs.ask(ctx, cx.ctl, &scope, kind, Request::SealedArt { op: sealed.op.clone() });
+                }
+                self.serial += 1;
+                self.flow = Some(Flow::Confirming { sealed: *sealed, serial: self.serial, origin: self.origin, art: None });
+            }
+            Reply::Prepared(sealed) => self.commit(ctx, cx.ctl, *sealed),
+            Reply::MaySent { .. } => {
+                self.flow = None;
+                self.ledger_due = true;
+                self.said = Some(failure_text(Failure::MaySent));
+            }
+            Reply::Failed(f) => {
+                self.flow = None;
+                self.ended(ctx, cx, None, Outcome::Refused(f));
+            }
+            _ => self.flow = None,
         }
-        self.flow = None;
-        self.confirm_art = None;
     }
-    /// The person asks what became of the uncertain write `op`.
-    pub(crate) fn check(&mut self, ctx: &egui::Context, ctl: &Ctl, op: &str) {
-        let (Some(scope), Some(u)) = (self.scope.clone(), self.drafts.uncertain.iter().find(|u| u.op == op).cloned()) else { return };
-        self.jobs.ask(ctx, ctl, &scope, Kind::Check(op.to_string()), Request::Check { op: op.to_string(), write: u.write });
-    }
-    /// The person, told a check could not settle it, lets it go.
-    pub(crate) fn release(&mut self, ctx: &egui::Context, ctl: &Ctl, op: &str) {
+    /// Sends a sealed write, as shown: its id and the digest of what it holds now.
+    fn commit(&mut self, ctx: &egui::Context, ctl: &Ctl, sealed: Sealed) {
         let Some(scope) = self.scope.clone() else { return };
-        self.jobs.ask(ctx, ctl, &scope, Kind::Release(op.to_string()), Request::Release { op: op.to_string() });
+        let (op, digest) = (sealed.op.clone(), sealed.digest());
+        self.flow = Some(Flow::Sending { sealed });
+        self.jobs.ask(ctx, ctl, &scope, Kind::Commit(op.clone()), Request::Commit { op, digest });
+    }
+    fn committed(&mut self, ctx: &egui::Context, cx: &mut Cx, op: String, reply: Reply) {
+        self.ledger_due = true;
+        let mine = matches!(&self.flow, Some(Flow::Sending { sealed }) if sealed.op == op);
+        let sealed = if mine {
+            match self.flow.take() {
+                Some(Flow::Sending { sealed }) => Some(sealed),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let outcome = match reply {
+            Reply::Outcome { outcome, .. } => outcome,
+            // Its answer did not come: the ledger has it. Until that can be read, what it was.
+            Reply::Failed(Failure::Lost) => {
+                if let Some(s) = &sealed {
+                    self.lost.push(Lost { op, group: s.group.clone(), kind: s.write.kind() });
+                }
+                Outcome::Unknown
+            }
+            // Not asked, or refused before it was looked at.
+            Reply::Failed(f) => Outcome::Refused(f),
+            _ => Outcome::Unknown,
+        };
+        self.ended(ctx, cx, sealed, outcome);
+    }
+    fn cancel(&mut self) {
+        self.end_flow();
+    }
+    /// The ledger as the service has it: the state of every write, whoever asked for it.
+    fn read_ledger(&mut self, ctx: &egui::Context, cx: &mut Cx, list: Vec<Entry>) {
+        for l in std::mem::take(&mut self.lost) {
+            match list.iter().find(|e| e.op == l.op) {
+                Some(e) if e.open() => {}
+                Some(e) if e.state == Stands::Done => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_words(l.kind)),
+                // Written before anything is sent: what it does not hold as sent was not.
+                _ => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr("It was not done: you can do it again.")),
+            }
+            if let Some(open) = self.open.as_mut().filter(|o| o.id == l.group) {
+                open.reload();
+            }
+        }
+        // A new post kept from an earlier window that the ledger says is out: not offered again as unsent.
+        if let Some(open) = self.open.as_mut() {
+            let out = |c: &page::Composer| c.restored && list.iter().any(|e| e.kind == Wrote::CreatePost && e.group == open.id && e.state == Stands::Done && e.evidence.content.as_deref() == Some(c.draft.content().as_str()));
+            if open.composer.as_ref().is_some_and(out) {
+                open.composer = None;
+            }
+        }
+        self.observed.retain(|op, _| list.iter().any(|e| e.op == *op && e.open()));
+        self.ledger = list;
+    }
+    /// The person asks what became of the write `op`.
+    pub(crate) fn check(&mut self, ctx: &egui::Context, ctl: &Ctl, op: &str) {
+        let Some(scope) = self.scope.clone() else { return };
+        self.jobs.ask(ctx, ctl, &scope, Kind::Check(op.to_string()), Request::Check { op: op.to_string() });
+    }
+    /// The person says what they saw of it.
+    pub(crate) fn say(&mut self, ctx: &egui::Context, ctl: &Ctl, op: &str, said: Said, made: Option<String>) {
+        let Some(scope) = self.scope.clone() else { return };
+        self.jobs.ask(ctx, ctl, &scope, Kind::Said(op.to_string()), Request::Said { op: op.to_string(), said, made });
     }
     fn checked(&mut self, ctx: &egui::Context, cx: &mut Cx, op: String, reply: Reply) {
         let Reply::Checked { observation, .. } = reply else {
@@ -464,125 +649,53 @@ impl State {
             }
             return;
         };
-        let write = self.drafts.uncertain.iter().find(|u| u.op == op).map(|u| u.write.clone());
-        match observation.clone() {
-            Observation::Recorded(Outcome::Done(done)) => {
-                self.settle(&op);
-                let prepared = write.map(|w| Prepared { op: op.clone(), write: w, confirm: false, role: None, post: None, member: None });
-                self.ended(ctx, cx, prepared, Outcome::Done(done));
-            }
-            Observation::Applied => {
-                self.settle(&op);
-                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, tr("VRChat shows it done."));
-                if let Some(open) = self.open.as_mut() {
-                    open.reload();
-                }
-            }
-            Observation::Recorded(_) | Observation::NotSent | Observation::NotApplied => {
-                self.settle(&op);
-                cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr("It was not done: you can do it again."));
-                if let Some(open) = self.open.as_mut() {
-                    open.reload();
-                }
-            }
-            Observation::Running | Observation::Inconclusive => {
-                if let Some(u) = self.drafts.uncertain.iter_mut().find(|u| u.op == op) {
-                    u.observation = Some(observation);
-                }
-                self.keep_drafts();
+        self.ledger_due = true;
+        match observation {
+            Observation::Done | Observation::Recorded { done: true } => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, tr("VRChat shows it done.")),
+            Observation::NotDone | Observation::Recorded { done: false } => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr("It was not done: you can do it again.")),
+            unclear => {
+                self.observed.insert(op, unclear);
+                return;
             }
         }
-    }
-    fn flow_answer(&mut self, ctx: &egui::Context, cx: &mut Cx, kind: Kind, reply: Reply) {
-        match (kind, reply) {
-            (Kind::Prepare, Reply::Prepared(p)) => {
-                if p.confirm {
-                    self.serial += 1;
-                    self.flow = Some(Flow::Confirming { prepared: *p, serial: self.serial, origin: self.origin });
-                } else {
-                    self.commit(ctx, cx.ctl, *p);
-                }
-            }
-            // Another write on this target is still uncertain: it is listed, with its check (Blocker 2).
-            (Kind::Prepare, Reply::Held { op, write }) => {
-                self.flow = None;
-                self.add_uncertain(op, write);
-                self.said = Some(failure_text(Failure::CheckFirst));
-            }
-            (Kind::Prepare, Reply::Failed(f)) => {
-                self.flow = None;
-                self.ended(ctx, cx, None, Outcome::Refused(f));
-            }
-            (Kind::Commit, Reply::Outcome(outcome)) => {
-                let prepared = match self.flow.take() {
-                    Some(Flow::Sending { prepared }) => Some(prepared),
-                    _ => None,
-                };
-                if outcome == Outcome::Unknown {
-                    if let Some(p) = &prepared {
-                        self.add_uncertain(p.op.clone(), p.write.clone());
-                    }
-                }
-                self.ended(ctx, cx, prepared, outcome);
-            }
-            // The service's answer to a commit did not arrive: the write may have been done. Unknown, never "refused"
-            // (Blocker 1).
-            (Kind::Commit, Reply::Failed(Failure::Lost)) => {
-                let prepared = match self.flow.take() {
-                    Some(Flow::Sending { prepared }) => Some(prepared),
-                    _ => None,
-                };
-                if let Some(p) = &prepared {
-                    self.add_uncertain(p.op.clone(), p.write.clone());
-                }
-                self.ended(ctx, cx, prepared, Outcome::Unknown);
-            }
-            (Kind::Commit, Reply::Failed(f)) => {
-                // Refused before it was looked at (the account changed, the service busy): nothing was sent.
-                self.flow = None;
-                self.ended(ctx, cx, None, Outcome::Refused(f));
-            }
-            _ => {}
+        self.observed.remove(&op);
+        self.lost.retain(|l| l.op != op);
+        if let Some(open) = self.open.as_mut() {
+            open.reload();
         }
     }
-    /// How a write ended: the page takes VRChat's answer as the state; refusals and unknowns stay on the page. Toasts
-    /// carry no names (M10).
-    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, prepared: Option<Prepared>, outcome: Outcome) {
-        self.confirm_art = None;
+    /// How a write ended, for the view it was of (a view of another group takes nothing from it). Toasts carry no names
+    /// (M10).
+    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, sealed: Option<Sealed>, outcome: Outcome) {
         if let Outcome::Done(done) = &outcome {
             cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(done));
         }
-        match &outcome {
-            Outcome::Refused(f) => self.said = Some(failure_text_for(prepared.as_ref().map(|p| &p.write), *f)),
-            Outcome::Unknown => self.said = None,
-            Outcome::Done(_) => self.said = None,
+        self.said = match &outcome {
+            Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
+            _ => None,
+        };
+        let group = sealed.as_ref().map(|s| s.group.clone());
+        if let Some(studio) = self.studio.as_mut().filter(|s| group.as_ref() == Some(&s.card.id)) {
+            studio.ended(sealed.as_ref(), &outcome);
         }
-        if let Some(studio) = self.studio.as_mut() {
-            studio.ended(prepared.as_ref(), &outcome);
+        if let Some(open) = self.open.as_mut().filter(|o| group.is_none() || group.as_ref() == Some(&o.id)) {
+            open.ended(sealed.as_ref(), outcome);
         }
-        if let Some(open) = self.open.as_mut() {
-            open.ended(prepared.as_ref(), outcome.clone());
-        }
-        // An upload done and not applied yet is remembered for its group (Major 8).
-        if let (Some(p), Outcome::Done(crate::controller::groups::Done::Uploaded(file))) = (&prepared, &outcome) {
-            if let Write::Upload { tag, group, .. } = &p.write {
-                let slot = if *tag == FileTag::Icon { orbiters_core::groups::ArtSlot::Icon } else { orbiters_core::groups::ArtSlot::Banner };
-                let revision = self.studio.as_ref().filter(|s| s.card.id == *group && slot == orbiters_core::groups::ArtSlot::Banner).map(|s| s.uploaded_revision());
-                self.drafts.set_uploaded(art::UploadedRef { group: group.clone(), slot, file: file.clone(), revision: revision.flatten() });
-            }
-        }
-        if let (Some(p), Outcome::Done(crate::controller::groups::Done::Group(_))) = (&prepared, &outcome) {
-            if let Write::ApplyArt { group, slot, .. } = &p.write {
-                self.drafts.clear_uploaded(group, *slot);
-            }
-        }
-        if matches!(outcome, Outcome::Done(crate::controller::groups::Done::Post(_))) {
-            if let Some(open) = self.open.as_ref() {
-                let id = open.id.clone();
-                self.drafts.set_composer(&id, None);
-            }
-        }
+        self.ledger_due = true;
         self.keep_drafts();
+    }
+}
+
+/// What a write did, by its kind.
+fn done_words(kind: Wrote) -> &'static str {
+    match kind {
+        Wrote::AssignRole | Wrote::UnassignRole => tr("The member's roles are updated."),
+        Wrote::CreateRole => tr("The role was created."),
+        Wrote::EditRole | Wrote::DeleteRole => tr("The roles are updated."),
+        Wrote::CreatePost | Wrote::EditPost => tr("The post is on VRChat."),
+        Wrote::DeletePost => tr("The post was deleted."),
+        Wrote::UploadGallery | Wrote::UploadIcon => tr("The picture is in your VRChat inventory."),
+        Wrote::ApplyBanner | Wrote::ApplyIcon => tr("The group's picture is changed."),
     }
 }
 
@@ -624,10 +737,13 @@ pub(crate) fn failure_text(f: Failure) -> String {
         Failure::Api(GroupFailure::Disabled) | Failure::AccountChanged => tr("The account changed: nothing was sent."),
         Failure::Busy => tr("Already busy with this. Try again in a moment."),
         Failure::Withheld(why) => why_text(why),
+        Failure::NotRead(m) => missing_text(m),
         Failure::Expired => tr("This waited too long. Do it again to send it."),
         Failure::Duplicate => tr("This was already sent once."),
         Failure::Changed => tr("It changed on VRChat since you opened it. Look again before trying."),
-        Failure::CheckFirst => tr("The last change here may have gone through. Check first."),
+        Failure::MaySent => tr("This may already have been sent: check first."),
+        Failure::NotKept => tr("Its record could not be kept on this computer, so nothing was sent. Check the disk's free space."),
+        Failure::Offline => tr("The Orbiters service could not be reached: nothing was sent."),
         Failure::NotHere => tr("Only the Orbiters window can do this."),
         Failure::TooLarge => tr("The picture is too large: 10 MB at most."),
     }
@@ -640,10 +756,9 @@ pub(crate) fn why_text(why: Why) -> &'static str {
         Why::RoleAtOrAbove => tr("This role is at or above your own highest role."),
         Why::FixedRole => tr("Everyone's role and the owner's role cannot be changed this way."),
         Why::PaidRole => tr("Roles bought in VRChat's store are not given here."),
-        Why::OwnerRole => tr("The owner's role keeps every right."),
+        Why::OwnerRole => tr("Only the name and description of the owner's role change."),
         Why::NotGrantable => tr("Your role cannot give this right."),
         Why::Prerequisite => tr("A right is missing the right it depends on."),
-        Why::MissingData => tr("VRChat did not give enough about the roles to do this safely."),
         Why::NotSelfAssignable => tr("Members cannot take this role themselves."),
         Why::Escalation => tr("You can only give rights you hold yourself."),
         Why::NotEligible => tr("Uploading to your VRChat inventory needs VRChat+."),
@@ -651,41 +766,93 @@ pub(crate) fn why_text(why: Why) -> &'static str {
     }
 }
 
-/// The writes of `group` whose outcome is not known, each with "Check VRChat", and, once a check could not settle it,
-/// what it saw and "Let it go". Shown on the page (every tab) and in the studio.
+/// What VRChat's answer left out, in the person's words: nothing is guessed, the page can be read again.
+pub(crate) fn missing_text(m: Missing) -> &'static str {
+    match m {
+        Missing::Membership => tr("VRChat did not give your own membership whole, so nothing is sent. Read the group again."),
+        Missing::Identity => tr("What VRChat gave is not of your account in this group, so nothing is sent. Read the group again."),
+        Missing::Roles => tr("VRChat did not give every role of this group, so nothing is sent. Read the group again."),
+        Missing::RoleOrder => tr("VRChat did not say where this role stands among the others, so nothing is sent. Read the group again."),
+        Missing::RoleDefinition => tr("VRChat did not give what this role may do, so nothing is sent. Read the group again."),
+        Missing::Catalogue => tr("VRChat did not give the rights a role can have, so nothing is sent. Read the group again."),
+        Missing::Member => tr("VRChat did not give this member's own roles whole, so nothing is sent. Read the group again."),
+        Missing::Post => tr("VRChat did not give this post, or who sees it, whole: it is not changed from here."),
+        Missing::Picture => tr("VRChat did not say which picture is there, so nothing is sent. Read the group again."),
+        Missing::Entitlement => tr("VRChat did not say whether your account may upload, so nothing is sent. Try again shortly."),
+    }
+}
+
+/// Why a control is not offered.
+pub(crate) fn authority_text(a: &orbiters_core::groups::Authority) -> Option<&'static str> {
+    match a {
+        orbiters_core::groups::Authority::Allowed(_) => None,
+        orbiters_core::groups::Authority::Refused(why) => Some(why_text(*why)),
+        orbiters_core::groups::Authority::Unknown(m) => Some(missing_text(*m)),
+    }
+}
+
+/// What another entry of the ledger says of a write about to go.
+pub(crate) fn warning_text(w: Warning) -> &'static str {
+    match w {
+        Warning::AnotherMayHaveGone => tr("Another change here may or may not have gone through. This one may overtake it, or it this one."),
+        Warning::AlreadyDone => tr("The very same was done less than a day ago. Sending it makes a second one."),
+        Warning::SaidNotDone => tr("The very same was sent before and its answer was lost; you said it was not done."),
+        Warning::RecordUnreadable => tr("A record of an earlier change could not be read: this may have been sent already."),
+    }
+}
+
+/// The writes of `group` that may have been done, from the ledger: each with "Check VRChat", and, once a check could not
+/// settle it, what it saw and the person's own word. Shown on the page (every tab) and in the studio.
 pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state: &mut State, group: &str) {
-    let list = state.uncertain_of(group);
-    let checking: Vec<String> = list.iter().filter(|u| state.jobs.running(&Kind::Check(u.op.clone()))).map(|u| u.op.clone()).collect();
-    let fits = |ui: &Ui, label: &str, glyph: f32| widgets::text_size(ui, &Txt::new(label, 14.0).weight(weight::MEDIUM)).x + 36.0 + glyph;
     let check_w = fits(ui, tr("Check VRChat"), 24.0).max(fits(ui, tr("Checking…"), 24.0)).max(136.0);
-    let release_w = fits(ui, tr("Let it go"), 0.0).max(110.0);
-    for u in list {
-        let w = ui.available_width();
-        let inconclusive = u.observation == Some(Observation::Inconclusive);
-        let buttons = check_w + if inconclusive { release_w + 10.0 } else { 0.0 };
-        let (what, more) = uncertain_words(&u);
-        let text = format!("{what} {more}");
-        let p = ui.painter().clone();
-        let galley = p.layout_job(Txt::new(&text, 13.0).color(theme::FG).line_height(19.0).job((w - 42.0 - buttons - 34.0).max(120.0)));
-        let h = galley.size().y.max(20.0) + 28.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
-        p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::WARN, 0.12));
-        p.rect_stroke(rect, theme::radius(14.0), egui::Stroke::new(1.0, theme::alpha(theme::WARN, 0.45)), egui::StrokeKind::Inside);
-        widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
-        p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
-        let check = Rect::from_min_size(pos2(rect.right() - 14.0 - check_w, rect.top() + 10.0), vec2(check_w, 34.0));
-        let busy = checking.contains(&u.op);
-        let label = if busy { tr("Checking…") } else { tr("Check VRChat") };
-        if widgets::Button::new(label).icon(icons::ARROW_CLOCKWISE).variant(widgets::Variant::Warn).size(widgets::Size::Sm).enabled(!busy).id_salt(("group-check", u.op.as_str())).show_at(ui, check).clicked() {
-            state.check(ctx, ctl, &u.op);
-        }
-        if inconclusive {
-            let release = Rect::from_min_size(pos2(check.left() - 10.0 - release_w, rect.top() + 10.0), vec2(release_w, 34.0));
-            let r = widgets::Button::new(tr("Let it go")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("group-release", u.op.as_str())).show_at(ui, release);
-            if crate::chat_bar::fresh_activation(ui, &r) {
-                state.release(ctx, ctl, &u.op);
+    for e in state.open_writes(group) {
+        let busy = state.jobs.running(&Kind::Check(e.op.clone()));
+        let telling = state.jobs.running(&Kind::Said(e.op.clone()));
+        let seen = state.observed.get(&e.op).cloned();
+        let text = format!("{} {}", uncertain_words(e.kind), seen_words(&e, seen.as_ref()));
+        warn_card(ui, &text, check_w, |ui, rect| {
+            let label = if busy { tr("Checking…") } else { tr("Check VRChat") };
+            if widgets::Button::new(label).icon(icons::ARROW_CLOCKWISE).variant(widgets::Variant::Warn).size(widgets::Size::Sm).enabled(!busy).id_salt(("group-check", e.op.as_str())).show_at(ui, rect).clicked() {
+                state.check(ctx, ctl, &e.op);
             }
+        });
+        let Some(seen) = seen else { continue };
+        // Only after a check that could not settle it: what the person saw, kept as theirs.
+        let mut said: Option<(Said, Option<String>)> = None;
+        match &seen {
+            Observation::Candidates(list) => {
+                for c in list {
+                    candidate_row(ui, &e.op, c, telling, &mut said);
+                }
+                ui.horizontal_wrapped(|ui| {
+                    let label = if list.is_empty() { tr("I looked: it was not done") } else { tr("None of these") };
+                    let r = widgets::Button::new(label).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-none", e.op.as_str())).show(ui);
+                    if widgets::activated_fresh(&r) {
+                        said = Some((Said::NotDone, None));
+                    }
+                });
+            }
+            Observation::Inconclusive(why) if *why != Unclear::TooSoon && !e.kind.makes() => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    for (label, what, salt) in [(tr("I looked: it was done"), Said::Done, "done"), (tr("I looked: it was not done"), Said::NotDone, "not-done")] {
+                        let r = widgets::Button::new(label).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-said", salt, e.op.as_str())).show(ui);
+                        if widgets::activated_fresh(&r) {
+                            said = Some((what, None));
+                        }
+                    }
+                });
+            }
+            _ => {}
         }
+        if let Some((what, made)) = said {
+            state.say(ctx, ctl, &e.op, what, made);
+        }
+    }
+    // Sent, its answer lost, and the ledger not read yet.
+    let waiting: Vec<(String, Wrote)> = state.lost.iter().filter(|l| l.group == group && !state.ledger.iter().any(|e| e.op == l.op)).map(|l| (l.op.clone(), l.kind)).collect();
+    for (_, kind) in waiting {
+        warn_card(ui, &format!("{} {}", uncertain_words(kind), tr("Its answer was lost. Reading what is known of it…")), 0.0, |_, _| {});
     }
     if let Some(said) = state.said.clone() {
         let w = ui.available_width();
@@ -698,27 +865,73 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
     }
 }
 
-/// What an uncertain write was, and what is known of it.
-fn uncertain_words(u: &Uncertain) -> (String, String) {
-    let what = match &u.write {
-        Write::MemberRole { add: true, .. } => tr("A role given to a member may or may not have been given."),
-        Write::MemberRole { add: false, .. } => tr("A role taken back from a member may or may not have been taken back."),
-        Write::CreateRole { .. } => tr("A new role may or may not have been created."),
-        Write::EditRole { .. } => tr("A role change may or may not have been saved."),
-        Write::DeleteRole { .. } => tr("A role may or may not have been deleted."),
-        Write::CreatePost { .. } => tr("A post may or may not have been published."),
-        Write::EditPost { .. } => tr("A post change may or may not have been saved."),
-        Write::DeletePost { .. } => tr("A post may or may not have been deleted."),
-        Write::Upload { .. } => tr("A picture may or may not have been uploaded to your inventory."),
-        Write::ApplyArt { .. } => tr("The group's picture may or may not have been changed."),
-    };
-    let more = match &u.observation {
-        None => tr("Its answer was lost. Nothing is sent here again until you check."),
+fn fits(ui: &Ui, label: &str, glyph: f32) -> f32 {
+    widgets::text_size(ui, &Txt::new(label, 14.0).weight(weight::MEDIUM)).x + 36.0 + glyph
+}
+
+fn warn_card(ui: &mut Ui, text: &str, button_w: f32, button: impl FnOnce(&mut Ui, Rect)) {
+    let w = ui.available_width();
+    let p = ui.painter().clone();
+    let galley = p.layout_job(Txt::new(text, 13.0).color(theme::FG).line_height(19.0).job((w - 42.0 - button_w - 34.0).max(120.0)));
+    let h = galley.size().y.max(20.0) + 28.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::WARN, 0.12));
+    p.rect_stroke(rect, theme::radius(14.0), egui::Stroke::new(1.0, theme::alpha(theme::WARN, 0.45)), egui::StrokeKind::Inside);
+    widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
+    p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
+    if button_w > 0.0 {
+        button(ui, Rect::from_min_size(pos2(rect.right() - 14.0 - button_w, rect.top() + 10.0), vec2(button_w, 34.0)));
+    }
+}
+
+/// One thing the write may have made, and "This is it".
+fn candidate_row(ui: &mut Ui, op: &str, c: &Candidate, telling: bool, said: &mut Option<(Said, Option<String>)>) {
+    let w = ui.available_width();
+    let bw = fits(ui, tr("This is it"), 0.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 46.0), Sense::hover());
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 12.0, theme::surface());
+    let name = if c.label.is_empty() { tr("A picture").to_string() } else { c.label.clone() };
+    let when = c.at.as_deref().map(super::local_time).unwrap_or_else(|| "—".to_string()); // i18n: not shown
+    let same = if c.same { tr("exactly what was sent") } else { tr("not exactly what was sent") };
+    widgets::text_truncated(&p, pos2(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {when} · {same}"), 13.0).color(theme::FG_2), w - bw - 44.0);
+    let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let r = widgets::Button::new(tr("This is it")).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
+    if widgets::activated_fresh(&r) {
+        *said = Some((Said::Done, Some(c.id.clone())));
+    }
+}
+
+/// What a write that may have been done was.
+fn uncertain_words(kind: Wrote) -> &'static str {
+    match kind {
+        Wrote::AssignRole => tr("A role given to a member may or may not have been given."),
+        Wrote::UnassignRole => tr("A role taken back from a member may or may not have been taken back."),
+        Wrote::CreateRole => tr("A new role may or may not have been created."),
+        Wrote::EditRole => tr("A role change may or may not have been saved."),
+        Wrote::DeleteRole => tr("A role may or may not have been deleted."),
+        Wrote::CreatePost => tr("A post may or may not have been published."),
+        Wrote::EditPost => tr("A post change may or may not have been saved."),
+        Wrote::DeletePost => tr("A post may or may not have been deleted."),
+        Wrote::UploadGallery | Wrote::UploadIcon => tr("A picture may or may not have been uploaded to your inventory."),
+        Wrote::ApplyBanner | Wrote::ApplyIcon => tr("The group's picture may or may not have been changed."),
+    }
+}
+
+/// What is known of it.
+fn seen_words(e: &Entry, seen: Option<&Observation>) -> &'static str {
+    match seen {
+        _ if e.state == Stands::Dispatched => tr("It is still being sent: check again in a moment."),
+        None => tr("Its answer was lost. The same is not sent again until you check."),
         Some(Observation::Running) => tr("It is still being sent: check again in a moment."),
-        Some(Observation::Inconclusive) => tr("The check could not tell: look on vrchat.com. If it is not there, let it go to do it again."),
-        Some(_) => "",
-    };
-    (what.to_string(), more.to_string())
+        Some(Observation::Inconclusive(Unclear::TooSoon)) => tr("VRChat does not show it yet, and it went out moments ago: check again in a minute."),
+        Some(Observation::Inconclusive(Unclear::NotRead)) => tr("VRChat's answer does not say: look on vrchat.com, then say what you saw."),
+        Some(Observation::Inconclusive(Unclear::Otherwise)) => tr("It is neither as it was nor as asked: someone else changed it. Look on vrchat.com, then say what you saw."),
+        Some(Observation::Inconclusive(Unclear::NotSeen)) => tr("It is not in what VRChat shows your account, which proves nothing: look on vrchat.com, then say what you saw."),
+        Some(Observation::Candidates(list)) if list.is_empty() => tr("Nothing new is in what VRChat shows your account, which proves nothing: look on vrchat.com."),
+        Some(Observation::Candidates(_)) => tr("Is one of these what was sent? Only you can tell."),
+        Some(Observation::Done | Observation::NotDone | Observation::Recorded { .. }) => "",
+    }
 }
 
 /// Home's Groups section, at its bottom: absent while VRChat is not signed in for certain, while it is read, and when
@@ -746,27 +959,37 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let w = ui.available_width();
     match &state.discovery {
         Discovery::Ready(cards, _) if !cards.is_empty() => {
-            let cards = cards.clone();
-            caption(ui, w, &orbiters_i18n::tr!("Your groups · {n}", n = cards.len()));
+            let count = cards.len();
+            caption(ui, w, &orbiters_i18n::tr!("Your groups · {n}", n = count));
             ui.add_space(-8.0);
             let cols = (((w + GAP) / (CARD_MIN_W + GAP)).floor() as usize).clamp(1, 3);
             let card_w = (w - GAP * (cols - 1) as f32) / cols as f32;
-            let rows = cards.len().div_ceil(cols);
+            let rows = count.div_ceil(cols);
             let (area, _) = ui.allocate_exact_size(vec2(w, rows as f32 * (CARD_H + GAP) - GAP), Sense::hover());
             // Cards in view without their names yet are read, a few at a time (Major 7).
             let mut unnamed: Vec<String> = Vec::new();
-            for (i, card) in cards.iter().enumerate() {
+            for i in 0..count {
                 let at = area.min + vec2((i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (CARD_H + GAP));
                 let rect = Rect::from_min_size(at, vec2(card_w, CARD_H));
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                if !card.named && unnamed.len() < crate::controller::groups::HYDRATE_BATCH {
+                let Discovery::Ready(cards, _) = &state.discovery else { break };
+                let card = cards[i].clone();
+                if !card.named && state.hydrate_again.get(&card.id).is_none_or(|at| now >= *at) && unnamed.len() < crate::controller::groups::HYDRATE_BATCH {
                     unnamed.push(card.id.clone());
                 }
-                match group_card(ui, cx, state, &scope, card, rect) {
-                    Some(CardPress::Open) => state.open = Some(page::Open::new(card.clone(), &state.drafts)),
-                    Some(CardPress::Studio) => state.studio = Some(studio::Studio::new(card.clone(), scope.vrchat_user().unwrap_or_default(), None, &state.drafts)),
+                match group_card(ui, cx, state, &scope, &card, rect) {
+                    Some(CardPress::Open) => {
+                        state.end_flow();
+                        state.open = Some(page::Open::new(card, &state.drafts));
+                        state.ledger_due = true;
+                    }
+                    Some(CardPress::Studio) => {
+                        state.end_flow();
+                        state.studio = Some(studio::Studio::new(card, scope.vrchat_user().unwrap_or_default(), None));
+                        state.ledger_due = true;
+                    }
                     None => {}
                 }
             }
@@ -923,44 +1146,33 @@ pub fn show_page(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     confirmation(ui, cx, state);
     state.keep_drafts();
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && state.flow.is_none() {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !matches!(state.flow, Some(Flow::Confirming { .. })) {
         if state.studio.is_some() {
-            state.studio = None;
+            state.close_studio();
         } else {
             state.close();
         }
     }
 }
 
-/// The confirmation of a prepared write: exactly what goes, and who it reaches, in words (M7); Send commits that one
-/// prepared write once, on a deliberate press (a held key's repeats never count, Blocker 6).
+/// The confirmation of a sealed write, drawn from it and nothing else: exactly what goes, and who it reaches (M7, B-E,
+/// B-F). Send commits that one sealed write once, on a deliberate press (a held key's repeats never count, Blocker 6).
 fn confirmation(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
-    let Some(Flow::Confirming { prepared, serial, origin }) = &state.flow else { return };
-    let (prepared, serial, origin) = (prepared.clone(), *serial, *origin);
+    let Some(Flow::Confirming { sealed, serial, origin, art }) = &state.flow else { return };
+    let (sealed, serial, origin, art) = (sealed.clone(), *serial, *origin, art.clone());
     let id = Id::unique(("group-confirm", serial));
-    let (title, action, danger) = confirm_words(&prepared);
+    let (title, action, danger) = confirm_words(&sealed);
     let mut send = false;
     let mut cancel = false;
-    let names = match (state.open.as_ref(), state.studio.as_ref()) {
-        (Some(o), _) => page::Names::of(o),
-        (None, Some(s)) => page::Names::of_card(&s.card),
-        _ => page::Names::default(),
-    };
-    let mut art = state.confirm_art.clone();
-    if let (None, Write::ApplyArt { file, .. }, Some(scope)) = (&art, &prepared.write, state.scope.clone()) {
-        if let Some(url) = state.own_picture(file) {
-            art = state.picture(&ctx, cx.ctl, &scope, &url);
-        }
-    }
-    // A picture goes only once it shows here: nobody applies one they cannot see (Blocker 5).
-    let shown = art.is_some() || !matches!(prepared.write, Write::ApplyArt { .. } | Write::Upload { .. });
+    // A picture goes only once it shows here, from the sealed bytes: nobody applies one they cannot see (Blocker 5).
+    let shown = sealed.art.is_none() || art.is_some();
     let response = orbiters_ui::dialog::Dialog::new(id, origin, &title).width(520.0).glyph(if danger { icons::WARNING } else { icons::CHECK_CIRCLE }).footer(true).show(&ctx, |ui, part| match part {
-        orbiters_ui::dialog::Part::Body => page::confirm_body(ui, &prepared, &names, art.as_ref()),
+        orbiters_ui::dialog::Part::Body => page::confirm_body(ui, &sealed, art.as_ref()),
         orbiters_ui::dialog::Part::Footer => {
             let variant = if danger { widgets::Variant::Danger } else { widgets::Variant::Primary };
             let button = widgets::Button::new(&action).variant(variant).enabled(shown).id_salt("group-confirm-send").show(ui);
-            if crate::chat_bar::fresh_activation(ui, &button) {
+            if widgets::activated_fresh(&button) {
                 send = true;
             }
             ui.add_space(8.0);
@@ -971,14 +1183,14 @@ fn confirmation(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     });
     if send {
         orbiters_ui::dialog::close(&ctx, id);
-        state.commit(&ctx, cx.ctl, prepared);
+        state.commit(&ctx, cx.ctl, sealed);
     } else if cancel || (response.closing && matches!(state.flow, Some(Flow::Confirming { .. }))) {
         orbiters_ui::dialog::close(&ctx, id);
-        state.cancel(&ctx, cx.ctl, prepared.op);
+        state.cancel();
     }
 }
 
-fn confirm_words(p: &Prepared) -> (String, String, bool) {
+fn confirm_words(p: &Sealed) -> (String, String, bool) {
     let s = |a: &str, b: &str, d: bool| (a.to_string(), b.to_string(), d);
     match &p.write {
         Write::MemberRole { add: true, .. } => s(tr("Give this role?"), tr("Give the role"), false),
@@ -991,8 +1203,8 @@ fn confirm_words(p: &Prepared) -> (String, String, bool) {
         Write::DeletePost { .. } => s(tr("Delete this post?"), tr("Delete the post"), true),
         Write::Upload { tag: FileTag::Gallery, .. } => s(tr("Upload to your VRChat gallery?"), tr("Upload"), false),
         Write::Upload { tag: FileTag::Icon, .. } => s(tr("Upload to your VRChat icons?"), tr("Upload"), false),
-        Write::ApplyArt { slot: orbiters_core::groups::ArtSlot::Banner, .. } => s(tr("Change the group's banner?"), tr("Change the banner"), false),
-        Write::ApplyArt { slot: orbiters_core::groups::ArtSlot::Icon, .. } => s(tr("Change the group's icon?"), tr("Change the icon"), false),
+        Write::ApplyArt { slot: ArtSlot::Banner, .. } => s(tr("Change the group's banner?"), tr("Change the banner"), false),
+        Write::ApplyArt { slot: ArtSlot::Icon, .. } => s(tr("Change the group's icon?"), tr("Change the icon"), false),
     }
 }
 
@@ -1037,25 +1249,27 @@ pub mod stage {
     }
     pub fn studio<'a>(state: &'a mut State, card: GroupCard, account: &str, source: image::RgbaImage) -> &'a mut studio::Studio {
         state.staged = true;
-        state.studio = Some(studio::Studio::new(card, account, Some(source), &Drafts::default()));
+        state.studio = Some(studio::Studio::new(card, account, Some(source)));
         state.studio.as_mut().unwrap()
     }
     pub fn studio_empty(state: &mut State, card: GroupCard) {
         state.staged = true;
         state.studio = Some(studio::Studio::staged_empty(card));
     }
-    /// The picture a staged confirmation shows (a staged address).
-    pub fn confirm_art(state: &mut State, url: &str) {
-        if let Some(Pic::Ready(t)) = state.pictures.map.get(url) {
-            state.confirm_art = Some(t.clone());
-        }
-    }
-    pub fn confirming(state: &mut State, prepared: Prepared, origin: Rect) {
+    /// A sealed write shown, with a staged picture (by its address) for its art.
+    pub fn confirming(state: &mut State, sealed: Sealed, origin: Rect, art: Option<&str>) {
+        let art = art.and_then(|url| match state.pictures.map.get(url) {
+            Some(Pic::Ready(t)) => Some(t.clone()),
+            _ => None,
+        });
         state.serial += 1;
-        state.flow = Some(Flow::Confirming { prepared, serial: state.serial, origin });
+        state.flow = Some(Flow::Confirming { sealed, serial: state.serial, origin, art });
     }
-    pub fn uncertain(state: &mut State, op: &str, write: Write, observation: Option<Observation>) {
-        state.drafts.uncertain.push(Uncertain { op: op.into(), write, observation });
+    pub fn entry(state: &mut State, entry: Entry, observed: Option<Observation>) {
+        if let Some(o) = observed {
+            state.observed.insert(entry.op.clone(), o);
+        }
+        state.ledger.push(entry);
     }
 }
 
@@ -1094,7 +1308,7 @@ mod tests {
             let text = done_text(&done);
             assert!(!text.contains("Secret") && !text.contains("usr_"), "{text}");
         }
-        for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::Withheld(Why::RoleAtOrAbove), Failure::Lost] {
+        for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::Withheld(Why::RoleAtOrAbove), Failure::NotRead(Missing::RoleOrder), Failure::MaySent, Failure::NotKept, Failure::Offline, Failure::Lost] {
             assert!(!failure_text(f).is_empty());
         }
     }

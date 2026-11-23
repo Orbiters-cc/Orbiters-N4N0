@@ -5,6 +5,9 @@
 //! developer update (Anchored 2048x385, Centered 2048x472): each zone's left and right edge on every row, simplified to
 //! within 1.2 px, as fractions of the canvas. VRChat's pictures are not shipped; these contours are our own data. Where
 //! zones overlap, the later one in each list is on top. They are guides: the real name-length breakpoints are not known.
+use crate::controller::groups::Key;
+use crate::controller::vrchat_data::Scope;
+use orbiters_core::groups::PostDraft;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -340,12 +343,14 @@ pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> anyhow::Result<image::Rg
     let icc = decoder.icc_profile().ok().flatten();
     let mut img = image::DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
-    if img.width() > SOURCE_MAX || img.height() > SOURCE_MAX {
-        img = img.resize(SOURCE_MAX, SOURCE_MAX, image::imageops::FilterType::Triangle);
-    }
     let mut rgba = img.to_rgba8();
     if let Some(icc) = icc {
         to_srgb(&mut rgba, &icc)?;
+    }
+    if rgba.width() > SOURCE_MAX || rgba.height() > SOURCE_MAX {
+        let k = (SOURCE_MAX as f64 / rgba.width() as f64).min(SOURCE_MAX as f64 / rgba.height() as f64);
+        let to = |v: u32| ((v as f64 * k).round() as u32).clamp(1, SOURCE_MAX);
+        rgba = shrink(&rgba, to(rgba.width()), to(rgba.height()));
     }
     Ok(rgba)
 }
@@ -421,93 +426,108 @@ pub fn store_saved(account: &str, group: &str, saved: &Saved) {
     }
 }
 
-/// A write whose outcome is not known yet: kept on disk with the account until a check settles it (Blockers 1, 2).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Uncertain {
-    pub op: String,
-    pub write: crate::controller::groups::Write,
-    /// What the last check saw (running, inconclusive), when one ran.
-    pub observation: Option<crate::controller::groups::Observation>,
-}
-
-/// The post the operator was writing in a group (Major 8).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ComposerDraft {
-    pub baseline: Option<orbiters_core::groups::Post>,
-    pub draft: orbiters_core::groups::PostDraft,
-}
-
-/// A picture uploaded to the account's inventory and not applied to its group yet (Major 8), with the studio's art
-/// revision it was made from when it came from the studio (Blocker 5).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UploadedRef {
-    pub group: String,
-    pub slot: orbiters_core::groups::ArtSlot,
-    pub file: orbiters_core::groups::InventoryFile,
-    pub revision: Option<u64>,
-}
-
-/// One account's own unfinished work in its groups. No roster, no posts list, nobody else's data beyond the target of
-/// its own pending write.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// The new posts the person is writing, one file per account (the environment and Orbiters account too) and group: their
+/// own words, who they are for and the notification, nothing read from VRChat but the ids of the roles they chose. An
+/// edit of an existing post is never here (verify2 B-C).
+#[derive(Default)]
 pub struct Drafts {
-    pub uncertain: Vec<Uncertain>,
-    /// Group id and its draft (a list, never a map keyed by anything numeric).
-    pub composers: Vec<(String, ComposerDraft)>,
-    pub uploaded: Vec<UploadedRef>,
+    posts: Vec<(String, PostDraft)>,
+    /// The last write failed: what is being written is in memory only.
+    pub failed: bool,
+}
+
+fn drafts_root() -> PathBuf {
+    orbiters_core::paths::local_data_root().join("group-drafts")
+}
+
+/// The folder of one account's drafts.
+pub fn drafts_dir(scope: &Scope) -> Option<PathBuf> {
+    Key::of(scope).map(|k| drafts_root().join(k.folder()))
 }
 
 impl Drafts {
-    pub fn composer(&self, group: &str) -> Option<&ComposerDraft> {
-        self.composers.iter().find(|(g, _)| g == group).map(|(_, d)| d)
-    }
-    pub fn set_composer(&mut self, group: &str, draft: Option<ComposerDraft>) {
-        self.composers.retain(|(g, _)| g != group);
-        if let Some(d) = draft {
-            self.composers.push((group.to_string(), d));
-            while self.composers.len() > 32 {
-                self.composers.remove(0);
+    pub fn load(scope: &Scope) -> Self {
+        // What earlier builds kept here held the posts being edited, words and author and all: gone.
+        if let Ok(files) = std::fs::read_dir(drafts_root()) {
+            for f in files.flatten().filter(|f| f.path().is_file()) {
+                let _ = std::fs::remove_file(f.path());
             }
         }
+        let mut posts = Vec::new();
+        if let Some(Ok(files)) = drafts_dir(scope).map(std::fs::read_dir) {
+            for path in files.flatten().map(|f| f.path()) {
+                let Some(group) = path.file_stem().and_then(|s| s.to_str()).filter(|s| orbiters_core::groups::is_group_id(s)).map(str::to_string) else { continue };
+                if let Some(d) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<PostDraft>(&b).ok()) {
+                    posts.push((group, PostDraft { image_id: None, ..d }));
+                }
+            }
+        }
+        Self { posts, failed: false }
     }
-    pub fn uploaded(&self, group: &str, slot: orbiters_core::groups::ArtSlot) -> Option<&UploadedRef> {
-        self.uploaded.iter().find(|u| u.group == group && u.slot == slot)
+    pub fn composer(&self, group: &str) -> Option<&PostDraft> {
+        self.posts.iter().find(|(g, _)| g == group).map(|(_, d)| d)
     }
-    pub fn set_uploaded(&mut self, up: UploadedRef) {
-        self.uploaded.retain(|u| !(u.group == up.group && u.slot == up.slot));
-        self.uploaded.push(up);
-        while self.uploaded.len() > 32 {
-            self.uploaded.remove(0);
+    /// The new post being written in `group`, or none any more. One that could not be written is tried again at the next
+    /// change or frame.
+    pub fn set(&mut self, scope: &Scope, group: &str, draft: Option<PostDraft>) {
+        let empty = |d: &PostDraft| d.title.trim().is_empty() && d.text.trim().is_empty();
+        let draft = draft.filter(|d| !empty(d)).map(|d| PostDraft { image_id: None, ..d });
+        if self.composer(group) == draft.as_ref() {
+            return;
+        }
+        let Some(file) = drafts_dir(scope).filter(|_| orbiters_core::groups::is_group_id(group)).map(|d| d.join(format!("{group}.json"))) else { return };
+        let written = match &draft {
+            Some(d) => file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && serde_json::to_vec(d).is_ok_and(|b| orbiters_core::write_atomic_private(&file, &b).is_ok()),
+            None => std::fs::remove_file(&file).is_ok() || !file.exists(),
+        };
+        self.failed = !written;
+        if written {
+            self.posts.retain(|(g, _)| g != group);
+            self.posts.extend(draft.map(|d| (group.to_string(), d)));
         }
     }
-    pub fn clear_uploaded(&mut self, group: &str, slot: orbiters_core::groups::ArtSlot) {
-        self.uploaded.retain(|u| !(u.group == group && u.slot == slot));
+}
+
+/// A picture's pixels as one number.
+pub fn pixels(img: &image::RgbaImage) -> u64 {
+    let mut h = 0xcbf29ce484222325u64 ^ ((img.width() as u64) << 32 | img.height() as u64);
+    for c in img.as_raw().as_chunks::<8>().0 {
+        h = (h ^ u64::from_le_bytes(*c)).wrapping_mul(0x100000001b3).rotate_left(23);
     }
-}
-
-/// The file of one account's drafts, under the local data folder.
-pub fn drafts_file(account: &str) -> Option<PathBuf> {
-    orbiters_core::vrchat_accounts::is_user_id(account).then(|| orbiters_core::paths::local_data_root().join("group-drafts").join(format!("{account}.json")))
-}
-
-pub fn load_drafts(account: &str) -> Drafts {
-    drafts_file(account).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-pub fn store_drafts(account: &str, drafts: &Drafts) {
-    if let Some(file) = drafts_file(account) {
-        if let (Some(dir), Ok(bytes)) = (file.parent(), serde_json::to_vec(drafts)) {
-            let _ = std::fs::create_dir_all(dir);
-            let _ = orbiters_core::write_atomic_private(&file, &bytes);
-        }
+    for b in img.as_raw().as_chunks::<8>().1 {
+        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
     }
+    h
 }
 
-/// The studio's art as one number: its source and the group banner's crop (what an upload was made from, Blocker 5).
-pub fn revision(source: Option<&Source>, crop: Crop) -> u64 {
-    // FNV-1a over a plain description: the same art gives the same number on every run.
-    let text = format!("{:?}|{:.5}|{:.5}|{:.5}|{}", source, crop.zoom, crop.cx, crop.cy, crop.turns);
+/// The studio's art as one number: its very pixels and the group banner's crop (what an upload was made from, Blocker 5).
+/// The same art gives the same number on every run and every visit; another file under the same name does not.
+pub fn revision(pixels: u64, crop: Crop) -> u64 {
+    let text = format!("{pixels:x}|{:.5}|{:.5}|{:.5}|{}", crop.zoom, crop.cx, crop.cy, crop.turns);
     text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// `img` made smaller, each pixel the average of those it covers, colour weighted by its alpha: no fringe beside
+/// transparent ones (M10).
+pub fn shrink(img: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    let (sw, sh) = img.dimensions();
+    image::RgbaImage::from_fn(w, h, |x, y| {
+        let span = |i: u32, n: u32, s: u32| ((i as u64 * s as u64 / n as u64) as u32, (((i as u64 + 1) * s as u64).div_ceil(n as u64) as u32).min(s));
+        let ((x0, x1), (y0, y1)) = (span(x, w, sw), span(y, h, sh));
+        let (mut c, mut a, mut n) = ([0u64; 3], 0u64, 0u64);
+        for yy in y0..y1.max(y0 + 1) {
+            for xx in x0..x1.max(x0 + 1) {
+                let p = img.get_pixel(xx.min(sw - 1), yy.min(sh - 1)).0;
+                for i in 0..3 {
+                    c[i] += p[i] as u64 * p[3] as u64;
+                }
+                a += p[3] as u64;
+                n += 1;
+            }
+        }
+        let colour = |v: u64| if a == 0 { 0 } else { ((v + a / 2) / a).min(255) as u8 };
+        image::Rgba([colour(c[0]), colour(c[1]), colour(c[2]), ((a + n / 2) / n.max(1)) as u8])
+    })
 }
 
 #[cfg(test)]

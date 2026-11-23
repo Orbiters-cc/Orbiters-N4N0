@@ -516,6 +516,7 @@ mod calls_access;
 mod cleanup;
 mod dolly;
 pub mod groups;
+mod groups_ledger;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;

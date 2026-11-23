@@ -154,7 +154,7 @@ impl State {
     /// A sheet or dialog of Home's is up over it (a profile, Previous instances, an edit of one's own card): it owns the
     /// keyboard and the pointer (N4N0's chat stands aside, verify-r21 major 7).
     pub fn modal_up(&self) -> bool {
-        self.launcher.holds()
+        self.launcher.holds() || self.groups.holds()
     }
 
     /// Back to Home itself (the sidebar's Home pressed on a feature's page, or on All tools).
@@ -181,6 +181,8 @@ impl State {
     /// Share to … holds are forgotten, now (MENU-13: nothing reads the camera for a page nobody sees); shown again, its
     /// page takes them up again.
     pub fn left(&mut self, backend: &crate::backend::Ctl) {
+        // A group's write not sent yet is over with its view (B-F).
+        self.groups.end_flow();
         if let Some(host) = self.host.as_mut() {
             host.let_go(backend);
             self.pending.extend(host.menu.take_up());

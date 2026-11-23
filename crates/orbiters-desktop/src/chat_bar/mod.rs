@@ -19,7 +19,6 @@
 pub mod layout;
 pub mod morph;
 mod panel;
-pub(crate) use panel::fresh_activation;
 #[cfg(test)]
 mod tests;
 

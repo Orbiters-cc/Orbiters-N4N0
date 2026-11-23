@@ -3,7 +3,7 @@
 //! confirmation and each write's outcome, in English, French and Japanese. Nothing is asked of the service.
 use super::{Page, Scenario};
 use crate::app::App;
-use crate::controller::groups::{Done, Outcome, Page as GroupPage, Prepared, Write};
+use crate::controller::groups::{Done, Entry, Evidence, Key, Kind, Outcome, Page as GroupPage, Sealed, State as Stands, Target as Aim, Write};
 use crate::controller::vrchat_data::Scope;
 use crate::controller::vrchat_login::Status;
 use crate::pages::groups::{art::{Crop, Target}, stage};
@@ -182,7 +182,7 @@ fn cards() -> Vec<GroupCard> {
 }
 
 fn roles() -> Vec<Role> {
-    let r = |id: &str, name: &str, order: i64, perms: &[&str]| Role { id: id.into(), name: name.into(), order: Some(order), permissions: s(perms), known: true, ..Default::default() };
+    let r = |id: &str, name: &str, order: i64, perms: &[&str]| Role { id: id.into(), name: name.into(), order: Some(order), permissions: s(perms), known: true, whole: true, ..Default::default() };
     vec![
         Role { description: "Founded the group.".into(), ..r("grol_owner", "Owner", 0, &["*"]) },
         Role { management: true, description: "Keeps the group running: roles, posts and members.".into(), ..r("grol_admin", "Admins", 1, &["group-roles-manage", "group-roles-assign", "group-members-manage", "group-announcement-manage"]) },
@@ -220,11 +220,13 @@ fn page(owner: bool) -> GroupPage {
             links: s(&["https://example.org/made-up-makers"]),
             icon_url: c.icon_url.clone(),
             banner_url: c.banner_url.clone(),
-            member_count: c.member_count.unwrap_or(0),
+            member_count: c.member_count,
+            banner_known: true,
+            icon_known: true,
             online_count: c.online_count,
             owner_id: if owner { ME.into() } else { "usr_00000000-0000-4000-8000-00000000e0ff".into() },
             privacy: "default".into(),
-            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into() }),
+            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into(), whole: true, group_id: None }),
             roles: Some(roles()),
             ..Default::default()
         },
@@ -258,8 +260,40 @@ fn posts() -> Vec<Post> {
     ]
 }
 
-fn prepared(write: Write, role: Option<Role>) -> Prepared {
-    Prepared { op: "op".into(), write, confirm: true, role, post: None, member: Some(Member { user_id: members()[0].user_id.clone(), membership_id: "gmem_00000000-0000-4000-8000-00000000c001".into(), ..Default::default() }) }
+fn prepared(write: Write, role: Option<Role>) -> Sealed {
+    let who = match &write {
+        Write::MemberRole { user, .. } => members().into_iter().find(|m| m.user_id == *user),
+        _ => None,
+    };
+    let art = match &write {
+        Write::ApplyArt { file, .. } => Some(crate::controller::groups::SealedArt { file: Some(file.clone()), sha256: String::new(), size: 2_811_204 }),
+        Write::Upload { staged, .. } => Some(crate::controller::groups::SealedArt { file: None, sha256: String::new(), size: staged.size }),
+        _ => None,
+    };
+    let labels = roles().into_iter().map(|r| (r.id, r.name)).chain(catalogue().into_iter().map(|p| (p.name, p.display_name))).collect();
+    let mut s = Sealed::made_up(write, true);
+    (s.group_name, s.role, s.member, s.art, s.labels) = ("Made-up Makers".into(), role, who, art, labels);
+    s
+}
+/// A write of the ledger, as the service keeps it.
+fn entry(scope: &Scope, op: &str, kind: Kind, state: Stands, made: Option<&str>) -> Option<Entry> {
+    Some(Entry {
+        op: op.into(),
+        key: Key::of(scope)?,
+        group: G1.into(),
+        kind,
+        target: Aim::default(),
+        payload: String::new(),
+        evidence: Evidence::default(),
+        state,
+        by: None,
+        said: None,
+        made: made.map(str::to_string),
+        checked: false,
+        prepared_at: 0,
+        dispatched_at: Some(0),
+        ended_at: None,
+    })
 }
 
 pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &Snapshot, f: u32) {
@@ -297,8 +331,6 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             studio.set_crop(Target::Centered, Crop { zoom: 1.2, cx: 0.5, cy: 0.4, turns: 0 });
             if n == "groups-studio-exported" {
                 studio.exported = vec![(Target::GroupBanner, "Made-up Makers - group-banner.png".into(), 2_811_204), (Target::Anchored, "Made-up Makers - nameplate-anchored-2048x385.png".into(), 902_117), (Target::Centered, "Made-up Makers - nameplate-centered-2048x472.png".into(), 1_061_490)];
-                let rev = studio.revision();
-                studio.uploaded = Some((InventoryFile { id: "file_up".into(), url: String::new() }, Some(rev)));
             }
             if n == "groups-studio-empty" {
                 stage::studio_empty(state, cards()[0].clone());
@@ -307,6 +339,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
         n => {
             let open = stage::open(state, cards()[0].clone(), page(owner));
             open.me_name = "Desktop Tester".into();
+            open.me_id = ME.into();
             open.members.items = members();
             open.posts.items = posts();
             use crate::pages::groups::Tab as tab;
@@ -328,10 +361,10 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     let r = roles()[3].clone();
                     let mut draft = RoleDraft::of(&r);
                     draft.permissions = s(&["group-instance-join"]);
-                    open.role_editor = Some(crate::pages::groups::RoleEditor { baseline: Some(r), draft });
+                    open.role_editor = Some(crate::pages::groups::RoleEditor::new(Some(r), draft));
                 }
                 "groups-posts-compose" => {
-                    open.composer = Some(crate::pages::groups::Composer { baseline: None, draft: PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() } });
+                    open.composer = Some(crate::pages::groups::Composer::new(None, PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
                 }
                 "groups-look-uploaded" => {}
                 "groups-outcome-refused" => {}
@@ -359,20 +392,30 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     Some(prepared(Write::EditPost { group: G1.into(), baseline: p, edit }, None))
                 }
                 "groups-confirm-delete-post" => Some(prepared(Write::DeletePost { group: G1.into(), post: posts()[2].clone() }, None)),
-                "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, group: G1.into(), staged: crate::controller::groups::Staged { name: "00000000-0000-4000-8000-000000000000.png".into(), size: 2_811_204, sha256: String::new() } }, None)),
+                "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, group: G1.into(), staged: crate::controller::groups::Staged { name: "00000000-0000-4000-8000-000000000000.png".into(), size: 2_811_204, sha256: String::new() }, art: None }, None)),
                 "groups-confirm-apply" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Banner, file: "file_up".into() }, None)),
                 _ => None,
             };
             // The page-level states that are the window's, not the page's (uncertain writes, refusals, uploads kept).
             match n {
-                "groups-outcome-unknown" => stage::uncertain(state, "op-unknown", Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "x".into(), ..Default::default() } }, None),
+                "groups-outcome-unknown" => {
+                    if let Some(e) = entry(&Scope::of(snapshot), "op-unknown", Kind::CreatePost, Stands::Unknown, None) {
+                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), at: Some("2026-11-21T19:00:00Z".into()), same: false }];
+                        stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
+                    }
+                }
                 "groups-outcome-refused" => state.said = Some(crate::pages::groups::failure_text(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),
-                "groups-confirm-upload" => stage::confirm_art(state, &cards()[1].banner_url),
-                "groups-look-uploaded" | "groups-confirm-apply" => state.drafts.set_uploaded(crate::pages::groups::art::UploadedRef { group: G1.into(), slot: ArtSlot::Banner, file: InventoryFile { id: "file_up".into(), url: cards()[1].banner_url.clone() }, revision: None }),
+                "groups-look-uploaded" => {
+                    stage::picture(ctx, state, "https://api.vrchat.cloud/api/1/file/file_up/1/file", color_image(&landscape(480, 270, 1)));
+                    if let Some(e) = entry(&Scope::of(snapshot), "op-up", Kind::UploadGallery, Stands::Done, Some("file_up")) {
+                        stage::entry(state, e, None);
+                    }
+                }
                 _ => {}
             }
             if let Some(p) = confirm {
-                stage::confirming(state, p, origin);
+                let art = p.art.is_some().then(|| cards()[1].banner_url.clone());
+                stage::confirming(state, p, origin, art.as_deref());
             }
         }
     }

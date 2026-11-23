@@ -462,6 +462,8 @@ pub static ACTIONS: &[(&str, &str)] = &[
     (mark("Experimental"), mark("Copy")),
     (mark("Experimental"), mark("Copied")),
     (mark("Experimental"), mark("New token")),
+    // Keys that can never be read: reset from the card that says it stays closed.
+    (mark("Experimental"), mark("Reset the token")),
     // About: the worker's log shown, quitting.
     (mark("About"), mark("Worker log")),
     (mark("About"), mark("Quit")),

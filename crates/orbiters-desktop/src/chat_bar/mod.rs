@@ -29,6 +29,7 @@ use egui::{pos2, vec2, Align2, CursorIcon, Event, Id, Key, KeyboardShortcut, Lay
 use layout::{Bar, Strip};
 use morph::Morph;
 use orbiters_i18n::tr;
+use orbiters_n4n0::status::SignedAs;
 use orbiters_n4n0::{Stamp, Surface};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{anim, icons, widgets};
@@ -71,6 +72,8 @@ pub enum Gate {
     Ready,
     /// Not signed in to Orbiters (or its sign-in expired): Sign in.
     SignedOut,
+    /// Signed in, but Orbiters has not said who yet: nobody's conversation, for a moment.
+    SigningIn,
     /// The assistant (or N4N0 altogether) is off: Turn on.
     Off,
 }
@@ -80,6 +83,7 @@ pub fn gate(snap: &Snapshot) -> Gate {
         return Gate::Off;
     }
     match snap.account.state {
+        AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. } if snap.n4n0.signed_as == SignedAs::Unknown => Gate::SigningIn,
         AccountState::SignedIn { .. } | AccountState::Offline { .. } | AccountState::Checking { .. } => Gate::Ready,
         _ => Gate::SignedOut,
     }
@@ -114,6 +118,8 @@ struct Shown {
     epoch: u64,
     /// The question whose card was in view in the open chat.
     question: Option<u64>,
+    /// The conversation it showed (`N4n0Status::conversation`).
+    conversation: u64,
 }
 
 /// The chat's state in the window.
@@ -155,6 +161,8 @@ pub struct ChatBar {
     draft_offset: f32,
     /// The Orbiters identity's epoch (`N4n0Status::account_epoch`): when it moves, what was typed goes.
     epoch: Option<u64>,
+    /// The question said to N4N0 as presented here: its card came into view (verify3-r21 B3).
+    presented: Option<u64>,
     /// The question this window answered (its card says so until it is gone).
     answered: Option<u64>,
     /// The failed turn this window retried (its button does not answer twice).
@@ -251,6 +259,7 @@ impl ChatBar {
                 ctx.input_mut(|i| i.events.retain(|e| !is_key_event(e)));
             }
             (self.reveal, self.seen, self.copied, self.answered, self.retried) = (None, None, None, None, None);
+            self.presented = None;
             self.log = false;
             self.count = 0;
             if let Some(mut state) = egui::TextEdit::load_state(ctx, field_id()) {
@@ -348,7 +357,13 @@ impl ChatBar {
             self.focus = false;
         }
         // What the person answers to from here on.
-        self.shown = Shown { epoch: snap.n4n0.account_epoch, question: self.drawing.take() };
+        self.shown = Shown { epoch: snap.n4n0.account_epoch, question: self.drawing.take(), conversation: snap.n4n0.conversation };
+        ctl.shown(self.shown.epoch, Surface::Window);
+        // Said once per question, and after any answer of this frame: from here on this window's answers can name it.
+        if self.shown.question.is_some() && self.shown.question != self.presented {
+            self.presented = self.shown.question;
+            ctl.n4n0(N4n0Command::Presented { stamp: self.stamp() });
+        }
     }
 
     /// The page behind the chat, blurred and darkened as far as it has opened; a press on it closes the chat.
@@ -476,6 +491,7 @@ impl ChatBar {
         if self.draft.is_empty() {
             let hint = match gate(snap) {
                 Gate::SignedOut => tr("Sign in to talk to N4N0"),
+                Gate::SigningIn => tr("Signing in…"),
                 Gate::Off if !snap.settings.n4n0.enabled => tr("N4N0 is off"),
                 Gate::Off => tr("N4N0's assistant is off"),
                 Gate::Ready if unread => tr("N4N0 answered"),
@@ -582,6 +598,7 @@ impl ChatBar {
             let hint = match gate(snap) {
                 Gate::Ready => tr("Ask N4N0 anything…"),
                 Gate::SignedOut => tr("Sign in to talk to N4N0"),
+                Gate::SigningIn => tr("Signing in…"),
                 Gate::Off => tr("N4N0's assistant is off"),
             };
             let hint = Txt::new(hint, 14.0).color(theme::FG_4);

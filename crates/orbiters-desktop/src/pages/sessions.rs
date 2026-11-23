@@ -1354,7 +1354,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                     open_folder = true;
                 }
             }
-            if IconButton::new(icons::TRASH, mark("Move to the recycle bin")).size(40.0, 17.0).danger().show_at(&mut cu, bin).clicked() {
+            if widgets::activated_fresh(&IconButton::new(icons::TRASH, mark("Move to the recycle bin")).size(40.0, 17.0).danger().show_at(&mut cu, bin)) {
                 d.confirm_trash = true;
             }
         }

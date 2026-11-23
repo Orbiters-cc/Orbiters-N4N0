@@ -3,6 +3,7 @@
 //! world's lines go through too), and hands N4N0 what it knows ([`crate::N4n0::set_feedback`]). Every menu shows the
 //! same (the status' `feedback`, the screen's menu directly).
 
+use crate::fence::Fence;
 use crate::runtime::Shared;
 use orbiters_n4n0_core::feedback::{FeedbackAsk, FeedbackView};
 
@@ -21,10 +22,12 @@ impl crate::N4n0 {
         }
         self.publish();
     }
+}
 
+impl Fence<'_> {
     /// What a menu asked (read a world's feedback, like, label, comment), on a thread: the app answers with
     /// [`crate::N4n0::set_feedback`].
-    pub(crate) fn feedback_ask(self: &Shared, ask: FeedbackAsk) {
+    pub(crate) fn feedback_ask(&self, ask: FeedbackAsk) {
         let later = self.later();
         std::thread::spawn(move || {
             if let Some(fence) = later.fence() {

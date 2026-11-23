@@ -239,8 +239,8 @@ pub(super) const PREVIOUS: [&str; 10] = [
 /// REQUEST23: Select in Request's place on a friend whose instance takes the account without asking: their row under
 /// the pointer, beside one that keeps Request; their profile, and one that keeps Request invite; Home while VRChat is
 /// asked whether it is open, once VRChat said it is closed, and once chosen.
-pub(super) const SELECT: [&str; 7] =
-    ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-asking", "launcher-select-closed", "launcher-select-home"];
+pub(super) const SELECT: [&str; 8] =
+    ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-asking", "launcher-select-closed", "launcher-select-picture", "launcher-select-home"];
 
 /// Made-up instances of the history, newest first: world names of the sample, every kind, several regions.
 fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
@@ -794,7 +794,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-select-modal" if f == 30 => state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         "launcher-request-modal" if f == 30 => state.open_profile(ctx, "usr_00000000-0000-4000-8000-000000000002", Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         // Home once Select was pressed on them, VRChat having said it is open.
-        "launcher-select-home" | "launcher-select-asking" | "launcher-select-closed" if f == 1 => {
+        "launcher-select-home" | "launcher-select-asking" | "launcher-select-closed" | "launcher-select-picture" if f == 1 => {
             use crate::pages::launcher::previous::Visit;
             use crate::pages::launcher::selection::{Origin, Verified};
             let friend = data(name).friend(nova).cloned();
@@ -806,7 +806,12 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
                     "launcher-select-closed" => Verified::Closed,
                     _ => Verified::Open { at: std::time::Instant::now(), by: Default::default() },
                 };
+                // Its picture on its way.
+                let picture = picture.filter(|_| name != "launcher-select-picture");
                 state.places.stand_in_instance(visit, Origin::Friend { id: nova.into(), name: friend, picture }, verified, false);
+                if name == "launcher-select-picture" {
+                    state.places.stand_in_picture_loading();
+                }
             }
         }
         "launcher-hover" => {

@@ -510,7 +510,7 @@ impl OverlayUi {
         let call = snap.n4n0.calls.call.as_ref();
         if let Some(call) = call {
             let ringing = call.incoming && call.phase == crate::state::CallPhase::Ringing;
-            let (first, first_cmd) = if ringing { (tr("Answer"), N4n0Command::AnswerCall) } else { (tr("Hang up"), N4n0Command::EndCall) };
+            let (first, first_cmd) = if ringing { (tr("Answer"), N4n0Command::AnswerCall { stamp: None }) } else { (tr("Hang up"), N4n0Command::EndCall) };
             let b = Button::new(first).icon(if ringing { icons::MICROPHONE } else { icons::X }).variant(if ringing {
                 Variant::Primary
             } else {

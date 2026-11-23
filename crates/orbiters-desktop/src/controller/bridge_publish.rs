@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-/// How a queued picture is published: Photos & captures' share for real ([`super::shares::share`]), a stand-in in tests.
-type ShareFn = Arc<dyn Fn(Server, super::shares::Entry, shares::Share, super::shares::Report) -> anyhow::Result<shares::Shared> + Send + Sync>;
+/// How a queued picture is published: Photos & captures' share for real ([`super::shares::share_as`], as whom it was asked
+/// as), a stand-in in tests.
+type ShareFn = Arc<dyn Fn(Option<&super::shares::Whose>, super::shares::Entry, shares::Share, super::shares::Report) -> anyhow::Result<shares::Shared> + Send + Sync>;
 
 /// A picture waiting to be published.
 struct Job {
@@ -24,6 +25,8 @@ struct Job {
     server: Server,
     entry: super::shares::Entry,
     public: bool,
+    /// The account signed in there as it was asked (none was): the one it is published as, however long it waits.
+    whose: Option<super::shares::Whose>,
 }
 
 /// Publishing, one picture at a time and in the order asked, pacing itself on Orbiters' answer: a 429 holds the queue until
@@ -101,7 +104,7 @@ impl Pacer {
             };
             let request = shares::Share { public: job.public, recipients: Vec::new(), acknowledge_explicit: false, message: String::new() };
             let explicit = job.public && job.entry.content.explicit;
-            match (self.share)(server, job.entry.clone(), request, &report) {
+            match (self.share)(job.whose.as_ref(), job.entry.clone(), request, &report) {
                 Ok(shares::Shared::Item { item, .. }) => {
                     self.jobs.lock().unwrap().insert(dir, (server, done(server, &item)));
                 }
@@ -152,7 +155,7 @@ impl RealPublish {
                 ctl.refresh_maps();
             }
         });
-        Self { ctl, pacer: Pacer::new(Arc::new(|server, entry, request, report| super::shares::share(server, entry, request, report)), after) }
+        Self { ctl, pacer: Pacer::new(Arc::new(|whose, entry, request, report| super::shares::share_as(whose.ok_or_else(super::shares::signed_out)?, entry, request, report)), after) }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -262,7 +265,7 @@ impl crate::bridge::game::Publish for RealPublish {
             entry.world_name = world_name.to_string();
         }
         drop(ctl);
-        self.pacer.add(Job { dir: session.to_path_buf(), server, entry, public });
+        self.pacer.add(Job { dir: session.to_path_buf(), server, entry, public, whose: super::shares::Whose::saved(server).ok() });
         Ok(())
     }
 
@@ -351,7 +354,7 @@ mod tests {
         let at_once = Arc::new(Mutex::new((0usize, 0usize)));
         let share: ShareFn = {
             let (sent, allowed, at_once) = (sent.clone(), allowed.clone(), at_once.clone());
-            Arc::new(move |_server, entry: Entry, request: shares::Share, report: crate::controller::shares::Report| {
+            Arc::new(move |_whose: Option<&crate::controller::shares::Whose>, entry: Entry, request: shares::Share, report: crate::controller::shares::Report| {
                 let dir = match entry.local.as_ref() {
                     Some(crate::controller::shares::Local::Session(d)) => d.clone(),
                     _ => PathBuf::new(),
@@ -379,11 +382,11 @@ mod tests {
         for dir in &dirs {
             let mut e = entry();
             e.local = Some(crate::controller::shares::Local::Session(dir.clone()));
-            pacer.add(Job { dir: dir.clone(), server: Server::Production, entry: e, public: true });
+            pacer.add(Job { dir: dir.clone(), server: Server::Production, entry: e, public: true, whose: None });
             // Asked twice: queued once.
             let mut e = entry();
             e.local = Some(crate::controller::shares::Local::Session(dir.clone()));
-            pacer.add(Job { dir: dir.clone(), server: Server::Production, entry: e, public: true });
+            pacer.add(Job { dir: dir.clone(), server: Server::Production, entry: e, public: true, whose: None });
         }
         // Two go, the third is refused: the queue holds, says so, and sends nothing for 2 s.
         let until = Instant::now() + Duration::from_secs(5);

@@ -89,6 +89,13 @@ fn same(a: Option<&Stamp>, b: Option<&Stamp>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a.same(b))
 }
 
+/// Whose the account installed is, of the environment chosen; none while who it is is unknown (its file could not be read,
+/// the environment is being switched: controller/identity.rs).
+fn installed(rt: &super::account::AccountRuntime) -> Option<(Server, Owner)> {
+    let (server, _) = rt.read.filter(|(server, _)| !rt.unknown && *server == Server::current())?;
+    rt.account.as_ref().map(|a| (server, Owner::of(server, a)))
+}
+
 /// What this computer alone says on Home's launcher: the game, its profiles and what runs it. Nobody's account.
 pub(super) struct MachineParts {
     pub(super) game: Game,
@@ -210,11 +217,11 @@ impl Controller {
         let (read, owner, epoch) = {
             let rt = self.account_runtime.lock().unwrap();
             // The epoch moves under this lock: it is the account's beside it.
-            (rt.read.is_some(), rt.read.and_then(|(server, _)| rt.account.as_ref().map(|a| Owner::of(server, a))), self.identity_epoch())
+            (rt.read.is_some() || rt.unknown, installed(&rt).map(|(_, owner)| owner), self.identity_epoch())
         };
         let mut login = self.vrchat_login.lock().unwrap();
         if read {
-            // The account thread installed what it read: from here on only what is installed counts.
+            // The account thread read it (or could not): from here on only what is installed counts.
             login.at_launch = None;
         }
         owner.or_else(|| login.at_launch.clone()).map(|owner| Stamp { epoch, owner })
@@ -230,9 +237,9 @@ impl Controller {
             return None;
         }
         let rt = self.account_runtime.lock().unwrap();
-        let (server, _) = rt.read?;
-        let account = rt.account.as_ref()?;
-        Some((Api::new(server), account.token.clone(), Stamp { epoch: self.identity_epoch(), owner: Owner::of(server, account) }))
+        let (server, owner) = installed(&rt)?;
+        let token = rt.account.as_ref()?.token.clone();
+        Some((Api::new(server), token, Stamp { epoch: self.identity_epoch(), owner }))
     }
 
     /// The VRChat session signed in and allowed for the Orbiters member now, and whose it is.

@@ -195,6 +195,8 @@ pub struct Controller {
     avatar_changed_at: Mutex<Option<Instant>>,
     /// The Orbiters account's credential and a sign-in in progress (controller/account.rs).
     account_runtime: Mutex<account::AccountRuntime>,
+    /// Whether the member has what the assistant does from an account (controller/assistant_access.rs).
+    assistant_access: Mutex<assistant_access::AssistantAccess>,
     /// `account_runtime`'s generation, readable under the snapshot's lock (controller/account.rs, C-7).
     account_generation: AtomicU64,
     /// The Orbiters identity's epoch, as `account_runtime` has it (controller/identity.rs): moved under its lock.
@@ -496,6 +498,7 @@ fn publish_log(line: &str) {
 
 mod account;
 pub mod assistant;
+mod assistant_access;
 mod around;
 mod booster;
 pub(crate) use booster::{dev_build as booster_dev_build, restore_at_sign_in as booster_restore_at_sign_in, store as booster_store};
@@ -595,6 +598,7 @@ impl Controller {
             hide: Mutex::new(hide_self::HideRuntime::with_journal((!cfg!(test)).then(hide_self::masks_journal))),
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
+            assistant_access: Mutex::default(),
             account_generation: AtomicU64::new(0),
             identity_epoch: AtomicU64::new(orbiters_n4n0::FIRST_EPOCH),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
@@ -2239,6 +2243,8 @@ impl Controller {
         if previous.development != settings.development {
             // The account thread reads the other server's account within half a second; the updates look there now.
             use_environment(settings.development);
+            // Signed out until it is, with nothing of the last one's credential left to send anywhere.
+            self.account_environment_changed();
             // What was read of worlds' feedback is the other environment's.
             self.world_feedback_environment_changed();
             self.update(|s| s.update.state = crate::state::UpdateState::Idle);

@@ -125,9 +125,13 @@ pub fn status_line(snap: &Snapshot) -> String {
         return tr("Assistant off: N4N0 is a tool without AI").into();
     }
     match &snap.account.state {
-        AccountState::Offline { .. } => return tr("Offline: N4N0 does the short commands it knows").into(),
+        AccountState::Offline { .. } if n4n0.signed_as != orbiters_n4n0::status::SignedAs::Unknown => return tr("Offline: N4N0 does the short commands it knows").into(),
+        AccountState::Offline { .. } => {}
         AccountState::SignedIn { .. } | AccountState::Checking { .. } => {}
         _ => return tr("Sign in to Orbiters (Settings) to talk to N4N0").into(),
+    }
+    if n4n0.signed_as == orbiters_n4n0::status::SignedAs::Unknown {
+        return tr("Signing in…").into();
     }
     match &n4n0.quota {
         Some(q) if q.own_key => tr("Answers on your own key").into(),
@@ -166,7 +170,8 @@ fn head(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, panel: Rect)
     if has_conversation(snap) {
         let new = Rect::from_min_size(pos2(right - 32.0, y - 16.0), vec2(32.0, 32.0));
         if IconButton::new(icons::PENCIL_SIMPLE, mark("New conversation")).size(32.0, 15.0).id_salt("chat-new").show_at(ui, new).clicked() {
-            ctl.n4n0(N4n0Command::NewConversation);
+            // The conversation the last frame showed, not one begun since.
+            ctl.n4n0(N4n0Command::NewConversation { conversation: Some(bar.shown.conversation), stamp: bar.stamp() });
             bar.log = false;
             bar.reveal = None;
             bar.focus = true;
@@ -190,6 +195,7 @@ fn head(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, panel: Rect)
 /// Why N4N0 cannot answer here, and the one thing that changes it.
 fn gated(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, g: Gate) {
     let (glyph, title, body, action) = match g {
+        Gate::SigningIn => (icons::SIGN_IN, tr("Signing in…"), tr("N4N0 answers as soon as Orbiters says who is signed in."), ""),
         Gate::SignedOut => (
             icons::SIGN_IN,
             tr("Sign in to Orbiters to talk to N4N0."),
@@ -207,6 +213,9 @@ fn gated(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, g: Gate) {
     let g2 = p.layout_job(Txt::new(body, 13.0).color(theme::FG_3).line_height(19.0).job(380.0f32.min(thread.width() - 64.0)));
     let body_rect = Rect::from_center_size(c + vec2(0.0, 12.0 + g2.size().y / 2.0), g2.size());
     p.galley(pos2(c.x - g2.size().x / 2.0, body_rect.top()), g2.clone(), theme::FG_3);
+    if action.is_empty() {
+        return;
+    }
     let b = Button::new(action).icon(glyph).variant(Variant::Primary).id_salt("chat-gate");
     let w = b.desired_width(ui);
     if b.show_at(ui, Rect::from_center_size(pos2(c.x, body_rect.bottom() + 32.0), vec2(w, 40.0))).clicked() {
@@ -435,7 +444,7 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
         let go = Button::new(tr("Approve on Orbiters")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt(id.with("approve"));
         let w = go.desired_width(ui);
         if go.confirm_at(ui, Rect::from_min_size(pos2(card.right() - 16.0 - w, foot), vec2(w, 34.0))) {
-            ctl.n4n0(N4n0Command::OpenLink { url: c.approve_url.clone() });
+            ctl.n4n0(N4n0Command::OpenLink { url: c.approve_url.clone(), stamp: bar.stamp() });
         }
     }
 }

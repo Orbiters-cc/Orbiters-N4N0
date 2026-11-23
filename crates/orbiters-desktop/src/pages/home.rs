@@ -1147,14 +1147,14 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             if ringing {
                 let answer = Button::new(tr("Answer")).icon(icons::PHONE).variant(Variant::Primary);
                 let w = answer.desired_width(ui);
-                if answer.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
+                if answer.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                     acts.push(Act::Press(Target::Answer));
                 }
                 x += w + 8.0;
             }
             let end = Button::new(if ringing { tr("Decline") } else { tr("Hang up") }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt("orbiters-home-hang-up");
             let w = end.desired_width(ui);
-            if end.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
+            if end.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                 acts.push(Act::Press(Target::HangUp));
             }
             ui.add_space(8.0);
@@ -1355,7 +1355,7 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                     if drop {
                         let hint = tr("Drop it in the world as a card: whoever grabs it copies the link");
                         let button = Button::new(tr("Drop")).icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
-                        if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
+                        if button.id_salt("orbiters-home-drop-playing").confirm(ui) {
                             acts.push(Act::Press(Target::DropPlaying));
                         }
                     }
@@ -1523,7 +1523,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let button = Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(ready);
         let bw = button.desired_width(ui);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-        if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))).clicked() {
+        if button.confirm_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))) {
             acts.push(Act::Press(Target::SuggestSend));
         }
     });
@@ -1682,7 +1682,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec
                 let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::FG_3);
                 widgets::text_truncated(p, pos2(r.left(), r.center().y + 11.0), Align2::LEFT_CENTER, &meta, room);
             }
-            if invite.show_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))).clicked() {
+            if invite.confirm_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))) {
                 acts.push(Act::Press(Target::InviteMe(i as u8)));
             }
         });
@@ -1753,6 +1753,8 @@ mod tests {
         age_ms: Mutex<u64>,
         /// By instance: what VRChat says of it and how long it takes to say it (verify-r21 Major 4: answers crossing).
         alive_by: Mutex<std::collections::HashMap<String, (Option<bool>, Duration)>>,
+        /// By address: the picture VRChat answers with (none: it fails) and how long it takes.
+        images: Mutex<std::collections::HashMap<String, (Option<Vec<u8>>, Duration)>>,
     }
 
     /// The instance VRChat makes in these tests.
@@ -1789,6 +1791,11 @@ mod tests {
                         }
                         None => Ok(Response::InstanceSeen { open: *self.alive.lock().unwrap(), age_ms }),
                     }
+                }
+                Request::Image { url } => {
+                    let (bytes, wait) = self.images.lock().unwrap().get(&url).cloned().unwrap_or((None, Duration::ZERO));
+                    std::thread::sleep(wait);
+                    bytes.map(Response::Image).ok_or_else(|| "not found".to_string())
                 }
                 _ => Err("not in tests".into()),
             }
@@ -3327,6 +3334,181 @@ mod tests {
         click(&mut h, "Play in VR");
         let sent = h.recorder.launcher.lock().unwrap().clone();
         assert!(matches!(sent.last(), Some(Action::As { account, action }) if *account == me && matches!(&**action, Action::PlayAt { destination, .. } if destination.instance_id == visit.instance)), "{sent:?}");
+    }
+
+    // --- REQUEST23, the owner: "the world thumbnail doesn't load": the place chosen has its world's picture. ---
+
+    /// A made-up picture address of VRChat's (each test its own: what was read is kept on disk by address).
+    #[cfg(not(target_os = "macos"))]
+    fn thumb_url(n: u32) -> String {
+        format!("https://api.vrchat.cloud/api/1/image/file_00000000-0000-4000-8000-{n:012}/1/256")
+    }
+
+    /// A made-up picture.
+    #[cfg(not(target_os = "macos"))]
+    fn png() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(16, 9, image::Rgba([40, 120, 200, 255])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pictures_asked(h: &Harness) -> Vec<String> {
+        h.recorder.asked.lock().unwrap().iter().filter(|a| a.starts_with("Image")).cloned().collect()
+    }
+
+    /// The friend `name` is in `world`, whose picture the friends list gives as `url`.
+    #[cfg(not(target_os = "macos"))]
+    fn puts_in(h: &mut Harness, name: &str, place: &orbiters_core::launcher::Place, world: u32, url: &str) -> orbiters_core::launcher::Place {
+        use orbiters_core::launcher::{Presence, Whereabouts};
+        let place = orbiters_core::launcher::Place { world_id: format!("wrld_00000000-0000-4000-8000-{world:012}"), world_picture: url.into(), ..place.clone() };
+        let mut data = (*h.state.launcher_mut().data).clone();
+        for f in data.friends.iter_mut().filter(|f| f.name == name) {
+            (f.presence, f.whereabouts) = (Presence::InGame, Whereabouts::World(place.clone()));
+        }
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        place
+    }
+
+    /// The friend's row under the pointer, its Select pressed (their profile, which reads their picture, not opened).
+    #[cfg(not(target_os = "macos"))]
+    fn select_on_row(h: &mut Harness, name: &str) {
+        for y in (60..760).step_by(12) {
+            for _ in 0..12 {
+                h.frame(vec![Event::PointerMoved(pos2(800.0, y as f32))]);
+            }
+            if orbiters_ui::widgets::control(&h.ctx, "Select").is_some_and(|(r, _)| r.left() > 721.0) {
+                return click(h, "Select");
+            }
+        }
+        panic!("no row shows Select ({name}'s is the first that can)");
+    }
+
+    /// Selecting a friend's instance asks VRChat whether it is open and for that one world's picture, once, at the address
+    /// the friends list already has; nothing before the press.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn selecting_a_friends_instance_asks_for_its_worlds_picture_once() {
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        let url = thumb_url(1);
+        let place = puts_in(&mut h, "Nova Sample", &place, 2001, &url);
+        h.recorder.images.lock().unwrap().insert(url.clone(), (Some(png()), Duration::from_millis(150)));
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        for _ in 0..30 {
+            h.frame(Vec::new());
+        }
+        assert!(pictures_asked(&h).is_empty(), "nothing before the press");
+        select_on_row(&mut h, "Nova Sample");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        let_pass(&mut h, 500);
+        assert_eq!(pictures_asked(&h), [format!("Image {{ url: {url:?} }}")]);
+        assert_eq!(h.recorder.asked.lock().unwrap().len(), 2, "that and whether it is open, nothing else: {:?}", h.recorder.asked.lock().unwrap());
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(format!("previous:{}:{}", place.world_id, place.instance_id).as_str()));
+    }
+
+    /// While its picture is read the chosen card has the loading placeholder, then the picture; one that cannot be had is
+    /// the usual card, and is not asked for again and again.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_chosen_cards_picture_loads_shows_or_falls_back() {
+        orbiters_ui::widgets::watch_controls();
+        for (n, bytes) in [(11, Some(png())), (12, None)] {
+            let (mut h, place, _) = friends_in_instances(false);
+            let url = thumb_url(n);
+            let place = puts_in(&mut h, "Nova Sample", &place, 2000 + n, &url);
+            let ends = if bytes.is_some() { "ready" } else { "none" };
+            h.recorder.images.lock().unwrap().insert(url, (bytes, Duration::from_millis(500)));
+            *h.recorder.alive.lock().unwrap() = Some(true);
+            select_on_row(&mut h, "Nova Sample");
+            let key = format!("previous:{}:{}", place.world_id, place.instance_id);
+            assert_eq!(h.state.launcher_mut().places.picture_of(&key), Some("loading"));
+            frames_until(&mut h, ends, |h| h.state.launcher_mut().places.picture_of(&key) == Some(ends));
+            let_pass(&mut h, 300);
+            assert_eq!(h.state.launcher_mut().places.picture_of(&key), Some(ends));
+            assert_eq!(pictures_asked(&h).len(), 1, "{:?}", pictures_asked(&h));
+            // Home chosen, its card still offered: what is here stays, nothing more is asked.
+            click(&mut h, "Home world");
+            let_pass(&mut h, 200);
+            assert_eq!(h.state.launcher_mut().places.picture_of(&key), Some(ends));
+            assert_eq!(pictures_asked(&h).len(), 1, "a card not chosen asks for nothing");
+        }
+    }
+
+    /// A choice replaced before its picture came: the picture is not the next choice's, and the next one asks for its own.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_late_picture_is_not_the_next_choices() {
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        let (a, b) = (thumb_url(21), thumb_url(22));
+        puts_in(&mut h, "Nova Sample", &place, 2021, &a);
+        h.recorder.images.lock().unwrap().insert(a.clone(), (Some(png()), Duration::from_millis(400)));
+        // The second one's fails: whatever it shows is not the first one's.
+        h.recorder.images.lock().unwrap().insert(b.clone(), (None, Duration::ZERO));
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        select_on_row(&mut h, "Nova Sample");
+        let place = puts_in(&mut h, "Nova Sample", &place, 2022, &b);
+        select_on_row(&mut h, "Nova Sample");
+        let key = format!("previous:{}:{}", place.world_id, place.instance_id);
+        frames_until(&mut h, "the next choice", |h| h.state.launcher_mut().places.chosen_key() == Some(key.as_str()));
+        let_pass(&mut h, 800);
+        assert_eq!(h.state.launcher_mut().places.picture_of(&key), Some("none"));
+        assert_eq!(pictures_asked(&h), [format!("Image {{ url: {a:?} }}"), format!("Image {{ url: {b:?} }}")], "each once");
+    }
+
+    /// The other cards: a previous instance picked has its world's picture, at the address a friend there brought (none
+    /// asked while the list is browsed); so have a place visited often and an invite once chosen, each asked once.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn every_kind_of_card_has_its_picture_once_chosen() {
+        use crate::pages::launcher::destinations::{Frequent, HistoryView};
+        use orbiters_core::launcher::InviteKind;
+        orbiters_ui::widgets::watch_controls();
+        // A previous instance: browsing asks for nothing, the pick for the open check and one picture.
+        let rows: Vec<_> = (0..6).map(|n| row_of(1000 + n, &format!("Quiet World {n}"))).collect();
+        let mut h = where_signed_in(rows.clone());
+        let friend_place = orbiters_core::launcher::Place { world_id: rows[0].world_id.clone(), world_name: "Quiet World 0".into(), world_picture: String::new(), instance_id: "9~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::Public, region: "eu".into() };
+        let url = thumb_url(31);
+        {
+            let mut data = (*h.state.launcher_mut().data).clone();
+            let f = data.friends.iter_mut().find(|f| f.name == "Nova Sample").unwrap();
+            f.whereabouts = orbiters_core::launcher::Whereabouts::World(orbiters_core::launcher::Place { world_picture: url.clone(), ..friend_place });
+            h.state.launcher_mut().set_data(Arc::new(data));
+        }
+        h.recorder.images.lock().unwrap().insert(url.clone(), (Some(png()), Duration::ZERO));
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Previous instances");
+        let_pass(&mut h, 150);
+        assert!(h.recorder.asked.lock().unwrap().is_empty(), "browsing sends nothing: {:?}", h.recorder.asked.lock().unwrap());
+        click(&mut h, "Quiet World 0");
+        frames_until(&mut h, "its picture", |h| h.state.launcher_mut().places.picture_of(&rows[0].key()) == Some("ready"));
+        let_pass(&mut h, 200);
+        assert_eq!((instance_checks(&h), pictures_asked(&h)), (1, vec![format!("Image {{ url: {url:?} }}")]));
+        assert_eq!(h.recorder.asked.lock().unwrap().len(), 2, "{:?}", h.recorder.asked.lock().unwrap());
+        // A place visited often, and an invite: their world's, once chosen.
+        let mut h = where_signed_in(Vec::new());
+        let mut data = (*h.state.launcher_mut().data).clone();
+        let invite = data.invites.iter().find(|i| i.kind == InviteKind::Invite).cloned().unwrap();
+        let invited = invite.place.clone().unwrap();
+        let (often, often_url, invite_url) = ("wrld_00000000-0000-4000-8000-000000002032", thumb_url(32), thumb_url(33));
+        let mut there = data.friends.iter_mut();
+        for (world, url) in [(often.to_string(), &often_url), (invited.world_id.clone(), &invite_url)] {
+            there.next().unwrap().whereabouts = orbiters_core::launcher::Whereabouts::World(orbiters_core::launcher::Place { world_id: world, world_picture: url.clone(), instance_id: "9~private(usr_x)~region(eu)".into(), ..invited.clone() });
+        }
+        h.state.launcher_mut().set_data(Arc::new(data));
+        let view = HistoryView { frequent: vec![Frequent { world_id: often.into(), name: "Lantern Garden".into(), visits: 5, score: 3.0, last: 0, picture: None }], last: None };
+        h.state.launcher_mut().places.stand_in(Some(view), Vec::new(), None, true);
+        h.settle();
+        assert!(pictures_asked(&h).is_empty(), "nothing before a choice: {:?}", pictures_asked(&h));
+        for (n, (name, key, url)) in [("Lantern Garden".to_string(), format!("often:{often}"), often_url), (invited.world_name.clone(), format!("invite:{}", invite.id), invite_url)].into_iter().enumerate() {
+            h.recorder.images.lock().unwrap().insert(url.clone(), (Some(png()), Duration::ZERO));
+            click(&mut h, &name);
+            frames_until(&mut h, &name, |h| h.state.launcher_mut().places.picture_of(&key) == Some("ready"));
+            let_pass(&mut h, 100);
+            assert_eq!(pictures_asked(&h).len(), n + 1, "{:?}", pictures_asked(&h));
+        }
     }
 
     /// REQUEST23: while VRChat's session is restored, Select holds the friend's instance (nothing chosen, nothing asked)

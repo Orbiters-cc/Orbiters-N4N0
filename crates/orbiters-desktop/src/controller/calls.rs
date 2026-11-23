@@ -817,7 +817,7 @@ fn idle_agent(connect: Duration, idle: Duration) -> ureq::Agent {
         }
     }
 
-    let config = ureq::Agent::config_builder().tls_config(orbiters_core::http_tls()).timeout_connect(Some(connect)).build();
+    let config = ureq::Agent::config_builder().middleware(orbiters_core::origin::guard).tls_config(orbiters_core::http_tls()).timeout_connect(Some(connect)).build();
     ureq::Agent::with_parts(config, DefaultConnector::new().chain(Idle(idle)), DefaultResolver::default())
 }
 

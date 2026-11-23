@@ -852,6 +852,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let backend: Ctl = Arc::new(Remote(client.clone()));
     crate::usage::forward(backend.clone());
     let mut startup_seen = backend.view().settings.startup.clone();
+    let mut settling = crate::backend::Settling::default();
     if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {
         client.send(&crate::ipc::ToService::PatchSettings { patch: serde_json::json!({"startup": startup}) });
     }
@@ -1013,6 +1014,8 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         was_visible = visible;
         let snap = backend.view();
+        // What is pressed this turn was pressed on pictures of the member shown before it.
+        backend.shown(settling.turn(snap.n4n0.account_epoch, Instant::now()), orbiters_n4n0::Surface::Overlay);
         if snap.settings.startup != startup_seen {
             startup_seen = snap.settings.startup.clone();
             if let Some(startup) = crate::startup::reconcile(&steamvr, &startup_seen) {

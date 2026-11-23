@@ -527,6 +527,11 @@ impl Infos {
         self.known.lock().unwrap()[e].get(id).cloned()
     }
 
+    /// The world's page when it was fetched already; asks for nothing.
+    pub fn known(&self, id: &str) -> Option<Info> {
+        self.known.lock().unwrap()[env_index(Server::current())].get(id).cloned()
+    }
+
     /// Fetches it again (after sharing something there).
     pub fn refresh(&mut self, id: &str) {
         let server = Server::current();
@@ -556,6 +561,9 @@ pub enum Picture {
     Session(PathBuf),
     /// A world's picture on VRChat (as Orbiters lists it): its thumbnail, or the full picture when `large`.
     Remote { world_id: String, url: String, large: bool },
+    /// The picture of the world VRChat will start in, at the address VRChat gave for it (a friend's place, an invite's):
+    /// read with the session of `scope`, at the size given, and kept on this computer as [`Picture::Remote`] is.
+    World { scope: crate::controller::vrchat_data::Scope, world_id: String, url: String },
     /// A world's thumbnail only if it is already kept on this computer: never fetched (verify-r21 Major 6).
     RemoteKept { world_id: String, url: String },
     /// An event's cover on Orbiters, read with the account's credential when signed in (members-only covers need it).
@@ -567,6 +575,14 @@ pub enum Picture {
     /// does not load (Discord's links expire) is renewed by Orbiters with the member's credential. `asset`: the asset
     /// whose showcase gallery it is in (0: a community gallery's), where its link is renewed.
     Gallery { development: bool, asset: u64, id: u64, url: String, large: bool },
+}
+
+/// Where a picture stands ([`Pictures::look`]).
+pub enum Look {
+    NotAsked,
+    Loading,
+    Ready(TextureHandle),
+    Missing,
 }
 
 enum Slot {
@@ -707,6 +723,8 @@ impl Pictures {
                                     .load(url, user.as_deref(), via, |old| deliver(Some(old), true), reply)
                                     .map(|image| Some(Some(image)))
                                     .unwrap_or(None)
+                            } else if let Picture::World { scope, world_id, url } = &picture {
+                                Some(world_picture(backend.as_ref(), scope, world_id, url))
                             } else {
                                 // The environment of the moment, for each picture (one chosen since the loader started is
                                 // the one asked; CORE2-13).
@@ -812,6 +830,25 @@ impl Pictures {
                 lock.lock().unwrap().push(picture.clone());
                 ready.notify_one();
                 None
+            }
+        }
+    }
+
+    /// Where `picture` stands, asking nothing.
+    pub fn look(&self, picture: &Picture) -> Look {
+        match self.slots.get(picture).map(|k| &k.slot) {
+            None => Look::NotAsked,
+            Some(Slot::Loading { .. }) => Look::Loading,
+            Some(Slot::Ready(t)) => Look::Ready(t.clone()),
+            Some(Slot::Missing { .. }) => Look::Missing,
+        }
+    }
+
+    /// One that could not be read is read again at its next ask, without its wait (the person asked for it anew).
+    pub fn again(&mut self, picture: &Picture) {
+        if let Some(Slot::Missing { since, tries }) = self.slots.get_mut(picture).map(|k| &mut k.slot) {
+            if *tries != NEVER {
+                (*since, *tries) = (f64::NEG_INFINITY, 0);
             }
         }
     }
@@ -1038,12 +1075,40 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             };
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
+        // (Read with a session, by the loader itself.)
+        Picture::World { world_id, url, .. } => kept_world(world_id, url),
         Picture::RemoteKept { world_id, url } => {
             let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
             let (w, h, rgba) = decode_image(&std::fs::read(&file).ok()?)?;
             Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
         }
     }
+}
+
+fn kept_world(world_id: &str, url: &str) -> Option<ColorImage> {
+    let (w, h, rgba) = decode_image(&std::fs::read(cache_dir().join("worlds").join(remote_file_name(world_id, url, false))).ok()?)?;
+    Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+}
+
+/// [`Picture::World`], on a loader thread: kept, or asked once of VRChat through the service (without a session, as any
+/// world's public picture) and kept.
+fn world_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controller::vrchat_data::Scope, world_id: &str, url: &str) -> Option<ColorImage> {
+    if let Some(kept) = kept_world(world_id, url) {
+        return Some(kept);
+    }
+    note_outbound(world_id);
+    let bytes = match backend.filter(|_| scope.signed_in()) {
+        Some(backend) => profile_fetch(backend, scope)(url).ok()?,
+        // Tests reach nothing but their own stand-in for the service.
+        None if cfg!(test) => return None,
+        None => public_api().0.image(url).ok()?,
+    };
+    let (w, h, rgba) = decode_image(&bytes)?;
+    let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
+    if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
+        let _ = orbiters_core::write_atomic(&file, &bytes);
+    }
+    Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
 }
 
 /// The file a world's picture read at `url` is kept in: by world and by address (another environment's picture, or the

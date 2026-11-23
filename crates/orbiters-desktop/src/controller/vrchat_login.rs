@@ -1403,11 +1403,11 @@ mod tests {
 
     /// The Orbiters member `id` named `name`, as the account thread installs it, shown as `state`.
     fn member(c: &Controller, server: Server, token: &str, id: &str, name: &str, state: AccountState) {
-        {
-            let mut rt = c.account_runtime.lock().unwrap();
+        c.install_account(|rt| {
             rt.read = Some((server, None));
             rt.account = Some(orbiters_core::account::Account { token: token.into(), user: Some(id.into()), username: Some(name.into()), avatar_url: None, features: None });
-        }
+            rt.unknown = false;
+        });
         c.update(|s| {
             s.account.state = state;
             s.account.development = Server::current() == Server::Development;
@@ -1676,7 +1676,7 @@ mod tests {
             let change = {
                 let dice = dice.clone();
                 move |c: &Shared| {
-                    let roll = dice.lock().unwrap().roll(8);
+                    let roll = dice.lock().unwrap().roll(10);
                     match roll {
                         0 | 1 => member(c, Server::current(), "fake", "1", "tester", signed("tester")),
                         2 => member(c, Server::current(), "another-token", "2", "tester", signed("tester")),
@@ -1684,6 +1684,9 @@ mod tests {
                         4 => member(c, other_server(), "fake", "1", "tester", signed("tester")),
                         5 => switching(c),
                         6 => c.update(|s| s.account.state = AccountState::SignedOut),
+                        // The account's file cannot be read: whose it is is unknown until it can.
+                        7 => c.install_account(|rt| rt.unknown = true),
+                        8 => c.account_environment_changed(),
                         _ => {}
                     }
                 }

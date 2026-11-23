@@ -1383,7 +1383,7 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
         }
         let mut bu = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(egui::Align::Center)));
         bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
-        if cx.windowed && Button::new(tr("Quit")).icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).show(&mut bu).clicked() {
+        if cx.windowed && Button::new(tr("Quit")).icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).confirm(&mut bu) {
             asked.quit = true;
         }
         if Button::new(tr("Worker log")).icon(icons::SCROLL).size(Size::Sm).show(&mut bu).clicked() {
@@ -1459,7 +1459,7 @@ fn updates(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
         match &u.state {
             UpdateState::Ready { .. } if u.restart_when_idle => {
-                if Button::new(tr("Restart now")).variant(Variant::Danger).size(Size::Sm).show(ui).clicked() {
+                if Button::new(tr("Restart now")).variant(Variant::Danger).size(Size::Sm).confirm(ui) {
                     ctl.updates(UpdateAction::Restart { now: true });
                 }
                 if Button::new(tr("Not after all")).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {

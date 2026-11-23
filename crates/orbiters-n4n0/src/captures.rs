@@ -3,6 +3,7 @@
 //! ([`crate::N4n0::set_captures`]); N4N0 reads the VRChat friends a capture goes to while a menu's Share to … shows. Every
 //! menu shows the same (the status' `captures` and `friends`, the screen's menu directly).
 
+use crate::fence::Fence;
 use crate::runtime::Shared;
 use crate::status::NoticeKind;
 use orbiters_n4n0_core::captures::{CapturesView, Friends, ShareAsk};
@@ -79,9 +80,17 @@ impl crate::N4n0 {
         });
     }
 
+    /// Lists the 3D captures again (a menu's History opened), on a thread.
+    pub(crate) fn captures_list(self: &Shared) {
+        let n = self.clone();
+        std::thread::spawn(move || n.host.captures_list());
+    }
+}
+
+impl Fence<'_> {
     /// Shares a 3D capture as a menu asked (on a thread: the app may read its files first); how it goes comes back with
     /// [`crate::N4n0::set_captures`].
-    pub(crate) fn share_capture(self: &Shared, ask: ShareAsk) {
+    pub(crate) fn share_capture(&self, ask: ShareAsk) {
         let later = self.later();
         std::thread::spawn(move || {
             let Some(fence) = later.fence() else { return };
@@ -89,11 +98,5 @@ impl crate::N4n0 {
                 fence.notify(NoticeKind::Warning, e);
             }
         });
-    }
-
-    /// Lists the 3D captures again (a menu's History opened), on a thread.
-    pub(crate) fn captures_list(self: &Shared) {
-        let n = self.clone();
-        std::thread::spawn(move || n.host.captures_list());
     }
 }

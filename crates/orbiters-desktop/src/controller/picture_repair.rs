@@ -44,8 +44,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(|list| list.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim().parse::<u64>()).collect::<Result<_, _>>())
         .transpose()?;
-    let (api, token) = super::shares::api(server)?;
-    let records: Vec<(PathBuf, Item)> = super::shares::uploads(server);
+    let whose = super::shares::Whose::saved(server)?;
+    let records: Vec<(PathBuf, Item)> = whose.uploads();
+    let (api, token) = whose.api();
     let sessions = orbiters_core::settings::Settings::load().sessions_dir;
     let items = match &ids {
         Some(ids) => ids.iter().map(|id| api.capture_item(&token, Kind::Capture, *id).map_err(|e| (*id, e))).collect::<Vec<_>>(),

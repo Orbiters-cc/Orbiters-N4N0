@@ -103,6 +103,8 @@ pub struct Facts {
     pub n4n0_prop: bool,
     pub can_drop: bool,
     pub computer: bool,
+    /// What is sent from an account may be done by the assistant (`orbiters_core::features::N4N0_ASSISTANT_ACTIONS`).
+    pub actions: bool,
 }
 
 impl Facts {
@@ -718,6 +720,21 @@ pub const CATALOGUE: &[Spec] = &[
 ];
 
 impl Intent {
+    /// The page where the person does what is sent from their account themselves.
+    pub fn instead(&self) -> Page {
+        match self {
+            Intent::ShareCapture { .. } => Page::AppCaptures,
+            Intent::YoutubeDrop { .. } => Page::Youtube,
+            Intent::HistoryDrop { .. } => Page::VideoHistory,
+            Intent::WorldLike { .. } | Intent::WorldComment { .. } | Intent::WorldLabel { .. } | Intent::GoToWorld { .. } => Page::Worlds,
+            Intent::InviteMe { .. } | Intent::GoToInstance { .. } => Page::Instances,
+            Intent::Call { .. } | Intent::AnswerCall => Page::Calls,
+            Intent::Suggest { .. } => Page::Suggest,
+            // Home: Play, friends, invites and the person's own card.
+            _ => Page::AppHome,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Intent::FastWalk { .. } => "fast_walk",
@@ -1149,8 +1166,13 @@ fn parse_in(group: Group, input: &Value) -> Result<Intent, String> {
 }
 
 /// The catalogue's client tools, for a turn's `tools` (beside [`crate::tools::specs`]).
-pub fn specs() -> Vec<Value> {
-    Group::ALL.into_iter().map(model::tool).collect()
+pub fn specs(actions: bool) -> Vec<Value> {
+    Group::ALL.into_iter().filter_map(|g| model::tool(g, actions)).collect()
+}
+
+/// Whether an intent is offered to the model: what is sent from an account ([`Risk::Confirm`]) only with `actions`.
+pub fn offered(spec: &Spec, actions: bool) -> bool {
+    actions || spec.risk != Risk::Confirm
 }
 
 // --- The gate. ---
@@ -1163,12 +1185,17 @@ pub enum Gate {
     Confirm,
     /// Not by voice: the page to offer (on the person's yes).
     Offer(Page),
+    /// Not from this account ([`Facts::actions`]): the page where the person does it themselves opens, at once.
+    Instead(Page),
     /// Not now: why, for the model.
     Refuse(String),
 }
 
 /// Whether `intent` runs now (`facts`: what the app can do; `tainted`: the turn read text other people wrote).
 pub fn gate(intent: &Intent, facts: &Facts, tainted: bool) -> Gate {
+    if intent.spec().risk == Risk::Confirm && !facts.actions {
+        return Gate::Instead(intent.instead());
+    }
     if let Some(need) = facts.lacks(intent) {
         return Gate::Refuse(need.missing().into());
     }

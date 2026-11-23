@@ -250,7 +250,7 @@ impl Export {
                 .id_salt("export-discard");
             let bw = b.desired_width(ui);
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-            if widgets::activated(&b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
+            if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(r.min, vec2(bw, 32.0)))) {
                 self.discard(&ctx);
             }
         }

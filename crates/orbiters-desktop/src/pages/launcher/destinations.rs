@@ -604,6 +604,11 @@ pub struct Places {
     infos: Option<crate::worlds::Infos>,
     /// Pictures of the page: what is handed in instead of being read.
     staged: Option<Staged>,
+    /// Pictures of the page: the picture of the place chosen is still being read.
+    stand_in_loading: bool,
+    /// How each card's picture was last drawn (tests).
+    #[cfg(test)]
+    shown: HashMap<String, &'static str>,
     /// Every previous instance, in a sheet over Home (REQUEST21 7), and the one chosen there.
     pub previous: super::previous::Previous,
 }
@@ -624,6 +629,17 @@ impl Places {
         let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
         *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
+    }
+
+    /// Pictures of the page: the picture of the place chosen is still being read.
+    pub fn stand_in_picture_loading(&mut self) {
+        self.stand_in_loading = true;
+    }
+
+    /// How the card `key`'s picture was last drawn: "ready", "loading" or "none" (tests).
+    #[cfg(test)]
+    pub fn picture_of(&self, key: &str) -> Option<&'static str> {
+        self.shown.get(key).copied()
     }
 
     /// Pictures of the page: the card `key` chosen.
@@ -1087,10 +1103,24 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
     widgets::frame(&p, rect, RADIUS, fill);
     let pic = Rect::from_min_size(rect.min, vec2(rect.width(), pic_h));
     let radii = [RADIUS, RADIUS, 0.0, 0.0];
-    match picture(state, card) {
-        Some(t) => paint::squircle_texture(&p, pic, radii, t.id(), cover_uv(t.size_vec2(), pic.size()), Color32::WHITE),
-        None => {
-            // No picture (yet, or none): the name's colour as a soft wash, and what the card is.
+    let shown = picture(state, card);
+    #[cfg(test)]
+    state.places.shown.insert(card.key.clone(), match &shown {
+        Shown::Ready(_) => "ready",
+        Shown::Loading => "loading",
+        Shown::None => "none",
+    });
+    match shown {
+        Shown::Ready(t) => paint::squircle_texture(&p, pic, radii, t.id(), cover_uv(t.size_vec2(), pic.size()), Color32::WHITE),
+        Shown::Loading => {
+            // Square below, as a picture is: the placeholder's lower corners are past the edge.
+            let clip = p.clip_rect().intersect(pic);
+            orbiters_ui::feedback::shimmer(&p.with_clip_rect(clip), Rect::from_min_max(pic.min, pic.max + vec2(0.0, RADIUS * 2.0)), RADIUS);
+            // The sweep is faint on a card: the spinner says it is on its way.
+            orbiters_ui::feedback::spinner(&p, pic.center(), 11.0, 2.2, theme::FG_3);
+        }
+        Shown::None => {
+            // No picture: the name's colour as a soft wash, and what the card is.
             let c = if card.go == Go::Home { theme::ACCENT } else { widgets::name_color(&card.name) };
             let points = paint::squircle_points(pic, theme::squircle(RADIUS));
             paint::fill_convex(&p, &points, |at| {
@@ -1205,25 +1235,173 @@ fn kind_pill(ui: &mut Ui, state: &mut State, pic: Rect, card: &Suggestion, kind:
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Who can join the new instance"));
 }
 
-/// A card's picture: the one its source gave (an invite's world through the launcher's pictures), else its world's on
-/// the Map explorer (Orbiters' public pages, kept on this computer).
-fn picture(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> {
-    if let Some(url) = &card.picture {
-        if let Some(t) = state.pictures.get(url) {
-            return Some(t.clone());
-        }
-        if url.starts_with("https://") && matches!(card.reason, Reason::Invite { .. }) {
-            return state.picture(url);
-        }
+/// A card's picture.
+enum Shown {
+    Ready(egui::TextureHandle),
+    /// Being read: the app's loading placeholder.
+    Loading,
+    /// None (it could not be had): the name's colour and what the card is.
+    None,
+}
+
+/// A card's picture. The place chosen has its world's, whatever card it is of: what is on this computer, else asked for
+/// once ([`chosen_picture`]). A card that is not chosen shows what its source always did: an invite's (the launcher's own
+/// pictures), an event's cover, its world's on the Map explorer (Orbiters' public pages, kept on this computer); a
+/// previous instance's or a friend's, chosen before, only what is here already.
+fn picture(state: &mut State, card: &Suggestion) -> Shown {
+    if let Some(t) = card.picture.as_ref().and_then(|url| state.pictures.get(url)) {
+        return Shown::Ready(t.clone());
     }
-    // A friend's instance (REQUEST23): the picture its row already shows, or one kept on this computer; never fetched.
-    if matches!(card.reason, Reason::Friend { .. }) {
-        return super::previous::kept_world_picture(state, &card.world_id);
+    if card.go != Go::Home && state.places.desk.is_chosen(&card.key) {
+        return chosen_picture(state, card);
     }
-    match &card.picture {
-        Some(url) if url.starts_with("https://") => remote_picture(state, &card.world_id, url.clone()),
+    here(state, card).or_else(|| sourced(state, card)).map_or(Shown::None, Shown::Ready)
+}
+
+/// What a card's own source gives, asked as it always was; nothing for a previous instance or a friend's.
+fn sourced(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> {
+    match (&card.reason, &card.picture) {
+        (Reason::Home | Reason::Previous { .. } | Reason::Friend { .. }, _) => None,
+        (Reason::Invite { .. }, Some(url)) if url.starts_with("https://") => {
+            let url = url.clone();
+            state.picture(&url)
+        }
+        (_, Some(url)) if url.starts_with("https://") => remote_picture(state, &card.world_id, url.clone()),
         _ => world_picture(state, &card.world_id),
     }
+}
+
+/// The address of the world's picture the app holds already: the card's own (a friend's place, an invite's), else one a
+/// friend or an invite in that world brought.
+fn held_url(state: &State, card: &Suggestion) -> Option<String> {
+    use orbiters_core::launcher::Whereabouts;
+    if card.world_id.is_empty() || matches!(card.reason, Reason::Event { .. }) {
+        return None;
+    }
+    let places = state
+        .data
+        .friends
+        .iter()
+        .filter_map(|f| match &f.whereabouts {
+            Whereabouts::World(p) => Some(p),
+            _ => None,
+        })
+        .chain(state.data.invites.iter().filter_map(|i| i.place.as_ref()));
+    let given = card.picture.clone().filter(|u| u.starts_with("https://"));
+    // A list that is no longer the account's says nothing.
+    given.or_else(|| (!state.stale()).then(|| places.filter(|p| p.world_id == card.world_id).map(|p| p.world_picture.clone()).find(|u| u.starts_with("https://"))).flatten())
+}
+
+/// The card's picture when it is here already: read before, or kept on this computer. Nothing is asked.
+fn here(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> {
+    use crate::worlds::{Look, Picture};
+    if !matches!(card.reason, Reason::Previous { .. } | Reason::Friend { .. }) {
+        return None;
+    }
+    if let (Some(url), Some(scope), false) = (held_url(state, card), state.scope.clone(), state.places.desk.is_quiet()) {
+        let ctx = state.ctx.clone()?;
+        let loader = state.loader.as_mut()?;
+        if let Look::Ready(t) = loader.look(&Picture::World { scope, world_id: card.world_id.clone(), url: url.clone() }) {
+            return Some(t);
+        }
+        if let Some(t) = loader.get(&ctx, &Picture::RemoteKept { world_id: card.world_id.clone(), url }) {
+            return Some(t);
+        }
+    }
+    // By its page on the Map explorer: read in this run, or kept on this computer.
+    let page = state.places.infos.as_ref().and_then(|i| i.known(&card.world_id)).and_then(|info| page_url(&info));
+    if let (Some(url), Some(loader)) = (page, state.loader.as_ref()) {
+        if let Look::Ready(t) = loader.look(&Picture::Remote { world_id: card.world_id.clone(), url, large: false }) {
+            return Some(t);
+        }
+    }
+    super::previous::kept_world_picture(state, &card.world_id)
+}
+
+/// The picture a world's page gives.
+fn page_url(info: &crate::worlds::Info) -> Option<String> {
+    match info {
+        crate::worlds::Info::Listed(page) => page.world.thumbnail_url.clone().or(page.world.image_url.clone()).filter(|u| u.starts_with("https://")),
+        _ => None,
+    }
+}
+
+/// The picture of the place chosen: the one read already, else asked for once under this choice: at the address the app
+/// holds ([`held_url`]), and only without one through the Map explorer's page of that world. What is here meanwhile shows
+/// (a friend's profile's small one), else the loading placeholder; what could not be had is the usual card.
+fn chosen_picture(state: &mut State, card: &Suggestion) -> Shown {
+    use crate::worlds::{Look, Picture};
+    if state.places.stand_in_loading {
+        return Shown::Loading;
+    }
+    if state.places.desk.is_quiet() {
+        return here(state, card).or_else(|| sourced(state, card)).map_or(Shown::None, Shown::Ready);
+    }
+    // What a card that asks by itself has got already stays as it is.
+    let had = if matches!(card.reason, Reason::Invite { .. }) { None } else { sourced(state, card) };
+    if let Some(t) = had {
+        return Shown::Ready(t);
+    }
+    let (Some(ctx), Some(scope)) = (state.ctx.clone(), state.scope.clone()) else { return Shown::None };
+    // A place of this computer's history, or an event, has its own on its way: not asked for twice.
+    if !matches!(card.reason, Reason::Previous { .. } | Reason::Friend { .. } | Reason::Invite { .. }) && page_loading(state, card) {
+        return Shown::Loading;
+    }
+    let Some(url) = held_url(state, card) else {
+        // No address: the world's page on the Map explorer, then its picture (a previous instance's; the others asked).
+        if matches!(card.reason, Reason::Previous { .. } | Reason::Friend { .. }) {
+            if let Some(t) = here(state, card).or_else(|| world_picture(state, &card.world_id)) {
+                return Shown::Ready(t);
+            }
+        }
+        return if page_loading(state, card) { Shown::Loading } else { Shown::None };
+    };
+    // The same picture at the small size the launcher keeps, when its profile or its invite showed it.
+    let small = {
+        let user = state.owner_of(&url);
+        state.loader.as_ref().and_then(|l| match l.look(&Picture::Profile { scope: scope.clone(), url: url.clone(), user }) {
+            Look::Ready(t) => Some(t),
+            _ => None,
+        })
+    };
+    let small = small.or_else(|| here(state, card));
+    let wanted = Picture::World { scope, world_id: card.world_id.clone(), url: url.clone() };
+    let first = state.places.desk.may_ask_picture(&card.key, &url);
+    let Some(loader) = state.loader.as_mut() else { return Shown::None };
+    let look = loader.look(&wanted);
+    let instead = |state| match small {
+        Some(t) => Shown::Ready(t),
+        None => state,
+    };
+    if matches!(look, Look::Missing) {
+        if !first {
+            return instead(Shown::None);
+        }
+        loader.again(&wanted);
+    }
+    match loader.get(&ctx, &wanted) {
+        Some(t) => Shown::Ready(t),
+        None => instead(Shown::Loading),
+    }
+}
+
+/// Whether the Map explorer's page of the world, or the picture it gives, is being read.
+fn page_loading(state: &mut State, card: &Suggestion) -> bool {
+    use crate::worlds::{Look, Picture};
+    if state.places.staged.is_some() || cfg!(test) || card.world_id.is_empty() {
+        return false;
+    }
+    let own = card.picture.clone().filter(|u| u.starts_with("https://") && matches!(card.reason, Reason::Event { .. }));
+    let url = match own {
+        Some(url) => Some(url),
+        None => match state.places.infos.as_mut().map(|i| i.get(&card.world_id)) {
+            None => return false,
+            Some(None) => return true,
+            Some(Some(info)) => page_url(&info),
+        },
+    };
+    let picture = url.map(|url| Picture::Remote { world_id: card.world_id.clone(), url, large: false });
+    picture.is_some_and(|p| state.loader.as_ref().is_some_and(|l| matches!(l.look(&p), Look::Loading)))
 }
 
 /// A world's own picture on the Map explorer (Orbiters' public pages, kept on this computer): Where's cards' and the
@@ -1234,10 +1412,7 @@ pub(super) fn world_picture(state: &mut State, world_id: &str) -> Option<egui::T
     }
     let ctx = state.ctx.clone()?;
     let infos = state.places.infos.get_or_insert_with(|| crate::worlds::Infos::new(&ctx));
-    let url = match infos.get(world_id)? {
-        crate::worlds::Info::Listed(page) => page.world.thumbnail_url.clone().or(page.world.image_url.clone()).filter(|u| u.starts_with("https://"))?,
-        _ => return None,
-    };
+    let url = page_url(&infos.get(world_id)?)?;
     remote_picture(state, world_id, url)
 }
 

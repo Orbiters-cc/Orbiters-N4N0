@@ -459,6 +459,11 @@ impl TextSender {
         self.current.is_some() || !self.queue.is_empty()
     }
 
+    /// Whether the text shown last stands whole on the panel: its last page is up, every block of it sent.
+    pub fn delivered(&self) -> bool {
+        self.current.is_some() && self.queue.is_empty() && self.arriving.is_none() && self.visible && self.phase.is_none() && self.complete_at.is_some()
+    }
+
     /// Pages left after the one on display.
     pub fn pages_waiting(&self) -> usize {
         self.queue.len()

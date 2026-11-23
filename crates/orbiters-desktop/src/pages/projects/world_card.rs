@@ -300,7 +300,7 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
             }
         } else {
             let b = capture_b.enabled(captures.len() == 1 && !sending_preview).hint(hint).id_salt(("world-capture", &w.id));
-            if widgets::activated(&b.show_at(&mut bu, r)) {
+            if widgets::pressed_fresh(&b.show_at(&mut bu, r)) {
                 share = captures.first().map(|c| c.dir.clone());
             }
         }
@@ -320,11 +320,13 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
         let enabled = !picking && !sending_pictures;
         if widgets::activated(&pictures_b.enabled(enabled).hint(&pictures_hint).id_salt(("world-pictures", &w.id)).show_at(&mut bu, r)) {
             let folder = here.and_then(|h| h.folder.clone());
+            state.pick_for = cx.ctl.shown_epoch();
             pick(state, &ctx, w, name, move || folder.or_else(|| orbiters_core::visited::screenshot_dirs().into_iter().next()), tr("Pictures of this world from VRChat"));
         }
         let r = at(2);
         if widgets::activated(&files_b.enabled(enabled).hint(tr("Pick pictures of this world from anywhere on the computer")).id_salt(("world-files", &w.id)).show_at(&mut bu, r)) {
             let pictures = || std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join("Pictures")).filter(|p| p.is_dir());
+            state.pick_for = cx.ctl.shown_epoch();
             pick(state, &ctx, w, name, pictures, tr("Pictures of this world"));
         }
     }

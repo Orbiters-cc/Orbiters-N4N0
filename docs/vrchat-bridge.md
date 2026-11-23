@@ -199,16 +199,35 @@ How it is one verified game (`controller/bridge_mac.rs`):
 
 - **Start.** Through the very start Home's Play uses (`obelisk_cli::Play` in `MacMachine`): one start at a time, and **none within
   80 s of a start that ended early** (`start_wait` with `retry_after_s`; Home says the same). The wait is the longest of three: the
-  exit this run saw (a monotonic clock, at once), a deadline kept on the clock since the Mac booted (`obelisk-start-gate.json` in the
-  settings folder: a restart of N4N0 keeps it, a wall clock set forward does not shorten it, a reboot ends it), and the engine's
-  own session records (`SteamSessions/<id>.v2.json`: ended under 150 s or with 0 frames shown). Records that cannot be read are no
-  "nothing ended early": the start is refused until they can. A program that ends without saying how the game did is asked of the
-  engine's record of its session, and without one counts as an early end. `go_to_world` asks the gate **before** VRChat's API is
-  asked for an instance (`Game::admit_start`: a start of Home's under way, or the wait with no game of the bridge's to close, makes
-  nothing); for the next world it closes its own game, then waits in the same call (at most 100 s) for that end to be finalized
-  and any wait after it, and starts the same instance. Each start has a launch id; its outcome (its Game session, the engine's
-  launcher, how it ended) is kept by that id for whoever made it, and Home's toast is told its own launch's failure once, never the
-  bridge's. The bridge starts nothing with an obelisk-cli older than 0.1.5 (it needs the record's `shown`, below).
+  exit this run saw (a monotonic clock, at once), a deadline kept on the boot clock (`obelisk-start-gate.json` in the settings
+  folder, version 2: `kern.bootsessionuuid` and the seconds since that boot, sleep counted; a restart of N4N0 keeps it, a wall clock
+  set either way does not move it, a reboot ends it; read once per run and written through; a deadline further than 81 s ahead is
+  taken as one written now, once; a file that cannot be read or is not one holds starts 80 s from first sight, once, then is
+  written again), and the engine's own session records (`SteamSessions/<id>.v2.json`: ended under 150 s, or with 0 frames shown
+  within 10 minutes; on the boot clock when the record says `played.ended`, obelisk-cli 0.1.6, else by when it was written).
+  **A record that cannot be read** (`obelisk::scan_records`: unreadable, not JSON, `{}`, another id than its name, open to others,
+  another owner) is never "nothing" and never a lock for ever: it holds starts 80 s from when it was first seen unchanged (by
+  device, inode, length, change time; kept in the gate file per boot), after which it is history and holds nothing, unless it is
+  the pointer to the current session or the record it names, which the engine itself stops at. Home names the file under its Play
+  button (the whole path on hover) and offers **Set aside** once it is history: `Play::set_aside` moves it into `<library>/Set
+  aside/` (never deletes it), only with no game of N4N0's attached, no engine process running from the library, the engine's own
+  `owner.lock` held for the move, and the file unchanged since it was judged. A records folder that cannot be listed holds starts
+  and Home names it. A program that ends without saying how the game did is asked of the engine's record of its session; a record
+  still running then is read again at each look until it ends (`Play::reconcile`); without one the start failed, with the
+  program's exit status.
+  **One owner per launch** (`Play::own`): the program's output read through a reader it can end (poll, a quarter second), the
+  program waited for, and the launch over only once the program is gone (its output closing while it lives ends nothing; a child
+  that keeps the output and speaks later changes nothing of the next launch: only the current launch sets what runs, or the wait).
+  Untold failures are kept apart from the launches (32), so later starts never push Home's out, and Home keeps every start of its
+  own until told.
+  `go_to_world` **reserves** the start before VRChat's API is asked for an instance (`Game::admit_start`, `Play::reserve`: Home's
+  Play is `Busy` meanwhile, at most 150 s; the program's version is checked there too), gives it back on any failure
+  (`Game::release_start`), and right before it closes its own game for the next world checks again for the person, a Stop and
+  the client. It then waits in the same call at most 20 s for that end to be finalized and any wait after it; past that it answers
+  `start_wait` with `retry_after_s`, and the instance already made is **kept** (`Run::kept`, 15 minutes) with any failure before
+  the launch (a `close_timeout`, a refused start): the next `go_to_world` to the same world and region resumes it instead of making
+  another. Each start has a launch id; its outcome is kept by that id for whoever made it. The bridge starts nothing with an
+  obelisk-cli older than 0.1.5 (it needs the record's `shown`, below).
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
 - **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose
@@ -217,26 +236,34 @@ How it is one verified game (`controller/bridge_mac.rs`):
   after the launch whose own `Arg:` lines hold the instance's launch link. Any of them changing ends the association; a window is
   checked again to be that `wsd`'s right before it is captured. A VRChat started from Home, or found after a
   restart of the service, is the person's: `get_state` says it runs, and nothing of it is read, looked at or closed.
-- **Its log** (held to be the same file, by device and inode, never shorter: replaced, cut or gone, what it said is forgotten, the
-  place with it, and a screenshot is refused until the game is back in its private instance): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
+- **Its log** (held to be the same file, by device and inode, never shorter, and the follower itself holds the file it opened
+  first, `LogWatcher::held`, which must be the one whose arguments were verified: replaced, cut, unreadable or gone, the follower is
+  lost for good, what it said is forgotten, the place with it, and a screenshot is refused): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
   Mac still follow the VRChat on the network: they are not changed by this.
-- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and its frames growing**:
-  the frames shown, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s), or
-  the presents its window server logs (`neptune unixlib wsi (wsd): <n> presents`, about every 3 s). A covered window or a locked
-  screen shows nothing while the game still presents (measured 23:54: presents on, shown events stuck), so only both stalled for
-  15 s is a frozen game: `get_state`'s `vrchat.renderer_lost` true and `screenshot` answers `renderer_lost`. The engine's log of
+- **Arrival** is the local player in this launch's own destination (the world and instance of its launch link exactly) after the
+  last `Joining` line (`WorldState::arrived`: never between the join and VRChat's "is local" line, the loading and spawning of
+  01:06:33 to 01:07:02), in its own held log, **while the game draws** (renderer evidence): its window on screen **and its frames
+  growing** from one count of this launch to a larger one (a first count, even 0, or a backlog's, proves nothing): the frames
+  shown, from its own Game session's record (`shown`, obelisk-cli 0.1.5), or the presents its window server logs
+  (`neptune unixlib wsi (wsd): <n> presents`, about every 3 s). Each arrival is numbered (`Seen::arrival`); a screenshot is taken
+  only under one and given only if the same one, instance and game still hold when the picture is back. Frames that stop (a
+  covered window, a locked screen, a long load) only withhold the arrival: that is no loss. `renderer_lost` is only the engine's
+  own word. The engine's log of
   this start (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start) is held open once found and read whole, in
   order: its graphics server dropping the game (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) says the same. Before arrival either ends the
   start with `start_crashed`, as does a start the program says ended early (also after its launcher was seen).
 - **Window:** the engine's window server (`wsd`, the launcher's own child) owns the game's window; the largest shown one is the game's
-  (never its 400 x 225 splash or the crash box). Coordinates: the game renders 1280 x 720 backing pixels, 640 x 360 points at scale 2,
-  under a 32-point title bar; `window_width`/`window_height` are the content's pixels (the scale is the display mode's of the display
+  (never its 400 x 225 splash or the crash box), and only that exact window is ever captured or counted in front. The session's
+  record is read again at most every 0.7 s while the game is followed (an ended session owns nothing). Coordinates: the game
+  renders 1280 x 720 backing pixels, 640 x 360 points at scale 2, under a 32-point title bar (none when the window covers its
+  whole display, borderless or full screen; the display is the one the window covers most of); `window_width`/`window_height` are the content's pixels (the scale is the display mode's of the display
   the window is on: pixel width over point width, 2940 / 1470 here; `CGDisplayPixelsWide` counts points), the screenshot is that
   content alone (title bar cut), and `scale` maps the JPEG to it. In front means that exact window is the frontmost one. The bridge never resizes the window or brings it forward on a Mac (no input needs it).
 - **Screenshots** are the window alone through macOS's `screencapture -l <window id>` (ScreenCaptureKit's single-window capture: the
-  window even when covered, never the desktop), into a folder of each call's own, refused unless the tool succeeded, ended after
-  10 s; only once the game arrived in its private instance (`not_in_world` between worlds, `caps.screenshot_needs_arrival`). macOS asks **Screen Recording** of the process that captures, the tray service of
+  window even when covered, never the desktop), into a folder of each call's own (removed however the call ends), refused unless
+  the tool succeeded, ended after 10 s (a kill that fails never waits without end), and kept only if the window is still that
+  game's when it is back; only once the game arrived in its private instance (`not_in_world` between worlds, `caps.screenshot_needs_arrival`). macOS asks **Screen Recording** of the process that captures, the tray service of
   Orbiters - N4N0: without it `screenshot` answers `screen_recording_not_allowed`, and Settings' bridge section shows **Allow screen
   recording**, which asks macOS from that process and opens System Settings, Privacy & Security, Screen Recording, where the person
   switches Orbiters - N4N0 on and reopens it. While the Mac's screen is locked macOS shows no frame of the game (the window counts
@@ -251,18 +278,36 @@ How it is one verified game (`controller/bridge_mac.rs`):
   last event at `now - idle` (`person::IdleClock`): a mouse that never stops is heard at every sample, and a listener started while
   the person is at the computer hears them at once. No hotkey on a Mac:
   Settings' Pause and Stop.
-- **Arguments** are held to the Mac's own tool list before anything else (`tools::schema_refusal`): an argument it does not name,
-  of another type, outside its enum or minimum is `bad_arguments`; `wait_for` waits only for what a Mac's game reports (not
+- **Arguments** are held to the computer's own tool list before anything else, **on Windows too** (`tools::schema_refusal`, one
+  validator over the schema: type, enum, least and most, length, pattern, items and their own properties, unique items; a null
+  only where the schema says null; `"arguments": null` is refused and no arguments at all is `{}`; every keyword any schema uses is
+  one it checks, `tools::CHECKED_KEYWORDS`, tested on both computers' lists): any other is `bad_arguments`; `wait_for` waits only for what a Mac's game reports (not
   `signed_in`, not `picture_saved`); a Unity tool's `session` (a capture's folder) stays. The resource and prompt metadata promise
   no 3D pictures. `list_sessions` reads the engine's roster (`MacOpener`: one VRChat, no Easy Anti-Cheat service, no side session).
-- **Keys:** a keys file that cannot be read is not "no keys": no new token replaces it, the bridge stays closed until it can be read,
-  and agents are registered with the open listener's own token (also on Windows, where DPAPI may refuse).
-- **Agents:** Claude Code and Codex are found on the person's own search path (asked once of their login shell, at most 5 s, which
-  also says `CODEX_HOME`; then the usual places of Homebrew, npm and the installers), and run with it (their scripts need `node`). Codex's settings file is written readable
+- **Keys:** a keys file that cannot be read is not "no keys": no new token replaces it by itself, the bridge stays closed until it
+  can be read, and agents are registered with the open listener's own token (also on Windows, where DPAPI may refuse). Settings
+  then offers **Reset the token** (`Command::ResetToken`, shared code): the unreadable file kept aside
+  (`vrchat-bridge.dat.unreadable-<s>`), new keys saved, the registered agents repaired. Every first creation of the keys is made
+  under one lock, so the listener's start and an agent's registration never make two tokens.
+- **Agents:** Claude Code and Codex are found on the person's own search path (asked once of their login shell, at most 5 s for all
+  of it, a process its profile leaves holding the output never waited for, which also says `CODEX_HOME`, the same one for the file
+  edited and every `codex` run; then the usual places of Homebrew, npm and the installers), and run with it (their scripts need `node`). Codex's settings file is written readable
   by this user only from its first byte.
 - **Disks** in `get_state` are grouped by real volume (a mount point), and the Unity tools take only folders on volumes macOS calls
-  local (`statfs`'s `MNT_LOCAL`), never a network share: told from the mount table first (`getmntinfo` without waiting), before the
-  path itself is touched, so a share that stopped answering holds nothing.
+  local (`MNT_LOCAL`, and not `smbfs`, `nfs`, `afpfs`, `webdav`, `autofs`, `ftp`, `cifs`), never a network share: the mount table is
+  read into each call's own buffer (`getfsstat`, thread-safe, without waiting), and the path is resolved part by part, links
+  followed, each part checked against that table before it is looked at (`projects::resolve_locally`), so a share that stopped
+  answering, or a local link into one, holds nothing.
+- **Incidents** (`controller/incident.rs`): while N4N0 runs it follows whatever session the engine runs (its pointer and record,
+  every 5 s), Home's, the bridge's or one started from a terminal. When frames, the engine's log and VRChat's log all stop for 30 s
+  while the game's process lives (a stall), when VRChat said `HandleApplicationQuit` and the session still runs 45 s later (a quit
+  that does not finish), or when the engine's log says the graphics went, it captures once per incident (three per session at most),
+  touching nothing of the game: `incident.json` (kind, session, launcher, time and boot clock, the look, the busiest process and its
+  command, what was sampled, the wrapper's `obelisk-wait:` lines), `processes.txt` (the launcher's tree and the library's processes,
+  CPU and memory), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
+  each, every line with what could be a credential cut), and two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
+  (the largest in memory), the render server, `wsd` and the busiest. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`, six
+  kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`).
 
 ### Phase 0 on this Mac (2026-11-22: VRChat under Voile `v26.3.0-27.beta1`, obelisk-cli 0.1.1, Apple M3, macOS 27)
 

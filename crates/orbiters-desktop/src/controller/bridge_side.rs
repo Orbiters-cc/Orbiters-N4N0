@@ -670,6 +670,7 @@ impl Game for SideGame {
             CaptureSeen { state: "idle".into(), session: st.last_picture.clone(), ..Default::default() }
         };
         Seen {
+            arrival: None,
             running,
             pid: st.pid,
             log_found: st.log.is_some(),

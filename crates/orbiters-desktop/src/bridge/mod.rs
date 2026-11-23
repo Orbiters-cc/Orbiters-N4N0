@@ -123,6 +123,9 @@ pub struct Status {
     /// Whether macOS lets the capturing process record the screen (`None`: not asked, or not a Mac).
     #[serde(default)]
     pub screen_recording: Option<bool>,
+    /// Its keys' file is there and cannot be read: Settings offers to reset the token (the file is kept aside).
+    #[serde(default)]
+    pub keys_unreadable: bool,
 }
 
 /// What Settings asks of the service.
@@ -140,6 +143,8 @@ pub enum Command {
     Resume,
     /// A new token: clients have to be given it again.
     NewToken,
+    /// While closed because its keys' file cannot be read: that file kept aside, new keys made, the agents updated.
+    ResetToken,
     /// macOS: asks for the Screen Recording permission the screenshots need, for the process that captures (the service).
     AllowScreenRecording,
 }
@@ -163,9 +168,25 @@ pub(crate) struct Going {
     pub started: bool,
 }
 
+/// A private instance the bridge created for a start that did not happen (a close that timed out, a wait it gave up, a
+/// launch refused): the next go_to_world to the same world and region in [`KEPT_FOR`] resumes it instead of making
+/// another.
+#[derive(Clone, Debug)]
+pub(crate) struct Kept {
+    pub world_id: String,
+    pub region: String,
+    pub instance: String,
+    pub at: Instant,
+}
+
+/// How long a [`Kept`] destination is resumed.
+pub(crate) const KEPT_FOR: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// What the bridge knows of its own run.
 #[derive(Default)]
 pub(crate) struct Run {
+    /// The destination kept from a start that did not happen.
+    pub kept: Option<Kept>,
     /// The VRChat the bridge started: only that one is ever acted on. A VRChat somebody else started is theirs.
     pub pid: Option<u32>,
     /// `pid` is only the main session's candidate: the first VRChat seen after its launch, which may be the person's

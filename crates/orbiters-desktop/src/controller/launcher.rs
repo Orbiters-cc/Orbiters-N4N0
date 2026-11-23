@@ -118,6 +118,14 @@ pub trait Machine: Send + Sync {
     fn as_mac(&self) -> Option<&MacMachine> {
         None
     }
+    /// A record of what runs VRChat here that cannot be read, for Home (a Mac's engine).
+    fn start_trouble(&self) -> Option<orbiters_core::launcher::StartTrouble> {
+        None
+    }
+    /// Sets that record aside: where it went, or why it was left (in the person's words).
+    fn set_aside(&self, _file: &str) -> Result<String, String> {
+        Err(tr("There is no such record on this computer.").into())
+    }
 }
 
 /// How VRChat is started on this computer: through Steam only when Steam's library really holds it; else through the
@@ -177,8 +185,9 @@ pub struct MacMachine {
     play: Arc<super::obelisk_cli::Play>,
     /// Steam refused the saved sign-in at the last start: the set-up is offered again until it ran.
     signed_out: AtomicBool,
-    /// Home's own last start: its failure is told by its launch id, never another start's (the bridge's).
-    home_launch: std::sync::Mutex<Option<u64>>,
+    /// Home's own starts not told yet: each failure is told by its launch id, never another start's (the bridge's), and a
+    /// later start does not hide an earlier one's.
+    home_launch: std::sync::Mutex<Vec<u64>>,
 }
 
 impl MacMachine {
@@ -192,12 +201,18 @@ impl MacMachine {
             std::thread::sleep(Duration::from_secs(15));
             super::obelisk_cli::update(&tools, &AtomicBool::new(false));
         });
+        // Whatever VRChat the engine runs, its hangs and quits that do not finish are kept as they happen.
+        #[cfg(target_os = "macos")]
+        if !cfg!(test) {
+            let (library, home) = (orbiters_core::obelisk::library(home), home.to_path_buf());
+            let _ = std::thread::Builder::new().name("vrchat-incidents".into()).spawn(move || super::incident::follow(library, home, orbiters_core::paths::logs_dir()));
+        }
         MacMachine {
             tools: orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir()),
             library: orbiters_core::obelisk::library(home),
             play: Arc::new(super::obelisk_cli::Play::new(orbiters_core::paths::config_dir().join("obelisk-start-gate.json"))),
             signed_out: AtomicBool::new(false),
-            home_launch: std::sync::Mutex::new(None),
+            home_launch: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -220,22 +235,24 @@ impl MacMachine {
 
     /// Starts VRChat with `args` through the shared start: its launch id, or why not.
     pub fn start_launch(&self, args: &[String]) -> Result<u64, super::obelisk_cli::Refused> {
+        self.start_launch_reserved(args, None)
+    }
+
+    /// The same, with the reservation `token` the bridge took before it created the instance (`Play::reserve`).
+    pub fn start_launch_reserved(&self, args: &[String], token: Option<u64>) -> Result<u64, super::obelisk_cli::Refused> {
         let program = self.program().ok_or_else(|| super::obelisk_cli::Refused::Failed(tr("VRChat is not set up on this Mac yet.").to_string()))?;
-        self.play.start(&program, &self.library, args)
+        self.play.start_reserved(&program, &self.library, args, token)
     }
 }
 
 impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
-        // What the engine's own records name, while that process lives; else what this N4N0's start said. Records that
-        // could not be read are no proof that nothing runs: then the program's word, as before a record exists.
-        let recorded = orbiters_core::obelisk::session_games(&self.library);
+        // What the engine's own records name, while that very process lives (its birth as recorded: a process that took
+        // the number of a game long gone is not it); else what this N4N0's start said. Records that could not be read are
+        // no proof that nothing runs: then the program's word, as before a record exists.
+        let recorded = orbiters_core::obelisk::session_games_born(&self.library);
         let recorded_none = recorded.as_ref().is_none_or(Vec::is_empty);
-        let recorded = recorded.unwrap_or_default();
-        let mut system = sysinfo::System::new();
-        let pids: Vec<sysinfo::Pid> = recorded.iter().map(|pid| sysinfo::Pid::from_u32(*pid)).collect();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&pids), true, sysinfo::ProcessRefreshKind::nothing());
-        let mut found: Vec<u32> = recorded.into_iter().filter(|pid| system.process(sysinfo::Pid::from_u32(*pid)).is_some()).collect();
+        let mut found: Vec<u32> = recorded.unwrap_or_default().into_iter().filter(|(pid, birth)| still_born(*pid, *birth)).map(|(pid, _)| pid).collect();
         // Before the record names the game's process, the program's word that it runs: under the process it said, else
         // under the program's own (alive for exactly as long as it follows the game), never a made-up 0.
         if found.is_empty() && recorded_none {
@@ -267,7 +284,10 @@ impl Machine for MacMachine {
 
     fn start(&self, args: &[String]) -> Result<(), String> {
         let id = self.start_launch(args).map_err(|refused| refused.words())?;
-        *self.home_launch.lock().unwrap() = Some(id);
+        let mut mine = self.home_launch.lock().unwrap();
+        mine.push(id);
+        let drop_old = mine.len().saturating_sub(16);
+        mine.drain(..drop_old);
         Ok(())
     }
 
@@ -276,8 +296,9 @@ impl Machine for MacMachine {
     }
 
     fn start_failure(&self) -> Option<String> {
-        let id = (*self.home_launch.lock().unwrap())?;
-        let failure = self.play.take_failure(id)?;
+        let ids = self.home_launch.lock().unwrap().clone();
+        let (id, failure) = ids.into_iter().find_map(|id| self.play.take_failure(id).map(|f| (id, f)))?;
+        self.home_launch.lock().unwrap().retain(|i| *i != id);
         if matches!(failure.code.as_str(), "not_signed_in" | "sign_in_expired" | "not_installed") {
             self.signed_out.store(true, Ordering::Relaxed);
         }
@@ -292,6 +313,44 @@ impl Machine for MacMachine {
 
     fn as_mac(&self) -> Option<&MacMachine> {
         Some(self)
+    }
+
+    fn start_trouble(&self) -> Option<orbiters_core::launcher::StartTrouble> {
+        let trouble = self.play.trouble(&self.library)?;
+        Some(orbiters_core::launcher::StartTrouble {
+            file: trouble.file.display().to_string(),
+            folder: trouble.unlistable,
+            blocks: trouble.blocks,
+            set_aside_in: trouble.settled_in.map(|d| d.as_secs().max(1)),
+        })
+    }
+
+    fn set_aside(&self, file: &str) -> Result<String, String> {
+        let aside = self.play.set_aside(&self.library, std::path::Path::new(file))?;
+        let text = format!("Set aside VRChat's engine record {file}: it is now {}", aside.display()); // i18n: not shown (for the log)
+        if !cfg!(test) {
+            orbiters_core::notice_log::append(&orbiters_core::paths::logs_dir(), "detail", &text, time::OffsetDateTime::now_utc().unix_timestamp());
+        }
+        Ok(aside.display().to_string())
+    }
+}
+
+/// Whether process `pid` lives and, when its record says its birth, is that same process (a reused number is not).
+fn still_born(pid: u32, birth: Option<(u64, u32)>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let born = super::bridge_mac::born(pid);
+        match birth {
+            Some(birth) => born == Some(birth),
+            None => born.is_some(),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = birth;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]), true, sysinfo::ProcessRefreshKind::nothing());
+        system.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 }
 
@@ -979,6 +1038,7 @@ impl Controller {
         }
         let profiles = if here && !machine.by_hand() { game_profiles(&self.view().settings.launch.profiles, &runs, &view.vrchat.runs, &claims) } else { Vec::new() };
         let running: Vec<(u32, bool)> = runs.iter().map(|r| (r.0, r.1)).collect();
+        let trouble = if here { machine.start_trouble() } else { None };
         // A start that failed after it was asked for (the game's own start, far from the press): said, and over.
         let failed = machine.start_failure();
         if let Some(words) = &failed {
@@ -1024,8 +1084,11 @@ impl Controller {
             if waiting_over {
                 s.launcher.engine_setup = None;
             }
-            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved;
+            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved || s.launcher.start_trouble != trouble;
             s.launcher.unresolved = unresolved;
+            if s.launcher.start_trouble != trouble {
+                s.launcher.start_trouble = trouble;
+            }
             if s.launcher.profiles != profiles {
                 s.launcher.profiles = profiles;
             }
@@ -1086,7 +1149,7 @@ impl Controller {
             self.update_if(|s| {
                 let signed = matches!(s.launcher.source, Source::SignedIn { .. });
                 if signed {
-                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
+                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, start_trouble: s.launcher.start_trouble.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
                     *s.launcher = kept;
                 }
                 signed
@@ -1106,6 +1169,7 @@ impl Controller {
             state.possible.play = s.launcher.possible.play;
             state.profiles = s.launcher.profiles.clone();
             state.unresolved = s.launcher.unresolved;
+            state.start_trouble = s.launcher.start_trouble.clone();
             // The account's own profile is read on its own (`launcher_mine`): kept for the same account only.
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
@@ -1186,6 +1250,7 @@ impl Controller {
             // stays for the same account (it is read on its own, `launcher_mine`): a scheduled read never erases them.
             state.profiles = s.launcher.profiles.clone();
             state.unresolved = s.launcher.unresolved;
+            state.start_trouble = s.launcher.start_trouble.clone();
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
             }
@@ -1435,6 +1500,18 @@ impl Controller {
                 machine.open_engine().err().map(Notice::Error)
             }
             Action::InstallEngine => self.launcher_install_engine(),
+            Action::SetAsideRecord { file } => {
+                let machine = self.launcher.lock().unwrap().machine.clone();
+                match machine.set_aside(&file) {
+                    Ok(aside) => {
+                        self.notify(super::NoticeKind::Success, tr!("The damaged record was set aside: {path}", path = aside));
+                        // Home shows the records as they are now.
+                        self.launcher_game(machine.as_ref());
+                        None
+                    }
+                    Err(why) => Some(Notice::Error(why)),
+                }
+            }
             Action::CloseProfile => {
                 self.update(|s| s.launcher.profile = None);
                 None
@@ -2254,3 +2331,15 @@ mod mine;
 #[cfg(test)]
 #[path = "launcher_tests.rs"]
 mod tests;
+
+/// M13: the Mac's roster takes a recorded game only as the very process recorded (its birth), never one that reused its number.
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn a_recorded_game_is_running_only_as_the_process_recorded() {
+    let me = std::process::id();
+    let birth = super::bridge_mac::born(me).expect("this test's own process");
+    assert!(still_born(me, Some(birth)));
+    assert!(!still_born(me, Some((birth.0, birth.1.wrapping_add(1)))), "the same number, another birth");
+    assert!(still_born(me, None), "an older record without a birth: by its number");
+    assert!(!still_born(u32::MAX - 7, None));
+}

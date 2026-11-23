@@ -103,5 +103,11 @@
   "1. Open the Steam app on your phone.": "1. Abre la app de Steam en tu teléfono.",
   "2. Scan this code with it and approve the sign-in.": "2. Escanea este código con ella y aprueba el inicio de sesión.",
   "The download starts by itself after that.": "La descarga empieza sola después.",
-  "Waiting for your phone…": "Esperando a tu teléfono…"
+  "Waiting for your phone…": "Esperando a tu teléfono…",
+  "VRChat's start records cannot be read: check the permissions of {file}.": "No se pueden leer los registros de inicio de VRChat: revisa los permisos de {file}.",
+  "A record of an earlier VRChat start cannot be read ({file}): Play waits {seconds} s, in case it is a start that just ended.": "No se puede leer un registro de un inicio anterior de VRChat ({file}): Jugar espera {seconds} s, por si es un inicio que acaba de terminar.",
+  "VRChat's engine stops at a damaged record ({file}): set it aside to play.": "El motor de VRChat se detiene ante un registro dañado ({file}): apártalo para jugar.",
+  "A record of an earlier VRChat start cannot be read ({file}): it no longer holds Play.": "No se puede leer un registro de un inicio anterior de VRChat ({file}): ya no bloquea Jugar.",
+  "Set aside": "Apartar",
+  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "Lo mueve a la carpeta Set aside, junto a los registros del motor de VRChat: no se borra nada."
 }

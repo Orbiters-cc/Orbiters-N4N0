@@ -289,5 +289,6 @@
   "not a PNG": "PNG ではありません",
   "a damaged PNG chunk": "破損した PNG チャンク",
   "a PNG chunk this copy cannot keep": "このコピーに残せない PNG チャンク",
-  "the key file is being written: try again": "鍵のファイルを書き込み中です。もう一度お試しください"
+  "the key file is being written: try again": "鍵のファイルを書き込み中です。もう一度お試しください",
+  "the key file could not be read: try again": "キーファイルを読めませんでした。もう一度お試しください"
 }

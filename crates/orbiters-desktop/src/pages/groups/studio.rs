@@ -857,12 +857,12 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
             // The upload applied from here is only the one made from the art shown now (Blocker 5).
             if studio.upload_matches() {
                 let r = widgets::Button::new(tr("Apply as the group's banner")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(art && !busy).id_salt("studio-apply").show(ui);
-                if widgets::deliberate(&r) {
+                if crate::chat_bar::fresh_activation(ui, &r) {
                     acts.push(Act::Apply(r.rect));
                 }
             } else {
                 let r = widgets::Button::new(tr("Upload to my gallery, then apply")).icon(icons::UPLOAD_SIMPLE).enabled(art && has && !busy && studio.making_upload.is_none()).id_salt("studio-upload").show(ui);
-                if widgets::deliberate(&r) {
+                if crate::chat_bar::fresh_activation(ui, &r) {
                     acts.push(Act::Upload(r.rect));
                 }
             }

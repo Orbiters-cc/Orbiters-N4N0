@@ -35,8 +35,7 @@ struct Window {
 
 impl Window {
     fn new(ctl: Ctl, snap: Arc<Snapshot>) -> Self {
-        let mut state = State::default();
-        state.scope = Some(Scope::of(&snap));
+        let state = State { scope: Some(Scope::of(&snap)), ..Default::default() };
         Self { state, ctx: egui::Context::default(), ctl, snap, toasts: Default::default() }
     }
     /// Takes the answers that came back, as a frame does.
@@ -191,10 +190,10 @@ fn an_upload_at_the_size_limits_keeps_the_link_up() {
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     png.resize(max, 7);
     let staged = stage_upload(&png).unwrap();
+    let reply = ctl.groups(Scope::of(&snap), Request::Prepare { write: Write::Upload { tag: FileTag::Gallery, group: G.into(), staged: staged.clone() } });
+    assert!(matches!(reply, Reply::Prepared(_)), "the largest picture is prepared: {reply:?}");
     let message = serde_json::to_vec(&crate::ipc::ToService::Groups { id: "x".into(), scope: Scope::of(&snap), request: Request::Prepare { write: Write::Upload { tag: FileTag::Gallery, group: G.into(), staged: staged.clone() } } }).unwrap();
     assert!(message.len() < 4096, "the link carries a reference, never the picture: {} bytes", message.len());
-    let reply = ctl.groups(Scope::of(&snap), Request::Prepare { write: Write::Upload { tag: FileTag::Gallery, group: G.into(), staged } });
-    assert!(matches!(reply, Reply::Prepared(_)), "the largest picture is prepared: {reply:?}");
     let mut over = png.clone();
     over.push(0);
     let staged = stage_upload(&over).unwrap();
@@ -267,6 +266,30 @@ fn leaving_while_a_write_is_sent_keeps_it_to_check() {
     assert!(w.state.flow.is_none());
     assert_eq!(w.state.uncertain_of(G).iter().map(|u| u.op.as_str()).collect::<Vec<_>>(), ["op-sent"], "still to check");
     let _ = std::fs::remove_file(art::drafts_file("usr_00000000-0000-4000-8000-0000000000e2").unwrap());
+}
+
+/// Blocker 1: the account changes while a write is being sent. The write stays listed with the account it is of, and
+/// nothing of it shows to the next one.
+#[test]
+fn an_account_switch_while_a_write_is_sent_keeps_it_with_its_account() {
+    let ctl: Ctl = Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+    let (a, b) = ("usr_00000000-0000-4000-8000-0000000000e3", "usr_00000000-0000-4000-8000-0000000000e4");
+    let signed = |id: &str| {
+        let mut snap = (*ctl.view()).clone();
+        snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: id.into(), ..Default::default() });
+        Arc::new(snap)
+    };
+    let mut w = Window::new(ctl.clone(), signed(a));
+    w.state.flow = Some(Flow::Sending { prepared: Prepared { op: "op-sent".into(), write: post(), confirm: true, role: None, post: None, member: None } });
+    let next = signed(b);
+    let mut toasts = orbiters_ui::toast::Toasts::default();
+    let cx = Cx { ctl: &ctl, snap: &next, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+    w.state.sync(&cx);
+    assert!(w.state.flow.is_none() && w.state.uncertain_of(G).is_empty(), "nothing of it for the next account");
+    assert_eq!(art::load_drafts(a).uncertain.iter().map(|u| u.op.as_str()).collect::<Vec<_>>(), ["op-sent"], "kept with its account");
+    for id in [a, b] {
+        let _ = std::fs::remove_file(art::drafts_file(id).unwrap());
+    }
 }
 
 /// Major 8: an unknown post's uncertainty, the post being written and a picture uploaded and not applied are the

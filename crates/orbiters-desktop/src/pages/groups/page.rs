@@ -111,6 +111,9 @@ pub(crate) struct Open {
     pub picker: Option<Picker>,
     /// The signed-in account's name (the "you" row).
     pub me_name: String,
+    /// Roster rows whose member was copied and worked out, ever (the tests' measure of Major 9).
+    #[cfg(test)]
+    rows_built: usize,
 }
 
 impl Open {
@@ -132,6 +135,8 @@ impl Open {
             composer,
             picker: None,
             me_name: String::new(),
+            #[cfg(test)]
+            rows_built: 0,
         }
     }
 
@@ -364,7 +369,7 @@ pub(crate) fn confirm_body(ui: &mut Ui, prepared: &Prepared, names: &Names, art:
             line(ui, tr("Member"), names.members.get(user).map(String::as_str).unwrap_or(tr("This member")));
             // Ids that tell two people of the same name apart (Major 3).
             let membership = prepared.member.as_ref().map(|m| id_tail(&m.membership_id)).unwrap_or_default();
-            line(ui, tr("Account"), &format!("{} {}", id_tail(user), membership).trim().to_string());
+            line(ui, tr("Account"), format!("{} {}", id_tail(user), membership).trim());
             if let Some(role) = &prepared.role {
                 line(ui, tr("Role"), &g::label(&role.name, g::ROLE_NAME_MAX));
                 let rights: Vec<String> = role.permissions.iter().map(|p| names.permission(p)).collect();
@@ -822,7 +827,7 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
             note(ui, tr("The picture is in your VRChat inventory. The group is unchanged until you apply it."), theme::FG_2);
             let label = if slot == ArtSlot::Icon { tr("Apply as the icon") } else { tr("Apply as the banner") };
             let resp = widgets::Button::new(label).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(!busy && art).id_salt(("look-apply-uploaded", file.id.as_str())).show(ui);
-            if widgets::deliberate(&resp) {
+            if crate::chat_bar::fresh_activation(ui, &resp) {
                 acts.push(Act::ApplyUploaded(slot, file.clone(), resp.rect));
             }
         });
@@ -996,16 +1001,24 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
     let w = ui.available_width();
     for row in rows {
         let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
-        let Some(o) = state.open.as_ref() else { return };
+        let Some(o) = state.open.as_mut() else { return };
+        let id = match row {
+            None => me.as_ref().map(|me| me.user_id.as_str()),
+            Some(i) => o.members.items.get(i).map(|m| m.user_id.as_str()),
+        };
+        let open_now = id.is_some() && open_for.as_deref() == id;
+        if !ui.is_rect_visible(rect.expand(120.0)) && !open_now {
+            continue;
+        }
+        #[cfg(test)]
+        {
+            o.rows_built += 1;
+        }
         let member = match row {
             None => me.as_ref().map(|me| Member { user_id: me.user_id.clone(), display_name: Some(o.me_name.clone()), role_ids: me.role_ids.clone(), roles_known: true, ..Default::default() }),
             Some(i) => o.members.items.get(i).cloned(),
         };
         let Some(m) = member else { continue };
-        let open_now = open_for.as_deref() == Some(m.user_id.as_str());
-        if !ui.is_rect_visible(rect.expand(120.0)) && !open_now {
-            continue;
-        }
         let mine = row.is_none();
         let roles: Vec<Role> = o.roles().to_vec();
         // Roles can be given or taken back only on a whole record (M8, Blocker 4), when some role allows it.
@@ -1089,7 +1102,7 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
         }
         // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
         // alone (Major 3, Blocker 6).
-        if verdict.allowed() && widgets::deliberate(&resp) {
+        if verdict.allowed() && crate::chat_bar::fresh_activation(ui, &resp) {
             acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), role: r.id.clone(), add: !has }, cr));
         }
     }
@@ -1566,7 +1579,7 @@ mod tests {
         let roles = o.roles().to_vec();
         let ctx = egui::Context::default();
         let mut chip = Rect::NOTHING;
-        let mut run = |events: Vec<egui::Event>, t: f64, chip_out: &mut Rect| {
+        let run = |events: Vec<egui::Event>, t: f64, chip_out: &mut Rect| {
             let mut acts = Vec::new();
             let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), time: Some(t), ..Default::default() };
             input.events = events;
@@ -1595,6 +1608,142 @@ mod tests {
         let names = Names { permissions: [("group-x".to_string(), "Bad\u{202E}name".to_string())].into_iter().collect(), ..Default::default() };
         assert_eq!(names.permission("group-x"), "Badname");
         assert_eq!(names.permission("group-unknown\u{202E}x"), "group-unknownx");
+    }
+
+    /// Every word painted, in order.
+    fn words(out: &egui::FullOutput) -> String {
+        fn walk(s: &egui::Shape, to: &mut String) {
+            match s {
+                egui::Shape::Text(t) => {
+                    to.push_str(t.galley.text());
+                    to.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, to)),
+                _ => {}
+            }
+        }
+        let mut to = String::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, &mut to));
+        to
+    }
+    fn confirmed(prepared: &Prepared, names: &Names) -> String {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(700.0, 900.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| confirm_body(ui, prepared, names, None));
+        out.textures_delta.clear();
+        words(&out)
+    }
+    fn prepared(write: Write) -> Prepared {
+        Prepared { op: "op".into(), write, confirm: true, role: None, post: None, member: None }
+    }
+
+    /// Major 3: two members of the same name are told apart in the confirmation.
+    #[test]
+    fn a_confirmation_tells_namesakes_apart() {
+        let (a, b) = ("usr_00000000-0000-4000-8000-00000000aaaa", "usr_00000000-0000-4000-8000-00000000bbbb");
+        let names = Names { members: [(a.to_string(), "Sam".to_string()), (b.to_string(), "Sam".to_string())].into_iter().collect(), ..Default::default() };
+        let said = |user: &str| confirmed(&prepared(Write::MemberRole { group: "grp_1".into(), user: user.into(), role: "grol_mod".into(), add: true }), &names);
+        assert!(said(a).contains("Sam") && said(a).contains("00aaaa"), "{}", said(a));
+        assert_ne!(said(a), said(b));
+    }
+
+    /// Blocker 5: what an apply's confirmation shows is the group, also from a Home card, and the file that goes.
+    #[test]
+    fn an_apply_confirmation_names_its_group_and_file() {
+        let card = GroupCard { id: "grp_1".into(), name: "Made-up Makers".into(), ..Default::default() };
+        let said = confirmed(&prepared(Write::ApplyArt { group: "grp_1".into(), slot: ArtSlot::Banner, file: "file_00000000-0000-4000-8000-00000000abcd".into() }), &Names::of_card(&card));
+        assert!(said.contains("Made-up Makers") && said.contains("00abcd"), "{said}");
+    }
+
+    /// Drives a composer: keys a person presses, one per frame.
+    fn compose(o: &mut Open, busy: bool, frames: Vec<Vec<egui::Event>>) {
+        let ctx = egui::Context::default();
+        for (i, events) in frames.into_iter().enumerate() {
+            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), time: Some(i as f64 * 0.05), ..Default::default() };
+            input.events = events;
+            let mut acts = Vec::new();
+            let mut out = ctx.run_ui(input, |ui| composer(ui, o, busy, &mut acts));
+            out.textures_delta.clear();
+            if o.composer.is_none() {
+                return;
+            }
+        }
+    }
+    fn press(key: egui::Key) -> Vec<Vec<egui::Event>> {
+        let e = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        vec![vec![e(true)], vec![e(false)]]
+    }
+
+    /// Major 12: while its write is prepared, confirmed or sent, the composer takes no edit; otherwise it does.
+    #[test]
+    fn the_composer_is_held_still_while_its_write_goes() {
+        let typed = |busy: bool| {
+            let mut o = open_as(&["*"], &["grol_owner"]);
+            o.composer = Some(Composer { baseline: None, draft: PostDraft { title: "Half".into(), text: "written".into(), ..Default::default() } });
+            let mut frames = vec![vec![], vec![]];
+            for _ in 0..4 {
+                frames.extend(press(egui::Key::Tab));
+                frames.push(vec![egui::Event::Text("X".into())]);
+            }
+            compose(&mut o, busy, frames);
+            let c = o.composer.expect("still being written").draft;
+            (c.title, c.text)
+        };
+        assert_eq!(typed(true), ("Half".to_string(), "written".to_string()), "held still");
+        let (title, text) = typed(false);
+        assert!(title.contains('X') || text.contains('X'), "the same keys do type when it is not: {title} / {text}");
+    }
+
+    /// Minor 6, through the composer itself: its toggle removes the post's picture, and the confirmation says so.
+    #[test]
+    fn the_composers_toggle_removes_the_picture_and_the_confirmation_says_so() {
+        let baseline = Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), complete: true, ..Default::default() };
+        let mut removed = None;
+        // Each control in turn, with the keyboard: the toggle is one of them.
+        for tabs in 1..14 {
+            let mut o = open_as(&["*"], &["grol_owner"]);
+            o.composer = Some(Composer { baseline: Some(baseline.clone()), draft: PostDraft { title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), ..Default::default() } });
+            let mut frames = vec![vec![], vec![]];
+            for _ in 0..tabs {
+                frames.extend(press(egui::Key::Tab));
+            }
+            frames.extend(press(egui::Key::Space));
+            frames.push(vec![]);
+            compose(&mut o, false, frames);
+            if let Some(c) = o.composer.filter(|c| c.removes_picture()) {
+                removed = Some(c.draft);
+                break;
+            }
+        }
+        let edit = removed.expect("a control removes the picture");
+        let said = confirmed(&prepared(Write::EditPost { group: "grp_1".into(), baseline, edit }), &Names::default());
+        assert!(said.contains(tr("Removed from the post")), "{said}");
+    }
+
+    /// Major 9: a large roster costs its rows in view, not every member loaded, each frame.
+    #[test]
+    fn only_the_roster_rows_in_view_are_built() {
+        let ctl: crate::backend::Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = ctl.view();
+        let scope = crate::controller::vrchat_data::Scope::of(&snap);
+        let mut state = State { staged: true, ..Default::default() };
+        let mut o = open_as(&["*"], &["grol_owner"]);
+        o.members.started = true;
+        o.members.items = (0..2000).map(|i| Member { user_id: format!("usr_00000000-0000-4000-8000-{i:012}"), display_name: Some(format!("Member {i}")), roles_known: true, ..Default::default() }).collect();
+        state.open = Some(o);
+        let ctx = egui::Context::default();
+        let frames = 3;
+        for t in 0..frames {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), time: Some(t as f64), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut out = ctx.run_ui(input, |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| members(ui, &cx, &mut state, &scope, &mut Vec::new()));
+            });
+            out.textures_delta.clear();
+        }
+        let built = state.open.unwrap().rows_built / frames;
+        assert!(built > 3 && built < 40, "{built} rows a frame of 2000");
     }
 
     /// Minor 6: an edit can remove the post's picture on purpose, and the confirmation says so.

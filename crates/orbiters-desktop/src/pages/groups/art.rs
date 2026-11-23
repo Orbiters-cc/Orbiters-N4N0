@@ -361,7 +361,7 @@ pub fn to_srgb(img: &mut image::RgbaImage, icc: &[u8]) -> anyhow::Result<()> {
     let mut output = vec![0u8; input.len()];
     transform.transform(&input, &mut output).map_err(|_| anyhow::anyhow!("colour conversion failed"))?; // i18n: not shown (worded by the studio)
     // The alpha as it was.
-    for (o, i) in output.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
+    for (o, i) in output.as_chunks_mut::<4>().0.iter_mut().zip(input.as_chunks::<4>().0) {
         o[3] = i[3];
     }
     *img = image::RgbaImage::from_raw(img.width(), img.height(), output).ok_or_else(|| anyhow::anyhow!("colour conversion failed"))?; // i18n: not shown (worded by the studio)

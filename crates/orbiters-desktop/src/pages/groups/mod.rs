@@ -671,7 +671,7 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
         if u.observation == Some(Observation::Inconclusive) {
             let release = Rect::from_min_size(pos2(rect.right() - 296.0, rect.top() + 10.0), vec2(138.0, 34.0));
             let r = widgets::Button::new(tr("Let it go")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("group-release", u.op.as_str())).show_at(ui, release);
-            if widgets::deliberate(&r) {
+            if crate::chat_bar::fresh_activation(ui, &r) {
                 state.release(ctx, ctl, &u.op);
             }
         }
@@ -941,7 +941,8 @@ fn confirmation(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         orbiters_ui::dialog::Part::Body => page::confirm_body(ui, &prepared, &names, art.as_ref()),
         orbiters_ui::dialog::Part::Footer => {
             let variant = if danger { widgets::Variant::Danger } else { widgets::Variant::Primary };
-            if widgets::deliberate(&widgets::Button::new(&action).variant(variant).id_salt("group-confirm-send").show(ui)) {
+            let button = widgets::Button::new(&action).variant(variant).id_salt("group-confirm-send").show(ui);
+            if crate::chat_bar::fresh_activation(ui, &button) {
                 send = true;
             }
             ui.add_space(8.0);

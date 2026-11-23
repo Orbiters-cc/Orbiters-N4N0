@@ -232,31 +232,6 @@ pub fn activated(resp: &Response) -> bool {
     }
 }
 
-/// A deliberate activation for a consequential control (send, delete, apply): a pointer click released on it, a FRESH
-/// Enter or Space on it while focused (a key held down and repeating never counts), or an accessibility click (no key at
-/// all this frame). egui turns every Enter/Space press, repeats included, into a click of the focused widget; this does
-/// not. Shared by the groups' confirmations and the chat's approvals.
-pub fn deliberate(resp: &Response) -> bool {
-    if !resp.clicked() {
-        return false;
-    }
-    if resp.clicked_by(egui::PointerButton::Primary) {
-        return true;
-    }
-    resp.ctx.input(|i| {
-        let keys: Vec<bool> = i
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                egui::Event::Key { key: egui::Key::Enter | egui::Key::Space, pressed: true, repeat, .. } => Some(*repeat),
-                _ => None,
-            })
-            .collect();
-        // No Enter/Space at all: an accessibility click. Otherwise at least one press must be a new one.
-        keys.is_empty() || keys.iter().any(|repeat| !repeat)
-    })
-}
-
 fn press_id() -> egui::Id {
     egui::Id::unique("orbiters-widget-press")
 }
@@ -1347,37 +1322,6 @@ pub fn flow(widths: &[f32], max_w: f32, row_h: f32, gap: f32) -> (Vec<Vec2>, f32
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A held Enter or Space (key repeats) never activates a focused consequential button; a fresh press or a click does.
-    /// egui decides what a repeat is from the keys it saw go down: the key is pressed before the button shows (as when
-    /// Enter, held on the press that opened a confirmation, keeps repeating on its Send).
-    #[test]
-    fn a_repeated_key_is_not_a_deliberate_activation() {
-        let ctx = egui::Context::default();
-        let id = "deliberate-test";
-        let frame = |events: Vec<egui::Event>, shown: bool| {
-            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
-            input.events = events;
-            let mut hit = false;
-            let mut out = ctx.run_ui(input, |ui| {
-                if shown {
-                    let resp = ui.push_id(id, |ui| ui.button("Send")).inner;
-                    resp.request_focus();
-                    hit = deliberate(&resp);
-                }
-            });
-            out.textures_delta.clear();
-            hit
-        };
-        let enter = |pressed: bool| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
-        frame(vec![enter(true)], false);
-        frame(vec![], true);
-        frame(vec![], true);
-        assert!(!frame(vec![enter(true)], true), "a repeat of a held key");
-        assert!(!frame(vec![enter(true), enter(true)], true));
-        assert!(!frame(vec![enter(false)], true), "the release");
-        assert!(frame(vec![enter(true)], true), "a fresh press");
-    }
 
     #[test]
     fn chips_wrap_in_rows() {

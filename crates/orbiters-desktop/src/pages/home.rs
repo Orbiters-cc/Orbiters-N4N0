@@ -1749,6 +1749,8 @@ mod tests {
         asked: Mutex<Vec<String>>,
         /// What VRChat says of an instance asked about (REQUEST21 7: whether it is still open).
         alive: Mutex<Option<bool>>,
+        /// How long ago VRChat said it (the service kept the answer).
+        age_ms: Mutex<u64>,
         /// By instance: what VRChat says of it and how long it takes to say it (verify-r21 Major 4: answers crossing).
         alive_by: Mutex<std::collections::HashMap<String, (Option<bool>, Duration)>>,
     }
@@ -1777,14 +1779,15 @@ mod tests {
                     closed: false,
                     can_join: true,
                 })),
-                Request::Instance { instance, .. } => {
+                Request::InstanceSeen { instance, .. } => {
                     let by = self.alive_by.lock().unwrap().get(&instance).copied();
+                    let age_ms = *self.age_ms.lock().unwrap();
                     match by {
                         Some((open, wait)) => {
                             std::thread::sleep(wait);
-                            Ok(Response::Instance(open))
+                            Ok(Response::InstanceSeen { open, age_ms })
                         }
-                        None => Ok(Response::Instance(*self.alive.lock().unwrap())),
+                        None => Ok(Response::InstanceSeen { open: *self.alive.lock().unwrap(), age_ms }),
                     }
                 }
                 _ => Err("not in tests".into()),
@@ -2390,7 +2393,7 @@ mod tests {
         *h.recorder.alive.lock().unwrap() = Some(true);
         click(&mut h, "Harbor Market");
         until(&mut h, "VRChat's answer", &|h| h.state.launcher_mut().places.chosen_key().is_some());
-        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {:?}, instance: {:?} }}", world(1), rows[0].instance)]);
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("InstanceSeen {{ world: {:?}, instance: {:?}, max_age_ms: 30000 }}", world(1), rows[0].instance)]);
         assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[0].key().as_str()));
         assert!(sent(&h).is_empty(), "a choice starts nothing");
         h.frame(vec![key(Key::Escape)]);
@@ -2505,7 +2508,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
             h.frame(Vec::new());
         }
-        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {world:?}, instance: {instance:?} }}")]);
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("InstanceSeen {{ world: {world:?}, instance: {instance:?}, max_age_ms: 30000 }}")]);
         assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(rows[0].key().as_str()), "rejoined once checked");
         h.frame(vec![key(Key::Escape)]);
         h.settle();
@@ -3158,7 +3161,7 @@ mod tests {
         let sent: Vec<_> = h.recorder.launcher.lock().unwrap()[before..].to_vec();
         let close_only = |a: &Action| matches!(a, Action::CloseProfile) || matches!(a, Action::As { action, .. } if matches!(**action, Action::CloseProfile));
         assert!(sent.iter().all(close_only), "Select asks nothing of the account: {sent:?}");
-        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {:?}, instance: {:?} }}", place.world_id, place.instance_id)], "only the existing open check");
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("InstanceSeen {{ world: {:?}, instance: {:?}, max_age_ms: 30000 }}", place.world_id, place.instance_id)], "only the existing open check");
         assert!(h.state.launcher_mut().modal_open().is_none(), "back to Home, Where in view");
         click(&mut h, "Play in VR");
         let last = match h.recorder.launcher.lock().unwrap().last().cloned() {
@@ -3268,6 +3271,38 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1200));
         h.frame(Vec::new());
         assert!(starts(&h).is_empty(), "a launch was sent in the departure frame: {:?}", starts(&h));
+    }
+
+    /// verify3-r21 M2: an "open" the service kept counts from when VRChat gave it: nearly a minute old at its arrival, it is
+    /// asked about again a few seconds later; the last instance's card too, for the profile chosen now only.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify3_an_open_the_service_kept_counts_from_when_vrchat_gave_it() {
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(1201, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        *h.recorder.age_ms.lock().unwrap() = 59_000;
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        assert_eq!(instance_checks(&h), 1);
+        std::thread::sleep(Duration::from_millis(1300));
+        click(&mut h, "Play in VR");
+        frames_until(&mut h, "asked again", |h| instance_checks(h) == 2);
+        // Answered from the service's keep once more, past the minute by now: still nothing starts from it.
+        *h.recorder.age_ms.lock().unwrap() = 61_000;
+        let_pass(&mut h, 200);
+        let sent = starts(&h).len();
+        click(&mut h, "Play in VR");
+        let_pass(&mut h, 200);
+        assert_eq!(starts(&h).len(), sent, "an answer older than a minute starts nothing: {:?}", starts(&h));
+        // VRChat's own answer, now: there.
+        *h.recorder.age_ms.lock().unwrap() = 0;
+        click(&mut h, "Play in VR");
+        frames_until(&mut h, "started", |h| starts(h).len() == sent + 1);
     }
 
     /// verify3-r21 M1: a destination verified for an account goes to the service bound to that account, also while the

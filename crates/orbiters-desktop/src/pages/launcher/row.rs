@@ -226,7 +226,7 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
             pill_content(p, rect, icons::HOURGLASS_MEDIUM, &orbiters_i18n::tr!("{n} s", n = left), theme::FG_3);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
             let resp = ui.interact(rect, id.with("cool"), Sense::hover());
-            resp.on_hover_text(orbiters_i18n::tr!("Again in {n} s: one at a time keeps it fun", n = left));
+            resp.on_hover_text(orbiters_i18n::tr!("Again in {n} s", n = left));
             false
         }
     }

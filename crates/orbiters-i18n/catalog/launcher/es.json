@@ -58,5 +58,19 @@
   "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat se cerró poco después de iniciarse. Si se bloqueó, pulsa Jugar de nuevo.",
   "VRChat ended early a moment ago: it can be started again in {seconds} s.": "VRChat se cerró antes de tiempo hace un momento: podrá iniciarse de nuevo en {seconds} s.",
   "It ended with {status}.": "Terminó con {status}.",
-  "VRChat's last start could not be checked yet. Try again in a moment.": "Todavía no se pudo comprobar el último inicio de VRChat. Inténtalo de nuevo en un momento."
+  "VRChat's last start could not be checked yet. Try again in a moment.": "Todavía no se pudo comprobar el último inicio de VRChat. Inténtalo de nuevo en un momento.",
+  "There is no such record on this computer.": "No hay ningún registro así en este ordenador.",
+  "The damaged record was set aside: {path}": "El registro dañado se apartó: {path}",
+  "The folder of VRChat's start records cannot be read: {file}": "No se puede leer la carpeta de los registros de inicio de VRChat: {file}",
+  "A record of an earlier VRChat start cannot be read ({file}): VRChat can be started in {seconds} s.": "No se puede leer un registro de un inicio anterior de VRChat ({file}): VRChat podrá iniciarse en {seconds} s.",
+  "A record of an earlier VRChat start cannot be read ({file}): set it aside in Home to play.": "No se puede leer un registro de un inicio anterior de VRChat ({file}): apártalo en Inicio para jugar.",
+  "VRChat is starting or running: set the record aside once it has closed.": "VRChat se está iniciando o está en marcha: aparta el registro cuando se haya cerrado.",
+  "That record can be read now, or is gone: nothing was set aside.": "Ese registro ya se puede leer, o ya no está: no se apartó nada.",
+  "The record was seen damaged only a moment ago: it can be set aside in {seconds} s.": "El registro se vio dañado hace solo un momento: podrá apartarse en {seconds} s.",
+  "VRChat's engine could not be checked: nothing was set aside.": "No se pudo comprobar el motor de VRChat: no se apartó nada.",
+  "VRChat's engine is running: set the record aside once it has closed.": "El motor de VRChat está en marcha: aparta el registro cuando se haya cerrado.",
+  "The record changed meanwhile: nothing was set aside. Look again in a moment.": "El registro cambió mientras tanto: no se apartó nada. Vuelve a mirar en un momento.",
+  "The record could not be moved: {reason}": "No se pudo mover el registro: {reason}",
+  "What runs VRChat on this Mac stopped without saying why ({status}).": "Lo que ejecuta VRChat en este Mac se detuvo sin decir por qué ({status}).",
+  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "VRChat dejó de responder en este Mac ({kind}): lo que estaba pasando se guarda en {path}"
 }

@@ -139,6 +139,8 @@ impl Game for RealGame {
         let world = &snap.vrchat.world;
         let stats = snap.capture.stats.as_ref();
         Seen {
+            // Arrival is proven only where it must be (a Mac's own game).
+            arrival: None,
             running: snap.vrchat.running,
             pid: snap.vrchat.pid,
             log_found: snap.vrchat.log_found,

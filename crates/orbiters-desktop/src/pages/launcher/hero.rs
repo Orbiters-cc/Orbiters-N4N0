@@ -41,6 +41,16 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         return hero_profiles(ui, cx, state, index);
     }
     let play = making(state, states::play(&state.data));
+    // A Mac whose engine has a record it cannot read: said under the Play button, with what can be done.
+    if let Some(trouble) = state.data.start_trouble.clone() {
+        hero_play(ui, cx, state, index, play);
+        return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| start_trouble(ui, cx, state, rect, &trouble));
+    }
+    hero_play(ui, cx, state, index, play)
+}
+
+/// Home's Play part on a PC in Desktop only, or on a Mac.
+fn hero_play(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize, play: PlayState) {
     // While Where shows above, an invite is one of its places: its card here is for a VRChat already running (Join).
     let invite = invite(state).filter(|_| !state.places.showing);
     // A Mac being set up, at the Steam sign-in: the QR code to read with the phone.
@@ -125,6 +135,33 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 60.0);
         }
     });
+}
+
+/// A record of the Mac's engine that cannot be read: which file (whole on hover), whether it holds Play, and Set aside once
+/// it is known to be history (never before: it may be the record of a start that just ended).
+fn start_trouble(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, trouble: &orbiters_core::launcher::StartTrouble) {
+    let name = std::path::Path::new(&trouble.file).file_name().map_or_else(|| trouble.file.clone(), |n| n.to_string_lossy().into_owned());
+    let line = match (trouble.folder, trouble.blocks, trouble.set_aside_in) {
+        (true, _, _) => tr!("VRChat's start records cannot be read: check the permissions of {file}.", file = trouble.file.clone()),
+        (false, true, Some(seconds)) => tr!("A record of an earlier VRChat start cannot be read ({file}): Play waits {seconds} s, in case it is a start that just ended.", file = name, seconds = seconds),
+        (false, true, None) => tr!("VRChat's engine stops at a damaged record ({file}): set it aside to play.", file = name),
+        (false, false, _) => tr!("A record of an earlier VRChat start cannot be read ({file}): it no longer holds Play.", file = name),
+    };
+    let button = (!trouble.folder && trouble.set_aside_in.is_none()).then(|| widgets::Button::new(tr("Set aside")).variant(if trouble.blocks { widgets::Variant::Primary } else { widgets::Variant::Secondary }).id_salt("launcher-set-aside"));
+    let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
+    let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, if trouble.blocks { theme::WARN } else { theme::FG_3 });
+    let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), text.width());
+    ui.interact(text, Id::unique("launcher-trouble-file"), Sense::hover()).on_hover_text(trouble.file.clone());
+    if let Some(button) = button {
+        let clicked = button.show_at(ui, at).on_hover_text(tr("Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.")).clicked();
+        if clicked {
+            state.act(cx, anim::time(ui.ctx()), Action::SetAsideRecord { file: trouble.file.clone() });
+        }
+    }
 }
 
 /// The Play buttons while Where has VRChat make a new instance for the press: the mode pressed turns, as a start does.

@@ -83,6 +83,24 @@ impl Keys {
         }
     }
 
+    /// New keys in place of keys that cannot be read (an explicit reset from Settings): the unreadable file is kept aside,
+    /// never deleted (`<name>.unreadable-<Unix s>`), then new keys are saved. Readable keys get a new token and keep their
+    /// port. The keys, and where the old file went.
+    pub fn reset(file: &std::path::Path) -> Result<(Self, Option<PathBuf>), String> {
+        let (keys, aside) = match Self::load(file) {
+            Ok(Some(keys)) => (Keys { token: Self::new_token(), ..keys }, None),
+            Ok(None) => (Keys { port: FIRST_PORT, token: Self::new_token() }, None),
+            Err(_) => {
+                let name = file.file_name().map_or_else(|| "keys".into(), |n| n.to_string_lossy().into_owned());
+                let aside = file.with_file_name(format!("{name}.unreadable-{}", time::OffsetDateTime::now_utc().unix_timestamp()));
+                std::fs::rename(file, &aside).map_err(|e| e.to_string())?;
+                (Keys { port: FIRST_PORT, token: Self::new_token() }, Some(aside))
+            }
+        };
+        keys.save(file)?;
+        Ok((keys, aside))
+    }
+
     pub fn save(&self, file: &std::path::Path) -> Result<(), String> {
         serde_json::to_vec(self)
             .map_err(anyhow::Error::from)
@@ -111,6 +129,8 @@ struct Inner {
     grant: Grant,
     open: Option<Open>,
     problem: Option<String>,
+    /// The last try to open found the keys' file unreadable.
+    keys_unreadable: bool,
 }
 
 /// Follows the three conditions.
@@ -130,6 +150,9 @@ pub struct Keeper {
     pub(crate) registrations: OnceLock<Arc<Registrations>>,
     /// The bridge just opened, or its token changed: what the agents have is looked at, and fixed.
     repair_due: AtomicBool,
+    /// Held around every first creation or change of the keys' file: the listener's start and an agent's registration never
+    /// make two different tokens at once.
+    keys_lock: Mutex<()>,
 }
 
 /// How to hear the person: `None` when that cannot be done.
@@ -149,13 +172,14 @@ impl Keeper {
             bridge,
             flag,
             keys_file,
-            inner: Mutex::new(Inner { identity: None, grant: Grant::new(refresh, lifetime), open: None, problem: None }),
+            inner: Mutex::new(Inner { identity: None, grant: Grant::new(refresh, lifetime), open: None, problem: None, keys_unreadable: false }),
             asking: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             published,
             hear,
             registrations: OnceLock::new(),
             repair_due: AtomicBool::new(false),
+            keys_lock: Mutex::new(()),
         })
     }
 
@@ -173,7 +197,10 @@ impl Keeper {
         let (port, token, listening) = match open {
             Some((port, token)) => (port, token, true),
             None => {
-                let keys = Keys::load_or_create(&self.keys_file).ok()?;
+                let keys = {
+                    let _one = self.keys_lock.lock().unwrap();
+                    Keys::load_or_create(&self.keys_file).ok()?
+                };
                 (keys.port, keys.token, false)
             }
         };
@@ -246,11 +273,19 @@ impl Keeper {
     }
 
     fn open(&self, inner: &mut Inner) {
-        let mut keys = match Keys::load_or_create(&self.keys_file) {
-            Ok(keys) => keys,
+        let loaded = {
+            let _one = self.keys_lock.lock().unwrap();
+            Keys::load_or_create(&self.keys_file)
+        };
+        let mut keys = match loaded {
+            Ok(keys) => {
+                inner.keys_unreadable = false;
+                keys
+            }
             Err(e) => {
-                // Tried again at the next look (the computer unlocked, the file written whole).
-                inner.problem = Some(tr!("The bridge's keys could not be read ({error}), so it stays closed until they can be.", error = e));
+                // Tried again at the next look (the computer unlocked, the file written whole); Settings offers a reset.
+                inner.keys_unreadable = true;
+                inner.problem = Some(tr!("The bridge's keys could not be read ({error}), so it stays closed until they can be, or until you reset the token.", error = e));
                 return;
             }
         };
@@ -338,6 +373,25 @@ impl Keeper {
                 // Also while closed: nothing else would ever tell them.
                 self.repair_due.store(true, Ordering::Relaxed);
             }
+            Command::ResetToken => {
+                // Only while closed: an open listener's keys were read, and New token is the way there.
+                if self.inner.lock().unwrap().open.is_some() {
+                    return self.tick();
+                }
+                let reset = {
+                    let _one = self.keys_lock.lock().unwrap();
+                    Keys::reset(&self.keys_file)
+                };
+                match reset {
+                    Ok((_, aside)) => {
+                        let kept = aside.map(|a| a.display().to_string()).unwrap_or_default();
+                        self.bridge.log(true, tr!("A new token: the bridge's unreadable keys were kept aside ({path}); the agents it was added to are updated.", path = kept));
+                        self.inner.lock().unwrap().keys_unreadable = false;
+                        self.repair_due.store(true, Ordering::Relaxed);
+                    }
+                    Err(e) => self.bridge.log(false, tr!("The bridge's keys could not be reset: {error}", error = e)),
+                }
+            }
             Command::Client { client, change } => self.change_client(client, change),
             Command::CheckClients => self.clients(|clients, wanted| clients.check(wanted)),
             // Asked by this process, the one whose screenshots need it (macOS judges the process that captures).
@@ -367,6 +421,7 @@ impl Keeper {
             let inner = self.inner.lock().unwrap();
             status.allowed = inner.identity.is_some() && inner.grant.allowed(Instant::now());
             status.problem = inner.problem.clone();
+            status.keys_unreadable = inner.keys_unreadable && inner.open.is_none();
             if let Some(open) = inner.open.as_ref() {
                 status.listening = true;
                 status.address = Some(address_of(open.server.port()));
@@ -418,6 +473,26 @@ mod tests {
         let nowhere = dir.join("a-file-not-a-folder");
         std::fs::write(&nowhere, b"x").unwrap();
         assert!(Keys::load_or_create(&nowhere.join("vrchat-bridge.dat")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// M11 (Windows' recovery, shared code): a keys' file that can never be read is reset on request: kept aside, never
+    /// deleted, new keys saved and loaded from then on; readable keys keep their port and get a new token.
+    #[test]
+    fn unreadable_keys_are_reset_on_request_and_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("orbiters-bridge-reset-{}", uuid::Uuid::new_v4().simple()));
+        let file = dir.join("vrchat-bridge.dat");
+        let first = Keys::load_or_create(&file).unwrap();
+        let (renewed, aside) = Keys::reset(&file).unwrap();
+        assert_eq!((renewed.port, aside), (first.port, None));
+        assert_ne!(renewed.token, first.token);
+        assert_eq!(Keys::load(&file).unwrap(), Some(renewed.clone()));
+        std::fs::write(&file, b"sealed by another user").unwrap();
+        assert!(Keys::load_or_create(&file).is_err(), "unreadable: never replaced by itself");
+        let (fresh, aside) = Keys::reset(&file).unwrap();
+        let aside = aside.expect("kept aside");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"sealed by another user");
+        assert_eq!(Keys::load_or_create(&file).unwrap(), fresh, "the new keys from now on");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

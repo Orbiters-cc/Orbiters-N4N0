@@ -124,6 +124,12 @@ pub enum Event {
 pub struct AssistantError {
     pub code: String,
     pub message: String,
+    /// When to try again, in seconds (the server's `retry_after`, else its Retry-After header): r23.
+    pub retry_after: Option<u32>,
+    /// Which limit stopped the answer (`tokens_per_minute`, `requests_per_day`, `provider_down`…), when the server says.
+    pub limit: Option<String>,
+    /// For an administrator only: the provider's failure, shown apart and smaller (never in `message`).
+    pub admin_detail: Option<String>,
     /// The same for the avatar's panel, which has Latin letters only: the server's own words as they came, the app's own in
     /// a Latin language.
     pub on_panel: String,
@@ -138,7 +144,15 @@ impl std::fmt::Display for AssistantError {
 impl std::error::Error for AssistantError {}
 
 fn error_from(status: u16, body: &str) -> AssistantError {
+    error_with(status, body, None)
+}
+
+/// [`error_from`] with the response's Retry-After header (seconds), when it had one.
+fn error_with(status: u16, body: &str, header_retry: Option<u32>) -> AssistantError {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let retry_after = value.get("retry_after").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0).map(|v| v.ceil().min(86_400.0) as u32).or(header_retry);
+    let limit = value.get("limit").and_then(Value::as_str).map(|l| l.chars().take(40).collect::<String>());
+    let admin_detail = value.get("admin_detail").and_then(Value::as_str).map(|d| d.chars().take(400).collect::<String>());
     let text = |k: &str| value.get(k).and_then(Value::as_str).map(str::to_string);
     let code = text("code").unwrap_or_else(|| {
         match status {
@@ -156,8 +170,8 @@ fn error_from(status: u16, body: &str) -> AssistantError {
         _ => orbiters_i18n::tr!("N4N0's assistant is not available right now ({status}).", status = status),
     };
     match text("message").or_else(|| text("error")) {
-        Some(message) => AssistantError { code, on_panel: message.clone(), message },
-        None => AssistantError { message: own(&code), on_panel: crate::text::latin(|| own(&code)), code },
+        Some(message) => AssistantError { code, on_panel: message.clone(), message, retry_after, limit, admin_detail },
+        None => AssistantError { message: own(&code), on_panel: crate::text::latin(|| own(&code)), code, retry_after, limit, admin_detail },
     }
 }
 
@@ -187,11 +201,12 @@ pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut 
         .send_json(request)
         .with_context(|| tr("Orbiters could not be reached"))?;
     let status = response.status().as_u16();
+    let header_retry = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u32>().ok());
     let json = response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
     let mut body = response.into_body();
     if !(200..300).contains(&status) {
         let text = body.with_config().limit(1 << 20).read_to_string().unwrap_or_default();
-        return Err(error_from(status, &text).into());
+        return Err(error_with(status, &text, header_retry).into());
     }
     if json {
         let text = body.with_config().limit(8 << 20).read_to_string()?;
@@ -364,6 +379,13 @@ mod tests {
         let err = err.downcast::<AssistantError>().unwrap();
         assert_eq!(err.code, "quota_exhausted");
         assert_eq!(err.message, "Free quota used up until midnight.");
+        // A busy provider (r23): when, which limit, and the administrator's detail apart from the words.
+        let busy = error_from(429, r#"{"error":"Busy.","message":"Busy.","code":"rate_limited","limit":"tokens_per_minute","retry_after":25,"admin_detail":"Groq: HTTP 429"}"#);
+        assert_eq!((busy.code.as_str(), busy.message.as_str(), busy.retry_after, busy.limit.as_deref(), busy.admin_detail.as_deref()), ("rate_limited", "Busy.", Some(25), Some("tokens_per_minute"), Some("Groq: HTTP 429")));
+        // No body's field: the response's header; a nonsense value is nothing.
+        assert_eq!(error_with(429, "{}", Some(7)).retry_after, Some(7));
+        assert_eq!(error_with(429, r#"{"retry_after":-3}"#, None).retry_after, None);
+        assert_eq!(error_from(503, "").retry_after, None);
         assert_eq!(error_from(401, "").code, "unauthorized");
         assert_eq!(error_from(500, r#"{"error":"Boom"}"#).message, "Boom");
         assert!(read_events("event: text\ndata: {}\n\n".as_bytes(), &AtomicBool::new(false), &mut |_| {}).is_err(), "no done");

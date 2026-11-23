@@ -140,6 +140,8 @@ pub struct ChatBar {
     epoch: Option<u64>,
     /// The question this window answered (its card says so until it is gone).
     answered: Option<u64>,
+    /// The failed turn this window retried (its button does not answer twice).
+    retried: Option<u64>,
     /// The page behind is blurred with the window's GPU objects (`orbiters_ui::backdrop`): they are given back when the
     /// chat has closed.
     blurred: Option<orbiters_ui::blur::Textures>,
@@ -220,7 +222,7 @@ impl ChatBar {
             self.draft.clear();
             self.draft_offset = 0.0;
             self.enter_later = false;
-            (self.reveal, self.seen, self.copied, self.answered) = (None, None, None, None);
+            (self.reveal, self.seen, self.copied, self.answered, self.retried) = (None, None, None, None, None);
             self.log = false;
             self.count = 0;
             if let Some(mut state) = egui::TextEdit::load_state(ctx, field_id()) {

@@ -3,3 +3,4 @@
 crates/orbiters-desktop/src/controller/launcher.rs
 crates/orbiters-desktop/src/pages/launch_card.rs
 crates/orbiters-desktop/src/controller/obelisk_cli.rs
+crates/orbiters-desktop/src/controller/incident.rs

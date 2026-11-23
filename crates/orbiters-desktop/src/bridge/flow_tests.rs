@@ -71,9 +71,13 @@ struct Flow {
 
 impl Flow {
     fn new(name: &str, caps: Capabilities) -> Self {
+        Self::with_close_limit(name, caps, Duration::from_secs(30))
+    }
+
+    fn with_close_limit(name: &str, caps: Capabilities, close_limit: Duration) -> Self {
         let dir = std::env::temp_dir().join(format!("orbiters-bridge-flow-{name}-{}", uuid::Uuid::new_v4().simple()));
         let game = LabGame::new(&dir, None);
-        let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: Duration::from_secs(30), close_limit: Duration::from_secs(30) });
+        let bridge = Bridge::with_timing(game.clone(), None, Timing { instance_every: Duration::from_millis(50), start_limit: Duration::from_secs(30), close_limit });
         bridge.set_capabilities(caps);
         let server = Server::start(bridge.clone(), 0, TOKEN.to_string()).expect("a free port");
         Self { game, bridge, server }
@@ -165,9 +169,9 @@ fn a_mac_goes_from_world_to_world_looks_and_closes() {
     assert_eq!((info["window_width"].as_u64(), info["window_height"].as_u64()), (window["width"].as_u64(), window["height"].as_u64()), "{answer} {window}");
     assert!(info["window_width"].as_u64().is_some_and(|w| w > 0), "{answer}");
     // A Mac's game is the size its launch asked for (VRChat honours -screen-width and -screen-height under the engine);
-    // Windows' fake window keeps the 640 x 360 its own end-to-end tests are written for.
-    #[cfg(not(windows))]
-    assert_eq!((info["window_width"].as_u64(), info["window_height"].as_u64()), (Some(1280), Some(720)), "{answer}");
+    // Windows' fake window keeps the 640 x 360 its own end-to-end tests are written for: asserted on both, never left out.
+    let expected = if cfg!(windows) { (Some(640), Some(360)) } else { (Some(1280), Some(720)) };
+    assert_eq!((info["window_width"].as_u64(), info["window_height"].as_u64()), expected, "{answer}");
     assert_eq!(info["window_restored"], false, "a Mac never resizes the window");
     assert_eq!(flow.game.resizes(), 0);
     assert!(answer["result"]["content"].as_array().unwrap().iter().any(|c| c["type"] == "image"));
@@ -280,6 +284,11 @@ fn a_mac_holds_arguments_to_its_own_tool_list_and_promises_only_what_it_can() {
     let tool = |name: &str| list["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).cloned().unwrap_or(Value::Null);
     let waits = tool("wait_for")["inputSchema"]["properties"]["until"]["enum"].clone();
     assert!(!waits.as_array().unwrap().iter().any(|u| u == "signed_in" || u == "picture_saved"), "{waits}");
+    // m18: nor does its description name them.
+    let tools = ok(rpc(flow.server.port(), "tools/list", json!({})));
+    let wait_for = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "wait_for").cloned().unwrap();
+    let said = wait_for["inputSchema"]["properties"]["until"]["description"].as_str().unwrap().to_string();
+    assert!(!said.contains("signed_in") && !said.contains("picture_saved") && said.contains("in_world"), "{said}");
     let unity = list["result"]["tools"].as_array().unwrap().iter().find(|t| t["inputSchema"]["properties"].get("session").is_some() && t["name"].as_str().unwrap().starts_with("unity_"));
     assert!(unity.is_some(), "a Unity tool keeps its capture's session argument");
     let resources = rpc(flow.server.port(), "resources/list", json!({}));
@@ -291,4 +300,60 @@ fn a_mac_holds_arguments_to_its_own_tool_list_and_promises_only_what_it_can() {
     let pc = Flow::new("pc-arguments", Capabilities::WINDOWS);
     let resources = rpc(pc.server.port(), "resources/list", json!({}));
     assert!(resources.to_string().contains("3D pictures"));
+}
+
+/// B1: between the join of the bridge's own instance and its local player's arrival (loading, then spawning) a
+/// screenshot is refused, whoever asks for it while go_to_world still waits; once arrived it is given.
+#[test]
+fn a_mac_s_screenshot_waits_for_the_local_player_s_own_arrival() {
+    let flow = Flow::new("mac-arrival", Capabilities::MAC);
+    flow.game.set_behaviour(|b| b.player_after = Duration::from_secs(4));
+    let port = flow.server.port();
+    let going = std::thread::spawn(move || rpc(port, "tools/call", json!({ "name": "go_to_world", "arguments": { "world_id": LAB_WORLD_A } })));
+    // Joined (the lab's log says so), its local player not there yet: a second client's screenshot is refused.
+    std::thread::sleep(Duration::from_millis(1500));
+    let refused = flow.tool("screenshot", json!({})).expect_err("not arrived");
+    assert_eq!(refused["code"], "not_in_world", "{refused}");
+    let arrived = ok(going.join().unwrap());
+    assert_eq!(arrived["result"]["structuredContent"]["arrived"], true, "{arrived}");
+    flow.tool("screenshot", json!({})).expect("arrived: looked at");
+    flow.tool("close_vrchat", json!({})).expect("closes");
+}
+
+/// B4: the destination made for a start that did not happen (the close of the bridge's own game timed out, as on
+/// 2026-11-23 01:09) is kept, and the next go_to_world to the same world resumes it instead of making another; a Stop
+/// pressed meanwhile leaves the game as it is, closing nothing.
+#[test]
+fn a_travel_that_fails_keeps_its_destination_for_the_retry_and_a_stop_closes_nothing() {
+    let flow = Flow::with_close_limit("mac-resume", Capabilities::MAC, Duration::from_secs(2));
+    let first = flow.tool("go_to_world", json!({ "world_id": LAB_WORLD_A })).expect("the first world");
+    if first["arrived"] != true {
+        flow.tool("wait_for", json!({ "until": "in_world" })).expect("arrives");
+    }
+    flow.game.set_behaviour(|b| b.close_ignored = true);
+    std::thread::sleep(Duration::from_millis(60));
+    flow.fails("go_to_world", json!({ "world_id": LAB_WORLD_B }), "close_timeout");
+    assert_eq!(flow.game.instances().len(), 2, "one made for the second world");
+    flow.game.set_behaviour(|b| b.close_ignored = false);
+    std::thread::sleep(Duration::from_millis(60));
+    let second = flow.tool("go_to_world", json!({ "world_id": LAB_WORLD_B })).expect("resumes");
+    let second = if second["arrived"] == true { second } else { flow.tool("wait_for", json!({ "until": "in_world" })).unwrap() };
+    assert_eq!(second["world_id"], LAB_WORLD_B);
+    assert_eq!(flow.game.instances().len(), 2, "the kept destination was used: none made again");
+    let launched = flow.game.launches();
+    assert_eq!(launched.last().map(|l| format!("{}:{}", l.world_id, l.instance)), flow.game.instances().last().cloned(), "launched into the instance made first");
+    // The person pauses the bridge while VRChat's API makes the next instance: the running game is not closed.
+    std::thread::sleep(Duration::from_millis(60));
+    let closes = flow.game.closes();
+    flow.game.set_behaviour(|b| b.create_takes = Duration::from_millis(800));
+    let port = flow.server.port();
+    let going = std::thread::spawn(move || rpc(port, "tools/call", json!({ "name": "go_to_world", "arguments": { "world_id": LAB_WORLD_A } })));
+    std::thread::sleep(Duration::from_millis(300));
+    flow.bridge.hold(true);
+    let answer = ok(going.join().unwrap());
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    assert_eq!(flow.game.closes(), closes, "paused while the instance was made: the game was not asked to close");
+    flow.bridge.hold(false);
+    flow.game.set_behaviour(|b| b.create_takes = Duration::ZERO);
+    flow.tool("close_vrchat", json!({})).expect("closes");
 }

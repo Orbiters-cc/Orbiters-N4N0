@@ -156,7 +156,13 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
 
         if let Some(problem) = &status.problem {
-            widgets::field(ui, tr("It stays closed"), Some(problem), 0.0, |_| {});
+            // Keys that can never be read: the way out is here, not only in a restart.
+            let room = if status.keys_unreadable { 200.0 } else { 0.0 };
+            widgets::field(ui, tr("It stays closed"), Some(problem), room, |ui| {
+                if status.keys_unreadable && Button::new(tr("Reset the token")).icon(icons::ARROW_CLOCKWISE).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                    cx.ctl.bridge_command(Command::ResetToken);
+                }
+            });
         }
         if !status.listening {
             // Off: an agent that has it can still be cleaned up, and nothing is offered that could not answer.

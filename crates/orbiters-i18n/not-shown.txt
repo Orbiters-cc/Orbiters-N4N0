@@ -14,6 +14,8 @@ crates/orbiters-n4n0-core/src/intents/model.rs
 # What the assistant's offline path hears (phrases matched, never shown), and its tests.
 crates/orbiters-n4n0-core/src/intents/phrases.rs
 crates/orbiters-n4n0-core/src/intents/quick.rs
+# The words that name a group of the assistant's tools, matched and never shown (r23).
+crates/orbiters-n4n0-core/src/intents/route.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
 # The tests of N4N0's bar and chat (REQUEST21 3).

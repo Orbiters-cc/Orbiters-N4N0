@@ -58,6 +58,11 @@ fn process(pid: u32) -> Option<Process> {
     }
 }
 
+/// When process `pid` was born (seconds, microseconds) while it runs: what the engine records of its game.
+pub(super) fn born(pid: u32) -> Option<(u64, u32)> {
+    process(pid).map(|p| p.birth)
+}
+
 /// When process `pid` started (Unix seconds), while it runs.
 fn birth(pid: u32) -> Option<u64> {
     process(pid).map(|p| p.birth.0)
@@ -100,6 +105,13 @@ pub(crate) fn log_of_launch(dir: &Path, since: SystemTime, link: &str) -> Option
     })
 }
 
+/// Whether the log's world state says the local player arrived in the destination of the launch link `link` (its world
+/// and instance exactly): after the last join, never between it and the local player's arrival.
+pub(crate) fn arrived_at(world: &orbiters_core::vrchat_log::WorldState, link: Option<&str>) -> bool {
+    let (Some(link), Some(world_id), Some(instance)) = (link, world.world_id.as_deref(), world.instance.as_deref()) else { return false };
+    world.in_world && world.arrived && crate::bridge::game::launch_link(world_id, instance) == link
+}
+
 /// Whether a Game session's record names the running launcher `pid` born at `birth` (seconds, microseconds) as its game:
 /// the same process, not one that took its number since.
 fn record_names(record: &obelisk::SessionRecord, pid: u32, birth: (u64, u32)) -> bool {
@@ -120,6 +132,8 @@ struct Ident {
     launcher: u32,
     birth: (u64, u32),
     wsd: Option<(u32, (u64, u32))>,
+    /// When the session's record last said it is this game: read again at most every [`LOOK_EVERY`].
+    verified: Instant,
 }
 
 /// The engine's log of this start, held open from the moment it was found (a new file each start): read whole, in order,
@@ -188,11 +202,16 @@ struct Mine {
     /// The last look at the windows and the engine's log.
     looked: Option<Instant>,
     window: Option<MacWindow>,
+    /// Each arrival authorized (this launch's held log, its own destination, the local player in it, drawing) is
+    /// numbered: a screenshot taken under one is delivered only under the same.
+    arrivals: u64,
+    authorized: bool,
 }
 
 impl Mine {
     /// The game's own log can no longer be followed: what it said is forgotten (place, arguments).
     fn lose_log(&mut self) {
+        self.authorized = false;
         self.log = None;
         self.log_key = None;
         self.log_len = 0;
@@ -202,6 +221,7 @@ impl Mine {
 
     /// Another game, or the association broken: nothing of the last one is kept.
     fn forget_game(&mut self) {
+        self.authorized = false;
         self.ident = None;
         self.window = None;
         self.shown = None;
@@ -217,11 +237,13 @@ pub(super) struct MacGame {
     real: RealGame,
     ctl: Weak<Controller>,
     mine: Mutex<Mine>,
+    /// The shared start reserved by [`Game::admit_start`] for the next launch, until it is made or given back.
+    reserved: Mutex<Option<u64>>,
 }
 
 impl MacGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default() }
+        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default() }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -253,16 +275,31 @@ impl MacGame {
             mine.forget_game();
             return None;
         };
-        if mine.ident.as_ref().is_some_and(|i| i.session == session && i.launcher == pid && i.birth == now.birth) {
+        let cached = mine.ident.as_ref().is_some_and(|i| i.session == session && i.launcher == pid && i.birth == now.birth);
+        if cached && mine.ident.as_ref().is_some_and(|i| i.verified.elapsed() < LOOK_EVERY) {
+            return Some(pid);
+        }
+        // The engine's record is read again: a session that ended, or names another game now, owns nothing.
+        let library = obelisk::library(&obelisk::home());
+        let record = obelisk::session_record_of(&library, &session);
+        let named = match &record {
+            Ok(Some(record)) => record_names(record, pid, now.birth),
+            // Not readable this moment (being rewritten whole): the association stands only as long as it was just proven.
+            Err(_) => cached && mine.ident.as_ref().is_some_and(|i| i.verified.elapsed() < LOOK_EVERY * 4),
+            Ok(None) => false,
+        };
+        if !named {
+            mine.forget_game();
+            return None;
+        }
+        if cached {
+            if let (Some(ident), Ok(Some(_))) = (mine.ident.as_mut(), &record) {
+                ident.verified = Instant::now();
+            }
             return Some(pid);
         }
         mine.forget_game();
-        let library = obelisk::library(&obelisk::home());
-        let record = obelisk::session_record_of(&library, &session).ok().flatten()?;
-        if !record_names(&record, pid, now.birth) {
-            return None;
-        }
-        mine.ident = Some(Ident { session, launcher: pid, birth: now.birth, wsd: None });
+        mine.ident = Some(Ident { session, launcher: pid, birth: now.birth, wsd: None, verified: Instant::now() });
         Some(pid)
     }
 
@@ -296,6 +333,13 @@ impl MacGame {
         if let Some(watcher) = mine.watcher.as_mut() {
             watcher.poll();
         }
+        // The follower reads the very file whose arguments were verified, or nothing of it counts.
+        let held = mine.watcher.as_ref().map(|w| (w.lost(), w.held()));
+        if let Some((lost, held)) = held {
+            if lost || held.is_some_and(|h| Some(h) != mine.log_key) {
+                mine.lose_log();
+            }
+        }
         if mine.looked.is_some_and(|at| at.elapsed() < LOOK_EVERY) {
             return;
         }
@@ -315,7 +359,7 @@ impl MacGame {
             if let Ok(Some(record)) = obelisk::session_record_of(library, &session) {
                 match record.shown {
                     Some(shown) => {
-                        if mine.shown.is_none_or(|before| shown.frames > before) {
+                        if grown(mine.shown, shown.frames) {
                             mine.grew = Some(Instant::now());
                         }
                         mine.shown = Some(mine.shown.map_or(shown.frames, |before| before.max(shown.frames)));
@@ -338,9 +382,12 @@ impl MacGame {
         let read = mine.engine.as_mut().map(|engine| (read_engine_log(engine), engine.presents));
         if let Some((lost, presents)) = read {
             mine.renderer_lost |= lost;
-            if presents > mine.presents {
-                mine.presents = presents;
-                mine.presents_grew = Some(Instant::now());
+            if let Some(presents) = presents {
+                // The first count read (a backlog, or the first line) is where it stands, not a growth.
+                if grown(mine.presents, presents) {
+                    mine.presents_grew = Some(Instant::now());
+                }
+                mine.presents = Some(mine.presents.map_or(presents, |before| before.max(presents)));
             }
         }
     }
@@ -361,7 +408,8 @@ impl MacGame {
     fn window_is_ours(&self, id: u32) -> bool {
         let Some(pid) = self.own_launcher() else { return false };
         let Some((wsd, born)) = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) else { return false };
-        process(wsd).is_some_and(|p| p.parent == pid && p.birth == born) && native::windows().iter().any(|w| w.id == id && w.owner == wsd)
+        // The very window chosen as the game's (not any window of the window server: its splash, a crash box).
+        process(wsd).is_some_and(|p| p.parent == pid && p.birth == born) && native::game_window(&native::windows(), wsd).is_some_and(|w| w.id == id)
     }
 
     /// Asks the program to quit the bridge's own game session, as the game's own Quit does: never forced.
@@ -389,6 +437,11 @@ impl MacGame {
             (Ok(()), None) => Ok(()),
         }
     }
+}
+
+/// Whether a count grew: from one already read of this launch, never from none (a first count, even 0, proves nothing).
+pub(crate) fn grown(before: Option<u64>, now: u64) -> bool {
+    before.is_some_and(|before| now > before)
 }
 
 /// The most presents the window server's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
@@ -472,20 +525,32 @@ impl Game for MacGame {
                 seen.running = true;
                 seen.pid = Some(launcher);
                 let drawn = drawing(mine.continuous, mine.grew, mine.presents_grew, Instant::now());
-                // Neither presented nor shown for a while: the game's graphics stopped, covered or not.
-                seen.renderer_lost = mine.renderer_lost || drawn == Drawing::Stalled;
+                // Lost only when the engine says so (or the game ends): frames that stop for a while (a long load, a
+                // suspended compositor) are no proof of drawing, which keeps the arrival from being given, and no loss.
+                seen.renderer_lost = mine.renderer_lost;
                 seen.desktop_mode = mine.args.as_ref().map(|a| a.iter().any(|x| x == "--no-vr"));
-                if let Some(watcher) = mine.watcher.as_ref().filter(|w| w.caught_up()) {
+                let mut mine = mine;
+                let link = mine.link.clone();
+                let window = mine.window.is_some();
+                let mut authorized = false;
+                if let Some(watcher) = mine.watcher.as_ref().filter(|w| w.caught_up() && !w.lost() && w.held().is_some()) {
                     let world = &watcher.state;
                     seen.world_id = world.world_id.clone();
                     seen.world_name = world.world_name.clone();
                     seen.instance = world.instance.clone();
-                    // Renderer evidence: in a world only while its window is on screen and its frames grow.
-                    seen.in_world = world.in_world && mine.window.is_some() && drawn == Drawing::Yes;
+                    // In a world only once the local player arrived in this launch's own destination, as its own held log
+                    // says, while its window is on screen and its frames grow.
+                    authorized = arrived_at(world, link.as_deref()) && window && drawn == Drawing::Yes;
+                    seen.in_world = authorized;
                     seen.local_player = world.local_player.clone();
                     seen.others = world.others();
                     seen.avatar_name = world.avatar_name.clone().or_else(|| world.local_player.as_ref().and_then(|me| world.avatars.get(me).cloned()));
                 }
+                if authorized && !mine.authorized {
+                    mine.arrivals += 1;
+                }
+                mine.authorized = authorized;
+                seen.arrival = authorized.then_some(mine.arrivals);
             }
             None => {
                 // The bridge's start that never ran, or ended: why, for the agent.
@@ -529,28 +594,18 @@ impl Game for MacGame {
         // The same lock Home's Play starts under.
         let _started = ctl.launcher_started_lock();
         // What tells a drawing game from a frozen window is the program's (its records' `shown`): no start without it.
-        if !mac.program().as_deref().and_then(program_version).is_some_and(|v| version_at_least(&v, CLI_SHOWN_FRAMES)) {
-            return Err(Failure::new(
-                "start_failed",
-                "What runs VRChat on this Mac is too old for the bridge (it cannot tell whether the game draws), so nothing was started.", // i18n: not shown (an AI client reads it)
-                "Tell the person: Orbiters - N4N0 gets a newer version a little after it starts; reopen it, then call go_to_world again.", // i18n: not shown
-            ));
-        }
+        cli_fit(mac)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
         let at = SystemTime::now();
-        match mac.start_launch(&plan.args()) {
+        let token = self.reserved.lock().unwrap().take();
+        match mac.start_launch_reserved(&plan.args(), token) {
             Ok(id) => {
                 *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_before, ..Default::default() };
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Wait(wait)) => Err(start_wait_failure(wait)),
-            Err(super::obelisk_cli::Refused::Unknown) => Err(Failure::new(
-                "start_wait",
-                "Whether VRChat's last start on this Mac ended early could not be read yet, so nothing was started (a start too soon after one makes Easy Anti-Cheat fail).", // i18n: not shown (an AI client reads it)
-                "Wait 10 s, then call go_to_world again.", // i18n: not shown
-            )
-            .retry_after(10)),
+            Err(super::obelisk_cli::Refused::Records(trouble)) => Err(records_failure(&trouble)),
             Err(super::obelisk_cli::Refused::Busy) => Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start).", "Wait a minute, then call get_state.")), // i18n: not shown
             Err(super::obelisk_cli::Refused::Failed(why)) => Err(Failure::new("start_failed", format!("VRChat did not start: {why}"), "Ask the person to look at Orbiters - N4N0's Home.")), // i18n: not shown
         }
@@ -560,18 +615,29 @@ impl Game for MacGame {
         let ctl = self.ctl()?;
         let machine = ctl.launcher_machine_now();
         let Some(mac) = machine.as_mac() else { return Ok(()) };
-        let own = self.mine.lock().unwrap().launch;
-        if mac.play().attached().is_some_and(|id| Some(id) != own) {
-            return Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start), so no instance was made.", "Wait a minute, then call get_state.")); // i18n: not shown (an AI client reads it)
+        // The program must have what the bridge relies on before anything is made for a start.
+        cli_fit(mac)?;
+        self.release_start();
+        let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
+        // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
+        match mac.play().reserve(mac.library(), own) {
+            Ok(token) => {
+                *self.reserved.lock().unwrap() = Some(token);
+                Ok(())
+            }
+            Err(super::obelisk_cli::Refused::Busy) => Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start), so no instance was made.", "Wait a minute, then call get_state.")), // i18n: not shown (an AI client reads it)
+            Err(super::obelisk_cli::Refused::Wait(wait)) => Err(start_wait_failure(wait)),
+            Err(super::obelisk_cli::Refused::Records(trouble)) => Err(records_failure(&trouble)),
+            Err(other) => Err(Failure::new("start_failed", other.words(), "Call get_state.")), // i18n: not shown (an AI client reads it)
         }
-        if own_running {
-            // Closed first; its end and any wait after it are waited for in the same call (start_ready).
-            return Ok(());
-        }
-        match mac.play().gate(mac.library()) {
-            Ok(None) => Ok(()),
-            Ok(Some(wait)) => Err(start_wait_failure(wait)),
-            Err(_) => Err(Failure::new("start_wait", "Whether VRChat's last start on this Mac ended early could not be read yet, so no instance was made.", "Wait 10 s, then call go_to_world again.").retry_after(10)), // i18n: not shown (an AI client reads it)
+    }
+
+    fn release_start(&self) {
+        let Some(token) = self.reserved.lock().unwrap().take() else { return };
+        if let Some(mac) = self.machine() {
+            if let Some(mac) = mac.as_mac() {
+                mac.play().unreserve(token);
+            }
         }
     }
 
@@ -602,7 +668,7 @@ impl Game for MacGame {
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
         let window = self.own_window(pid)?;
-        let (width, height) = native::content_pixels(&window, native::scale_of(&window));
+        let (width, height) = native::content_pixels(&window, native::scale_of(&window), native::title_points(&window, native::display_frame(&window)));
         Some(GameWindow { handle: window.id as isize, width, height })
     }
 
@@ -641,10 +707,16 @@ impl Game for MacGame {
             Failure::new("not_started_by_bridge", "That window is no longer this bridge's VRChat's, so it was not looked at.", "Call get_state.") // i18n: not shown (an AI client reads it)
         })?;
         let frame = self.mine.lock().unwrap().window;
+        let owner = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd);
         let png = native::capture_png(id).map_err(|e| Failure::new("screenshot_failed", format!("macOS did not give the window's picture: {e}"), "Call get_state; try again in a moment."))?; // i18n: not shown
+        // The window may have changed hands while it was captured: the picture is kept only if it is still this game's.
+        let still = self.window_is_ours(id) && self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) == owner;
+        if !still {
+            return Err(Failure::new("not_started_by_bridge", "That window stopped being this bridge's VRChat's while it was looked at, so the picture was not kept.", "Call get_state.")); // i18n: not shown (an AI client reads it)
+        }
         let image = image::load_from_memory(&png).map_err(|e| Failure::new("screenshot_failed", e.to_string(), "Try again in a moment."))?.to_rgba8(); // i18n: not shown
         // The title bar is the system's, not the game's: the picture is the content, as clicks and VRChat count it.
-        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height)).min(image.height().saturating_sub(1));
+        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, native::title_points(&f, native::display_frame(&f)))).min(image.height().saturating_sub(1));
         let (width, height) = (image.width(), image.height() - top);
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for row in top..image.height() {
@@ -745,7 +817,12 @@ impl crate::bridge::game::Opener for MacOpener {
     /// The engine's launcher whose window server owns the frontmost ordinary window, when that is one of the VRChats here.
     fn foreground_pid(&self) -> Option<u32> {
         let front = native::front_window()?;
-        let owner = native::windows().into_iter().find(|w| w.id == front)?.owner;
+        let windows = native::windows();
+        let owner = windows.iter().find(|w| w.id == front)?.owner;
+        // Only the game's own window counts (a splash or a crash box of the same window server does not).
+        if native::game_window(&windows, owner).is_none_or(|w| w.id != front) {
+            return None;
+        }
         let launcher = process(owner)?.parent;
         self.running().contains(&launcher).then_some(launcher)
     }
@@ -768,6 +845,36 @@ fn start_wait_failure(wait: Duration) -> Failure {
         format!("Wait {} s, then call go_to_world again.", wait.as_secs().max(1)), // i18n: not shown
     )
     .retry_after(wait.as_secs().max(1))
+}
+
+/// Whether the program has what the bridge relies on (`shown` frames, the session-qualified quit), refused before
+/// anything is made otherwise.
+fn cli_fit(mac: &super::launcher::MacMachine) -> Result<(), Failure> {
+    if mac.program().as_deref().and_then(program_version).is_some_and(|v| version_at_least(&v, CLI_SHOWN_FRAMES)) {
+        return Ok(());
+    }
+    Err(Failure::new(
+        "start_failed",
+        "What runs VRChat on this Mac is too old for the bridge (it cannot tell whether the game draws), so nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Tell the person: Orbiters - N4N0 gets a newer version a little after it starts; reopen it, then call go_to_world again.", // i18n: not shown
+    ))
+}
+
+/// A start held by a record of the engine's that cannot be read: a wait while it may still be a start's, else the person.
+fn records_failure(trouble: &super::obelisk_cli::Trouble) -> Failure {
+    match trouble.wait() {
+        Some(wait) => Failure::new(
+            "start_wait",
+            format!("A record of an earlier VRChat start on this Mac cannot be read ({}), so whether it ended early is not known yet and nothing was made or started.", super::obelisk_cli::file_name(&trouble.file)), // i18n: not shown (an AI client reads it)
+            format!("Wait {} s, then call go_to_world again.", wait.as_secs().max(1)), // i18n: not shown
+        )
+        .retry_after(wait.as_secs().max(1)),
+        None => Failure::new(
+            "start_blocked",
+            format!("VRChat cannot be started on this Mac until a damaged record of its engine is set aside ({}).", trouble.file.display()), // i18n: not shown (an AI client reads it)
+            "Tell the person: Orbiters - N4N0's Home shows the record and a Set aside button.", // i18n: not shown
+        ),
+    }
 }
 
 /// What a Mac's game answers for what its capabilities already refuse (a second line of defence).
@@ -830,6 +937,28 @@ mod tests {
         assert!(!log_continues((1, 7), 100, ((1, 7), 40)), "cut shorter");
     }
 
+    /// B1: a screenshot's arrival is this launch's exact destination with its local player in it, never the join before
+    /// it (loading, spawning), never another instance of the same world, never with no launch link.
+    #[test]
+    fn arrival_is_the_launch_s_own_destination_with_its_local_player() {
+        use orbiters_core::vrchat_log::{LogEvent, WorldState};
+        let world = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+        let ours = "11~private(usr_8784f94a-27ed-4a3b-9c1d-112233445566)~region(eu)~nonce(a)";
+        let link = crate::bridge::game::launch_link(world, ours);
+        let mut state = WorldState::default();
+        state.apply(&LogEvent::Joining { world_id: world.into(), instance: ours.into(), at: None });
+        assert!(!arrived_at(&state, Some(&link)), "Joining: loading");
+        state.apply(&LogEvent::JoinedRoom { name: "W".into() });
+        assert!(!arrived_at(&state, Some(&link)), "joined, spawning: not arrived");
+        state.apply(&LogEvent::LocalPlayer { name: "Me".into() });
+        assert!(arrived_at(&state, Some(&link)));
+        assert!(!arrived_at(&state, None), "no launch of the bridge's");
+        assert!(!arrived_at(&state, Some(&crate::bridge::game::launch_link(world, "12~private(usr_8784f94a-27ed-4a3b-9c1d-112233445566)~region(eu)~nonce(b)"))), "another instance");
+        state.apply(&LogEvent::Joining { world_id: world.into(), instance: "12~private(usr_x)~region(eu)".into(), at: None });
+        state.apply(&LogEvent::LocalPlayer { name: "Me".into() });
+        assert!(!arrived_at(&state, Some(&link)), "moved on: the old destination is not where it is");
+    }
+
     /// The game draws while its frames grow; a count that stopped is a frozen window, one without continuity is unknown.
     #[test]
     fn a_window_is_drawn_only_while_its_frames_grow() {
@@ -840,6 +969,9 @@ mod tests {
         assert_eq!(drawing(Some(true), old, old, now), Drawing::Stalled, "neither: a frozen game");
         assert_eq!(drawing(Some(false), Some(now), None, now), Drawing::Unknown, "a log that lost its continuity, no presents known");
         assert_eq!(drawing(None, None, None, now), Drawing::Unknown, "no count yet");
+        // M6: a first count (0, or a backlog's) is where it stands; only a later, larger one is drawing.
+        assert!(!grown(None, 0) && !grown(None, 6452), "a first count proves nothing");
+        assert!(!grown(Some(10), 10) && grown(Some(10), 11));
         // As this Mac's engine wrote them on 2026-11-22 23:56.
         let log = "neptune unixlib wsi (wsd): 6420 presents (4599 shown events), last 60: interval avg 55.840 ms\nneptune unixlib wsi (wsd): alive: 6452 presents, 4599 shown events, 7286 drains\nwsd: window 1 overlay: frame held 183.3 ms\n";
         assert_eq!(presents_said(log), Some(6452));

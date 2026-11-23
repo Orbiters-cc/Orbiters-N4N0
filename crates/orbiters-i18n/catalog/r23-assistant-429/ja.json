@@ -1,0 +1,7 @@
+{
+  "Retry in {wait}": "{wait}後に再試行",
+  "Trying again in {wait}": "{wait}後に自動で再試行",
+  "{n} min": "{n} 分",
+  "{n} h": "{n} 時間",
+  "Sends your last message again, once.": "最後のメッセージをもう一度だけ送ります。"
+}

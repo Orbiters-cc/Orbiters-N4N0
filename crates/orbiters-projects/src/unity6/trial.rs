@@ -1176,8 +1176,8 @@ pub(crate) mod tests {
         let cancel = AtomicBool::new(false);
         let copy = |to: PathBuf| crate::templates::copy(&e.source, &to, &cancel, &Default::default());
         assert!(copy(e.source.join("Assets/Made/Copy")).is_err());
-        assert!(copy(other.join("Assets/Made/Copy")).is_err());
         assert_eq!(snapshot(&e.source), original, "Duplicate into the original");
+        assert!(copy(other.join("Assets/Made/Copy")).is_err());
         assert!(!other.join("Assets/Made").exists());
         // A local archive whose name is taken by another in Packages: said before anything is copied.
         std::fs::write(e.root.join("External/tool.tgz"), b"one").unwrap();

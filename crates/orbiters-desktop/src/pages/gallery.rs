@@ -1343,7 +1343,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         let window = ctx.content_rect();
         let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
         let mut open = true;
-        egui::Area::new(egui::Id::unique("gallery-remote-editor")).order(egui::Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, egui::Id::unique("gallery-remote-editor"), egui::Order::Foreground, true).fixed_pos(rect.min).show(&ctx, |ui| {
             ui.set_min_size(rect.size());
             open = e.show(ui, rect);
         });
@@ -2147,7 +2147,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
     let mut close = false;
     let mut open_link = None;
     let mut retry = false;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).fade_in(false).show(ctx, |ui| {
+    let area = orbiters_ui::front::area(ctx, id, Order::Foreground, !closing).fixed_pos(rect.min).fade_in(false).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         ui.multiply_opacity(kk);
         let p = ui.painter().clone();

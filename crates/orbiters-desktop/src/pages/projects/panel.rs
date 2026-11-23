@@ -40,6 +40,9 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             state.panel_closing = false;
             return;
         }
+        if !state.panel_closing {
+            orbiters_ui::front::hold(&ctx, Id::unique("project-sheet"));
+        }
         let w = split.panel;
         let out = (1.0 - v) * (w + 24.0);
         let scrim = ui.interact(page, Id::unique("project-sheet-scrim"), Sense::click());

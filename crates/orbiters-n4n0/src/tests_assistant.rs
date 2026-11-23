@@ -46,7 +46,7 @@ fn the_offline_path_works_signed_out_and_without_a_network() {
     let (t, n) = n4n0(Settings::default());
     assert!(!t.settings().walk_boost.enabled);
     // Signed out, no server at all: the sentence never leaves the computer.
-    n.ask("Turn on fast walk".into(), "voice");
+    n.asked("Turn on fast walk".into(), "voice");
     assert!(t.settings().walk_boost.enabled, "through the menus' own Fast walk");
     let status = t.view();
     let lines: Vec<(N4n0Who, String)> = status.lines.iter().map(|l| (l.who, l.text.clone())).collect();
@@ -55,17 +55,17 @@ fn the_offline_path_works_signed_out_and_without_a_network() {
     assert_eq!((entry.intent.as_str(), entry.outcome, entry.via), ("fast_walk", Outcome::Done, Via::Quick));
     assert!(t.notices().iter().any(|(k, m)| *k == NoticeKind::Success && m.contains("Fast walk on")), "a toast says it: {:?}", t.notices());
     // Undo, said: back as it was.
-    n.ask("undo that".into(), "voice");
+    n.asked("undo that".into(), "voice");
     assert!(!t.settings().walk_boost.enabled);
     // Another language, the same command.
-    n.ask("Active le pas rapide".into(), "voice");
+    n.asked("Active le pas rapide".into(), "voice");
     assert!(t.settings().walk_boost.enabled);
-    n.ask("早歩きをオフにして".into(), "voice");
+    n.asked("早歩きをオフにして".into(), "voice");
     assert!(!t.settings().walk_boost.enabled);
     // The model hears of it at its next turn, in its own words.
     assert!(n.n4n0.lock().unwrap().notes.iter().any(|note| note.contains("did it by itself") && note.contains("Fast walk on")));
     // What is not a known command goes to the model, which needs a sign-in.
-    n.ask("what world am I in".into(), "voice");
+    n.asked("what world am I in".into(), "voice");
     assert_eq!(t.view().lines.last().map(|l| l.who), Some(N4n0Who::Error));
 }
 
@@ -73,7 +73,7 @@ fn the_offline_path_works_signed_out_and_without_a_network() {
 fn the_assistant_off_switch_stops_the_offline_path_too() {
     let (t, n) = n4n0(Settings::default());
     n.command(Command::Assistant { on: false });
-    n.ask("turn on fast walk".into(), "voice");
+    n.asked("turn on fast walk".into(), "voice");
     assert!(!t.settings().walk_boost.enabled, "off is off");
     assert!(t.view().assistant.log.is_empty());
 }
@@ -82,7 +82,7 @@ fn the_assistant_off_switch_stops_the_offline_path_too() {
 fn a_quick_command_the_app_cannot_do_now_says_why() {
     // A phone's app: no 3D pictures there.
     let (t, n) = n4n0(Settings::default());
-    n.ask("take a 3d picture".into(), "voice");
+    n.asked("take a 3d picture".into(), "voice");
     let last = t.view().lines.last().cloned().unwrap();
     assert_eq!(last.who, N4n0Who::Error);
     assert!(last.text.contains("Only Orbiters - N4N0 on the computer"), "{}", last.text);
@@ -99,7 +99,7 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     ]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("turn fast walk on, boop Sam and sign me out".into(), "typed");
+    n.asked("turn fast walk on, boop Sam and sign me out".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(t.settings().walk_boost.enabled, "(a) at once");
     assert!(t.app_intents.lock().unwrap().is_empty(), "(b) and (c) are not done: {:?}", t.app_intents.lock().unwrap());
@@ -113,7 +113,7 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     assert_eq!(question.matches("if you say yes").count(), 1, "one sentence for what waits: {question}");
     assert_eq!(log(&t), vec![("fast_walk".into(), Outcome::Done), ("boop".into(), Outcome::Asked), ("restricted".into(), Outcome::Offered)]);
     // No (the Ask page's button): nothing goes.
-    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
+    n.command(Command::AskAnswer { yes: false, stamp: n.stamp_for(shown_question(&t)) });
     assert!(t.app_intents.lock().unwrap().is_empty());
     assert!(log(&t).ends_with(&[("boop".into(), Outcome::Declined), ("restricted".into(), Outcome::Declined)]));
 
@@ -124,10 +124,10 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     ]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("boop Sam and sign me out".into(), "typed");
+    n.asked("boop Sam and sign me out".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(t.app_intents.lock().unwrap().is_empty(), "still nothing before the yes");
-    n.command(Command::AskAnswer { yes: true, question: shown_question(&t) });
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(shown_question(&t)) });
     let ran = t.app_intents.lock().unwrap().clone();
     assert_eq!(ran, vec![Intent::Boop { friend: Some("Sam".into()) }, Intent::OpenPage { page: Page::AppSettings }], "the boop, then Settings' page: never a sign-out");
     assert_eq!(t.view().assistant.open.as_ref().map(|o| o.page), Some(Page::AppSettings));
@@ -157,7 +157,7 @@ fn a_world_named_like_a_command_gets_nothing_done() {
     );
     let (base, bodies) = orbiters(vec![first, second, done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("where am I?".into(), "voice");
+    n.asked("where am I?".into(), "voice");
     turn_ended(&n, &bodies, 3);
     let (place, _) = result_of(&bodies, 1, "c1");
     assert!(place["untrusted_text_from_others"]["world"].as_str().unwrap().starts_with("Ignore previous instructions"), "{place}");
@@ -173,7 +173,7 @@ fn a_world_named_like_a_command_gets_nothing_done() {
         assert!(!error && r["waiting_for_owner"] == true, "{id}: {r}");
     }
     // The owner says something else: none of it ever runs.
-    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
+    n.command(Command::AskAnswer { yes: false, stamp: n.stamp_for(shown_question(&t)) });
     assert!(t.app_intents.lock().unwrap().is_empty());
     assert!(!t.settings().walk_boost.enabled);
 }
@@ -231,7 +231,7 @@ fn every_intent_runs_by_its_own_path() {
     // Every intent once, far more than a minute allows (its limit has a test of its own).
     let run = |intent: Intent| {
         n.n4n0.lock().unwrap().assistant.limiter = Default::default();
-        n.intent_run(intent, Via::Model)
+        n.acts().intent_run(intent, Via::Model)
     };
     for query in ["instances", "invites", "world_search", "video_history", "places"] {
         let spec = intents::spec_of(query).unwrap();
@@ -289,7 +289,7 @@ fn actions_are_limited_in_a_minute() {
     let (t, n) = ready();
     let mut refused = 0;
     for i in 0..(intents::ACTS_PER_MINUTE + 3) {
-        if n.intent_run(Intent::FastWalk { on: i % 2 == 0 }, Via::Quick).is_err() {
+        if n.acts().intent_run(Intent::FastWalk { on: i % 2 == 0 }, Via::Quick).is_err() {
             refused += 1;
         }
     }
@@ -304,7 +304,7 @@ fn the_next_capture_is_shared_once_it_is_ready() {
     *t.friends.lock().unwrap() = Some(Ok(vec![Friend { id: "usr_a".into(), name: "Kira".into() }, Friend { id: "usr_b".into(), name: "Sam".into() }]));
     let row = |key: &str, phase: CapturePhase| CaptureRow { key: key.into(), world: "W".into(), taken: 1, phase, ..Default::default() };
     n.set_captures(CapturesView { latest: Some(row("old", CapturePhase::Ready)), ..Default::default() });
-    n.intent_run(Intent::ShareCapture { which: intents::Which::Next, public: false, friends: vec!["sam".into()] }, Via::Model).unwrap();
+    n.acts().intent_run(Intent::ShareCapture { which: intents::Which::Next, public: false, friends: vec!["sam".into()] }, Via::Model).unwrap();
     // Not the one before, nor the new one while its 3D view is made.
     n.set_captures(CapturesView { latest: Some(row("new", CapturePhase::Making { percent: 10 })), ..Default::default() });
     std::thread::sleep(Duration::from_millis(100));
@@ -327,13 +327,13 @@ fn ask_to_boop(t: &TestHost, n: &Shared, friend: &str) {
     let calls = json!([call("b1", "orbiters_friends", json!({ "intent": "boop", "friend": friend }))]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask(format!("boop {friend}"), "typed");
+    n.asked(format!("boop {friend}"), "typed");
     turn_ended(n, &bodies, 2);
 }
 
 /// The answer a surface sends for the question it showed.
 fn answer_shown(n: &Shared, yes: bool, question: u64) {
-    n.command(Command::AskAnswer { yes, question });
+    n.command(Command::AskAnswer { yes, stamp: n.stamp_for(question) });
 }
 
 /// Verify-r21 blocker 1: question A is answered on one surface, question B arrives, then another surface's late answer
@@ -358,7 +358,7 @@ fn a_late_answer_to_an_older_question_never_resolves_the_next_one() {
         assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a late answer to A ran B ({late_yes})");
         assert_eq!(shown_question(&t), b, "B still waits ({late_yes})");
         // A typed yes sent while A was the question on screen: nothing either.
-        n.command(Command::Ask { text: "yes".into(), question: Some(a) });
+        n.command(Command::Ask { text: "yes".into(), stamp: n.stamp_for(a) });
         assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a typed yes for A ran B");
         assert_eq!(shown_question(&t), b, "B still waits after a typed yes for A");
         // B's own answer.
@@ -376,23 +376,24 @@ fn the_next_orbiters_account_starts_from_an_empty_conversation() {
     let first = done(json!([{ "role": "user", "content": secret }, { "role": "assistant", "content": "Noted, A." }]), json!([call("b1", "orbiters_friends", json!({ "intent": "boop", "friend": "Sam" }))]));
     let (base, bodies) = orbiters(vec![first, done(json!([{ "role": "user", "content": secret }]), json!([]))]);
     t.sign_in(base, "orbit-a");
-    n.ask(secret.into(), "typed");
+    n.asked(secret.into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(!t.view().lines.is_empty() && !t.view().confirmations.is_empty() && !t.view().assistant.log.is_empty());
     assert!(!n.n4n0.lock().unwrap().conversation.is_empty(), "A's conversation is kept for A's next turn");
     let epoch = t.view().account_epoch;
-    // The controller's identity gate: B is signed in.
-    n.command(Command::ForgetAccount);
+    // The controller's handover: B is signed in.
+    let (base_b, bodies_b) = orbiters(vec![done(json!([]), json!([]))]);
+    let late = n.stamp_for(1);
+    t.switch_member(&n, Some((base_b, "orbit-b")));
     let view = t.view();
     assert!(view.lines.is_empty() && view.confirmations.is_empty() && view.assistant.log.is_empty() && view.quota.is_none(), "{:?}", view.lines);
     assert_eq!(view.account_epoch, epoch + 1);
     // A late yes for A's question: nothing waits any more.
-    n.command(Command::AskAnswer { yes: true, question: 1 });
+    n.command(Command::AskAnswer { yes: true, stamp: late });
     assert!(t.app_intents.lock().unwrap().is_empty());
-    let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
-    t.sign_in(base, "orbit-b");
-    n.ask("hello".into(), "typed");
-    turn_ended(&n, &bodies, 1);
+    n.asked("hello".into(), "typed");
+    turn_ended(&n, &bodies_b, 1);
+    let bodies = bodies_b;
     let body = bodies.lock().unwrap()[0].to_string();
     assert!(!body.contains("4242") && !body.contains("Noted, A"), "B's request carries A's conversation: {body}");
     assert_eq!(bodies.lock().unwrap()[0]["messages"].as_array().map_or(0, Vec::len), 0, "an empty conversation");
@@ -427,7 +428,7 @@ fn a_minute_limit_is_tried_again_once_by_itself() {
     let (t, n) = ready();
     let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), done(json!([{ "role": "user", "content": "x" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
     let view = t.view();
     let f = view.assistant.failure.clone().expect("the failure is kept");
@@ -448,7 +449,7 @@ fn an_automatic_retry_that_fails_is_never_tried_again_by_itself() {
     let (t, n) = ready();
     let (base, bodies) = orbiters(vec![busy(1, "requests_per_minute"), busy(1, "requests_per_minute"), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     until("the automatic retry's failure", || bodies.lock().unwrap().len() == 2 && !n.n4n0.lock().unwrap().thinking());
     std::thread::sleep(Duration::from_millis(4000));
     assert_eq!(bodies.lock().unwrap().len(), 2, "no loop");
@@ -457,13 +458,13 @@ fn an_automatic_retry_that_fails_is_never_tried_again_by_itself() {
     // Its button: one send, however often it is pressed.
     let wait = f.waits(crate::unix_ms());
     std::thread::sleep(Duration::from_secs(wait) + Duration::from_millis(200));
-    n.command(Command::RetryTurn { id: f.id });
-    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
     until("Retry's send", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(bodies.lock().unwrap().len(), 3, "one press is one send");
     assert_eq!(you_lines(&t), 1);
-    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(bodies.lock().unwrap().len(), 3, "an old button does nothing");
 }
@@ -473,21 +474,21 @@ fn retry_before_its_moment_and_of_an_older_failure_does_nothing() {
     let (t, n) = ready();
     let (base, bodies) = orbiters(vec![busy(600, "tokens_per_day"), busy(0, "provider_down"), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
     let f = t.view().assistant.failure.clone().unwrap();
     assert!(f.retry && !f.automatic, "a daily limit waits for the person");
-    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(bodies.lock().unwrap().len(), 1, "too early");
-    n.ask("and about the sun".into(), "typed");
+    n.asked("and about the sun".into(), "typed");
     turn_ended(&n, &bodies, 2);
     let g = t.view().assistant.failure.clone().unwrap();
     assert_ne!(g.id, f.id);
-    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(bodies.lock().unwrap().len(), 2, "the older failure's number");
-    n.command(Command::RetryTurn { id: g.id });
+    n.command(Command::RetryTurn { id: g.id, stamp: n.stamped() });
     until("the newer failure's Retry", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
     assert_eq!(bodies.lock().unwrap()[2]["input"]["text"], "and about the sun");
 }
@@ -497,9 +498,9 @@ fn asking_something_else_takes_the_automatic_retry_away() {
     let (t, n) = ready();
     let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), done(json!([]), json!([])), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
-    n.ask("never mind, tell me about the sun".into(), "typed");
+    n.asked("never mind, tell me about the sun".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(t.view().assistant.failure.is_none());
     std::thread::sleep(Duration::from_millis(3500));
@@ -507,13 +508,13 @@ fn asking_something_else_takes_the_automatic_retry_away() {
     // Nor after New conversation, nor for another account.
     let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), busy(1, "tokens_per_minute"), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
     n.command(Command::NewConversation);
     assert!(t.view().assistant.failure.is_none());
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 2);
-    n.command(Command::ForgetAccount);
+    t.switch_member(&n, None);
     std::thread::sleep(Duration::from_millis(3500));
     assert_eq!(bodies.lock().unwrap().len(), 2);
 }
@@ -523,14 +524,14 @@ fn retry_is_offered_for_what_can_be_sent_again_only() {
     let (t, n) = ready();
     // No connection at all.
     t.sign_in("http://127.0.0.1:9/".into(), "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     until("the failure", || t.view().assistant.failure.is_some());
     let f = t.view().assistant.failure.clone().unwrap();
     assert!(f.retry && !f.automatic && f.waits(crate::unix_ms()) == 0, "{f:?}");
     // The provider down (a 5xx from the server), with an administrator's detail beside the calm words.
     let (base, bodies) = orbiters(vec![failed("unavailable", "N4N0 is unavailable.", json!({ "limit": "provider_down", "admin_detail": "Groq: HTTP 503" }))]);
     t.sign_in(base, "orbit-test");
-    n.ask("tell me about the moon".into(), "typed");
+    n.asked("tell me about the moon".into(), "typed");
     turn_ended(&n, &bodies, 1);
     let view = t.view();
     let f = view.assistant.failure.clone().unwrap();
@@ -540,7 +541,7 @@ fn retry_is_offered_for_what_can_be_sent_again_only() {
     for (code, what) in [("quota_exhausted", "used up"), ("unauthorized", "sign in"), ("bad_request", "bad")] {
         let (base, bodies) = orbiters(vec![failed(code, what, json!({}))]);
         t.sign_in(base, "orbit-test");
-        n.ask("tell me about the moon".into(), "typed");
+        n.asked("tell me about the moon".into(), "typed");
         turn_ended(&n, &bodies, 1);
         assert!(t.view().assistant.failure.is_none(), "{code}");
     }
@@ -551,7 +552,7 @@ fn retry_is_offered_for_what_can_be_sent_again_only() {
 #[test]
 fn the_status_is_set_offline_after_a_yes() {
     let (t, n) = ready();
-    n.ask("put me in orange".into(), "typed");
+    n.asked("put me in orange".into(), "typed");
     assert!(t.app_intents.lock().unwrap().is_empty());
     assert_eq!(log(&t), vec![("set_status".to_string(), Outcome::Asked)]);
     assert_eq!(t.view().assistant.log.last().map(|e| e.via), Some(Via::Quick));
@@ -559,11 +560,11 @@ fn the_status_is_set_offline_after_a_yes() {
     let shown = t.view().confirmations.iter().find(|c| c.is_local()).unwrap().summary.clone();
     assert!(shown.contains("if you say yes") && shown.contains("Ask me"), "{shown}");
     // No model was asked: no account was needed.
-    n.command(Command::AskAnswer { yes: true, question });
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(question) });
     assert_eq!(*t.app_intents.lock().unwrap(), vec![Intent::SetStatus { status: intents::StatusKind::AskMe }]);
     // Said no: nothing.
-    n.ask("mets-moi en rouge".into(), "typed");
-    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
+    n.asked("mets-moi en rouge".into(), "typed");
+    n.command(Command::AskAnswer { yes: false, stamp: n.stamp_for(shown_question(&t)) });
     assert_eq!(t.app_intents.lock().unwrap().len(), 1);
 }
 
@@ -577,7 +578,7 @@ fn a_turn_carries_the_named_tools_and_opens_more_on_request() {
     let boop = json!([call("m2", "orbiters_friends", json!({ "intent": "boop", "friend": "Sam" }))]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), open), done(json!([{ "role": "user", "content": "x" }]), boop), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("hello N4N0, how are you".into(), "typed");
+    n.asked("hello N4N0, how are you".into(), "typed");
     turn_ended(&n, &bodies, 3);
     let sent = bodies.lock().unwrap().clone();
     let first = names(&sent[0]);
@@ -588,13 +589,13 @@ fn a_turn_carries_the_named_tools_and_opens_more_on_request() {
     // The next turn carries the same group ("boop them again").
     let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("thanks".into(), "typed");
+    n.asked("thanks".into(), "typed");
     turn_ended(&n, &bodies, 1);
     assert!(names(&bodies.lock().unwrap()[0]).contains(&"orbiters_friends".to_string()));
     // But no further: what a turn inherited and did not use does not pile up over a conversation.
     let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("thanks again".into(), "typed");
+    n.asked("thanks again".into(), "typed");
     turn_ended(&n, &bodies, 1);
     assert!(!names(&bodies.lock().unwrap()[0]).contains(&"orbiters_friends".to_string()));
 }
@@ -607,14 +608,14 @@ fn a_turn_that_did_something_is_not_repeated_by_itself() {
     let walk = json!([call("w1", "orbiters_walk", json!({ "intent": "fast_walk", "on": true }))]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), walk), busy(1, "tokens_per_minute"), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("could you please do the fast walk thing for me".into(), "typed");
+    n.asked("could you please do the fast walk thing for me".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(t.settings().walk_boost.enabled);
     let f = t.view().assistant.failure.clone().unwrap();
     assert!(f.retry && !f.automatic, "{f:?}");
     std::thread::sleep(Duration::from_millis(3500));
     assert_eq!(bodies.lock().unwrap().len(), 2);
-    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id, stamp: n.stamped() });
     until("Retry", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
     let summary = bodies.lock().unwrap()[2]["context"]["summary"].as_str().unwrap().to_string();
     assert!(summary.contains("Your last answer did not arrive") && summary.contains("did:"), "{summary}");
@@ -631,7 +632,7 @@ fn a_tool_that_was_not_offered_is_gated_all_the_same() {
     ]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("hello".into(), "typed");
+    n.asked("hello".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(!bodies.lock().unwrap()[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "orbiters_profile"));
     assert!(t.app_intents.lock().unwrap().is_empty());

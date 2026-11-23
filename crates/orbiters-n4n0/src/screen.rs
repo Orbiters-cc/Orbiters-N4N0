@@ -1508,7 +1508,7 @@ impl N4n0 {
                 return;
             }
         }
-        self.voice_listen(Source::Touch);
+        self.voice_listen(Source::Touch, None);
     }
 
     /// The overlay's menu opened, closed, or moved to or from its search page.
@@ -1564,18 +1564,23 @@ impl N4n0 {
     /// Sends a feature suggestion to Orbiters as the signed-in account, on a thread of its own: from the avatar's
     /// screen (`screen`: its menu hears how it went), or from the overlay's or the window's (numbered in the status).
     pub(crate) fn suggestion_send(self: &Shared, text: String, voice: bool, screen: bool) {
-        let n = self.clone();
+        let later = self.later();
         let _ = std::thread::Builder::new().name("n4n0-suggestion".into()).spawn(move || {
+            // As the member who sent it or not at all; and how it went is told to them only.
+            let Some(fence) = later.fence() else { return };
             let about = orbiters_n4n0_core::suggestions::About {
                 source: "menu",
-                app_version: n.host.app_version(),
-                n4n0_version: n.n4n0.lock().unwrap().n4n0_version.clone(),
+                app_version: fence.host.app_version(),
+                n4n0_version: fence.n4n0.lock().unwrap().n4n0_version.clone(),
                 voice,
             };
-            let result = match n.host.account() {
+            let account = fence.account();
+            drop(fence);
+            let result = match account {
                 Some((api, token)) => orbiters_n4n0_core::suggestions::send(&api, &token, &text, &about).map_err(|e| format!("{e:#}")),
                 None => Err(signed_out_message()),
             };
+            let Some(n) = later.fence() else { return };
             {
                 let mut rt = n.n4n0.lock().unwrap();
                 if screen {
@@ -1600,9 +1605,13 @@ impl N4n0 {
     /// and what it could not do says to connect one ([`invite_route`]).
     pub(crate) fn invite_send(self: &Shared, location: String, screen: bool) {
         use orbiters_n4n0_core::menu::InviteAnswer;
-        let n = self.clone();
+        let later = self.later();
         let _ = std::thread::Builder::new().name("n4n0-invite".into()).spawn(move || {
-            let answer = invite_route(n.host.as_ref(), &location);
+            let Some(n) = later.fence() else { return };
+            let (host, epoch) = (n.host.clone(), n.epoch());
+            drop(n);
+            let answer = invite_route(host.as_ref(), epoch, &location);
+            let Some(n) = later.fence() else { return };
             {
                 let mut rt = n.n4n0.lock().unwrap();
                 if screen {
@@ -1669,8 +1678,9 @@ impl N4n0 {
     /// A 3D picture in `seconds` (now when 0); the menus count down. VRChat's camera closed (OSC cannot open it) is said
     /// at once, not once the timer ran out.
     pub(crate) fn photo_3d_in(self: &Shared, seconds: u32) {
-        let n = self.clone();
+        let later = self.later();
         std::thread::spawn(move || {
+            let Some(n) = later.fence() else { return };
             if seconds == 0 {
                 return n.photo_3d_now();
             }
@@ -1701,12 +1711,13 @@ impl N4n0 {
             s.photo_wait_id
         };
         self.publish();
-        let n = self.clone();
+        let later = self.later();
         std::thread::spawn(move || {
             // How long it waits for the camera to be opened.
             const PHOTO_WAIT: Duration = Duration::from_secs(90);
             let until = Instant::now() + PHOTO_WAIT;
             loop {
+                let Some(n) = later.fence() else { return };
                 let wait = if n.host.camera_open() == Some(false) {
                     Some(PhotoWait::Camera)
                 } else if !n.host.camera_pose_known() {
@@ -1736,6 +1747,7 @@ impl N4n0 {
                 if wait.is_none() {
                     return n.photo_3d_in(seconds);
                 }
+                drop(n);
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
@@ -1787,11 +1799,14 @@ impl N4n0 {
         }
         // Orbiters keeps it for whoever grabs it in this instance (a member's card only).
         let instance = self.host.world().instance_hash();
-        match (self.host.account(), instance) {
+        let epoch = self.host.identity_epoch();
+        match (self.host.account_for(epoch), instance) {
             (Some((api, token)), Some(instance)) => {
-                let n = self.clone();
+                let later = self.later();
                 std::thread::spawn(move || {
-                    if let Err(e) = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title) {
+                    let posted = orbiters_n4n0_core::drops::post(&api, &token, &instance, &link, &title);
+                    let Some(n) = later.fence() else { return };
+                    if let Err(e) = posted {
                         n.notify(NoticeKind::Warning, tr!("People around cannot copy your card's link: {error}", error = format!("{e:#}")));
                     }
                 });
@@ -3122,12 +3137,13 @@ mod tests {
 /// account when the app has one connected ([`Host::invite_self`]); else Orbiters' VRChat account, through Orbiters. That
 /// one can invite only an account that befriended it, to an instance it may invite to: what it could not do becomes the
 /// way that works, connecting the person's own VRChat account (Add Orbiters as a friend stays, it can work).
-pub(crate) fn invite_route(host: &dyn crate::Host, location: &str) -> orbiters_n4n0_core::menu::InviteAnswer {
+pub(crate) fn invite_route(host: &dyn crate::Host, epoch: u64, location: &str) -> orbiters_n4n0_core::menu::InviteAnswer {
     use orbiters_n4n0_core::menu::InviteAnswer;
     if let Some(answer) = host.invite_self(location) {
         return answer;
     }
-    let answer = match host.account() {
+    // As the member who asked, or not at all.
+    let answer = match host.account_for(epoch) {
         Some((api, token)) => orbiters_n4n0_core::invites::send(&api, &token, location),
         None => InviteAnswer::Failed { message: signed_out_message() },
     };

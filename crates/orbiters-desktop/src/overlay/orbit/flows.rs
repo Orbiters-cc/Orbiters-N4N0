@@ -1969,6 +1969,55 @@ fn ask_listens_by_itself_says_what_it_hears_and_asks_for_a_sign_in_first() {
     assert!(heard.said()[before..].iter().any(|c| c.contains("AskPage") && c.contains("false")), "{:?}", &heard.said()[before..]);
 }
 
+/// Verify2-r21 B1 (the overlay): Yes pressed on the picture that shows question 7, for member 3, with question 8 and member
+/// 4's state already here and not painted yet: the answer is question 7's and member 3's, on the painter's thread and
+/// without it, pressed at once or run on the next turn.
+#[test]
+fn an_answer_on_the_ask_page_is_for_the_question_its_picture_shows() {
+    use orbiters_n4n0::status::{N4n0Confirmation, VoiceReadiness, LOCAL_APPROVAL};
+    let question = |n: u64| N4n0Confirmation { id: format!("n4n0-{n}"), title: String::new(), summary: format!("N4N0 will do this if you say yes: {n}."), approve_url: format!("{LOCAL_APPROVAL}{n}") };
+    for worker in [false, true] {
+        let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = worker;
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        snap.n4n0.voice.readiness = VoiceReadiness::Ready;
+        snap.n4n0.account_epoch = 3;
+        snap.n4n0.confirmations = vec![question(7)];
+        person.snap = Arc::new(snap.clone());
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        person.press(Action::Talk);
+        person.turns_until("the question on the page", |p| p.find(Action::AskAnswer(true)).is_some());
+        for _ in 0..20 {
+            person.turn();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (part, at) = person.find(Action::AskAnswer(true)).unwrap();
+        person.panels.hover(Some((part, at)));
+        person.turn();
+        // The newer state is here; its picture is not.
+        snap.n4n0.confirmations = vec![question(8)];
+        snap.n4n0.account_epoch = 4;
+        person.panels.facts.talk_question_id = Some(8);
+        person.panels.facts.talk_question = Some("8".into());
+        person.panels.facts.talk_epoch = 4;
+        let newer = Arc::new(snap);
+        person.panels.press(&newer);
+        person.panels.release();
+        person.snap = newer;
+        person.turn();
+        let said: Vec<String> = heard.said().into_iter().filter(|c| c.contains("AskAnswer")).collect();
+        assert_eq!(said.len(), 1, "worker {worker}: {said:?}");
+        assert!(said[0].contains("question: Some(7)") && said[0].contains("epoch: 3") && said[0].contains("yes: true"), "worker {worker}: {said:?}");
+        // Talk pressed there is of the same picture.
+        person.turns_until("the newer question", |p| p.panels.takeover.as_ref().and_then(|t| t.displayed.as_ref()).is_some_and(|f| f.talk_question_id == Some(8)));
+        person.press(Action::TalkToggle);
+        let talk = heard.said().into_iter().filter(|c| c.contains("AskTalk") && c.contains("down: true")).next_back().expect("Talk");
+        assert!(talk.contains("question: Some(8)") && talk.contains("epoch: 4"), "{talk}");
+    }
+}
+
 /// Enzo (VR feedback F4): a test the booster runs can be stopped from its page, through the hand and the host: the engine is asked to stop it.
 #[test]
 fn the_booster_s_test_stops_from_its_page() {

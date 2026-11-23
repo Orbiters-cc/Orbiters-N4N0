@@ -23,7 +23,11 @@
   "N4N0's assistant is off: turn it on in Orbiters - N4N0 › Settings › Voice & assistant.": "L’assistant de N4N0 est désactivé : active-le dans Orbiters - N4N0 › Paramètres › Voix et assistant.",
   "N4N0 prepared something that needs your approval: see N4N0's chat at the top of Orbiters - N4N0.": "N4N0 a préparé quelque chose qui a besoin de ton accord : regarde la discussion de N4N0 en haut d’Orbiters - N4N0.",
   "Calls are off: Orbiters - N4N0 › Settings › N4N0 companion": "Appels désactivés : Orbiters - N4N0 › Paramètres › Compagnon N4N0",
-  "That answer was for a question N4N0 no longer asks: nothing was done. Answer the one shown now.": "Cette réponse concernait une question que N4N0 ne pose plus : rien n’a été fait. Réponds à celle affichée maintenant.",
+  "That came from an older part of Orbiters - N4N0: nothing was done. Send it again.": "Cela venait d’une partie plus ancienne d’Orbiters - N4N0 : rien n’a été fait. Renvoie-le.",
+  "That was for the Orbiters account signed in before: nothing was done.": "C’était pour le compte Orbiters connecté avant : rien n’a été fait.",
+  "N4N0 asked something else meanwhile: nothing was done. It asks now: {question}": "N4N0 a demandé autre chose entre-temps : rien n’a été fait. Sa question maintenant : {question}",
+  "N4N0 no longer asks that: nothing was done.": "N4N0 ne demande plus cela : rien n’a été fait.",
+  "Answer N4N0's question with its Yes or No: nothing was done.": "Réponds à la question de N4N0 avec son Oui ou son Non : rien n’a été fait.",
   "Answer sent": "Réponse envoyée",
   "Turn it on in Orbiters - N4N0 › Settings › Voice & assistant": "Active-le dans Orbiters - N4N0 › Paramètres › Voix et assistant",
   "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Installe ses oreilles dans Orbiters - N4N0 › Paramètres › Voix et assistant"

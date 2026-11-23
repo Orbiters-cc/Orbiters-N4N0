@@ -238,6 +238,33 @@ pub fn activated(resp: &Response) -> bool {
     }
 }
 
+/// Whether the click `resp` has this frame is a held key's: egui makes a click of the focused widget of every Enter or
+/// Space, a held one's repeats included. Not a pointer's, not an accessibility tool's (even beside an unrelated repeat),
+/// not a fresh press of the key.
+fn held_key_click(resp: &Response) -> bool {
+    if !resp.clicked() || resp.clicked_by(egui::PointerButton::Primary) {
+        return false;
+    }
+    let id = resp.id;
+    resp.ctx.input(|i| {
+        let asked = i.has_accesskit_action_request(id, egui::accesskit::Action::Click);
+        let fresh = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Space, pressed: true, repeat: false, .. }));
+        !asked && !fresh
+    })
+}
+
+/// A click of the person's own: a pointer's, an accessibility tool's, or a fresh press of Enter or Space on the focused
+/// widget, never a held key's repeats. For what is hard to take back or reaches someone else: send, approve, delete, sign
+/// out, share, invite, start the game. (Also [`Button::confirm`].)
+pub fn activated_fresh(resp: &Response) -> bool {
+    resp.clicked() && !held_key_click(resp)
+}
+
+/// [`activated`] (on pointer down) as [`activated_fresh`]: never a held key's repeats.
+pub fn pressed_fresh(resp: &Response) -> bool {
+    activated(resp) && !held_key_click(resp)
+}
+
 fn press_id() -> egui::Id {
     egui::Id::unique("orbiters-widget-press")
 }
@@ -335,6 +362,17 @@ pub struct Button<'a> {
 impl<'a> Button<'a> {
     pub fn new(label: &'a str) -> Self {
         Self { label, icon: None, variant: Variant::Secondary, size: Size::Md, enabled: true, width: None, hint: None, id_salt: None }
+    }
+
+    /// [`Button::show`] for what is hard to take back or reaches someone else: true on a press of the person's own
+    /// ([`activated_fresh`]).
+    pub fn confirm(self, ui: &mut Ui) -> bool {
+        activated_fresh(&self.show(ui))
+    }
+
+    /// [`Button::confirm`] in a given rect, as [`Button::show_at`].
+    pub fn confirm_at(self, ui: &mut Ui, rect: Rect) -> bool {
+        activated_fresh(&self.show_at(ui, rect))
     }
 
     /// What tells this button from others with the same label and icon in one place (rows of a list), for
@@ -1328,6 +1366,59 @@ pub fn flow(widths: &[f32], max_w: f32, row_h: f32, gap: f32) -> (Vec<Vec2>, f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One frame of a page with a button, focused when `focus`: egui's own click, and [`activated_fresh`],
+    /// [`Button::confirm`] and [`pressed_fresh`] of three buttons, the focused one's.
+    fn pressing(ctx: &egui::Context, events: Vec<egui::Event>, focus: bool) -> (bool, bool, Id) {
+        let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
+        input.events = events;
+        let mut seen = (false, false, Id::NULL);
+        let mut out = ctx.run_ui(input, |ui| {
+            let resp = ui.button("Yes");
+            if focus {
+                ui.memory_mut(|m| m.request_focus(resp.id));
+            }
+            seen = (resp.clicked(), activated_fresh(&resp), resp.id);
+        });
+        out.textures_delta.clear();
+        seen
+    }
+
+    /// Verify-r21 blocker 2, verify2-r21 m3: egui turns a held Enter's (or Space's) repeats into clicks of the focused
+    /// button. What is hard to take back takes a pointer's press, an accessibility tool's, or a fresh key press only; an
+    /// accessibility press counts beside an unrelated held key's repeat.
+    #[test]
+    fn a_fresh_activation_is_no_held_key_s_repeat() {
+        use egui::{Event, Key, Modifiers};
+        let ctx = egui::Context::default();
+        pressing(&ctx, Vec::new(), true);
+        let id = pressing(&ctx, Vec::new(), false).2;
+        let key = |key: Key, pressed: bool| Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+        let tool = || {
+            Event::AccessKitActionRequest(egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::Click,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: id.accesskit_id(),
+                data: None,
+            })
+        };
+        for k in [Key::Enter, Key::Space] {
+            let at = |events: Vec<Event>| { let (clicked, fresh, _) = pressing(&ctx, events, false); (clicked, fresh) };
+            assert_eq!(at(vec![key(k, true)]), (true, true), "{k:?}: a fresh press");
+            assert_eq!(at(vec![key(k, true)]), (true, false), "{k:?} held: egui's click of its repeat is nobody's press");
+            assert_eq!(at(vec![key(k, true), tool()]), (true, true), "{k:?} held, and an accessibility tool's press");
+            assert_eq!(at(vec![key(k, true)]), (true, false));
+            at(vec![key(k, false)]);
+            assert_eq!(at(vec![tool()]), (true, true), "an accessibility tool's press");
+        }
+        // A pointer's, even with a key held.
+        pressing(&ctx, vec![key(Key::Enter, true)], false);
+        let p = pos2(20.0, 18.0);
+        let button = |pressed: bool| Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        pressing(&ctx, vec![Event::PointerMoved(p), button(true)], false);
+        let (clicked, fresh, _) = pressing(&ctx, vec![key(Key::Enter, true), button(false)], false);
+        assert_eq!((clicked, fresh), (true, true), "a pointer's press beside a held key's repeat");
+    }
 
     #[test]
     fn chips_wrap_in_rows() {

@@ -7,7 +7,7 @@ use crate::media::{MediaBackend, NoMedia, Reading, Watcher};
 use crate::platform::*;
 use crate::runtime::{int_value, parameter, screen_replace, thumbnail_bytes, Shared};
 use crate::status::*;
-use crate::{Command, N4n0};
+use crate::{Command, N4n0, Stamp, Surface};
 use orbiters_contracts::avatar::AvatarManifest;
 use orbiters_contracts::n4n0::{self as contract, params, Page, POINTER_CLEAR, TEXT_LENGTH};
 use orbiters_core::account::Api;
@@ -84,8 +84,39 @@ pub(crate) struct TestHost {
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
     invited_self: Mutex<Vec<String>>,
+    /// How often another member was signed in.
+    epoch: std::sync::atomic::AtomicU64,
     /// N4N0's files, gone with the test.
     _dir: TempDir,
+}
+
+/// A test's inputs, as a surface that shows what N4N0 says now captures them.
+pub(crate) trait Captured {
+    /// Its stamp: the identity and the question shown now.
+    fn stamped(&self) -> Option<Stamp>;
+    /// Its stamp while it showed question `question`.
+    fn stamp_for(&self, question: u64) -> Option<Stamp>;
+    fn asked(&self, text: String, via: &'static str);
+    /// The fence of an input let in.
+    fn acts(&self) -> crate::fence::Fence<'_>;
+}
+
+impl Captured for Shared {
+    fn stamped(&self) -> Option<Stamp> {
+        Some(self.own_stamp(Surface::Window))
+    }
+
+    fn stamp_for(&self, question: u64) -> Option<Stamp> {
+        Some(Stamp { question: Some(question), ..self.own_stamp(Surface::Window) })
+    }
+
+    fn asked(&self, text: String, via: &'static str) {
+        self.ask(text, via, self.stamped());
+    }
+
+    fn acts(&self) -> crate::fence::Fence<'_> {
+        self.let_in(self.stamped()).expect("let in").0
+    }
 }
 
 /// A test's folder, gone with it.
@@ -117,8 +148,20 @@ impl TestHost {
         change(&mut self.world.lock().unwrap());
     }
 
+    /// The account's credential (the first one, or the same member's again).
     fn sign_in(&self, base: String, token: &str) {
         *self.server.lock().unwrap() = Some((base, token.into()));
+    }
+
+    /// Another member (or nobody) is signed in, as the app's handover does it.
+    pub(crate) fn switch_member(&self, n: &Shared, account: Option<(String, &str)>) {
+        let paused = n.pause_effects();
+        let epoch = {
+            let mut server = self.server.lock().unwrap();
+            *server = account.map(|(base, token)| (base, token.to_string()));
+            self.epoch.fetch_add(1, Ordering::SeqCst) + 1 + crate::FIRST_EPOCH
+        };
+        paused.forget_account(epoch);
     }
 
     fn notices(&self) -> Vec<(NoticeKind, String)> {
@@ -224,6 +267,15 @@ impl Host for TestHost {
 
     fn account(&self) -> Option<(Api, String)> {
         self.server.lock().unwrap().clone().map(|(base, token)| (Api::at(&base), token))
+    }
+
+    fn identity_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst) + crate::FIRST_EPOCH
+    }
+
+    fn account_for(&self, epoch: u64) -> Option<(Api, String)> {
+        let server = self.server.lock().unwrap();
+        (epoch == self.identity_epoch()).then(|| server.clone()).flatten().map(|(base, token)| (Api::at(&base), token))
     }
 
     fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
@@ -779,7 +831,7 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     );
     let (base, bodies) = orbiters(vec![first, second]);
     t.sign_in(base, "orbit-test");
-    n.ask("N4N0, mets mon sweat".into(), "typed");
+    n.asked("N4N0, mets mon sweat".into(), "typed");
     let sent = received(&vrchat, Duration::from_millis(4000));
     assert!(sent.contains(&(parameter("Hoodie"), OscType::Bool(true))), "{sent:?}");
     let mut cells: Page = [0; TEXT_LENGTH];
@@ -833,7 +885,7 @@ fn an_answer_shows_as_it_arrives_and_once_when_whole() {
     let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
     let (base, _) = orbiters(vec![format!("{}{}{}{done}", delta("It is "), delta("sunny "), delta("and warm."))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Is it nice out?".into(), "typed");
+    n.asked("Is it nice out?".into(), "typed");
     let first = status_when(&t, |s| !the_answers(s).is_empty());
     assert_eq!(the_answers(&first), vec![("It is".to_string(), true)], "the first words, as they came");
     assert!(first.thinking, "still answering");
@@ -857,7 +909,7 @@ fn words_before_a_tool_give_way_to_the_answer() {
     let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
     let (base, _) = orbiters(vec![format!("{}{tool}", delta("One moment.")), format!("{}{}{done}", delta("Your hoodie "), delta("is on."))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Hoodie please".into(), "typed");
+    n.asked("Hoodie please".into(), "typed");
     let arriving = status_when(&t, |s| the_answers(s).first().is_some_and(|a| a.0 == "Your hoodie"));
     assert_eq!(the_answers(&arriving).len(), 1, "the next round's words replace the last round's: {:?}", arriving.lines);
     let whole = status_when(&t, |s| !s.thinking);
@@ -873,7 +925,7 @@ fn an_answer_that_breaks_off_leaves_no_half_line() {
     let error = format!("event: error\ndata: {}\n\n", json!({ "code": "overloaded", "message": "Too many people at once." }));
     let (base, _) = orbiters(vec![format!("{}{error}", delta("Half an"))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Hello".into(), "typed");
+    n.asked("Hello".into(), "typed");
     status_when(&t, |s| !the_answers(s).is_empty());
     let over = status_when(&t, |s| !s.thinking);
     assert!(the_answers(&over).is_empty(), "{:?}", over.lines);
@@ -887,7 +939,7 @@ fn a_new_conversation_stops_what_is_arriving() {
     let (t, n, _vrchat) = n4n0_with_vrchat();
     let (base, _) = orbiters(vec![format!("{}{}{}", delta("One "), delta("two "), delta("three"))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Count".into(), "typed");
+    n.asked("Count".into(), "typed");
     status_when(&t, |s| !the_answers(s).is_empty());
     n.command(Command::NewConversation);
     let cleared = status_when(&t, |s| s.lines.is_empty() && !s.thinking);
@@ -914,7 +966,7 @@ fn a_slow_answer_grows_on_the_panel_over_osc() {
     let (base, _) = orbiters(vec![format!("{}{}{}{}{}{}{done}", slowly("Hello "), slowly("from "), slowly("the "), slowly("slow "), slowly("server "), slowly("today."))]);
     t.sign_in(base, "orbit-test");
     let mut cells: Page = [0; TEXT_LENGTH];
-    n.ask("Say hello".into(), "typed");
+    n.asked("Say hello".into(), "typed");
     let asked = Instant::now();
     let mut first_words = None;
     while t.view().thinking || asked.elapsed() < Duration::from_millis(300) {
@@ -945,7 +997,7 @@ fn a_bursty_answer_keeps_to_the_panel_s_pace_and_ends_exactly() {
     let (base, _) = orbiters(vec![format!("{burst}\0{done}")]);
     t.sign_in(base, "orbit-test");
     let mut cells: Page = [0; TEXT_LENGTH];
-    n.ask("Count".into(), "typed");
+    n.asked("Count".into(), "typed");
     let start = Instant::now();
     let blocks = panel_after(&vrchat, Duration::from_secs(5), &mut cells);
     let per_second = blocks as f32 / start.elapsed().as_secs_f32();
@@ -964,7 +1016,7 @@ fn a_bursty_answer_keeps_to_the_panel_s_pace_and_ends_exactly() {
     let (base, _) = orbiters(vec![format!("{}{tool}", delta(long)), format!("{}event: done\ndata: {}\n\n", delta("Done."), json!({ "messages": [], "tool_calls": [] }))]);
     t.sign_in(base, "orbit-test");
     let mut cells: Page = [0; TEXT_LENGTH];
-    n.ask("Hoodie".into(), "typed");
+    n.asked("Hoodie".into(), "typed");
     assert!(status_when(&t, |s| !s.thinking).lines.iter().any(|l| l.text == "Done."));
     let (start, wanted) = (Instant::now(), contract::pages("Done.")[0]);
     while cells != wanted {
@@ -984,7 +1036,7 @@ fn an_answer_arriving_leaves_the_open_menu_the_channel() {
     let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
     let (base, _) = orbiters(vec![format!("{}{}{}{done}", delta("Some "), delta("words "), delta("arriving."))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Hello".into(), "typed");
+    n.asked("Hello".into(), "typed");
     let start = Instant::now();
     while t.view().thinking || start.elapsed() < Duration::from_millis(100) {
         {
@@ -1003,7 +1055,7 @@ fn an_answer_arriving_leaves_the_open_menu_the_channel() {
     let done = format!("event: done\ndata: {}\n\n", json!({ "messages": [], "tool_calls": [] }));
     let (base, _) = orbiters(vec![format!("{}\0\0\0{}\0\0\0{}{done}", delta("Some words "), delta("arriving "), delta("slowly."))]);
     t.sign_in(base, "orbit-test");
-    n.ask("Hello".into(), "typed");
+    n.asked("Hello".into(), "typed");
     assert!(until(|| n.n4n0.lock().unwrap().sender.as_ref().is_some_and(TextSender::streaming)));
     n.on_parameter(params::MENU, &OscValue::Bool(true));
     assert!(until(|| menu_is_open(&n)));
@@ -1024,10 +1076,10 @@ fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
     t.sign_in(base, "orbit-test");
     // Heard while the wake word is on, but not for N4N0: nothing goes anywhere. A sentence that only starts like a
     // misheard "Nano" is ordinary speech too.
-    n.heard("I saw a nano drone in that world".into(), false, false);
-    n.heard("Nana, passe-moi le sel.".into(), false, false);
+    n.heard_since("I saw a nano drone in that world".into(), None, None);
+    n.heard_since("Nana, passe-moi le sel.".into(), None, None);
     // The wake word: the request carries what follows.
-    n.heard("Nano, mets mon sweat à capuche.".into(), false, false);
+    n.heard_since("Nano, mets mon sweat à capuche.".into(), None, None);
     let started = Instant::now();
     while bodies.lock().unwrap().is_empty() && started.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(20));
@@ -1048,9 +1100,9 @@ fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
     t.sign_in(base, "orbit-test");
     n.n4n0.lock().unwrap().voice.installed = true;
     // Pressed, then let go: the worker transcribes only now, so its sentence arrives after the button is up.
-    n.app_talk(true, false);
+    n.app_talk(true, false, n.stamped());
     assert!(n.n4n0.lock().unwrap().listening.is_some());
-    n.app_talk(false, false);
+    n.app_talk(false, false, None);
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     let heard = |text: &str, listen: u64| VoiceEvent::Heard { text: text.into(), for_n4n0: true, seconds: 1.2, decode_ms: 90, listen };
     n.on_voice_event(heard("mets mon sweat", 1));
@@ -1061,7 +1113,7 @@ fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
     assert_eq!(bodies.lock().unwrap().len(), 1, "the held sentence went to N4N0");
     assert_eq!(bodies.lock().unwrap()[0]["input"]["text"], "mets mon sweat");
     // The overlay goes away while its Talk is held: nothing it heard goes anywhere, even if the worker answers.
-    n.app_talk(true, true);
+    n.app_talk(true, true, n.stamped());
     n.link_closed(true);
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     n.on_voice_event(heard("this stays here", 2));
@@ -1090,7 +1142,7 @@ fn orbiters_out_of_reach_is_one_plain_sentence() {
     // logs6/shot4.png: the dev server was stopped and the person read the operating system's "(os error 10061)".
     let (t, n, _vrchat) = n4n0_with_vrchat();
     t.sign_in("http://127.0.0.1:9/".into(), "orbit-test");
-    n.ask("salut".into(), "typed");
+    n.asked("salut".into(), "typed");
     let started = Instant::now();
     while (n.n4n0.lock().unwrap().thinking() || t.view().lines.last().is_none_or(|l| l.who != N4n0Who::Error)) && started.elapsed() < Duration::from_secs(8) {
         std::thread::sleep(Duration::from_millis(20));
@@ -1118,12 +1170,12 @@ fn a_failed_round_leaves_the_conversation_as_it_was() {
     let failed = format!("event: error\ndata: {}\n\n", json!({ "code": "quota_exhausted", "message": "Free quota used up until midnight." }));
     let (base, bodies) = orbiters(vec![first, failed, done(json!([{ "role": "user", "content": "et alors ?" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("mets mon sweat".into(), "typed");
+    n.asked("mets mon sweat".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert_eq!(n.n4n0.lock().unwrap().conversation, before, "no call without its result stays in the conversation");
     assert_eq!(t.view().lines.last().map(|l| (l.who, l.text.clone())), Some((N4n0Who::Error, "Free quota used up until midnight.".into())));
     // The next turn starts from the conversation as it was, and hears what the failed one did.
-    n.ask("et alors ?".into(), "typed");
+    n.asked("et alors ?".into(), "typed");
     turn_ended(&n, &bodies, 3);
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies[2]["messages"], json!(before));
@@ -1146,7 +1198,7 @@ fn what_lasts_waits_for_the_owner_s_yes_and_n4n0_s_own_parameters_are_never_reac
     let second = format!("event: text\ndata: {}\n\n{}", json!({ "delta": "Say yes and it's done." }), done(json!([{ "role": "user", "content": "q" }]), json!([])));
     let (base, bodies) = orbiters(vec![first, second]);
     t.sign_in(base, "orbit-test");
-    n.ask("garde mon sweat et mets un message".into(), "typed");
+    n.asked("garde mon sweat et mets un message".into(), "typed");
     turn_ended(&n, &bodies, 2);
     {
         let bodies = bodies.lock().unwrap();
@@ -1162,7 +1214,7 @@ fn what_lasts_waits_for_the_owner_s_yes_and_n4n0_s_own_parameters_are_never_reac
     assert!(status.lines.iter().any(|l| l.text.starts_with("N4N0 asks to keep \"Hoodie\" on")), "{:?}", status.lines);
     assert!(status.panel.as_deref().is_some_and(|p| p.starts_with("Say yes and it's done.")), "{:?}", status.panel);
     // The owner's yes, typed: done here, without the assistant.
-    n.ask("oui vas-y".into(), "typed");
+    n.asked("oui vas-y".into(), "typed");
     let settings = t.settings().n4n0;
     assert_eq!(settings.pins.iter().map(|p| p.parameter.as_str()).collect::<Vec<_>>(), vec!["Hoodie"]);
     assert_eq!((settings.afk_message.as_str(), settings.afk_message_enabled), ("brb, tea", true));
@@ -1194,7 +1246,7 @@ fn a_raw_parameter_write_never_reaches_an_avatar_with_menu_labels() {
     let calls = json!([{ "id": "c1", "name": "set_avatar_parameter", "input": { "name": "Lingerie", "value": 1 } }]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "q" }]), calls), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("mets ma lingerie".into(), "typed");
+    n.asked("mets ma lingerie".into(), "typed");
     turn_ended(&n, &bodies, 2);
     {
         let bodies = bodies.lock().unwrap();
@@ -1219,7 +1271,7 @@ fn a_yes_never_acts_on_another_avatar_than_the_one_it_was_asked_about() {
     ]);
     let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "q" }]), calls), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("lingerie and an afk message".into(), "typed");
+    n.asked("lingerie and an afk message".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert_eq!(n.n4n0.lock().unwrap().pending.len(), 2, "both wait for the owner");
     let first_id = t.view().confirmations.iter().find(|c| c.approve_url.starts_with(LOCAL_APPROVAL)).unwrap().approve_url.clone();
@@ -1236,7 +1288,7 @@ fn a_yes_never_acts_on_another_avatar_than_the_one_it_was_asked_about() {
     assert!(asks[0].approve_url != first_id && !asks[0].summary.contains("Lingerie"), "asked again without the avatar's part: {:?}", asks[0]);
     assert!(status.lines.iter().any(|l| l.text.starts_with("Not done: turn on \"Outfits / Lingerie\"")), "{:?}", status.lines);
     let _ = received(&vrchat, Duration::from_millis(100));
-    n.ask("yes".into(), "typed");
+    n.asked("yes".into(), "typed");
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(!sent.iter().any(|(a, _)| *a == parameter("Hoodie")), "nothing written to the new avatar: {sent:?}");
     assert_eq!(t.settings().n4n0.afk_message, "brb", "what names no control is done");
@@ -1256,7 +1308,7 @@ fn an_approval_taken_before_an_avatar_change_still_checks_the_avatar_when_it_run
     // The same controls again on the new avatar (its manifest is the same): still not the reviewed avatar.
     n.refresh_avatar(Some("avtr_bound_d".into()), HashMap::new(), crate::runtime::TREE_RETRIES);
     let _ = received(&vrchat, Duration::from_millis(100));
-    assert_eq!(n.run_action_for_test(action, &bound), Err("the avatar changed".to_string()));
+    assert_eq!(n.acts().run_action_for_test(action, &bound), Err("the avatar changed".to_string()));
     let sent = received(&vrchat, Duration::from_millis(300));
     assert!(!sent.iter().any(|(a, _)| *a == parameter("Hoodie")), "{sent:?}");
     t.shutdown(&n);
@@ -1296,15 +1348,15 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
     // N4N0-3: let go before VRChat's MuteSelf echo, N4N0 forgot it had muted, and VRChat then muted the owner.
     let (_t, n) = n4n0_ready_to_listen();
     // Let go before the press's pulses even left: they are called off.
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     assert_eq!(voice_pulses(&n), vec![1, 0]);
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "VRChat never hears of it");
     assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none());
     // Let go after the pulses left, before the echo: the toggle back waits for VRChat's word, then goes once.
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     dispatched(&n);
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "no blind toggle");
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
@@ -1314,26 +1366,26 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(false));
     // No echo at all: nothing is sent, and the wait ends.
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     dispatched(&n);
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     n.n4n0.lock().unwrap().unmute_step(Instant::now() + Duration::from_secs(5));
     assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none() && voice_pulses(&n).is_empty());
     // Pressed again before the echo: that mute is the new press's, no second toggle.
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     dispatched(&n);
-    n.talk(false, Source::Menu);
-    n.talk(true, Source::Menu);
+    n.talk(false, Source::Menu, None);
+    n.talk(true, Source::Menu, None);
     assert!(voice_pulses(&n).is_empty(), "no second toggle");
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
     assert!(voice_pulses(&n).is_empty(), "still held: stays muted");
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     assert_eq!(voice_pulses(&n), vec![1, 0], "let go: toggled back");
     dispatched(&n);
     // Muted by the owner before: Talk mutes nothing, unmutes nothing.
-    n.talk(true, Source::Menu);
-    n.talk(false, Source::Menu);
+    n.talk(true, Source::Menu, None);
+    n.talk(false, Source::Menu, None);
     assert!(voice_pulses(&n).is_empty());
 }
 
@@ -1343,10 +1395,10 @@ fn a_toggle_back_never_starts_before_the_press_s_own_release_left() {
     // verify-n4n0 (8): the press's first edge had left, its release had not, and VRChat said muted: the toggle back's press
     // was queued at once, two presses with no release between.
     let (_t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     // Only the press's first edge left.
     n.n4n0.lock().unwrap().outbox.retain(|(_, (a, v))| !(a == "/input/Voice" && *v == OscType::Int(1)));
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
     assert_eq!(voice_pulses(&n), vec![0], "only the press's own release waits");
@@ -1360,7 +1412,7 @@ fn switching_off_in_settings_puts_back_a_mute_talk_made() {
     use crate::runtime::Source;
     // verify-n4n0 (8): with only a menu mute owned (the listen over), turning the assistant off in Settings never restored it.
     let (t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.voice_cancel();
@@ -1392,12 +1444,12 @@ fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
     use crate::runtime::Source;
     // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.
     let (_t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu);
+    n.talk(true, Source::Menu, None);
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.command(Command::Assistant { on: false });
     assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back once");
-    n.talk(false, Source::Menu);
+    n.talk(false, Source::Menu, None);
     assert_eq!(voice_pulses(&n), vec![1, 0], "and not again at the release");
 }
 
@@ -1410,6 +1462,11 @@ fn local_ask(t: &TestHost) -> Option<String> {
     t.view().confirmations.iter().find(|c| c.approve_url.starts_with(LOCAL_APPROVAL)).map(|c| c.approve_url.clone())
 }
 
+/// The number in a question's link.
+fn number(ask: &str) -> u64 {
+    ask.strip_prefix(LOCAL_APPROVAL).unwrap().parse().unwrap()
+}
+
 #[test]
 fn a_late_click_on_an_older_question_leaves_the_newer_one_up() {
     // N4N0-20: a click for question A arriving while B is up removed B's button and did neither.
@@ -1417,21 +1474,24 @@ fn a_late_click_on_an_older_question_leaves_the_newer_one_up() {
     let end = || done(json!([{ "role": "user", "content": "q" }]), json!([]));
     let (base, bodies) = orbiters(vec![hold_turn(), end(), hold_turn(), end()]);
     t.sign_in(base, "orbit-test");
-    n.ask("keep my hoodie".into(), "typed");
+    n.asked("keep my hoodie".into(), "typed");
     turn_ended(&n, &bodies, 2);
     let a = local_ask(&t).expect("question A");
     // Something else asked: A is dropped, and the new turn asks B.
-    n.ask("keep it, really".into(), "typed");
+    n.asked("keep it, really".into(), "typed");
     turn_ended(&n, &bodies, 4);
     let b = local_ask(&t).expect("question B");
     assert_ne!(a, b);
-    n.command(Command::OpenLink { url: a });
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(number(&a)) });
     assert_eq!(local_ask(&t).as_deref(), Some(b.as_str()), "B still up");
     assert!(t.settings().n4n0.pins.is_empty(), "nothing done by a stale click");
+    // A link names a question but not whom it was shown to: it answers nothing.
     n.command(Command::OpenLink { url: b.clone() });
+    assert_eq!(local_ask(&t).as_deref(), Some(b.as_str()), "still up");
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(number(&b)) });
     assert_eq!(t.settings().n4n0.pins.iter().map(|p| p.parameter.as_str()).collect::<Vec<_>>(), vec!["Hoodie"]);
     assert!(local_ask(&t).is_none());
-    n.command(Command::OpenLink { url: b });
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(number(&b)) });
     assert_eq!(t.settings().n4n0.pins.len(), 1, "done once");
     t.shutdown(&n);
 }
@@ -1442,13 +1502,13 @@ fn switching_the_assistant_off_drops_what_waited_for_a_yes() {
     let (t, n, _vrchat) = n4n0_with_vrchat();
     let (base, bodies) = orbiters(vec![hold_turn(), done(json!([{ "role": "user", "content": "q" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.ask("keep my hoodie".into(), "typed");
+    n.asked("keep my hoodie".into(), "typed");
     turn_ended(&n, &bodies, 2);
     let ask = local_ask(&t).expect("asked");
     n.command(Command::Assistant { on: false });
     assert!(local_ask(&t).is_none(), "its button goes");
-    n.command(Command::OpenLink { url: ask });
-    n.ask("yes".into(), "typed");
+    n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(number(&ask)) });
+    n.asked("yes".into(), "typed");
     assert!(t.settings().n4n0.pins.is_empty(), "nothing done while off");
     t.shutdown(&n);
 }
@@ -1465,7 +1525,7 @@ fn a_website_approval_opened_in_the_browser_no_longer_keeps_n4n0_from_listening(
     );
     let (base, bodies) = orbiters(vec![confirmation]);
     t.sign_in(base, "orbit-test");
-    n.ask("plan a movie night".into(), "typed");
+    n.asked("plan a movie night".into(), "typed");
     turn_ended(&n, &bodies, 1);
     assert!(n.n4n0.lock().unwrap().ask_busy(), "waiting for the website");
     n.command(Command::OpenLink { url: url.clone() });
@@ -1486,7 +1546,7 @@ fn an_approved_hold_never_pins_the_next_avatar() {
     let other = n.clone();
     *crate::runtime::HOLD_BETWEEN.lock().unwrap() = Some(Box::new(move || other.on_avatar("avtr_other".into())));
     let hold = orbiters_n4n0_core::tools::Action::Hold { control: "hoodie".into(), on: Some(true), value: None, release: false };
-    assert_eq!(n.run_action_for_test(hold, &bound), Err("the avatar changed".to_string()));
+    assert_eq!(n.acts().run_action_for_test(hold, &bound), Err("the avatar changed".to_string()));
     assert!(t.settings().n4n0.pins.is_empty(), "no pin for the next avatar: {:?}", t.settings().n4n0.pins);
     t.shutdown(&n);
 }
@@ -2813,9 +2873,9 @@ fn the_ears_start_with_vrchat_listen_and_stop_and_a_crash_is_told() {
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })));
     assert_eq!(device.ears.workers.lock().unwrap().len(), 1);
     // Talk: a held listen, then its end.
-    n.app_talk(true, false);
+    n.app_talk(true, false, n.stamped());
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, id: 1, .. })));
-    n.app_talk(false, false);
+    n.app_talk(false, false, None);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Finish)));
     // It stops on its own: N4N0 says so and the next start waits.
     worker.crash(3, "something went wrong");
@@ -3227,7 +3287,7 @@ fn ask_preflight_blocks_capture_and_reports_each_reason() {
     *d.ears.allowed.lock().unwrap() = true;
     n.ask_page(true);
     assert_eq!(t.view().voice.readiness, VoiceReadiness::SignIn);
-    n.app_talk(true, true);
+    n.app_talk(true, true, n.stamped());
     assert!(d.ears.workers.lock().unwrap().is_empty());
     t.sign_in("http://127.0.0.1:1/".into(), "test");
     n.publish();
@@ -3287,7 +3347,7 @@ fn review_lifecycle_serializes_arm_manual_and_final_with_exit() {
             started.send(()).unwrap();
             match operation % 3 {
                 0 => other.ask_follow(),
-                1 => other.ask_talk(true),
+                1 => { let stamp = other.stamped(); other.ask_talk(true, stamp) }
                 _ => other.on_voice_event(VoiceEvent::Heard { listen, text: "discarded".into(), for_n4n0: true, seconds: 1.0, decode_ms: 1 }),
             }
             done.send(()).unwrap();
@@ -3315,7 +3375,7 @@ fn review_wake_followup_is_admitted_only_outside_pause_gates() {
       settings.n4n0.menu.wake_word = false;
     }
     n.n4n0.lock().unwrap().voice.installed = true;
-    n.app_talk(true, true);
+    n.app_talk(true, true, n.stamped());
     let worker = d.ears.workers.lock().unwrap()[0].clone();
     n.voice_cancel();
     n.n4n0.lock().unwrap().listening = None;
@@ -3340,13 +3400,13 @@ fn only_the_ask_page_s_listens_ask_for_the_sentence_as_it_is_spoken() {
     *d.ears.allowed.lock().unwrap() = true;
     t.sign_in("http://127.0.0.1:1/".into(), "test");
     n.n4n0.lock().unwrap().voice.installed = true;
-    n.app_talk(true, false);
+    n.app_talk(true, false, n.stamped());
     let worker = d.ears.workers.lock().unwrap()[0].clone();
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { live: false, .. })), "the window's Talk: {:?}", worker.commands());
-    n.app_talk(false, false);
+    n.app_talk(false, false, None);
     n.ask_page(true);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: false, live: true, .. })), "the Ask page: {:?}", worker.commands());
-    n.ask_talk(true);
+    n.ask_talk(true, n.stamped());
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, live: true, .. })), "Talk on the Ask page");
     t.shutdown(&n);
 }
@@ -3478,7 +3538,7 @@ fn closing_ask_keeps_a_sentence_the_window_holds_now() {
     n.n4n0.lock().unwrap().voice.installed = true;
     n.ask_page(true);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    n.app_talk(true, false);
+    n.app_talk(true, false, n.stamped());
     assert!(matches!(n.n4n0.lock().unwrap().listening, Some((Source::Window, _))), "the window has the microphone");
     let before = worker.commands().len();
     n.ask_page(false);
@@ -3526,12 +3586,12 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert_eq!(bodies.lock().unwrap().len(), 1);
     assert_eq!(t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count(), 1);
     worker.say(VoiceEvent::Provisional { listen: 2, text: "cancel this".into() });
-    n.ask_talk(true);
+    n.ask_talk(true, n.stamped());
     assert!(t.view().voice.provisional.is_none());
     assert!(worker.commands().contains(&VoiceCommand::Cancel));
     assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: true, id: 3, .. })));
     assert!(!t.view().voice.automatic);
-    n.ask_talk(false);
+    n.ask_talk(false, n.stamped());
     assert_eq!(worker.commands().last(), Some(&VoiceCommand::Finish));
     n.ask_page(false);
     worker.say(VoiceEvent::Provisional { listen: 3, text: "late".into() });
@@ -3618,7 +3678,7 @@ fn ask_waits_for_approval_then_rearms() {
     n.ask_follow(); n.publish();
     assert!(!t.view().listening);
     assert_eq!(worker.commands().iter().filter(|c| matches!(c, VoiceCommand::Listen { .. })).count(), 1);
-    n.ask("yes".into(), "typed");
+    n.asked("yes".into(), "typed");
     n.ask_follow(); n.publish();
     assert!(t.view().listening);
     assert_eq!(bodies.lock().unwrap().len(), 2, "approval never starts an assistant request");
@@ -3639,7 +3699,7 @@ fn switching_the_assistant_off_stops_all_of_it_at_once() {
     n.n4n0.lock().unwrap().voice.installed = true;
     n.ask_page(true);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    n.ask("what time is it".into(), "typed");
+    n.asked("what time is it".into(), "typed");
     assert!(n.n4n0.lock().unwrap().answering(), "an answer under way");
     n.command(Command::Assistant { on: false });
     assert!(!t.settings().n4n0.assistant, "the setting Settings shows, saved");
@@ -3653,11 +3713,11 @@ fn switching_the_assistant_off_stops_all_of_it_at_once() {
     // Nothing brings it back: a hand on N4N0, Talk, the menu's listening, a question.
     n.touch();
     n.menu_listen();
-    n.command(Command::Talk { down: true });
+    n.command(Command::Talk { down: true, stamp: n.stamped() });
     n.voice_follow();
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     assert_eq!(d.ears.workers.lock().unwrap().len(), 1, "no microphone taken again");
-    n.ask("and now".into(), "typed");
+    n.asked("and now".into(), "typed");
     assert!(!n.n4n0.lock().unwrap().answering());
     // On again, from the same switch.
     n.command(Command::Assistant { on: true });
@@ -3676,7 +3736,7 @@ fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
     n.n4n0.lock().unwrap().voice.installed = true;
     n.ask_page(true);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    n.ask("what time is it".into(), "typed");
+    n.asked("what time is it".into(), "typed");
     assert!(n.n4n0.lock().unwrap().answering());
     t.settings.lock().unwrap().n4n0.assistant = false;
     n.voice_follow();
@@ -3688,6 +3748,9 @@ fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
 /// The assistant's intents in the runtime (REQUEST20 6): their own file, as test data.
 #[path = "tests_assistant.rs"]
 mod assistant;
+
+#[path = "tests_identity.rs"]
+mod identity;
 /// A stand-in Orbiters for Invite me: answers every request with `status` and `body`, and counts them.
 fn orbiters_invites(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3732,24 +3795,24 @@ fn invite_me_takes_the_connected_vrchat_account_else_orbiters_and_then_says_to_c
         let host = TestHost::default();
         *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
         *host.vrchat_invite.lock().unwrap() = Some(answer.clone());
-        assert_eq!(crate::screen::invite_route(&host, location), answer);
+        assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), answer);
         assert_eq!(*host.invited_self.lock().unwrap(), [location]);
     }
     assert_eq!(asked.load(Ordering::SeqCst), 0, "Orbiters' account is not asked when the person's own is connected");
     // Not connected: Orbiters' account, as before.
     let host = TestHost::default();
     *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
-    assert_eq!(crate::screen::invite_route(&host, location), InviteAnswer::Sent);
+    assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::Sent);
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     let (befriend, _) = orbiters_invites(409, r#"{"code":"not_friends","message":"Add it first.","account":{"name":"Orbiters","link":"https://vrchat.com/home/user/usr_1"}}"#);
     *host.server.lock().unwrap() = Some((befriend, "orbit-test".into()));
-    assert!(matches!(crate::screen::invite_route(&host, location), InviteAnswer::NeedsFriend { .. }), "adding Orbiters as a friend can work: offered");
+    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::NeedsFriend { .. }), "adding Orbiters as a friend can work: offered");
     // What Orbiters' account could not do: connect your own.
     let (refused, _) = orbiters_invites(409, r#"{"code":"refused","message":"VRChat refused this invite. The instance may have closed."}"#);
     *host.server.lock().unwrap() = Some((refused, "orbit-test".into()));
-    let InviteAnswer::NeedsVrchat { message } = crate::screen::invite_route(&host, location) else { panic!("connect VRChat") };
+    let InviteAnswer::NeedsVrchat { message } = crate::screen::invite_route(&host, crate::FIRST_EPOCH, location) else { panic!("connect VRChat") };
     assert!(message.contains("VRChat refused this invite") && message.contains("Connect your VRChat account"), "{message}");
     *host.server.lock().unwrap() = None;
-    assert!(matches!(crate::screen::invite_route(&host, location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
+    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
     assert!(host.invited_self.lock().unwrap().is_empty());
 }

@@ -1674,7 +1674,7 @@ impl Panels {
     fn stop_talking(&mut self) {
         if self.facts.sheet == Some(Sheet::Talk) { self.backend.n4n0(N4n0Command::AskPage { open: false }); }
         if std::mem::take(&mut self.talking) {
-            self.backend.n4n0(N4n0Command::Talk { down: false });
+            self.backend.n4n0(N4n0Command::Talk { down: false, stamp: None });
         }
     }
 
@@ -2648,6 +2648,7 @@ impl Panels {
             talk_question: snap.n4n0.confirmations.iter().rev().find(|c| c.is_local()).map(|c| c.summary.trim_end_matches(orbiters_i18n::tr("(or say yes or no)")).trim().to_string()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
             // Its number goes with the Yes or No pressed on it: a late press answers nothing newer (verify-r21 1).
             talk_question_id: snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_epoch: snap.n4n0.account_epoch,
             talk_retry: snap.n4n0.assistant.failure.as_ref().filter(|f| f.retry && !snap.n4n0.thinking && self.facts.sheet == Some(Sheet::Talk)).map(|f| {
                 let now = orbiters_n4n0::unix_ms();
                 (f.id, f.label(now), f.waits(now) == 0)
@@ -2930,6 +2931,12 @@ impl Panels {
 
     fn action_facts(&self) -> &Facts {
         self.pressed_facts.as_ref().or_else(|| self.stage.presented.as_ref().map(|(_, f, _)| f)).unwrap_or(&self.facts)
+    }
+
+    /// The stamp of a press on the Ask page: what the picture pressed showed.
+    fn ask_stamp(&self) -> Option<orbiters_n4n0::Stamp> {
+        let facts = self.action_facts();
+        Some(orbiters_n4n0::Stamp { epoch: facts.talk_epoch, question: facts.talk_question_id, surface: orbiters_n4n0::Surface::Overlay, seq: orbiters_n4n0::next_input() })
     }
 
     fn press_what(&mut self, snap: &Snapshot) -> Pressed {
@@ -3442,17 +3449,23 @@ impl Panels {
                 _ => {
                     let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
-                    self.backend.n4n0(N4n0Command::AskTalk { down });
+                    let stamp = self.ask_stamp().filter(|_| down);
+                    self.backend.n4n0(N4n0Command::AskTalk { down, stamp });
                 }
             },
             Action::NewConversation => self.backend.n4n0(N4n0Command::NewConversation),
             // The question's Yes or No, as saying it (REQUEST20 6).
-            // The question drawn when it was pressed (the facts the page was laid out with).
-            Action::AskAnswer(yes) => self.backend.n4n0(N4n0Command::AskAnswer { yes, question: self.facts.talk_question_id.unwrap_or(0) }),
+            // For the question on the picture that was pressed, never the one that came since (verify2-r21 B1).
+            Action::AskAnswer(yes) => {
+                if let Some(stamp) = self.ask_stamp().filter(|s| s.question.is_some()) {
+                    self.backend.n4n0(N4n0Command::AskAnswer { yes, stamp: Some(stamp) });
+                }
+            }
             // The failed message of the button as it was drawn: a late press of an older one is refused by its number.
             Action::RetryTurn => {
-                if let Some((id, _, true)) = self.facts.talk_retry {
-                    self.backend.n4n0(N4n0Command::RetryTurn { id });
+                if let Some((id, _, true)) = self.action_facts().talk_retry {
+                    let stamp = self.ask_stamp();
+                    self.backend.n4n0(N4n0Command::RetryTurn { id, stamp });
                 }
             }
             Action::TalkActions => {
@@ -4361,6 +4374,8 @@ impl Panels {
                         panel.items = items;
                         stage.canvas.paint(time, |p| panels::paint_sheet(p, sheet, &facts, hover, pressed));
                         stage.canvas_to(panel, &mut show);
+                        // What a press on the Ask page answers: the picture's, as the worker's pages have it.
+                        panel.displayed = (sheet == Sheet::Talk).then_some(facts);
                         panel.dirty = first;
                     }
                 }

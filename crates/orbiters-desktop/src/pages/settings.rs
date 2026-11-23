@@ -1552,11 +1552,11 @@ fn account(ui: &mut Ui, cx: &Cx, confirm_sign_out: &mut bool) {
                             *confirm_sign_out = false;
                         }
                         ui.add_space(8.0);
-                        if Button::new(tr("Sign out of every tool")).icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).show(ui).clicked() {
+                        if Button::new(tr("Sign out of every tool")).icon(icons::SIGN_OUT).variant(Variant::Danger).size(Size::Sm).confirm(ui) {
                             *confirm_sign_out = false;
                             cx.ctl.sign_out();
                         }
-                    } else if Button::new(tr("Sign out")).icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                    } else if Button::new(tr("Sign out")).icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).confirm(ui) {
                         *confirm_sign_out = true;
                     }
                 });
@@ -1633,7 +1633,8 @@ impl State {
 }
 
 fn vrchat_pressed(response: egui::Response) -> bool {
-    response.enabled() && (response.clicked() || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed())))
+    // Never a held key's repeats: some of these sign out, or remove a session.
+    response.enabled() && (widgets::activated_fresh(&response) || (response.is_pointer_button_down_on() && response.ctx.input(|i| i.pointer.primary_pressed())))
 }
 
 /// The same flat well as widgets::text_field, with egui's password masking and an eye that shows what was typed.

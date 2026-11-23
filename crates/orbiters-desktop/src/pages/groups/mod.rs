@@ -1101,7 +1101,7 @@ fn candidate_row(ui: &mut Ui, op: &str, c: &Candidate, thumb: Option<&egui::Text
     }
     let name = if c.label.is_empty() { tr("A picture").to_string() } else { c.label.clone() };
     let when = c.at.as_deref().map(super::local_time).unwrap_or_else(|| "—".to_string()); // i18n: not shown
-    let same = if c.same { tr("exactly what was sent") } else { tr("not exactly what was sent") };
+    let same = if c.same { tr("exactly what you asked for") } else { tr("not exactly what you asked for") };
     widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::FG_2), rect.right() - bw - 28.0 - x);
     let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let r = widgets::Button::new(tr("This is it")).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
@@ -1133,14 +1133,14 @@ fn seen_words(e: &Entry, seen: Option<&Observation>) -> String {
         None if e.answer == Some(Looked::ShowsNot) => tr("VRChat does not show it now: it may never have applied, or someone changed it since."),
         None => tr("Its answer was lost. The same is not sent again until you check."),
         Some(Observation::ShowsNot) => tr("VRChat does not show it now: it may never have applied, or someone changed it since."),
-        Some(Observation::CannotTell(Unclear::TooSoon)) => tr("Cannot tell yet: VRChat does not show it, and it went out moments ago. Check again in a minute."),
+        Some(Observation::CannotTell(Unclear::TooSoon)) => tr("Cannot tell yet: VRChat does not show it, and it was asked for moments ago. Check again in a minute."),
         Some(Observation::CannotTell(Unclear::NotRead)) => tr("Cannot tell: VRChat's answer does not say. Look on vrchat.com."),
         Some(Observation::CannotTell(Unclear::NotSeen)) => tr("Cannot tell: it is not in what VRChat shows your account, which proves nothing. Look on vrchat.com."),
         Some(Observation::CannotTell(Unclear::Rejoined)) => tr("Cannot tell: this person left the group and joined again since. Look on vrchat.com."),
         Some(Observation::CannotTell(Unclear::NoRecord)) => tr("Cannot tell: its record here cannot be read. Look on vrchat.com."),
         Some(Observation::CannotTell(Unclear::Failed(f))) => return format!("{} {}", tr("Cannot tell: VRChat could not be read. Look on vrchat.com, or check again."), failure_text(*f)),
         Some(Observation::Candidates(list)) if list.is_empty() => tr("Cannot tell: nothing new is in what VRChat shows your account, which proves nothing. Look on vrchat.com."),
-        Some(Observation::Candidates(_)) => tr("Cannot tell whether one of these is what was sent: only you can."),
+        Some(Observation::Candidates(_)) => tr("Cannot tell whether one of these is yours: only you can."),
         Some(Observation::Shows | Observation::Closed | Observation::Answered { .. }) => "",
     };
     text.to_string()

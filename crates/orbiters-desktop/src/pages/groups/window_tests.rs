@@ -742,7 +742,7 @@ fn the_panel_says_which_it_is_and_always_has_a_way_out() {
     r.world.lock().unwrap().posts[0]["roleIds"] = json!([]);
     r.w.check(&op);
     let text = text_of(&mut r);
-    for want in [tr("This is it"), tr("None of these"), tr("Drop it"), tr("not exactly what was sent"), "Saturday", "…s_new1"] {
+    for want in [tr("This is it"), tr("None of these"), tr("Drop it"), tr("not exactly what you asked for"), "Saturday", "…s_new1"] {
         assert!(text.contains(want), "{want}: {text}");
     }
     let made = match &r.w.state.observed[&op] {
@@ -776,7 +776,7 @@ fn the_panel_says_which_it_is_and_always_has_a_way_out() {
     let op = lose(&mut r, Wrote::UploadGallery, true);
     r.w.check(&op);
     let text = text_of(&mut r);
-    assert!(text.contains(tr("A picture")) && text.contains("…le_up1") && text.contains(tr("exactly what was sent")), "{text}");
+    assert!(text.contains(tr("A picture")) && text.contains("…le_up1") && text.contains(tr("exactly what you asked for")), "{text}");
     // VRChat refuses the reads, or there is no answer at all: the person still has a way out, for every kind.
     for kind in Wrote::ALL {
         let mut r = rig();

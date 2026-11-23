@@ -42,5 +42,7 @@
   "Both are already the values measured to match VRChat": "どちらもすでにVRChatに合うよう測定した値です",
   "Puts both smoothings back to the values measured to match VRChat": "両方のスムージングを、VRChatに合うよう測定した値に戻します",
   "Smoothing back to the values measured to match VRChat": "スムージングをVRChatに合うよう測定した値に戻しました",
-  "default measured smoothing back": "初期値 測定 スムージング 戻す"
+  "default measured smoothing back": "初期値 測定 スムージング 戻す",
+  "World ID": "ワールドID",
+  "{name} has closed since you chose it: choose a new instance of its world, or another place.": "{name}は選んだ後に閉じられました。このワールドの新しいインスタンスか、別の場所を選んでください。"
 }

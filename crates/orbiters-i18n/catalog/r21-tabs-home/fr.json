@@ -42,5 +42,7 @@
   "Both are already the values measured to match VRChat": "Les deux sont déjà les valeurs mesurées pour suivre VRChat",
   "Puts both smoothings back to the values measured to match VRChat": "Remet les deux lissages aux valeurs mesurées pour suivre VRChat",
   "Smoothing back to the values measured to match VRChat": "Lissage revenu aux valeurs mesurées pour suivre VRChat",
-  "default measured smoothing back": "défaut mesuré lissage revenir"
+  "default measured smoothing back": "défaut mesuré lissage revenir",
+  "World ID": "ID du monde",
+  "{name} has closed since you chose it: choose a new instance of its world, or another place.": "{name} s’est fermée depuis que tu l’as choisie : choisis une nouvelle instance de son monde, ou un autre lieu."
 }

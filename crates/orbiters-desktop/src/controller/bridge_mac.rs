@@ -32,8 +32,9 @@ const ENGINE_LOG_LOOK: usize = 8 << 20;
 const LOOK_EVERY: Duration = Duration::from_millis(700);
 /// How long the program may take to say a quit was taken.
 const QUIT_LIMIT: Duration = Duration::from_secs(20);
-/// The game draws while the frames it has shown grew within this (the engine counts them every 2 s).
-const DRAWING_WITHIN: Duration = Duration::from_secs(8);
+/// The game draws while the frames it presented or showed grew within this (the engine counts shown frames every 2 s; its
+/// window server says its presents every 60 of them or so, about every 3 s at the game's usual rate).
+const DRAWING_WITHIN: Duration = Duration::from_secs(15);
 
 /// A process as macOS tells it: its parent, and when it was born (seconds, microseconds), as the engine records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +129,8 @@ struct EngineLog {
     read: u64,
     /// The end of the last read, kept so that a line cut there is still found.
     tail: Vec<u8>,
+    /// The most presents its window server said so far (`neptune unixlib wsi (wsd): <n> presents`).
+    presents: Option<u64>,
 }
 
 /// Whether the game draws: the frames its Game session's record says it has shown, as they grow.
@@ -141,12 +144,18 @@ pub(crate) enum Drawing {
     Stalled,
 }
 
-/// What the frames shown say at `now`, the count having last grown at `grew` (the first count of a start grows from none).
-pub(crate) fn drawing(continuous: Option<bool>, grew: Option<Instant>, now: Instant) -> Drawing {
-    match (continuous, grew) {
-        (Some(true), Some(at)) if now.duration_since(at) <= DRAWING_WITHIN => Drawing::Yes,
-        (Some(true), Some(_)) => Drawing::Stalled,
-        _ => Drawing::Unknown,
+/// What the frames say at `now`: the shown frames of the Game session's record (`continuous` while counted whole, last grown
+/// at `shown_grew`) and the presents of this start's window server (last grown at `presents_grew`). Either growing is a game
+/// that draws. A covered window or a locked screen shows nothing while the game still presents, so only both stalled is a
+/// frozen game, and only when the presents are known.
+pub(crate) fn drawing(continuous: Option<bool>, shown_grew: Option<Instant>, presents_grew: Option<Instant>, now: Instant) -> Drawing {
+    let recent = |at: Option<Instant>| at.is_some_and(|at| now.duration_since(at) <= DRAWING_WITHIN);
+    if (continuous == Some(true) && recent(shown_grew)) || recent(presents_grew) {
+        Drawing::Yes
+    } else if presents_grew.is_some() {
+        Drawing::Stalled
+    } else {
+        Drawing::Unknown
     }
 }
 
@@ -173,6 +182,9 @@ struct Mine {
     shown: Option<u64>,
     grew: Option<Instant>,
     continuous: Option<bool>,
+    /// The presents its window server said, and when they last grew.
+    presents: Option<u64>,
+    presents_grew: Option<Instant>,
     /// The last look at the windows and the engine's log.
     looked: Option<Instant>,
     window: Option<MacWindow>,
@@ -195,6 +207,8 @@ impl Mine {
         self.shown = None;
         self.grew = None;
         self.continuous = None;
+        self.presents = None;
+        self.presents_grew = None;
         self.looked = None;
     }
 }
@@ -317,16 +331,17 @@ impl MacGame {
             if let Ok(file) = std::fs::File::open(obelisk::engine_log(&obelisk::home())) {
                 let key = file.metadata().ok().map(|m| file_key(&m));
                 if key.is_some() && key != mine.engine_before {
-                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new() });
+                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new(), presents: None });
                 }
             }
         }
-        if !mine.renderer_lost {
-            let mut lost = false;
-            if let Some(engine) = mine.engine.as_mut() {
-                lost = read_engine_log(engine);
+        let read = mine.engine.as_mut().map(|engine| (read_engine_log(engine), engine.presents));
+        if let Some((lost, presents)) = read {
+            mine.renderer_lost |= lost;
+            if presents > mine.presents {
+                mine.presents = presents;
+                mine.presents_grew = Some(Instant::now());
             }
-            mine.renderer_lost = lost;
         }
     }
 
@@ -376,6 +391,15 @@ impl MacGame {
     }
 }
 
+/// The most presents the window server's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
+/// `… alive: 6452 presents, …`).
+fn presents_said(text: &str) -> Option<u64> {
+    text.lines()
+        .filter_map(|line| line.split_once("neptune unixlib wsi (wsd): ")) // i18n: not shown (the engine's log lines)
+        .filter_map(|(_, rest)| rest.trim_start_matches("alive: ").split_once(" presents").and_then(|(n, _)| n.trim().parse().ok()))
+        .max()
+}
+
 /// Reads what the held engine log gained since the last read, up to [`ENGINE_LOG_LOOK`] at a time (the rest next time):
 /// whether it says the game's graphics went.
 fn read_engine_log(engine: &mut EngineLog) -> bool {
@@ -387,7 +411,9 @@ fn read_engine_log(engine: &mut EngineLog) -> bool {
     let before = bytes.len();
     let _ = (&mut engine.file).take(ENGINE_LOG_LOOK as u64).read_to_end(&mut bytes);
     engine.read += (bytes.len() - before) as u64;
-    let lost = obelisk::renderer_lost(&String::from_utf8_lossy(&bytes));
+    let text = String::from_utf8_lossy(&bytes);
+    let lost = obelisk::renderer_lost(&text);
+    engine.presents = engine.presents.max(presents_said(&text));
     // A line cut at the end is read again with what follows.
     engine.tail = bytes[bytes.len().saturating_sub(256)..].to_vec();
     lost
@@ -445,9 +471,9 @@ impl Game for MacGame {
                 let mine = self.mine.lock().unwrap();
                 seen.running = true;
                 seen.pid = Some(launcher);
-                let drawn = drawing(mine.continuous, mine.grew, Instant::now());
-                // Frames that stopped while the screen is unlocked are graphics gone (a locked screen shows none by design).
-                seen.renderer_lost = mine.renderer_lost || (drawn == Drawing::Stalled && !native::screen_locked());
+                let drawn = drawing(mine.continuous, mine.grew, mine.presents_grew, Instant::now());
+                // Neither presented nor shown for a while: the game's graphics stopped, covered or not.
+                seen.renderer_lost = mine.renderer_lost || drawn == Drawing::Stalled;
                 seen.desktop_mode = mine.args.as_ref().map(|a| a.iter().any(|x| x == "--no-vr"));
                 if let Some(watcher) = mine.watcher.as_ref().filter(|w| w.caught_up()) {
                     let world = &watcher.state;
@@ -808,9 +834,15 @@ mod tests {
     #[test]
     fn a_window_is_drawn_only_while_its_frames_grow() {
         let now = Instant::now();
-        assert_eq!(drawing(Some(true), Some(now - Duration::from_secs(2)), now), Drawing::Yes);
-        assert_eq!(drawing(Some(true), Some(now - Duration::from_secs(20)), now), Drawing::Stalled, "a frozen picture");
-        assert_eq!(drawing(Some(false), Some(now), now), Drawing::Unknown, "a log that lost its continuity");
-        assert_eq!(drawing(None, None, now), Drawing::Unknown, "no count yet");
+        let (fresh, old) = (Some(now - Duration::from_secs(2)), Some(now - Duration::from_secs(40)));
+        assert_eq!(drawing(Some(true), fresh, old, now), Drawing::Yes, "shown frames growing");
+        assert_eq!(drawing(Some(true), old, fresh, now), Drawing::Yes, "covered, or the screen locked: presented, not shown");
+        assert_eq!(drawing(Some(true), old, old, now), Drawing::Stalled, "neither: a frozen game");
+        assert_eq!(drawing(Some(false), Some(now), None, now), Drawing::Unknown, "a log that lost its continuity, no presents known");
+        assert_eq!(drawing(None, None, None, now), Drawing::Unknown, "no count yet");
+        // As this Mac's engine wrote them on 2026-11-22 23:56.
+        let log = "neptune unixlib wsi (wsd): 6420 presents (4599 shown events), last 60: interval avg 55.840 ms\nneptune unixlib wsi (wsd): alive: 6452 presents, 4599 shown events, 7286 drains\nwsd: window 1 overlay: frame held 183.3 ms\n";
+        assert_eq!(presents_said(log), Some(6452));
+        assert_eq!(presents_said("nothing"), None);
     }
 }

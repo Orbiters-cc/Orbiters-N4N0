@@ -221,10 +221,11 @@ How it is one verified game (`controller/bridge_mac.rs`):
   place with it, and a screenshot is refused until the game is back in its private instance): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
   Mac still follow the VRChat on the network: they are not changed by this.
-- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and the frames it has
-  shown growing**, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s). A
-  count that stops growing for 8 s while the screen is unlocked is a frozen picture: `get_state`'s `vrchat.renderer_lost` true and
-  `screenshot` answers `renderer_lost`; a count that lost its continuity proves nothing either way (not arrived). The engine's log of
+- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and its frames growing**:
+  the frames shown, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s), or
+  the presents its window server logs (`neptune unixlib wsi (wsd): <n> presents`, about every 3 s). A covered window or a locked
+  screen shows nothing while the game still presents (measured 23:54: presents on, shown events stuck), so only both stalled for
+  15 s is a frozen game: `get_state`'s `vrchat.renderer_lost` true and `screenshot` answers `renderer_lost`. The engine's log of
   this start (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start) is held open once found and read whole, in
   order: its graphics server dropping the game (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) says the same. Before arrival either ends the
   start with `start_crashed`, as does a start the program says ended early (also after its launcher was seen).
@@ -285,6 +286,19 @@ guest's upload buffer (grown to fit) behind `EXECUTE_COMMAND_STREAM`'s range che
 The owner's own start from Home at 23:22 (full screen, home world) had died the same way at 23:23:04 (`byte_size 70744960 exceeds cap
 67108864`). With the fix, at 23:50: the avatar loaded at 23:50:56 and the game drew for 3 min 50 s, 4,594 frames, until the Mac's
 screen locked (frames presented on, none shown); no cap line, no lost context; quit by session in 7 s.
+
+**The bridge's real flow on 0.3.9-dev.23 with obelisk-cli 0.1.5 (2026-11-23 01:02 to 01:15, the owner's account, screen unlocked):**
+
+| Start | What happened |
+| --- | --- |
+| 01:02 `go_to_world` home world | Hung about 50 s in (01:02:58: VRChat's log, the engine's log and the frame count stopped together, every engine process at 0 % CPU, VRChat's last line a GC heap allocation): no cap line, no lost context. The bridge said `start_crashed` (frames stalled) at 01:03:15; `close_vrchat` was `close_timeout` (not forced); ended by the experimenter with `steam quit --session --force` (146 s, 829 frames). The same hang as Phase 0's 20:48 start: an engine fault of its own, not the cap. |
+| 01:05 `go_to_world` | `start_wait`, `retry_after_s` 40, no instance made (the gate before the API). |
+| 01:06 Autumn fragrance | Arrived in its private instance (`~private(<me>)`), the 64 MB avatar loaded at 01:07:08, still drawing at 01:09 with the avatar on screen; screenshots 1280 x 720 with `scale` 1.0. |
+| 01:09 `go_to_world` Sky Dream | Its first game was asked to quit (01:09:13), began closing (`OnDestroy`, "finished" at 01:09:15), then an `install.exe` failed to load (`mscoree.dll not found`) and one engine process spun at 100 % CPU for over 2 minutes: `close_timeout`, nothing started (no instance lost: made only once the start could go). Ended by the experimenter by session with `--force` (321 s, 1,991 frames). |
+| 01:11 Sky Dream again | Arrived, avatar loaded 01:13:22, drawing at 01:14:40, screenshot of its welcome screen; `close_vrchat` closed it gracefully in 18 s. |
+
+Not one cap line in these starts. What remains of the engine on this Mac: an occasional hang a minute in, and an occasional quit that
+does not finish; the bridge reports both and never forces.
 
 **Why the graphics went (2026-11-22 22:17 and 22:20, the same bytes both times):** one texture or buffer upload of 70,744,960 bytes
 is refused by the render server's D3D path, whose cap is 64 MiB (`resource_update: byte_size %u exceeds cap %u` in Voile's

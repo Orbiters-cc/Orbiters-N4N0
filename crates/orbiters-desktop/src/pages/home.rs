@@ -2866,9 +2866,12 @@ mod tests {
         h.snap.vrchat_login.known = Some(vrchat_user(&me, &name));
         h.settle();
         click(&mut h, "Previous instances");
+        // The sheet says it is in front (chat and its keys stand aside), until it is put away.
+        assert!(orbiters_ui::front::held(&h.ctx));
         click(&mut h, "Harbor Market");
         h.frame(vec![key(Key::Escape)]);
         h.settle();
+        assert!(!orbiters_ui::front::held(&h.ctx));
         try_click(&mut h, "Play in VR");
         let_pass(&mut h, 100);
         assert!(starts(&h).is_empty(), "Play while the pick is held: {:?}", starts(&h));

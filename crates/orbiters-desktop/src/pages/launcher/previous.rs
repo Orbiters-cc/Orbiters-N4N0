@@ -709,7 +709,7 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         return Some(true);
     }
     // A press on the row picks it (again: asked again).
-    (widgets::activated(&resp) && !popup::any_open(&ctx)).then_some(false)
+    (widgets::pressed_fresh(&resp) && !popup::any_open(&ctx)).then_some(false)
 }
 
 /// The kind of a new instance of `v`'s world, as Where's card pill chooses it: a pill whose list has VRChat's kinds,

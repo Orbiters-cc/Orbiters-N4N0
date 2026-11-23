@@ -969,7 +969,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             if offer_new {
                 let b = widgets::Button::new(tr("New instance of this world")).icon(icons::PLUS).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("where-new-instead");
                 let bw = b.desired_width(ui);
-                if widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
+                if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
                     take_new = true;
                 }
                 room -= bw + 8.0;
@@ -1155,7 +1155,7 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
     } else if hover > 0.01 {
         paint::stroke_squircle(&p, rect, theme::squircle(RADIUS), egui::Stroke::new(1.0, theme::white(0.08 * hover)));
     }
-    if widgets::activated(&resp) {
+    if widgets::pressed_fresh(&resp) {
         choose(state, cx, card);
     }
     let tip = match &card.reason {

@@ -121,6 +121,9 @@ pub fn icon(painter: &Painter, center: Pos2, glyph: &str, size: f32, color: Colo
     if glyph == icons::BLENDER {
         return crate::blender_logo::glyph(painter, center, size, color);
     }
+    if glyph == icons::DISCORD_LOGO {
+        return crate::discord_logo::glyph(painter, center, size, color);
+    }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons()), color);
 }
 
@@ -134,6 +137,9 @@ pub fn icon_fill(painter: &Painter, center: Pos2, glyph: &str, size: f32, color:
     }
     if glyph == icons::BLENDER {
         return crate::blender_logo::glyph(painter, center, size, color);
+    }
+    if glyph == icons::DISCORD_LOGO {
+        return crate::discord_logo::glyph(painter, center, size, color);
     }
     painter.text(center, Align2::CENTER_CENTER, glyph, FontId::new(size, fonts::icons_fill()), color);
 }

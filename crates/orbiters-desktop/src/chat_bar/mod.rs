@@ -39,6 +39,11 @@ pub fn field_id() -> Id {
     Id::unique("orbiters-chat-field")
 }
 
+/// The page's blur behind the chat (its GPU objects).
+fn behind_id() -> Id {
+    Id::unique("orbiters-chat-behind")
+}
+
 /// The layer behind the chat that blurs the page and takes the presses beside the chat.
 fn backdrop_layer() -> LayerId {
     LayerId::new(Order::Middle, Id::unique("orbiters-chat-backdrop"))
@@ -82,9 +87,21 @@ pub fn has_conversation(snap: &Snapshot) -> bool {
     !snap.n4n0.lines.is_empty() || !snap.n4n0.confirmations.is_empty() || snap.n4n0.thinking || snap.n4n0.listening
 }
 
-/// N4N0's answers so far (an answer that came while the chat was closed lights the bar).
-fn answers(snap: &Snapshot) -> usize {
-    snap.n4n0.lines.iter().filter(|l| l.who == N4n0Who::N4n0 && !l.streaming).count()
+/// N4N0's latest whole answer (when it was said, and its words' hash): one that came while the chat was closed lights the
+/// bar. Its identity, not a count: the conversation keeps its last lines only, so a full one does not grow (verify-r21
+/// minor 5).
+fn latest_answer(snap: &Snapshot) -> Option<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    snap.n4n0.lines.iter().rev().find(|l| l.who == N4n0Who::N4n0 && !l.streaming).map(|l| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        l.text.hash(&mut h);
+        (l.at_ms, h.finish())
+    })
+}
+
+/// Whether an answer came that the chat has not shown.
+fn unread(bar: &ChatBar, snap: &Snapshot) -> bool {
+    !bar.morph.is_open() && latest_answer(snap).is_some_and(|latest| bar.seen != Some(latest))
 }
 
 /// The chat's state in the window.
@@ -105,8 +122,8 @@ pub struct ChatBar {
     focus: bool,
     /// The streamed answer as far as it is shown: its line (by time) and how many characters of it.
     reveal: Option<(u64, f32)>,
-    /// N4N0's answers seen with the chat open.
-    seen: usize,
+    /// The latest of N4N0's answers seen with the chat open (when it was said, and its words' hash).
+    seen: Option<(u64, u64)>,
     /// A message's text copied, and when (its button shows a check for a moment).
     copied: Option<(u64, f64)>,
     /// The thread stays at its end as it grows (until the person scrolls up).
@@ -115,6 +132,17 @@ pub struct ChatBar {
     count: usize,
     /// Where the strip put the bar last frame.
     strip: Option<Strip>,
+    /// A fresh Enter came with the last letters typed: it sends on the next frame.
+    enter_later: bool,
+    /// How far a draft longer than the composer is moved up to show its caret.
+    draft_offset: f32,
+    /// The Orbiters account's turn as N4N0 counts them (`N4n0Status::account_epoch`): when it moves, what was typed goes.
+    epoch: Option<u64>,
+    /// The question this window answered (its card says so until it is gone).
+    answered: Option<u64>,
+    /// The page behind is blurred with the window's GPU objects (`orbiters_ui::backdrop`): they are given back when the
+    /// chat has closed.
+    blurred: Option<orbiters_ui::blur::Textures>,
 }
 
 /// Keyboard events: what the page does not get while the chat has the keyboard.
@@ -140,6 +168,16 @@ impl ChatBar {
     /// Shows what N4N0 did instead of the conversation (the chat's head does it; screenshots too).
     pub fn show_log(&mut self, on: bool) {
         self.log = on;
+    }
+
+    /// How far a draft longer than the composer is moved up to show its caret.
+    pub fn draft_offset(&self) -> f32 {
+        self.draft_offset
+    }
+
+    /// Whether the bar says N4N0 answered (an answer came that the chat has not shown).
+    pub fn says_answered(&self, snap: &Snapshot) -> bool {
+        unread(self, snap)
     }
 
     /// Where the title strip put the bar in the last frame.
@@ -168,8 +206,45 @@ impl ChatBar {
         }
     }
 
+    /// What the chat holds that closing the window would lose: the chat itself up, something typed, Talk held. The
+    /// window's automatic rest to the tray waits while it does (verify-r21 8).
+    pub fn holds(&self) -> bool {
+        self.shows() || !self.draft.trim().is_empty() || self.talking
+    }
+
+    /// Another Orbiters account (or nobody) is signed in now (`N4n0Status::account_epoch` moved, after N4N0 forgot the
+    /// conversation): what was typed for the account before goes too, with the text field's undo steps (verify-r21 3).
+    fn follow_account(&mut self, ctx: &egui::Context, snap: &Snapshot) {
+        let epoch = snap.n4n0.account_epoch;
+        if self.epoch.is_some_and(|seen| seen != epoch) {
+            self.draft.clear();
+            self.draft_offset = 0.0;
+            self.enter_later = false;
+            (self.reveal, self.seen, self.copied, self.answered) = (None, None, None, None);
+            self.log = false;
+            self.count = 0;
+            if let Some(mut state) = egui::TextEdit::load_state(ctx, field_id()) {
+                state.clear_undoer();
+                state.store(ctx, field_id());
+            }
+            self.close(ctx);
+        }
+        self.epoch = Some(epoch);
+    }
+
     /// Before the page is drawn: the shortcut, Esc, and the page's keys held back while the chat has the keyboard.
-    pub fn before_page(&mut self, ctx: &egui::Context, snap: &Snapshot) {
+    /// `modal`: a sheet, dialog or menu of the page is up — the frontmost thing owns the keyboard and the pointer, so the
+    /// chat stands aside: closed, its shortcut and Esc left to the modal (verify-r21 major 7).
+    pub fn before_page(&mut self, ctx: &egui::Context, snap: &Snapshot, modal: bool) {
+        self.follow_account(ctx, snap);
+        if modal {
+            if self.morph.is_open() || ctx.memory(|m| m.has_focus(field_id())) {
+                self.close(ctx);
+            }
+            self.focus = false;
+            self.held.clear();
+            return;
+        }
         let focused = ctx.memory(|m| m.has_focus(field_id()));
         if ctx.input_mut(|i| i.consume_shortcut(&SHORTCUT)) {
             self.focus = true;
@@ -210,13 +285,17 @@ impl ChatBar {
             ctx.request_repaint();
         }
         if self.morph.is_open() {
-            self.seen = answers(snap);
+            self.seen = latest_answer(snap);
         }
         let panel = layout::panel(strip.window);
         let bar = strip.bar.rect();
         if self.morph.openness() > 0.0 {
             let (focus, radius) = if self.morph.reduced() { (panel, layout::PANEL_RADIUS) } else { layout::shape(bar, panel, self.morph.shape()) };
             self.backdrop(&ctx, strip, focus, radius, gpu);
+        } else if let Some(textures) = self.blurred.take() {
+            // Closed and settled: the blur's targets and its hold on the page's textures go now, not at a next opening
+            // (verify-r21 major 9).
+            orbiters_ui::backdrop::release(&textures, behind_id());
         }
         if self.morph.reduced() {
             // No morph: the bar stays, the chat fades in over it.
@@ -243,8 +322,11 @@ impl ChatBar {
             let resp = ui.allocate_rect(body, Sense::click());
             let look = orbiters_ui::backdrop::Look { strength, focus, radius, ..BEHIND };
             let blurred = gpu.is_some_and(|gpu| {
-                orbiters_ui::backdrop::behind(ui.painter(), Id::unique("orbiters-chat-behind"), &gpu.textures, LayerId::background(), egui::layers::ShapeIdx(0), body, look)
+                orbiters_ui::backdrop::behind(ui.painter(), behind_id(), &gpu.textures, LayerId::background(), egui::layers::ShapeIdx(0), body, look)
             });
+            if let Some(gpu) = gpu {
+                self.blurred.get_or_insert_with(|| gpu.textures.clone());
+            }
             // Without the window's GPU (a test), or for the one frame a new backdrop meets a changing font atlas, there
             // is nothing to blur with: the page only darkens.
             if !blurred {
@@ -318,7 +400,7 @@ impl ChatBar {
         let rect = bar.rect();
         let mut p = ui.painter().clone();
         p.multiply_opacity(alpha);
-        let unread = answers(snap) > self.seen && !self.morph.is_open();
+        let unread = unread(self, snap);
         if let Bar::Icon(_) = bar {
             panel::n4n0_face(&p, rect.center(), 9.0);
             if unread {
@@ -408,10 +490,32 @@ impl ChatBar {
         let focused = ui.memory(|m| m.has_focus(field_id()));
         // Enter sends (Shift+Enter is a new line); never while an input method composes, nor the Enter that commits it.
         let committed = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Ime(egui::ImeEvent::Commit(_)))));
-        let enter = focused && ready && !self.composing && !committed && take_plain_enter(ui);
+        // Only a fresh press of Enter sends (never a held Enter's repeats), and never the Enter that comes with a paste:
+        // what was pasted needs its own Enter. One typed in the same moment as its last letters sends on the next frame.
+        let (pasted, typed) = ui.input(|i| {
+            let pasted = i.events.iter().any(|e| matches!(e, Event::Paste(_)));
+            (pasted, i.events.iter().any(|e| matches!(e, Event::Text(_))))
+        });
+        let mut enter = false;
+        if focused && ready && !self.composing && !committed {
+            if take_plain_enter(ui) {
+                if typed && !pasted {
+                    self.enter_later = true;
+                } else {
+                    enter = !pasted;
+                }
+            } else if std::mem::take(&mut self.enter_later) {
+                enter = !pasted;
+            }
+        } else {
+            self.enter_later = false;
+        }
         let font = theme::font(egui::lerp(13.0..=14.0, t), weight::REGULAR);
         let rows = if t < 0.5 { 1 } else { panel::draft_rows(ui, &self.draft, at.width()) };
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(at));
+        // The chat's one scroll region is its thread (owner rule): a draft longer than the composer shows the lines
+        // around its caret, the composer following the caret as a single-line field follows it sideways.
+        let offset = if rows > panel::MAX_ROWS { self.draft_offset } else { 0.0 };
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(at.min - vec2(0.0, offset), vec2(at.width(), 4000.0))));
         child.set_clip_rect(at.expand2(vec2(2.0, 2.0)).intersect(ui.clip_rect()));
         let before = self.draft.clone();
         let edit = egui::TextEdit::multiline(&mut self.draft)
@@ -424,12 +528,22 @@ impl ChatBar {
             .desired_rows(rows)
             .interactive(ready)
             .return_key(Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)));
-        let resp = if rows > panel::MAX_ROWS {
-            // A very long message scrolls in its own field, the chat's thread being the one place answers scroll.
-            egui::ScrollArea::vertical().id_salt("chat-draft").max_height(at.height()).stick_to_bottom(true).show(&mut child, |ui| ui.add(edit)).inner
+        let out = edit.show(&mut child);
+        let resp = out.response.response.clone();
+        if rows > panel::MAX_ROWS {
+            if let Some(cursor) = out.cursor_range {
+                let caret = out.galley.pos_from_cursor(cursor.primary);
+                let visible = at.height();
+                let most = (out.galley.rect.height() - visible).max(0.0);
+                let next = self.draft_offset.clamp(caret.bottom() - visible, caret.top()).clamp(0.0, most);
+                if (next - self.draft_offset).abs() > 0.5 {
+                    self.draft_offset = next;
+                    ui.ctx().request_repaint();
+                }
+            }
         } else {
-            child.add(edit)
-        };
+            self.draft_offset = 0.0;
+        }
         if t > 0.5 && self.draft.is_empty() {
             let hint = match gate(snap) {
                 Gate::Ready => tr("Ask N4N0 anything…"),
@@ -460,19 +574,29 @@ impl ChatBar {
             return false;
         }
         self.draft.clear();
+        self.draft_offset = 0.0;
         self.follow = true;
         self.log = false;
         self.open();
-        ctl.n4n0(N4n0Command::Ask { text });
+        // With the question shown now: a typed yes or no answers that one only (verify-r21 1).
+        ctl.n4n0(N4n0Command::Ask { text, question: shown_question(snap) });
         true
     }
 }
 
-/// Takes a plain Enter out of this frame's events (egui's `consume_key` would take Shift+Enter for it too).
+/// The question N4N0 asks that the chat shows now (its number), if any.
+pub fn shown_question(snap: &Snapshot) -> Option<u64> {
+    snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question())
+}
+
+/// Takes this frame's plain Enters out of its events (egui's `consume_key` would take Shift+Enter for one too); true
+/// when one of them is a fresh press, not a held Enter's repeat (verify-r21 2).
 fn take_plain_enter(ui: &Ui) -> bool {
     ui.input_mut(|i| {
-        let at = i.events.iter().position(|e| matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.command));
-        at.map(|at| i.events.remove(at)).is_some()
+        let plain = |e: &Event| matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.command);
+        let fresh = i.events.iter().any(|e| plain(e) && matches!(e, Event::Key { repeat: false, .. }));
+        i.events.retain(|e| !plain(e));
+        fresh
     })
 }
 

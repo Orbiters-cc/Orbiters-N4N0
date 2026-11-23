@@ -557,6 +557,10 @@ fn options(
     reason: Option<Why>,
     tops: &mut Vec<(Part, f32)>,
 ) {
+    // The world's id (verify-r21 Minor 4: the Capture tab's header showed it; two worlds can share a name), to select.
+    if let Some(id) = cx.snap.vrchat.world.world_id.clone().filter(|_| cx.snap.vrchat.world.in_world) {
+        world_id_row(ui, &id);
+    }
     tops.push((Part::Vrchats, ui.cursor().top()));
     vrchat_picker(ui, cx);
     tops.push((Part::Actions, ui.cursor().top()));
@@ -576,6 +580,20 @@ fn options(
     if here {
         performance(ui, cx);
     }
+}
+
+/// The current world's id in the open options: its caption, then the id in mono, selectable to copy.
+fn world_id_row(ui: &mut Ui, id: &str) {
+    let label = tr("World ID");
+    let r = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+            ui.add(egui::Label::new(egui::RichText::new(label.to_uppercase()).size(11.0).color(theme::FG_3)).selectable(false));
+            ui.add(egui::Label::new(egui::RichText::new(id).monospace().size(12.5).color(theme::FG_2)).selectable(true));
+        })
+        .response
+        .rect;
+    widgets::note_control(ui.ctx(), label, r, true);
 }
 
 /// A reconstruction under way: whose, its stage, how far, why it waits, and its Stop. Its card in the gallery says the
@@ -1809,6 +1827,7 @@ pub(crate) mod tests {
             assert!(h.drawn(label), "{label} is in the open element");
         }
         assert_eq!(h.scroll_areas(), 1, "one scroll area: the page's list");
+        assert!(!h.drawn("World ID"), "no world's id without one");
         h.recorder.said.lock().unwrap().clear();
         h.press("capture-people");
         h.press("capture-world");
@@ -1906,5 +1925,17 @@ pub(crate) mod tests {
         let source = include_str!("capture.rs");
         let code = source.split("#[cfg(test)]").next().unwrap_or(source);
         assert!(!code.contains(concat!("Scroll", "Area")), "the capture element scrolls with the page's list");
+    }
+
+    /// verify-r21 Minor 4: the open options carry the current world's id (selectable), as the Capture tab's header did.
+    #[test]
+    fn the_open_options_show_the_worlds_id() {
+        widgets::watch_controls();
+        let mut h = Harness::new();
+        h.snap.vrchat.world.world_id = Some("wrld_00000000-0000-4000-8000-000000000123".into());
+        h.settle();
+        assert!(!h.drawn("World ID"), "the gallery first");
+        h.press("Options");
+        assert!(h.drawn("World ID"));
     }
 }

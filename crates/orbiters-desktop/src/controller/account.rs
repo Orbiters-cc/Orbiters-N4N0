@@ -163,8 +163,9 @@ impl Controller {
     /// one is installed: the account file read (another tool signed in or out, the environment switched), a browser
     /// sign-in, a sign-out. When `next` is not the identity installed now, the account installed now leaves first
     /// (`calls_leave`: its call ends here, its media stops, nothing of it or of its shares stays shown), with its own
-    /// credential for what Orbiters hears. The same identity read again (a same-credential refresh) leaves nothing.
-    /// True when the account left.
+    /// credential for what Orbiters hears. N4N0's conversation, what it asked and its action log go with it, and a turn
+    /// under way for it comes to nothing (verify-r21 3). The same identity read again (a same-credential refresh)
+    /// leaves nothing. True when the account left.
     pub(super) fn leave_unless_same(&self, next: Option<(Server, &str)>) -> bool {
         let held = {
             let rt = self.account_runtime.lock().unwrap();
@@ -175,6 +176,7 @@ impl Controller {
             return false;
         }
         self.calls_leave(Some((Api::new(server).url(""), token)));
+        self.n4n0.command(crate::ipc::N4n0Command::ForgetAccount);
         true
     }
 

@@ -18,5 +18,13 @@
   "Send (Enter)": "Enviar (Intro)",
   "N4N0 is answering…": "N4N0 está respondiendo…",
   "Enter to send · Shift+Enter for a new line": "Intro para enviar · Mayús+Intro para una línea nueva",
-  "Pick a feature, or talk to N4N0 at the top of the window": "Elige una función o habla con N4N0 arriba de la ventana"
+  "Pick a feature, or talk to N4N0 at the top of the window": "Elige una función o habla con N4N0 arriba de la ventana",
+  "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › Settings › Voice & assistant.": "N4N0 aún no puede oírte: instala sus modelos de voz en Orbiters - N4N0 › Configuración › Voz y asistente.",
+  "N4N0's assistant is off: turn it on in Orbiters - N4N0 › Settings › Voice & assistant.": "El asistente de N4N0 está desactivado: actívalo en Orbiters - N4N0 › Configuración › Voz y asistente.",
+  "N4N0 prepared something that needs your approval: see N4N0's chat at the top of Orbiters - N4N0.": "N4N0 preparó algo que necesita tu aprobación: mira el chat de N4N0 arriba en Orbiters - N4N0.",
+  "Calls are off: Orbiters - N4N0 › Settings › N4N0 companion": "Llamadas desactivadas: Orbiters - N4N0 › Configuración › Compañero N4N0",
+  "That answer was for a question N4N0 no longer asks: nothing was done. Answer the one shown now.": "Esa respuesta era para una pregunta que N4N0 ya no hace: no se hizo nada. Responde a la que se muestra ahora.",
+  "Answer sent": "Respuesta enviada",
+  "Turn it on in Orbiters - N4N0 › Settings › Voice & assistant": "Actívalo en Orbiters - N4N0 › Configuración › Voz y asistente",
+  "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Instala sus oídos en Orbiters - N4N0 › Configuración › Voz y asistente"
 }

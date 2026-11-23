@@ -24,7 +24,9 @@ use orbiters_i18n::{tr, tr_n};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{icons, paint, popup, widgets};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// The sheet's size at most, a row's height, its picture.
 const W: f32 = 660.0;
@@ -76,9 +78,16 @@ pub fn visits(history: &orbiters_core::visited::History) -> Vec<Visit> {
         .collect()
 }
 
+/// How long VRChat's "still open" stands before Play asks it again (verify-r21 Major 4): VRChat's own client keeps an
+/// instance's answer about a minute, so asking more often learns nothing; an instance chosen longer ago than that is
+/// asked again at Play, and VRChat starts only if it still says open.
+pub const OPEN_FOR: Duration = Duration::from_secs(60);
+
 /// What VRChat said of a picked instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
+    /// VRChat's session is being restored: who is signed in is not known yet; asked once it is (verify-r21 Major 1).
+    Waiting,
     /// Being asked.
     Asking,
     /// Open: rejoined.
@@ -98,12 +107,26 @@ pub struct Picked {
     pub check: Check,
     /// A new instance of its world was chosen (the instance closed, not known, or not joinable by its link).
     pub new: bool,
+    /// When VRChat said it is open, and for which account (an Open is good for that account only, for [`OPEN_FOR`]).
+    pub checked: Option<(Instant, String)>,
 }
 
 impl Picked {
-    /// Whether Play rejoins the instance itself (else it makes a new one of its world).
+    pub fn new(visit: Visit, check: Check, new: bool) -> Self {
+        Self { visit, check, new, checked: None }
+    }
+
+    /// Whether Play rejoins the instance itself (else it makes a new one of its world): VRChat said it is open, for the
+    /// account signed in now, and its kind lets that account in by its link.
     pub fn rejoins(&self, me: Option<&str>) -> bool {
-        !self.new && self.check == Check::Open && me.is_some_and(|me| rejoinable(&self.visit.instance, me))
+        !self.new
+            && self.check == Check::Open
+            && me.is_some_and(|me| rejoinable(&self.visit.instance, me) && self.checked.as_ref().is_some_and(|(_, who)| who == me))
+    }
+
+    /// Whether VRChat's "open" is older than [`OPEN_FOR`] (Play asks again).
+    pub fn stale(&self, now: Instant) -> bool {
+        self.checked.as_ref().is_none_or(|(at, _)| now.saturating_duration_since(*at) > OPEN_FOR)
     }
 
     /// Whether it is Where's choice now (a row only asked about, or closed and not taken as a new instance, is not).
@@ -120,19 +143,45 @@ pub struct Previous {
     query: String,
     /// The text searched for at the last frame ([`crate::pages::new_search`]).
     searched: Option<String>,
-    /// The history's instances, read when the sheet opens (pictures of the page hand them in).
-    rows: Arc<Mutex<Option<Vec<Visit>>>>,
-    reading: bool,
+    /// The history's instances, read when the sheet opens (pictures of the page hand them in), and whether a read is
+    /// under way: one lock, so a read finishing while the sheet is closed is never lost (verify-r21 Major 5).
+    history: Arc<Mutex<HistoryRead>>,
+    /// How the history is read (tests: a stand-in; the app: this computer's file).
+    reader: Option<Reader>,
     /// The rows were handed in (nothing is read), and nothing is asked of VRChat or loaded either (pictures of the page).
     staged: bool,
     quiet: bool,
     pub picked: Option<Picked>,
-    /// VRChat's answer for a location asked about.
-    answer: Arc<Mutex<Option<(String, Option<bool>)>>>,
+    /// The pick being asked about: an answer for an older one is dropped before it can replace anything (Major 4).
+    generation: Arc<AtomicU64>,
+    /// VRChat's answer for the pick of a generation.
+    answer: Arc<Mutex<Option<Answer>>>,
+    /// Play pressed on a chosen instance whose "open" was too old: started once VRChat says it still is.
+    play_after: Option<(orbiters_core::launcher::LaunchMode, Option<u32>)>,
+    /// The worlds' pictures this sheet may show: only those already kept on this computer (Major 6), looked up once.
+    kept: std::collections::HashMap<String, Option<String>>,
     /// The account Where's places are for this frame, and whether VRChat makes instances for it (Where's row says).
     pub(super) me: Option<String>,
     pub(super) can_create: bool,
     pub(super) signed_in_elsewhere: bool,
+    /// VRChat's saved session is being restored: who is signed in is not known yet (Major 1).
+    pub(super) connecting: bool,
+}
+
+type Reader = Arc<dyn Fn() -> Vec<Visit> + Send + Sync>;
+
+#[derive(Default)]
+struct HistoryRead {
+    rows: Option<Vec<Visit>>,
+    reading: bool,
+}
+
+/// VRChat's answer about a pick: its generation, whether open, and when.
+struct Answer {
+    generation: u64,
+    location: String,
+    open: Option<bool>,
+    at: Instant,
 }
 
 impl Previous {
@@ -148,7 +197,7 @@ impl Previous {
 
     /// Pictures of the page and tests: the history's instances handed in (nothing read), the sheet up with `query`.
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
-        *self.rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
         self.staged = true;
         self.quiet = true;
         self.query = query.into();
@@ -158,13 +207,44 @@ impl Previous {
     /// Tests: the history's instances handed in (nothing read); a row picked is asked of the backend as on the app.
     #[cfg(test)]
     pub fn stand_in_rows(&mut self, rows: Vec<Visit>) {
-        *self.rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
         self.staged = true;
+    }
+
+    /// Tests: the history read by `reader` (on its thread, as the app reads its file), nothing handed in.
+    #[cfg(test)]
+    pub fn stand_in_reader(&mut self, reader: impl Fn() -> Vec<Visit> + Send + Sync + 'static) {
+        self.reader = Some(Arc::new(reader));
+        self.staged = false;
+    }
+
+    /// Tests: VRChat's "open" for the pick made `by` ago.
+    #[cfg(test)]
+    pub fn age_check(&mut self, by: Duration) {
+        if let Some((at, _)) = self.picked.as_mut().and_then(|p| p.checked.as_mut()) {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
+    }
+
+    /// Another place was chosen in Where (a card, Home world): the pick being asked about is dropped, and its answer,
+    /// when it comes, chooses nothing (verify-r21 Major 4).
+    pub(super) fn cancel(&mut self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.play_after = None;
+        if self.picked.as_ref().is_some_and(|p| matches!(p.check, Check::Asking | Check::Waiting)) {
+            self.picked = None;
+        }
+    }
+
+    /// Whether Play waits for VRChat to say again that the chosen instance is open.
+    pub fn rechecking(&self) -> bool {
+        self.play_after.is_some()
     }
 
     /// Pictures of the page: `visit` picked, VRChat having said `check`.
     pub fn stand_in_pick(&mut self, visit: Visit, check: Check, new: bool) {
-        self.picked = Some(Picked { visit, check, new });
+        let checked = (check == Check::Open).then(|| (Instant::now(), self.me.clone().unwrap_or_default()));
+        self.picked = Some(Picked { visit, check, new, checked });
     }
 
     /// Pictures of the page: the sheet put away (the choice kept).
@@ -176,7 +256,11 @@ impl Previous {
         self.up = Some((clock, None));
         self.query.clear();
         if !self.staged {
-            *self.rows.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            // Read again (it changes as VRChat runs), unless a read is under way: its rows come.
+            let mut h = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            if !h.reading {
+                h.rows = None;
+            }
         }
     }
 
@@ -204,67 +288,143 @@ pub(super) fn button(ui: &mut Ui, state: &mut State, right_center: Pos2) -> f32 
     w
 }
 
-/// Takes VRChat's answer for the row picked, when it came.
-pub(super) fn follow(state: &mut State) {
-    let answer = state.places.previous.answer.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let Some((location, open)) = answer else { return };
+/// Follows the pick: asked of VRChat once VRChat says who is signed in (a pick made while it connected), taken back
+/// when that account goes, and VRChat's answer taken when it came, for the pick it was asked for only. Play waiting on
+/// a fresh answer goes on, or stops with a word, here.
+pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
     let me = state.places.previous.me.clone();
-    let Some(p) = state.places.previous.picked.as_mut().filter(|p| p.visit.location() == location && p.check == Check::Asking) else { return };
-    p.check = match open {
+    let connecting = state.places.previous.connecting;
+    // Pictures of the page stage an "open" before the account is set: it is that account's.
+    if state.places.previous.quiet {
+        if let Some((_, who)) = state.places.previous.picked.as_mut().and_then(|p| p.checked.as_mut()).filter(|(_, who)| who.is_empty()) {
+            *who = me.clone().unwrap_or_default();
+        }
+    }
+    // A pick made while VRChat connected: asked now that the account is known, or offered as a new instance when it
+    // turned out signed out (or another account's profile): never taken as one by itself.
+    if let Some(p) = state.places.previous.picked.clone().filter(|p| p.check == Check::Waiting) {
+        if me.is_some() {
+            ask(state, cx, &p.visit, false);
+        } else if !connecting {
+            state.places.previous.picked = Some(Picked::new(p.visit.clone(), Check::NotAsked, false));
+        }
+    }
+    let answer = state.places.previous.answer.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let Some(answer) = answer else { return };
+    if answer.generation != state.places.previous.generation.load(Ordering::SeqCst) {
+        return;
+    }
+    let rechecking = state.places.previous.play_after.is_some();
+    let Some(p) = state.places.previous.picked.as_mut().filter(|p| p.visit.location() == answer.location && (p.check == Check::Asking || rechecking)) else { return };
+    p.check = match answer.open {
         Some(true) => Check::Open,
         Some(false) => Check::Closed,
         None => Check::Unknown,
     };
-    if p.rejoins(me.as_deref()) {
-        let (key, name) = (p.visit.key(), world_name(&p.visit));
+    p.checked = (p.check == Check::Open).then(|| (answer.at, me.clone().unwrap_or_default()));
+    let rejoins = p.rejoins(me.as_deref());
+    let (key, name) = (p.visit.key(), world_name(&p.visit));
+    let play_after = state.places.previous.play_after.take();
+    if rejoins {
         state.places.chosen = Some(Chosen { key, name, instance: true });
         state.places.page = 0;
         state.places.notice = None;
+        if let Some((mode, profile)) = play_after {
+            // Asked again at Play and still open: VRChat starts there now.
+            state.places.making = None;
+            state.places.previous.picked.as_mut().map(|p| p.checked = Some((Instant::now(), me.clone().unwrap_or_default())));
+            super::destinations::play(state, cx, clock, mode, profile);
+        }
+    } else {
+        if play_after.is_some() {
+            state.places.making = None;
+            if state.places.chosen.as_ref().is_some_and(|c| c.key == key) {
+                state.places.chosen = None;
+            }
+            state.places.notice = Some((orbiters_i18n::tr!("{name} has closed since you chose it: choose a new instance of its world, or another place.", name = name), clock));
+        }
     }
 }
 
-/// A row pressed: asked of VRChat where it can be rejoined, else taken at once as a new instance of its world.
+/// A row pressed: kept until VRChat says who is signed in (while it connects), asked of VRChat where it can be
+/// rejoined, else taken at once as a new instance of its world.
 fn pick(state: &mut State, cx: &Cx, visit: &Visit) {
     let me = state.places.previous.me.clone();
-    let can_ask = me.as_deref().is_some_and(|me| rejoinable(&visit.instance, me));
-    if can_ask {
-        state.places.previous.picked = Some(Picked { visit: visit.clone(), check: Check::Asking, new: false });
+    // A pick replaces the one before: its answer, still to come, chooses nothing.
+    state.places.previous.generation.fetch_add(1, Ordering::SeqCst);
+    state.places.previous.play_after = None;
+    if state.places.chosen.as_ref().is_some_and(|c| c.key.starts_with("previous:")) {
         // Not chosen until VRChat said it is open (a closed one is not taken silently as a new one).
-        if state.places.chosen.as_ref().is_some_and(|c| c.key.starts_with("previous:")) {
-            state.places.chosen = None;
-        }
-        if state.places.previous.quiet {
-            return;
-        }
-        let Some(scope) = state.scope.clone() else {
-            state.places.previous.picked = Some(Picked { visit: visit.clone(), check: Check::Unknown, new: false });
-            return;
-        };
-        let (ctl, answer, ctx) = (cx.ctl.clone(), state.places.previous.answer.clone(), state.ctx.clone());
-        let (world, instance, location) = (visit.world_id.clone(), visit.instance.clone(), visit.location());
-        // A read into memory (whether VRChat says the instance is open): nothing of the window's work.
-        let started = std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
-            let open = match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
-                Ok(Response::Instance(open)) => open,
-                _ => None,
-            };
-            *answer.lock().unwrap_or_else(|e| e.into_inner()) = Some((location, open));
-            if let Some(ctx) = ctx {
-                ctx.request_repaint();
-            }
-        });
-        if started.is_err() {
-            state.places.previous.picked = Some(Picked { visit: visit.clone(), check: Check::Unknown, new: false });
-        }
+        state.places.chosen = None;
+    }
+    if me.is_none() && state.places.previous.connecting {
+        // VRChat's session is being restored (verify-r21 Major 1): the instance is kept, asked once it is known.
+        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Waiting, false));
+        return;
+    }
+    if me.as_deref().is_some_and(|me| rejoinable(&visit.instance, me)) {
+        ask(state, cx, visit, false);
     } else {
         // Signed out, another account's profile, or an instance only an invite lets in: a new one of its world.
         take_new(state, visit, Check::NotAsked);
     }
 }
 
+/// Asks VRChat whether `visit` is still open, for the current pick's generation (a later pick, or another place
+/// chosen, drops this answer before it can replace anything).
+/// `again`: the choice stands while it is asked again (Play on an old "open"), else the pick shows as being asked.
+fn ask(state: &mut State, cx: &Cx, visit: &Visit, again: bool) {
+    let generation = state.places.previous.generation.load(Ordering::SeqCst);
+    if !again {
+        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Asking, false));
+    }
+    if state.places.previous.quiet {
+        return;
+    }
+    let Some(scope) = state.scope.clone() else {
+        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Unknown, false));
+        return;
+    };
+    let (ctl, answer, current, ctx) = (cx.ctl.clone(), state.places.previous.answer.clone(), state.places.previous.generation.clone(), state.ctx.clone());
+    let (world, instance, location) = (visit.world_id.clone(), visit.instance.clone(), visit.location());
+    // A read into memory (whether VRChat says the instance is open): nothing of the window's work.
+    let started = std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
+        let open = match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
+            Ok(Response::Instance(open)) => open,
+            _ => None,
+        };
+        // Only the current pick's answer is kept: an older one never overwrites it.
+        if current.load(Ordering::SeqCst) == generation {
+            *answer.lock().unwrap_or_else(|e| e.into_inner()) = Some(Answer { generation, location, open, at: Instant::now() });
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        }
+    });
+    if started.is_err() {
+        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Unknown, false));
+    }
+}
+
+/// Play on a previous instance VRChat said was open longer ago than [`OPEN_FOR`]: asked again first; VRChat starts
+/// there only if it still is (`follow`). Whether Play waits for that.
+pub(super) fn recheck_before_play(state: &mut State, cx: &Cx, key: &str, mode: orbiters_core::launcher::LaunchMode, profile: Option<u32>) -> bool {
+    let Some(p) = state.places.previous.picked.clone().filter(|p| p.visit.key() == key && p.check == Check::Open) else { return false };
+    if !p.stale(Instant::now()) {
+        return false;
+    }
+    state.places.previous.generation.fetch_add(1, Ordering::SeqCst);
+    // The choice stays shown while it is asked again.
+    ask(state, cx, &p.visit, true);
+    state.places.previous.play_after = Some((mode, profile));
+    state.places.making = Some(mode);
+    true
+}
+
 /// The row's world taken as a new instance: Where's choice now.
 fn take_new(state: &mut State, visit: &Visit, check: Check) {
-    state.places.previous.picked = Some(Picked { visit: visit.clone(), check, new: true });
+    state.places.previous.generation.fetch_add(1, Ordering::SeqCst);
+    state.places.previous.picked = Some(Picked::new(visit.clone(), check, true));
     state.places.chosen = Some(Chosen { key: visit.key(), name: world_name(visit), instance: false });
     state.places.page = 0;
     state.places.notice = None;
@@ -285,23 +445,38 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         state.places.previous.up = None;
         return;
     }
-    // The history, read once the sheet opens (never in tests or pictures of the page: they hand it in).
-    if !state.places.previous.staged && !cfg!(test) && !state.places.previous.reading && state.places.previous.rows.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-        state.places.previous.reading = true;
-        let (rows, ctx2) = (state.places.previous.rows.clone(), ctx.clone());
-        let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
-            let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-            *rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(visits(&history));
-            ctx2.request_repaint();
-        });
-        if started.is_err() {
-            *state.places.previous.rows.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+    // The history, read once the sheet opens (tests hand a reader in, or the rows; pictures of the page the rows), on a
+    // thread that leaves its rows and the end of its read together.
+    let reader: Option<Reader> = match &state.places.previous.reader {
+        Some(r) => Some(r.clone()),
+        None if cfg!(test) => None,
+        None => Some(Arc::new(|| visits(&orbiters_core::visited::History::load(&orbiters_core::visited::history_file())))),
+    };
+    if let (false, Some(reader)) = (state.places.previous.staged, reader) {
+        let start = {
+            let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+            let start = h.rows.is_none() && !h.reading;
+            h.reading |= start;
+            start
+        };
+        if start {
+            let (history, ctx2) = (state.places.previous.history.clone(), ctx.clone());
+            let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
+                let rows = reader();
+                let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
+                h.rows = Some(rows);
+                h.reading = false;
+                drop(h);
+                ctx2.request_repaint();
+            });
+            if started.is_err() {
+                let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
+                h.rows = Some(Vec::new());
+                h.reading = false;
+            }
         }
     }
-    if state.places.previous.rows.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-        state.places.previous.reading = false;
-    }
-    follow(state);
+    follow(state, cx, clock);
 
     let layer = LayerId::new(Order::Foreground, Id::unique("where-previous-layer"));
     let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer));
@@ -325,7 +500,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     // The head: its name, what it is, and close.
     let p = panel.painter().clone();
     widgets::text(&p, pos2(inner.left(), inner.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(tr("Previous instances"), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
-    let rows = state.places.previous.rows.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let rows = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
     let sub = match &rows {
         Some(rows) if !rows.is_empty() => tr_n("{count} instance you were in, newest first", "{count} instances you were in, newest first", rows.len() as u64),
         _ => tr("Instances you were in").into(),
@@ -342,7 +517,10 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     }
     let mut y = search_r.bottom() + 12.0;
     let me = state.places.previous.me.clone();
-    let note = if me.is_none() {
+    let note = if me.is_none() && state.places.previous.connecting {
+        // A saved session being restored: no sign-in offered; what is picked is asked once it is known (Major 1).
+        Some(tr("Connecting to VRChat…"))
+    } else if me.is_none() {
         Some(if state.places.previous.signed_in_elsewhere {
             tr("These are this computer's: on this profile, Play opens a new public instance of the world chosen.")
         } else {
@@ -438,7 +616,7 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
     }
     // The picture, the world's (Where's cards' own), else the name's colour with a globe.
     let pic = Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 27.0), vec2(PIC_W, 54.0));
-    match super::destinations::world_picture(state, &v.world_id) {
+    match kept_picture(state, &v.world_id) {
         Some(tex) => paint::squircle_texture(&p, pic, [RADIUS; 4], tex.id(), cover_uv(tex.size_vec2(), pic.size()), Color32::WHITE),
         None => {
             let c = widgets::name_color(&name);
@@ -456,6 +634,8 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
     let status: Option<(String, Color32, &str)> = match check {
         None => None,
         Some((Check::Asking, _)) => Some((tr("Asking VRChat…").into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
+        Some((Check::Waiting, _)) => Some((tr("Connecting to VRChat…").into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
+        Some((Check::NotAsked, false)) => Some((tr("Not signed in").into(), theme::WARN, icons::WARNING_CIRCLE)),
         Some((_, true)) => {
             let kind = super::destinations::kind_for(state, &v.world_id, state.places.previous.can_create);
             Some((orbiters_i18n::tr!("New {kind} instance · chosen", kind = access_name(kind_access(kind))), theme::ACCENT, icons::CHECK))
@@ -463,9 +643,8 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         Some((Check::Open, false)) => Some((tr("Open · chosen").into(), theme::ACCENT, icons::CHECK)),
         Some((Check::Closed, false)) => Some((tr("Closed now").into(), theme::WARN, icons::WARNING_CIRCLE)),
         Some((Check::Unknown, false)) => Some((tr("VRChat did not say").into(), theme::WARN, icons::WARNING_CIRCLE)),
-        Some((Check::NotAsked, false)) => None,
     };
-    let offer_new = matches!(check, Some((Check::Closed | Check::Unknown, false)));
+    let offer_new = matches!(check, Some((Check::Closed | Check::Unknown | Check::NotAsked, false)));
     if offer_new {
         let b = widgets::Button::new(tr("New instance of this world")).icon(icons::PLUS).variant(widgets::Variant::Secondary).size(widgets::Size::Sm).id_salt(("where-previous-new", v.location()));
         let bw = b.desired_width(ui);
@@ -564,3 +743,16 @@ fn stand_in_row(ui: &Ui, r: Rect) {
     p.rect_filled(Rect::from_min_size(pos2(r.left() + PIC_W + 22.0, r.center().y + 6.0), vec2(r.width() * 0.22, 9.0)), theme::radius(4.5), theme::white(0.04));
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
+
+/// A world's picture for this sheet: only one already kept on this computer, never fetched (verify-r21 Major 6: opening
+/// the list sends nothing, world ids included, before the person chooses anything). Its address is read once from the
+/// Map explorer's page kept on disk; the picture from the file kept beside it; else the name's colour and a globe.
+fn kept_picture(state: &mut State, world_id: &str) -> Option<egui::TextureHandle> {
+    if state.places.previous.quiet || world_id.is_empty() {
+        return None;
+    }
+    let url = state.places.previous.kept.entry(world_id.to_string()).or_insert_with(|| crate::worlds::kept_thumbnail(world_id)).clone()?;
+    let ctx = state.ctx.clone()?;
+    state.loader.as_mut()?.get(&ctx, &crate::worlds::Picture::RemoteKept { world_id: world_id.to_string(), url })
+}
+

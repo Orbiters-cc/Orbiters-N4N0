@@ -259,6 +259,23 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
     assert_eq!(commit(&c, &s), Outcome::Unknown);
     let s = prepare(&c, plain("grol_events")).unwrap();
     assert_eq!((s.warning, s.confirm), (Some(Warning::AnotherMayHaveGone), true));
+    // Sealed before the other went out (another window's): it was not told, so it does not go; sealed again, it is.
+    let (c, w, sent) = world();
+    let seal = |link: u64, role: &str| match c.groups(link, scope(&c), Request::Prepare { write: plain(role) }) {
+        Reply::Prepared(s) => *s,
+        r => panic!("{r:?}"),
+    };
+    let (one, two) = (seal(7, "grol_artist"), seal(8, "grol_events"));
+    assert_eq!(two.warning, None);
+    let go = |link: u64, s: &Sealed| match c.groups(link, scope(&c), Request::Commit { op: s.op.clone(), digest: s.digest() }) {
+        Reply::Outcome { outcome, .. } => outcome,
+        r => panic!("{r:?}"),
+    };
+    w.lock().unwrap().fault = Some(Fault::Drop { done: false });
+    assert_eq!(go(7, &one), Outcome::Unknown);
+    assert_eq!(go(8, &two), Outcome::Refused(Failure::MaySent));
+    assert_eq!(writes(&sent).len(), 1);
+    assert_eq!(seal(8, "grol_events").warning, Some(Warning::AnotherMayHaveGone));
 }
 
 /// Nothing is sent whose record cannot be kept first.
@@ -679,7 +696,7 @@ fn unknown_entry(c: &Shared, write: &Write, evidence: Evidence) -> String {
     let book = c.groups_book();
     let op = uuid::Uuid::new_v4().to_string();
     book.prepare(Entry { op: op.clone(), key: Key::of(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target: write.ids(), payload: write.payload(), evidence, state: State::Prepared, by: None, said: None, made: None, checked: false, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
-    book.dispatch(&op).unwrap();
+    book.dispatch(&op, false).unwrap();
     book.end(&op, State::Unknown, None, None);
     later(c);
     op

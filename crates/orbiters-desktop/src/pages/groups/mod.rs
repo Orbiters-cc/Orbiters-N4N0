@@ -913,7 +913,7 @@ fn warn_card(ui: &mut Ui, text: &str, button_w: f32, button: impl FnOnce(&mut Ui
     widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
     p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
     if button_w > 0.0 {
-        button(ui, Rect::from_min_size(pos2(rect.right() - 14.0 - button_w, rect.top() + 10.0), vec2(button_w, 34.0)));
+        button(ui, Rect::from_min_size(pos2(rect.right() - 14.0 - button_w, (rect.center().y - 17.0).min(rect.top() + 10.0)), vec2(button_w, 34.0)));
     }
 }
 

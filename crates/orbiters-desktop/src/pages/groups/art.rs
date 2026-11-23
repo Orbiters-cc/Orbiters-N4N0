@@ -532,7 +532,7 @@ pub fn shrink(img: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
                 n += 1;
             }
         }
-        let colour = |v: u64| if a == 0 { 0 } else { ((v + a / 2) / a).min(255) as u8 };
+        let colour = |v: u64| (v + a / 2).checked_div(a).unwrap_or(0).min(255) as u8;
         image::Rgba([colour(c[0]), colour(c[1]), colour(c[2]), ((a + n / 2) / n.max(1)) as u8])
     })
 }

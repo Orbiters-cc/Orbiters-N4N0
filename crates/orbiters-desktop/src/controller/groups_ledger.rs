@@ -423,13 +423,14 @@ impl Ledger {
             k.unreadable.then_some(Warning::RecordUnreadable)
         })
     }
-    /// The point of no return: on the disk as sent, or not sent. The last write to the disk before the request.
-    pub fn dispatch(&self, op: &str) -> Result<(), Stop> {
+    /// The point of no return: on the disk as sent, or not sent. The last write to the disk before the request. Another
+    /// change of the same object that may have gone since it was sealed stops it unless the person was told (`warned`).
+    pub fn dispatch(&self, op: &str, warned: bool) -> Result<(), Stop> {
         let now = self.now();
         self.with(|k| {
             let at = k.entries.iter().position(|e| e.op == op && e.state == State::Prepared).ok_or(Stop::NotPrepared)?;
             let mut e = k.entries[at].clone();
-            if k.entries.iter().any(|x| x.op != e.op && x.open() && x.identical(&e)) {
+            if k.entries.iter().any(|x| x.op != e.op && x.open() && (x.identical(&e) || !warned && x.same_object(&e))) {
                 return Err(Stop::MaySent);
             }
             (e.state, e.dispatched_at) = (State::Dispatched, Some(now));
@@ -576,8 +577,8 @@ mod tests {
         for op in ["prepared", "sent", "done"] {
             l.prepare(entry(&l, op, Kind::CreatePost, None, op)).unwrap();
         }
-        l.dispatch("sent").unwrap();
-        l.dispatch("done").unwrap();
+        l.dispatch("sent", false).unwrap();
+        l.dispatch("done", false).unwrap();
         l.end("done", State::Done, Some(By::Answer), Some("gpos_1".into()));
         let l2 = again(&l);
         let state = |op: &str| l2.get(&key(), op).map(|e| (e.state, e.by)).unwrap();
@@ -597,9 +598,11 @@ mod tests {
         l.prepare(entry(&l, "c", Kind::EditPost, Some("gpos_1"), "other")).unwrap();
         l.prepare(entry(&l, "d", Kind::EditPost, Some("gpos_2"), "p")).unwrap();
         l.prepare(entry(&l, "e", Kind::DeletePost, Some("gpos_1"), "del")).unwrap();
-        l.dispatch("a").unwrap();
-        assert_eq!(l.dispatch("a"), Err(Stop::NotPrepared), "one operation goes once");
-        assert_eq!(l.dispatch("b"), Err(Stop::MaySent));
+        l.dispatch("a", false).unwrap();
+        assert_eq!(l.dispatch("a", false), Err(Stop::NotPrepared), "one operation goes once");
+        assert_eq!(l.dispatch("b", false), Err(Stop::MaySent));
+        assert_eq!(l.dispatch("b", true), Err(Stop::MaySent), "the identical one is refused whatever was shown");
+        assert_eq!(l.dispatch("c", false), Err(Stop::MaySent), "sealed before the other went: its person was told nothing");
         let get = |op: &str| l.get(&key(), op).unwrap();
         assert_eq!(l.may_have_gone(&get("b")), Some("a".into()));
         assert_eq!(l.warning(&get("c")), Some(Warning::AnotherMayHaveGone));
@@ -608,12 +611,12 @@ mod tests {
         l.end("a", State::Unknown, None, None);
         assert!(!l.said("a", Said::NotDone, None), "not before a check");
         l.ahead_ms.store(400 * 24 * 3600 * 1000, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(l.dispatch("b"), Err(Stop::MaySent), "no age ends an unknown");
+        assert_eq!(l.dispatch("b", false), Err(Stop::MaySent), "no age ends an unknown");
         l.checked("a");
         assert!(l.said("a", Said::NotDone, None));
         assert_eq!((get("a").state, get("a").said), (State::Unknown, Some(Said::NotDone)), "kept as what it is, with what was said");
         assert_eq!(l.warning(&get("b")), Some(Warning::SaidNotDone));
-        l.dispatch("b").unwrap();
+        l.dispatch("b", false).unwrap();
     }
 
     /// Nothing is sent that is not written down first; a failed last write leaves "unknown" for the next program.
@@ -625,10 +628,10 @@ mod tests {
         l.full.store(false, std::sync::atomic::Ordering::Relaxed);
         l.prepare(entry(&l, "a", Kind::CreatePost, None, "p")).unwrap();
         l.full.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(l.dispatch("a"), Err(Stop::NotKept));
+        assert_eq!(l.dispatch("a", false), Err(Stop::NotKept));
         assert_eq!(l.get(&key(), "a").unwrap().state, State::Prepared, "not sent");
         l.full.store(false, std::sync::atomic::Ordering::Relaxed);
-        l.dispatch("a").unwrap();
+        l.dispatch("a", false).unwrap();
         l.full.store(true, std::sync::atomic::Ordering::Relaxed);
         l.end("a", State::Done, Some(By::Answer), None);
         assert_eq!(again(&l).get(&key(), "a").unwrap().state, State::Unknown);
@@ -641,7 +644,7 @@ mod tests {
         for i in 0..ENDED_MAX + 80 {
             let op = format!("op-{i}");
             l.prepare(entry(&l, &op, Kind::CreatePost, None, &op)).unwrap();
-            l.dispatch(&op).unwrap();
+            l.dispatch(&op, false).unwrap();
             if i % 2 == 0 {
                 l.end(&op, State::Done, Some(By::Answer), None);
             } else {

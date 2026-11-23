@@ -1138,7 +1138,7 @@ impl Controller {
         if *scope != Scope::of(&self.view()) {
             return Gone::Stopped(Failure::AccountChanged);
         }
-        match self.groups_book().dispatch(&sealed.op) {
+        match self.groups_book().dispatch(&sealed.op, sealed.warning == Some(Warning::AnotherMayHaveGone)) {
             Ok(()) => {}
             Err(Stop::NotKept) => return Gone::Stopped(Failure::NotKept),
             Err(Stop::MaySent) => return Gone::Stopped(Failure::MaySent),

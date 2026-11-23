@@ -351,5 +351,8 @@
   "profile {number}": "perfil {number}",
   "{count} VRChat": "{count} VRChat",
   "{count} VRChats": "{count} VRChats",
-  "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "Não foi possível ler as chaves da ponte ({error}), então ela fica fechada até que possam ser lidas."
+  "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "Não foi possível ler as chaves da ponte ({error}), então ela fica fechada até que possam ser lidas.",
+  "The bridge's keys could not be read ({error}), so it stays closed until they can be, or until you reset the token.": "Não foi possível ler as chaves da ponte ({error}), então ela fica fechada até que possam ser lidas, ou até você redefinir o token.",
+  "A new token: the bridge's unreadable keys were kept aside ({path}); the agents it was added to are updated.": "Um novo token: as chaves ilegíveis da ponte foram separadas ({path}); os agentes aos quais ela foi adicionada são atualizados.",
+  "The bridge's keys could not be reset: {error}": "Não foi possível redefinir as chaves da ponte: {error}"
 }

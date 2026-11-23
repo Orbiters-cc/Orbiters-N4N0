@@ -1,5 +1,5 @@
 {
-  "Again in {n} s: one at a time keeps it fun": "{n} 秒後にもう一度：一回ずつが楽しい",
+  "Again in {n} s": "あと {n} 秒",
   "Boop again in {n} s": "{n} 秒後にもう一度ブープ",
   "From {app}'s copy, {when}": "{app} のコピー（{when}）",
   "Nobody matches “{text}”": "「{text}」に一致する人はいません",
@@ -103,5 +103,11 @@
   "1. Open the Steam app on your phone.": "1. スマートフォンで Steam アプリを開きます。",
   "2. Scan this code with it and approve the sign-in.": "2. このコードを読み取り、サインインを承認します。",
   "The download starts by itself after that.": "その後、ダウンロードが自動で始まります。",
-  "Waiting for your phone…": "スマートフォンを待っています…"
+  "Waiting for your phone…": "スマートフォンを待っています…",
+  "VRChat's start records cannot be read: check the permissions of {file}.": "VRChat の起動記録を読めません。{file} のアクセス権を確認してください。",
+  "A record of an earlier VRChat start cannot be read ({file}): Play waits {seconds} s, in case it is a start that just ended.": "以前の VRChat 起動の記録を読めません（{file}）。直前に終わった起動の可能性があるため、プレイは {seconds} 秒待ちます。",
+  "VRChat's engine stops at a damaged record ({file}): set it aside to play.": "VRChat のエンジンが壊れた記録（{file}）で止まります。プレイするには退避してください。",
+  "A record of an earlier VRChat start cannot be read ({file}): it no longer holds Play.": "以前の VRChat 起動の記録を読めません（{file}）。プレイはもう妨げられません。",
+  "Set aside": "退避",
+  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "VRChat のエンジンの記録の隣にある Set aside フォルダーへ移動します。何も削除されません。"
 }

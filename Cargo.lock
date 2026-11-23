@@ -4301,6 +4301,7 @@ dependencies = [
  "png",
  "qrcode",
  "raw-window-handle",
+ "regex",
  "rfd",
  "rosc",
  "serde",

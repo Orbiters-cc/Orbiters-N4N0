@@ -78,6 +78,9 @@ const AVATAR_SETTLE: Duration = Duration::from_millis(1500);
 const PIN_DEBOUNCE: Duration = Duration::from_millis(400);
 /// What VRChat's `/input/Voice` needs between press and release.
 const VOICE_PRESS: Duration = Duration::from_millis(80);
+/// A minute limit's wait up to which the message is sent again once by itself; a longer one waits for Retry.
+pub(crate) const AUTO_RETRY_MAX: Duration = Duration::from_secs(30);
+const AUTO_RETRY_AFTER: Duration = Duration::from_millis(1500);
 /// What of `outbox` goes at `now`, in order, and what waits. Two edges of VRChat's `/input/Voice` never go in one step (a late
 /// step would send a press and its release together, which VRChat may read in one frame, N4N0-12): the second waits
 /// [`VOICE_PRESS`] more.
@@ -134,6 +137,8 @@ pub enum Source {
 struct Turn {
     id: u64,
     cancel: Arc<AtomicBool>,
+    /// The message this turn sends was sent before (by Retry or by itself): it is not sent again by itself (r23).
+    auto_used: bool,
 }
 
 /// An action the assistant asked for that waits for the owner's yes, and what it does in the app's words.
@@ -244,6 +249,11 @@ struct TurnTools {
     /// A result of this turn carried text other people wrote: nothing more changes in it without the owner's yes
     /// (`intents::gate`).
     tainted: bool,
+    /// The groups of the app's tools this turn's requests carry (r23: `intents::route`, and what `orbiters_more` opened).
+    groups: std::collections::BTreeSet<orbiters_n4n0_core::intents::route::ToolGroup>,
+    /// Those of them this turn is about (its words, what it opened, what it called): the next turn carries them too, and
+    /// the ones inherited from the turn before go no further, so a conversation's requests do not grow.
+    own_groups: std::collections::BTreeSet<orbiters_n4n0_core::intents::route::ToolGroup>,
 }
 
 #[derive(Default)]
@@ -2236,6 +2246,7 @@ impl N4n0 {
             Command::Talk { down } => self.talk(down, Source::Window),
             Command::AskPage { open } => self.ask_page(open),
             Command::AskRetry => self.ask_retry(),
+            Command::RetryTurn { id } => self.retry_turn(id, false),
             Command::AskAnswer { yes, question } => {
                 self.answer_with(Some(yes), Seen::Question(question));
             }
@@ -2268,6 +2279,7 @@ impl N4n0 {
                 rt.notes.clear();
                 rt.pending.clear();
                 rt.pending_at = None;
+                rt.assistant.clear_failure();
                 // A turn under way stops, and nothing of it comes back: what arrived goes from the panel too.
                 rt.generation += 1;
                 if let Some(sender) = rt.sender.as_mut().filter(|s| s.streaming()) {
@@ -2444,7 +2456,12 @@ impl N4n0 {
     pub(crate) fn ask_seen(self: &Shared, text: String, via: &'static str, seen: Seen) {
         let _lifecycle = self.voice_lifecycle.lock();
         let text = text.trim().to_string();
-        if text.is_empty() || self.answer(&text, seen) {
+        if text.is_empty() {
+            return;
+        }
+        // Something else is said: the failed message is no longer waiting to be sent again.
+        self.n4n0.lock().unwrap().assistant.clear_failure();
+        if self.answer(&text, seen) {
             return;
         }
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
@@ -2456,6 +2473,12 @@ impl N4n0 {
             self.quick(&text, actions);
             return;
         }
+        self.start_turn(text, via, None);
+    }
+
+    /// Sends `text` to the model as a turn of its own: the first time, or again (`retry`: the failed turn it is of, whose
+    /// You line is already shown) once, by a Retry press or by itself.
+    fn start_turn(self: &Shared, text: String, via: &'static str, retry: Option<u64>) {
         let Some((api, token)) = self.host.account() else {
             let mut rt = self.n4n0.lock().unwrap();
             rt.line(N4n0Who::Error, tr("Sign in to Orbiters to talk to N4N0."));
@@ -2466,23 +2489,65 @@ impl N4n0 {
         };
         let (id, cancel) = {
             let mut rt = self.n4n0.lock().unwrap();
+            // Retry is one send: a retry of a message that is not waiting any more does nothing (a second press, a press
+            // on an old button, the automatic retry after a manual one).
+            if let Some(of) = retry {
+                if rt.assistant.retry.as_ref().is_none_or(|r| r.id != of) {
+                    return;
+                }
+            }
             if rt.turn.is_some() {
-                rt.line(N4n0Who::Note, tr("N4N0 is still answering the last one."));
+                if retry.is_none() {
+                    rt.line(N4n0Who::Note, tr("N4N0 is still answering the last one."));
+                }
                 drop(rt);
                 self.publish();
                 return;
             }
+            rt.assistant.clear_failure();
             rt.turns += 1;
             let (id, cancel) = (rt.turns, Arc::new(AtomicBool::new(false)));
-            rt.turn = Some(Turn { id, cancel: cancel.clone() });
+            rt.turn = Some(Turn { id, cancel: cancel.clone(), auto_used: retry.is_some() });
             rt.mood = None;
             rt.panel_taken = false;
-            rt.line(N4n0Who::You, text.clone());
+            if retry.is_none() {
+                rt.line(N4n0Who::You, text.clone());
+            }
             (id, cancel)
         };
         self.publish();
         let n = self.clone();
         let _ = std::thread::Builder::new().name("n4n0-turn".into()).spawn(move || n.turn(api, token, text, via, id, cancel));
+    }
+
+    /// Sends the last failed message again (turn `id`'s): a Retry press ([`Command::RetryTurn`]), or once by itself when
+    /// its wait is over (`automatic`). One send per press: the record goes when it is taken. A press too early does nothing.
+    pub(crate) fn retry_turn(self: &Shared, id: u64, automatic: bool) {
+        let _lifecycle = self.voice_lifecycle.lock();
+        if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) || self.n4n0.lock().unwrap().stop {
+            return;
+        }
+        let Some(retry) = self.n4n0.lock().unwrap().assistant.retry.clone().filter(|r| r.id == id && Instant::now() >= r.not_before) else { return };
+        if automatic && retry.auto_used {
+            return;
+        }
+        self.start_turn(retry.text, retry.via, Some(id));
+    }
+
+    /// Asks the owner about `actions` the offline path understood, as a turn's own question would be (r23).
+    pub(crate) fn ask_owner(self: &Shared, actions: Vec<Action>) {
+        let mut rt = self.n4n0.lock().unwrap();
+        let epoch = rt.avatar_epoch;
+        let waiting: Vec<Pending> =
+            actions.into_iter().map(|action| Pending { what: policy::what(&action, None), action, bound: Bound { epoch, path: None }, control: None }).collect();
+        let (question, on_panel) = questions(&waiting);
+        rt.pending_id += 1;
+        let n = rt.pending_id;
+        rt.pending = waiting;
+        rt.pending_at = Some(Instant::now());
+        rt.line(N4n0Who::Note, question.clone());
+        rt.confirmations.push(local_confirmation(n, &question));
+        rt.show(&on_panel);
     }
 
     /// One turn (number `id`): requests and tool rounds until an answer, on the conversation as it was when the turn
@@ -2497,7 +2562,16 @@ impl N4n0 {
         let mut results: Vec<ToolResult> = Vec::new();
         let mut shown = String::new();
         let mut tools_run = TurnTools::default();
+        // The tools this turn carries: the groups its words name, and the last turn's (for "the second one", "undo that").
+        {
+            let rt = self.n4n0.lock().unwrap();
+            let labels: Vec<String> = rt.controls.controls.iter().map(|c| c.label().to_string()).collect();
+            tools_run.own_groups = orbiters_n4n0_core::intents::route::route(&text, &labels);
+            tools_run.groups = tools_run.own_groups.clone();
+            tools_run.groups.extend(rt.assistant.last_groups.iter().copied());
+        }
         let mut rounds = 0;
+        let mut gone_round = false;
         let outcome: anyhow::Result<()> = loop {
             if cancel.load(Ordering::Relaxed) {
                 break Err(anyhow::anyhow!("cancelled"));
@@ -2505,10 +2579,12 @@ impl N4n0 {
             let (tools, display) = {
                 let rt = self.n4n0.lock().unwrap();
                 let bare = !rt.manifest && !rt.controls.is_empty();
-                (tools::specs(bare), rt.sender.is_some())
+                (tools::specs_for(bare, &tools_run.groups), rt.sender.is_some())
             };
+            // The avatar's controls (up to 3,500 characters) only when the avatar's tools come with it.
+            let avatar = tools_run.groups.contains(&orbiters_n4n0_core::intents::route::ToolGroup::Avatar);
             let context = assistant::Context {
-                summary: self.moment().summary(),
+                summary: self.moment(avatar).summary(),
                 locale: self.device.locale.locale(),
                 time: local_time_iso(),
                 display: display.then_some(Display { columns: contract::COLUMNS as u32, rows: contract::ROWS as u32 }),
@@ -2552,6 +2628,7 @@ impl N4n0 {
                         break Ok(());
                     }
                     if rounds == MAX_ROUNDS {
+                        gone_round = true;
                         break Err(anyhow::anyhow!("{}", tr("N4N0 went round in circles: ask again.")));
                     }
                     rounds += 1;
@@ -2567,10 +2644,13 @@ impl N4n0 {
             // New conversation stopped it: nothing of it comes back.
             return;
         }
+        let auto_used = rt.turn.as_ref().is_some_and(|t| t.auto_used);
         rt.turn = None;
         rt.end_stream();
+        let mut automatic_at = None;
         match outcome {
             Ok(()) => {
+                rt.assistant.last_groups = std::mem::take(&mut tools_run.own_groups);
                 rt.conversation = assistant::trim(conversation, MAX_CONVERSATION);
                 // What the assistant was told before this turn has been heard.
                 let heard = notes.min(rt.notes.len());
@@ -2618,10 +2698,45 @@ impl N4n0 {
                 };
                 rt.line(N4n0Who::Error, message);
                 rt.show(&panel);
+                // What can be sent again is kept, with when the service says it may be.
+                let said = e.downcast_ref::<AssistantError>();
+                let retry = match said {
+                    Some(a) => matches!(a.code.as_str(), "rate_limited" | "unavailable"),
+                    // Not an answer of the service: the network stopped it. Going round in circles would only do so again.
+                    None => !gone_round && !cancel.load(Ordering::Relaxed),
+                };
+                let wait = said.and_then(|a| a.retry_after).map(|s| Duration::from_secs(s.into()));
+                let at_ms = rt.lines.last().map(|l| l.at_ms).unwrap_or_default();
+                let minute = said.is_some_and(|a| matches!(a.limit.as_deref(), Some("tokens_per_minute" | "requests_per_minute" | "rate_limit")) || (a.code == "rate_limited" && a.limit.is_none()));
+                // Nothing the failed turn did may be done twice unasked: its message goes again by itself only if it did nothing.
+                let automatic = retry && minute && !auto_used && tools_run.done.is_empty() && wait.is_some_and(|w| w <= AUTO_RETRY_MAX);
+                let not_before = Instant::now() + wait.unwrap_or(Duration::ZERO);
+                if retry {
+                    rt.assistant.retry = Some(crate::assistant::Retrying { id, text, via, not_before, auto_used });
+                }
+                rt.assistant.view.failure = (retry || said.is_some_and(|a| a.admin_detail.is_some())).then(|| crate::assistant::TurnFailure {
+                    id,
+                    at_ms,
+                    retry,
+                    retry_at_ms: wait.map(|w| crate::unix_ms() + w.as_millis() as u64).unwrap_or_default(),
+                    automatic,
+                    admin_detail: said.and_then(|a| a.admin_detail.clone()),
+                });
+                if automatic {
+                    // A little after the moment the service named: not at the same instant as everything else.
+                    automatic_at = Some(not_before + AUTO_RETRY_AFTER);
+                }
             }
         }
         drop(rt);
         self.publish();
+        if let Some(at) = automatic_at {
+            let n = self.clone();
+            let _ = std::thread::Builder::new().name("n4n0-retry".into()).spawn(move || {
+                std::thread::sleep(at.saturating_duration_since(Instant::now()));
+                n.retry_turn(id, true);
+            });
+        }
     }
 
     /// What has arrived of turn `id`'s answer goes to the conversation, every [`STREAM_EVERY`] at most: every window and
@@ -2690,7 +2805,7 @@ impl N4n0 {
     }
 
     /// What the assistant is told about the moment.
-    fn moment(&self) -> Moment {
+    fn moment(&self, with_controls: bool) -> Moment {
         let running = self.host.scene().vrchat;
         let world = self.host.world();
         let addresses = self.n4n0.lock().unwrap().controls.addresses();
@@ -2708,7 +2823,7 @@ impl N4n0 {
             n4n0_prop: rt.sender.is_some(),
             afk: rt.afk,
             last_video,
-            controls: rt.controls.summary(&latest, CONTROLS_CHARS),
+            controls: if with_controls { rt.controls.summary(&latest, CONTROLS_CHARS) } else { String::new() },
             controls_from_manifest: rt.manifest,
             saved_videos: rt.videos.videos.len(),
             notes: rt.notes.clone(),
@@ -2727,8 +2842,18 @@ impl N4n0 {
             Ok(action) => action,
             Err(e) => return result(&e, true),
         };
+        turn.own_groups.extend(orbiters_n4n0_core::intents::route::group_of(&call.name));
         if let Action::App(intent) = action {
             return self.run_intent(call, intent, turn);
+        }
+        if let Action::OpenTools { groups } = &action {
+            if let Verdict::Refuse { why } = turn.policy.review(&action, None) {
+                return result(&why, true);
+            }
+            turn.groups.extend(groups.iter().copied());
+            turn.own_groups.extend(groups.iter().copied());
+            let keys: Vec<&str> = groups.iter().map(|g| g.key()).collect();
+            return result(&json!({ "opened": keys, "note": "Their tools come with your next request: call them there." }).to_string(), false); // i18n: not shown
         }
         // Raw writes are for avatars without a menu (the tool is offered only there), before any question is asked.
         if matches!(action, Action::SetParameter { .. }) && self.n4n0.lock().unwrap().manifest {
@@ -3033,6 +3158,8 @@ impl N4n0 {
                 Ok(json!({ "on": light.on, "color": name.to_lowercase(), "brightness": light.level }))
             }
             Action::App(intent) => self.intent_run(intent, Via::Model),
+            // Answered where the call is run ([`N4n0::run_tool`]): it opens tools for this turn, nothing of the app's.
+            Action::OpenTools { .. } => Ok(Value::Null),
             Action::Mood { mood } => {
                 self.n4n0.lock().unwrap().mood = Some(match mood {
                     Mood::Neutral => N4n0Face::Talking,
@@ -3169,7 +3296,7 @@ pub(crate) fn action_says(action: &Action) -> String {
         Action::Light { on: Some(false), .. } => tr("N4N0's light: off").into(),
         Action::Light { .. } => tr("N4N0's light on").into(),
         Action::App(intent) => intent.says(),
-        Action::Media { .. } | Action::Mood { .. } | Action::FindControls { .. } | Action::ListSavedVideos => String::new(),
+        Action::Media { .. } | Action::Mood { .. } | Action::FindControls { .. } | Action::ListSavedVideos | Action::OpenTools { .. } => String::new(),
     }
 }
 

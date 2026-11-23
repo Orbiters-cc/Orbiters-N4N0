@@ -7,6 +7,7 @@
 pub mod anim;
 pub mod autoscroll;
 pub mod blender_logo;
+pub mod discord_logo;
 pub mod backdrop;
 pub mod blur;
 pub mod dialog;

@@ -58,6 +58,7 @@ pub const CUBE: &str = "\u{E1DA}";
 pub const CUBE_FOCUS: &str = "\u{ED0A}";
 pub const DESKTOP: &str = "\u{E560}";
 pub const DEVICE_MOBILE: &str = "\u{E1E0}";
+/// Discord's own logo ([`crate::discord_logo`]), drawn in place of Phosphor's glyph of this code, which only resembles it.
 pub const DISCORD_LOGO: &str = "\u{E61A}";
 pub const DOOR_OPEN: &str = "\u{E7E6}";
 pub const DOTS_NINE: &str = "\u{E1FC}";

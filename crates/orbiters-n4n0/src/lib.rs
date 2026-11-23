@@ -29,7 +29,7 @@ mod voice;
 #[cfg(test)]
 mod tests;
 
-pub use assistant::{AssistantView, OpenAsk};
+pub use assistant::{AssistantView, OpenAsk, TurnFailure};
 pub use command::{Command, MenuHolder};
 pub use platform::{
     language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen, QrSide,

@@ -58,5 +58,19 @@
   "VRChat closed shortly after it started. If it crashed, press Play again.": "VRChat が起動直後に終了しました。クラッシュした場合は、もう一度プレイを押してください。",
   "VRChat ended early a moment ago: it can be started again in {seconds} s.": "VRChat は少し前に早く終了しました。{seconds} 秒後にもう一度起動できます。",
   "It ended with {status}.": "{status} で終了しました。",
-  "VRChat's last start could not be checked yet. Try again in a moment.": "VRChat の前回の起動をまだ確認できませんでした。少し待ってからもう一度お試しください。"
+  "VRChat's last start could not be checked yet. Try again in a moment.": "VRChat の前回の起動をまだ確認できませんでした。少し待ってからもう一度お試しください。",
+  "There is no such record on this computer.": "このコンピューターにはそのような記録はありません。",
+  "The damaged record was set aside: {path}": "壊れた記録を退避しました：{path}",
+  "The folder of VRChat's start records cannot be read: {file}": "VRChat の起動記録のフォルダーを読めません：{file}",
+  "A record of an earlier VRChat start cannot be read ({file}): VRChat can be started in {seconds} s.": "以前の VRChat 起動の記録を読めません（{file}）。VRChat は {seconds} 秒後に起動できます。",
+  "A record of an earlier VRChat start cannot be read ({file}): set it aside in Home to play.": "以前の VRChat 起動の記録を読めません（{file}）。プレイするにはホームで退避してください。",
+  "VRChat is starting or running: set the record aside once it has closed.": "VRChat が起動中か実行中です。終了してから記録を退避してください。",
+  "That record can be read now, or is gone: nothing was set aside.": "その記録は今は読めるか、なくなっています。何も退避されませんでした。",
+  "The record was seen damaged only a moment ago: it can be set aside in {seconds} s.": "記録が壊れているのを見つけたばかりです。{seconds} 秒後に退避できます。",
+  "VRChat's engine could not be checked: nothing was set aside.": "VRChat のエンジンを確認できませんでした。何も退避されていません。",
+  "VRChat's engine is running: set the record aside once it has closed.": "VRChat のエンジンが実行中です。終了してから記録を退避してください。",
+  "The record changed meanwhile: nothing was set aside. Look again in a moment.": "その間に記録が変わりました。何も退避されていません。少ししてからもう一度確認してください。",
+  "The record could not be moved: {reason}": "記録を移動できませんでした：{reason}",
+  "What runs VRChat on this Mac stopped without saying why ({status}).": "この Mac で VRChat を動かすものが理由を示さずに止まりました（{status}）。",
+  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "この Mac の VRChat が応答しなくなりました（{kind}）。そのときの状況は {path} に保存されています"
 }

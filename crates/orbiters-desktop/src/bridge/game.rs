@@ -63,6 +63,9 @@ pub struct ReconstructionSeen {
 /// Everything the tools read about the game, at one moment.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Seen {
+    /// Where arrival must be proven (a Mac): the number of the arrival the bridge's game is in now, `None` while it is not
+    /// in one (a picture taken under one is given only if the same one still holds).
+    pub arrival: Option<u64>,
     pub running: bool,
     pub pid: Option<u32>,
     /// VRChat's log folder was found, so joins can be seen at all.
@@ -392,6 +395,8 @@ pub trait Game: Send + Sync {
     fn admit_start(&self, _own_running: bool) -> Result<(), Failure> {
         Ok(())
     }
+    /// Gives back what [`Game::admit_start`] reserved when no launch follows (the call failed or was stopped before it).
+    fn release_start(&self) {}
     /// After the bridge's own game was closed: how long to wait before [`Game::launch`] can start the next (its end being
     /// finalized, or the wait after an early end); `None` when it can now.
     fn start_ready(&self) -> Option<std::time::Duration> {

@@ -186,7 +186,7 @@ fn keeping(name: &str, proof: Duration) -> Keeping {
     let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    super::keeper::Keys { port, token: TOKEN.to_string() }.save(&keys);
+    super::keeper::Keys { port, token: TOKEN.to_string() }.save(&keys).expect("the lab's keys are saved");
     let keeper = Keeper::new(
         bridge,
         flag.clone(),
@@ -392,7 +392,7 @@ fn stop_takes_control_back_at_once_and_turns_it_off() {
     let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
-    super::keeper::Keys { port, token: TOKEN.to_string() }.save(&keys);
+    super::keeper::Keys { port, token: TOKEN.to_string() }.save(&keys).expect("the lab's keys are saved");
     let keeper = Keeper::new(
         bridge.clone(),
         flag.clone(),

@@ -27,6 +27,13 @@
   which only the person can allow. A real game on this Mac: at most a few starts, never one within 80 s of an early quit, close it
   when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 
+- **The engine patch (obelisk-cli's files over Voile's) must replace every earlier build's files.** Each manifest entry lists
+  the SHA-256 every earlier `cli-v*` put at that path (`previous`); `scripts/build-engine-patch.sh` writes none that leaves one
+  out, and `every_earlier_release_s_files_are_replaced` (with `OBELISK_PRISTINE_RELEASE`) checks it from the real tags. A file
+  of ours loaded in the game's process (Neptune's `d3d11.dll`/`dxgi.dll`, the Wine driver) is changed only when necessary and
+  soaked over several starts first. Measure VRChat on a Mac with `tools/mac-bench/bench.py` (`docs/mac-performance.md`): one
+  results file per start, the screen unlocked and the window in front, or the shown-frame numbers mean nothing.
+
 - **Every version bump gets a GitHub release.** `cargo xtask bump <version>`, commit and push, then
   `cargo xtask release` (with `--unsigned` until Azure Artifact Signing is set up; see `docs/releasing.md`). It tags
   `desktop-v<version>` and attaches `OrbitersSetup-<version>.exe` to

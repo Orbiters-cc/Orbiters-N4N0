@@ -72,5 +72,7 @@
   "The record changed meanwhile: nothing was set aside. Look again in a moment.": "その間に記録が変わりました。何も退避されていません。少ししてからもう一度確認してください。",
   "The record could not be moved: {reason}": "記録を移動できませんでした：{reason}",
   "What runs VRChat on this Mac stopped without saying why ({status}).": "この Mac で VRChat を動かすものが理由を示さずに止まりました（{status}）。",
-  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "この Mac の VRChat が応答しなくなりました（{kind}）。そのときの状況は {path} に保存されています"
+  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "この Mac の VRChat が応答しなくなりました（{kind}）。そのときの状況は {path} に保存されています",
+  "Picture detail": "画質",
+  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "このMacでVRChatが描画するピクセル数（一辺あたり）。macOSが画像を画面に合わせて拡大縮小します。少ないほど速く、柔らかい画質になります。100 %は画面本来のピクセルです。次回の起動から反映されます。"
 }

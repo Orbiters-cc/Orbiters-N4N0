@@ -859,6 +859,11 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             if snap.bridge.allowed {
                 apply |= place(&mut m, c, 4, mark("Experimental"), |ui| super::experimental::show(ui, cx, 4, &mut state.experimental, &mut draft.experimental));
             }
+            // A Mac: how Home's Play starts VRChat there (its picture detail).
+            #[cfg(target_os = "macos")]
+            {
+                apply |= place(&mut m, c, 2, mark("Play VRChat"), |ui| super::launch_card::card(ui, cx, 2, draft));
+            }
             // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.
             if !vrchat_here {
                 apply |= place(&mut m, c, 5, mark("VRChat on your network"), |ui| widgets::unrecorded(|| super::network::card(ui, cx, 5, &mut state.network, draft)));

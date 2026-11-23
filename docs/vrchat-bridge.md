@@ -303,11 +303,19 @@ How it is one verified game (`controller/bridge_mac.rs`):
   while the game's process lives (a stall), when VRChat said `HandleApplicationQuit` and the session still runs 45 s later (a quit
   that does not finish), or when the engine's log says the graphics went, it captures once per incident (three per session at most),
   touching nothing of the game: `incident.json` (kind, session, launcher, time and boot clock, the look, the busiest process and its
-  command, what was sampled, the wrapper's `obelisk-wait:` lines), `processes.txt` (the launcher's tree and the library's processes,
-  CPU and memory), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
-  each, every line with what could be a credential cut), and two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
-  (the largest in memory), the render server, `wsd` and the busiest. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`, six
-  kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`).
+  executable, what was sampled, the wrapper's `obelisk-wait:` lines), `processes.txt` (the launcher's tree and the processes whose
+  executable is the engine's, by `ps -o comm=`: never a process that only names the library in its arguments, and never anyone's
+  arguments), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
+  each, every line with what could be a credential cut and with every `vrchat://` link, an instance's `~private(...)`,
+  `~nonce(...)` and the like, and `usr_` ids taken out), and two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
+  (the largest in memory), the render server, `wsd` and the busiest, each process's birth checked before each round (a pid used
+  again is not sampled) and each sample redacted the same way once written. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`,
+  six kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`). Since 0.3.9-dev.29 (the third
+  verification's findings 5 and 6): a stall told is told again only after the game itself moved (a frame, a line of VRChat's: the
+  engine's log also grows around a parked game, from a client of its window server or a quit asked of it), two stalls per session
+  at most, and a quit and a lost renderer are told whatever stalls came first; the engine accepting a quit (`wsd: quit requested` in
+  its log) arms the stuck-quit detection, which a parked game, that cannot log `HandleApplicationQuit`, needs; a pointer or record
+  that cannot be read for a moment keeps the session followed.
 
 ### Live run, 0.3.9-dev.27 with obelisk-cli 0.1.6 (2026-11-23, 03:42 to 04:07)
 
@@ -325,6 +333,33 @@ again, 03:52: arrived at 03:53:22 (the local player in its own private instance)
 03:56:07, screenshot. 4. travel to "The Black Cat", arrived 03:58:50, screenshot; `close_vrchat` closed it in 6 s, the wrapper's
 `obelisk-wait:` lines 50 ms apart. 5. `obelisk-cli steam play 438100` directly: home world, the owner's avatar loaded at 04:01:41
 and the game drew on (`shown` 1,771 to 6,527 frames) for 355 s; `steam quit --session` closed it in 5 s.
+
+### The hang of 03:43, diagnosed and fixed (obelisk-cli 0.1.7, 2026-11-23)
+
+The capture held: every guest thread of the game sat in park()'s **untraced** group-stop loop (the shipped binary's
+`lkd_signal_next+656` is that loop's `poll`, past the `traced` branch). No `famsvc ... timed out` line was in the log, so the first
+diagnosis (the tracer's wake not arrived before its SIGSTOP) was not what happened; what was reproduced instead, without a game
+(voile-lkd `lkd/tests/test_ptrace_reattach.c`, Wine's attach, wait, `PEEKUSER`, detach loop between two processes): the tracee,
+leaving the previous stop, read "no link" from the shared table just before the next attach linked it, and wrote that over the
+`TRACED` flag the tracer's wake had just set, so the next SIGSTOP stopped the whole process (4 of 4 long runs on the release's code,
+at rounds 7,533 to 172,804; 0 of 1.2 million rounds on the fix). The verifier's second ordering (the tracer ends between queuing the
+SIGSTOP and the tracee taking it) is reproduced too (`test_ptrace_transport.c`), and fails on `0766ab7`, which was never shipped.
+voile-lkd `9bf6dfa` binds the attach's SIGSTOP to its link (reported to that tracer, dropped with the link), makes the flag sync
+re-read the table until it agrees, keeps ordinary stops as they are, and logs attaches, group stops (signal, sender, ptrace state)
+and SIGCONTs. obelisk-cli 0.1.7 ships it as `engine/fexdarwin-run`. Measured on its first start: wineserver attached the game's
+threads more than 4,096 times in 5 minutes (`lkd: ptrace: attach 4096:`), one every 70 ms or so: the race had many chances.
+
+### Render scale and Low Power Mode (0.3.9-dev.29)
+
+Home's Play on a Mac starts VRChat at Settings' **Picture detail** (VRChat, Play VRChat), 25 to 100 % per side of the display's
+drawing resolution, 58 by default (ruling 1: a third of the pixels), "100 %" being the panel's own pixels (this Mac: 2558 x 1663,
+the engine's 87 %), never more; the size is shown beside it. It goes to the CLI as `steam play --render-percent <engine percent>`
+for that launch only (0.1.7 and later: an older program would refuse the whole start, so it is given none), never written into the
+engine's settings (R7). **The bridge's starts never take one** (`start_reserved`, tested): its coordinates stay the engine's own,
+`GameWindow` is the content's backing pixels (`bridge/mac.rs` `guest_pixels(..., 100)`), and a capture is always the window's
+backing pixels; at 58 % Home's full-screen game draws 1705 x 1109 in a 2940 x 1912 capture (tested at both scales). When Low Power
+Mode is on while the Mac is on power, Home says so under Play with a **Battery settings** button (`mac_display.rs`); N4N0 never
+changes it (ruling 3).
 
 ### Phase 0 on this Mac (2026-11-22: VRChat under Voile `v26.3.0-27.beta1`, obelisk-cli 0.1.1, Apple M3, macOS 27)
 

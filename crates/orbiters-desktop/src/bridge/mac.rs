@@ -50,6 +50,15 @@ pub fn content_pixels(window: &MacWindow, scale: f64, title: f64) -> (u32, u32) 
     (w, h)
 }
 
+/// The pixels the game itself draws in `window` at `scale` backing pixels per point, its title bar of `title` points left
+/// out, when its engine draws at `render_percent` % of the display's drawing resolution (`obelisk-cli steam play
+/// --render-percent`): the content's backing pixels at 100, fewer below (macOS scales the picture up to the window). A
+/// capture is always the window's backing pixels; the bridge's own starts take no render percent (100), so for them the
+/// game's pixels and a capture's are one and the same (`controller/obelisk_cli.rs`, `start_reserved`).
+pub fn guest_pixels(window: &MacWindow, scale: f64, title: f64, render_percent: u32) -> (u32, u32) {
+    content_pixels(window, scale * f64::from(render_percent.clamp(1, 100)) / 100.0, title)
+}
+
 /// The rows of a window capture that are its title bar of `title` points, at the capture's own size: a capture of a frame
 /// `frame_height` points high `image_height` pixels tall.
 pub fn title_rows(image_height: u32, frame_height: f64, title: f64) -> u32 {
@@ -401,6 +410,23 @@ mod tests {
         assert_eq!(most_covered((1400.0, 100.0, 640.0, 392.0), &displays), Some(2), "570 points on the second, 70 on the first");
         assert_eq!(most_covered((100.0, 100.0, 640.0, 392.0), &displays), Some(1));
         assert_eq!(most_covered((5000.0, 5000.0, 10.0, 10.0), &displays), None);
+    }
+
+    /// R2: at both scales, the game's pixels, the window's points and a capture's pixels kept apart. Full screen on this
+    /// Mac (1470 x 956 points at 2x): 2940 x 1912 drawn at 100 %, 1705 x 1109 at 58 % (Home's default), while a capture
+    /// stays 2940 x 1912 and has no title bar to cut; a 640 x 360-point window at 100 % is 1280 x 720 either way.
+    #[test]
+    fn the_game_s_pixels_follow_the_render_percent_and_a_capture_s_do_not() {
+        let whole = MacWindow { x: 0.0, y: 0.0, ..w(3, 1470.0, 956.0, 0, true) };
+        let title = title_points(&whole, Some((0.0, 0.0, 1470.0, 956.0)));
+        assert_eq!(title, 0.0);
+        assert_eq!(guest_pixels(&whole, 2.0, title, 100), (2940, 1912));
+        assert_eq!(guest_pixels(&whole, 2.0, title, 58), (1705, 1109));
+        assert_eq!(content_pixels(&whole, 2.0, title), (2940, 1912), "the capture");
+        assert_eq!(title_rows(1912, 956.0, title), 0);
+        let windowed = w(3, 640.0, 392.0, 0, true);
+        assert_eq!(guest_pixels(&windowed, 2.0, TITLE_BAR_POINTS, 100), content_pixels(&windowed, 2.0, TITLE_BAR_POINTS), "the bridge's starts");
+        assert_eq!(guest_pixels(&windowed, 2.0, TITLE_BAR_POINTS, 100), (1280, 720));
     }
 
     /// The verifier's case: this Mac's 2940-pixel panel drawn as 1470 points. The window's content is 1280 x 720 pixels,

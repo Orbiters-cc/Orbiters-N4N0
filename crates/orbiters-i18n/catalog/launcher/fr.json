@@ -72,5 +72,7 @@
   "The record changed meanwhile: nothing was set aside. Look again in a moment.": "L’enregistrement a changé entre-temps : rien n’a été mis de côté. Réessayez dans un instant.",
   "The record could not be moved: {reason}": "L’enregistrement n’a pas pu être déplacé : {reason}",
   "What runs VRChat on this Mac stopped without saying why ({status}).": "Ce qui fait tourner VRChat sur ce Mac s’est arrêté sans dire pourquoi ({status}).",
-  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "VRChat ne répond plus sur ce Mac ({kind}) : ce qui se passait est conservé dans {path}"
+  "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "VRChat ne répond plus sur ce Mac ({kind}) : ce qui se passait est conservé dans {path}",
+  "Picture detail": "Détail de l'image",
+  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "Le nombre de pixels que VRChat dessine sur ce Mac, par côté ; macOS met l'image à l'échelle de l'écran. Moins, c'est plus rapide et plus doux. 100 % correspond aux pixels propres de l'écran. S'applique au prochain lancement."
 }

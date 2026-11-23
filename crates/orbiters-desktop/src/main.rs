@@ -29,6 +29,8 @@ mod link_smoke;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
+mod mac_display;
+#[cfg(target_os = "macos")]
 mod mac_update;
 mod mailbox;
 mod media;

@@ -565,8 +565,15 @@ impl Play {
 
     /// Starts VRChat with `args` from the library `library` (whose records say when a start last ended early); the events
     /// are followed on a thread of their own. The launch's id, or why it was not made.
+    #[cfg(test)]
     pub fn start(self: &Arc<Self>, program: &Path, library: &Path, args: &[String]) -> Result<u64, Refused> {
         self.start_at(program, library, args, std::time::SystemTime::now())
+    }
+
+    /// Home's start: as [`Play::start`], drawn at `render_percent` (the engine's percent of the display's drawing
+    /// resolution, for this launch only) when the program takes it; an older program starts the game at its own size.
+    pub fn start_rendered(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], render_percent: Option<u32>) -> Result<u64, Refused> {
+        self.start_full(program, library, args, std::time::SystemTime::now(), None, render_percent.filter(|_| obelisk::takes_render_percent(program)))
     }
 
     /// How long a start must still wait (the longest of the three sources), or why it cannot be made; and the trouble with
@@ -647,11 +654,16 @@ impl Play {
         self.start_with(program, library, args, std::time::SystemTime::now(), token)
     }
 
+    #[cfg(test)]
     pub(crate) fn start_at(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime) -> Result<u64, Refused> {
         self.start_with(program, library, args, now_is, None)
     }
 
     fn start_with(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>) -> Result<u64, Refused> {
+        self.start_full(program, library, args, now_is, token, None)
+    }
+
+    fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>) -> Result<u64, Refused> {
         let mut now = self.now.lock().unwrap();
         if now.attached {
             return Err(Refused::Busy);
@@ -664,6 +676,10 @@ impl Play {
             return Err(Refused::Wait(wait));
         }
         let mut command: Vec<&str> = vec!["steam", "play", obelisk::STEAM_APP];
+        let percent = render_percent.map(|p| p.clamp(1, 100).to_string());
+        if let Some(percent) = &percent {
+            command.extend(["--render-percent", percent.as_str()]);
+        }
         if !args.is_empty() {
             command.push("--");
             command.extend(args.iter().map(String::as_str));
@@ -1420,6 +1436,54 @@ mod tests {
         assert!(aside.starts_with(library.join("Set aside")) && aside.is_file() && !record.exists(), "kept, out of the records: {aside:?}");
         assert_eq!(play.trouble(&library), None);
         assert!(play.gate(&library).is_ok_and(|w| w.is_none()), "Play plays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ruling 1 and R7: Home's start asks for its render scale for that launch alone, before the game's arguments, only of a
+    /// program that takes it (0.1.7 and later: an older one would refuse the whole start); the bridge's starts never do (its
+    /// coordinates are the engine's own size).
+    #[test]
+    fn home_s_start_asks_for_its_render_scale_and_the_bridge_s_never() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-render-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let program_of = |version: &str| {
+            let folder = dir.join(format!("obelisk-cli-{version}-arm64"));
+            std::fs::create_dir_all(&folder).unwrap();
+            let script = folder.join("obelisk-cli");
+            let said = folder.join("args");
+            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"event\":\"starting\",\"app_id\":438100}}'\n", said.display())).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (script, said)
+        };
+        let args = ["-screen-fullscreen".to_string(), "1".to_string()];
+        let said = |file: &Path| -> Vec<String> {
+            for _ in 0..200 {
+                if let Ok(text) = std::fs::read_to_string(file) {
+                    if text.ends_with('\n') {
+                        return text.lines().map(str::to_owned).collect();
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Vec::new()
+        };
+        let (new, new_said) = program_of("0.1.7");
+        let play = Arc::new(Play::default());
+        let id = play.start_rendered(&new, &library, &args, Some(58)).expect("starts");
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "58", "--", "-screen-fullscreen", "1"]);
+        let _ = wait_for(&play, id, |l| l.over);
+        clear(&play);
+        let (old, old_said) = program_of("0.1.6");
+        let id = play.start_rendered(&old, &library, &args, Some(58)).expect("starts");
+        assert_eq!(said(&old_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "an older program: the engine's size");
+        let _ = wait_for(&play, id, |l| l.over);
+        clear(&play);
+        std::fs::remove_file(&new_said).unwrap();
+        let id = play.start_reserved(&new, &library, &args, None).expect("the bridge's start");
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "the bridge's: never a render scale");
+        let _ = wait_for(&play, id, |l| l.over);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -153,5 +153,6 @@
   "wrist watch hand left right": "muñeca reloj mano izquierda derecha",
   "{count} matching setting": "{count} ajuste coincidente",
   "{count} matching settings": "{count} ajustes coincidentes",
-  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ para moverte, Intro para abrir, Esc para borrar"
+  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ para moverte, Intro para abrir, Esc para borrar",
+  "resolution render scale pixels sharp fast Mac": "resolución escala de renderizado píxeles nítido rápido Mac"
 }

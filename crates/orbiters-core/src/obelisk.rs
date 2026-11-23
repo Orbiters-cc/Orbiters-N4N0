@@ -593,9 +593,65 @@ pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://"))).collect()
 }
 
+/// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
+/// draws (the owner's choice, 2026-11-23). The bridge's own starts take none (`render_percent`).
+pub const DEFAULT_RENDER_PERCENT: u32 = 58;
+/// The range Settings offers.
+pub const RENDER_PERCENTS: std::ops::RangeInclusive<u32> = 25..=100;
+
+/// What the engine is told for a render scale of `chosen` % per side of the display's drawing resolution (`backing`
+/// pixels wide), "full" (100) being the panel's real pixels (`panel` wide) and never more: the engine's own percent,
+/// 1 to 100, of the drawing resolution.
+pub fn render_percent(chosen: u32, backing: u32, panel: u32) -> u32 {
+    let chosen = chosen.clamp(*RENDER_PERCENTS.start(), *RENDER_PERCENTS.end());
+    let full = if backing > 0 && panel > 0 && panel < backing { (100 * panel / backing).max(1) } else { 100 };
+    chosen.min(full)
+}
+
+/// The size the game draws at for `chosen` % on a display drawing `backing` pixels (width, height) on a panel of
+/// `panel` pixels: as the engine rounds it (points times its scale), within a pixel.
+pub fn render_size(chosen: u32, backing: (u32, u32), panel: (u32, u32)) -> (u32, u32) {
+    let percent = render_percent(chosen, backing.0, panel.0) as f64 / 100.0;
+    ((backing.0 as f64 * percent).round() as u32, (backing.1 as f64 * percent).round() as u32)
+}
+
+/// Whether the obelisk-cli at `program` takes `steam play --render-percent` (0.1.7 and later): an older one refuses
+/// the whole start for an option it does not know. Told by its folder's name (`obelisk-cli-<version>-arm64`).
+pub fn takes_render_percent(program: &Path) -> bool {
+    program
+        .parent()
+        .and_then(|folder| folder.file_name())
+        .and_then(|name| numbers(name.to_str()?.strip_prefix("obelisk-cli-")?.strip_suffix("-arm64")?))
+        .is_some_and(|version| version >= vec![0, 1, 7])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This Mac (2026-11-23): a 2560 x 1664 panel drawn at 2940 x 1912. 58 % is a third of the pixels; "full" is the
+    /// panel's 87 %, never the 100 % that draws more than the panel shows.
+    #[test]
+    fn the_render_scale_is_a_share_of_the_drawing_capped_at_the_panel() {
+        let (backing, panel) = ((2940, 1912), (2560, 1664));
+        assert_eq!(render_percent(58, backing.0, panel.0), 58);
+        assert_eq!(render_size(58, backing, panel), (1705, 1109));
+        assert_eq!(render_percent(100, backing.0, panel.0), 87);
+        assert_eq!(render_size(100, backing, panel), (2558, 1663));
+        assert_eq!(render_percent(90, backing.0, panel.0), 87, "above the panel is the panel");
+        assert_eq!(render_percent(10, backing.0, panel.0), 25, "the lowest offered");
+        assert_eq!(render_percent(100, 1920, 1920), 100, "a display drawn at its own pixels");
+        assert_eq!(render_percent(100, 1920, 0), 100, "a panel that says nothing");
+    }
+
+    #[test]
+    fn only_an_obelisk_cli_from_0_1_7_is_given_a_render_percent() {
+        let at = |v: &str| PathBuf::from(format!("/tools/obelisk-cli-{v}-arm64/obelisk-cli"));
+        assert!(!takes_render_percent(&at("0.1.6")));
+        assert!(takes_render_percent(&at("0.1.7")));
+        assert!(takes_render_percent(&at("0.2.0")));
+        assert!(!takes_render_percent(Path::new("/usr/local/bin/obelisk-cli")));
+    }
 
     const RECEIPTS: &str = r#"[
         {"appId": 252950, "language": "english", "name": "Rocket League", "directory": "/Games/Rocket League", "platform": "windows", "totalBytes": 1},

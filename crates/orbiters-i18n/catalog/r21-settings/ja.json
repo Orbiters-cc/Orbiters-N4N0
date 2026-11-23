@@ -153,5 +153,6 @@
   "wrist watch hand left right": "手首 ウォッチ 時計 手 左 右",
   "{count} matching setting": "一致する設定：{count}件",
   "{count} matching settings": "一致する設定：{count}件",
-  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ で移動、Enter で開く、Esc で消去"
+  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ で移動、Enter で開く、Esc で消去",
+  "resolution render scale pixels sharp fast Mac": "解像度 レンダースケール ピクセル 鮮明 高速 Mac"
 }

@@ -29,7 +29,16 @@ pub(super) fn covers(ctx: &egui::Context) -> bool {
 /// The profile shown: the contract's, once it is this person's; their row's meanwhile.
 fn profile(state: &State, id: &str) -> Option<Profile> {
     match &state.data.profile {
-        Some(p) if p.friend.id == id => Some(p.clone()),
+        Some(p) if p.friend.id == id => {
+            let mut p = p.clone();
+            // Where they are as the list says it now: the profile was read when the window opened, and Join and Select
+            // must not name an instance they have left since (REQUEST23).
+            if let Some(now) = state.data.friend(id) {
+                p.friend.presence = now.presence;
+                p.friend.whereabouts = now.whereabouts.clone();
+            }
+            Some(p)
+        }
         _ => state.data.friend(id).map(|f| Profile { friend: f.clone(), loading: true, ..Default::default() }),
     }
 }

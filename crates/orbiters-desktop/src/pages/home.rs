@@ -2807,7 +2807,8 @@ mod tests {
         let key_of = format!("previous:{}:{}", place.world_id, place.instance_id);
         assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(key_of.as_str()));
         let sent: Vec<_> = h.recorder.launcher.lock().unwrap()[before..].to_vec();
-        assert!(sent.iter().all(|a| matches!(a, Action::CloseProfile)), "Select asks nothing of the account: {sent:?}");
+        let close_only = |a: &Action| matches!(a, Action::CloseProfile) || matches!(a, Action::As { action, .. } if matches!(**action, Action::CloseProfile));
+        assert!(sent.iter().all(close_only), "Select asks nothing of the account: {sent:?}");
         assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {:?}, instance: {:?} }}", place.world_id, place.instance_id)], "only the existing open check");
         assert!(h.state.launcher_mut().modal_open().is_none(), "back to Home, Where in view");
         click(&mut h, "Play in VR");
@@ -2827,6 +2828,39 @@ mod tests {
         h.settle();
         assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
         assert!(h.state.launcher_mut().places.notice().is_some_and(|n| n.contains("Nova Sample")), "{:?}", h.state.launcher_mut().places.notice());
+    }
+
+    /// REQUEST23: the same on a friend's row of the list, under the pointer: Select where Request was (its pill as wide
+    /// as Request's), and a press chooses the instance without opening the profile or sending anything.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_friends_row_selects_their_instance() {
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        // The row's pill appears under the pointer: down the side panel until a row shows `label`.
+        let over = |h: &mut Harness, label: &str| {
+            for y in (60..760).step_by(12) {
+                for _ in 0..12 {
+                    h.frame(vec![Event::PointerMoved(pos2(800.0, y as f32))]);
+                }
+                if let Some((r, _)) = orbiters_ui::widgets::control(&h.ctx, label).filter(|(r, _)| r.left() > 721.0) {
+                    return r;
+                }
+            }
+            panic!("no row shows {label}");
+        };
+        let request = over(&mut h, "Request");
+        let select = over(&mut h, "Select");
+        assert_eq!(select.width(), request.width(), "no jump between the two");
+        let before = h.recorder.launcher.lock().unwrap().len();
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Select");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        let key_of = format!("previous:{}:{}", place.world_id, place.instance_id);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(key_of.as_str()));
+        assert!(h.recorder.launcher.lock().unwrap()[before..].iter().all(|a| !matches!(a, Action::As { .. })), "nothing asked of the account");
+        assert!(h.state.launcher_mut().modal_open().is_none(), "the row's profile did not open");
     }
 
     /// REQUEST23: while VRChat's session is restored, Select holds the friend's instance (nothing chosen, nothing asked)

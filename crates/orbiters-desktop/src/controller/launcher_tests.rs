@@ -1680,7 +1680,9 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
     machine.running.lock().unwrap().push((10, false));
     let c = controller(machine.clone());
-    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: place.clone() }), Some(Notice::Error(_))));
+    signed(&c, 0);
+    let refused = c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: place.clone() }));
+    assert_eq!(refused, Some(Notice::Error("VRChat already runs on profile 0: choose another profile to start one more.".into())), "its own account's profile, which runs");
     assert!(machine.started.lock().unwrap().is_empty() && machine.beside.lock().unwrap().is_empty(), "nothing went to the running one");
     signed(&c, 1);
     assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 1, destination: place.clone() })), Some(Notice::Sent { .. })));
@@ -1702,10 +1704,10 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     // A destination pressed on another account's list: nothing starts.
     let (_, _) = c.test_vrchat(vec![]);
     signed_in_list(&c);
-    let other = Action::As { account: "usr_other".into(), action: Box::new(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place.clone() }) };
-    assert!(matches!(c.launcher_do(other), Some(Notice::Error(_))));
-    assert!(machine.started.lock().unwrap().is_empty());
     proven(&c, &[1]);
+    let other = Action::As { account: "usr_other".into(), action: Box::new(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place.clone() }) };
+    assert_eq!(c.launcher_do(other), Some(changed_account()));
+    assert!(machine.started.lock().unwrap().is_empty());
     assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place })), Some(Notice::Sent { .. })), "its own account's: it goes");
 }
 
@@ -2275,7 +2277,7 @@ fn verify3_a_bound_destination_needs_its_account_not_its_list() {
     // Proven to be its account's: for that account alone, its list read or not.
     proven(&c, &[0]);
     let other = c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(play()) });
-    assert!(matches!(other, Some(Notice::Error(_))), "{other:?}");
+    assert_eq!(other, Some(changed_account()));
     assert!(machine.started.lock().unwrap().is_empty());
     assert!(!matches!(c.view().launcher.source, Source::SignedIn { .. }), "its list is not read yet");
     let sent = c.launcher_do(mine(play()));

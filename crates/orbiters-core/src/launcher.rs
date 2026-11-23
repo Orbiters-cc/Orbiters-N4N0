@@ -487,12 +487,11 @@ pub enum Notice {
 pub enum SentKind { Boop, RequestInvite, Launch, Join }
 
 /// Whom what VRChat said of an account was verified for: the Orbiters identity's epoch, the member (a digest of the
-/// environment and their id, when known) and the VRChat account.
+/// environment and their id: never anything else) and the VRChat account.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VerifiedFor {
     pub epoch: u64,
-    #[serde(default)]
-    pub member: Option<String>,
+    pub member: String,
     #[serde(default)]
     pub user: Option<String>,
 }

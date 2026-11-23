@@ -308,7 +308,8 @@ impl Controller {
         match &snap.account.state {
             AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. } | AccountState::SigningIn => match self.vrchat_ready() {
                 Some((api, token, stamp)) => Orbiters::Ready(api, token, stamp),
-                None if snap.account.state == AccountState::SigningIn => Orbiters::Gone,
+                // A first sign-in on its way over nobody's account; over one whose member is not known, it waits as ever.
+                None if snap.account.state == AccountState::SigningIn && self.account_runtime.lock().unwrap().account.is_none() => Orbiters::Gone,
                 None => Orbiters::Changing,
             },
             AccountState::Unknown => Orbiters::Changing,
@@ -369,7 +370,7 @@ impl Controller {
         }
         self.forget_login(|st| st.restoring |= st.user.is_none());
         let Some(stamp) = self.vrchat_now() else { return };
-        let own = cached.filter(|(_, _, kept_for)| kept_for.is_some() && *kept_for == stamp.owner.member).map(|(user, picture, _)| (user, picture));
+        let own = cached.filter(|(_, _, kept_for)| kept_for.as_ref() == Some(&stamp.owner.member)).map(|(user, picture, _)| (user, picture));
         if let Some((user, picture)) = own {
             self.publish_login(&stamp, |st, _| {
                 if st.user.is_none() {
@@ -514,7 +515,7 @@ impl Controller {
                 let owner = stamp.owner.member.clone();
                 let rt = self.vrchat_login.lock().unwrap();
                 if displayed && rt.cache_generation == cache_generation {
-                    if let (Some(path), Some(owner)) = (rt.cache_path.as_deref(), owner) {
+                    if let Some(path) = rt.cache_path.as_deref() {
                         write_account_cache(path, &user, portrait.as_ref(), &owner);
                     }
                 }
@@ -710,8 +711,8 @@ impl Controller {
                     rt.untold = None;
                     rt.signed_bell.ring();
                     if rt.cache_generation == cache_generation {
-                        if let (Some(path), Some(owner)) = (rt.cache_path.clone(), owner.as_deref()) {
-                            write_account_cache(&path, u, picture.as_ref(), owner);
+                        if let Some(path) = rt.cache_path.clone() {
+                            write_account_cache(&path, u, picture.as_ref(), &owner);
                         }
                     }
                 }
@@ -910,7 +911,7 @@ pub(super) fn follow_orbiters_and_record(s: &mut crate::state::Snapshot, rt: &mu
         let (login, list) = (&s.vrchat_login, &s.launcher);
         let signed = matches!(list.source, orbiters_core::launcher::Source::SignedIn { .. });
         rt.pairs.push(Pair {
-            member: now.map(|n| n.owner.member.clone().unwrap_or_else(|| n.owner.credential.clone())),
+            member: now.map(|n| n.owner.member.clone()),
             epoch: now.map_or(0, |n| n.epoch),
             status: login.user.is_some() || login.known.is_some() || login.picture.is_some() || login.upload.is_some(),
             list: signed || (list.me.is_some() || list.profile.is_some() || list.mine.is_some()) && !matches!(list.source, orbiters_core::launcher::Source::Database { .. }),
@@ -1511,7 +1512,7 @@ mod tests {
     }
     /// The owner of what VRChat shows now, as the cache keeps it.
     fn owner_now(c: &Controller) -> Option<String> {
-        c.vrchat_now().and_then(|n| n.owner.member)
+        c.vrchat_now().map(|n| n.owner.member)
     }
     fn as_folder(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);

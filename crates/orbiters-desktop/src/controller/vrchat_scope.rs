@@ -14,44 +14,33 @@
 //! [`Controller::forget_login`] and [`Controller::forget_launcher`]. Groups, and whatever else is read with a VRChat
 //! session, belong here too.
 
+use super::identity::Identity;
 use super::vrchat_login::{Grounds, Runtime, Status};
 use super::Controller;
 use crate::state::{AccountState, AccountStatus, Snapshot};
-use orbiters_core::account::{Account, Api, Server};
+use orbiters_core::account::{Api, Server};
 use orbiters_core::launcher::{EngineSetup, EngineTrouble, Game, GameProfile, LauncherState, Notice, Source, StartTrouble, VerifiedFor};
 use orbiters_core::vrchat_api::Client;
 use std::sync::{Arc, Mutex};
 
 /// Whose a VRChat account, its name and picture are to see: an Orbiters member of an environment, by the id Orbiters gives
-/// them ([`Owner::of`]). Digests; nothing here is a name or a credential.
+/// them, as controller/identity.rs knows them ([`Owner::of`]). Nobody else owns anything here: a credential whose member is
+/// not known (an older file, with no id) is unknown there and is nobody here (verify4-r21 P5).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Owner {
-    /// The environment and the member's id, when the account says one: what the cache on disk is kept for. Ids are
-    /// Orbiters' own (digits, as text): compared exactly, with no case or Unicode folding; a name, which can be reused,
-    /// changed or missing, has no part in it.
-    pub(super) member: Option<String>,
-    /// The environment and the credential, in memory only: the same account before its id is known (an older file).
-    pub(super) credential: String,
+    /// A digest of the environment and the member's id: what the cache on disk is kept for. Ids are Orbiters' own (digits,
+    /// as text): compared exactly, with no case or Unicode folding; a name, which can be reused, changed or missing, and a
+    /// credential have no part in it.
+    pub(super) member: String,
 }
 
 impl Owner {
-    pub(super) fn of(server: Server, account: &Account) -> Self {
+    pub(super) fn of(identity: &Identity) -> Option<Self> {
         use sha2::{Digest, Sha256};
-        let env = if server == Server::Development { "development" } else { "production" };
-        let digest = |kind: &str, text: &str| -> String {
-            let d = Sha256::digest(format!("{env}\n{kind}\n{text}").as_bytes());
-            d.iter().take(16).map(|b| format!("{b:02x}")).collect()
-        };
-        let id = account.user.as_deref().map(str::trim).filter(|id| !id.is_empty());
-        Self { member: id.map(|id| digest("member", id)), credential: digest("credential", &account.token) }
-    }
-
-    /// The same member: by their ids; by the credential while one of them has no id.
-    pub(super) fn same(&self, other: &Owner) -> bool {
-        match (&self.member, &other.member) {
-            (Some(a), Some(b)) => a == b,
-            _ => self.credential == other.credential,
-        }
+        let Identity::Member { development, user } = identity else { return None };
+        let env = if *development { "development" } else { "production" };
+        let digest = Sha256::digest(format!("{env}\nmember\n{user}").as_bytes());
+        Some(Self { member: digest.iter().take(16).map(|b| format!("{b:02x}")).collect() })
     }
 }
 
@@ -64,7 +53,7 @@ pub(super) struct Stamp {
 
 impl Stamp {
     pub(super) fn same(&self, other: &Stamp) -> bool {
-        self.epoch == other.epoch && self.owner.same(&other.owner)
+        self == other
     }
 
     fn said(&self, user: Option<&str>) -> VerifiedFor {
@@ -89,11 +78,11 @@ fn same(a: Option<&Stamp>, b: Option<&Stamp>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a.same(b))
 }
 
-/// Whose the account installed is, in its environment; none while who it is is unknown (its file could not be read,
-/// the environment is being switched: controller/identity.rs).
+/// Whose the account installed is, in its environment; none while who it is is unknown (its file could not be read or names
+/// no member, the environment is being switched: controller/identity.rs).
 fn installed(rt: &super::account::AccountRuntime) -> Option<(Server, Owner)> {
-    let (server, _) = rt.read.filter(|_| !rt.unknown)?;
-    rt.account.as_ref().map(|a| (server, Owner::of(server, a)))
+    let owner = rt.identity().as_ref().and_then(Owner::of)?;
+    rt.read.map(|(server, _)| (server, owner))
 }
 
 /// What this computer alone says on Home's launcher: the game, its profiles and what runs it. Nobody's account.
@@ -199,8 +188,9 @@ pub(super) fn enforce(s: &mut Snapshot, rt: &mut Runtime, now: Option<&Stamp>) {
 }
 
 impl Controller {
-    /// Whom what is read from VRChat now is for: the Orbiters account installed (at launch, the one its file names), while
-    /// the one on show is of the environment chosen; none while no account is known (being read, signed out, refused).
+    /// Whom what is read from VRChat now is for: the Orbiters member whose account is installed (at launch, the one its file
+    /// names), while the one on show is of the environment chosen; none while no member is known (the account being read,
+    /// one with no member id, signed out, refused).
     pub(super) fn vrchat_now(&self) -> Option<Stamp> {
         self.vrchat_stamp_of(&self.view().account)
     }
@@ -227,7 +217,7 @@ impl Controller {
         owner.or_else(|| login.at_launch.clone()).map(|owner| Stamp { epoch, owner })
     }
 
-    /// The Orbiters account VRChat may be asked for now: its API and credential, and whom that is for, taken together.
+    /// The Orbiters member's account VRChat may be asked for now: its API and credential, and whom that is for, taken together.
     pub(super) fn vrchat_ready(&self) -> Option<(Api, String, Stamp)> {
         let view = self.view();
         if view.account.development != (Server::current() == Server::Development) {
@@ -423,24 +413,25 @@ impl Controller {
 mod tests {
     use super::*;
 
-    fn account(token: &str, id: Option<&str>) -> Account {
-        Account { token: token.into(), user: id.map(str::to_string), username: Some("tester".into()), avatar_url: None, features: None }
-    }
-
-    /// verify2-r21 M2: who it belongs to: the member's id in its environment (exactly, spaces around it aside); the
-    /// credential only while one of the two has no id.
+    /// verify2-r21 M2, verify4-r21 P5: who it belongs to: the member's id in its environment (exactly, spaces around it
+    /// aside), as controller/identity.rs says it; a credential with no member id, and nobody, own nothing.
     #[test]
     fn verify2_the_owner_is_the_member_id_in_its_environment() {
-        let of = |server, token: &str, id: Option<&str>| Owner::of(server, &account(token, id));
+        use orbiters_core::account::Account;
+        let of = |server, token: &str, id: Option<&str>| {
+            let account = Account { token: token.into(), user: id.map(str::to_string), username: Some("tester".into()), avatar_url: None, features: None };
+            Owner::of(&Identity::of(server, Some(&account)))
+        };
         let (prod, dev) = (Server::Production, Server::Development);
-        assert!(of(prod, "a", Some("1")).same(&of(prod, "b", Some(" 1 "))), "the same member, another credential");
-        assert!(!of(prod, "a", Some("1")).same(&of(prod, "a", Some("2"))), "another member, whatever the credential");
-        assert!(!of(prod, "a", Some("1")).same(&of(dev, "a", Some("1"))), "another environment");
-        assert!(of(prod, "a", None).same(&of(prod, "a", Some("1"))), "its id learned later");
-        assert!(!of(prod, "a", None).same(&of(prod, "b", Some("1"))) && !of(prod, "a", None).same(&of(prod, "b", None)));
-        assert_eq!(of(prod, "a", Some("  ")).member, None, "no id is no member: nothing is kept on disk for it");
+        let one = of(prod, "a", Some("1"));
+        assert!(one.is_some());
+        assert_eq!(one, of(prod, "b", Some(" 1 ")), "the same member, another credential");
+        assert_ne!(one, of(prod, "a", Some("2")), "another member, whatever the credential");
+        assert_ne!(one, of(dev, "a", Some("1")), "another environment");
+        assert_eq!((of(prod, "a", None), of(prod, "a", Some("  "))), (None, None), "no id is no member");
+        assert_eq!((Owner::of(&Identity::Anonymous), Owner::of(&Identity::Unknown { key: None })), (None, None));
         // The same member at another time of the identity: what was read before they left is not theirs now.
-        let at = |epoch| Stamp { epoch, owner: of(prod, "a", Some("1")) };
+        let at = |epoch| Stamp { epoch, owner: one.clone().unwrap() };
         assert!(at(3).same(&at(3)) && !at(3).same(&at(5)));
     }
 

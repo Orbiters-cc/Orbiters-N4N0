@@ -203,7 +203,7 @@ impl Controller {
 
     /// What the account's file says at launch, before the account thread installed it.
     pub(super) fn account_saved_at_launch(&self, server: Server, saved: Option<Account>) {
-        self.vrchat_login.lock().unwrap().at_launch = saved.as_ref().map(|a| super::vrchat_login::Owner::of(server, a));
+        self.vrchat_login.lock().unwrap().at_launch = super::vrchat_login::Owner::of(&super::identity::Identity::of(server, saved.as_ref()));
         self.account_at_launch(server, saved.map(|a| a.username));
     }
 

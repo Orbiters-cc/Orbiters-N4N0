@@ -17,8 +17,8 @@
   Home's Play shares (`obelisk_cli::Play`: one at a time, reserved by the bridge before it makes an instance, none within 80 s
   of an early end, by this run's exit, a deadline on the boot clock (`kern.bootsessionuuid`) and the engine's records; a record
   that cannot be read holds starts 80 s from first sight, then is history, except the current session's, which Home names with a
-  **Set aside** button: never a lock for ever, never "nothing"), only with obelisk-cli 0.1.5 or later (the record's `shown` frames
-  are its renderer evidence), arrives only once the local player is in its own destination in its own held log, closes with
+  **Set aside** button: never a lock for ever, never "nothing"), only with obelisk-cli 0.1.9 or later (the record's `shown` frames
+  are its renderer evidence; Home's Play holds to the same `obelisk::LEAST`), arrives only once the local player is in its own destination in its own held log, closes with
   `steam quit --session` and never `--force`. A stall, a quit that does not finish or a lost renderer of any session the engine
   runs is captured once (`controller/incident.rs`, `<logs>/incidents/`, Settings' Log says where): look there before guessing. VRChat's freeze about 5 s after the
   avatar loaded was Neptune's render server refusing an upload over 64 MiB: fixed in Orbiters-cc/neptune (branch `orbiters`) and
@@ -27,14 +27,18 @@
   which only the person can allow. A real game on this Mac: at most a few starts, never one within 80 s of an early quit, close it
   when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 
-- **The engine files change only as a recorded transaction, never under a running game** (obelisk-cli 0.1.8, its
-  `docs/CLI.md`, Keyboard layout): `linux/.obelisk-engine-patch.txn.json` says what a crash left, `.obelisk-engine-sessions.lock`
-  is held shared from a launch's preparation to its game's exit; a launch that finds them in a state it cannot repair is refused
-  with `engine patch: not started: …` on standard error naming the paths. voile-lkd `bf0af9b` (the attach stop as link state, the
+- **A game starts on one complete released set of engine files or not at all, and they never change under it** (obelisk-cli
+  0.1.9, its `docs/CLI.md`, Keyboard layout): the exact digests of every file (the manifest's `generations`) proven under the
+  runtime's lock on every path that lets a launch go on; that lock (`<library>/Voile.locks/`, outside what an install replaces) is
+  one open file from the launch's preparation to its game's exit, inherited by its supervisor, and the installer, `engine repair`
+  and the removal of replaced releases take it too. No pin, no launch. A refusal is the CLI's `engine_files` error, which Home shows
+  with **Repair**: never tell anyone to delete a file of it. What a guest writes goes to its log through the supervisor
+  (`game_log.rs`): nothing of logging may ever block or end the game. voile-lkd `bf0af9b` (the attach stop as link state, the
   event ring) is **held back**: one start of five on it got Easy Anti-Cheat's "Debugger detected" (`docs/vrchat-bridge.md`,
   2026-11-23 08:06); never ship it before that is explained. Home offers
-  **Restart VRChat** only for a confirmed lost picture of its own running session (`controller/picture.rs`, R1): never make a
-  covered, locked or slow game look lost. Benchmarks: `tools/mac-bench/session.sh` (the screen must be unlocked; only valid
+  **Restart VRChat** only for a confirmed lost picture of its own running session, the one it names (`controller/picture.rs`, R1;
+  one decision per session, shared with the bridge and the incident capture): never make a covered, locked or slow game look lost,
+  nor one that could not be read. Benchmarks: `tools/mac-bench/session.sh` (the screen must be unlocked; only valid
   windows are scored).
 - **The engine patch (obelisk-cli's files over Voile's) must replace every earlier build's files.** Each manifest entry lists
   the SHA-256 every earlier `cli-v*` put at that path (`previous`); `scripts/build-engine-patch.sh` (from 0.1.8 reading every `cli-v*` release on GitHub) writes none that leaves one

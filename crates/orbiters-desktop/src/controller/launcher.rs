@@ -132,10 +132,25 @@ pub trait Machine: Send + Sync {
     fn picture_lost(&self) -> Option<String> {
         None
     }
+    /// Starts as [`Machine::start`], for the VRChat account `account` when the arguments' destination is that account's.
+    fn start_for(&self, args: &[String], _account: Option<&str>) -> Result<(), String> {
+        self.start(args)
+    }
     /// Quits that session (`session`, checked again: still Home's, still running, still lost) and starts VRChat again
-    /// with what Home started it with, through the one start; blocks until done or refused (in the person's words).
-    fn restart_lost(&self, _session: &str) -> Result<(), String> {
+    /// with what that very launch was started with, through the one start; blocks until done or refused (in the person's
+    /// words). `live` says whether the VRChat account that launch was for is still the one signed in: asked before the quit
+    /// and again before the start.
+    fn restart_lost(&self, _session: &str, _live: &dyn Fn(&str) -> bool) -> Result<(), String> {
         Err(tr("There is nothing to start again.").into())
+    }
+    /// The engine's files no VRChat starts on (a Mac's engine), and what ends it.
+    fn engine_problem(&self) -> Option<orbiters_core::obelisk::EngineProblem> {
+        None
+    }
+    /// Installs what the engine is made of again; `progress` hears how far it is. Blocks until done or not (in the
+    /// person's words).
+    fn repair_engine(&self, _progress: &dyn Fn(Option<u8>), _stop: &AtomicBool) -> Result<(), String> {
+        Err(tr("There is nothing to repair on this computer.").into())
     }
 }
 
@@ -197,13 +212,26 @@ pub struct MacMachine {
     /// Steam refused the saved sign-in at the last start: the set-up is offered again until it ran.
     signed_out: AtomicBool,
     /// Home's own starts not told yet: each failure is told by its launch id, never another start's (the bridge's), and a
-    /// later start does not hide an earlier one's.
-    home_launch: std::sync::Mutex<Vec<u64>>,
+    /// later start does not hide an earlier one's. Each with what it was asked with, to start that very one again.
+    home_launch: std::sync::Mutex<Vec<HomeLaunch>>,
     /// The render scale Home's next Play asks for (Settings, `LaunchSettings::mac_render_percent`).
     render: std::sync::atomic::AtomicU32,
-    /// What Home's last start was asked with, to start the same again after a lost picture.
-    home_args: std::sync::Mutex<Option<Vec<String>>>,
+    /// The session being quit and started again: one at a time.
+    restarting: std::sync::Mutex<Option<String>>,
+    repairing: AtomicBool,
 }
+
+/// One of Home's own starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HomeLaunch {
+    id: u64,
+    args: Vec<String>,
+    /// The VRChat account its destination is of, when it is one's.
+    account: Option<String>,
+}
+
+/// How many of Home's starts are kept.
+const HOME_LAUNCHES: usize = 16;
 
 impl MacMachine {
     pub fn new(home: &std::path::Path) -> Self {
@@ -229,7 +257,8 @@ impl MacMachine {
             signed_out: AtomicBool::new(false),
             home_launch: std::sync::Mutex::new(Vec::new()),
             render: std::sync::atomic::AtomicU32::new(orbiters_core::obelisk::DEFAULT_RENDER_PERCENT),
-            home_args: std::sync::Mutex::new(None),
+            restarting: std::sync::Mutex::new(None),
+            repairing: AtomicBool::new(false),
         }
     }
 }
@@ -237,8 +266,105 @@ impl MacMachine {
 impl MacMachine {
     /// Whether Game session `session` is one Home started here and it still runs (the program's word on that launch).
     fn home_session_running(&self, session: &str) -> bool {
-        let ids = self.home_launch.lock().unwrap().clone();
-        ids.into_iter().filter_map(|id| self.play.launch(id)).any(|l| l.session.as_deref() == Some(session) && l.running && !l.over)
+        self.home_launch_of(session).is_some()
+    }
+
+    /// Home's own start whose Game session is `session`, while it runs: what it was asked with.
+    fn home_launch_of(&self, session: &str) -> Option<HomeLaunch> {
+        let launches = self.home_launch.lock().unwrap().clone();
+        launches.into_iter().find(|home| self.play.launch(home.id).is_some_and(|l| l.session.as_deref() == Some(session) && l.running && !l.over))
+    }
+
+    /// Home's start with `args`, kept as one of its own.
+    fn start_home(&self, args: &[String], account: Option<&str>) -> Result<(), super::obelisk_cli::Refused> {
+        let id = self.start_launch(args)?;
+        let mut mine = self.home_launch.lock().unwrap();
+        mine.push(HomeLaunch { id, args: args.to_vec(), account: account.map(str::to_owned) });
+        let drop_old = mine.len().saturating_sub(HOME_LAUNCHES);
+        mine.drain(..drop_old);
+        Ok(())
+    }
+
+    /// The program to start VRChat with: the newest release there is, got first when the one here is too old.
+    fn program_to_start(&self) -> Result<std::path::PathBuf, super::obelisk_cli::Refused> {
+        let refused = |words: &str| super::obelisk_cli::Refused::Failed(words.to_string());
+        let program = self.program().ok_or_else(|| refused(tr("VRChat is not set up on this Mac yet.")))?;
+        if !orbiters_core::obelisk::too_old(&program) {
+            return Ok(program);
+        }
+        if !cfg!(test) {
+            super::obelisk_cli::update(&self.tools, &AtomicBool::new(false));
+        }
+        self.program()
+            .filter(|program| !orbiters_core::obelisk::too_old(program))
+            .ok_or_else(|| refused(tr("What runs VRChat on this Mac is too old and its new version could not be downloaded. Check the connection and try again.")))
+    }
+
+    /// The Steam account the program is signed in with now.
+    fn steam_account(&self, program: &std::path::Path) -> Option<u64> {
+        let mut account = None;
+        super::obelisk_cli::run(program, &["status"], &AtomicBool::new(false), |event| {
+            if let orbiters_core::obelisk::Event::Status { steam_id, .. } = event {
+                account = steam_id.as_deref().and_then(|id| id.parse().ok());
+            }
+        })
+        .ok()?;
+        account
+    }
+
+    /// Whether the launch that is started again is still this person's to start: its VRChat account the one signed in, its
+    /// Steam account (`steam`, of the session that ran) the one it would run on.
+    fn same_accounts(&self, launch: &HomeLaunch, steam: Option<u64>, program: &std::path::Path, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
+        let vrchat = launch.account.as_deref().is_none_or(live);
+        if vrchat && steam.is_some() && self.steam_account(program) == steam {
+            return Ok(());
+        }
+        Err(tr("The account VRChat was started with is no longer the one signed in: press Play to start it on this one.").into())
+    }
+
+    fn restart(&self, session: &str, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
+        // Checked again on the click: the same session, still Home's, still running, its picture still lost.
+        let launch = self
+            .home_launch_of(session)
+            .filter(|_| super::picture::lost().as_deref() == Some(session))
+            .ok_or_else(|| tr("VRChat draws again, or is no longer the one Home started: nothing was done.").to_string())?;
+        let program = self.program().ok_or_else(|| tr("VRChat is not set up on this Mac yet.").to_string())?;
+        let steam = orbiters_core::obelisk::session_record_of(&self.library, session).ok().flatten().and_then(|r| r.account);
+        self.same_accounts(&launch, steam, &program, live)?;
+        // Asked to quit as its own Quit does, that very session only, never forced.
+        let quit = ["steam", "quit", orbiters_core::obelisk::STEAM_APP, "--session", session, "--wait", "60"];
+        let mut refused = None;
+        let ran = super::obelisk_cli::run_for(&program, &quit, Duration::from_secs(75), |line| {
+            if let Some(code) = serde_json::from_str::<serde_json::Value>(line).ok().and_then(|v| (v["event"] == "error").then(|| v["code"].as_str().map(str::to_owned)).flatten()) {
+                refused = Some(code);
+            }
+        });
+        match refused.as_deref() {
+            None | Some("not_running") => {}
+            Some(code) => return Err(tr!("VRChat could not be asked to quit ({code}): quit it yourself, then press Play.", code = code).to_string()),
+        }
+        if let (None, Err(e)) = (&refused, ran) {
+            return Err(tr!("VRChat could not be asked to quit: {reason}", reason = e).to_string());
+        }
+        // It ended (or ends): then the one start, which keeps its 80 s after an early end and one start at a time.
+        let until = Instant::now() + Duration::from_secs(90);
+        while self.home_session_running(session) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if self.home_session_running(session) {
+            return Err(tr("VRChat did not quit in time: quit it yourself, then press Play.").into());
+        }
+        for _ in 0..2 {
+            // Minutes may have passed: nothing is started for an account that is no longer the one signed in, nor over a
+            // start made meanwhile (which the one start refuses).
+            self.same_accounts(&launch, steam, &program, live)?;
+            match self.start_home(&launch.args, launch.account.as_deref()) {
+                Ok(()) => return Ok(()),
+                Err(super::obelisk_cli::Refused::Wait(wait)) if wait <= Duration::from_secs(100) => std::thread::sleep(wait + Duration::from_secs(1)),
+                Err(refused) => return Err(refused.words()),
+            }
+        }
+        Err(tr("VRChat could not be started again yet: press Play in a moment.").into())
     }
 
     /// The start shared by Home's Play and the VRChat bridge (the bridge's `controller/bridge_mac.rs`).
@@ -260,7 +386,7 @@ impl MacMachine {
     /// 25 to 100 % of the display's drawing resolution, the panel's pixels at most): its launch id, or why not. The
     /// bridge's starts (`start_launch_reserved`) keep the engine's own size, which its coordinates are measured in.
     pub fn start_launch(&self, args: &[String]) -> Result<u64, super::obelisk_cli::Refused> {
-        let program = self.program().ok_or_else(|| super::obelisk_cli::Refused::Failed(tr("VRChat is not set up on this Mac yet.").to_string()))?;
+        let program = self.program_to_start()?;
         let render = self.render.load(Ordering::Relaxed);
         #[cfg(target_os = "macos")]
         let sizes = crate::mac_display::sizes();
@@ -319,13 +445,30 @@ impl Machine for MacMachine {
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
-        let id = self.start_launch(args).map_err(|refused| refused.words())?;
-        *self.home_args.lock().unwrap() = Some(args.to_vec());
-        let mut mine = self.home_launch.lock().unwrap();
-        mine.push(id);
-        let drop_old = mine.len().saturating_sub(16);
-        mine.drain(..drop_old);
-        Ok(())
+        self.start_for(args, None)
+    }
+
+    fn start_for(&self, args: &[String], account: Option<&str>) -> Result<(), String> {
+        self.start_home(args, account).map_err(|refused| refused.words())
+    }
+
+    fn engine_problem(&self) -> Option<orbiters_core::obelisk::EngineProblem> {
+        self.play.engine_problem()
+    }
+
+    fn repair_engine(&self, progress: &dyn Fn(Option<u8>), stop: &AtomicBool) -> Result<(), String> {
+        if self.repairing.swap(true, Ordering::AcqRel) {
+            return Err(tr("It is being repaired already.").into());
+        }
+        let done = self.program_to_start().map_err(|refused| refused.words()).and_then(|program| {
+            self.play.repair(&program, stop, progress).map_err(|failure| match failure.code.as_str() {
+                "busy" => tr("A game runs on what runs VRChat: quit it, then press Repair.").to_string(),
+                "voile_failed" => tr("What runs VRChat could not be downloaded again. Check the connection and the free space, and try again: nothing was changed.").to_string(),
+                _ => failure.words,
+            })
+        });
+        self.repairing.store(false, Ordering::Release);
+        done
     }
 
     fn starting(&self) -> bool {
@@ -333,9 +476,9 @@ impl Machine for MacMachine {
     }
 
     fn start_failure(&self) -> Option<String> {
-        let ids = self.home_launch.lock().unwrap().clone();
-        let (id, failure) = ids.into_iter().find_map(|id| self.play.take_failure(id).map(|f| (id, f)))?;
-        self.home_launch.lock().unwrap().retain(|i| *i != id);
+        let launches = self.home_launch.lock().unwrap().clone();
+        let (id, failure) = launches.into_iter().find_map(|home| self.play.take_failure(home.id).map(|f| (home.id, f)))?;
+        self.home_launch.lock().unwrap().retain(|home| home.id != id);
         if matches!(failure.code.as_str(), "not_signed_in" | "sign_in_expired" | "not_installed") {
             self.signed_out.store(true, Ordering::Relaxed);
         }
@@ -367,50 +510,17 @@ impl Machine for MacMachine {
         self.home_session_running(&session).then_some(session)
     }
 
-    fn restart_lost(&self, session: &str) -> Result<(), String> {
-        // Checked again on the click: the same session, still Home's, still running, its picture still lost.
-        if self.picture_lost().as_deref() != Some(session) {
-            return Err(tr("VRChat draws again, or is no longer the one Home started: nothing was done.").into());
-        }
-        let args = self.home_args.lock().unwrap().clone().ok_or_else(|| tr("Home does not know how VRChat was started: start it again with Play.").to_string())?;
-        let program = self.program().ok_or_else(|| tr("VRChat is not set up on this Mac yet.").to_string())?;
-        // Asked to quit as its own Quit does, that very session only, never forced.
-        let quit = ["steam", "quit", orbiters_core::obelisk::STEAM_APP, "--session", session, "--wait", "60"];
-        let mut refused = None;
-        let ran = super::obelisk_cli::run_for(&program, &quit, Duration::from_secs(75), |line| {
-            if let Some(code) = serde_json::from_str::<serde_json::Value>(line).ok().and_then(|v| (v["event"] == "error").then(|| v["code"].as_str().map(str::to_owned)).flatten()) {
-                refused = Some(code);
+    fn restart_lost(&self, session: &str, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
+        {
+            let mut restarting = self.restarting.lock().unwrap();
+            if restarting.is_some() {
+                return Err(tr("VRChat is being started again already.").into());
             }
-        });
-        match refused.as_deref() {
-            None | Some("not_running") => {}
-            Some(code) => return Err(tr!("VRChat could not be asked to quit ({code}): quit it yourself, then press Play.", code = code).to_string()),
+            *restarting = Some(session.to_owned());
         }
-        if let Err(e) = ran {
-            return Err(tr!("VRChat could not be asked to quit: {reason}", reason = e).to_string());
-        }
-        // It ended (or ends): then the one start, which keeps its 80 s after an early end and one start at a time.
-        let until = Instant::now() + Duration::from_secs(90);
-        while self.home_session_running(session) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        if self.home_session_running(session) {
-            return Err(tr("VRChat did not quit in time: quit it yourself, then press Play.").into());
-        }
-        for _ in 0..2 {
-            match self.start_launch(&args) {
-                Ok(id) => {
-                    let mut mine = self.home_launch.lock().unwrap();
-                    mine.push(id);
-                    let drop_old = mine.len().saturating_sub(16);
-                    mine.drain(..drop_old);
-                    return Ok(());
-                }
-                Err(super::obelisk_cli::Refused::Wait(wait)) if wait <= Duration::from_secs(100) => std::thread::sleep(wait + Duration::from_secs(1)),
-                Err(refused) => return Err(refused.words()),
-            }
-        }
-        Err(tr("VRChat could not be started again yet: press Play in a moment.").into())
+        let done = self.restart(session, live);
+        *self.restarting.lock().unwrap() = None;
+        done
     }
 
     fn set_aside(&self, file: &str) -> Result<String, String> {
@@ -662,6 +772,8 @@ pub(super) struct Runtime {
     /// On a Mac: Play was asked for while VRChat was not in Obelisk yet (its install, or Obelisk's own, was started
     /// from here); it is played once it is there, within [`PLAY_WHEN_READY_FOR`].
     play_when_ready: Option<Instant>,
+    /// What the Mac's engine is made of is being installed again: how far, when known.
+    repairing: Option<Option<u8>>,
     /// Starts under way, by profile (Home's Play and profile choice, Go there, the VRChat bridge): each claims its
     /// profile from before the start until a VRChat on it is seen, or [`PROFILE_HELD`] passed (REQUEST15 fix B4).
     starting: Vec<Claim>,
@@ -742,6 +854,7 @@ impl Default for Runtime {
             machine: real_machine(),
             pending: None,
             play_when_ready: None,
+            repairing: None,
             starting: Vec::new(),
             claims_made: 0,
             mine_next: None,
@@ -1127,7 +1240,9 @@ impl Controller {
         let profiles = if here && !machine.by_hand() { game_profiles(&self.view().settings.launch.profiles, &runs, &view.vrchat.runs, &claims) } else { Vec::new() };
         let running: Vec<(u32, bool)> = runs.iter().map(|r| (r.0, r.1)).collect();
         let trouble = if here { machine.start_trouble() } else { None };
-        let picture_lost = here && machine.picture_lost().is_some();
+        let picture_lost = if here { machine.picture_lost() } else { None };
+        let repairing = self.launcher.lock().unwrap().repairing;
+        let engine_trouble = if here { machine.engine_problem() } else { None }.map(|p| orbiters_core::launcher::EngineTrouble { paths: p.paths, action: p.action, repairing: repairing.is_some(), percent: repairing.flatten() });
         // A start that failed after it was asked for (the game's own start, far from the press): said, and over.
         let failed = machine.start_failure();
         if let Some(words) = &failed {
@@ -1173,8 +1288,9 @@ impl Controller {
             if waiting_over {
                 s.launcher.engine_setup = None;
             }
-            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved || s.launcher.start_trouble != trouble || s.launcher.picture_lost != picture_lost;
+            let changed = waiting_over || s.launcher.game != game || s.launcher.possible.play != here || s.launcher.profiles != profiles || s.launcher.unresolved != unresolved || s.launcher.start_trouble != trouble || s.launcher.picture_lost != picture_lost || s.launcher.engine_trouble != engine_trouble;
             s.launcher.picture_lost = picture_lost;
+            s.launcher.engine_trouble = engine_trouble;
             s.launcher.unresolved = unresolved;
             if s.launcher.start_trouble != trouble {
                 s.launcher.start_trouble = trouble;
@@ -1239,7 +1355,7 @@ impl Controller {
             self.update_if(|s| {
                 let signed = matches!(s.launcher.source, Source::SignedIn { .. });
                 if signed {
-                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, start_trouble: s.launcher.start_trouble.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
+                    let kept = LauncherState { game: s.launcher.game.clone(), profiles: s.launcher.profiles.clone(), unresolved: s.launcher.unresolved, start_trouble: s.launcher.start_trouble.clone(), engine_trouble: s.launcher.engine_trouble.clone(), picture_lost: s.launcher.picture_lost.clone(), possible: Possible { play: s.launcher.possible.play, ..Possible::default() }, ..LauncherState::default() };
                     *s.launcher = kept;
                 }
                 signed
@@ -1260,6 +1376,8 @@ impl Controller {
             state.profiles = s.launcher.profiles.clone();
             state.unresolved = s.launcher.unresolved;
             state.start_trouble = s.launcher.start_trouble.clone();
+            state.engine_trouble = s.launcher.engine_trouble.clone();
+            state.picture_lost = s.launcher.picture_lost.clone();
             // The account's own profile is read on its own (`launcher_mine`): kept for the same account only.
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
@@ -1341,6 +1459,8 @@ impl Controller {
             state.profiles = s.launcher.profiles.clone();
             state.unresolved = s.launcher.unresolved;
             state.start_trouble = s.launcher.start_trouble.clone();
+            state.engine_trouble = s.launcher.engine_trouble.clone();
+            state.picture_lost = s.launcher.picture_lost.clone();
             if s.launcher.source == state.source {
                 state.mine = s.launcher.mine.clone();
             }
@@ -1590,22 +1710,54 @@ impl Controller {
                 machine.open_engine().err().map(Notice::Error)
             }
             Action::InstallEngine => self.launcher_install_engine(),
-            Action::RestartLostGame => {
+            Action::RestartLostGame { session } => {
                 let machine = self.launcher.lock().unwrap().machine.clone();
-                match machine.picture_lost() {
-                    None => Some(Notice::Error(tr("VRChat draws again, or is no longer the one Home started: nothing was done.").into())),
-                    Some(session) => {
-                        let ctl = self.clone();
-                        let _ = std::thread::Builder::new().name("launcher-restart-lost".into()).spawn(move || {
-                            match machine.restart_lost(&session) {
-                                Ok(()) => ctl.notify(super::NoticeKind::Success, tr("VRChat is starting again.").to_string()),
-                                Err(why) => ctl.launcher_notice(Notice::Error(why)),
-                            }
-                            ctl.launcher_game(machine.as_ref());
-                        });
-                        None
-                    }
+                // The session the press was made on, never whichever lost its picture since.
+                if machine.picture_lost().as_deref() != Some(session.as_str()) {
+                    return Some(Notice::Error(tr("VRChat draws again, or is no longer the one Home started: nothing was done.").into()));
                 }
+                let ctl = self.clone();
+                let _ = std::thread::Builder::new().name("launcher-restart-lost".into()).spawn(move || {
+                    match machine.restart_lost(&session, &|account| ctl.launcher_live(Some(account))) {
+                        Ok(()) => {
+                            *ctl.launcher_started.lock().unwrap() = Some(Instant::now());
+                            ctl.update(|s| s.launcher.game = Game::Starting(LaunchMode::Desktop));
+                            ctl.notify(super::NoticeKind::Success, tr("VRChat is starting again.").to_string());
+                        }
+                        Err(why) => ctl.launcher_notice(Notice::Error(why)),
+                    }
+                    ctl.launcher_game(machine.as_ref());
+                });
+                None
+            }
+            Action::RepairEngine => {
+                let machine = self.launcher.lock().unwrap().machine.clone();
+                {
+                    let mut rt = self.launcher.lock().unwrap();
+                    if rt.repairing.is_some() || machine.engine_problem().is_none() {
+                        return None;
+                    }
+                    rt.repairing = Some(None);
+                }
+                self.launcher_game(machine.as_ref());
+                let ctl = self.clone();
+                let _ = std::thread::Builder::new().name("launcher-repair-engine".into()).spawn(move || {
+                    let step = |percent: Option<u8>| {
+                        ctl.launcher.lock().unwrap().repairing = Some(percent);
+                        ctl.update_if(|s| {
+                            let trouble = s.launcher.engine_trouble.as_mut();
+                            trouble.is_some_and(|t| std::mem::replace(&mut t.percent, percent) != percent)
+                        });
+                    };
+                    let done = machine.repair_engine(&step, &ctl.quitting);
+                    ctl.launcher.lock().unwrap().repairing = None;
+                    ctl.launcher_game(machine.as_ref());
+                    match done {
+                        Ok(()) => ctl.notify(super::NoticeKind::Success, tr("What runs VRChat was repaired: press Play.").to_string()),
+                        Err(why) => ctl.launcher_notice(Notice::Error(why)),
+                    }
+                });
+                None
             }
             Action::SetAsideRecord { file } => {
                 let machine = self.launcher.lock().unwrap().machine.clone();
@@ -2177,7 +2329,8 @@ impl Controller {
             Vec::new()
         };
         machine.set_render_percent(self.view().settings.launch.mac_render_percent);
-        match machine.start(&args) {
+        // A destination is of the account it was asked on: a start of it again is too.
+        match machine.start_for(&args, account.filter(|_| destination.is_some())) {
             Ok(()) => {
                 // Bound to the account it was asked on.
                 *started = Some(Instant::now());

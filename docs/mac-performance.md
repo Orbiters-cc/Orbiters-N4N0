@@ -24,23 +24,33 @@ shown frames only). Reading them afterwards means reading the engine's log, or t
 
 The script records, per start: `pmset -g custom` and `-g batt` (Low Power Mode on AC and on battery, the power source),
 `pmset -g therm` at start and end, the render percent the window server applied, the swapchain sizes and generations, and
-once a second the console's lock state (`ioreg` `IOConsoleLocked`), the frontmost app (`lsappinfo`), GPU utilisation
-(`ioreg`, device-wide) and the engine's threads' CPU (`ps -M`). It starts `obelisk-cli steam play 438100 [--render-percent N]
+once a second whether the session lives (its record and its launcher), the console's lock state (`ioreg` `IOConsoleLocked`),
+the frontmost app (`lsappinfo`), GPU utilisation (`ioreg`, device-wide) and the CPU of the threads of its own launcher's
+process tree (`ps -M`). It starts `obelisk-cli steam play 438100 [--render-percent N]
 -- -screen-fullscreen 1 -window-mode borderless <link>`, waits (with deadlines) for the engine to say the game runs and for
-`OnPlayerJoinComplete` in **this start's own** VRChat log (the one whose command line holds the link), waits `--warm`
-seconds and then until 20 s pass without a frame held over 250 ms, records `--windows` windows of `--window` seconds
+the local player to be in **the destination of the link** (world, instance and every tag it names: a fallback is no
+arrival) as **this start's own** VRChat log says it (the one whose command line holds the link), waits `--warm`
+seconds and then until 20 s pass without a frame held over 250 ms (within 180 s, else nothing is scored), records `--windows` windows of `--window` seconds
 with nobody touching the game, takes 3 s stack samples only after them, and in every case (an arrival that never came, a
 failed start, an interruption) quits by session (`steam quit --session --wait 60`, never forced) and writes its results
-file with its `outcome`.
+file with its `outcome`. The session is known from its **admission** (the record the engine makes for this launch), so that
+it is asked to quit whether or not the program that started it still lives; its own record says how it ended (`terminal`).
+A run whose session is not known to have ended exits with 5, and `session.sh` stops the series there, as it does after any
+run that failed.
 
-A window is **valid** only when, from its start to its end, the screen was unlocked, VRChat was the frontmost app and the
-window server presented frames (positive presentation times); otherwise it is kept with `valid: false` and why, and never
-scored. `--allow-locked` scores production alone behind a locked screen, and says `production_only` in each window. Rates
+A window is **valid** only when all of it was seen: from its start to its end, never more than 5 s between two looks, the
+session lived, the screen was unlocked, this session's own window server was the frontmost app and the local player stayed
+in the destination; its submissions were counted over at least 90 % of it, and the shown frames of that window server (by
+the process and the time its `metal-HUD:` lines carry) fill as much of it, never more than 5 s apart; otherwise it is kept
+with `valid: false` and why, and never scored. `--allow-locked` scores production alone behind a locked screen, and says `production_only` in each window. Rates
 are counted, never reciprocal intervals: the presents (or shown events) between two lines of one swapchain generation
-divided by the time between those two lines, the last line before the window included as its base, a count that went
+divided by the time between those two lines (lines read together are one reading, the last of them: two batches read at
+once used to count one), the last line before the window included as its base, a count that went
 back (a new swapchain) never subtracted across, a measured zero kept as 0.
 
-`tools/mac-bench/test_bench.py` checks the scoring (boundary interval, generations, zero, validity).
+`tools/mac-bench/test_bench.py` checks the scoring (boundary interval, generations, zero, coverage, validity), the arrival
+and the cleanup, without a game. **Results made by an earlier `bench.py`** (every file up to 2026-11-23) were scored by
+weaker rules: a window valid there is not one valid here.
 `tools/mac-bench/summary.py` gives per condition the median over starts (the start is the unit) and the spread from the
 lowest to the highest start; a condition with one start says "one sample".
 
@@ -66,6 +76,38 @@ end times (powermetrics and Metal's counters need root or the game's own process
 wake-up intervals. Without them the host wait cannot be split into GPU execution, queueing and wake-up; an overlap test
 (more work in flight) needs a change that demonstrably changes the in-flight work, and one matched pair of the same
 condition with the screen unlocked and locked is still to make.
+
+## Results: 2026-11-23, 11:28 to 12:12, the first with the screen unlocked (obelisk-cli 0.1.8)
+
+The same Mac (MacBook Air M3), world, avatar and settings as below, the screen **unlocked** and VRChat shown. Files
+`2026-11-23_11-*.json` and `2026-11-23_12-06-100.json`. One start per row:
+
+| Engine percent | Low Power Mode | Shown per second | Submitted per second | Batch interval, ms | Fence wait, ms | Record |
+|---|---|---|---|---|---|---|
+| 100 | on | 19.5 to 19.9 | 19.6 to 19.8 | 50.3 to 50.8 | 46.0 to 46.1 | `11-28-100` (partly beside a build) |
+| 58 | on | 27.2 to 27.5 | 31.8 to 32.0 | 31.1 to 31.5 | 20.9 to 21.2 | `11-36-58` (beside a build at background priority) |
+| 58 | off | 32.1 | 32.1 | n/a | 20.8 | `11-51-58`: from the engine's log over 15 minutes, the script's own file has no window (below) |
+| 100 | off | 19.3 to 20.2 | 19.2 to 20.1 | 49.8 to 51.6 | 45.1 to 45.7 | `12-06-100` |
+
+**No window of these files is scored**: the script read the frontmost app as None on macOS 27 (`lsappinfo`'s output changed;
+fixed since), so every window says `valid: false` for that alone, though the screen was unlocked and frames were shown all
+along; and the 11:51 start ran with a fixed script that took a running session for one that never started (fixed and
+tested). Read them as counted observations of one start each, **neither paired nor repeated**: indicative. `11-05-58` was made
+beside a compile with nothing shown, and counts for nothing; the 11:26 start ended by itself about 30 s in, before Easy
+Anti-Cheat's first lines (the cause is unknown). Every start's VRChat log says "Failed creating world instance ... Bad
+response data" and still joins; the script now checks that the place joined is the one asked for.
+
+What they allow, and no more:
+
+- **Submitted frames are the same with Low Power Mode on or off** (32 per second at 58 %, 19 to 20 at 100 %).
+- **With Low Power Mode on, about 15 % of the frames submitted at 58 % were not shown** (27 of 32); none were lost at 100 %, nor
+  at 58 % with it off.
+- **58 % against 100 %: 1.6 times the frames shown** (32.1 against 19.3 to 20.2, Low Power Mode off).
+- **The frame interval is mostly the fence wait**: 45 of 51 ms at 100 %, 21 of 31 ms at 58 %; the other 6 to 10 ms is
+  everything else. Two points fit "9 ms + 36 ms x pixel share", as any two points fit a line: most of the wait scales with the
+  pixels. How the wait splits between GPU execution and serial waiting in the render server is **not known**.
+- **The rates with the screen locked (below) were about half of these** at 58 % (15.5 against 32 submitted): a locked screen is
+  not a stand-in for production either. Nothing below is comparable with these numbers.
 
 ## Results: 2026-11-23, 05:11 to 05:55 (obelisk-cli 0.1.7 before its release, Orbiters - N4N0 0.3.9-dev.28 running)
 
@@ -107,10 +149,10 @@ What these numbers allow (the fourth verification's verdicts), and no more:
 - **The bitblt test does not close overlap or thread priorities**: it changed the buffer count and format, did not show
   more work in flight, and low average CPU cannot exclude a latency-critical thread waiting to run. Overlap and QoS stay
   **open** (and the game's own threads are never given another priority: Easy Anti-Cheat).
-- These rates are far below the earlier unlocked sessions' (19 fps on average then, another world part of the time): a
-  locked screen may lower clocks or change the window server's behaviour. Not comparable with the historical numbers.
+- These rates are about half of the unlocked ones measured the same day (above): a locked screen lowers production itself
+  (clocks, or the window server's behaviour: not known which). Not comparable with anything measured unlocked.
 - The engine (0.1.7's fexdarwin-run) held: no group stop in seven starts, while wineserver attached the game's threads
   more than 4,096 times in each start's first minutes.
 
-Not answered: anything about presentation (nothing was presented), Game Mode, Low Power Mode off, shown frames, holds.
-The session above is for them.
+Not answered here: anything about presentation (nothing was presented), Game Mode, Low Power Mode off, shown frames, holds.
+The unlocked results above begin to; a scored, paired session is still to make.

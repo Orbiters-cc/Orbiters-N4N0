@@ -510,14 +510,37 @@ struct PretendMac {
     /// The Game session of Home's VRChat whose picture is lost (confirmed), and the restarts asked for.
     lost: Mutex<Option<String>>,
     restarts: Mutex<Vec<String>>,
+    refused: Mutex<u32>,
+    /// The engine's files no game starts on, and the repairs asked for.
+    engine: Mutex<Option<orbiters_core::obelisk::EngineProblem>>,
+    repairs: Mutex<u32>,
+    hold_repair: std::sync::atomic::AtomicBool,
 }
 impl Machine for PretendMac {
     fn picture_lost(&self) -> Option<String> {
         self.lost.lock().unwrap().clone()
     }
-    fn restart_lost(&self, session: &str) -> Result<(), String> {
+    fn engine_problem(&self) -> Option<orbiters_core::obelisk::EngineProblem> {
+        self.engine.lock().unwrap().clone()
+    }
+    fn repair_engine(&self, progress: &dyn Fn(Option<u8>), _stop: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+        *self.repairs.lock().unwrap() += 1;
+        progress(Some(40));
+        while self.hold_repair.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if self.cannot_install {
+            return Err("no network".into());
+        }
+        *self.engine.lock().unwrap() = None;
+        Ok(())
+    }
+    fn restart_lost(&self, session: &str, live: &dyn Fn(&str) -> bool) -> Result<(), String> {
         if self.picture_lost().as_deref() != Some(session) {
             return Err("checked again: not lost".into());
+        }
+        if !live("usr_of_the_start") {
+            *self.refused.lock().unwrap() += 1;
         }
         self.restarts.lock().unwrap().push(session.to_owned());
         Ok(())
@@ -1844,21 +1867,25 @@ fn a_mac_offers_a_restart_only_for_a_confirmed_lost_picture_checked_on_the_click
     let c = mac(machine.clone());
     c.launcher_game(machine.as_ref());
     assert_eq!(c.view().launcher.game, Game::Running(LaunchMode::Desktop));
-    assert!(!c.view().launcher.picture_lost, "a healthy (or covered, or locked) game: nothing offered");
-    assert!(matches!(c.launcher_do(Action::RestartLostGame), Some(Notice::Error(_))));
+    let restart = |session: &str| c.launcher_do(Action::RestartLostGame { session: session.into() });
+    assert_eq!(c.view().launcher.picture_lost, None, "a healthy (or covered, or locked) game: nothing offered");
+    assert!(matches!(restart("s1"), Some(Notice::Error(_))));
     // confirmed lost: offered
     *machine.lost.lock().unwrap() = Some("s1".into());
     c.launcher_game(machine.as_ref());
-    assert!(c.view().launcher.picture_lost);
+    assert_eq!(c.view().launcher.picture_lost.as_deref(), Some("s1"));
     // it draws again before the click: nothing done
     *machine.lost.lock().unwrap() = None;
-    assert!(matches!(c.launcher_do(Action::RestartLostGame), Some(Notice::Error(_))));
+    assert!(matches!(restart("s1"), Some(Notice::Error(_))));
     assert!(machine.restarts.lock().unwrap().is_empty());
     c.launcher_game(machine.as_ref());
-    assert!(!c.view().launcher.picture_lost, "the offer goes with the loss");
+    assert_eq!(c.view().launcher.picture_lost, None, "the offer goes with the loss");
     // lost, and the click: that very session is restarted
     *machine.lost.lock().unwrap() = Some("s2".into());
-    assert_eq!(c.launcher_do(Action::RestartLostGame), None);
+    // (fifth verification, finding 8: the button shown for s1 and pressed now restarts neither)
+    assert!(matches!(restart("s1"), Some(Notice::Error(_))));
+    assert!(machine.restarts.lock().unwrap().is_empty());
+    assert_eq!(restart("s2"), None);
     for _ in 0..200 {
         if !machine.restarts.lock().unwrap().is_empty() {
             break;
@@ -1867,3 +1894,217 @@ fn a_mac_offers_a_restart_only_for_a_confirmed_lost_picture_checked_on_the_click
     }
     assert_eq!(*machine.restarts.lock().unwrap(), ["s2"]);
 }
+
+/// Fifth verification, finding 5: the engine's files no game starts on are said on Home with what ends it; Repair installs
+/// them again, once at a time, says how far it is, and what it came to; a list read meanwhile keeps it on show.
+#[test]
+fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
+    use orbiters_core::obelisk::{EngineAction, EngineProblem};
+    let problem = |action| EngineProblem { paths: vec!["engine/wsd".into()], reason: "why".into(), action };
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.engine_trouble, None);
+    assert_eq!(c.launcher_do(Action::RepairEngine), None);
+    assert_eq!(*machine.repairs.lock().unwrap(), 0, "nothing to repair");
+    *machine.engine.lock().unwrap() = Some(problem(EngineAction::Repair));
+    c.launcher_game(machine.as_ref());
+    let shown = c.view().launcher.engine_trouble.clone().unwrap();
+    assert_eq!((shown.paths, shown.action, shown.repairing), (vec!["engine/wsd".to_string()], EngineAction::Repair, false));
+    // Other ends are said as they are.
+    *machine.engine.lock().unwrap() = Some(problem(EngineAction::QuitGame));
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.engine_trouble.as_ref().map(|t| t.action), Some(EngineAction::QuitGame));
+    *machine.engine.lock().unwrap() = Some(problem(EngineAction::Repair));
+    machine.hold_repair.store(true, Ordering::Relaxed);
+    assert_eq!(c.launcher_do(Action::RepairEngine), None);
+    let until = |done: &dyn Fn() -> bool| {
+        for _ in 0..400 {
+            if done() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("it never came");
+    };
+    until(&|| c.view().launcher.engine_trouble.as_ref().is_some_and(|t| t.repairing && t.percent == Some(40)));
+    assert_eq!(c.launcher_do(Action::RepairEngine), None);
+    c.launcher_game(machine.as_ref());
+    c.launcher_commit_read(LauncherState::default());
+    assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| t.repairing && t.percent == Some(40)), "a list read keeps it");
+    machine.hold_repair.store(false, Ordering::Relaxed);
+    until(&|| c.view().launcher.engine_trouble.is_none());
+    assert_eq!(*machine.repairs.lock().unwrap(), 1, "once, however often it is pressed");
+    // One that fails is said, and the offer stays.
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, cannot_install: true, ..Default::default() });
+    *machine.engine.lock().unwrap() = Some(problem(EngineAction::Repair));
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    c.launcher_do(Action::RepairEngine);
+    until(&|| c.view().launcher.notice == Some(Notice::Error("no network".into())));
+    assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| !t.repairing));
+}
+
+/// A program in `root` that answers as obelisk-cli 0.1.9 does: `steam play` runs a game until `stop` is written, its session
+/// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
+#[cfg(target_os = "macos")]
+fn pretend_program(root: &std::path::Path) -> MacMachine {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = root.join("tools/obelisk-cli-0.1.9-arm64");
+    std::fs::create_dir_all(folder.join("SteamNative")).unwrap();
+    std::fs::create_dir_all(root.join("library/SteamSessions")).unwrap();
+    std::fs::write(folder.join("SteamNative/obelisk-steam-host"), "").unwrap();
+    let script = r#"#!/bin/bash
+umask 077
+root=ROOT
+echo "$*" >> "$root/asked"
+case "$1 $2" in
+"status ") echo "{\"event\":\"status\",\"account\":{\"steam_id\":\"$(cat "$root/account")\",\"account_name\":\"n\"}}" ;;
+"engine repair")
+    echo '{"event":"engine_repairing","bytes_done":1,"bytes_total":2,"fraction":0.5}'
+    if [ -e "$root/repairs" ]; then echo '{"event":"engine_repaired","voile":"v1","keyboard_layout":"mac","engine_files":[]}'; exit 0; fi
+    echo '{"event":"error","code":"voile_failed","message":"m","key":null}'; exit 1 ;;
+"steam quit") touch "$root/stop-$5"; while [ -e "$root/stop-$5" ]; do sleep 0.05; done; echo '{"event":"quit_requested","app_id":438100,"forced":false}' ;;
+"steam play")
+    if [ -e "$root/refuses" ]; then
+        echo '{"event":"error","code":"engine_files","message":"m","key":"backend.runtime.engineFiles","engine":{"paths":["engine/wsd"],"reason":"why","action":"repair"}}'; exit 1
+    fi
+    n=$(($(cat "$root/count" 2>/dev/null || echo 0) + 1)); echo $n > "$root/count"; session="5e551011-0000-4000-8000-00000000000$n"
+    record() { echo "{\"version\":2,\"id\":\"$session\",\"account_id\":77,\"phase\":\"$1\",\"store\":{\"app_id\":438100},\"played\":{\"seconds\":400,\"frames\":{\"count\":1000,\"measured\":true}},\"revision\":1}" > "$root/writing" && mv "$root/writing" "$root/library/SteamSessions/$session.v2.json"; }
+    record Running
+    echo "{\"event\":\"running\",\"app_id\":438100,\"pid\":$$,\"session_id\":\"$session\"}"
+    while [ ! -e "$root/stop-$session" ]; do sleep 0.05; done
+    record Finished
+    echo "{\"event\":\"exited\",\"app_id\":438100,\"session_id\":\"$session\",\"exit_code\":0,\"seconds\":400,\"frames\":1000}"
+    rm "$root/stop-$session" ;;
+esac
+"#;
+    let program = folder.join("obelisk-cli");
+    std::fs::write(&program, script.replace("ROOT", &format!("'{}'", root.display()))).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("account"), "77").unwrap();
+    MacMachine {
+        tools: root.join("tools"),
+        library: root.join("library"),
+        play: Arc::new(super::super::obelisk_cli::Play::default()),
+        signed_out: std::sync::atomic::AtomicBool::new(false),
+        home_launch: Mutex::default(),
+        render: std::sync::atomic::AtomicU32::new(100),
+        restarting: Mutex::default(),
+        repairing: std::sync::atomic::AtomicBool::new(false),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn eventually(done: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("it never came");
+}
+
+/// Fifth verification, finding 8: a restart is of the session it was shown for, with what that very launch was started with
+/// and for its own accounts, asked again after the quit; nothing is asked to quit for a launch that could not be started
+/// again, and nothing is started over another start.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_restart_is_of_its_own_session_its_own_arguments_and_its_own_accounts() {
+    use super::super::picture;
+    let _publishing = picture::PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("orbiters-restart-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    let session = |n: u32| format!("5e551011-0000-4000-8000-00000000000{n}");
+    let asked = || std::fs::read_to_string(root.join("asked")).unwrap_or_default();
+    let plays = || asked().lines().filter(|l| l.starts_with("steam play")).map(str::to_owned).collect::<Vec<_>>();
+    let quits = || asked().lines().filter(|l| l.starts_with("steam quit")).count();
+    let args = |link: &str| vec!["-screen-fullscreen".to_string(), link.to_string()];
+    let runs = |n: u32| machine.home_session_running(&session(n));
+
+    // One start, ended by itself; then another, of another destination and account.
+    machine.start_for(&args("vrchat://a"), Some("usr_a")).unwrap();
+    eventually(|| runs(1));
+    std::fs::write(root.join(format!("stop-{}", session(1))), "").unwrap();
+    eventually(|| !runs(1) && !machine.play.starting() && machine.play.attached().is_none());
+    machine.start_for(&args("vrchat://b"), Some("usr_b")).unwrap();
+    eventually(|| runs(2));
+
+    // Not lost; lost but of another session; of the first one, long gone: nothing is asked.
+    let live = |account: &str| account == "usr_b";
+    picture::publish(None);
+    assert!(machine.restart_lost(&session(2), &live).is_err());
+    picture::publish(Some((session(2), picture::Picture::Lost)));
+    assert_eq!(machine.picture_lost(), Some(session(2)));
+    assert!(machine.restart_lost(&session(1), &live).is_err());
+    // Its account is no longer the one signed in, at VRChat or at Steam: it is left running.
+    assert!(machine.restart_lost(&session(2), &|account| account == "usr_a").is_err());
+    std::fs::write(root.join("account"), "78").unwrap();
+    assert!(machine.restart_lost(&session(2), &live).is_err());
+    std::fs::write(root.join("account"), "77").unwrap();
+    assert_eq!((quits(), plays().len()), (0, 2));
+    assert!(runs(2));
+
+    // Restarted: that session asked to quit, then started as it was.
+    machine.restart_lost(&session(2), &live).unwrap();
+    assert!(asked().contains(&format!("steam quit 438100 --session {} --wait 60", session(2))));
+    eventually(|| runs(3));
+    assert_eq!(quits(), 1);
+    assert!(plays()[2].ends_with("-- -screen-fullscreen vrchat://b"), "{:?}", plays());
+
+    // The account goes while the game quits: nothing is started.
+    picture::publish(Some((session(3), picture::Picture::Lost)));
+    let times = std::sync::atomic::AtomicU32::new(0);
+    let first_only = |_: &str| times.fetch_add(1, Ordering::Relaxed) == 0;
+    assert!(machine.restart_lost(&session(3), &first_only).is_err());
+    assert_eq!((quits(), plays().len()), (2, 3));
+    picture::publish(None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Finding 5, end to end with the program: a start refused over the engine's files is kept with its paths, whoever it was
+/// for; a repair that fails leaves it, one that succeeds ends it.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_start_refused_over_the_engine_s_files_is_kept_until_they_are_repaired() {
+    use orbiters_core::obelisk::EngineAction;
+    let root = std::env::temp_dir().join(format!("orbiters-repair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    assert_eq!(machine.engine_problem(), None);
+    std::fs::write(root.join("refuses"), "").unwrap();
+    // (the bridge's start here: Home says it all the same)
+    machine.start_launch_reserved(&[], None).unwrap();
+    eventually(|| machine.engine_problem().is_some());
+    let problem = machine.engine_problem().unwrap();
+    assert_eq!((problem.paths.as_slice(), problem.action), (["engine/wsd".to_string()].as_slice(), EngineAction::Repair));
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let heard = Mutex::new(Vec::new());
+    let repair = || machine.repair_engine(&|percent| heard.lock().unwrap().push(percent), &stop);
+    assert!(repair().is_err());
+    assert!(machine.engine_problem().is_some(), "still there");
+    std::fs::write(root.join("repairs"), "").unwrap();
+    repair().unwrap();
+    assert_eq!(machine.engine_problem(), None);
+    assert_eq!(*heard.lock().unwrap(), [Some(50), Some(50)]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A program older than the one every start needs starts nothing (its new version could not be got).
+#[test]
+#[cfg(target_os = "macos")]
+fn a_program_too_old_starts_no_vrchat() {
+    let root = std::env::temp_dir().join(format!("orbiters-too-old-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    std::fs::rename(root.join("tools/obelisk-cli-0.1.9-arm64"), root.join("tools/obelisk-cli-0.1.8-arm64")).unwrap();
+    assert!(machine.start(&[]).is_err());
+    assert!(!root.join("asked").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+

@@ -357,6 +357,27 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
     Value::Array(tools)
 }
 
+/// The highest profile `go_to_world` starts the main session on: every number the start itself carries to VRChat
+/// (`LaunchPlan::profile`, written as `--profile=N` as it is). Home offers fewer (`vrchat_launch::PROFILE_MAX`) and side
+/// sessions go to 99 (their OSC ports); neither bounds the main session, whose account may be on any.
+const MAIN_PROFILE_MAX: u32 = u32::MAX;
+
+/// What an action of a tool needs beside what its schema says for every one of them: refused before anything is done for the
+/// call (a window focused or put back to its size, a network asked).
+pub fn action_refusal(name: &str, args: &Value) -> Option<Failure> {
+    let bad = |message: String, next: &str| Some(Failure::new("bad_arguments", message, next)); // i18n: not shown (an AI client reads it)
+    let action = args["action"].as_str().unwrap_or_default();
+    let missing = |key: &str| args[key].as_str().is_none_or(|v| v.trim().is_empty());
+    match (name, action) {
+        ("mouse", "move" | "click") if args["x"].as_u64().is_none() || args["y"].as_u64().is_none() => bad(format!("{action} needs x and y, in the window's pixels."), "See screenshot's window_width and window_height."), // i18n: not shown
+        ("mouse", "look") if [&args["dx"], &args["dy"]].iter().all(|v| v.as_i64().unwrap_or(0) == 0) => bad("look needs dx or dy.".into(), "Pass mouse counts: how far that turns depends on VRChat's sensitivity."), // i18n: not shown
+        ("unity_change_packages", "install" | "remove" | "update") if missing("package") => bad(format!("{action} needs package."), "Pass the package's name, as com.vrchat.avatars."), // i18n: not shown
+        ("unity_repositories", "add") if missing("url") => bad("add needs url: the repository's listing (index.json).".into(), "Pass its https URL."), // i18n: not shown
+        ("unity_repositories", "remove" | "enable" | "disable") if missing("id") => bad(format!("{action} needs id."), "Pass the repository's id (or URL) from list."), // i18n: not shown
+        _ => None,
+    }
+}
+
 /// The tools as `tools/list` gives them, in a fixed order.
 pub fn list() -> Value {
     let read_only = json!({ "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false });
@@ -388,7 +409,7 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_… from find_worlds." },
                 "region": { "type": "string", "enum": ["eu", "us", "use", "jp"], "description": "Where the instance runs. Default eu." },
-                "profile": { "type": "integer", "minimum": 0, "maximum": orbiters_core::vrchat_launch::PROFILE_MAX, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
+                "profile": { "type": "integer", "minimum": 0, "maximum": MAIN_PROFILE_MAX, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
                 "relaunch": { "type": "boolean", "description": "Side session: start its VRChat again in the instance instead of travelling in the running game. Only when travelling did not work: every start of VRChat starts Easy Anti-Cheat again, and long runs of starts have left its driver stuck until Windows restarted." },
             }, "required": ["world_id"], "additionalProperties": false },
             "annotations": acts,
@@ -647,7 +668,7 @@ impl Bridge {
         // On every computer the arguments are held to the tool list it gives before anything else: none it does not name,
         // none of another type (a number for `session` read as the main one, a text for `profile` ignored), no null.
         if refused.is_none() {
-            refused = tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, args));
+            refused = tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, args)).or_else(|| action_refusal(name, args));
         }
         let result = match name {
             _ if refused.is_some() => Err(refused.unwrap_or_else(|| Failure::new("not_on_this_computer", "", ""))),
@@ -3197,10 +3218,23 @@ mod tests {
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{}] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a", "other": 1 }] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }] })).is_none());
-        // Bridge verification 3, finding 4: go_to_world's profile is bounded as the launch takes it (u32, then
-        // PROFILE_MAX); orbiters_environment's omitted action reaches its default (read), as before the validator.
+        // Bridge verification 3, finding 4: go_to_world's profile is bounded as the launch takes it (u32); fifth
+        // verification, finding 13: and by nothing less (Home's 15, refused for a while; a side session's 99).
+        // orbiters_environment's omitted action reaches its default (read), as before the validator.
         assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": 4294967297u64 })), Some("bad_arguments"));
-        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": orbiters_core::vrchat_launch::PROFILE_MAX + 1 })), Some("bad_arguments"));
+        for profile in [0, 1, orbiters_core::vrchat_launch::PROFILE_MAX, orbiters_core::vrchat_launch::PROFILE_MAX + 1, 99, 100, u32::MAX] {
+            assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": profile })), None, "{profile}");
+            let plan = crate::bridge::game::LaunchPlan { world_id: "wrld_x".into(), instance: "1".into(), width: 1280, height: 720, profile: Some(profile), osc: None, vr: false };
+            assert!(plan.args().contains(&format!("--profile={profile}")), "carried to VRChat as it is");
+        }
+        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": -1 })), Some("bad_arguments"));
+        assert_eq!(check("open_session", json!({ "profile": 99 })), None);
+        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_arguments"));
+        // What a handler has a default for is not required (unity_repositories lists, unity_editor says its status).
+        assert_eq!(check("unity_repositories", json!({})), None);
+        assert_eq!(check("unity_repositories", json!({ "action": "erase" })), Some("bad_arguments"));
+        assert_eq!(check("unity_editor", json!({ "path": "C:\\p" })), None);
+        assert_eq!(check("unity_editor", json!({})), Some("bad_arguments"));
         assert_eq!(check("orbiters_environment", json!({})), None);
         assert_eq!(check("orbiters_environment", json!({ "action": "erase" })), Some("bad_arguments"));
         // A schema-valued additionalProperties checks every further key, recursively; anyOf takes either form.
@@ -3212,6 +3246,34 @@ mod tests {
         assert!(schema_refusal("t", &either, &json!({ "v": 3 })).is_none());
         assert!(schema_refusal("t", &either, &json!({ "v": -3 })).is_some());
         assert!(schema_refusal("t", &either, &json!({ "v": true })).is_some());
+    }
+
+    /// Fifth verification, finding 13: what one action of a tool needs is refused before anything is done for the call.
+    #[test]
+    fn what_an_action_needs_is_refused_before_anything_is_done() {
+        let refused = |name: &str, args: Value| assert_eq!(action_refusal(name, &args).map(|f| f.code), Some("bad_arguments"), "{name} {args}");
+        let fits = |name: &str, args: Value| assert_eq!(action_refusal(name, &args).map(|f| f.code), None, "{name} {args}");
+        for args in [json!({ "action": "click" }), json!({ "action": "move" }), json!({ "action": "click", "x": 3 }), json!({ "action": "move", "y": 3 }), json!({ "action": "look" }), json!({ "action": "look", "x": 1, "y": 1 }), json!({ "action": "look", "dx": 0, "dy": 0 })] {
+            refused("mouse", args);
+        }
+        for args in [json!({ "action": "click", "x": 0, "y": 0 }), json!({ "action": "move", "x": 3, "y": 4 }), json!({ "action": "look", "dx": -5 }), json!({ "action": "look", "dy": 5 })] {
+            fits("mouse", args);
+        }
+        for action in ["install", "remove", "update"] {
+            refused("unity_change_packages", json!({ "path": "p", "action": action }));
+            fits("unity_change_packages", json!({ "path": "p", "action": action, "package": "com.x" }));
+        }
+        for action in ["restore", "update_all", "solve", "apply_plan"] {
+            fits("unity_change_packages", json!({ "path": "p", "action": action }));
+        }
+        refused("unity_repositories", json!({ "action": "add" }));
+        fits("unity_repositories", json!({ "action": "add", "url": "https://x/index.json" }));
+        for action in ["remove", "enable", "disable"] {
+            refused("unity_repositories", json!({ "action": action }));
+            fits("unity_repositories", json!({ "action": action, "id": "x" }));
+        }
+        fits("unity_repositories", json!({}));
+        fits("close_vrchat", json!({}));
     }
 
     /// Writes Windows' tool list to `$ORBITERS_TOOLS_OUT` (to check other computers' test calls against it).

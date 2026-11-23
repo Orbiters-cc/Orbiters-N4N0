@@ -499,6 +499,7 @@ impl Controller {
         let ended = c.ended_user().cloned();
         drop(c);
         self.update_if(|s| {
+            let owner = owner_key_of(&s.account.state, s.account.development);
             let st = &mut s.vrchat_login;
             let before = st.clone();
             if granted {
@@ -514,6 +515,8 @@ impl Controller {
                             if st.user.is_none() {
                                 signed_bell.ring();
                             }
+                            // Verified under this Orbiters account's grant: its name and picture are this account's to see.
+                            self.vrchat_login.lock().unwrap().shown_for = owner.clone();
                             st.user = Some(u);
                             st.known = None;
                             st.restoring = false;
@@ -664,6 +667,7 @@ impl Controller {
             return;
         }
         self.update(|s| {
+            let owner = owner_key(s);
             let mut rt = self.vrchat_login.lock().unwrap();
             if rt.generation != generation || rt.identity.as_ref() != Some(identity) || !rt.gate.allowed() {
                 // Not shown here: the next look says what the session is (it was handed to the new grant).
@@ -682,6 +686,7 @@ impl Controller {
             }
             match result {
                 Ok(Some(Login::SignedIn(u))) => {
+                    rt.shown_for = owner;
                     status.restoring = false;
                     status.user = Some(u);
                     status.known = None;
@@ -738,9 +743,7 @@ pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) 
     // environment, or none, sees a plain "Connecting" (verify-r21 Major 2), at every publish whatever path got here.
     let owner = owner_key(s);
     let st = &mut s.vrchat_login;
-    if st.user.is_some() {
-        rt.shown_for = owner;
-    } else if (st.known.is_some() || st.picture.is_some()) && (owner.is_none() || rt.shown_for != owner) {
+    if st.user.is_none() && (st.known.is_some() || st.picture.is_some()) && (owner.is_none() || rt.shown_for != owner) {
         st.known = None;
         st.picture = None;
     }
@@ -749,13 +752,17 @@ pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) 
 /// The Orbiters account and environment a VRChat name and picture may be shown to: a digest of the environment and the
 /// account's name (no credential), `None` while no account is known (being read, signed out, refused).
 pub(super) fn owner_key(s: &crate::state::Snapshot) -> Option<String> {
+    owner_key_of(&s.account.state, s.account.development)
+}
+
+fn owner_key_of(state: &AccountState, development: bool) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let name = match &s.account.state {
+    let name = match state {
         AccountState::SignedIn { username } => Some(username.as_str()),
         AccountState::Checking { username } | AccountState::Offline { username } => username.as_deref(),
         _ => None,
     }?;
-    let env = if s.account.development { "development" } else { "production" };
+    let env = if development { "development" } else { "production" };
     let digest = Sha256::digest(format!("{env}\n{name}").as_bytes());
     Some(digest.iter().take(16).map(|b| format!("{b:02x}")).collect())
 }

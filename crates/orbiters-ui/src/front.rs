@@ -75,7 +75,7 @@ mod tests {
 
     fn frame(ctx: &Context, ui: impl FnMut(&mut egui::Ui)) {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))), ..Default::default() };
-        let _ = ctx.run_ui(input, ui);
+        ctx.run_ui(input, ui).textures_delta.clear();
     }
 
     #[test]

@@ -1564,7 +1564,9 @@ impl N4n0 {
         match name {
             params::TALK => {
                 let down = value.truthy();
-                self.queue(move |n| n.talk(down, Source::Menu, None));
+                // Stamped as it is pressed: what waits in the queue before it may bring another question.
+                let stamp = down.then(|| self.own_stamp(Surface::Avatar));
+                self.queue(move |n| n.talk(down, Source::Menu, stamp));
             }
             params::TOUCH => {
                 if value.truthy() {
@@ -1925,13 +1927,14 @@ impl N4n0 {
     /// The avatar menu's Talk button (or the window's, or the overlay's), pressed or let go. Letting go ends the
     /// sentence: the worker transcribes it and answers that listen by its number ([`N4n0::heard`]). A press of the window's
     /// or the overlay's is an input of the person like a typed one: `stamp` is what its surface saw then, checked now, and
-    /// what is heard is taken as of it. The avatar menu's (`None`) is stamped here: its press arrives as it is made.
+    /// what is heard is taken as of it. The avatar menu's is stamped as VRChat says it (`None`: here, as it is made).
     pub(crate) fn talk(self: &Shared, down: bool, source: Source, stamp: Option<Stamp>) {
         let _lifecycle = self.voice_lifecycle.lock();
         let mut pressed = None;
         if down {
             if source == Source::Menu {
-                pressed = Some(self.own_stamp(Surface::Avatar));
+                let Some((_fence, stamp)) = self.still(stamp.unwrap_or_else(|| self.own_stamp(Surface::Avatar))) else { return };
+                pressed = Some(stamp);
             } else {
                 // A repeat of the press held now is the same press.
                 if self.n4n0.lock().unwrap().listening.is_some_and(|(s, _)| s == source) {
@@ -2868,6 +2871,7 @@ impl Fence<'_> {
     /// Sends the last failed message again (turn `id`'s): a Retry press ([`Command::RetryTurn`]), or once by itself when
     /// its wait is over (`automatic`). One send per press: the record goes when it is taken. A press too early does nothing.
     pub(crate) fn retry_turn(&self, id: u64, automatic: bool) {
+        let _lifecycle = self.voice_lifecycle.lock();
         let _lifecycle = self.voice_lifecycle.lock();
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) || self.n4n0.lock().unwrap().stop {
             return;

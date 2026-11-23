@@ -3005,7 +3005,7 @@ fn lay_out(gpu: Option<&mut Offscreen>, ctx: &egui::Context, input: RawInput, ui
     match gpu {
         Some(gpu) => gpu.frame(ctx, input, ui, capture),
         None => {
-            let _ = ctx.run_ui(input, ui);
+            ctx.run_ui(input, ui).textures_delta.clear();
             Ok(None)
         }
     }
@@ -4201,7 +4201,7 @@ mod dashboard_tests {
     fn every_layer_over_the_page_says_it_is_shown() {
         let out = std::env::temp_dir().join(format!("orbiters-layers-{}", std::process::id()));
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", "screenshot::tests::the_layers_walk", "--ignored", "--nocapture"]).env("ORBITERS_LAYERS_OUT", &out).env("RUST_MIN_STACK", (32 << 20).to_string());
+        child.args(["--exact", "screenshot::dashboard_tests::the_layers_walk", "--ignored", "--nocapture"]).env("ORBITERS_LAYERS_OUT", &out).env("RUST_MIN_STACK", (32 << 20).to_string());
         for name in ["ORBITERS_HARNESS_FIXTURES", "ORBITERS_SCREENSHOT_SCROLL", "ORBITERS_SCREENSHOT_PICTURE_FOLDERS", "ORBITERS_SCREENSHOT_KEEP_SANDBOX"] {
             child.env_remove(name);
         }

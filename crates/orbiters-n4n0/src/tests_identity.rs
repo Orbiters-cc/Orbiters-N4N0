@@ -15,6 +15,8 @@ fn ready() -> (Arc<TestHost>, Shared, Device) {
     t.scene(|s| s.vrchat = true);
     *device.ears.allowed.lock().unwrap() = true;
     n.n4n0.lock().unwrap().voice.installed = true;
+    // As a start does: the windows are shown the identity's epoch.
+    n.publish();
     (t, n, device)
 }
 

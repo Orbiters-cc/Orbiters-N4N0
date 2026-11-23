@@ -909,3 +909,22 @@ fn the_blur_gives_its_gpu_objects_back_when_the_chat_has_closed() {
         assert_eq!(orbiters_ui::backdrop::count(&textures), 0, "nothing held once closed");
     }
 }
+
+/// Verify2 B1 (typed): "yes" typed and Enter pressed in the same moment while question 7 shows; question 8 arrives
+/// before the next frame. What was sent is bound to the moment of the Enter: question 7, never 8.
+#[test]
+fn a_typed_reply_is_bound_to_the_question_shown_at_its_enter() {
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, "N4N0 will do this if you say yes: Boop \"Sam\".")];
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let enter = |pressed: bool| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    w.frame(vec![Event::Text("yes".into()), enter(true), enter(false)]);
+    w.backend.set(|s| s.n4n0.confirmations = vec![local_question(8, "N4N0 will do this if you say yes: Boop \"Mira\".")]);
+    w.frame(Vec::new());
+    w.frame(Vec::new());
+    let sent: Vec<Option<u64>> = w.backend.sent().iter().filter_map(|c| match c { N4n0Command::Ask { question, .. } => Some(*question), _ => None }).collect(); // BEFORE
+    assert_eq!(sent, vec![Some(7)], "{:?}", w.backend.sent());
+}

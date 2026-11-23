@@ -589,6 +589,66 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
 
+    // --- Verify2-r21 M1: N4N0's conversation belongs to the Orbiters member (environment and member id), not to the
+    // credential. ---
+
+    fn member(token: &str, user: &str) -> Account {
+        Account { token: token.into(), user: Some(user.into()), username: Some(format!("member {user}")), avatar_url: None, features: None }
+    }
+
+    /// The saved account read again (another tool signed in or out, the environment switched), Orbiters' check answering
+    /// `checked` (`None`: offline).
+    fn reread(ctl: &Shared, server: Server, saved: Option<Account>, checked: Option<Account>) {
+        ctl.read_account_with(server, None, false, move || Ok(saved), move |_| match checked {
+            Some(account) => Ok(Check::Valid(account)),
+            None => Err(anyhow::anyhow!("offline in tests")),
+        });
+    }
+
+    /// Something said to N4N0 that it does by itself (no server): a line of the conversation.
+    fn say(ctl: &Shared) {
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), question: None }); // BEFORE
+    }
+
+    fn lines(ctl: &Shared) -> usize {
+        ctl.snapshot.lock().unwrap().n4n0.lines.len()
+    }
+
+    /// Every transition the controller has, and whether N4N0's conversation goes with it.
+    #[test]
+    fn the_conversation_belongs_to_the_member_not_the_credential() {
+        type Step = fn(&Shared);
+        let prod = Server::Production;
+        let rows: Vec<(&str, Step, Step, bool)> = vec![
+            ("anonymous, then the first sign-in (the saved account read)", |_| {}, |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), true),
+            ("a token refreshed for the same member", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, Some(member("orbit-a2", "1")), None), false),
+            ("the same credential read again", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), false),
+            ("Checking, then Signed in as the same member", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, Some(member("orbit-a", "1")), Some(member("orbit-a", "1"))), false),
+            ("another member", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, Some(member("orbit-b", "2")), None), true),
+            ("the environment switched (the same id on another server)", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Development, Some(member("orbit-d", "1")), None), true),
+            ("another tool signed out (the file gone)", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| reread(c, Server::Production, None, None), true),
+            ("signed out here", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| c.sign_out_with(Server::Production, || Ok(())).unwrap(), true),
+            ("the file unreadable for a moment", |c| reread(c, Server::Production, Some(member("orbit-a", "1")), None), |c| c.read_account_with(Server::Production, None, false, || Err(anyhow::anyhow!("being written")), |_| Err(anyhow::anyhow!("offline"))), false),
+            ("anonymous, the environment switched with nobody saved", |_| {}, |c| reread(c, Server::Development, None, None), false),
+        ];
+        let _ = prod;
+        let mut wrong = Vec::new();
+        for (name, before, change, clears) in rows {
+            let ctl = Controller::new(Settings::default());
+            before(&ctl);
+            say(&ctl);
+            let said = lines(&ctl);
+            assert!(said > 0, "{name}: something was said");
+            change(&ctl);
+            let after = lines(&ctl);
+            if clears != (after == 0) {
+                wrong.push(format!("{name}: {said} lines before, {after} after (expected {})", if clears { "none" } else { "kept" }));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("
+"));
+    }
+
     /// A refused credential is asked about again, later each time, never more often than every ten minutes.
     #[test]
     fn a_refused_credential_is_asked_about_again_later_each_time() {

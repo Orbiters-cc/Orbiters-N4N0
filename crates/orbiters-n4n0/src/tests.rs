@@ -3688,6 +3688,9 @@ fn the_assistant_turned_off_in_settings_stops_an_answer_too() {
 /// The assistant's intents in the runtime (REQUEST20 6): their own file, as test data.
 #[path = "tests_assistant.rs"]
 mod assistant;
+
+#[path = "tests_identity.rs"]
+mod identity;
 /// A stand-in Orbiters for Invite me: answers every request with `status` and `body`, and counts them.
 fn orbiters_invites(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -156,7 +156,7 @@ pub struct Evidence {
 
 /// An id as kept among those there before: enough to know it again, not to say it.
 pub fn known_id(id: &str) -> String {
-    orbiters_core::groups::digest(&["there before", id])[..24].to_string()
+    orbiters_core::groups::digest(&["before", id])[..24].to_string() // i18n: not shown (a record's words)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

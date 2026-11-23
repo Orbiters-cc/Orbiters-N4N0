@@ -494,8 +494,8 @@ fn new_posts_being_written_come_back() {
     assert!(offered(&mut next, &|c| c.id = uuid::Uuid::new_v4().to_string()), "a later announcement with the same words is another");
     assert!(offered(&mut next, &|c| c.draft.text = "written, and more".into()), "what was written since stays");
     assert!(!offered(&mut next, &|_| {}), "it is on VRChat");
-    let left = newest(G);
-    assert!(left.as_ref().is_none_or(|d| d.0 != "Half"), "and off the disk: {left:?}");
+    assert!(!art::drafts_dir(&scope).unwrap().join(format!("{}.json", c.id)).exists(), "and off the disk");
+    assert_eq!(newest(G).map(|d| d.0).as_deref(), Some("Half"), "the later one with the same words is still there");
     let _ = std::fs::remove_dir_all(art::drafts_dir(&scope).unwrap());
 }
 

@@ -642,7 +642,7 @@ pub(crate) fn sample_instances() -> Vec<InstanceRow> {
         ("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:1", "VRChat Home", 12 * 86400),
     ]
     .into_iter()
-    .map(|(location, world, ago)| InstanceRow { location: location.into(), world: world.into(), at: now - ago })
+    .map(|(location, world, ago)| InstanceRow { location: location.into(), world: world.into(), at: now - ago, account: None })
     .collect()
 }
 

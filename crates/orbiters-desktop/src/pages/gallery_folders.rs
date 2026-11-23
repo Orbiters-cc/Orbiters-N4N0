@@ -445,7 +445,7 @@ mod tests {
         }
         let (history_file, records_file) = (root.join("visited-worlds.json"), root.join("capture-uploads.json"));
         let mut history = History::default();
-        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "1~private".into(), at: 100 });
+        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "1~private".into(), at: 100, account: None });
         history.save(&history_file).unwrap();
 
         let mut h = Harness::new();
@@ -516,7 +516,7 @@ mod tests {
         rest(&mut h);
 
         // It learns of another instance joined (pictures are filed by instance): another revision, and a frame.
-        history.instances.push(InstanceVisit { world_id: "wrld_b".into(), instance: "2~friends".into(), at: 200 });
+        history.instances.push(InstanceVisit { world_id: "wrld_b".into(), instance: "2~friends".into(), at: 200, account: None });
         history.save(&history_file).unwrap();
         h.state.look_now();
         woken(&h, "a frame for the new visit");

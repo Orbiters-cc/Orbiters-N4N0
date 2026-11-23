@@ -24,5 +24,9 @@
   "{name} · new {kind} instance": "{name} · nueva instancia {kind}",
   "Last visited": "Última visita",
   "Often visited": "Visitado a menudo",
-  "New · {kind}": "Nueva · {kind}"
+  "New · {kind}": "Nueva · {kind}",
+  "VRChat's log cannot be read": "No se puede leer el registro de VRChat",
+  "Private places need VRChat's log, not found: turn on Logging in VRChat's settings.": "Los lugares privados necesitan el registro de VRChat, que falta: activa Logging en VRChat.",
+  "Private places need VRChat's log: allow Orbiters - N4N0 to read {path}": "Los lugares privados necesitan el registro de VRChat: permite que Orbiters - N4N0 lea {path}",
+  "Private places need VRChat's log, which is off: turn on Logging in VRChat's settings.": "Los lugares privados necesitan el registro de VRChat, desactivado: activa Logging en VRChat."
 }

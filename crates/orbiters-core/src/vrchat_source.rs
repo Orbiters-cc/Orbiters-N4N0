@@ -173,6 +173,10 @@ impl Source {
     pub fn instance_alive(&self, world: &str, instance: &str) -> anyhow::Result<Option<bool>> {
         self.direct(|c| c.instance_alive(world, instance)).unwrap_or(Ok(None))
     }
+    /// [`Self::instance_alive`] as VRChat said it `at_most` ago, and how long ago that was.
+    pub fn instance_seen(&self, world: &str, instance: &str, at_most: std::time::Duration) -> anyhow::Result<(Option<bool>, std::time::Duration)> {
+        self.direct(|c| c.instance_seen(world, instance, at_most)).unwrap_or(Ok((None, std::time::Duration::ZERO)))
+    }
     pub fn current_user(&self) -> anyhow::Result<Option<User>> {
         self.direct(Client::current_user).transpose()
     }

@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 const EVERY: Duration = Duration::from_millis(500);
+/// The same while a game runs on this very Mac.
+const EVERY_IN_GAME: Duration = Duration::from_secs(2);
 /// Sends nothing and answers nothing for this long: no longer connected.
 const QUIET_NS: u64 = 60_000_000_000;
 /// Keeps the service's own browsing from binding to one VRChat while several are there and none is chosen.
@@ -79,14 +81,15 @@ impl super::Controller {
             let mut browser: Option<LanBrowser> = None;
             let mut running: Option<Running> = None;
             loop {
-                {
+                let wait = {
                     let Some(ctl) = ctl.upgrade() else { return };
                     if ctl.quitting.load(Ordering::Relaxed) {
                         return;
                     }
                     ctl.keep_lan(&mut browser, &mut running);
-                }
-                std::thread::sleep(EVERY);
+                    if ctl.game_on_this_mac() { EVERY_IN_GAME } else { EVERY }
+                };
+                std::thread::sleep(wait);
             }
         });
     }

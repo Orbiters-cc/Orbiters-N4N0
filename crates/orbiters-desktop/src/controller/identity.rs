@@ -318,7 +318,7 @@ mod tests {
             if !name.ends_with(".rs") || name.contains("test") || name.starts_with("bridge_") || name.starts_with("launcher") || name == "identity.rs" || name == "vrchat_data.rs" {
                 continue;
             }
-            // (Whatever the line endings of the checkout.)
+            // (As Git wrote it here: LF or CRLF.)
             let source = std::fs::read_to_string(entry.path()).unwrap().replace("\r\n", "\n");
             let source = source.split("\n#[cfg(test)]\nmod ").next().unwrap();
             for what in ["account_api()", "account::read(", "account::read_saved(", "vrchat_signed_client()"] {

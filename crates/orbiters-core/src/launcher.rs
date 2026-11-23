@@ -300,6 +300,10 @@ pub struct GameProfile {
     pub profile: u32,
     /// The account last seen signed in on it (its VRChat log said so), when known.
     pub account: Option<String>,
+    /// That account's VRChat user id, when its own log said it (and has not said since that nobody is signed in): whose private
+    /// places the profile may be started into ([`crate::vrchat_launch::handing`]).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// A VRChat runs on it now, in this mode.
     pub running: Option<LaunchMode>,
     /// Started from here a moment ago and not yet seen running.
@@ -429,8 +433,12 @@ pub enum Action {
     ListPictures(PictureKind),
     /// Read the account's own profile (bio, icon, banner) for Home's card.
     ReadMine,
+    /// Send the VRChat that runs or starts here to `destination`; none is ever started for it.
+    JoinRunning { mode: LaunchMode, destination: Place },
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
+    /// Accept an invite into the VRChat that runs or starts here; none is ever started for it.
+    AcceptInviteRunning { invite: String, mode: LaunchMode },
     /// [`Action::AcceptInvite`] starting VRChat on `profile` (Home's Where, REQUEST20 2): the same one accept per invite,
     /// the same card going and coming back, the same hide at VRChat once there.
     AcceptInviteOn { invite: String, mode: LaunchMode, profile: u32 },
@@ -441,8 +449,8 @@ pub enum Action {
     Boop { to: String, emoji: Option<String> },
     /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
-    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play.
-    InstallEngine,
+    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play it on `profile`.
+    InstallEngine { profile: u32 },
     /// On a Mac: move the engine's damaged start record `file` ([`StartTrouble`]) out of its records, kept aside.
     SetAsideRecord { file: String },
     /// On a Mac: the VRChat of Game session `session`, which Home showed as having lost its picture for good
@@ -478,10 +486,24 @@ pub enum Notice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SentKind { Boop, RequestInvite, Launch, Join }
 
+/// Whom what VRChat said of an account was verified for: the Orbiters identity's epoch, the member (a digest of the
+/// environment and their id, when known) and the VRChat account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VerifiedFor {
+    pub epoch: u64,
+    #[serde(default)]
+    pub member: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
 /// What the Home page reads.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LauncherState {
     pub source: Source,
+    /// Whom a signed-in account's list was verified for; none for this computer's own copy (verify3-r21 B6).
+    #[serde(default)]
+    pub verified_for: Option<VerifiedFor>,
     pub possible: Possible,
     /// The account itself (top of the list), when known.
     pub me: Option<Friend>,
@@ -668,7 +690,12 @@ pub fn sample() -> LauncherState {
         loading: false,
     };
     LauncherState {
+        verified_for: None,
         source: Source::SignedIn { user_id: me.id.clone(), name: me.name.clone() },
+        profiles: vec![
+            GameProfile { profile: 0, account: Some("Sample Me".into()), account_id: Some(me.id.clone()), ..GameProfile::default() },
+            GameProfile { profile: 1, account: Some("Sample Alt".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000a1".into()), ..GameProfile::default() },
+        ],
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },
         me: Some(me),
         friends,
@@ -681,10 +708,6 @@ pub fn sample() -> LauncherState {
         notice: None,
         loading: false,
         unresolved: 0,
-        profiles: vec![
-            GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
-            GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
-        ],
         engine_setup: None,
         picture_lost: None,
         engine_trouble: None,

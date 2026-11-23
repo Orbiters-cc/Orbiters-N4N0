@@ -64,11 +64,13 @@ tray-icon = "0.26"
 libc = "0.2"
 # eframe's: the window process's activation policy (window.rs).
 winit = { version = "0.30", default-features = false }
+# eframe's: the window itself, to ask macOS of it (mac_cover.rs).
+raw-window-handle = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSObject", "NSProcessInfo", "NSRunLoop", "NSDate"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSRunningApplication", "NSResponder", "NSEvent", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep",
-    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "objc2-core-foundation",
+    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "objc2-core-foundation",
 ] }
 objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 

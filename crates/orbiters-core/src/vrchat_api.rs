@@ -712,14 +712,31 @@ fn marker_of(path: &std::path::Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// How a sign-out went: forgotten here in any case (the session is never used again); what could not be done is said.
+/// How a sign-out went: forgotten in memory in any case; what could not be done is said.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignedOut {
-    /// The session file and its copy are gone from this computer. `false`: one could not be removed (locked, denied); it
-    /// is marked as over, and removing it is tried again at the next start.
-    pub removed: bool,
-    /// Whether VRChat was told (or had nothing to be told). Not told, the session can stay valid on its side.
-    pub told: Result<()>,
+    pub removed: Removed,
+    pub told: Told,
+}
+
+/// What of the session file and its copy is left on this computer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removed {
+    All,
+    /// One could not be removed (locked, denied): it is over all the same (marked, or emptied), and removing it is tried
+    /// again at the next start.
+    Over,
+    /// Nor could it be marked or emptied: the next start may find it and use it.
+    NotSuppressed,
+}
+
+/// Whether VRChat was told of a sign-out. Not told, the session can stay valid on its side.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Told {
+    Yes,
+    /// There was no session left here to tell it of (which says nothing of what it was told before).
+    Nothing,
+    Failed(Error),
 }
 
 /// Sealed bytes as cookies: `None` when they are not this Windows user's session (damaged, another user's, empty).
@@ -732,26 +749,38 @@ fn unseal(bytes: &[u8]) -> Option<Cookies> {
     (!cookies.auth.is_empty()).then_some(cookies)
 }
 
-/// Removes the session file at `path` and its copy; whether both are gone. While one is left, a marker beside it says the
-/// session is over: it is never restored, whenever the rest can be removed.
-fn remove_session(path: &std::path::Path) -> bool {
+/// Removes the session file at `path` and its copy. While one is left, a marker beside it says the session is over: it is
+/// never restored, whenever the rest can be removed; where no marker can be put, what is left is emptied.
+fn remove_session(path: &std::path::Path) -> Removed {
     let marker = marker_of(path);
     let gone = |file: &std::path::Path| match std::fs::remove_file(file) {
         Ok(()) => true,
-        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound || (!file.exists() && std::fs::symlink_metadata(file).is_err()),
     };
     if !marker.exists() && path.exists() {
         // Before anything is removed: a stop half-way leaves nothing that could be restored.
         let _ = std::fs::write(&marker, b"");
     }
     let (main, copy) = (gone(path), gone(&backup_of(path)));
-    let all = main && copy;
-    if all {
+    if main && copy {
         let _ = std::fs::remove_file(&marker);
-    } else if !marker.exists() {
-        let _ = std::fs::write(&marker, b"");
+        return Removed::All;
     }
-    all
+    if !marker.exists() && std::fs::write(&marker, b"").is_err() {
+        // No marker: the session file alone can be restored (its copy never is), and an empty one is none.
+        let emptied = main || std::fs::OpenOptions::new().write(true).open(path).and_then(|f| f.set_len(0)).is_ok();
+        if !emptied {
+            return Removed::NotSuppressed;
+        }
+        // Nor may an empty one be mended from its copy.
+        if !main && !copy {
+            let emptied = std::fs::OpenOptions::new().write(true).open(backup_of(path)).and_then(|f| f.set_len(0)).is_ok();
+            if !emptied {
+                return Removed::NotSuppressed;
+            }
+        }
+    }
+    Removed::Over
 }
 
 /// Removes what a write killed half-way left beside the session (`<file>.<pid>-<n>.tmp`), once a minute old: sealed
@@ -947,17 +976,17 @@ impl Client {
         }
         self.clear();
     }
-    /// The person's sign-out: memory, the session file and its copy. Whether both are gone from this computer.
-    fn forget(&mut self) -> bool {
+    /// The person's sign-out: memory, the session file and its copy. What is left of them on this computer.
+    fn forget(&mut self) -> Removed {
         self.clear();
         self.ended = None;
-        self.store.as_deref().is_none_or(remove_session)
+        self.store.as_deref().map_or(Removed::All, remove_session)
     }
     /// At the start: what a sign-out could not remove of the session is tried again (and a copy left without its session
     /// file, which is never one, goes). Whether nothing of a session signed out is left.
     pub fn clean_signed_out(&self) -> bool {
         let Some(path) = &self.store else { return true };
-        if marker_of(path).exists() || (!path.exists() && backup_of(path).exists()) { remove_session(path) } else { true }
+        if marker_of(path).exists() || (!path.exists() && backup_of(path).exists()) { remove_session(path) == Removed::All } else { true }
     }
     /// The client of a new grant (another Orbiters identity or environment, or Orbiters' yes asked again) with this one's
     /// session: cookies, who is signed in, what was read with it, its transport and saved file. This one keeps nothing
@@ -1256,19 +1285,16 @@ impl Client {
         let removed = self.forget();
         Ok(SignedOut { removed, told: self.tell_signed_out(cookie) })
     }
-    fn tell_signed_out(&mut self, cookie: String) -> Result<()> {
+    fn tell_signed_out(&mut self, cookie: String) -> Told {
         if cookie.is_empty() {
-            return Ok(());
+            return Told::Nothing;
         }
-        self.pace("auth")?;
-        let r = self.transport.send(Request { method: "PUT", url: format!("{BASE}/logout"), cookie, basic: None, body: None, upload: None, form: None })?;
-        if r.status == 429 {
-            return Err(self.back_off(&r));
-        }
-        if (200..300).contains(&r.status) || r.status == 401 {
-            Ok(())
-        } else {
-            Err(Error::Unavailable)
+        let asked = self.pace("auth").and_then(|()| self.transport.send(Request { method: "PUT", url: format!("{BASE}/logout"), cookie, basic: None, body: None, upload: None, form: None }));
+        match asked {
+            Err(e) => Told::Failed(e),
+            Ok(r) if r.status == 429 => Told::Failed(self.back_off(&r)),
+            Ok(r) if (200..300).contains(&r.status) || r.status == 401 => Told::Yes,
+            Ok(_) => Told::Failed(Error::Unavailable),
         }
     }
     pub fn avatar(&mut self, id: &str) -> Result<Avatar> {
@@ -1375,11 +1401,18 @@ impl Client {
     /// `Some(false)` when VRChat no longer knows it (404 "Instance not found", or the `null` it answers an unknown
     /// instance with) or reports it closed, `None` when access is denied: a hidden instance cannot be declared dead.
     pub fn instance_alive(&mut self, world: &str, instance: &str) -> Result<Option<bool>> {
+        self.instance_seen(world, instance, Duration::from_secs(60)).map(|(alive, _)| alive)
+    }
+    /// [`Self::instance_alive`] as VRChat said it `at_most` ago (an answer is kept a minute), and how long ago that was
+    /// (verify3-r21 M2: what is built on it counts from then, not from now).
+    pub fn instance_seen(&mut self, world: &str, instance: &str, at_most: Duration) -> Result<(Option<bool>, Duration)> {
         self.authenticated()?;
         let key = (world.to_owned(), instance.to_owned());
-        if let Some((_, alive)) = self.instances.get(&key).filter(|(at, _)| at.elapsed() < Duration::from_secs(60)) {
-            return Ok(*alive);
+        if let Some((at, alive)) = self.instances.get(&key).filter(|(at, _)| at.elapsed() < at_most.min(Duration::from_secs(60))) {
+            return Ok((*alive, at.elapsed()));
         }
+        // The answer is as old as its asking, at most.
+        let asked = Instant::now();
         // The location goes as VRChat writes it: percent-encoded, the `( )` of its parts are refused (400).
         let url = format!("{BASE}/instances/{}:{}", path_segment(world), path_segment(instance));
         let alive = match self.request_accepting("instances", "GET", url, None, None, &[404]) {
@@ -1392,8 +1425,8 @@ impl Client {
         if self.instances.len() >= 256 {
             self.instances.clear();
         }
-        self.instances.insert(key, (Instant::now(), alive));
-        Ok(alive)
+        self.instances.insert(key, (asked, alive));
+        Ok((alive, asked.elapsed()))
     }
     /// A page of a world list ([`world_list_path`]) and whether another follows, read as VRChat's `LimitedWorld`s. Kept
     /// five minutes (the favorites one): typing a search again, or paging back, asks nothing.
@@ -2220,7 +2253,7 @@ pub(crate) mod tests {
         assert!(calls[1].url.ends_with("offset=24"));
         drop(calls);
         // Signing out forgets them.
-        assert!(c.forget());
+        assert_eq!(c.forget(), Removed::All);
         assert_eq!(c.find_worlds(&WorldList::Popular, 0), Err(Error::Unauthorized));
     }
     #[test]
@@ -2590,7 +2623,7 @@ pub(crate) mod tests {
         assert_eq!(seen.lock().unwrap()[0].cookie, "auth=rotated");
         assert!(seen.lock().unwrap()[0].basic.is_none());
         assert!(backup_of(&path).exists(), "the last good copy beside it");
-        assert_eq!(c.sign_out(), Ok(SignedOut { removed: true, told: Err(Error::Unavailable) }));
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: Removed::All, told: Told::Failed(Error::Unavailable) }));
         assert!(!path.exists() && !backup_of(&path).exists(), "the person's sign-out removes the session and its copy");
         assert!(!c.signed_in() && c.cookies.header().is_empty());
     }
@@ -2771,7 +2804,7 @@ pub(crate) mod tests {
         std::fs::write(&path, b"made-up").unwrap();
         // A directory of that name: no system deletes it as a file.
         std::fs::create_dir_all(backup_of(&path)).unwrap();
-        assert_eq!(c.sign_out(), Ok(SignedOut { removed: false, told: Ok(()) }));
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: Removed::Over, told: Told::Yes }));
         assert!(!path.exists(), "the session file is gone");
         assert!(c.cookies.header().is_empty() && !c.signed_in(), "gone from memory");
         assert!(seen.lock().unwrap().iter().any(|r| r.url.ends_with("/logout")), "VRChat was told");
@@ -2797,7 +2830,7 @@ pub(crate) mod tests {
         assert!(c.session_saved());
         // Read by another program that lets nobody delete it (FILE_SHARE_READ | FILE_SHARE_WRITE).
         let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
-        assert_eq!(c.sign_out(), Ok(SignedOut { removed: false, told: Ok(()) }));
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: Removed::Over, told: Told::Yes }));
         assert_eq!(seen.lock().unwrap().len(), 1, "VRChat was told");
         assert!(path.exists() && !c.session_saved(), "left, and over");
         let restored = |path: &std::path::Path| {
@@ -2813,13 +2846,61 @@ pub(crate) mod tests {
         // Left again, then a new sign-in: that one is restored.
         c.save().unwrap();
         let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
-        assert!(!c.forget());
+        assert_eq!(c.forget(), Removed::Over);
         drop(held);
         c.cookies.auth = "new-session".into();
         c.save().unwrap();
         assert!(c.session_saved());
         assert_eq!(restored(&path), Ok(true));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// verify3-r21 M4: neither removed nor marked (a name too long for a marker beside it, the file held by another program):
+    /// emptied, it is over; where not even that can be done, that is what is said.
+    #[cfg(windows)]
+    #[test]
+    fn a_session_that_can_be_neither_removed_nor_marked_is_emptied_or_said() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = session_dir("unmarked");
+        let path = dir.join("s".repeat(252));
+        for (share, expected) in [(1 | 2, Removed::Over), (1, Removed::NotSuppressed)] {
+            let (mut c, _) = mock(vec![response(200, "", &[])]);
+            c.store = Some(path.clone());
+            let sealed = crate::dpapi::crypt(&serde_json::to_vec(&c.cookies).unwrap(), ENTROPY, true).unwrap();
+            std::fs::write(&path, &sealed).unwrap();
+            assert!(std::fs::write(marker_of(&path), b"").is_err(), "no marker can be put");
+            let held = std::fs::OpenOptions::new().read(true).share_mode(share).open(&path).unwrap();
+            let out = c.sign_out().unwrap();
+            assert_eq!((out.removed, out.told), (expected, Told::Yes), "share {share}");
+            let (mut fresh, _) = mock(vec![]);
+            fresh.cookies = Cookies::default();
+            fresh.store = Some(path.clone());
+            let restored = fresh.restore();
+            assert_eq!(restored == Ok(true), expected == Removed::NotSuppressed, "share {share}: {restored:?}");
+            drop(held);
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// verify3-r21 M2: an answer about an instance says how old it is, kept or not.
+    #[test]
+    fn an_instances_answer_says_when_vrchat_gave_it() {
+        let (mut c, seen) = mock(vec![response(200, r#"{"closedAt":null}"#, &[]), response(200, r#"{"closedAt":null}"#, &[])]);
+        let first = c.instance_seen("wrld_00000000-0000-4000-8000-000000000001", "1~region(eu)", Duration::from_secs(60)).unwrap();
+        assert!(first.1 < Duration::from_secs(5), "{first:?}");
+        std::thread::sleep(Duration::from_millis(120));
+        let again = c.instance_seen("wrld_00000000-0000-4000-8000-000000000001", "1~region(eu)", Duration::from_secs(60)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1, "kept");
+        assert_eq!(again.0, first.0);
+        assert!(again.1 >= first.1 + Duration::from_millis(100), "{first:?} {again:?}");
+        // As one kept for a while says.
+        if let Some((at, _)) = c.instances.values_mut().next() {
+            *at = at.checked_sub(Duration::from_secs(50)).unwrap();
+        }
+        let old = c.instance_seen("wrld_00000000-0000-4000-8000-000000000001", "1~region(eu)", Duration::from_secs(60)).unwrap();
+        assert!(old.1 >= Duration::from_secs(50), "{old:?}");
+        // Asked for younger than that, VRChat is asked.
+        assert!(c.instance_seen("wrld_00000000-0000-4000-8000-000000000001", "1~region(eu)", Duration::from_secs(5)).unwrap().1 < Duration::from_secs(5));
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
     /// r20: a new grant (another Orbiters identity or environment) goes on with the session in memory: nothing read again,
     /// nothing asked of VRChat, and the earlier grant's client keeps nothing.

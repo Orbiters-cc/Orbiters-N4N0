@@ -1013,6 +1013,23 @@ fn a_deletion_whose_subject_changed_is_refused() {
     assert!(writes(&sent).is_empty());
 }
 
+/// The record's entries are the scope's own Orbiters member's, by the id they were verified for: the same at another time
+/// of theirs, another's under the same name, and never of whoever is signed in by now.
+#[test]
+fn the_records_owner_is_the_scopes() {
+    let (c, _, _) = world();
+    let verified = |epoch: u64, member: &str| {
+        let v = orbiters_core::launcher::VerifiedFor { epoch, member: Some(member.into()), user: Some("usr_test".into()) };
+        c.update(|s| s.vrchat_login.verified_for = Some(v));
+        scope(&c)
+    };
+    let (a, again, b) = (verified(1, "a"), verified(2, "a"), verified(3, "b"));
+    let key = |s: &Scope| c.groups_key(s).unwrap();
+    assert_eq!((key(&a), key(&a).orbiters.as_str()), (key(&again), "a"));
+    assert_ne!(key(&a), key(&b));
+    assert!(a != again, "another time of theirs is another scope");
+}
+
 /// B3: A → Connecting → B while a write waits for its confirmation: it can no longer be sent by anyone.
 #[test]
 fn an_account_switch_drops_a_sealed_write() {

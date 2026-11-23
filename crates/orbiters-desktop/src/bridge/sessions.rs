@@ -114,6 +114,10 @@ pub struct VrchatRun {
     pub query: Option<SocketAddr>,
     /// The account signed in (id, display name).
     pub account: Option<(String, String)>,
+    /// Its log says nobody is signed in now.
+    pub signed_out: bool,
+    /// Its command line names exactly one profile (or none: the default one).
+    pub one_profile: bool,
     pub world: Option<String>,
     /// Desktop (`--no-vr`) or in VR; unknown until its log said.
     pub desktop: Option<bool>,
@@ -290,6 +294,8 @@ impl Sides {
                     osc_in: mark.osc_in,
                     query: mark.query,
                     account: None,
+                    signed_out: false,
+                    one_profile: true,
                     world: None,
                     desktop: Some(true),
                     camera: None,

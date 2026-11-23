@@ -691,11 +691,11 @@ impl Controller {
     }
 
     /// Whose the record's entries are: the environment, the Orbiters member (by the id Orbiters gives them: a name can be
-    /// changed, or used again) and the VRChat account.
+    /// changed, or used again) and the VRChat account. All of it the scope's own: never of whoever is signed in by now.
     pub(crate) fn groups_key(&self, scope: &Scope) -> Result<Key, Failure> {
         let key = Key::of(scope).ok_or(Failure::SignedOut)?;
-        Ok(match self.vrchat_owner().and_then(|o| o.member_digest().map(str::to_string)) {
-            Some(orbiters) => Key { orbiters, ..key },
+        Ok(match scope.orbiters_member() {
+            Some(orbiters) => Key { orbiters: orbiters.to_string(), ..key },
             None => key,
         })
     }

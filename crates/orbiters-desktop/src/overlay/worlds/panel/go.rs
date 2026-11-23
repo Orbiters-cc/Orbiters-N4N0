@@ -69,6 +69,7 @@ pub fn went_words(gone: &GoneTo) -> (&'static str, String) {
                 Detour::OtherVrchat => tr("Another VRChat on this computer, one of Orbiters' AI bridge, receives VRChat's links: going there directly would move it, not yours."),
                 Detour::LinkRefused => tr("Your VRChat did not take the link to go there directly."),
                 Detour::Remote => tr("Your VRChat runs on another device: Orbiters cannot take it there directly."),
+                Detour::OtherAccount => tr("This place is private, and the VRChat on this computer is not known to be signed in with your account."),
                 Detour::Asked => "",
             };
             (tr("Invite sent"), format!("{because} {invite}"))

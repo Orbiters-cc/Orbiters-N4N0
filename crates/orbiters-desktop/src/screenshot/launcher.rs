@@ -202,7 +202,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
 /// ("launcher-where"; its second page; a card chosen; a new instance's kind changed and its list open; one being
 /// made), only places visited, nothing visited yet, the history still read, signed out of VRChat, no pictures
 /// (offline), a chosen card gone, an event waiting for its invite, and a profile of another account chosen.
-pub(super) const WHERE: [&str; 15] = [
+pub(super) const WHERE: [&str; 16] = [
     "launcher-where",
     "launcher-where-page-2",
     "launcher-where-selected",
@@ -217,6 +217,7 @@ pub(super) const WHERE: [&str; 15] = [
     "launcher-where-expired",
     "launcher-where-waiting",
     "launcher-where-other-profile",
+    "launcher-where-unknown-profile",
     "launcher-small-where",
 ];
 
@@ -518,19 +519,32 @@ fn data(name: &str) -> LauncherState {
         s.engine_setup = Some(orbiters_core::launcher::EngineSetup::Game { game: true, percent: Some(62) });
     }
     // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
-    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };
+    let own = match &s.source {
+        orbiters_core::launcher::Source::SignedIn { user_id, .. } => user_id.clone(),
+        _ => String::new(),
+    };
+    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), account_id: Some(if profile == 0 { own.clone() } else { format!("usr_00000000-0000-4000-8000-0000000000a{profile}") }), running, starting, assistant: false };
+    // A Mac has the desktop game alone, one at a time: the same choice, none startable beside it.
+    let mode = if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop };
     match name {
         "launcher-running-one" => {
-            s.game = Game::Running(LaunchMode::Vr);
-            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None)];
+            s.game = Game::Running(mode);
+            s.profiles = vec![profile(0, "Sample Me", Some(mode), None)];
         }
         "launcher-profiles" | "launcher-small-profiles" | "launcher-where-other-profile" => {
-            s.game = Game::Running(LaunchMode::Vr);
-            s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
+            s.game = Game::Running(mode);
+            s.profiles = vec![profile(0, "Sample Me", Some(mode), None), profile(1, "Sample Alt", None, None), profile(2, "Sample Builder", None, None)];
         }
-        "launcher-profile-starting" => {
+        "launcher-where-unknown-profile" => {
+            s.profiles = vec![profile(0, "Sample Me", None, None), GameProfile { profile: 1, ..GameProfile::default() }];
+        }
+        "launcher-profile-starting" if orbiters_core::vrchat_launch::SEVERAL_HERE => {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, Some(LaunchMode::Desktop))];
+        }
+        "launcher-profile-starting" => {
+            s.game = Game::Starting(mode);
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", None, Some(mode))];
         }
         _ => {}
     }
@@ -827,7 +841,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0)));
         }
         "launcher-small-drawer" if f == 30 => state.open_drawer(ctx),
-        "launcher-profiles" | "launcher-small-profiles" | "launcher-profile-starting" if f == 1 => state.stand_in_profile(1),
+        "launcher-profiles" | "launcher-small-profiles" | "launcher-profile-starting" | "launcher-where-unknown-profile" if f == 1 => state.stand_in_profile(1),
         "launcher-stale" | "launcher-small-stale" if f == 10 => state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         "launcher-stale" | "launcher-small-stale" if f == 40 => state.stand_in_login(None),
         "launcher-mine-status-text" if f == 1 => state.mine.stand_in_editing(Editing::StatusText("building a new world tonight".into())),

@@ -70,6 +70,7 @@ impl Controller {
             n4n0_prop: false,
             can_drop: false,
             computer: true,
+            actions: self.assistant_actions(),
         }
     }
 

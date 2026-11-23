@@ -688,7 +688,7 @@ fn selection_bar(ui: &mut Ui, rect: Rect, bottom: f32, k: f32, selected: usize, 
         acted = Some(On::Hide);
     }
     x += hw + 8.0;
-    if delete.show_at(&mut bu, large(x, dw)).clicked() {
+    if delete.confirm_at(&mut bu, large(x, dw)) {
         acted = Some(On::Delete);
     }
     x += dw + 12.0;
@@ -1319,7 +1319,7 @@ impl Viewer {
         p.rect_filled(chip_r, theme::radius(22.0), theme::black(0.72));
         widgets::icon(p, pos2(chip_r.left() + 26.0, chip_r.center().y), icons::WARNING, 16.0, theme::WARN);
         widgets::text_truncated(p, pos2(chip_r.left() + 42.0, chip_r.center().y), Align2::LEFT_CENTER, &t, tw);
-        if b.show_at(ui, Rect::from_min_size(pos2(chip_r.right() - 8.0 - bw, chip_r.center().y - 16.0), vec2(bw, 32.0))).clicked() {
+        if b.confirm_at(ui, Rect::from_min_size(pos2(chip_r.right() - 8.0 - bw, chip_r.center().y - 16.0), vec2(bw, 32.0))) {
             if let Err(err) = e.discard() {
                 e.problem = Some(Problem::NotDiscarded(format!("{err:#}")));
             }

@@ -260,6 +260,8 @@ pub struct State {
     pub(super) here_job: Job<HashMap<String, super::world_card::Here>>,
     /// Pictures picked to add to a world (the file dialog runs on a worker): the world's ID and name, and the files.
     pub(super) pick_job: Job<Option<(String, String, Vec<PathBuf>)>>,
+    /// The Orbiters identity's epoch shown as the pictures were asked for.
+    pub(super) pick_for: u64,
     /// Uploads handed to the tray service, by world: when, and what (shown as starting until the service lists them).
     pub(super) handed: HashMap<String, (f64, crate::state::UploadKind)>,
     /// The visit Orbiters was last asked what this member added to its Map explorer.
@@ -426,6 +428,7 @@ impl Default for State {
             here_key: None,
             here_job: Job::default(),
             pick_job: Job::default(),
+            pick_for: 0,
             handed: HashMap::new(),
             maps_visit: None,
             fixture_maps: None,
@@ -1047,7 +1050,8 @@ impl State {
             self.here = here;
         }
         if let Some(Some((id, name, paths))) = self.pick_job.take() {
-            if !paths.is_empty() {
+            // Picked while another member was shown: nothing is sent as the one signed in now.
+            if !paths.is_empty() && self.pick_for == cx.ctl.shown_epoch() {
                 self.handed.insert(id.clone(), (orbiters_ui::anim::time(ctx), crate::state::UploadKind::Pictures));
                 cx.ctl.upload_pictures(id, name, paths);
             }

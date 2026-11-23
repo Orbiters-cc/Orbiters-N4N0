@@ -42,7 +42,7 @@ pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// What the menu asks of N4N0 and of the app's settings, from where it is drawn.
 pub trait MenuService {
-    /// Asks N4N0 for `command`.
+    /// Asks N4N0 for `command`, stamped with what its surface shows when it acts for the person ([`Command::stamped`]).
     fn command(&self, command: Command);
     /// Saves what changed from `before` to `after` in the settings.
     fn save_settings(&self, before: &Settings, after: &Settings);
@@ -649,8 +649,8 @@ impl<P: Pictures> MenuHost<P> {
                     self.echoes.mismatch.press(on);
                     service.save_settings(&base, &changed);
                 }
-                Effect::CallContact { id } => service.command(Command::Call { contact: id }),
-                Effect::Answer => service.command(Command::AnswerCall),
+                Effect::CallContact { id } => service.command(Command::Call { contact: id, stamp: None }),
+                Effect::Answer => service.command(Command::AnswerCall { stamp: None }),
                 Effect::HangUp => service.command(Command::EndCall),
                 Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
@@ -676,7 +676,7 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::ApplyState { id, .. } => service.command(Command::States { action: StateAction::Apply { id }, avatar: None }),
                 Effect::TakeBack => service.command(Command::TakeBack),
                 Effect::Drop { link, title, video } => {
-                    service.command(Command::Drop { link, title, video });
+                    service.command(Command::Drop { link, title, video, stamp: None });
                     self.dropped = true;
                 }
                 Effect::Tracking { on, ms } => {
@@ -684,19 +684,19 @@ impl<P: Pictures> MenuHost<P> {
                     service.command(Command::Tracking { on, ms })
                 }
                 Effect::Dictate => service.command(Command::Dictate),
-                Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice }),
+                Effect::SendSuggestion { text, voice } => service.command(Command::Suggest { text, voice, stamp: None }),
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),
                 Effect::SaveVideo => service.command(Command::SaveVideo),
                 // This computer's visits, read here (a small file): the service keeps it as VRChat's logs grow.
                 Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::read_rows(), true, ""),
-                Effect::InviteMe { location } => service.command(Command::InviteMe { location }),
+                Effect::InviteMe { location } => service.command(Command::InviteMe { location, stamp: None }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
                 Effect::QrScan(on) => service.command(Command::Qr { on, holder: self.holder }),
                 Effect::Captures => service.command(Command::Captures),
                 Effect::Friends(on) => service.command(Command::Friends { on, holder: self.holder }),
-                Effect::ShareCapture(share) => service.command(Command::ShareCapture { share }),
-                Effect::Feedback(ask) => service.command(Command::Feedback { ask }),
+                Effect::ShareCapture(share) => service.command(Command::ShareCapture { share, stamp: None }),
+                Effect::Feedback(ask) => service.command(Command::Feedback { ask, stamp: None }),
                 // The overlay never shows the camera's picture: its card is greyed out there.
                 Effect::Mirror(_) => {}
                 Effect::Close => close = true,

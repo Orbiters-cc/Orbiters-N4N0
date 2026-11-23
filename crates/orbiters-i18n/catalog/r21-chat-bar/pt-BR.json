@@ -30,5 +30,21 @@
   "Answer N4N0's question with its Yes or No: nothing was done.": "Responda à pergunta do N4N0 com o Sim ou o Não dele: nada foi feito.",
   "Answer sent": "Resposta enviada",
   "Turn it on in Orbiters - N4N0 › Settings › Voice & assistant": "Ative-o em Orbiters - N4N0 › Configurações › Voz e assistente",
-  "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Instale os ouvidos dele em Orbiters - N4N0 › Configurações › Voz e assistente"
+  "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Instale os ouvidos dele em Orbiters - N4N0 › Configurações › Voz e assistente",
+  "Signing in to Orbiters…": "Entrando no Orbiters…",
+  "N4N0 answers as soon as Orbiters says who is signed in.": "O N4N0 responde assim que o Orbiters diz quem entrou.",
+  "N4N0 asks to let go of {control}.": "O N4N0 pede para liberar {control}.",
+  "N4N0 asks to take a picture with VRChat's camera.": "O N4N0 pede para tirar uma foto com a câmera do VRChat.",
+  "N4N0 asks to save the world's video.": "O N4N0 pede para salvar o vídeo do mundo.",
+  "N4N0 asks to change what plays on your computer, or its volume.": "O N4N0 pede para mudar o que toca no seu computador, ou o volume.",
+  "N4N0 asks to turn its light off.": "O N4N0 pede para apagar a luz dele.",
+  "N4N0 asks to turn its light on, or to change it.": "O N4N0 pede para acender a luz dele, ou mudá-la.",
+  "N4N0 asks to turn your AFK message off.": "O N4N0 pede para desativar sua mensagem de ausência.",
+  "N4N0 asks to turn your AFK message on.": "O N4N0 pede para ativar sua mensagem de ausência.",
+  "Not from your account yet: its page opened instead.": "Ainda não pela sua conta: a página foi aberta no lugar.",
+  "not from your account yet": "ainda não pela sua conta",
+  "Orbiters is still signing you in: nothing was done. Try again in a moment.": "O Orbiters ainda está entrando na sua conta: nada foi feito. Tente de novo em um instante.",
+  "Your Orbiters account could not be read on this computer, so you are signed out for now. Orbiters keeps trying; if this stays, sign in again.": "Não foi possível ler sua conta do Orbiters neste computador, então você está desconectado por enquanto. O Orbiters continua tentando; se isso persistir, entre de novo.",
+  "Your VRChat account changed meanwhile: nothing was sent.": "Sua conta do VRChat mudou nesse meio-tempo: nada foi enviado.",
+  "This Orbiters account belongs to another environment: nothing was sent.": "Esta conta do Orbiters é de outro ambiente: nada foi enviado."
 }

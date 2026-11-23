@@ -279,7 +279,8 @@ fn take(ctl: &Shared, r: Request, file: PathBuf, imports: &mut VecDeque<(Request
                 Operation::Unshare(orbiters_core::shares::Unshare { public: true, ..Default::default() })
             };
             jobs.insert(r.id.clone(), Job { world: world.clone(), action: if share { "share" } else { "unshare" }, session: summary.dir.clone(), file });
-            ctl.capture_share(shares::Request { id: r.id, server, entry, extra: Vec::new(), operation });
+            // Asked by the Unity editor on this computer now: as whoever is signed in now.
+            ctl.capture_share(shares::Request { id: r.id, server, entry, extra: Vec::new(), operation }, ctl.identity_epoch());
         }
         other => fail(tr!("Orbiters - N4N0 does not know the action \"{other}\": update it.", other = other)),
     }

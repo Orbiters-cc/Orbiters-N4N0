@@ -282,12 +282,30 @@ fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
     None
 }
 
+/// The arguments whose refusal has a code of its own that callers branch on (verify3-r21 m1): out of the range, the list or the
+/// form their schema says, they answer with it; of another type, or missing, with `bad_arguments` like any other.
+const OWN_CODES: [(&str, &str, &str); 6] = [
+    ("open_session", "profile", "bad_profile"),
+    ("walk", "seconds", "bad_duration"),
+    ("wear_avatar", "avatar_id", "not_an_avatar"),
+    ("label_world", "add", "unknown_label"),
+    ("label_world", "remove", "unknown_label"),
+    ("press", "input", "unknown_input"),
+];
+
+/// The code of refusing tool `name` because of `why` ([`misfit`]'s words, starting with the argument).
+fn refusal_code(name: &str, why: &str) -> &'static str {
+    let out_of_it = [" must be one of ", " does not have the form ", " is below its least", " is above its most"].iter().any(|k| why.contains(k));
+    let is = |argument: &str| why.strip_prefix(argument).is_some_and(|rest| rest.starts_with([' ', '[']));
+    OWN_CODES.iter().find(|(tool, argument, _)| out_of_it && *tool == name && is(argument)).map_or("bad_arguments", |(_, _, code)| code)
+}
+
 /// Why `args` do not fit the tool's input schema `schema` (as `tools/list` gives it on this computer): not an object (an
 /// explicit `null` included: no arguments is `{}`, or none given at all), an argument it does not name, a null where none is
 /// taken, of another type, outside its enum, its least or its most, an item of a list that does not fit, or a required one
 /// missing. `None` when they fit. The same on every computer, before any session is chosen or anything done.
 pub fn schema_refusal(name: &str, schema: &Value, args: &Value) -> Option<Failure> {
-    let bad = |why: String| Some(Failure::new("bad_arguments", format!("{name}: {why}, so nothing was done."), "Pass the arguments tools/list gives for this tool on this computer, with their types; leave out what you do not set.")); // i18n: not shown (an AI client reads it)
+    let bad = |why: String| Some(Failure::new(refusal_code(name, &why), format!("{name}: {why}, so nothing was done."), "Pass the arguments tools/list gives for this tool on this computer, with their types; leave out what you do not set.")); // i18n: not shown (an AI client reads it)
     if !args.is_object() {
         return bad("the arguments are not an object".into());
     }
@@ -3252,7 +3270,7 @@ mod tests {
         }
         assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": -1 })), Some("bad_arguments"));
         assert_eq!(check("open_session", json!({ "profile": 99 })), None);
-        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_arguments"));
+        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_profile"));
         // What a handler has a default for is not required (unity_repositories lists, unity_editor says its status).
         assert_eq!(check("unity_repositories", json!({})), None);
         assert_eq!(check("unity_repositories", json!({ "action": "erase" })), Some("bad_arguments"));

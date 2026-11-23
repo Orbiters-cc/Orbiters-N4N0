@@ -141,6 +141,8 @@ pub struct ProvisionalSpeech {
 pub enum VoiceReadiness {
     Ready,
     SignIn,
+    /// Someone is signing in: who is not known yet.
+    SigningIn,
     ModelsMissing,
     ModelsDownloading,
     #[default]
@@ -299,10 +301,28 @@ pub struct N4n0Status {
     /// The assistant's actions (REQUEST20 6): its log, what it does now, the page it asked to open.
     #[serde(default)]
     pub assistant: Slice<crate::assistant::AssistantView>,
-    /// How many times the Orbiters account changed under N4N0 ([`crate::Command::ForgetAccount`]): a window drops what was
+    /// The Orbiters identity's epoch (0: not published yet): what the surfaces stamp their inputs with; a window drops what was
     /// being typed when it moves.
     #[serde(default)]
     pub account_epoch: u64,
+    /// Whose that identity is.
+    #[serde(default)]
+    pub signed_as: SignedAs,
+    /// The conversation's number (New conversation begins another): what a surface's New conversation names.
+    #[serde(default)]
+    pub conversation: u64,
+}
+
+/// Who is signed in to Orbiters, as far as it is known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignedAs {
+    #[default]
+    Nobody,
+    /// A credential whose member is not known yet, or an account file that could not be read: nobody's conversation, and the
+    /// assistant waits.
+    Unknown,
+    Member,
 }
 
 // The avatar's states and the world feedback stay plain values for now (copied with the state, compared by value):
@@ -312,7 +332,7 @@ orbiters_core::parts!(N4n0Status {
         avatar_id, prop_sync, manifest, controls, face, panel, listening, thinking, afk, confirmations, quota, voice, test_face, test_cycle, test_afk,
         bot, bot_keeps_menu, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
         can_drop, card, tracking, tracking_note, suggestion, versions, keys, world_video, photo_note, invite, qr, feedback, input_params, mirror,
-        account_epoch,
+        account_epoch, signed_as, conversation,
     ],
     slices: [lines, videos, resources, calls, captures, friends, assistant],
     identity: [],

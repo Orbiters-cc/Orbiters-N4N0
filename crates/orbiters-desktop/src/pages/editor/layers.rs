@@ -457,7 +457,7 @@ fn stack_rows(ed: &mut Editor, ui: &mut Ui, stack: Option<usize>, indent: f32) {
         if selected || resp.hovered() {
             widgets::icon(lu.painter(), pos2(r.right() - 52.0, r.center().y), icons::DOTS_SIX_VERTICAL, 14.0, theme::FG_4);
             let bin = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(28.0, 28.0));
-            if widgets::activated(&IconButton::new(icons::TRASH, mark("Remove this layer")).size(28.0, 14.0).danger().id_salt(row_id.with("bin")).show_at(&mut lu, bin)) {
+            if widgets::pressed_fresh(&IconButton::new(icons::TRASH, mark("Remove this layer")).size(28.0, 14.0).danger().id_salt(row_id.with("bin")).show_at(&mut lu, bin)) {
                 ed.selected = Selected::Layer(stack, *id);
                 delete_selected(ed);
                 return;

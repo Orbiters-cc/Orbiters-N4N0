@@ -555,16 +555,18 @@ impl MacGame {
     }
 
     /// The title bar of the game's window `window`, in points: the window's own, as its window server says it; else from
-    /// the size the game renders (`swapchain`) and the frame when they say it; else none for a window covering its display
-    /// and the engine's 32 otherwise.
+    /// the size the game renders (`swapchain`) and the frame when they say it; else none for a window covering its display or
+    /// one macOS gives no title, and the engine's 32 otherwise.
     fn title_of(&self, window: &MacWindow, swapchain: Option<(u32, u32)>) -> f64 {
-        let said = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.windows.title());
+        let (scale, display) = (native::scale_of(window), native::display_frame(window));
+        let covers = native::title_points(window, display) == 0.0;
+        let said = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.windows.title((window.width, window.height), scale, covers));
         if let Some(title) = said {
             return title;
         }
         swapchain
-            .and_then(|(_, h)| native::title_from_guest(window.height, native::scale_of(window), h))
-            .unwrap_or_else(|| native::title_points(window, native::display_frame(window)))
+            .and_then(|(_, h)| native::title_from_guest(window.height, scale, h))
+            .unwrap_or_else(|| if window.titled { native::title_points(window, display) } else { 0.0 })
     }
 
     /// Asks the program to quit the bridge's own game session, as the game's own Quit does: never forced.
@@ -1083,7 +1085,7 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.9", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.8", CLI_LEAST));
+        assert!(version_at_least("0.1.10", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.9", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);
@@ -1093,7 +1095,7 @@ mod tests {
     /// and a log replaced or cut ends what its follower said.
     #[test]
     fn only_the_recorded_launcher_and_its_own_whole_log_are_the_bridge_s() {
-        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None, quit_accepted: None, account: None };
+        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None, quit_accepted: None, account: None, supervisor: None, log_failed: false };
         assert!(record_names(&record("Running"), 33466, (1795387812, 431)));
         assert!(!record_names(&record("Running"), 33466, (1795387812, 432)), "the same number, another process");
         assert!(!record_names(&record("Running"), 33467, (1795387812, 431)));

@@ -209,8 +209,14 @@ pub fn arguments_on(mode: LaunchMode, settings: &LaunchSettings, window: Vec<Str
     out
 }
 
-/// The highest profile number Home offers (VRChat takes any; a person keeps a few accounts).
+/// The highest profile VRChat's main start is made on, whoever makes it: Home's choice, its arguments and the bridge's main
+/// session (a person keeps a few accounts). The bridge's side sessions have a range of their own (to 99: their OSC ports).
 pub const PROFILE_MAX: u32 = 15;
+
+/// `profile` as one the main start is made on: none other is turned into another one, whose account it is not.
+pub fn main_profile(profile: u64) -> Option<u32> {
+    u32::try_from(profile).ok().filter(|profile| *profile <= PROFILE_MAX)
+}
 
 /// What a start on `profile` adds: `--profile=N`, none for the default profile 0 (VRChat's own start without it).
 pub fn profile_arg(profile: u32) -> Option<String> {

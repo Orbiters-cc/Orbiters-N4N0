@@ -33,6 +33,12 @@ impl Failure {
 
     /// What a command said as it failed.
     fn said(code: &str, message: &str, engine: Option<&obelisk::EngineProblem>) -> Self {
+        // A disk that cannot be repaired in place is no download to try again: told with its path (the program's own reason
+        // and its argument, `docs/CLI.md`'s `voile_failed`).
+        if let Some(path) = message.split_once("backend.voile.noExchange (").and_then(|(_, rest)| rest.strip_suffix(')')) {
+            let words = tr!("The disk of {path} cannot be repaired in place: it is not an APFS disk. Nothing was changed.", path = path);
+            return Failure { code: "no_exchange".into(), words: words.to_string(), engine: None };
+        }
         Failure { code: code.into(), words: engine.map_or_else(|| words(code, message), engine_words), engine: engine.cloned() }
     }
 }
@@ -52,6 +58,7 @@ pub fn words(code: &str, message: &str) -> String {
     match code {
         "not_signed_in" | "sign_in_expired" => tr("Steam asks you to sign in again.").into(),
         "login_expired" => tr("Nobody approved the Steam sign-in in time.").into(),
+        "other_account" => tr("The account VRChat was started with is no longer the one signed in: press Play to start it on this one.").into(),
         "not_owned" => tr("This Steam account does not have VRChat: add it to the account (it is free) and try again.").into(),
         "network" => tr("Steam could not be reached. Check the connection and try again.").into(),
         "rate_limited" => tr("Steam asks to wait a little before another sign-in.").into(),
@@ -274,6 +281,25 @@ pub struct Play {
     now: Mutex<Now>,
     /// Where the boot-relative deadline is kept (none in a test that wants none).
     gate_file: Option<PathBuf>,
+    /// The one slot there is for a start on this computer, whichever N4N0 makes it.
+    slot: Arc<Mutex<Slot>>,
+}
+
+/// The slot: a lock beside the gate's file, held while a start is reserved or followed. Two coordinators (two N4N0s at a cold
+/// start) never both reserve, and neither creates an instance for a start the other makes.
+#[derive(Default)]
+struct Slot {
+    file: Option<std::fs::File>,
+    reserved: Option<u64>,
+    attached: Option<u64>,
+}
+
+impl Slot {
+    fn let_go(&mut self) {
+        if self.reserved.is_none() && self.attached.is_none() {
+            self.file = None;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -308,6 +334,9 @@ const UNREAD_KEPT: usize = 32;
 
 /// How long a reservation holds at most when it is neither used nor given back (the bridge's call ended some other way).
 const RESERVED_FOR: Duration = Duration::from_secs(150);
+
+/// How long the slot is asked for before another N4N0 is taken to hold it.
+const SLOT_WAIT: Duration = Duration::from_millis(300);
 
 /// What became of one start, as the program said it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -580,7 +609,64 @@ impl Now {
 impl Play {
     /// The start shared by Home and the bridge, keeping its boot-relative deadline in `gate_file`.
     pub fn new(gate_file: PathBuf) -> Self {
-        Play { now: Mutex::default(), gate_file: Some(gate_file) }
+        Play { now: Mutex::default(), gate_file: Some(gate_file), slot: Arc::default() }
+    }
+
+    /// Takes the slot, or finds it this one's already: refused while another N4N0 holds it.
+    fn take_slot(&self) -> Result<(), Refused> {
+        let Some(gate) = &self.gate_file else { return Ok(()) };
+        let mut slot = self.slot.lock().unwrap();
+        if slot.file.is_some() {
+            return Ok(());
+        }
+        let path = gate.with_extension("lock");
+        if let Some(folder) = path.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(|e| Refused::Failed(e.to_string()))?;
+        // A program being started may hold a copy of a lock just let go of, for the moment before it runs.
+        let until = std::time::Instant::now() + SLOT_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+                Err(std::fs::TryLockError::WouldBlock) => return Err(Refused::Busy),
+                Err(std::fs::TryLockError::Error(e)) => return Err(Refused::Failed(e.to_string())),
+            }
+        }
+        slot.file = Some(file);
+        Ok(())
+    }
+
+    /// Takes the slot for the reservation `token`, which lets go of it at the latest when it expires, used or not.
+    fn reserve_slot(&self, token: u64) -> Result<(), Refused> {
+        self.take_slot()?;
+        self.slot.lock().unwrap().reserved = Some(token);
+        let slot = Arc::downgrade(&self.slot);
+        let _ = std::thread::Builder::new().name("obelisk-reserved".into()).spawn(move || {
+            std::thread::sleep(RESERVED_FOR);
+            if let Some(slot) = slot.upgrade() {
+                Self::unreserve_slot(&slot, token);
+            }
+        });
+        Ok(())
+    }
+
+    fn unreserve_slot(slot: &Mutex<Slot>, token: u64) {
+        let mut slot = slot.lock().unwrap();
+        if slot.reserved == Some(token) {
+            slot.reserved = None;
+            slot.let_go();
+        }
+    }
+
+    /// Launch `id` is over: the slot is free, unless it is reserved.
+    fn free_slot(&self, id: u64) {
+        let mut slot = self.slot.lock().unwrap();
+        if slot.attached == Some(id) {
+            slot.attached = None;
+            slot.let_go();
+        }
     }
 
     /// Starts VRChat with `args` from the library `library` (whose records say when a start last ended early); the events
@@ -592,8 +678,10 @@ impl Play {
 
     /// Home's start: as [`Play::start`], drawn at `render_percent` (the engine's percent of the display's drawing
     /// resolution, for this launch only) when the program takes it; an older program starts the game at its own size.
-    pub fn start_rendered(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], render_percent: Option<u32>) -> Result<u64, Refused> {
-        self.start_full(program, library, args, std::time::SystemTime::now(), None, render_percent.filter(|_| obelisk::takes_render_percent(program)))
+    /// Started for the Steam account `steam`, or not at all, when one is named: the program checks it against the very session
+    /// it starts with.
+    pub fn start_rendered(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], render_percent: Option<u32>, steam: Option<u64>) -> Result<u64, Refused> {
+        self.start_full(program, library, args, std::time::SystemTime::now(), None, render_percent.filter(|_| obelisk::takes_render_percent(program)), steam)
     }
 
     /// How long a start must still wait (the longest of the three sources), or why it cannot be made; and the trouble with
@@ -656,6 +744,7 @@ impl Play {
         }
         now.made += 1;
         let token = now.made;
+        self.reserve_slot(token)?;
         now.reserved = Some((token, std::time::Instant::now() + RESERVED_FOR));
         Ok(token)
     }
@@ -666,6 +755,7 @@ impl Play {
         if now.reserved.is_some_and(|(t, _)| t == token) {
             now.reserved = None;
         }
+        Self::unreserve_slot(&self.slot, token);
     }
 
     /// Starts as [`Play::start`] does, with the reservation `token` (used up by it); without one, a start reserved by
@@ -674,7 +764,7 @@ impl Play {
     /// engine applies the installation's saved percentage, while the bridge measures its coordinates at 100 %).
     pub fn start_reserved(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], token: Option<u64>) -> Result<u64, Refused> {
         let full = obelisk::takes_render_percent(program).then_some(100);
-        self.start_full(program, library, args, std::time::SystemTime::now(), token, full)
+        self.start_full(program, library, args, std::time::SystemTime::now(), token, full, None)
     }
 
     #[cfg(test)]
@@ -683,22 +773,36 @@ impl Play {
     }
 
     fn start_with(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>) -> Result<u64, Refused> {
-        self.start_full(program, library, args, now_is, token, None)
+        self.start_full(program, library, args, now_is, token, None, None)
     }
 
-    fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>) -> Result<u64, Refused> {
+    #[allow(clippy::too_many_arguments)]
+    fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>, steam: Option<u64>) -> Result<u64, Refused> {
         let mut now = self.now.lock().unwrap();
         if now.attached {
             return Err(Refused::Busy);
         }
         match now.reserved {
             Some((held, until)) if until > std::time::Instant::now() && Some(held) != token => return Err(Refused::Busy),
-            _ => now.reserved = None,
+            _ => {}
         }
-        if let Some(wait) = self.wait(&mut now, library, now_is)? {
-            return Err(Refused::Wait(wait));
+        // Used up here, whatever comes of it.
+        let held = now.reserved.take();
+        let unused = |refused| {
+            if let Some((token, _)) = held {
+                Self::unreserve_slot(&self.slot, token);
+            }
+            refused
+        };
+        if let Some(wait) = self.wait(&mut now, library, now_is).map_err(unused)? {
+            return Err(unused(Refused::Wait(wait)));
         }
+        self.take_slot()?;
         let mut command: Vec<&str> = vec!["steam", "play", obelisk::STEAM_APP];
+        let steam = steam.map(|id| id.to_string());
+        if let Some(steam) = &steam {
+            command.extend(["--steam-id", steam.as_str()]);
+        }
         let percent = render_percent.map(|p| p.clamp(1, 100).to_string());
         if let Some(percent) = &percent {
             command.extend(["--render-percent", percent.as_str()]);
@@ -707,14 +811,30 @@ impl Play {
             command.push("--");
             command.extend(args.iter().map(String::as_str));
         }
-        let mut child = spawn(program, &command).map_err(|e| Refused::Failed(e.to_string()))?;
+        // Kept from here: a start that is not made lets go of it.
+        let free = || {
+            let mut slot = self.slot.lock().unwrap();
+            slot.reserved = None;
+            slot.let_go();
+        };
+        let mut child = spawn(program, &command).map_err(|e| {
+            free();
+            Refused::Failed(e.to_string())
+        })?;
         let Some(out) = child.stdout.take() else {
             let _ = child.kill();
             let _ = child.wait();
+            free();
             return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
         };
         now.made += 1;
         let id = now.made;
+        {
+            // The reservation is used up by its start.
+            let mut slot = self.slot.lock().unwrap();
+            slot.reserved = None;
+            slot.attached = Some(id);
+        }
         now.attached = true;
         now.running = None;
         now.program = Some(child.id());
@@ -853,6 +973,7 @@ impl Play {
 
     /// A start that could not be followed: as if it was never made.
     fn abandon(&self, id: u64) {
+        self.free_slot(id);
         let mut now = self.now.lock().unwrap();
         now.attached = false;
         now.program = None;
@@ -957,6 +1078,7 @@ impl Play {
     /// record of its session: a record still running is looked at again later ([`Play::reconcile`]); without one, the
     /// start failed (with the program's exit status).
     fn finish(&self, id: u64, library: &Path, status: Option<std::process::ExitStatus>) {
+        self.free_slot(id);
         let mut now = self.now.lock().unwrap();
         let Some(launch) = now.launch(id).cloned() else { return };
         if launch.over {
@@ -1531,12 +1653,12 @@ mod tests {
         };
         let (new, new_said) = program_of("0.1.7");
         let play = Arc::new(Play::default());
-        let id = play.start_rendered(&new, &library, &args, Some(58)).expect("starts");
+        let id = play.start_rendered(&new, &library, &args, Some(58), None).expect("starts");
         assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "58", "--", "-screen-fullscreen", "1"]);
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
         let (old, old_said) = program_of("0.1.6");
-        let id = play.start_rendered(&old, &library, &args, Some(58)).expect("starts");
+        let id = play.start_rendered(&old, &library, &args, Some(58), None).expect("starts");
         assert_eq!(said(&old_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "an older program: the engine's size");
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
@@ -1685,6 +1807,15 @@ mod tests {
         assert!(run_for(&fine, &[], Duration::from_secs(5), |_| heard += 1).is_ok());
         assert_eq!(heard, 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sixth verification, ruling 1: a disk that exchanges nothing is said with its path, never as a download to try again.
+    #[test]
+    fn a_disk_that_cannot_be_repaired_in_place_is_said_with_its_path() {
+        let failure = Failure::said("voile_failed", "the Voile runtime could not be installed: backend.voile.noExchange (/Volumes/a (disk)/Voile)", None);
+        assert_eq!(failure.code, "no_exchange");
+        assert!(failure.words.contains("/Volumes/a (disk)/Voile"), "{}", failure.words);
+        assert_eq!(Failure::said("voile_failed", "the Voile runtime could not be installed: backend.voile.damaged", None).code, "voile_failed");
     }
 
     #[test]

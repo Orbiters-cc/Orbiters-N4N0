@@ -129,6 +129,26 @@ class Scoring(unittest.TestCase):
         invalid(lines, state, [(5.0, True), (40.0, False), (45.0, True)], "in the destination")
         invalid(lines, state, [(5.0, True), (8.0, False)], "in the destination")
 
+    def test_coverage_is_of_the_window_and_its_readings_are_close(self):
+        """Sixth verification, finding 11 (the verifier's): a baseline at -100 and one batch at 10.5 claimed 110.5 s of a
+        60 s window; two readings 59.8 s apart passed."""
+        hud = [(t, l) for t, l in self.window()[0] if "metal-HUD" in l]
+        _, state, moves = self.window()
+        for batches in ([(-100.0, npt(0)), (10.5, npt(60))], [(10.1, npt(0)), (69.9, npt(3600))]):
+            bad = self.scored(sorted(hud + batches), state, moves)
+            self.assertFalse(bad["valid"], bad["invalid_because"])
+            self.assertEqual(bad["guest_present"]["read_over_seconds_of_the_window"], 0.0)
+            self.assertTrue(any("counted over 0.0 s of 60.0" in w for w in bad["invalid_because"]), bad["invalid_because"])
+        # The line before the window is the rate's base, and nothing of its coverage.
+        points = bench.generations([(9.0, npt(0)), (10.5, npt(60)), (11.5, npt(120)), (12.5, npt(180))])
+        self.assertEqual(bench.coverage(points, 10.0, 13.0), 2.5)
+        # A swapchain's first reading covers nothing before it; six seconds without a reading are no coverage.
+        points = bench.generations([(1.0, npt(0)), (2.0, npt(60)), (2.5, "guest swapchain: created 1705x1109 fmt=29 buffers=1"), (3.0, npt(60)), (4.0, npt(120)), (10.0, npt(180))])
+        self.assertEqual(bench.coverage(points, 0.0, 20.0), 2.0)
+        lines, state, moves = self.window()
+        hole = [(t, l) for t, l in lines if "metal-HUD" in l or not 31 < t < 36]
+        self.assertTrue(any("submissions were not read for" in w for w in self.scored(hole, state, moves)["invalid_because"]))
+
     def test_a_start_that_does_not_settle_is_not_calm(self):
         quiet = [(t / 2, npt(t * 30)) for t in range(0, 200)]
         self.assertTrue(bench.settled(quiet, 99.0))
@@ -183,15 +203,38 @@ class Ownership(unittest.TestCase):
             with open(f"{self.root.name}/{name}.v2.json", "w") as f:
                 json.dump(value, f)
 
-    def test_a_session_is_known_from_its_admission(self):
-        self.assertIsNone(bench.admitted(None, 1000))
-        self.write("a", phase="Finished")
-        self.assertIsNone(bench.admitted("a", 1000), "the one there was")
-        self.assertIsNone(bench.admitted("z", 2000), "another launch's, before this one")
-        self.write("b", phase="Preparing", game=None)
-        self.assertEqual(bench.admitted("a", 1000), "b", "before it runs")
-        self.write("c", store={"app_id": 1})
-        self.assertIsNone(bench.admitted("a", 1000), "another game's")
+    def test_a_session_is_known_from_the_program_s_own_word_alone(self):
+        """Sixth verification, finding 3: the library's current session is whoever's (until then it was taken by its
+        supervisor's birth, which two launches share)."""
+        self.write("foreign")
+        session = {"id": None, "running_at": None}
+        bench.told(session, {"event": "preparing"}, 1.0)
+        self.assertIsNone(session["id"])
+        bench.told(session, {"event": "starting", "session_id": "b"}, 1.0)
+        self.assertEqual(session, {"id": "b", "running_at": None}, "before it runs")
+        self.assertFalse(bench.refused([{"event": "preparing"}]), "said nothing of what became of it")
+        self.assertTrue(bench.refused([{"event": "preparing"}, {"event": "error"}]))
+        self.assertFalse(bench.refused([{"event": "starting"}, {"event": "error"}]))
+        self.assertFalse(hasattr(bench, "admitted") or hasattr(bench, "pointer"))
+
+    def test_the_log_is_the_one_whose_argument_is_the_link(self):
+        kept = bench.VRC_LOGS
+        bench.VRC_LOGS = self.root.name
+        try:
+            since = os.stat(self.root.name).st_birthtime
+            write = lambda name, text: open(f"{self.root.name}/output_log_{name}.txt", "w").write(text)
+            write("1", f"2026.11.23 11:29:24 Debug      -  seen on a portal: {LINK}\n")
+            write("2", f"2026.11.23 11:29:24 Debug      -  Arg: {LINK}&x=1\n")
+            self.assertIsNone(bench.own_vrchat_log(since, LINK))
+            write("3", f"2026.11.23 11:29:24 Debug      -  Arg: -screen-fullscreen\n2026.11.23 11:29:24 Debug      -  Arg: {LINK}\nlater\n")
+            with bench.own_vrchat_log(since, LINK) as f:
+                # What is put at its path later is not read.
+                os.rename(f.name, f.name + ".old")
+                write("3", "another's")
+                self.assertTrue(f.read().endswith("later\n"))
+            self.assertIsNone(bench.own_vrchat_log(since + 1000, LINK), "made before")
+        finally:
+            bench.VRC_LOGS = kept
 
     def test_a_launch_is_closed_by_its_own_record_whether_or_not_its_program_lives(self):
         asked, clock = [], [0.0]
@@ -229,9 +272,14 @@ class Ownership(unittest.TestCase):
             hung = Proc(None)
             self.assertTrue(bench.close("/cli", "a", hung, {"outcome": "x"}))
             self.assertEqual(hung.code, -15)
-            # No session was admitted: the program's own end says so; one that hangs is not resolved.
-            self.assertTrue(bench.close("/cli", None, Proc(1), {"outcome": "x"}))
-            self.assertFalse(bench.close("/cli", None, Proc(None), {"outcome": "x"}))
+            # No session was named: only the program's word that it started nothing resolves it (until the sixth verification
+            # its end alone did), and nothing is ever asked to quit.
+            self.assertTrue(bench.close("/cli", None, Proc(1), {"outcome": "x"}, True))
+            res = {"outcome": "x"}
+            self.assertFalse(bench.close("/cli", None, Proc(1), res))
+            self.assertIn("never named", res["outcome"])
+            self.assertFalse(bench.close("/cli", None, Proc(None), {"outcome": "x"}, True))
+            self.assertEqual(len(asked), 1)
             # A record that cannot be read, or whose game still lives, is no end.
             with open(f"{self.root.name}/b.v2.json", "w") as f:
                 f.write("{ half")
@@ -258,16 +306,25 @@ def write(session, phase, game):
         open(f"{root}/records/{name}.new", "w").write(json.dumps(value))
         os.rename(f"{root}/records/{name}.new", f"{root}/records/{name}.v2.json")
 if sys.argv[1:3] == ["steam", "quit"]:
-    open(f"{root}/quit", "w").write(" ".join(sys.argv))
+    open(f"{root}/quit", "a").write(" ".join(sys.argv) + "\n")
     sys.exit(0)
 say(event="preparing", app_id=438100)
 if how.get("fails"):
     say(event="error", code="busy", message="m")
     sys.exit(1)
-write("s-1", "Preparing", None)
-say(event="starting", app_id=438100)
+if how.get("foreign"):
+    # Somebody else's start, at the same moment: the library's current session is theirs.
+    write("foreign", "Running", {"pid": 1})
+if how.get("dies_unnamed"):
+    sys.exit(1)
+def current(session, phase, game):
+    write(session, phase, game)
+    if how.get("foreign"):
+        write("foreign", "Running", {"pid": 1})
+current("s-1", "Preparing", None)
+say(event="starting", app_id=438100, session_id="s-1")
 time.sleep(1.5)  # the admission is seen well before it runs
-write("s-1", "Running", {"pid": 4242})
+current("s-1", "Running", {"pid": 4242})
 if how.get("dies"):
     sys.exit(1)
 say(event="running", app_id=438100, pid=4242, session_id="s-1")
@@ -285,7 +342,7 @@ while not os.path.exists(f"{root}/quit"):
     engine.flush()
 if how.get("stays"):
     sys.exit(0)
-write("s-1", "Finished", None)
+current("s-1", "Finished", None)
 say(event="exited", app_id=438100, session_id="s-1", exit_code=0)
 """
 
@@ -321,7 +378,11 @@ class WholeRun(unittest.TestCase):
                 for name, value in kept.items():
                     setattr(bench, name, value)
             with open(f"{root}/out.json") as f:
-                return status, json.load(f), os.path.exists(f"{root}/quit")
+                self.quits = []
+                if os.path.exists(f"{root}/quit"):
+                    with open(f"{root}/quit") as asked:
+                        self.quits = asked.read().split("\n")[:-1]
+                return status, json.load(f), bool(self.quits)
 
     def test_a_start_admitted_before_it_runs_is_measured(self):
         # 2026-11-23 11:51, a real start: admitted, then running, and "did not start: []" 900 s later, the game untouched.
@@ -331,6 +392,22 @@ class WholeRun(unittest.TestCase):
         self.assertTrue(res["windows"][0]["valid"], res["windows"][0]["invalid_because"])
         self.assertTrue(quit)
         self.assertEqual(res["terminal"]["phase"], "Finished")
+        # Everything that decided its window is kept with its times: scored again, it is the same.
+        seen, window = res["observed"], res["windows"][0]
+        state = {"gpu": [], "cpu": [], "look": seen["look"]}
+        again = bench.summarize([tuple(x) for x in seen["lines"]], window["from"], window["to"], state, False, [tuple(x) for x in seen["moves"]])
+        for key in ("valid", "invalid_because", "guest_present", "wsd_shown", "looks"):
+            self.assertEqual(again[key], window[key], key)
+
+    def test_somebody_else_s_session_is_never_asked_to_quit(self):
+        """Sixth verification, finding 3 (the verifier's): a concurrent session's fresh pointer and record were taken for this
+        launch's, and it was asked to quit."""
+        status, res, _ = self.run_with(foreign=True)
+        self.assertEqual((status, res["session"]), (0, "s-1"), res["outcome"])
+        self.assertTrue(self.quits and all("--session s-1" in quit for quit in self.quits), self.quits)
+        # The program died before it said what it started: nothing is asked to quit, and the series stops.
+        status, res, quit = self.run_with(foreign=True, dies_unnamed=True)
+        self.assertEqual((status, res["session"], quit), (5, None, False), res["outcome"])
 
     def test_each_run_that_does_not_go_as_planned_ends_its_session_and_says_so(self):
         for how, expected, outcome in (
@@ -351,10 +428,11 @@ class WholeRun(unittest.TestCase):
         session = {"id": "a", "running_at": None}
         bench.told(session, {"event": "starting"}, 1.0)
         self.assertEqual(session, {"id": "a", "running_at": None})
-        bench.told(session, {"event": "running", "session_id": "b"}, 2.0)
-        self.assertEqual(session, {"id": "b", "running_at": 2.0})
+        bench.told(session, {"event": "running", "session_id": "a"}, 2.0)
+        self.assertEqual(session, {"id": "a", "running_at": 2.0})
+        # (the first name said is this launch's own: until the sixth verification the last one won)
         bench.told(session, {"event": "running", "session_id": "c"}, 3.0)
-        self.assertEqual(session, {"id": "b", "running_at": 2.0})
+        self.assertEqual(session, {"id": "a", "running_at": 2.0})
         older = {"id": "a", "running_at": None}
         bench.told(older, {"event": "running", "session_id": None}, 2.0)
         self.assertEqual(older, {"id": "a", "running_at": 2.0})

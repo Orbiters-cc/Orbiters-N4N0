@@ -180,9 +180,24 @@ pub struct SessionRecord {
     pub phase: String,
     /// The engine's launcher of the game while it runs (the `running` event's pid).
     pub game: Option<u32>,
-    /// How long the game ran, and how many frames it presented, once it ended.
+    /// How long the game ran, and how many frames it presented, once it ended (`None` for a count the engine could not
+    /// read: `played.frames.measured` false, obelisk-cli 0.1.5).
     pub seconds: Option<u64>,
     pub frames: Option<u64>,
+    /// When the game's process (the engine's launcher) was born, as the supervisor recorded it: seconds, microseconds.
+    pub game_birth: Option<(u64, u32)>,
+    /// While it runs, the frames shown so far (obelisk-cli 0.1.5 and later).
+    pub shown: Option<Shown>,
+}
+
+/// The frames a running game has shown so far, as its record says them (`shown`, obelisk-cli 0.1.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub frames: u64,
+    /// When the count was taken, seconds since 1970.
+    pub at: u64,
+    /// Counted from the game's own log without a gap: false once it is not, and then the count says nothing more.
+    pub continuous: bool,
 }
 
 impl SessionRecord {
@@ -211,12 +226,21 @@ pub fn session_record(text: &str) -> Option<SessionRecord> {
         return None;
     }
     let played = record.get("played").filter(|p| p.is_object());
+    let frames = played.and_then(|p| p.get("frames"));
+    // Absent in records before obelisk-cli 0.1.5, which read the log the same way: measured.
+    let measured = frames.and_then(|f| f.get("measured")).and_then(serde_json::Value::as_bool).unwrap_or(true);
+    let game = record.get("game").filter(|g| g.is_object());
+    let shown = record.get("shown").filter(|s| s.is_object());
     Some(SessionRecord {
         id: record.get("id")?.as_str()?.to_string(),
         phase: record.get("phase")?.as_str()?.to_string(),
-        game: record.get("game").and_then(|g| g.get("pid")).and_then(serde_json::Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
+        game: game.and_then(|g| g.get("pid")).and_then(serde_json::Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
         seconds: played.and_then(|p| p.get("seconds")).and_then(serde_json::Value::as_u64),
-        frames: played.and_then(|p| p.get("frames")).and_then(|f| f.get("count")).and_then(serde_json::Value::as_u64),
+        frames: frames.and_then(|f| f.get("count")).and_then(serde_json::Value::as_u64).filter(|_| measured),
+        game_birth: game.and_then(|g| Some((g.get("birth_seconds")?.as_u64()?, u32::try_from(g.get("birth_microseconds")?.as_u64()?).ok()?))),
+        shown: shown.and_then(|s| {
+            Some(Shown { frames: s.get("frames")?.as_u64()?, at: s.get("at")?.as_u64()?, continuous: s.get("continuous")?.as_bool()? })
+        }),
     })
 }
 
@@ -231,6 +255,53 @@ pub fn session_records(library: &Path) -> Vec<(SessionRecord, std::time::SystemT
             Some((session_record(&std::fs::read_to_string(f.path()).ok()?)?, written))
         })
         .collect()
+}
+
+/// The engine's records could not be read now (not "there are none"): asked again later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unreadable;
+
+/// The record of the Game session `id` in `library`: `Ok(None)` when there is none (yet, or no more), `Err` when it could
+/// not be read or is not whole (a supervisor rewriting it: ask again). Only a UUID names a record.
+pub fn session_record_of(library: &Path, id: &str) -> Result<Option<SessionRecord>, Unreadable> {
+    if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return Ok(None);
+    }
+    match std::fs::read_to_string(library.join("SteamSessions").join(format!("{id}.v2.json"))) {
+        Ok(text) => session_record(&text).filter(|r| r.id == id).map(Some).ok_or(Unreadable),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Unreadable),
+    }
+}
+
+/// When the last start that ended early ended, from the records in `library`: `Err` when the records could not all be
+/// read (a folder that cannot be listed, a record that cannot be read or is not whole), which is not "none ended early".
+pub fn early_end_in_records(library: &Path) -> Result<Option<std::time::SystemTime>, Unreadable> {
+    let files = match std::fs::read_dir(library.join("SteamSessions")) {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Unreadable),
+    };
+    let mut last = None;
+    for file in files {
+        let file = file.map_err(|_| Unreadable)?;
+        if !file.file_name().to_string_lossy().ends_with(".v2.json") {
+            continue;
+        }
+        let written = file.metadata().and_then(|m| m.modified()).map_err(|_| Unreadable)?;
+        let text = std::fs::read_to_string(file.path()).map_err(|_| Unreadable)?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| Unreadable)?;
+        // The pointer to the last session (`session.v2.json`) and other games' records are no VRChat start.
+        if value.get("store").is_none() {
+            continue;
+        }
+        if let Some(record) = session_record(&text) {
+            if record.ended_early() {
+                last = last.max(Some(written));
+            }
+        }
+    }
+    Ok(last)
 }
 
 /// How long a start must still wait at `now`, after the last start that ended early at `ended` ([`AFTER_EARLY_END`]):
@@ -311,8 +382,9 @@ pub enum Event {
     Starting,
     /// The game runs: the engine's launcher of it, and its Game session (0.1.3 and later say it).
     Running { pid: Option<u32>, session: Option<String> },
-    /// The game ended, after this many seconds and with this many frames shown, when the program knows.
-    Exited { code: Option<i64>, seconds: Option<u64>, frames: Option<u64> },
+    /// The game ended, after this many seconds and with this many frames shown, when the program knows; the Game session
+    /// that held it (0.1.3 and later say it).
+    Exited { code: Option<i64>, seconds: Option<u64>, frames: Option<u64>, session: Option<String> },
     /// The command failed: its stable code, and a sentence in English for a log.
     Error { code: String, message: String },
     /// Anything else the program tells.
@@ -345,6 +417,7 @@ pub fn event(line: &str) -> Option<Event> {
             code: value.get("exit_code").and_then(serde_json::Value::as_i64),
             seconds: value.get("seconds").and_then(serde_json::Value::as_u64),
             frames: value.get("frames").and_then(serde_json::Value::as_u64),
+            session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned),
         },
         "error" => Event::Error { code: text("code"), message: text("message") },
         _ => Event::Other,
@@ -493,6 +566,58 @@ mod tests {
         assert_eq!(session_record(&running_other_app()), None);
     }
 
+    #[test]
+    fn a_record_says_its_game_s_birth_its_frames_so_far_and_an_unknown_count() {
+        let running = r#"{"version":2,"id":"261267fa-b5be-4f91-87c2-e3df42fef46e","store":{"app_id":438100},"phase":"Running","game":{"pid":33466,"uid":501,"birth_seconds":1795387812,"birth_microseconds":431},"shown":{"frames":4594,"at":1795388231,"continuous":true}}"#;
+        let r = session_record(running).unwrap();
+        assert_eq!(r.game_birth, Some((1795387812, 431)));
+        assert_eq!(r.shown, Some(Shown { frames: 4594, at: 1795388231, continuous: true }));
+        // 0.1.5: a log that could not be read is an unknown count, not a start that showed nothing.
+        let unread = r#"{"version":2,"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":900,"frames":{"count":0,"measured":false}}}"#;
+        let unread = session_record(unread).unwrap();
+        assert_eq!(unread.frames, None);
+        assert!(!unread.ended_early(), "900 s and an unknown count: played");
+        let old = r#"{"version":2,"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}}}"#;
+        assert!(session_record(old).unwrap().ended_early(), "an older record's 0 is a count");
+    }
+
+    #[test]
+    fn one_record_is_read_by_its_uuid_and_an_unreadable_one_is_not_none() {
+        let temp = Temp::new("record-of");
+        let id = "261267fa-b5be-4f91-87c2-e3df42fef46e";
+        assert_eq!(session_record_of(&temp.0, id), Ok(None), "no folder yet");
+        let sessions = temp.0.join("SteamSessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join(format!("{id}.v2.json")), format!(r#"{{"id":"{id}","store":{{"app_id":438100}},"phase":"Running"}}"#)).unwrap();
+        assert_eq!(session_record_of(&temp.0, id).unwrap().unwrap().phase, "Running");
+        std::fs::write(sessions.join(format!("{id}.v2.json")), r#"{"id":"#).unwrap();
+        assert_eq!(session_record_of(&temp.0, id), Err(Unreadable), "half written: ask again");
+        assert_eq!(session_record_of(&temp.0, "../../etc/passwd"), Ok(None), "only a UUID names a record");
+    }
+
+    #[test]
+    fn records_that_cannot_be_read_are_no_proof_that_nothing_ended_early() {
+        let temp = Temp::new("gate-unknown");
+        assert_eq!(early_end_in_records(&temp.0), Ok(None), "no folder: nothing ever ran");
+        let sessions = temp.0.join("SteamSessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("session.v2.json"), r#"{"version":2,"id":"x"}"#).unwrap();
+        std::fs::write(sessions.join("b.v2.json"), r#"{"id":"b","store":{"app_id":438100},"phase":"Finished","played":{"seconds":600,"frames":{"count":9000}}}"#).unwrap();
+        assert_eq!(early_end_in_records(&temp.0), Ok(None), "the pointer and a played game");
+        std::fs::write(sessions.join("c.v2.json"), r#"{"id":"c","store":"#).unwrap();
+        assert_eq!(early_end_in_records(&temp.0), Err(Unreadable), "a record being written");
+        std::fs::write(sessions.join("c.v2.json"), r#"{"id":"c","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#).unwrap();
+        assert!(early_end_in_records(&temp.0).unwrap().is_some());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = early_end_in_records(&temp.0);
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(unreadable, Err(Unreadable), "a folder that cannot be listed");
+        }
+    }
+
     fn running_other_app() -> String {
         r#"{"version":2,"id":"y","store":{"app_id":252950},"phase":"Running","game":{"pid":5}}"#.into()
     }
@@ -540,8 +665,9 @@ mod tests {
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242), session: None }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":12777,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Running { pid: Some(12777), session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None, session: None }));
-        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: None }));
-        assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":0,"exit_code":0,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: Some(0) }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: None, session: None }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":0,"exit_code":0,"seconds":100}"#), Some(Event::Exited { code: Some(0), seconds: Some(100), frames: Some(0), session: Some("x".into()) }));
+        assert_eq!(event(r#"{"event":"exited","app_id":438100,"session_id":"x","frames":null,"exit_code":0,"seconds":900}"#), Some(Event::Exited { code: Some(0), seconds: Some(900), frames: None, session: Some("x".into()) }), "0.1.5: an unknown count is null");
         assert_eq!(event(r#"{"event":"error","code":"not_signed_in","message":"No Steam account is signed in.","key":null}"#), Some(Event::Error { code: "not_signed_in".into(), message: "No Steam account is signed in.".into() }));
         assert_eq!(event(r#"{"event":"voile_update","version":"v1"}"#), Some(Event::Other));
         assert_eq!(event("warning: something on the wrong stream"), None);

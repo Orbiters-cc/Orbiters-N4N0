@@ -198,45 +198,71 @@ game started or closed). Settings shows the bridge's section on a Mac too, with 
 How it is one verified game (`controller/bridge_mac.rs`):
 
 - **Start.** Through the very start Home's Play uses (`obelisk_cli::Play` in `MacMachine`): one start at a time, and **none within
-  80 s of a start that ended early** (`start_wait` with `retry_after_s`; Home says the same). That wait comes from the engine's own
-  session records (`SteamSessions/<id>.v2.json`: ended under 150 s or with 0 frames shown), so it holds across a restart of N4N0.
-  Each start has a launch id; its outcome (its Game session, the engine's launcher process, how it ended) is kept by that id for
-  whoever made it, and Home's toast is told once as before.
+  80 s of a start that ended early** (`start_wait` with `retry_after_s`; Home says the same). The wait is the longest of three: the
+  exit this run saw (a monotonic clock, at once), a deadline kept on the clock since the Mac booted (`obelisk-start-gate.json` in the
+  settings folder: a restart of N4N0 keeps it, a wall clock set forward does not shorten it, a reboot ends it), and the engine's
+  own session records (`SteamSessions/<id>.v2.json`: ended under 150 s or with 0 frames shown). Records that cannot be read are no
+  "nothing ended early": the start is refused until they can. A program that ends without saying how the game did is asked of the
+  engine's record of its session, and without one counts as an early end. `go_to_world` asks the gate **before** VRChat's API is
+  asked for an instance (`Game::admit_start`: a start of Home's under way, or the wait with no game of the bridge's to close, makes
+  nothing); for the next world it closes its own game, then waits in the same call (at most 100 s) for that end to be finalized
+  and any wait after it, and starts the same instance. Each start has a launch id; its outcome (its Game session, the engine's
+  launcher, how it ended) is kept by that id for whoever made it, and Home's toast is told its own launch's failure once, never the
+  bridge's. The bridge starts nothing with an obelisk-cli older than 0.1.5 (it needs the record's `shown`, below).
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
-- **Ownership.** A game is the bridge's only when it is its own launch's: the launcher's process with its birth time, the Game
-  session the program names (obelisk-cli 0.1.3 says it in `running`; before, the engine's record of that launcher), and the VRChat
-  log made after the launch whose own `Arg:` lines hold the instance's launch link. A VRChat started from Home, or found after a
+- **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose
+  record names the launcher's process **with its birth to the microsecond** (`game.birth_seconds`, `birth_microseconds`, as
+  `proc_pidinfo` gives it: a reused process number is not it), the launcher's own child `wsd` with its birth, and the VRChat log made
+  after the launch whose own `Arg:` lines hold the instance's launch link. Any of them changing ends the association; a window is
+  checked again to be that `wsd`'s right before it is captured. A VRChat started from Home, or found after a
   restart of the service, is the person's: `get_state` says it runs, and nothing of it is read, looked at or closed.
-- **Its log:** VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
+- **Its log** (held to be the same file, by device and inode, never shorter: replaced, cut or gone, what it said is forgotten, the
+  place with it, and a screenshot is refused until the game is back in its private instance): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
   Mac still follow the VRChat on the network: they are not changed by this.
-- **Arrival needs the game's window on screen** (renderer evidence), not only the log's join. The engine's log
-  (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start: told apart by its inode) is read from the launch on: its graphics server dropping the game
-  (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) makes `get_state`'s `vrchat.renderer_lost` true and `screenshot` answer `renderer_lost`;
-  before arrival it ends the start with `start_crashed`, as does a start the program says ended early.
+- **Arrival needs the game to draw** (renderer evidence), not only the log's join: its window on screen **and its frames growing**:
+  the frames shown, from its own Game session's record (`shown`, obelisk-cli 0.1.5: counted from the game's own log every 2 s), or
+  the presents its window server logs (`neptune unixlib wsi (wsd): <n> presents`, about every 3 s). A covered window or a locked
+  screen shows nothing while the game still presents (measured 23:54: presents on, shown events stuck), so only both stalled for
+  15 s is a frozen game: `get_state`'s `vrchat.renderer_lost` true and `screenshot` answers `renderer_lost`. The engine's log of
+  this start (`~/Library/Logs/Obelisk/Steam/wine-438100.log`, a new file at each start) is held open once found and read whole, in
+  order: its graphics server dropping the game (`VTEST_CLIENT_ERROR_CONTEXT_LOST`) says the same. Before arrival either ends the
+  start with `start_crashed`, as does a start the program says ended early (also after its launcher was seen).
 - **Window:** the engine's window server (`wsd`, the launcher's own child) owns the game's window; the largest shown one is the game's
   (never its 400 x 225 splash or the crash box). Coordinates: the game renders 1280 x 720 backing pixels, 640 x 360 points at scale 2,
-  under a 32-point title bar; `window_width`/`window_height` are the content's pixels, the screenshot is that content alone (title
-  bar cut), and `scale` maps the JPEG to it. The bridge never resizes the window or brings it forward on a Mac (no input needs it).
+  under a 32-point title bar; `window_width`/`window_height` are the content's pixels (the scale is the display mode's of the display
+  the window is on: pixel width over point width, 2940 / 1470 here; `CGDisplayPixelsWide` counts points), the screenshot is that
+  content alone (title bar cut), and `scale` maps the JPEG to it. In front means that exact window is the frontmost one. The bridge never resizes the window or brings it forward on a Mac (no input needs it).
 - **Screenshots** are the window alone through macOS's `screencapture -l <window id>` (ScreenCaptureKit's single-window capture: the
-  window even when covered, never the desktop). macOS asks **Screen Recording** of the process that captures, the tray service of
+  window even when covered, never the desktop), into a folder of each call's own, refused unless the tool succeeded, ended after
+  10 s; only once the game arrived in its private instance (`not_in_world` between worlds, `caps.screenshot_needs_arrival`). macOS asks **Screen Recording** of the process that captures, the tray service of
   Orbiters - N4N0: without it `screenshot` answers `screen_recording_not_allowed`, and Settings' bridge section shows **Allow screen
   recording**, which asks macOS from that process and opens System Settings, Privacy & Security, Screen Recording, where the person
   switches Orbiters - N4N0 on and reopens it. While the Mac's screen is locked macOS shows no frame of the game (the window counts
   as covered: 0 shown events, measured 22:00), so `screenshot` answers `screen_locked` with `retry_after_s`, and `get_state`'s
   `this_computer` says `screen_recording_allowed` and `screen_locked`.
 - **Close** is the game's own Quit through the engine, for that Game session only (`obelisk-cli steam quit 438100 --session <uuid>`,
-  0.1.3; with an older program the running session is checked to be the bridge's first). Never forced: a game that does not go is
-  `close_timeout`, and the person decides.
+  0.1.3 and later; an older program is not asked at all, `close_failed`: its quit names no session). Never forced: a game that does
+  not go is `close_timeout`, and the person decides. A short command of the program (`run_for`) is held to its time after its output
+  ends too, and only its success is one.
 - **The person:** any keyboard, mouse or trackpad event (the HID system's idle time, `CGEventSourceSecondsSinceLastEventType`, no
-  permission needed; the bridge sends no input on a Mac, so all of it is theirs) pauses the agent for 30 s. No hotkey on a Mac:
+  permission needed; the bridge sends no input on a Mac, so all of it is theirs) pauses the agent for 30 s. Each sample places the
+  last event at `now - idle` (`person::IdleClock`): a mouse that never stops is heard at every sample, and a listener started while
+  the person is at the computer hears them at once. No hotkey on a Mac:
   Settings' Pause and Stop.
-- **Agents:** Claude Code and Codex are found on the person's own search path (asked once of their login shell, then the usual
-  places of Homebrew, npm and the installers), and run with it (their scripts need `node`). Codex's settings file is written readable
+- **Arguments** are held to the Mac's own tool list before anything else (`tools::schema_refusal`): an argument it does not name,
+  of another type, outside its enum or minimum is `bad_arguments`; `wait_for` waits only for what a Mac's game reports (not
+  `signed_in`, not `picture_saved`); a Unity tool's `session` (a capture's folder) stays. The resource and prompt metadata promise
+  no 3D pictures. `list_sessions` reads the engine's roster (`MacOpener`: one VRChat, no Easy Anti-Cheat service, no side session).
+- **Keys:** a keys file that cannot be read is not "no keys": no new token replaces it, the bridge stays closed until it can be read,
+  and agents are registered with the open listener's own token (also on Windows, where DPAPI may refuse).
+- **Agents:** Claude Code and Codex are found on the person's own search path (asked once of their login shell, at most 5 s, which
+  also says `CODEX_HOME`; then the usual places of Homebrew, npm and the installers), and run with it (their scripts need `node`). Codex's settings file is written readable
   by this user only from its first byte.
 - **Disks** in `get_state` are grouped by real volume (a mount point), and the Unity tools take only folders on volumes macOS calls
-  local (`statfs`'s `MNT_LOCAL`), never a network share.
+  local (`statfs`'s `MNT_LOCAL`), never a network share: told from the mount table first (`getmntinfo` without waiting), before the
+  path itself is touched, so a share that stopped answering holds nothing.
 
 ### Phase 0 on this Mac (2026-11-22: VRChat under Voile `v26.3.0-27.beta1`, obelisk-cli 0.1.1, Apple M3, macOS 27)
 
@@ -252,7 +278,29 @@ built as VRChat's client builds one), with `-screen-fullscreen 0 -screen-width 1
 | 22:16:19 | Screen unlocked, obelisk-cli 0.1.3, home world, `--osc=9010:127.0.0.1:9011`. Window shown, frames shown (874 by arrival), local player at 22:17:12, a picture of the world at 22:17:15. **Graphics lost at 22:17:16**: `virgl_render_server: npt: resource_update: byte_size 70744960 exceeds cap 67108864`, `ring_submit_cmd: dispatch failed`, then `neptune: ring fatal error` and `VTEST_CLIENT_ERROR_CONTEXT_LOST`. 1,134 frames, 170 s. `steam quit --session <uuid> --wait 60`: `exited` 6 s later, `ended_by_request` true. |
 | 22:19:45 | Same, to act during the loading screen. **Graphics lost at 22:20:36** with exactly the same line (`byte_size 70744960 exceeds cap 67108864`), 5 s after the local avatar began loading (`Starting download of Avatar @ 64 MB`, 22:20:31). 1,074 frames, 323 s; graceful quit by session in 7 s. |
 
-**Why the graphics go (2026-11-22 22:17 and 22:20, the same bytes both times):** one texture or buffer upload of 70,744,960 bytes
+**Fixed in obelisk-cli 0.1.4 (2026-11-22 23:50):** the cap is in Neptune's render server (`virglrenderer/src/neptune/npt_resource.h`,
+`NPT_MAX_RESOURCE_UPDATE_BYTES`, imported from UTM's virglrenderer), checked by `npt_dispatch_resource_update` in the statically linked
+`virgl_render_server`. It sized no buffer: an update's bytes are read in place from the command stream, which for a large one is the
+guest's upload buffer (grown to fit) behind `EXECUTE_COMMAND_STREAM`'s range check; it only kept `byte_size + 7` from wrapping. It is
+1 GiB in Orbiters-cc/neptune (branch `orbiters`), and obelisk-cli puts that render server over Voile's (its `docs/CLI.md`, Graphics).
+The owner's own start from Home at 23:22 (full screen, home world) had died the same way at 23:23:04 (`byte_size 70744960 exceeds cap
+67108864`). With the fix, at 23:50: the avatar loaded at 23:50:56 and the game drew for 3 min 50 s, 4,594 frames, until the Mac's
+screen locked (frames presented on, none shown); no cap line, no lost context; quit by session in 7 s.
+
+**The bridge's real flow on 0.3.9-dev.23 with obelisk-cli 0.1.5 (2026-11-23 01:02 to 01:15, the owner's account, screen unlocked):**
+
+| Start | What happened |
+| --- | --- |
+| 01:02 `go_to_world` home world | Hung about 50 s in (01:02:58: VRChat's log, the engine's log and the frame count stopped together, every engine process at 0 % CPU, VRChat's last line a GC heap allocation): no cap line, no lost context. The bridge said `start_crashed` (frames stalled) at 01:03:15; `close_vrchat` was `close_timeout` (not forced); ended by the experimenter with `steam quit --session --force` (146 s, 829 frames). The same hang as Phase 0's 20:48 start: an engine fault of its own, not the cap. |
+| 01:05 `go_to_world` | `start_wait`, `retry_after_s` 40, no instance made (the gate before the API). |
+| 01:06 Autumn fragrance | Arrived in its private instance (`~private(<me>)`), the 64 MB avatar loaded at 01:07:08, still drawing at 01:09 with the avatar on screen; screenshots 1280 x 720 with `scale` 1.0. |
+| 01:09 `go_to_world` Sky Dream | Its first game was asked to quit (01:09:13), began closing (`OnDestroy`, "finished" at 01:09:15), then an `install.exe` failed to load (`mscoree.dll not found`) and one engine process spun at 100 % CPU for over 2 minutes: `close_timeout`, nothing started (no instance lost: made only once the start could go). Ended by the experimenter by session with `--force` (321 s, 1,991 frames). |
+| 01:11 Sky Dream again | Arrived, avatar loaded 01:13:22, drawing at 01:14:40, screenshot of its welcome screen; `close_vrchat` closed it gracefully in 18 s. |
+
+Not one cap line in these starts. What remains of the engine on this Mac: an occasional hang a minute in, and an occasional quit that
+does not finish; the bridge reports both and never forces.
+
+**Why the graphics went (2026-11-22 22:17 and 22:20, the same bytes both times):** one texture or buffer upload of 70,744,960 bytes
 is refused by the render server's D3D path, whose cap is 64 MiB (`resource_update: byte_size %u exceeds cap %u` in Voile's
 `linux/graphics/lib/libvirglrenderer.1.dylib`); the guest's command ring then fails for good. Both times it came seconds after the
 local avatar (64 MB bundle, the owner's current one) loaded, in the same world, so which asset it is (avatar or world) is not yet

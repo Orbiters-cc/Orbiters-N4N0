@@ -386,6 +386,17 @@ pub trait Game: Send + Sync {
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure>;
     fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure>;
     fn launch(&self, plan: &LaunchPlan) -> Result<(), Failure>;
+    /// Whether a start may be asked for now, before anything is made for it (an instance at VRChat's API): `own_running`
+    /// says the bridge's own game runs and will be closed first. Where starts share a gate with the person's (a Mac), a
+    /// start of theirs under way, or a wait the gate holds with no game of the bridge's to close, refuses it here.
+    fn admit_start(&self, _own_running: bool) -> Result<(), Failure> {
+        Ok(())
+    }
+    /// After the bridge's own game was closed: how long to wait before [`Game::launch`] can start the next (its end being
+    /// finalized, or the wait after an early end); `None` when it can now.
+    fn start_ready(&self) -> Option<std::time::Duration> {
+        None
+    }
     /// Hands the plan's launch link to this game's own running VRChat through VRChat's link pipe, as `launch.exe` does for a
     /// running game: no new process, so no Easy Anti-Cheat start. Refused unless that VRChat is the pipe's server (only the
     /// first VRChat started on a computer serves it). VRChat may show the world's page with a Join button instead of

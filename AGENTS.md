@@ -14,9 +14,12 @@
   unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side
   effect. The Mac's game is `controller/bridge_mac.rs`: only its own launch (launch id, Game session UUID, launcher birth, the log
   whose `Arg:` lines name its link) is ever read, looked at or closed; Home's VRChat is the person's. It starts through the start
-  Home's Play shares (`obelisk_cli::Play`: one at a time, none within 80 s of an early end, by the engine's records), closes with
-  `steam quit --session` and never `--force`. VRChat under the engine often loses its graphics seconds after arriving
-  (`renderer_lost`, `start_crashed`: the engine's, not the bridge's). Screenshots need macOS's Screen Recording for the tray service,
+  Home's Play shares (`obelisk_cli::Play`: one at a time, none within 80 s of an early end, by this run's exit, a boot-clock
+  deadline and the engine's records, an unreadable record refusing), only with obelisk-cli 0.1.5 or later (the record's `shown`
+  frames are its renderer evidence), closes with `steam quit --session` and never `--force`. VRChat's freeze about 5 s after the
+  avatar loaded was Neptune's render server refusing an upload over 64 MiB: fixed in Orbiters-cc/neptune (branch `orbiters`) and
+  shipped by obelisk-cli 0.1.4's engine patch (the fork's `docs/CLI.md`, Graphics); `renderer_lost`/`start_crashed` still report
+  any other loss. Screenshots need macOS's Screen Recording for the tray service,
   which only the person can allow. A real game on this Mac: at most a few starts, never one within 80 s of an early quit, close it
   when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 

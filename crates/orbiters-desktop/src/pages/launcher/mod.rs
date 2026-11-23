@@ -195,8 +195,9 @@ impl State {
         self.scope = Some(crate::controller::vrchat_data::Scope::of(cx.snap));
         // The service's sign-in, against the service's list; data handed in for pictures of the page is its own.
         if !self.staged {
-            // r21: the account being connected counts as the one signed in, so its list is not masked meanwhile.
-            self.login = Some(cx.snap.vrchat_login.shown_user().map(|u| u.id.clone()));
+            // Only the account VRChat verified counts (verify-r21 Major 2): a name shown while connecting is not proof
+            // of whose list this is.
+            self.login = Some(cx.snap.vrchat_login.user.as_ref().map(|u| u.id.clone()));
         }
         self.mask_if_stale();
         self.warm_pictures();

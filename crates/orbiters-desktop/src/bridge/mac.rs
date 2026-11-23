@@ -99,8 +99,11 @@ mod imp {
         fn CGEventSourceSecondsSinceLastEventType(state: i32, kind: u32) -> f64;
         fn CGSessionCopyCurrentDictionary() -> CFTypeRef;
         fn CGMainDisplayID() -> u32;
-        fn CGDisplayPixelsWide(display: u32) -> usize;
-        fn CGDisplayBounds(display: u32) -> CGRect;
+        fn CGGetDisplaysWithRect(rect: CGRect, max: u32, displays: *mut u32, count: *mut u32) -> i32;
+        fn CGDisplayCopyDisplayMode(display: u32) -> CFTypeRef;
+        fn CGDisplayModeGetWidth(mode: CFTypeRef) -> usize;
+        fn CGDisplayModeGetPixelWidth(mode: CFTypeRef) -> usize;
+        fn CGDisplayModeRelease(mode: CFTypeRef);
         static kCGWindowNumber: CFTypeRef;
         static kCGWindowOwnerPID: CFTypeRef;
         static kCGWindowBounds: CFTypeRef;
@@ -209,21 +212,27 @@ mod imp {
         list(LIST_ALL)
     }
 
-    /// The process whose ordinary window is in front of all others now.
-    pub fn front_owner() -> Option<u32> {
-        list(ON_SCREEN_ONLY | EXCLUDE_DESKTOP).into_iter().find(|w| w.layer == 0 && w.width > 1.0 && w.height > 1.0).map(|w| w.owner)
+    /// The ordinary window in front of all others now.
+    pub fn front_window() -> Option<u32> {
+        list(ON_SCREEN_ONLY | EXCLUDE_DESKTOP).into_iter().find(|w| w.layer == 0 && w.width > 1.0 && w.height > 1.0).map(|w| w.id)
     }
 
-    /// Backing pixels per point of the main display (2 on a Retina display).
-    pub fn scale() -> f64 {
-        // SAFETY: plain queries.
+    /// Backing pixels per point of the display that shows most of `window` (2 on a Retina display), from its display mode:
+    /// `CGDisplayPixelsWide` and `CGDisplayBounds` both count points (1470 on this Mac's 2940-pixel panel).
+    pub fn scale_of(window: &MacWindow) -> f64 {
+        let rect = CGRect { x: window.x, y: window.y, w: window.width.max(1.0), h: window.height.max(1.0) };
+        let mut displays = [0u32; 4];
+        let mut count = 0u32;
+        // SAFETY: plain queries into buffers of ours; the mode is released.
         unsafe {
-            let display = CGMainDisplayID();
-            let points = CGDisplayBounds(display).w;
-            if points <= 0.0 {
+            let display = if CGGetDisplaysWithRect(rect, displays.len() as u32, displays.as_mut_ptr(), &mut count) == 0 && count > 0 { displays[0] } else { CGMainDisplayID() };
+            let mode = CGDisplayCopyDisplayMode(display);
+            if mode.is_null() {
                 return 1.0;
             }
-            (CGDisplayPixelsWide(display) as f64 / points).max(1.0)
+            let scale = super::mode_scale(CGDisplayModeGetPixelWidth(mode), CGDisplayModeGetWidth(mode));
+            CGDisplayModeRelease(mode);
+            scale
         }
     }
 
@@ -233,21 +242,64 @@ mod imp {
         unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) }
     }
 
-    /// A picture of the window `id` alone as PNG bytes, through macOS's `screencapture -l` (its shadow left out, no sound).
+    /// A picture of the window `id` alone as PNG bytes, through macOS's `screencapture -l` (its shadow left out, no sound):
+    /// into a file of this call's own, refused unless the tool succeeded and wrote one, ended past [`super::CAPTURE_LIMIT`].
     pub fn capture_png(id: u32) -> Result<Vec<u8>, String> {
-        let file = std::env::temp_dir().join(format!("orbiters-bridge-shot-{}-{id}.png", std::process::id()));
-        let ran = std::process::Command::new("/usr/sbin/screencapture")
-            .args(["-l", &id.to_string(), "-o", "-x", "-t", "png"])
-            .arg(&file)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| e.to_string())?;
-        let bytes = std::fs::read(&file).map_err(|_| String::from_utf8_lossy(&ran.stderr).trim().to_string());
-        let _ = std::fs::remove_file(&file);
-        bytes
+        let folder = std::env::temp_dir().join(format!("orbiters-bridge-shot-{}-{id}-{}", std::process::id(), super::next_shot()));
+        std::fs::create_dir(&folder).map_err(|e| e.to_string())?;
+        let file = folder.join("shot.png");
+        let result = (|| {
+            let mut child = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-l", &id.to_string(), "-o", "-x", "-t", "png"])
+                .arg(&file)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            let status = super::wait_until(&mut child, super::CAPTURE_LIMIT)?;
+            if !status.success() {
+                return Err(format!("screencapture ended with {status}")); // i18n: not shown (an AI client reads it)
+            }
+            std::fs::read(&file).map_err(|e| e.to_string())
+        })();
+        let _ = std::fs::remove_dir_all(&folder);
+        result
     }
+}
+
+/// How long one window capture may take.
+pub const CAPTURE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A number for each capture of this process: no two share a file.
+pub fn next_shot() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Waits for `child` for at most `limit`: past it, the child is ended and waited for, and the wait fails.
+pub fn wait_until(child: &mut std::process::Child, limit: std::time::Duration) -> Result<std::process::ExitStatus, String> {
+    let until = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() >= until => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("no answer within {} s", limit.as_secs())); // i18n: not shown (an AI client reads it)
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Backing pixels per point of a display mode `pixel_width` pixels wide drawn `point_width` points wide (at least 1).
+pub fn mode_scale(pixel_width: usize, point_width: usize) -> f64 {
+    if point_width == 0 || pixel_width == 0 {
+        return 1.0;
+    }
+    (pixel_width as f64 / point_width as f64).max(1.0)
 }
 
 #[cfg(test)]
@@ -269,5 +321,29 @@ mod tests {
         assert_eq!(content_pixels(&listed[2], 2.0), (1280, 720));
         assert_eq!(title_rows(784, 392.0), 64, "the capture of a 640 x 392 frame at scale 2");
         assert_eq!(title_rows(392, 392.0), 32);
+    }
+
+    /// The verifier's case: this Mac's 2940-pixel panel drawn as 1470 points. The window's content is 1280 x 720 pixels,
+    /// not 640 x 360.
+    #[test]
+    fn a_retina_display_mode_gives_scale_2_and_the_content_its_pixels() {
+        assert_eq!(mode_scale(2940, 1470), 2.0);
+        assert_eq!(mode_scale(1920, 1920), 1.0);
+        assert_eq!(mode_scale(0, 1470), 1.0, "a mode that says nothing");
+        let game = w(3, 640.0, 392.0, 0, true);
+        assert_eq!(content_pixels(&game, mode_scale(2940, 1470)), (1280, 720));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_hangs_is_ended_at_its_limit() {
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let begun = std::time::Instant::now();
+        assert!(wait_until(&mut child, std::time::Duration::from_millis(300)).is_err());
+        assert!(begun.elapsed() < std::time::Duration::from_secs(5));
+        assert!(child.try_wait().unwrap().is_some(), "ended and reaped");
+        let mut ok = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        assert!(wait_until(&mut ok, std::time::Duration::from_secs(5)).unwrap().success());
+        assert_ne!(next_shot(), next_shot(), "each capture its own file");
     }
 }

@@ -12,7 +12,7 @@ use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
 
-/// How many of the bridge's last actions show.
+/// How many of the bridge's last actions show at first (older ones a press of Show more away).
 const BRIDGE_LINES: usize = 12;
 
 /// What VRChat's Terms say of this, plainly, right where it is turned on. Their Effective Date was October 23, 2026.
@@ -24,6 +24,8 @@ pub struct State {
     copied: Option<(&'static str, f64)>,
     /// The visit of the page whose look at the agents was asked for.
     checked: Option<u64>,
+    /// How many of the bridge's last actions show.
+    shown: usize,
 }
 
 /// A button that copies `text`, and says so for a moment.
@@ -235,12 +237,23 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         ui.add_space(12.0);
         widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 7.0), egui::Align2::LEFT_CENTER, &Txt::new(tr("Recent actions"), 13.5).weight(weight::MEDIUM));
         ui.add_space(24.0);
-        // The last actions, newest at the bottom, in the page's own scroll (never a scroll area inside it).
+        // The last actions, newest at the bottom, in the page's own scroll (never a scroll area inside it); older ones
+        // come above them a press of Show more at a time, as the notice log's do.
+        state.shown = state.shown.max(BRIDGE_LINES);
+        if status.log.len() > state.shown {
+            let (r, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+            let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let more = tr!("Show more ({count} more)", count = status.log.len() - state.shown);
+            if Button::new(&more).variant(Variant::Ghost).size(Size::Sm).id_salt("bridge-log-more").show(&mut bu).clicked() {
+                state.shown += 40;
+            }
+            ui.add_space(6.0);
+        }
         let mut galleys = Vec::new();
         if status.log.is_empty() {
             galleys.push((ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0)), theme::FG_3));
         }
-        for line in status.log.iter().skip(status.log.len().saturating_sub(BRIDGE_LINES)) {
+        for line in status.log.iter().skip(status.log.len().saturating_sub(state.shown)) {
             let color = if line.ok { theme::FG_2 } else { theme::WARN };
             // Today's actions: the time says enough.
             let when = super::local_time_unix(line.at);

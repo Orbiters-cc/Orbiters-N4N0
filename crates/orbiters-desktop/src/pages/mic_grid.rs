@@ -146,6 +146,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             let (row, column) = (i / columns, i % columns);
             let rect = Rect::from_min_size(area.min + vec2(column as f32 * (tile_w + GAP), row as f32 * (TILE_HIGH + GAP)), vec2(tile_w, TILE_HIGH));
             let response = ui.interact(rect, ui.id().with(("mic", &mic.endpoint.id)), Sense::click());
+            widgets::mark_control("mic-tile", "tile", rect);
             let is_default = chosen.as_deref() == Some(mic.endpoint.id.as_str());
             let fill = mic.peak.map_or(0.0, fill_of);
             let was = state.shown.get(&mic.endpoint.id).copied().unwrap_or(0.0);

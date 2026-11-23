@@ -65,6 +65,14 @@ pub fn text_row(ui: &mut egui::Ui, texts: &mut Texts, key: &'static str, saved: 
 /// Saves what a page changed in `draft` against `base` (the settings it drew this frame from): only those fields go,
 /// merged by the service into the settings as they are then ([`orbiters_core::settings::Settings::patched`]). Where
 /// something else changed the same field meanwhile, the page wins: it is what the person just did.
+/// The room a [`text_row`] needs in a settings row `row_width` wide: its Save button, the gap and its field, the field
+/// at most `field_max` wide and leaving the row's text at least half of it. Returns (the control's width, the field's).
+pub fn text_row_width(ui: &egui::Ui, row_width: f32, field_max: f32) -> (f32, f32) {
+    let save = Button::new(tr("Save")).size(Size::Sm).desired_width(ui);
+    let field = (row_width * 0.5 - save - 8.0).clamp(140.0, field_max);
+    (save + 8.0 + field, field)
+}
+
 pub fn save(ctl: &Ctl, base: &Settings, draft: &Settings) {
     ctl.save_changes(base, draft);
 }

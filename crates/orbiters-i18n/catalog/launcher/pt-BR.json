@@ -56,5 +56,7 @@
   "The download could not be unpacked.": "Não foi possível descompactar o download.",
   "The download is not signed by Orbiters: nothing was installed.": "O download não é assinado pela Orbiters: nada foi instalado.",
   "VRChat closed shortly after it started. If it crashed, press Play again.": "O VRChat fechou logo depois de iniciar. Se travou, pressione Jogar de novo.",
-  "VRChat ended early a moment ago: it can be started again in {seconds} s.": "O VRChat encerrou cedo há um instante: ele poderá ser iniciado de novo em {seconds} s."
+  "VRChat ended early a moment ago: it can be started again in {seconds} s.": "O VRChat encerrou cedo há um instante: ele poderá ser iniciado de novo em {seconds} s.",
+  "It ended with {status}.": "Ele terminou com {status}.",
+  "VRChat's last start could not be checked yet. Try again in a moment.": "Ainda não foi possível verificar a última inicialização do VRChat. Tente de novo em instantes."
 }

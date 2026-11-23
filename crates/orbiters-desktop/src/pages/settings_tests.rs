@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 struct Recorder {
     patches: Mutex<Vec<serde_json::Value>>,
     n4n0: Mutex<Vec<N4n0Command>>,
+    /// The worker's log as the service keeps it.
+    worker: Mutex<Option<Vec<String>>>,
 }
 
 impl Backend for Recorder {
@@ -52,7 +54,7 @@ impl Backend for Recorder {
     fn sign_out(&self) {}
     fn request_worker_log(&self) {}
     fn worker_log(&self) -> Option<Vec<String>> {
-        None
+        self.worker.lock().unwrap().clone()
     }
     fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<PathBuf>) {}
     fn upload_preview(&self, _world_id: String, _world_name: String, _session: PathBuf) {}
@@ -98,12 +100,18 @@ impl Harness {
         s.walk_boost.enabled = true;
         s.orbit.camera_tiles = true;
         s.performance.record_mic = true;
+        s.launch.performance = true;
+        s.translate.provider = orbiters_core::settings::TranslateProvider::Address;
         let mut snap = Snapshot::new(s);
+        // An AI server that offers models (the translator's Model row).
+        snap.translate.set(crate::state::TranslateStatus { models: vec!["made-up-model".into()], ..Default::default() });
         snap.account.state = AccountState::SignedIn { username: "TestMember".into() };
         snap.vrchat_login.allowed = true;
         snap.bridge.allowed = true;
         // Calls open to this account (they start as "coming soon", their switch greyed).
         snap.n4n0.calls.link = crate::state::CallLink::Off;
+        // The bridge listening: its address, token, controls and recent actions show.
+        snap.bridge.listening = true;
         Self { ctx, recorder, ctl, snap, toasts: Toasts::default(), state: State::default(), time: 0.0, size: vec2(1280.0, 820.0), go: None }
     }
 
@@ -158,41 +166,158 @@ impl Harness {
 /// The gates the harness opens: no window GPU to choose here.
 const HERE: Open = Open { bridge: true, vrchat_login: true, gpu_choice: false, gpu_split: false };
 
-/// The test the registry is held to: a row drawn in Settings without an entry would be a setting nobody can search.
-#[test]
-fn every_row_drawn_in_settings_has_a_registry_entry() {
-    let mut h = Harness::new();
-    for group in registry::groups(&HERE) {
-        h.open(group.id());
-        assert_eq!(h.state.group(), group);
-        assert!(!h.state.seen.is_empty() || !h.state.seen_cards.is_empty(), "{group:?} draws nothing");
-        for (card, _) in &h.state.seen_cards {
-            assert!(ENTRIES.iter().any(|e| e.group == group && e.card == *card), "{group:?}: the card {card:?} has no entry");
+impl Harness {
+    /// Every switch and choice that hides another off, signed out of nothing else: the other conditional state.
+    fn dependencies_off(&mut self) {
+        let s = &mut self.snap.settings;
+        s.n4n0.afk_message_enabled = false;
+        s.n4n0.calls = false;
+        s.floating.watch = false;
+        s.walk_boost.enabled = false;
+        s.orbit.camera_tiles = false;
+        s.performance.record_mic = false;
+        s.launch.performance = false;
+        s.translate.provider = orbiters_core::settings::TranslateProvider::ThisComputer;
+        self.snap.account.state = AccountState::SignedOut;
+        self.snap.translate.set(crate::state::TranslateStatus::default());
+    }
+
+    /// The rows drawn in `card` last frame, by label, for [`registry::claim`].
+    fn rows_of(&self, card: &str) -> Vec<(String, Rect)> {
+        self.state.seen.iter().filter(|(c, _, _)| *c == card).map(|(_, l, r)| (l.clone(), *r)).collect()
+    }
+
+    /// Every row and every control the sub-tab shown drew that no setting claims, and is neither a status row nor an action.
+    fn unclaimed(&self, group: Group) -> Vec<String> {
+        let mut out = Vec::new();
+        for (card, _) in &self.state.seen_cards {
+            if !ENTRIES.iter().any(|e| e.group == group && e.card == *card) {
+                out.push(format!("the card {card:?} has no entry"));
+            }
         }
-        for (card, label, _) in &h.state.seen {
-            assert!(!card.is_empty(), "{group:?}: the row {label:?} is in no card");
-            let known = ENTRIES.iter().any(|e| e.group == group && e.card == *card && (e.has_row(label) || e.whole));
-            assert!(known, "{group:?} › {card}: the row {label:?} is drawn without a registry entry (pages/settings_registry.rs)");
+        for (card, label, _) in &self.state.seen {
+            let known = ENTRIES.iter().any(|e| e.group == group && e.card == *card && e.has_row(label)) || registry::is_status_row(card, label);
+            if !known {
+                out.push(format!("{card} › row {label:?}"));
+            }
+        }
+        for (card, key, rect) in &self.state.seen_controls {
+            if registry::claim(group, card, key, rect.center(), &self.rows_of(card)) == registry::Claim::Nobody {
+                out.push(format!("{card} › control {key:?}"));
+            }
+        }
+        out
+    }
+}
+
+/// The test the registry is held to, in both states of every dependency: each row Settings draws is a setting's or a
+/// status row, and each control (toggle, slider, segments, step slider, text field, dropdown, button, chip, tile) is a
+/// setting's (in its row, or named by it) or a listed action. A control nobody claims is a setting nobody can search.
+#[test]
+fn every_row_and_control_drawn_in_settings_belongs_to_a_setting() {
+    for off in [false, true] {
+        let mut h = Harness::new();
+        if off {
+            h.dependencies_off();
+        }
+        for group in registry::groups(&HERE) {
+            h.open(group.id());
+            assert_eq!(h.state.group(), group);
+            assert!(!h.state.seen_controls.is_empty(), "{group:?} draws no control");
+            let unclaimed = h.unclaimed(group);
+            assert!(unclaimed.is_empty(), "dependencies {}: {group:?}: drawn without a registry entry (pages/settings_registry.rs):\n{}", if off { "off" } else { "on" }, unclaimed.join("\n"));
         }
     }
 }
 
-/// And the other way: every entry that can show here is drawn where the registry says, unless its rows show only in
-/// some states.
+/// A broad card's own control left out of the registry fails the test above: the FPS booster's level slider, claimed by
+/// its setting, and the same slider under a name no entry has.
+#[test]
+fn a_control_missing_from_the_registry_is_caught_on_a_broad_card() {
+    let mut h = Harness::new();
+    h.open("vrchat");
+    let (card, key, rect) = h.state.seen_controls.iter().find(|(_, k, _)| k == "booster-level").cloned().expect("the booster's level slider is drawn and recorded");
+    assert_eq!(card, "FPS booster");
+    let rows = h.rows_of(card);
+    assert_eq!(registry::claim(Group::Vrchat, card, &key, rect.center(), &rows), registry::Claim::Setting("vrchat.booster"));
+    // The same control under another name: nobody claims it, and the card being "the FPS booster" does not excuse it.
+    assert_eq!(registry::claim(Group::Vrchat, card, "booster-another-slider", rect.center(), &rows), registry::Claim::Nobody);
+    h.state.seen_controls.push((card, "booster-another-slider".into(), rect));
+    assert_eq!(h.unclaimed(Group::Vrchat), vec!["FPS booster › control \"booster-another-slider\"".to_string()]);
+}
+
+/// And the other way, in both states: with every dependency on, every setting that can show here is drawn where the
+/// registry says (a row of it, a control of it, or its whole card); with them off, each setting that needs another is
+/// not drawn, the one it needs is, and a search result for it leads there.
 #[test]
 fn every_setting_of_the_registry_is_drawn_where_it_says() {
+    let drawn = |h: &Harness, e: &registry::Entry| {
+        let card = h.state.seen_cards.iter().find(|(c, r)| *c == e.card && r.height() > 1.0).map(|(_, r)| *r);
+        let row = h.state.seen.iter().any(|(c, label, _)| *c == e.card && e.has_row(label));
+        let control = h.state.seen_controls.iter().any(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str()));
+        card.is_some() && (row || control || e.whole)
+    };
     let mut h = Harness::new();
     for group in registry::groups(&HERE) {
         h.open(group.id());
-        for e in registry::of_group(group, &HERE).filter(|e| !e.sometimes) {
-            let card = h.state.seen_cards.iter().any(|(c, r)| *c == e.card && r.height() > 1.0);
-            assert!(card, "{}: its card {:?} is not drawn in {group:?}", e.id, e.card);
-            if !e.whole {
-                let drawn = h.state.seen.iter().any(|(c, label, _)| *c == e.card && e.has_row(label));
-                assert!(drawn, "{}: no row of it in {:?} › {}", e.id, group, e.card);
-            }
+        for e in registry::of_group(group, &HERE) {
+            assert!(drawn(&h, e), "dependencies on: {} is not drawn in {group:?} › {}", e.id, e.card);
         }
     }
+    let mut h = Harness::new();
+    h.dependencies_off();
+    let mut hidden = 0;
+    for group in registry::groups(&HERE) {
+        h.open(group.id());
+        for e in registry::of_group(group, &HERE) {
+            let Some(needs) = e.needs else { continue };
+            assert!(!(needs.met)(&h.snap), "{}: its dependency is still met", e.id);
+            let why = (
+                h.state.seen.iter().filter(|(c, label, _)| *c == e.card && e.has_row(label)).map(|(_, l, _)| l.clone()).collect::<Vec<_>>(),
+                h.state.seen_controls.iter().filter(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str())).map(|(_, k, _)| k.clone()).collect::<Vec<_>>(),
+            );
+            assert!(!drawn(&h, e), "dependencies off: {} is drawn while {:?} is not so: {why:?}", e.id, needs.when);
+            let parent = registry::entry(needs.parent).expect("its parent is an entry");
+            assert_eq!(parent.group, e.group, "{}: what shows it is in another sub-tab", e.id);
+            assert!(drawn(&h, parent), "dependencies off: {} is hidden, and {} that shows it is not drawn", e.id, parent.id);
+            assert_eq!(target_of(e, &h.snap).id, parent.id, "{}: a result for it leads to {}", e.id, parent.id);
+            hidden += 1;
+        }
+    }
+    assert!(hidden >= 12, "only {hidden} settings were tested hidden");
+}
+
+/// Major 10's case: Direct calls searched with Calls off. The result says what it needs; Enter opens Calls' sub-tab and
+/// lights the Calls switch (not the card); the banner names Direct calls and why it is not there.
+#[test]
+fn a_hidden_setting_says_what_it_needs_and_lights_its_switch() {
+    let mut h = Harness::new();
+    h.snap.settings.n4n0.calls = false;
+    h.open("account");
+    h.state.stage_search("direct calls");
+    let texts = super::super::rest::texts(&h.settle());
+    assert!(texts.contains("Shown when Calls is on"), "{texts}");
+    let id = h.state.search_id.expect("the search field");
+    h.ctx.memory_mut(|m| m.request_focus(id));
+    h.frame(Vec::new());
+    assert_eq!(registry::search("direct calls", &HERE)[0].entry.id, "n4n0.direct-calls");
+    h.key(egui::Key::Enter);
+    let texts = super::super::rest::texts(&h.settle_a_little_more());
+    assert_eq!(h.state.group(), Group::N4n0);
+    assert_eq!(h.state.found, Some("n4n0.direct-calls"));
+    let jump = h.state.jump.expect("something is lit");
+    assert_eq!(jump.id, "n4n0.calls", "the switch that shows it is lit, not its card");
+    assert!(jump.lit.is_some(), "and it was found and brought into view");
+    assert!(texts.contains("Shown when Calls is on"), "the banner says why: {texts}");
+    // A link to it does the same.
+    let mut h = Harness::new();
+    h.snap.settings.n4n0.calls = false;
+    h.open("n4n0.direct-calls");
+    assert_eq!(h.state.jump.map(|j| j.id), Some("n4n0.calls"));
+    // With Calls on, Direct calls itself.
+    let mut h = Harness::new();
+    h.open("n4n0.direct-calls");
+    assert_eq!(h.state.jump.map(|j| j.id), Some("n4n0.direct-calls"));
 }
 
 /// N4N0's settings are no longer drawn on the N4N0 page: each is in Settings once.
@@ -410,3 +535,148 @@ fn reset_puts_the_menus_smoothing_back_to_the_values_measured_with_vrchat() {
     assert!(!on, "both at the measured values: nothing to reset");
 }
 
+impl Harness {
+    fn settle_a_little_more(&mut self) -> egui::FullOutput {
+        let mut out = self.frame(Vec::new());
+        for _ in 0..20 {
+            out = self.frame(Vec::new());
+        }
+        out
+    }
+
+    /// Moves the pointer to `at` (from just beside it, a real move), then leaves it there.
+    fn park_pointer(&mut self, at: Pos2) {
+        self.frame(vec![Event::PointerMoved(at - vec2(6.0, 0.0))]);
+        self.frame(vec![Event::PointerMoved(at)]);
+    }
+}
+
+/// Minor 1: a pointer left over a result never takes the lit result back from the arrows, and Enter opens the one the
+/// arrows chose.
+#[test]
+fn a_parked_pointer_does_not_take_the_arrows_selection_back() {
+    let mut h = Harness::new();
+    h.open("account");
+    h.state.stage_search("micro");
+    h.settle();
+    let found = registry::search("micro", &HERE);
+    assert!(found.len() >= 3, "{}", found.len());
+    // The pointer comes to rest over the third result: it lights it, as a move does.
+    let third = h.state.result_rects[2];
+    h.park_pointer(third.center());
+    h.settle_a_little();
+    assert_eq!(h.state.active, 2, "a pointer moving onto a result lights it");
+    // The arrows take it from there, and keep it while the pointer stays where it is.
+    let id = h.state.search_id.expect("the search field");
+    h.ctx.memory_mut(|m| m.request_focus(id));
+    h.frame(Vec::new());
+    h.key(egui::Key::ArrowUp);
+    assert_eq!(h.state.active, 1);
+    h.settle_a_little();
+    assert_eq!(h.state.active, 1, "the parked pointer took the selection back");
+    h.key(egui::Key::Enter);
+    h.settle_a_little();
+    assert_eq!(h.state.found, Some(found[1].entry.id), "Enter opened the result the arrows chose");
+}
+
+/// Minor 1: the arrows bring the lit result into view in a short window.
+#[test]
+fn the_arrows_bring_the_lit_result_into_view() {
+    let mut h = Harness::new();
+    h.size = vec2(1280.0, 520.0);
+    h.open("account");
+    h.state.stage_search("vrchat");
+    h.settle();
+    let shown = h.state.result_rects.len();
+    assert!(shown >= 8, "{shown} results");
+    let id = h.state.search_id.expect("the search field");
+    h.ctx.memory_mut(|m| m.request_focus(id));
+    h.frame(Vec::new());
+    for _ in 0..shown - 1 {
+        h.key(egui::Key::ArrowDown);
+    }
+    h.settle_a_little();
+    assert_eq!(h.state.active, shown - 1);
+    let r = h.state.result_rects[shown - 1];
+    assert!(r.bottom() <= 520.0 + 0.5 && r.top() >= 0.0, "the last result, lit by the arrows, is out of view: {r:?}");
+}
+
+/// The press of the button whose key starts with `start` among the controls drawn last frame.
+fn press_control(h: &mut Harness, start: &str) -> bool {
+    let Some((_, _, r)) = h.state.seen_controls.iter().find(|(_, k, _)| k.starts_with(start)).cloned() else { return false };
+    h.press(r.center());
+    h.settle_a_little();
+    true
+}
+
+/// Minor 2: every line the service keeps of the worker's log can be reached: the last ones at once, older ones a press
+/// of Show more at a time, in the page's one scroll.
+#[test]
+fn every_worker_log_line_is_reachable() {
+    let mut h = Harness::new();
+    h.size = vec2(1280.0, 6000.0);
+    *h.recorder.worker.lock().unwrap() = Some((1..=400).map(|i| format!("worker line {i}")).collect());
+    h.state.log_open = true;
+    let texts = super::super::rest::texts(&h.open("app.about"));
+    assert!(texts.contains("worker line 400") && texts.contains("worker line 361"), "the last lines");
+    assert!(!texts.contains("worker line 360\n"));
+    let mut presses = 0;
+    while press_control(&mut h, "Show more (") {
+        presses += 1;
+        assert!(presses < 10);
+    }
+    let texts = super::super::rest::texts(&h.settle());
+    assert!(texts.contains("worker line 1\n"), "the oldest line is reachable");
+    assert!(presses >= 4, "{presses} presses");
+}
+
+/// Minor 2: every action the bridge keeps can be reached the same way.
+#[test]
+fn every_bridge_action_is_reachable() {
+    let mut h = Harness::new();
+    h.size = vec2(1280.0, 8000.0);
+    h.snap.bridge.log = (1..=80).map(|i| crate::bridge::LogLine { at: 1_795_000_000 + i, text: format!("made-up action {i}"), ok: true }).collect();
+    let texts = super::super::rest::texts(&h.open("vrchat.bridge"));
+    assert!(texts.contains("made-up action 80"), "the last action: {texts}");
+    assert!(!texts.contains("made-up action 1\n"), "the last actions only");
+    let mut presses = 0;
+    while press_control(&mut h, "Show more (") {
+        presses += 1;
+        assert!(presses < 10);
+    }
+    let texts = super::super::rest::texts(&h.settle());
+    assert!(texts.contains("made-up action 1\n"), "the oldest action is reachable");
+}
+
+/// At the smallest window (1040 wide, the sidebar's 232 points off: 808 for the page), in English and French, every
+/// row leaves its text the room a row needs beside its control, every control stays in the room its row gave it, and
+/// nothing goes past the page.
+#[test]
+fn every_control_fits_at_the_smallest_window() {
+    let mut wrong = Vec::new();
+    for language in [Language::En, Language::Fr] {
+        in_language(language, || {
+            let mut h = Harness::new();
+            h.size = vec2(808.0, 700.0);
+            for group in registry::groups(&HERE) {
+                h.open(group.id());
+                for (label, control, text_w) in &h.state.seen_fields {
+                    if *text_w < 120.0 {
+                        wrong.push(format!("{language:?} {group:?}: the row {label:?} leaves its text {text_w:.0} pt beside its control"));
+                    }
+                    for (_, key, r) in h.state.seen_controls.iter().filter(|(_, _, r)| control.contains(r.center())) {
+                        if r.left() < control.left() - 0.5 {
+                            wrong.push(format!("{language:?} {group:?}: {key:?} in {label:?} runs {:.0} pt over its row's text", control.left() - r.left()));
+                        }
+                    }
+                }
+                for (card, key, r) in &h.state.seen_controls {
+                    if r.left() < 0.0 || r.right() > 808.0 - 24.0 {
+                        wrong.push(format!("{language:?} {group:?} › {card}: {key:?} goes past the page: {r:?}"));
+                    }
+                }
+            }
+        });
+    }
+    assert!(wrong.is_empty(), "{} controls do not fit:\n{}", wrong.len(), wrong.join("\n"));
+}

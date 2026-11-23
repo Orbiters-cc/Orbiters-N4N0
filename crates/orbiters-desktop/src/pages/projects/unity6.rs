@@ -309,9 +309,10 @@ impl U6 {
         self.outcomes_at = Some(Instant::now());
         let (id, at) = (job.id.clone(), job.unity6().path.clone());
         self.outcome_job = Job::spawn(ctx, move || {
-            let running = trial::is_open(&at);
+            // Each attempt's own process; Unity on the trial only stands in for the last one where the system gave none.
+            let open = trial::is_open(&at);
             let last = pending.iter().map(|a| a.n).max();
-            pending.iter().map(|a| ((id.clone(), a.n), trial::attempt_outcome(a, running && Some(a.n) == last))).collect()
+            pending.iter().map(|a| ((id.clone(), a.n), trial::attempt_outcome(a, trial::attempt_running(a, open && Some(a.n) == last)))).collect()
         });
         crate::pages::frame_in(ctx, OUTCOME_EVERY.as_secs_f64());
     }
@@ -394,6 +395,7 @@ impl State {
         let modules = self.u6.standing(&source).and_then(|s| self.u6.editors.get(&s.editor.text)).and_then(|f| f.usable().map(|c| c.modules)).unwrap_or_default();
         let need = target.size_here().filter(|_| editor_missing).map(|s| unity6::budget::EditorNeed::of(s, modules.android, modules.ios));
         let working = super::super::Working::begin();
+        let wake = ctx.clone();
         let job = Job::spawn(ctx, move || {
             let _working = working;
             let dir = orbiters_projects::data_dir();
@@ -406,7 +408,10 @@ impl State {
                 anyhow::ensure!(plan.fits(), "{}", tr("Not enough room on a disk for the trial, checked again just now: choose another place or free some space."));
                 Ok(high)
             };
-            let recorded = |j: &trial::Job| *rec.lock().unwrap() = Some(j.id.clone());
+            let recorded = |j: &trial::Job| {
+                *rec.lock().unwrap() = Some(j.id.clone());
+                wake.request_repaint();
+            };
             let open = |p: &Path| trial::is_open(p);
             let t = trial::Target { sdk: target.sdk.clone(), unity: target.unity.clone(), changeset: target.changeset.clone() };
             trial::prepare(trial::Prepare { dir: &dir, vcc: &vcc, source: &from, parent: &parent, name: &name, target: t, open: &open, budget: &budget, recorded: &recorded }, &stop, &prog)
@@ -538,5 +543,78 @@ mod tests {
         state.u6.apply(1, l);
         assert!(state.u6.present(Path::new("Q:/Not/Here/Trial")), "said present as the worker saw it, though no such disk exists here");
         assert!(state.u6.standing(Path::new("q:\\not\\here")).is_some(), "found by its key");
+    }
+
+    /// Verification major 6 and minor 3: the gallery drawn for real, scrolled to its found projects. A trial's row that
+    /// arrives (a copy that starts, one that failed) moves no card and no row in view, and neither does a damaged record.
+    /// Nothing drawn is on this computer.
+    #[test]
+    fn a_trials_row_that_arrives_moves_nothing_in_view() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl = Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = (*ctl.view()).clone();
+        let mut state = State::default();
+        state.fixture = true;
+        state.u6.fixture = Some(Fixture::default());
+        state.scan.projects = (0..24u64)
+            .map(|i| orbiters_projects::discovery::Project {
+                path: PathBuf::from(format!("Q:/Not/Here/P{i}")),
+                name: format!("Project {i}"),
+                unity: "2022.3.22f1".into(),
+                registered: i < 6,
+                modified: 1000 - i,
+                ..Default::default()
+            })
+            .collect();
+        state.u6.apply(1, look(&[("Q:/Not/Here/P0", standing::State::On2022)]));
+        let mut time = 0.0;
+        let mut draw = |state: &mut State, frames: usize| {
+            for _ in 0..frames {
+                time += 1.0 / 60.0;
+                let input = egui::RawInput { time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0))), ..Default::default() };
+                let mut toasts = orbiters_ui::toast::Toasts::default();
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut cx = crate::pages::Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    super::super::ui::show(ui, &mut cx, state);
+                });
+                output.textures_delta.clear();
+            }
+        };
+        draw(&mut state, 60);
+        state.scroll_fix = Some(500.0);
+        draw(&mut state, 60);
+        let before = state.row_places.clone();
+        let shown = before.iter().filter(|(_, r)| r.bottom() > 120.0 && r.top() < 700.0).count();
+        assert!(shown > 0 && before[0].1.top() < 0.0, "scrolled into the gallery: {before:?}");
+        let arrivals = [
+            (trial::Status::Running, trial::Health::Fine),
+            (trial::Status::Failed { kept: true }, trial::Health::Fine),
+            (trial::Status::Unfinished, trial::Health::Damaged { why: "x".into(), backup: true }),
+        ];
+        for (i, (status, health)) in arrivals.into_iter().enumerate() {
+            let mut l = look(&[("Q:/Not/Here/P0", standing::State::On2022)]);
+            let missing = PathBuf::from("Q:/Not/Here/Trial");
+            l.trials = vec![(trial_job(&missing, None), status)];
+            l.health = health;
+            assert!(state.u6.apply(2 + i as u64, l));
+            assert_eq!(state.u6.jobs().len(), 1, "a row of its own");
+            draw(&mut state, 60);
+            assert_eq!(state.row_places, before, "arrival {i}");
+        }
+    }
+
+    /// Verification minor 3: what paints the card, the job rows and the sheet asks nothing of the disk (a network share
+    /// that does not answer would stall the whole window). Reads happen in workers; the one look at a folder here is a
+    /// click's.
+    #[test]
+    fn nothing_painted_reads_the_disk() {
+        for (name, source) in [("unity6_card.rs", include_str!("unity6_card.rs")), ("unity6_sheet.rs", include_str!("unity6_sheet.rs"))] {
+            for (n, line) in source.lines().enumerate() {
+                let asks = [".exists()", "std::fs::", "canonicalize(", ".verified()", "source_verified()", "trial::guard(", "trial::record(", "trial::jobs("].iter().any(|w| line.contains(w));
+                let worker = line.contains("destination.exists()"); // in the sheet's check, a worker's
+                assert!(!asks || worker, "{name}:{}: {line}", n + 1);
+            }
+        }
     }
 }

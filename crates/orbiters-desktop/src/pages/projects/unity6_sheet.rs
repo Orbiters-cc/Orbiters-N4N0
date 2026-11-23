@@ -158,7 +158,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             let open = state.session(&project.path).open();
             let b = Button::new(if open { tr("Unity has it open") } else { tr("Open in Unity 2022") }).icon(icons::PLAY).variant(Variant::Ghost).enabled(!open && !state.running()).id_salt("u6-open-2022");
             if widgets::activated(&b.show(ui)) {
-                state.open_unity(&ctx, &project, false);
+                state.open_unity_as_is(&ctx, &project);
             }
         }
         Step::Place => {

@@ -347,6 +347,10 @@ fn checklist(ui: &mut Ui, list: &compat::Checklist) {
         foot.push(' ');
         foot.push_str(tr("Its assets are not saved as text, so scenes and prefabs could not be read here."));
     }
+    if !list.skipped.is_empty() {
+        foot.push(' ');
+        foot.push_str(&tr!("Not read (too large, a link or unreadable): {files}.", files = list.skipped.join(", ")));
+    }
     if list.cut {
         foot.push(' ');
         foot.push_str(tr("The look stopped before the end of its files."));
@@ -583,7 +587,23 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         &tr!("Unity 6 trial of {name}", name = job.source.name),
         Some(&tr!("Made {day}. Fixes made to the original after that day are not in the trial: before moving for good, make a fresh trial.", day = day(job.forked()))),
     );
+    // The first copy, once Creator Companion's own migrated copy was taken: it stays on 2022, with nothing to open.
+    if job.migrated.is_some() && orbiters_projects::discovery::key(&job.trial.path) == orbiters_projects::discovery::key(&project.path) {
+        para(ui, tr("Creator Companion's migrated copy is this trial's Unity 6 copy now; this first copy stays on Unity 2022 and is not changed from here."), 12.0, theme::FG_3);
+        let list = [(tr("Show the migrated copy"), icons::ARROW_RIGHT, true, "migrated"), (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal-first")];
+        match buttons(ui, &list, false) {
+            Some(0) => state.open(&ctx, job.unity6().path.clone()),
+            Some(1) => {
+                let _ = orbiters_projects::reveal(&job.trial.path);
+            }
+            _ => {}
+        }
+        return;
+    }
     ids_warning(ui, worlds);
+    if !job.localized.is_empty() {
+        para(ui, &tr!("Local packages made part of the trial, named so in its Packages/manifest.json: {packages}.", packages = job.localized.join(", ")), 12.0, theme::FG_3);
+    }
     if state.u6.mac() {
         para(ui, tr("On a Mac, Creator Companion's migration and opening a trial in Unity 6 from Orbiters are not available: this trial is shown for what its files say. Its migration is done on Windows."), 12.0, theme::FG_3);
     }
@@ -624,7 +644,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                         state.u6.act(&ctx, tr("Opening the trial in Unity 6…"), move || {
                             let start = |program: &Path, project: &Path, log: &Path| orbiters_projects::start_logged(program, project, log, &unity);
                             // Found and probed again now: what was found earlier is not trusted at the launch.
-                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &|v| editors::find(v), &trial::is_open, &trial::alive, &start)?;
+                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &|v, build| editors::find_build(v, Some(build)), &trial::is_open, &trial::alive, &start)?;
                             Ok(tr!("Unity is starting. This opening's log: {log}", log = a.log.display()))
                         });
                     }

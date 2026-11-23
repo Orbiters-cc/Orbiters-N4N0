@@ -205,11 +205,20 @@ pub fn demands(trial: &Path, copy: u64, library: Option<u64>, editor: Option<Edi
 pub fn editor_install_folder() -> PathBuf {
     let hub = crate::hub_data_dir();
     let secondary = hub
+        .as_ref()
         .and_then(|h| std::fs::read_to_string(h.join("secondaryInstallPath.json")).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.as_str().or_else(|| v["secondaryInstallPath"].as_str()).map(str::trim).map(ToOwned::to_owned))
         .map(PathBuf::from)
         .filter(|p| p.is_absolute());
+    #[cfg(target_os = "macos")]
+    let secondary = secondary.or_else(|| {
+        let files = [hub.as_ref().map(|h| h.join("settings.json")), Some(PathBuf::from("/Library/Application Support/Unity/config/services-config.json"))];
+        files.into_iter().flatten().find_map(|f| {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(f).ok()?).ok()?;
+            v["machineWideSecondaryInstallLocation"].as_str().map(PathBuf::from).filter(|p| p.is_absolute())
+        })
+    });
     secondary.unwrap_or_else(|| if cfg!(target_os = "macos") { PathBuf::from("/Applications/Unity/Hub/Editor") } else { PathBuf::from(r"C:\Program Files\Unity\Hub\Editor") })
 }
 
@@ -280,9 +289,9 @@ mod tests {
         let link = temp.path().join("link");
         junction::create(&target, &link).unwrap();
         let (through, there) = (Disks.of(&link.join("Trial")).unwrap(), Disks.of(&target).unwrap());
-        assert_eq!(through.0, there.0, "the junction's key is its target's volume");
         let _ = junction::delete(&link);
-        let _ = std::fs::remove_dir_all(&target);
+        let _ = std::fs::remove_dir(&target);
+        assert_eq!(through.0, there.0, "the junction's key is its target's volume");
     }
 
     #[test]

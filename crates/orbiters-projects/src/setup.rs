@@ -67,8 +67,14 @@ pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -
     })
 }
 pub fn write(project: &Path, request: &Request) -> anyhow::Result<()> {
-    if let crate::unity6::trial::Guard::Blocked(why) = crate::unity6::trial::guard(&crate::data_dir(), project) {
-        bail!("{why}");
+    match crate::unity6::trial::guard(&crate::data_dir(), project) {
+        crate::unity6::trial::Guard::Free => {}
+        crate::unity6::trial::Guard::Blocked(why) => bail!("{why}"),
+        // This ends in the SDK's build panel, ready to upload: from a trial that would end the avatar's uploads from 2022.
+        crate::unity6::trial::Guard::Unity6(_) => bail!(
+            "{}",
+            tr("This is a Unity 6 trial with its original's avatar IDs: uploading from it would end the avatar's uploads from Unity 2022. Orbiters does not prepare an upload from it.")
+        ),
     }
     if request.schema != 1 || uuid::Uuid::parse_str(&request.id)?.to_string() != request.id {
         bail!("{}", tr("Invalid setup request id or schema"));

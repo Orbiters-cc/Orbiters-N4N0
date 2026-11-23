@@ -297,14 +297,24 @@ pub(crate) fn within<T: Send + 'static>(limit: std::time::Duration, f: impl FnOn
 /// Opens `project` in its Unity version and returns once the editor has started (or was already there). Always prompt:
 /// never a long operation, which [`storage::repair`] is, asked for separately. Call on a worker.
 pub fn open_project(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, true)
+}
+
+/// [`open_project`] without its storage step: Unity is started and Orbiters changes nothing of the project itself. For an
+/// original about to be tried on Unity 6, which Orbiters never writes to.
+pub fn open_project_as_is(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, false)
+}
+
+fn open_limited(project: &discovery::Project, tidy: bool) -> anyhow::Result<Opened> {
     let name = project.name.clone();
     let p = project.clone();
-    within(OPEN_LIMIT, move || open_now(&p)).unwrap_or_else(|| {
+    within(OPEN_LIMIT, move || open_now(&p, tidy)).unwrap_or_else(|| {
         anyhow::bail!("{}", tr!("Opening {name} is taking too long: its disk or Unity's list of editors is not answering. Unity may still open by itself.", name = name))
     })
 }
 
-fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
+fn open_now(project: &discovery::Project, tidy: bool) -> anyhow::Result<Opened> {
     anyhow::ensure!(
         discovery::is_project(&project.path),
         "{}",
@@ -333,7 +343,7 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
         unity6::trial::Guard::Blocked(why) => anyhow::bail!("{why}"),
         unity6::trial::Guard::Unity6(job) => {
             let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
-            unity6::trial::launch(&data_dir(), &job.id, &|v| unity6::editors::find(v), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
+            unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
             return Ok(Opened { already_open: false, moved: None });
         }
     }
@@ -342,10 +352,7 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     let editor = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
     let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
-    let moved = storage::preflight(&project.path).unwrap_or_else(|e| {
-        eprintln!("the storage check of {} did not finish: {e:#}", project.path.display());
-        None
-    });
+    let moved = if tidy { preflight(&project.path) } else { None };
     #[cfg(not(target_os = "macos"))]
     let started = {
         let mut command = hidden_command(&editor);
@@ -356,6 +363,13 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     let started = start_on_mac(&editor, &project.path, START_WATCH, &project.unity);
     started?;
     Ok(Opened { already_open: false, moved })
+}
+
+fn preflight(project: &Path) -> Option<PathBuf> {
+    storage::preflight(project).unwrap_or_else(|e| {
+        eprintln!("the storage check of {} did not finish: {e:#}", project.display());
+        None
+    })
 }
 
 /// The program Open uses for a project on `unity`: exactly that version (or, said nothing of itself, found where a hint
@@ -703,7 +717,7 @@ mod open_tests {
         assert_eq!(unity6::standing::EditorStamp::read(temp.path()).text, "6000.0.67f1");
         std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "nothing\n").unwrap();
         let project = discovery::Project { name: "Changed".into(), path: temp.path().to_path_buf(), unity: "2022.3.22f1".into(), ..Default::default() };
-        let error = format!("{:#}", open_now(&project).unwrap_err());
+        let error = format!("{:#}", open_now(&project, true).unwrap_err());
         assert!(error.contains("does not say which Unity version"), "{error}");
     }
 
@@ -712,7 +726,7 @@ mod open_tests {
         // Unity would make a new, empty project there.
         let temp = tempfile::tempdir().unwrap();
         let project = discovery::Project { name: "Gone".into(), path: temp.path().join("gone"), unity: "2022.3.22f1".into(), ..Default::default() };
-        let error = open_now(&project).unwrap_err();
+        let error = open_now(&project, true).unwrap_err();
         assert!(format!("{error:#}").contains("is not at"), "{error:#}");
         assert!(!temp.path().join("gone").exists());
     }

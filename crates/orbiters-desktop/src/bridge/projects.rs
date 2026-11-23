@@ -2133,4 +2133,39 @@ mod unity6_tests {
         assert!(GUIDE.contains("unity_line") && GUIDE.contains("no tool migrates"));
         let _ = std::fs::remove_dir_all(&temp);
     }
+
+    /// Verification blocker 3: the bridge's own commands against a trial that waits for Creator Companion: its packages
+    /// are not changed and Unity is not opened, and what it answers says why.
+    #[test]
+    fn the_bridges_commands_refuse_a_waiting_trial() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-trial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let original = temp.join("Avatar");
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        std::fs::create_dir_all(original.join("Assets")).unwrap();
+        let target = Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() };
+        let dir = orbiters_projects::data_dir();
+        let job = unity6::trial::prepare(
+            unity6::trial::Prepare { dir: &dir, vcc: &root(), source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_| Ok(0), recorded: &|_| {} },
+            &AtomicBool::new(false),
+            &Default::default(),
+        )
+        .unwrap();
+        let projects = Projects::default();
+        let at = job.trial.path.clone();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
+        let said = |r: Result<Answer, Failure>| match r {
+            Err(f) => format!("{} {}", f.code, f.message),
+            Ok(Answer::Data(v)) => v.to_string(),
+            Ok(_) => panic!("data"),
+        };
+        let changed = said(projects.call("unity_change_packages", &json!({ "path": at, "action": "restore", "wait_s": 20 }), &call(), None));
+        assert!(changed.contains("Creator Companion"), "{changed}");
+        let opened = said(projects.call("unity_editor", &json!({ "path": at, "action": "open" }), &call(), None));
+        assert!(opened.contains("open_failed") && opened.contains("Creator Companion"), "{opened}");
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
+        unity6::trial::forget(&dir, &job.id).unwrap();
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

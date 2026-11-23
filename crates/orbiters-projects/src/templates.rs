@@ -306,6 +306,8 @@ pub(crate) fn copy_keeping_then(
     check_destination(&source, destination, project)?;
     let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
     std::fs::create_dir_all(parent)?;
+    // Again, now that every folder above exists: none of them was swapped for a link into a project meanwhile.
+    check_destination(&source, destination, project)?;
     let parent = std::fs::canonicalize(parent)?;
     if parent.starts_with(&source) {
         bail!("{}", tr("Create the copy outside the source project."));
@@ -567,6 +569,24 @@ pub(crate) fn check_destination(source: &Path, destination: &Path, project: bool
         }
     }
     Ok(())
+}
+
+/// Every file a copy of `source` (without Library) reads, with its length and modification time: two of them equal means
+/// nothing the copy reads changed between, an edit in place included (a folder's own time does not show one).
+pub(crate) fn inventory(source: &Path) -> anyhow::Result<std::collections::BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>> {
+    let mut out = std::collections::BTreeMap::new();
+    for e in walkdir::WalkDir::new(source)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(|e| !left_out(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), Keep::default(), true))
+    {
+        let e = e?;
+        if e.file_type().is_file() {
+            let m = e.metadata()?;
+            out.insert(e.path().to_path_buf(), (m.len(), m.modified().ok()));
+        }
+    }
+    Ok(out)
 }
 
 /// Whether the folder `copy` holds what `origin` holds: the same files at the same sizes (what a copy made earlier must

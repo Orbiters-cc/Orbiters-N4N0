@@ -195,8 +195,29 @@ fn parse(bytes: &[u8]) -> Result<Vec<Job>, String> {
     Ok(store.jobs)
 }
 
+fn log_of(folder: &Path, n: u32) -> PathBuf {
+    folder.join(format!("attempt-{n}.log"))
+}
+
+/// Every attempt's log is at its own place under app data, whatever the record says: a record edited by hand never makes
+/// Orbiters read, show or remove a file elsewhere.
+fn own_logs(dir: &Path, jobs: &mut [Job]) {
+    for j in jobs {
+        let folder = logs_of(dir, &j.id);
+        for a in &mut j.attempts {
+            a.log = log_of(&folder, a.n);
+        }
+    }
+}
+
 /// The record in `dir` (app data): missing is an empty record; damaged is said, with its last good copy when there is one.
 pub fn record(dir: &Path) -> Record {
+    let mut record = read_record(dir);
+    own_logs(dir, &mut record.jobs);
+    record
+}
+
+fn read_record(dir: &Path) -> Record {
     let main = std::fs::read(dir.join(STORE));
     let backup = std::fs::read(dir.join(BACKUP)).ok().and_then(|b| parse(&b).ok());
     match main {
@@ -271,12 +292,15 @@ fn logs_of(dir: &Path, id: &str) -> PathBuf {
 /// Takes the trial off Orbiters' record and removes its attempts' logs (Orbiters' own files in app data); the trial's
 /// folder and its listing stay as they are.
 pub fn forget(dir: &Path, id: &str) -> anyhow::Result<()> {
-    transact(dir, |jobs| {
+    let known = transact(dir, |jobs| {
+        let before = jobs.len();
         jobs.retain(|j| j.id != id);
-        Ok(())
+        Ok(jobs.len() < before)
     })?;
-    // The id was validated when recorded: the folder is ours, under app data.
-    let _ = std::fs::remove_dir_all(logs_of(dir, id));
+    // Only a trial that was recorded, whose id was validated then: its folder of logs is ours, under app data.
+    if known {
+        let _ = std::fs::remove_dir_all(logs_of(dir, id));
+    }
     Ok(())
 }
 
@@ -414,6 +438,7 @@ pub enum Guard {
 pub fn guard(dir: &Path, project: &Path) -> Guard {
     let rec = record(dir);
     let key = crate::discovery::key(project);
+    let resolved = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     if let (Health::Damaged { backup: false, .. }, Some(raw)) = (&rec.health, &rec.raw) {
         // Nothing readable: a project the damaged text names is treated as a trial.
         let text = raw.to_lowercase().replace("\\\\", "\\").replace('/', "\\");
@@ -422,14 +447,16 @@ pub fn guard(dir: &Path, project: &Path) -> Guard {
         }
     }
     for job in &rec.jobs {
-        let first = crate::discovery::key(&job.trial.path) == key;
-        let migrated = job.migrated.as_ref().is_some_and(|m| crate::discovery::key(&m.path) == key);
+        // By identity first (another spelling, a junction, a folder moved since), by path only when no identity was
+        // recorded: another folder at a recorded path is not the trial.
+        let is = |place: &Place| match place.id {
+            Some(id) => owned::id_of(&resolved).is_ok_and(|now| now == id),
+            None => crate::discovery::key(&place.path) == key,
+        };
+        let first = is(&job.trial);
+        let migrated = job.migrated.as_ref().is_some_and(is);
         if !first && !migrated {
             continue;
-        }
-        let place = if migrated { job.migrated.as_ref().unwrap() } else { &job.trial };
-        if place.verified() == Some(false) {
-            continue; // another folder is there now: not the trial
         }
         if first && job.migrated.is_some() {
             return Guard::Blocked(tr("Creator Companion's migrated copy is this trial's Unity 6 copy now; this first copy stays on Unity 2022 and is not changed from here.").into());
@@ -515,6 +542,12 @@ fn local_packages(project: &Path) -> (Vec<String>, Vec<String>) {
             unsupported.push(name.clone());
             continue;
         }
+        if at.is_file() && !inside {
+            let taken = project.join("Packages").join(format!("{name}.tgz"));
+            if taken.exists() && std::fs::read(&taken).ok() != std::fs::read(&at).ok() {
+                unsupported.push(name.clone());
+            }
+        }
         if at.is_dir() {
             let deps = std::fs::read(at.join("package.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).unwrap_or_default();
             if deps["dependencies"].as_object().into_iter().flatten().any(|(_, v)| v.as_str().is_some_and(|s| s.starts_with("file:"))) {
@@ -554,11 +587,6 @@ pub struct Prepare<'a> {
     pub recorded: &'a dyn Fn(&Job),
 }
 
-/// What changes when a project's files change: the newest modification under it.
-fn stamp(project: &Path) -> u64 {
-    crate::size::stamp(project)
-}
-
 /// Makes the trial: checks again, records, copies, lists it, makes it independent of the original. Every failure after
 /// the record leaves it in a phase [`status`] shows; the error says where the trial is. Nothing is created before every
 /// check passed, and nothing is ever written in the original.
@@ -578,7 +606,7 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &crate::templates::Sha
     anyhow::ensure!(!destination.exists(), "{}", tr!("{path} exists already: choose another name.", path = destination.display()));
     let copy = crate::templates::duplication_bytes(&source, crate::templates::Keep::default())?;
     let import_high = (p.budget)(copy)?;
-    let before = stamp(&source);
+    let before = crate::templates::inventory(&source)?;
 
     let job = Job {
         id: uuid::Uuid::new_v4().simple().to_string(),
@@ -622,7 +650,7 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &crate::templates::Sha
         return Err(e);
     }
     // The original changed or was opened while it was copied: the copy may mix two states of it.
-    if (p.open)(&source) || stamp(&source) != before {
+    if (p.open)(&source) || crate::templates::inventory(&source).ok().as_ref() != Some(&before) {
         let text = tr!("The original changed while it was copied: the copy at {path} may mix two states of it. Start a new trial with the original closed.", path = destination.display());
         update(p.dir, &id, |j| {
             j.phase = Phase::Failed;
@@ -682,6 +710,12 @@ fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &crat
         anyhow::anyhow!("{text}")
     };
     let manifest_before = std::fs::read(at.join("Packages/manifest.json")).ok();
+    // Room for the packages that come from outside the original, checked just before they are copied.
+    let outside = outside_bytes(&job.source.path, &at);
+    let free = free_space(&at).unwrap_or(0);
+    if outside > free {
+        return Err(unfinished(tr!("The trial is listed at {path}, but its disk has {free} GB free and its local packages need {need} GB.", path = at.display(), free = gb(free), need = gb(outside))));
+    }
     if let Err(e) = crate::templates::copy_local_packages(&job.source.path, &at, cancel, progress) {
         return Err(unfinished(tr!("The trial is listed at {path}, but its local packages could not be copied: {error}", path = at.display(), error = format!("{e:#}"))));
     }
@@ -689,8 +723,16 @@ fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &crat
         return Err(unfinished(format!("{e:#}")));
     }
     let localized = local_names(manifest_before.as_deref());
+    // Both folders again, right before the last write: nothing was put at their place since.
+    if job.trial.verified() != Some(true) || is_link(&at.join("ProjectSettings")) || is_link(&at.join("ProjectSettings/ProjectSettings.asset")) {
+        return Err(unfinished(tr!("The folder at {path} is not the trial Orbiters made.", path = at.display())));
+    }
     let settings = at.join("ProjectSettings/ProjectSettings.asset");
-    if let Ok(s) = std::fs::read_to_string(&settings) {
+    if settings.exists() {
+        let s = match std::fs::read_to_string(&settings) {
+            Ok(s) => s,
+            Err(e) => return Err(unfinished(tr!("The trial is listed at {path}, but its project settings could not be written: {error}", path = at.display(), error = e))),
+        };
         let from = job.source.path.file_name().map(|n| n.to_string_lossy().into_owned());
         if let Err(e) = std::fs::write(&settings, crate::templates::retarget(&s, &job.trial.name, from.as_deref())) {
             return Err(unfinished(tr!("The trial is listed at {path}, but its project settings could not be written: {error}", path = at.display(), error = e)));
@@ -710,6 +752,37 @@ fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &crat
         j.localized = localized;
         j.siblings = siblings;
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's room on the trial's disk.
+    static FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+fn gb(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / 1e9)
+}
+
+fn free_space(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(free) = FREE.with(|f| f.get()) {
+        return Some(free);
+    }
+    crate::size::free_space(path)
+}
+
+/// What the original's local packages from outside it take, those the trial already has left out.
+fn outside_bytes(source: &Path, trial: &Path) -> u64 {
+    let m: serde_json::Value = std::fs::read(source.join("Packages/manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    m["dependencies"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, v)| v.as_str()?.strip_prefix("file:").map(|p| (name, source.join("Packages").join(p))))
+        .filter(|(name, _)| !trial.join("Packages").join(name).exists())
+        .map(|(_, at)| walkdir::WalkDir::new(at).follow_links(true).into_iter().flatten().filter(|e| e.file_type().is_file()).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum::<u64>())
+        .sum()
 }
 
 /// The names of `file:` packages in a `Packages/manifest.json` (as it was before they were made part of the copy).
@@ -757,8 +830,8 @@ pub fn unregister(dir: &Path, vcc: &Path, id: &str) -> anyhow::Result<PathBuf> {
 /// What a launch needs: the editor's program, the project, the attempt's log; answers the process id when it has one.
 pub type Start<'a> = &'a dyn Fn(&Path, &Path, &Path) -> anyhow::Result<Option<u32>>;
 
-/// The editor a trial opens with, found and probed now.
-pub type Find<'a> = &'a dyn Fn(&str) -> super::editors::Found;
+/// The editor a trial opens with (its version and its changeset), found and probed now.
+pub type Find<'a> = &'a dyn Fn(&str, &str) -> super::editors::Found;
 
 /// Whether a process still runs.
 pub fn alive(pid: u32) -> bool {
@@ -766,7 +839,8 @@ pub fn alive(pid: u32) -> bool {
     let mut system = System::new();
     let pid = Pid::from_u32(pid);
     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).is_some()
+    // A number the system gave to another program since is not the editor.
+    system.process(pid).is_some_and(|p| p.name().to_string_lossy().to_ascii_lowercase().starts_with("unity"))
 }
 
 /// Opens the trial in Unity 6, checked again at this moment: the very folder recorded; on exactly the reviewed tuple of
@@ -791,7 +865,7 @@ pub fn launch(dir: &Path, id: &str, find: Find, open: &dyn Fn(&Path) -> bool, ru
     );
     let row = row.unwrap();
     anyhow::ensure!(!open(&at.path), "{}", tr("Unity has the trial open already."));
-    let editor = match find(&s.editor.text) {
+    let editor = match find(&s.editor.text, &row.changeset) {
         super::editors::Found::Exact(c) => c,
         _ => anyhow::bail!("{}", tr!("Unity {version} could not be verified on this computer: install it with Unity Hub, or locate a program that says it is that version.", version = s.editor.text)),
     };
@@ -799,11 +873,11 @@ pub fn launch(dir: &Path, id: &str, find: Find, open: &dyn Fn(&Path) -> bool, ru
         anyhow::ensure!(changeset == row.changeset, "{}", tr!("{path} is Unity {version} of another build ({changeset}).", path = editor.program.display(), version = s.editor.text, changeset = changeset));
     }
     if job.attempts.is_empty() && job.import_high > 0 {
-        let free = crate::size::free_space(&at.path).unwrap_or(0);
+        let free = free_space(&at.path).unwrap_or(0);
         anyhow::ensure!(
             free >= job.import_high,
             "{}",
-            tr!("The trial's disk has {free} bytes free, and its first import may need up to {need}: free some space first.", free = free, need = job.import_high)
+            tr!("The trial's disk has {free} GB free, and its first import may need up to {need} GB: free some space first.", free = gb(free), need = gb(job.import_high))
         );
     }
     // Reserve the attempt: its number and its log file are taken under the record's lock.
@@ -813,15 +887,21 @@ pub fn launch(dir: &Path, id: &str, find: Find, open: &dyn Fn(&Path) -> bool, ru
         let j = jobs.iter_mut().find(|j| j.id == id).ok_or_else(|| anyhow::anyhow!("{}", tr("This Unity 6 trial is not recorded any more.")))?;
         let busy = j.attempts.iter().any(|a| (a.reserved && now.saturating_sub(a.started) < RESERVATION_SECS) || a.pid.is_some_and(running));
         anyhow::ensure!(!busy, "{}", tr("Another opening of this trial is starting or running."));
-        let n = j.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
         std::fs::create_dir_all(&folder)?;
-        let log = folder.join(format!("attempt-{n}.log"));
+        // A log left by an opening whose record could not be saved keeps its number.
+        let mut n = j.attempts.iter().map(|a| a.n).max().unwrap_or(0) + 1;
+        while log_of(&folder, n).exists() {
+            n += 1;
+        }
+        let log = log_of(&folder, n);
         std::fs::OpenOptions::new().write(true).create_new(true).open(&log).map_err(|_| anyhow::anyhow!("{}", tr("This attempt's log exists already.")))?;
         let a = Attempt { n, started: now, log, editor: editor.program.clone(), unity: s.editor.text.clone(), start: None, pid: None, reserved: true };
         j.attempts.push(a.clone());
         Ok(a)
     })?;
-    let started = start(&editor.program, &at.path, &attempt.log);
+    // The last look before starting: still the very folder, still that version, still closed.
+    let still = at.verified() == Some(true) && standing::EditorStamp::read(&at.path) == s.editor && !open(&at.path);
+    let started = if still { start(&editor.program, &at.path, &attempt.log) } else { Err(anyhow::anyhow!("{}", tr("The trial changed just before it was opened: look at it again."))) };
     let (pid, outcome) = match &started {
         Ok(pid) => (*pid, None),
         Err(e) => (None, Some(match e.downcast_ref::<crate::QuitAtOnce>() {
@@ -839,16 +919,22 @@ pub fn launch(dir: &Path, id: &str, find: Find, open: &dyn Fn(&Path) -> bool, ru
         // Kept: the last few attempts; older ones go with their logs (Orbiters' own files in app data).
         while j.attempts.len() > KEEP_ATTEMPTS {
             let old = j.attempts.remove(0);
-            if old.log.starts_with(&folder) {
-                let _ = std::fs::remove_file(&old.log);
-            }
+            let _ = std::fs::remove_file(log_of(&folder, old.n));
         }
     })?;
     started?;
     Ok(job.attempts.into_iter().find(|a| a.n == n).unwrap_or(attempt))
 }
 
-/// What an attempt shows now: `running` is whether its own process (or, without one, Unity on the trial) still runs.
+/// Whether an attempt's own editor still runs: its process, or (where the system gave none) Unity on the trial.
+pub fn attempt_running(attempt: &Attempt, open: bool) -> bool {
+    match attempt.pid {
+        Some(pid) => alive(pid),
+        None => open,
+    }
+}
+
+/// What an attempt shows now: `running` is [`attempt_running`].
 pub fn attempt_outcome(attempt: &Attempt, running: bool) -> Outcome {
     if let Some(start) = &attempt.start {
         return start.clone();
@@ -950,7 +1036,7 @@ pub(crate) mod tests {
         assert!(matches!(guard(&e.app, &job.trial.path), Guard::Blocked(_)), "nothing opens or changes it while it waits");
         assert_eq!(guard(&e.app, &e.source), Guard::Free, "the original is not a trial");
         let editor = exact(&e.root, "6000.0.67f1", None);
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("started")).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("started")).is_err());
     }
 
     /// Verification blocker 1: every path of the flow, its refusals and its failures, against a generated original whose
@@ -997,8 +1083,8 @@ pub(crate) mod tests {
         let _ = adopt_vcc_copy(&e.app, &e.vcc, &job.id);
         vcc_migrates(&job.trial.path);
         let editor = exact(&e.root, "6000.0.67f1", Some("78a1c2bbeb6a"));
-        let _ = launch(&e.app, &job.id, &|_| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| Ok(Some(1)));
-        let _ = launch(&e.app, &job.id, &|_| Found::Missing { wrong: vec![] }, &|_| false, &|_| false, &|_, _, _| Ok(None));
+        let _ = launch(&e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| Ok(Some(1)));
+        let _ = launch(&e.app, &job.id, &|_, _| Found::Missing { wrong: vec![] }, &|_| false, &|_| false, &|_, _, _| Ok(None));
         check("openings");
         let m = crate::unity6::matrix::Matrix::built_in();
         let _ = crate::unity6::look(&e.app, std::slice::from_ref(&e.source), &[]);
@@ -1009,6 +1095,37 @@ pub(crate) mod tests {
         check("looking at it");
         unregister(&e.app, &e.vcc, &job.id).unwrap();
         check("unregistering the trial");
+        // A place Creator Companion's list cannot be written at, from the very start: kept, listed here, the original same.
+        assert!(prepare(
+            Prepare { dir: &e.app, vcc: &vcc_missing, source: &e.source, parent: &projects, name: "Not listed", target: target(), open: &|_| false, budget: &ok, recorded: &|_| {} },
+            &AtomicBool::new(false),
+            &Default::default(),
+        )
+        .is_err());
+        check("a trial that could not be listed");
+        let unlisted = jobs(&e.app).into_iter().find(|j| j.trial.name == "Not listed").unwrap();
+        assert!(unlisted.trial.path.join("Assets/Avatar.unity").is_file(), "its copy is kept");
+        forget(&e.app, &unlisted.id).unwrap();
+        check("forgetting a trial");
+        assert!(unlisted.trial.path.join("Assets/Avatar.unity").is_file(), "forgetting deletes nothing of it");
+        // Creator Companion's own copy taken as the trial's.
+        let second = run_at(&e, &projects, "Second", &|_| false, &ok).unwrap();
+        let migrated = projects.join("Second-Migrated");
+        for f in walkdir::WalkDir::new(&second.trial.path).into_iter().flatten().filter(|f| f.file_type().is_file()) {
+            let to = migrated.join(f.path().strip_prefix(&second.trial.path).unwrap());
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(f.path(), to).unwrap();
+        }
+        vcc_migrates(&migrated);
+        adopt_vcc_copy(&e.app, &e.vcc, &second.id).unwrap();
+        check("taking Creator Companion's copy");
+        // A damaged record: refused, then set aside.
+        std::fs::write(e.app.join(STORE), "{").unwrap();
+        assert!(run_at(&e, &projects, "While damaged", &|_| false, &ok).is_err());
+        check("a damaged record");
+        set_aside(&e.app).unwrap();
+        check("setting the damaged record aside");
+        assert!(guarded(&e.source).iter().all(|(_, b)| b.is_some()));
         // Stopped at once: the partial copy is removed, the original stays.
         let recorded = |_: &Job| {};
         let stopped = prepare(
@@ -1021,8 +1138,55 @@ pub(crate) mod tests {
         // A trial with a local package from outside: copied into the trial, the original untouched.
         std::fs::write(e.source.join("Packages/manifest.json"), format!(r#"{{"dependencies":{{"com.example.tool":"file:{}"}}}}"#, ext.display().to_string().replace('\\', "/"))).unwrap();
         let original = snapshot(&e.source);
+        let external = snapshot(&ext);
         run_at(&e, &projects, "With a local package", &|_| false, &ok).unwrap();
-        assert_eq!(snapshot(&e.source), original, "a trial with a local package changed the original");
+        assert_eq!(snapshot(&ext), external, "the local package's own folder");
+        // The same package gone while copying: a failure after the copy.
+        let away = e.root.join("External/away");
+        let recorded = |_: &Job| std::fs::rename(&ext, &away).unwrap();
+        let failed = prepare(
+            Prepare { dir: &e.app, vcc: &e.vcc, source: &e.source, parent: &projects, name: "Package gone", target: target(), open: &|_| false, budget: &ok, recorded: &recorded },
+            &AtomicBool::new(false),
+            &Default::default(),
+        );
+        assert!(failed.is_err());
+        assert_eq!(snapshot(&e.source), original, "a failure after the copy");
+        std::fs::rename(&away, &ext).unwrap();
+        // A file that cannot be read in the middle of the copy.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(e.source.join("Assets/Avatar.unity")).unwrap();
+            assert!(run_at(&e, &projects, "Unreadable file", &|_| false, &ok).is_err());
+            drop(held);
+            assert_eq!(snapshot(&e.source), original, "a copy that failed in the middle");
+        }
+        // A junction into the original as the trial's place, and one into it on the way there.
+        #[cfg(windows)]
+        {
+            let link = e.root.join("link-into-original");
+            junction::create(e.source.join("Assets"), &link).unwrap();
+            assert!(run_at(&e, &link, "T", &|_| false, &ok).is_err());
+            assert!(run_at(&e, &link.join("Deeper"), "T", &|_| false, &ok).is_err());
+            junction::delete(&link).unwrap();
+            let _ = std::fs::remove_dir(&link);
+            assert_eq!(snapshot(&e.source), original, "a place reached through a junction into the original");
+        }
+        // A copy asked for directly (Duplicate): the same refusal, nothing made in the original.
+        let cancel = AtomicBool::new(false);
+        let copy = |to: PathBuf| crate::templates::copy(&e.source, &to, &cancel, &Default::default());
+        assert!(copy(e.source.join("Assets/Made/Copy")).is_err());
+        assert!(copy(other.join("Assets/Made/Copy")).is_err());
+        assert_eq!(snapshot(&e.source), original, "Duplicate into the original");
+        assert!(!other.join("Assets/Made").exists());
+        // A local archive whose name is taken by another in Packages: said before anything is copied.
+        std::fs::write(e.root.join("External/tool.tgz"), b"one").unwrap();
+        std::fs::write(e.source.join("Packages/com.example.tool.tgz"), b"another").unwrap();
+        std::fs::write(e.source.join("Packages/manifest.json"), format!(r#"{{"dependencies":{{"com.example.tool":"file:{}"}}}}"#, e.root.join("External/tool.tgz").display().to_string().replace('\\', "/"))).unwrap();
+        let original = snapshot(&e.source);
+        assert!(format!("{:#}", run_at(&e, &projects, "Archive taken", &|_| false, &ok).unwrap_err()).contains("com.example.tool"));
+        assert!(!projects.join("Archive taken").exists());
+        assert_eq!(snapshot(&e.source), original, "a local archive whose name is taken");
     }
 
     /// Verification blocker 2: a failure making the trial independent leaves it unfinished (a job with its error), never
@@ -1034,7 +1198,26 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::write(ext.join("package.json"), r#"{"name":"com.example.tool","version":"1.0.0"}"#).unwrap();
         std::fs::write(e.source.join("Packages/manifest.json"), format!(r#"{{"dependencies":{{"com.example.tool":"file:{}"}}}}"#, ext.display().to_string().replace('\\', "/"))).unwrap();
-        let job = run(&e).unwrap();
+        // The package goes away between the checks and the copy: listed, not independent, its error kept.
+        let away = e.root.join("External/away");
+        let recorded = |_: &Job| std::fs::rename(&ext, &away).unwrap();
+        let failed = prepare(
+            Prepare { dir: &e.app, vcc: &e.vcc, source: &e.source, parent: &e.root.join("Projects"), name: &trial_name("My avatar"), target: target(), open: &|_| false, budget: &ok, recorded: &recorded },
+            &AtomicBool::new(false),
+            &Default::default(),
+        );
+        assert!(failed.is_err());
+        let j = jobs(&e.app).into_iter().next().unwrap();
+        assert_eq!((j.phase, status(&j, false)), (Phase::Registered, Status::Unfinished));
+        assert!(j.error.as_deref().unwrap_or_default().contains("com.example.tool"), "{:?}", j.error);
+        assert!(matches!(guard(&e.app, &j.trial.path), Guard::Blocked(_)));
+        // Put back: no room for it yet, then finished.
+        std::fs::rename(&away, &ext).unwrap();
+        FREE.with(|f| f.set(Some(1)));
+        assert!(register_again(&e.app, &e.vcc, &j.id, &AtomicBool::new(false), &Default::default()).is_err());
+        assert_eq!(status(&jobs(&e.app)[0], false), Status::Unfinished, "the trial is kept, unfinished, when its disk is full");
+        FREE.with(|f| f.set(None));
+        let job = register_again(&e.app, &e.vcc, &j.id, &AtomicBool::new(false), &Default::default()).unwrap();
         assert_eq!(job.localized, vec!["com.example.tool".to_string()], "said, not hidden");
         // Its copy of the package changed behind Orbiters' back, then the trial is finished again.
         let copy = job.trial.path.join("Packages/com.example.tool");
@@ -1198,7 +1381,7 @@ pub(crate) mod tests {
         assert_eq!(status(&job, false), Status::Replaced);
         assert_eq!(guard(&e.app, &job.trial.path), Guard::Free, "another folder there now is not the trial");
         let editor = exact(&e.root, "6000.0.67f1", None);
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("started on another folder")).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("started on another folder")).is_err());
         assert!(register_again(&e.app, &e.vcc, &job.id, &AtomicBool::new(false), &Default::default()).is_err());
     }
 
@@ -1225,7 +1408,7 @@ pub(crate) mod tests {
         assert!(matches!(guard(&e.app, &job.trial.path), Guard::Unity6(_)));
         let after_vcc = guarded(&job.trial.path);
         let good = exact(&e.root, "6000.0.67f1", Some("78a1c2bbeb6a"));
-        let launch_with = |found: Found, start: Start| launch(&e.app, &job.id, &move |_| found.clone(), &|_| false, &|_| false, start);
+        let launch_with = |found: Found, start: Start| launch(&e.app, &job.id, &move |_, _| found.clone(), &|_| false, &|_| false, start);
         let started = |_: &Path, _: &Path, _: &Path| -> anyhow::Result<Option<u32>> { Ok(Some(4242)) };
         // Not verified now, another build, or none: refused before anything is reserved.
         let unverified = Candidate { check: Check::Unverified, identity: None, hint: Hint::Located, ..good.clone() };
@@ -1234,31 +1417,31 @@ pub(crate) mod tests {
         assert!(launch_with(Found::Exact(other_build), &started).is_err());
         assert!(jobs(&e.app)[0].attempts.is_empty());
         // The first one is reserved and bound to its process; a second while it runs is refused.
-        let a1 = launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| true, &started).unwrap();
+        let a1 = launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| true, &started).unwrap();
         assert_eq!((a1.pid, a1.reserved), (Some(4242), false));
         assert!(a1.log.starts_with(e.app.join(LOGS)));
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|pid| pid == 4242, &started).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|pid| pid == 4242, &started).is_err());
         // A reservation a crash left (no process recorded) blocks for a while, then not.
         update(&e.app, &job.id, |j| {
             j.attempts[0].pid = None;
             j.attempts[0].reserved = true;
         })
         .unwrap();
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| false, &started).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &started).is_err());
         update(&e.app, &job.id, |j| j.attempts[0].started = 0).unwrap();
-        let a2 = launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| false, &started).unwrap();
+        let a2 = launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &started).unwrap();
         assert_ne!(a1.log, a2.log);
         // Typed failures.
         let quit = |_: &Path, _: &Path, _: &Path| -> anyhow::Result<Option<u32>> { Err(anyhow::Error::new(crate::QuitAtOnce(Some("exit code: 3".into()), "quit".into()))) };
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| false, &quit).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &quit).is_err());
         let spawn = |_: &Path, _: &Path, _: &Path| -> anyhow::Result<Option<u32>> { anyhow::bail!("no such program") };
-        assert!(launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| false, &spawn).is_err());
+        assert!(launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &spawn).is_err());
         let j = jobs(&e.app).into_iter().next().unwrap();
         assert!(matches!(attempt_outcome(&j.attempts[2], false), Outcome::ExitedAtOnce(_)));
         assert!(matches!(attempt_outcome(&j.attempts[3], false), Outcome::DidNotStart(_)));
         // Kept: the last few, older logs removed with them.
         for _ in 0..KEEP_ATTEMPTS {
-            launch(&e.app, &job.id, &|_| Found::Exact(good.clone()), &|_| false, &|_| false, &|_, _, _| Ok(None)).unwrap();
+            launch(&e.app, &job.id, &|_, _| Found::Exact(good.clone()), &|_| false, &|_| false, &|_, _, _| Ok(None)).unwrap();
         }
         let j = jobs(&e.app).into_iter().next().unwrap();
         assert_eq!(j.attempts.len(), KEEP_ATTEMPTS);
@@ -1275,7 +1458,7 @@ pub(crate) mod tests {
         project(&job.trial.path, Some("m_EditorVersion: 6000.1.1f1\n"), &[(SDK_BASE, "4.0.0")], &[(SDK_BASE, "4.0.0", "6000.1")]);
         assert_eq!(status(&job, false), Status::OnUnity6, "shown as what its files say");
         let editor = exact(&e.root, "6000.1.1f1", None);
-        let err = launch(&e.app, &job.id, &|_| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("unreviewed")).unwrap_err();
+        let err = launch(&e.app, &job.id, &|_, _| Found::Exact(editor.clone()), &|_| false, &|_| false, &|_, _, _| panic!("unreviewed")).unwrap_err();
         assert!(format!("{err:#}").contains("not reviewed"), "{err:#}");
     }
 
@@ -1331,6 +1514,11 @@ pub(crate) mod tests {
         assert!(!job.trial.path.join("UserSettings/Orbiters").exists(), "nothing written in it");
         let project = crate::discovery::Project { path: job.trial.path.clone(), name: job.trial.name.clone(), unity: "2022.3.22f1".into(), ..Default::default() };
         assert!(format!("{:#}", crate::open_project(&project).unwrap_err()).contains("Creator Companion"));
+        // On Unity 6: what ends in the SDK's build panel (ready to upload) is still refused, with the reason.
+        vcc_migrates(&job.trial.path);
+        assert!(matches!(guard(&e.app, &job.trial.path), Guard::Unity6(_)));
+        assert!(format!("{:#}", crate::setup::write(&job.trial.path, &request).unwrap_err()).contains("uploads from Unity 2022"));
+        assert!(!job.trial.path.join("UserSettings/Orbiters").exists(), "nothing written in it");
         forget(&e.app, &job.id).unwrap();
     }
 
@@ -1348,6 +1536,73 @@ pub(crate) mod tests {
         assert_eq!(status(&j, false), Status::Failed { kept: true }, "kept and shown, never handed over");
     }
 
+    /// Verification blocker 1: an edit in place while copying (which leaves every folder's time as it was) is seen too.
+    #[test]
+    fn an_edit_in_place_during_the_copy_is_seen() {
+        let e = env();
+        let recorded = |_: &Job| std::fs::write(e.source.join("Assets/Avatar.unity"), "another scene").unwrap();
+        let failed = prepare(
+            Prepare { dir: &e.app, vcc: &e.vcc, source: &e.source, parent: &e.root.join("Projects"), name: "T", target: target(), open: &|_| false, budget: &ok, recorded: &recorded },
+            &AtomicBool::new(false),
+            &Default::default(),
+        );
+        assert!(format!("{:#}", failed.unwrap_err()).contains("changed while it was copied"));
+        assert_eq!(status(&jobs(&e.app)[0], false), Status::Failed { kept: true });
+    }
+
+    /// Verification blocker 3: the guard follows the folder, not its spelling: through a junction, or moved since.
+    #[test]
+    fn the_guard_follows_the_folder_not_its_path() {
+        let e = env();
+        let job = run(&e).unwrap();
+        #[cfg(windows)]
+        {
+            let link = e.root.join("alias");
+            junction::create(&job.trial.path, &link).unwrap();
+            assert!(matches!(guard(&e.app, &link), Guard::Blocked(_)), "through a junction");
+            junction::delete(&link).unwrap();
+            let _ = std::fs::remove_dir(&link);
+        }
+        let moved = e.root.join("Projects/Renamed");
+        std::fs::rename(&job.trial.path, &moved).unwrap();
+        assert!(matches!(guard(&e.app, &moved), Guard::Blocked(_)), "renamed since");
+    }
+
+    /// Verification blocker 5: a log path written in the record by hand is not followed, and only a recorded trial's
+    /// logs are ever removed.
+    #[test]
+    fn a_recorded_log_path_is_never_followed() {
+        let e = env();
+        let job = run(&e).unwrap();
+        let outside = e.root.join("outside.log");
+        std::fs::write(&outside, "Entering Safe Mode").unwrap();
+        update(&e.app, &job.id, |j| j.attempts.push(Attempt { n: 1, started: 1, log: outside.clone(), editor: PathBuf::from("x"), unity: "6000.0.67f1".into(), start: None, pid: None, reserved: false })).unwrap();
+        let j = jobs(&e.app).into_iter().next().unwrap();
+        assert_eq!(j.attempts[0].log, e.app.join(LOGS).join(&job.id).join("attempt-1.log"));
+        assert!(matches!(attempt_outcome(&j.attempts[0], false), Outcome::Undetermined { .. }));
+        let bystander = e.app.join("keep");
+        std::fs::create_dir_all(&bystander).unwrap();
+        forget(&e.app, "../keep").unwrap();
+        assert!(bystander.is_dir(), "an id nobody recorded removes nothing");
+    }
+
+    /// Verification blocker 4: what changed between the checks and the start stops the opening, and is recorded so.
+    #[test]
+    fn a_trial_swapped_just_before_the_start_is_not_opened() {
+        let e = env();
+        let job = run(&e).unwrap();
+        vcc_migrates(&job.trial.path);
+        let good = exact(&e.root, "6000.0.67f1", Some("78a1c2bbeb6a"));
+        // The folder is put aside while the editor is looked for.
+        let find = |_: &str, _: &str| {
+            std::fs::write(job.trial.path.join("ProjectSettings/ProjectVersion.txt"), U2022).unwrap();
+            Found::Exact(good.clone())
+        };
+        assert!(launch(&e.app, &job.id, &find, &|_| false, &|_| false, &|_, _, _| panic!("started on another version")).is_err());
+        assert!(matches!(jobs(&e.app)[0].attempts[0].start, Some(Outcome::DidNotStart(_))));
+        assert!(!jobs(&e.app)[0].attempts[0].reserved, "the reservation is given back");
+    }
+
     /// Verification major 10: a trial is paired with its original only while that folder is still the one recorded.
     #[test]
     fn a_trial_is_paired_only_with_its_very_original() {
@@ -1357,5 +1612,15 @@ pub(crate) mod tests {
         std::fs::rename(&e.source, e.root.join("Projects/Old")).unwrap();
         source(&e.root);
         assert!(crate::unity6::look(&e.app, std::slice::from_ref(&e.source), &[]).pairs.is_empty());
+    }
+
+    /// Verification major 5: an attempt runs while its own editor does: not another program that was given its number
+    /// since, and Unity on the trial counts only where the system gave no number.
+    #[test]
+    fn an_attempt_runs_while_its_own_editor_does() {
+        let attempt = |pid| Attempt { n: 1, started: 1, log: PathBuf::from("x"), editor: PathBuf::from("x"), unity: "6000.0.67f1".into(), start: None, pid, reserved: false };
+        let not_unity = attempt(Some(std::process::id()));
+        assert!(!attempt_running(&not_unity, true), "this process is no editor");
+        assert!(attempt_running(&attempt(None), true) && !attempt_running(&attempt(None), false));
     }
 }

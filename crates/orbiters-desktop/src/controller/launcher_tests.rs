@@ -196,6 +196,7 @@ fn dismissing_an_invite_hides_it_at_vrchat_and_a_boop_only_here() {
 fn a_pipeline_message_moves_a_friend() {
     let c = controller(Arc::new(Pretend::default()));
     by(&c);
+    signed_in_list(&c);
     c.update(|s| {
         s.launcher.friends = vec![launcher_feed::friend(&json!({"id": A, "displayName": "Nova", "location": "offline"}), false).unwrap()];
     });

@@ -89,10 +89,10 @@ fn same(a: Option<&Stamp>, b: Option<&Stamp>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a.same(b))
 }
 
-/// Whose the account installed is, of the environment chosen; none while who it is is unknown (its file could not be read,
+/// Whose the account installed is, in its environment; none while who it is is unknown (its file could not be read,
 /// the environment is being switched: controller/identity.rs).
 fn installed(rt: &super::account::AccountRuntime) -> Option<(Server, Owner)> {
-    let (server, _) = rt.read.filter(|(server, _)| !rt.unknown && *server == Server::current())?;
+    let (server, _) = rt.read.filter(|_| !rt.unknown)?;
     rt.account.as_ref().map(|a| (server, Owner::of(server, a)))
 }
 
@@ -295,8 +295,8 @@ impl Controller {
         });
     }
 
-    /// Home's list, changed by what `by`'s session gave, only while that is the session of the member signed in now (and
-    /// the list on show, if any, is that account's). Whether it was written. What this computer says stays as it is.
+    /// Home's list, changed by what `by`'s session gave, only while that is the session of the member signed in now and
+    /// the list is that account's (the one on show, or the one `f` puts there). Whether it was written. What this computer says stays as it is.
     pub(super) fn publish_launcher(&self, by: &By, f: impl FnOnce(&mut LauncherState)) -> bool {
         let mut written = false;
         self.update_if(|s| {
@@ -314,13 +314,12 @@ impl Controller {
             let mut state = (*s.launcher).clone();
             f(&mut state);
             MachineParts::of(&s.launcher).into(&mut state);
-            if let Source::SignedIn { user_id, .. } = &state.source {
-                if *user_id != by.user {
-                    return false;
-                }
-                rt.list_for = Some(by.stamp.clone());
-                state.verified_for = Some(by.stamp.said(Some(&by.user)));
+            // Onto that account's list, or as it: what a session says is in no other.
+            if !matches!(&state.source, Source::SignedIn { user_id, .. } if *user_id == by.user) {
+                return false;
             }
+            rt.list_for = Some(by.stamp.clone());
+            state.verified_for = Some(by.stamp.said(Some(&by.user)));
             written = true;
             let changed = state != *s.launcher;
             if changed {

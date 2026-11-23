@@ -127,17 +127,17 @@ pub(crate) fn add(root: &ListRoot, project: &Path, here: &Which) -> anyhow::Resu
     let text = project.to_str().ok_or_else(|| anyhow::anyhow!("{}", tr("Project path is not Unicode")))?;
     let facts = facts(project);
     let database = edit_database(root, |db| {
-        if db.get_all(PROJECTS).any(|d| d["Path"].as_str().is_some_and(|p| here.is(p))) {
+        if db.get_all(PROJECTS).any(|d| d["Path"].as_str().is_some_and(|p| here.is(p))) { // i18n: not shown (a field of VCC's database)
             return Ok(false);
         }
         let now = DateTime::now();
         let mut doc = Document::new();
-        doc.insert("Path", plain(project).to_str().unwrap_or(text));
+        doc.insert("Path", plain(project).to_str().unwrap_or(text)); // i18n: not shown (a field of VCC's database)
         doc.insert("UnityVersion", facts.unity.clone().map_or(Value::Null, Value::from));
         doc.insert("CreatedAt", now);
         doc.insert("LastModified", now);
-        doc.insert("Type", facts.kind as i32);
-        doc.insert("Favorite", false);
+        doc.insert("Type", facts.kind as i32); // i18n: not shown (a field of VCC's database)
+        doc.insert("Favorite", false); // i18n: not shown (a field of VCC's database)
         if let Some(unity) = &facts.unity {
             let mut own = Document::new();
             own.insert("cached_unity_version", unity.as_str());
@@ -168,7 +168,7 @@ fn write(root: &ListRoot, edits: [Edit; 2]) -> anyhow::Result<()> {
 /// Takes every entry `which` means off the list in `root`.
 pub(crate) fn remove(root: &ListRoot, which: &Which) -> anyhow::Result<()> {
     let database = edit_database(root, |db| {
-        let ids: Vec<Value> = db.get_all(PROJECTS).filter(|d| d["Path"].as_str().is_some_and(|p| which.is(p))).map(|d| d["_id"].clone()).collect();
+        let ids: Vec<Value> = db.get_all(PROJECTS).filter(|d| d["Path"].as_str().is_some_and(|p| which.is(p))).map(|d| d["_id"].clone()).collect(); // i18n: not shown (a field of VCC's database)
         db.delete(PROJECTS, &ids);
         Ok(!ids.is_empty())
     })?;
@@ -209,7 +209,7 @@ fn edit_database(root: &ListRoot, edit: impl FnOnce(&mut LiteDBFile) -> anyhow::
     // As both programs do on opening it.
     db.drop_indexes_and_update_collation_if_collation_not_supported();
     let path = BsonExpression::create("$.Path").map_err(|e| unknown(DATABASE, e))?;
-    db.ensure_index(PROJECTS, "Path", path, false).map_err(|e| unknown(DATABASE, e))?;
+    db.ensure_index(PROJECTS, "Path", path, false).map_err(|e| unknown(DATABASE, e))?; // i18n: not shown (a field of VCC's database)
     let was = documents(&db);
     if !edit(&mut db)? {
         return Ok(None);
@@ -220,7 +220,7 @@ fn edit_database(root: &ListRoot, edit: impl FnOnce(&mut LiteDBFile) -> anyhow::
     let now = documents(&check);
     let same = was.iter().zip(&now).all(|((a, old), (b, new))| {
         let kept = |d: &Document| old.contains(d);
-        a == b && if a == PROJECTS { new.iter().filter(|d| !kept(d)).count() <= 1 && old.iter().filter(|d| !new.contains(d)).all(|d| d["Path"].as_str().is_some()) } else { old == new }
+        a == b && if a == PROJECTS { new.iter().filter(|d| !kept(d)).count() <= 1 && old.iter().filter(|d| !new.contains(d)).all(|d| d["Path"].as_str().is_some()) } else { old == new } // i18n: not shown (a field of VCC's database)
     });
     anyhow::ensure!(same && was.len() == now.len(), "{}", unknown(DATABASE, tr("it does not read back the same")));
     Ok(Some((DATABASE, before, after)))

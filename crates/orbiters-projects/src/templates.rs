@@ -389,8 +389,8 @@ impl Stage {
         for at in payload.items.keys() {
             let names: Vec<_> = at.iter().collect();
             let wanted = match names[..] {
-                [a, b] => a == "Packages" && (b == "manifest.json" || b == "vpm-manifest.json") || at.as_path() == Path::new(payload::VERSION_FILE),
-                [a, _, c] => a == "Packages" && c == "package.json",
+                [a, b] => a == "Packages" && (b == "manifest.json" || b == "vpm-manifest.json") || at.as_path() == Path::new(payload::VERSION_FILE), // i18n: not shown (a folder's name)
+                [a, _, c] => a == "Packages" && c == "package.json", // i18n: not shown (a folder's name)
                 _ => false,
             };
             let Some(bytes) = wanted.then(|| payload.read(at)).transpose()?.flatten() else { continue };

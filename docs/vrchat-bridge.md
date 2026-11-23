@@ -281,7 +281,12 @@ How it is one verified game (`controller/bridge_mac.rs`):
 - **Arguments** are held to the computer's own tool list before anything else, **on Windows too** (`tools::schema_refusal`, one
   validator over the schema: type, enum, least and most, length, pattern, items and their own properties, unique items; a null
   only where the schema says null; `"arguments": null` is refused and no arguments at all is `{}`; every keyword any schema uses is
-  one it checks, `tools::CHECKED_KEYWORDS`, tested on both computers' lists): any other is `bad_arguments`; `wait_for` waits only for what a Mac's game reports (not
+  one it checks, `tools::CHECKED_KEYWORDS`, tested on both computers' lists, walking into `anyOf`/`oneOf` and schema-valued
+  `additionalProperties`): any other is `bad_arguments`. Shared with Windows' Unity tools (the third verification's finding 4): a
+  schema-valued `additionalProperties` checks each further key's value (a repository's `headers`, a map of strings, was refused
+  whole); `unity_change_packages`' `install` takes each package as `{name, version}` or as `[name, version]`, the form a
+  conflict's plan gives back for `apply_plan` (round trip tested: `plan_pairs`); `orbiters_environment`'s omitted `action` reaches
+  its default `read` again; `go_to_world.profile` is bounded at `PROFILE_MAX` and read without truncation; `wait_for` waits only for what a Mac's game reports (not
   `signed_in`, not `picture_saved`); a Unity tool's `session` (a capture's folder) stays. The resource and prompt metadata promise
   no 3D pictures. `list_sessions` reads the engine's roster (`MacOpener`: one VRChat, no Easy Anti-Cheat service, no side session).
 - **Keys:** a keys file that cannot be read is not "no keys": no new token replaces it by itself, the bridge stays closed until it
@@ -316,6 +321,45 @@ How it is one verified game (`controller/bridge_mac.rs`):
   at most, and a quit and a lost renderer are told whatever stalls came first; the engine accepting a quit (`wsd: quit requested` in
   its log) arms the stuck-quit detection, which a parked game, that cannot log `HandleApplicationQuit`, needs; a pointer or record
   that cannot be read for a moment keeps the session followed.
+  Since the fourth verification (findings 7 to 9; obelisk-cli 0.1.8): **only the game's own progress** counts (a frame shown, the
+  guest's presents, `neptune unixlib wsi (wsd): <n> presents`, which grow behind a lock screen, a line of VRChat's): the engine's
+  log growing alone never postpones a stall; a reading that failed keeps the last valid one (651 again after a gap is no
+  progress); a shorter log or a smaller count (a log replaced, a new swapchain) is a new base, never progress. The stuck-quit
+  timer starts from the record's `quit_accepted` (when the supervisor accepted the Quit, on the boot clock), whatever the game or
+  a dead window server can log. **Which processes are the session's**: the launcher's descendants, and the processes whose own
+  arguments or environment name this launch (`obelisk-engine-<launcher>`, `FEXDARWIN_SUPERVISOR_PID=<launcher>`, read from
+  `ps -axwwE` to decide and never kept) with their descendants: another session's engine or an editor is never chosen. Each
+  process to sample is chosen at once with its **pid, birth and executable** read together, before memory and logs are
+  collected, and checked again before each round. **Redaction** takes out a location whole (`wrld_…` and every instance part
+  after it, closed, cut short or percent-encoded, singly or doubly), any `vrchat:` link in any case or encoded, an instance part on
+  its own, a nonce given as a value, `usr_` and `grp_` ids (tested with each form). **No raw sample is ever on disk**: `sample`
+  writes to its standard output (`-file /dev/stdout`), which is redacted in memory and only then written. The engine's
+  recent-event ring (`wine-438100.lkd-events`, voile-lkd's last 8192 ptrace and signal events, from an engine with voile-lkd
+  `bf0af9b`, which obelisk-cli 0.1.8 holds back) is copied sorted and redacted (`lkd-events.txt`) when it is there.
+- **2026-11-23 08:01 to 08:26, the soak of a 0.1.8 candidate with voile-lkd `bf0af9b`** (five starts, private instances of the
+  owner's home world, the screen locked, each quit by session): four arrived (42 to 46 s) and quit cleanly, no group stop; in one
+  (08:06), Easy Anti-Cheat logged `Client Violation with Type: 15 Message: Forbidden system configuration (Debugger detected.)` at
+  08:07:03, 26 s in, VRChat then failed to create its instance and was told the anti-cheat could not verify the installation; the
+  session ran on until quit by session at 604 s. That line is in none of the 26 earlier VRChat logs here. The new ptrace code's
+  attach windows measured as short as the old (p99 1 ms), its engine log shows no failed attach and no group stop, and the
+  event ring had wrapped (8192 lines hold about three minutes of Wine's attaches) before it could show the start-up; the cause
+  is unknown. obelisk-cli 0.1.8 therefore ships `fexdarwin-run` from 0.1.7's sources, and `bf0af9b` waits for an explanation
+  (what Easy Anti-Cheat's Linux client checks to call a debugger: `TracerPid`, an attach of its own refused): do not ship it
+  before. The first start of that candidate also showed the bounded log writer printing to the launcher's discarded standard
+  output (no guest line in the log): fixed in 0.1.8 before release.
+- **A lost picture** (requirement R1; `controller/picture.rs`): three states. *Presenting*: the guest's presents or the shown
+  frames grew within 15 s. *Unobservable*: nothing seen lately: a covered window, another Space, the lock screen, a stall, loading;
+  nothing is said or offered. *Lost*: the engine's log said the graphics server dropped this session's game (`destroying Neptune
+  context`, `VTEST_CLIENT_ERROR_CONTEXT_LOST`), not during a quit, and no frame was presented for 10 s since (a context dropped
+  and made again, which presents again, is none). Home offers **Restart VRChat** under its running line only for a confirmed loss
+  of a session Home itself started that still runs (`MacMachine::picture_lost`); the click checks all of it again
+  (`restart_lost`), asks that very session to quit (`steam quit --session --wait 60`, never forced), waits for it to end, then
+  starts VRChat as Home started it through the one start (its 80 s after an early end and one start at a time hold; a wait up to
+  100 s is waited once). The bridge's `renderer_lost` is the same confirmed loss (it used to be the log's marker alone), and its
+  presents count per swapchain generation (the largest count seen used to hide a new swapchain's growth). The flood after a loss
+  (420 MB in five minutes from the guest driver's retries) is bounded by obelisk-cli 0.1.8's launch script (its standard error) (a line repeated
+  without end is kept 200 times, then counted; the frame counters' lines always pass): the guest driver inside the game's
+  process is left unchanged (it loads in the game's process; Easy Anti-Cheat; a change there needs its own soak).
 
 ### Live run, 0.3.9-dev.27 with obelisk-cli 0.1.6 (2026-11-23, 03:42 to 04:07)
 
@@ -355,9 +399,13 @@ Home's Play on a Mac starts VRChat at Settings' **Picture detail** (VRChat, Play
 drawing resolution, 58 by default (ruling 1: a third of the pixels), "100 %" being the panel's own pixels (this Mac: 2558 x 1663,
 the engine's 87 %), never more; the size is shown beside it. It goes to the CLI as `steam play --render-percent <engine percent>`
 for that launch only (0.1.7 and later: an older program would refuse the whole start, so it is given none), never written into the
-engine's settings (R7). **The bridge's starts never take one** (`start_reserved`, tested): its coordinates stay the engine's own,
-`GameWindow` is the content's backing pixels (`bridge/mac.rs` `guest_pixels(..., 100)`), and a capture is always the window's
-backing pixels; at 58 % Home's full-screen game draws 1705 x 1109 in a 2940 x 1912 capture (tested at both scales). When Low Power
+engine's settings (R7). The size shown is the engine's own result: capped at the panel (87 to 100 all say 87 % and one size on this
+Mac) and never under the 640 x 480 the window server keeps (25 % of a 1920 x 1080 display is 853 x 480). **The bridge's starts say
+`--render-percent 100`** (from the fourth verification, finding 10: without it the engine applied a percentage saved for the
+installation while the bridge measured at 100 %; `start_reserved`, tested), and `GameWindow` is the size the game renders now,
+read from this start's own engine log (its last `guest swapchain: created WxH`), else the content's backing pixels at 100 %; the
+window's title bar comes from that size and the frame (none for a borderless window, whatever its size), else from whether the
+frame covers its display. A capture is always the window's backing pixels; at 58 % Home's full-screen game draws 1705 x 1109 in a 2940 x 1912 capture (tested at both scales). When Low Power
 Mode is on while the Mac is on power, Home says so under Play with a **Battery settings** button (`mac_display.rs`); N4N0 never
 changes it (ruling 3).
 

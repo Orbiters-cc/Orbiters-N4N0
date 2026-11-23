@@ -332,6 +332,23 @@ pub fn title_points(window: &MacWindow, display: Option<Frame>) -> f64 {
     }
 }
 
+/// The title bar of a window whose game renders `guest_height` pixels at `scale` backing pixels per point at 100 %: none
+/// or the engine's 32 points, when the frame says one of them exactly (borderless windows smaller than their display have
+/// none); `None` when it says neither (the caller keeps its own rule).
+pub fn title_from_guest(frame_height: f64, scale: f64, guest_height: u32) -> Option<f64> {
+    if scale <= 0.0 {
+        return None;
+    }
+    let extra = frame_height - guest_height as f64 / scale;
+    if extra.abs() < 1.5 {
+        Some(0.0)
+    } else if (extra - TITLE_BAR_POINTS).abs() < 1.5 {
+        Some(TITLE_BAR_POINTS)
+    } else {
+        None
+    }
+}
+
 /// How long one window capture may take.
 pub const CAPTURE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -399,6 +416,13 @@ mod tests {
         assert_eq!(content_pixels(&listed[2], 2.0, TITLE_BAR_POINTS), (1280, 720));
         assert_eq!(title_rows(784, 392.0, TITLE_BAR_POINTS), 64, "the capture of a 640 x 392 frame at scale 2");
         assert_eq!(title_rows(392, 392.0, TITLE_BAR_POINTS), 32);
+        // Finding 10: the title bar from the size the game renders: a 640 x 360 content in a 640 x 392 frame at scale 2
+        // has the engine's 32; a borderless window smaller than its display has none; a size that says neither is not
+        // guessed at.
+        assert_eq!(title_from_guest(392.0, 2.0, 720), Some(TITLE_BAR_POINTS));
+        assert_eq!(title_from_guest(800.0, 2.0, 1600), Some(0.0));
+        assert_eq!(title_from_guest(800.0, 2.0, 1100), None);
+        assert_eq!(title_from_guest(800.0, 0.0, 1600), None);
         // m17: a borderless game covering its display has no title bar to cut.
         let whole = MacWindow { x: 0.0, y: 0.0, width: 1470.0, height: 956.0, ..listed[2] };
         assert_eq!(title_points(&whole, Some((0.0, 0.0, 1470.0, 956.0))), 0.0);

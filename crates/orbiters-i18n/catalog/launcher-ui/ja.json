@@ -111,5 +111,8 @@
   "Set aside": "退避",
   "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "VRChat のエンジンの記録の隣にある Set aside フォルダーへ移動します。何も削除されません。",
   "Battery settings": "バッテリー設定",
-  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "このMacは電源に接続されていますが、低電力モードがオンです。VRChatの動作が遅くなる場合があります。"
+  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "このMacは電源に接続されていますが、低電力モードがオンです。VRChatの動作が遅くなる場合があります。",
+  "Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.": "VRChat 自身の終了と同じように終了を求め、ホームが起動したときと同じ方法で再び起動します。",
+  "Restart VRChat": "VRChat を再起動",
+  "VRChat's picture stopped on this Mac and will not come back: restart it.": "この Mac で VRChat の画面が止まり、元に戻りません。再起動してください。"
 }

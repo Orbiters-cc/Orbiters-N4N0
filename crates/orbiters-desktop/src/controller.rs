@@ -518,6 +518,7 @@ pub mod launcher;
 mod obelisk_cli;
 mod identity;
 mod incident;
+mod picture;
 mod language;
 mod maps;
 pub(crate) mod menu_shares;

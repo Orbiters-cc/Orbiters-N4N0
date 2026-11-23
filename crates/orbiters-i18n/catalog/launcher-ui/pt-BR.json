@@ -111,5 +111,8 @@
   "Set aside": "Separar",
   "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "Move-o para a pasta Set aside, ao lado dos registros do motor do VRChat: nada é apagado.",
   "Battery settings": "Ajustes de bateria",
-  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "O Modo de Pouca Energia está ativado com este Mac na tomada: o VRChat pode ficar mais lento."
+  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "O Modo de Pouca Energia está ativado com este Mac na tomada: o VRChat pode ficar mais lento.",
+  "Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.": "Pede ao VRChat para fechar, como o próprio Sair dele, e depois o inicia de novo como o Início o iniciou.",
+  "Restart VRChat": "Reiniciar o VRChat",
+  "VRChat's picture stopped on this Mac and will not come back: restart it.": "A imagem do VRChat parou neste Mac e não vai voltar: reinicie-o."
 }

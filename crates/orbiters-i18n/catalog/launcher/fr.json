@@ -74,5 +74,13 @@
   "What runs VRChat on this Mac stopped without saying why ({status}).": "Ce qui fait tourner VRChat sur ce Mac s’est arrêté sans dire pourquoi ({status}).",
   "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "VRChat ne répond plus sur ce Mac ({kind}) : ce qui se passait est conservé dans {path}",
   "Picture detail": "Détail de l'image",
-  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "Le nombre de pixels que VRChat dessine sur ce Mac, par côté ; macOS met l'image à l'échelle de l'écran. Moins, c'est plus rapide et plus doux. 100 % correspond aux pixels propres de l'écran. S'applique au prochain lancement."
+  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "Le nombre de pixels que VRChat dessine sur ce Mac, par côté ; macOS met l'image à l'échelle de l'écran. Moins, c'est plus rapide et plus doux. 100 % correspond aux pixels propres de l'écran. S'applique au prochain lancement.",
+  "Home does not know how VRChat was started: start it again with Play.": "L’Accueil ne sait pas comment VRChat a été lancé : relancez-le avec Jouer.",
+  "There is nothing to start again.": "Il n’y a rien à relancer.",
+  "VRChat could not be asked to quit ({code}): quit it yourself, then press Play.": "Impossible de demander à VRChat de quitter ({code}) : quittez-le vous-même, puis appuyez sur Jouer.",
+  "VRChat could not be asked to quit: {reason}": "Impossible de demander à VRChat de quitter : {reason}",
+  "VRChat could not be started again yet: press Play in a moment.": "VRChat ne peut pas encore être relancé : appuyez sur Jouer dans un instant.",
+  "VRChat did not quit in time: quit it yourself, then press Play.": "VRChat n’a pas quitté à temps : quittez-le vous-même, puis appuyez sur Jouer.",
+  "VRChat draws again, or is no longer the one Home started: nothing was done.": "VRChat affiche de nouveau une image, ou ce n’est plus celui que l’Accueil a lancé : rien n’a été fait.",
+  "VRChat is starting again.": "VRChat redémarre."
 }

@@ -636,7 +636,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble) -> &'stat
     };
     if place.duplicate {
         assert_eq!(found, trouble.then, "{name}: {said}");
-        if matches!(found, LISTED | WHOLE) && trouble.act != Act::Crash {
+        if matches!(found, LISTED | WHOLE | PART) && trouble.act != Act::Crash {
             assert!(said.contains(&copy.display().to_string()), "{name}: where it is: {said}");
         }
         if found == READY {

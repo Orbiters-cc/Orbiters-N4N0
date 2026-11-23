@@ -185,6 +185,7 @@
   "The copy at {path} is not a verified one: start a new trial.": "{path} のコピーは確認済みではありません。新しいお試しを始めてください。",
   "The copy at {path} is not what the original holds ({count} differences): {first}": "{path} のコピーは元の内容と違います (相違 {count} 件): {first}",
   "The copy at {path} is not what was verified any more ({count} differences): {first}": "{path} のコピーは確認したときの内容と違います (相違 {count} 件): {first}",
+  "The copy could not be finished: what was copied is kept at {path}, and is not listed as a project": "コピーを完了できませんでした。コピーされた分は {path} に残っており、プロジェクトとしては一覧に表示されません",
   "The copy was interrupted before every file was in. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.": "すべてのファイルがコピーされる前に中断しました。このフォルダーはプロジェクトではありません。何も削除していません。新しいお試しを始め、不要になったらこのフォルダーをご自分で削除してください。",
   "The copy was interrupted. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.": "コピーが中断されました。このフォルダーはプロジェクトではありません。何も削除していません。新しいお試しを始め、不要になったらこのフォルダーを自分で取り除いてください。",
   "The damaged record is kept at {path}.": "壊れた記録は {path} に残してあります。",

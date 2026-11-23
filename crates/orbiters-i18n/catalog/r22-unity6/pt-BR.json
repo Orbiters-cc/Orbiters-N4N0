@@ -185,6 +185,7 @@
   "The copy at {path} is not a verified one: start a new trial.": "A cópia em {path} não está verificada: comece um novo teste.",
   "The copy at {path} is not what the original holds ({count} differences): {first}": "A cópia em {path} não é o que o original contém ({count} diferenças): {first}",
   "The copy at {path} is not what was verified any more ({count} differences): {first}": "A cópia em {path} não é mais o que foi verificado ({count} diferenças): {first}",
+  "The copy could not be finished: what was copied is kept at {path}, and is not listed as a project": "A cópia não pôde ser concluída: o que foi copiado fica em {path} e não aparece na lista de projetos",
   "The copy was interrupted before every file was in. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.": "A cópia foi interrompida antes de todos os arquivos serem copiados. Esta pasta não é um projeto; nada foi apagado. Comece um novo teste e apague você mesmo esta pasta quando não precisar mais dela.",
   "The copy was interrupted. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.": "A cópia foi interrompida. Esta pasta não é um projeto; nada foi apagado. Comece um novo teste e remova esta pasta você quando não precisar mais dela.",
   "The damaged record is kept at {path}.": "O registro danificado fica guardado em {path}.",

@@ -211,7 +211,7 @@ fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &Atom
         // What this copy made is held until here; its folder is, until the caller is done.
         (Ok(()), Some(id)) => Ok((new, root, id)),
         (Err(_), _) if cancel.load(Ordering::Relaxed) => Err(anyhow::anyhow!("{}", copying::undo(root, new, made))),
-        (Err(e), _) => Err(e),
+        (Err(e), _) => Err(e.context(tr!("The copy could not be finished: what was copied is kept at {path}, and is not listed as a project", path = destination.display()))),
         (Ok(()), None) => bail!("{}", tr("Stopped.")),
     }
 }
@@ -317,9 +317,9 @@ async fn make(
     drop(stage);
     // Every file is in: a Stop pressed now no longer leaves a whole copy unlisted (AGENTS.md: a retained project is
     // visible); it is registered like any other.
-    between(Step::Copied)?;
     let path = if crate::owned::is_same(&destination, new.id) { destination } else { new.path.clone() };
     let unlisted = || tr!("The copy is at {path}, but registration failed", path = path.display());
+    between(Step::Copied).with_context(unlisted)?;
     copying::unmark(&held, marker).and_then(|()| between(Step::MarkerGone)).with_context(unlisted)?;
     progress.lock().unwrap().phase = mark("Registering project").into();
     crate::vpm::list_entry(root, &path, &crate::vcc_list::Which::folder(&path, new.id), true).await.with_context(unlisted)?;

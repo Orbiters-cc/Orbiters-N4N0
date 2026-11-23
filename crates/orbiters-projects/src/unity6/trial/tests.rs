@@ -222,7 +222,7 @@ fn a_trial_is_recorded_copied_compared_listed_and_waits_for_creator_companion() 
 #[test]
 fn a_copy_that_differs_by_a_byte_is_a_failed_copy() {
     type Change = fn(&Path);
-    let changes: [(&str, Change); 5] = [
+    let changes: [(&str, Change); 4] = [
         ("Assets/Avatar.unity", |t| {
             let p = t.join("Assets/Avatar.unity");
             let mut b = std::fs::read(&p).unwrap();
@@ -232,8 +232,20 @@ fn a_copy_that_differs_by_a_byte_is_a_failed_copy() {
         ("ProjectSettings/ProjectSettings.asset", |t| std::fs::remove_file(t.join("ProjectSettings/ProjectSettings.asset")).unwrap()),
         ("Packages/manifest.json", |t| std::fs::remove_file(t.join("Packages/manifest.json")).unwrap()),
         ("Assets/Extra.txt", |t| std::fs::write(t.join("Assets/Extra.txt"), "x").unwrap()),
-        ("Assets/Empty", |t| std::fs::remove_dir(t.join("Assets/Empty")).unwrap()),
     ];
+    // A folder of it is held while it is made.
+    #[cfg(windows)]
+    {
+        let e = env();
+        let trial = e.root.join("Projects/T");
+        let _s = at_step(move |s| {
+            if s == Step::Copied {
+                assert!(std::fs::remove_dir(trial.join("Assets/Empty")).is_err());
+            }
+            Ok(())
+        });
+        run_at(&e, &e.root.join("Projects"), "T", &|_| false, &ok).unwrap();
+    }
     for (name, change) in changes {
         let e = env();
         let trial = e.root.join("Projects/T");

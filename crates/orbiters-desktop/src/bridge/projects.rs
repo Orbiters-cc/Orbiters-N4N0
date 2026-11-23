@@ -1719,6 +1719,10 @@ impl Projects {
             if outcome["conflict"] == json!(true) {
                 return Ok(outcome);
             }
+            // Asked again now that its packages changed.
+            if let Some(leave) = &leave {
+                leave.still(&path).map_err(|why| Failure::new("refused", why, "Its packages are installed; nothing else was done. Tell the person."))?;
+            }
             if let Some(warning) = leave.as_ref().and_then(|l| l.warning.as_ref()) {
                 outcome["upload_warning"] = json!(warning);
             }
@@ -2278,10 +2282,12 @@ mod unity6_tests {
             differences: vec![],
             attempts: vec![],
             migrated: None,
+            adopting: None,
             beside: None,
             localized: vec![],
             linked: vec![],
             content: vec![],
+            content_unsure: vec![],
             guid: String::new(),
             manifest: None,
             import_high: 0,

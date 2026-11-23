@@ -66,7 +66,7 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
     state.u6.sheet.check = Job::spawn(ctx, move || {
         let checked: Checked = (|| -> anyhow::Result<_> {
             // The same look the copy starts with, by reading only: the place is refused here as it would be there.
-            let l = trial::look(&dir, &source, Path::new(&key.0), &key.1, trial::is_open(&source), &Default::default());
+            let l = trial::look(&dir, &[&dir, &orbiters_projects::vcc_dir()], &source, Path::new(&key.0), &key.1, trial::is_open(&source), &Default::default());
             let place = match l.place {
                 Ok(p) => p,
                 // What is in the way of any trial comes before what is wrong with this place.
@@ -182,6 +182,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
                     d.pick_folder()
                 });
             }
+            note(ui, tr("A folder that exists, on a disk of this computer, outside every Unity project and everything the original uses: Orbiters makes the trial's own folder in it and no other."));
             if let Err(e) = orbiters_projects::templates::validate_name(&state.u6.sheet.name) {
                 inline_warning(ui, &e.to_string());
             }

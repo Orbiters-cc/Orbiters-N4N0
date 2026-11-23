@@ -87,6 +87,15 @@ fn a_line_without_an_end_is_not_a_way_around() {
         let (ids, whole) = yaml(&body);
         assert!(!ids.is_empty() || !whole, "{at}");
     }
+    // The value alone past it, and an override's.
+    for at in LINE - 60..LINE + 2 {
+        let body = format!("{}blueprintId:{}{A}", "0".repeat(LINE - 12), " ".repeat(at - (LINE - 60)));
+        assert!(!yaml(&body).1, "{at}");
+        let body = format!("  propertyPath: blueprintId\n{}value: {A}", "0".repeat(at));
+        let (ids, whole) = yaml(&body);
+        assert!(!ids.is_empty() || !whole, "{at}");
+    }
+    assert!(!carries(Path::new("ProjectSettings/ProjectSettings.asset")));
 }
 
 /// VRChat's own samples are nobody's upload; anything else in its packages may be.

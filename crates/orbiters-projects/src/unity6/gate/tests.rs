@@ -415,6 +415,8 @@ mod source {
         pub paths: BTreeSet<String>,
         pub methods: BTreeSet<String>,
         pub unsafe_code: bool,
+        /// The modules it declares (each is a file of its own, looked at too).
+        pub modules: BTreeSet<String>,
     }
 
     fn imports(t: &[Token], i: &mut usize, prefix: &str, out: &mut BTreeMap<String, String>, all: &mut BTreeSet<String>) {
@@ -486,6 +488,11 @@ mod source {
                 i += 1;
                 continue;
             };
+            if first == "mod" {
+                if let Some(Word(name)) = body.get(i + 1) {
+                    out.modules.insert(name.clone());
+                }
+            }
             if first == "unsafe" || first == "extern" || first == "asm" {
                 out.unsafe_code = true;
             }
@@ -543,12 +550,12 @@ const READS: &[&str] = &[
     // Not files at all.
     "std::io::Read", "std::io::Write", "std::io::Error", "std::io::ErrorKind::", "std::io::Result", "std::io::copy", "std::io::sink", "std::io::BufRead", "std::io::BufReader", "std::io::BufReader::", "std::io",
     "std::io::Error::", "std::path::", "std::collections::", "std::sync::", "std::ffi::", "std::time::", "std::ops::", "std::fmt::", "std::cell::", "std::mem::", "std::ptr::", "std::env::temp_dir", "std::env::var_os", "std::env::consts::",
-    "std::str::", "std::thread::", "std::os::unix::fs::MetadataExt", "std::os::windows::ffi::", "std::iter::", "std::cmp::", "std::process::id", "std::borrow::",
+    "std::str::", "std::thread::", "std::os::unix::fs::MetadataExt", "std::os::windows::ffi::", "std::iter::", "std::cmp::", "std::process::id", "std::borrow::", "std::slice::", "std::io::Seek", "std::io::SeekFrom", "std::io::SeekFrom::", "clippy::",
     "anyhow::", "serde::", "serde_json::", "orbiters_i18n::", "ring::digest::", "ring::signature::", "uuid::", "time::", "url::", "base64::", "walkdir::", "sysinfo::", "flate2::read::", "regex::",
-    "vrc_get_vpm::version::", "vrc_get_vpm::ProjectType", "vrc_get_litedb::bson::", "vrc_get_litedb::expression::", "vrc_get_litedb::file_io::LiteDBFile", "vrc_get_litedb::file_io::LiteDBFile::", "vrc_get_litedb::file_io::BsonAutoId", "vrc_get_litedb::file_io::BsonAutoId::",
+    "vrc_get_vpm::version::", "vrc_get_vpm::ProjectType", "vrc_get_vpm::ProjectType::", "vrc_get_litedb::bson::", "vrc_get_litedb::expression::", "vrc_get_litedb::file_io::LiteDBFile", "vrc_get_litedb::file_io::LiteDBFile::", "vrc_get_litedb::file_io::BsonAutoId", "vrc_get_litedb::file_io::BsonAutoId::",
     // This app's own, which read.
-    "crate::owned::FileId", "crate::owned::id_of", "crate::owned::id_of_file", "crate::owned::is_same", "crate::owned::is_link", "crate::owned", "crate::owned::",
-    "crate::discovery::key", "crate::discovery::is_project", "crate::discovery::now", "crate::discovery::parse_version", "crate::discovery::is_link", "crate::discovery::Project",
+    "crate::owned::FileId", "crate::owned::id_of", "crate::owned::id_of_file", "crate::owned::is_same", "crate::owned::is_link", "crate::owned",
+    "crate::discovery::key", "crate::discovery::is_project", "crate::discovery::now", "crate::discovery::parse_version", "crate::discovery::is_link", "crate::discovery::Project", "crate::discovery::database_editors", "crate::discovery::editor_hints",
     "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
     "crate::templates::Keep", "crate::templates::Keep::", "crate::templates::left_out", "crate::templates::retarget_with", "crate::templates::packages_only_in_library", "crate::templates::installed_dependencies_complete",
     "crate::templates::dependencies_complete", "crate::templates::Marker", "crate::templates::Marker::", "crate::templates::INCOMPLETE", "crate::templates::Progress", "crate::templates::SharedProgress", "crate::templates::validate_name",
@@ -557,8 +564,8 @@ const READS: &[&str] = &[
 
 /// What one file alone may use besides, and why.
 const ALONE: &[(&str, &[&str])] = &[
-    // A restore's staging folder, in app data, is filled by VPM; the one entry of the list.
-    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::vpm::list_entry"]),
+    // A restore's staging folder, in app data, is filled by VPM; the one entry of the list; the bundled templates' own cache.
+    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::vpm::list_entry", "crate::bundled_templates::builtins"]),
     // Asking a disk and an editor's program what they are.
     ("budget.rs", &["windows::core::PCWSTR", "windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW", "windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW", "windows::Win32::Storage::FileSystem::GetVolumePathNameW"]),
     ("editors.rs", &["windows::", "winreg::", "plist::"]),
@@ -580,7 +587,7 @@ fn refused(name: &str, read: &source::Read) -> Vec<String> {
     let types = |path: &str| path.split("::").next().is_some_and(|f| f.chars().next().is_some_and(|c| c.is_uppercase() || c.is_numeric()));
     let local = |path: &str| ["self", "super", "Self"].contains(&path.split("::").next().unwrap_or_default());
     let core = |path: &str| ["u8", "u16", "u32", "u64", "i32", "i64", "usize", "f64", "str", "char", "bool"].contains(&path.split("::").next().unwrap_or_default());
-    let mut out: Vec<String> = read.paths.iter().filter(|p| p.contains("::") && !(lets(p) || types(p) || local(p) || core(p))).map(|p| format!("{name}: {p}")).collect();
+    let mut out: Vec<String> = read.paths.iter().filter(|p| p.contains("::") && !(lets(p) || types(p) || local(p) || core(p) || read.modules.contains(p.split("::").next().unwrap_or_default()))).map(|p| format!("{name}: {p}")).collect();
     out.extend(read.methods.iter().filter(|m| WRITING.contains(&m.as_str())).map(|m| format!("{name}: .{m}(")));
     if read.unsafe_code && !ASKS_WINDOWS.contains(&name) {
         out.push(format!("{name}: unsafe"));

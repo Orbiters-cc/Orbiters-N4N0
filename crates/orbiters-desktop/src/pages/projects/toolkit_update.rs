@@ -90,6 +90,8 @@ impl State {
                     Err(e) => return Err(e),
                 },
             }
+            // Asked again now that its packages changed, and before Unity is opened to upload from.
+            leave.still(&project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
             orbiters_projects::open_project(&project)?;
             let said = match &avatar {
                 Some(avatar) => tr!("{name} has the current Orbiters Toolkit and is open in Unity. Upload {avatar} from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.", name = name, avatar = avatar),

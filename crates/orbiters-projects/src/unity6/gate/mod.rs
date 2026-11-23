@@ -618,38 +618,47 @@ impl ListRoot {
         }
     }
 
-    /// Replaces the file `name` whole, at once, when it is still `before` and nobody holds it open.
-    pub fn replace(&self, name: &Path, before: Option<&[u8]>, after: &[u8]) -> anyhow::Result<()> {
-        let (_, leaf) = split(name)?;
-        let busy = || anyhow::anyhow!("{}", tr!("Creator Companion or ALCOM is using {file}: close it, then try again. Nothing was changed.", file = name.display()));
-        // Alone with it until it is replaced: anybody else having it open refuses this, and nobody changes it meanwhile.
-        let alone = match before {
-            Some(_) => Some(sys::open_at(&self.dir, leaf, Want::Alone, false).map_err(|_| busy())?),
-            None => None,
-        };
-        if let Some(mut now) = alone.as_ref() {
-            anyhow::ensure!(!sys::is_link(now)?, "{}", tr!("{path} is a link: Orbiters does not write through it.", path = name.display()));
-            // Somebody else's change since it was read is never written over.
-            let mut bytes = vec![];
-            now.read_to_end(&mut bytes)?;
-            anyhow::ensure!(Some(&bytes[..]) == before, "{}", busy());
-        } else {
-            anyhow::ensure!(self.read(name)?.is_none(), "{}", busy());
+    /// Replaces each file (its name, what it was read as, what it becomes) whole, at once. Every one of them is held first: it
+    /// must be what it was read as, and nobody else may have it open; else none is replaced.
+    pub fn replace(&self, edits: &[(&str, Option<Vec<u8>>, Vec<u8>)]) -> anyhow::Result<()> {
+        let busy = |name: &str| anyhow::anyhow!("{}", tr!("Creator Companion or ALCOM is using {file}: close it, then try again. Nothing was changed.", file = name));
+        let mut held = vec![];
+        for (name, before, _) in edits {
+            let (_, leaf) = split(Path::new(name))?;
+            let alone = match before {
+                Some(before) => {
+                    let mut now = sys::open_at(&self.dir, leaf, Want::Alone, false).map_err(|_| busy(name))?;
+                    anyhow::ensure!(!sys::is_link(&now)?, "{}", tr!("{path} is a link: Orbiters does not write through it.", path = name));
+                    let mut bytes = vec![];
+                    now.read_to_end(&mut bytes)?;
+                    anyhow::ensure!(bytes == *before, "{}", busy(name));
+                    Some(now)
+                }
+                None => {
+                    anyhow::ensure!(self.read(Path::new(name))?.is_none(), "{}", busy(name));
+                    None
+                }
+            };
+            held.push(alone);
         }
-        let temp = OsString::from(format!("{}.{}.tmp", leaf.to_string_lossy(), uuid::Uuid::new_v4().simple())); // i18n: not shown (a file's name)
-        let mut file = sys::open_at(&self.dir, &temp, Want::NewFile, false)?;
-        let done = (|| -> anyhow::Result<()> {
-            file.write_all(after)?;
-            file.sync_all()?;
-            sys::publish_held(&self.dir, &file, &temp, leaf, alone).map_err(|_| busy())
-        })();
-        if done.is_err() {
-            if let Ok(id) = id_of_file(&file) {
-                drop(file);
-                let _ = sys::remove_at(&self.dir, &temp, id, false);
+        for ((name, _, after), alone) in edits.iter().zip(held) {
+            let (_, leaf) = split(Path::new(name))?;
+            let temp = OsString::from(format!("{name}.{}.tmp", uuid::Uuid::new_v4().simple())); // i18n: not shown (a file's name)
+            let mut file = sys::open_at(&self.dir, &temp, Want::NewFile, false)?;
+            let done = (|| -> anyhow::Result<()> {
+                file.write_all(after)?;
+                file.sync_all()?;
+                sys::publish_held(&self.dir, &file, &temp, leaf, alone).map_err(|_| busy(name))
+            })();
+            if done.is_err() {
+                if let Ok(id) = id_of_file(&file) {
+                    drop(file);
+                    let _ = sys::remove_at(&self.dir, &temp, id, false);
+                }
+                return done;
             }
         }
-        done
+        Ok(())
     }
 }
 

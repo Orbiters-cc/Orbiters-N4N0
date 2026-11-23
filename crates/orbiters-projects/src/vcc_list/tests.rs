@@ -39,7 +39,7 @@ fn a_project_is_listed_once_and_taken_off() {
     assert_eq!(v[LIST], serde_json::json!([shown]));
     let db = database(&e);
     let doc = db.get_all(PROJECTS).next().unwrap().clone();
-    assert_eq!(doc["Path"].as_str(), Some(shown.as_str()));
+    assert_eq!(doc["Path"].as_str(), plain(&e.source).to_str());
     assert_eq!(doc["UnityVersion"].as_str(), Some("2022.3.22f1"));
     assert_eq!(doc["Type"], Value::from(ProjectType::Avatars as i32));
     assert!(doc["Favorite"] == Value::from(false) && doc["CreatedAt"].as_date_time().is_some());
@@ -102,12 +102,21 @@ fn a_form_not_known_changes_neither_file() {
     std::fs::write(e.vcc.join(SETTINGS), [0xff, 0xfe]).unwrap();
     assert!(run(&e, &other, true).is_err());
     std::fs::write(e.vcc.join(SETTINGS), good[0].as_ref().unwrap()).unwrap();
-    for bad in [&b"not a database"[..], &[0; 8192]] {
-        std::fs::write(e.vcc.join(DATABASE), bad).unwrap();
+    let whole = good[1].clone().unwrap();
+    let cut = whole[..whole.len() - 100].to_vec();
+    for bad in [b"not a database".to_vec(), vec![], vec![0; PAGE], cut, [&whole[..], b"more"].concat()] {
+        std::fs::write(e.vcc.join(DATABASE), &bad).unwrap();
         assert!(run(&e, &other, true).is_err() && run(&e, &e.source, false).is_err());
         assert_eq!(std::fs::read(e.vcc.join(DATABASE)).unwrap(), bad);
         assert_eq!(std::fs::read(e.vcc.join(SETTINGS)).unwrap(), *good[0].as_ref().unwrap());
     }
+    // Changes it has not taken in yet.
+    std::fs::write(e.vcc.join(DATABASE), &whole).unwrap();
+    std::fs::write(e.vcc.join(LOG), "x").unwrap();
+    assert!(run(&e, &other, true).is_err() && run(&e, &e.source, false).is_err());
+    assert_eq!(files(&e), good);
+    std::fs::write(e.vcc.join(LOG), "").unwrap();
+    run(&e, &other, true).unwrap();
 }
 
 /// Another program has a file open, or changed it since it was read: not written over.
@@ -124,16 +133,16 @@ fn a_file_in_use_or_changed_is_not_written_over() {
             let held = std::fs::OpenOptions::new().read(true).share_mode(share).open(e.vcc.join(name)).unwrap();
             assert!(run(&e, &e.source, false).is_err(), "{name} {share}");
             drop(held);
+            assert_eq!(files(&e), before, "neither is written, {name} {share}");
         }
-        assert_eq!(std::fs::read(e.vcc.join(name)).unwrap(), *before[if name == SETTINGS { 0 } else { 1 }].as_ref().unwrap(), "{name}");
-        let _ = run(&e, &e.source, true);
     }
     let root = ListRoot::open(&e.vcc).unwrap();
     let now = std::fs::read(e.vcc.join(SETTINGS)).unwrap();
-    assert!(root.replace(Path::new(SETTINGS), Some(b"another"), b"x").is_err());
-    assert!(root.replace(Path::new(SETTINGS), None, b"x").is_err(), "one that is there where none was");
+    let replace = |before: Option<&[u8]>, after: &[u8]| root.replace(&[(SETTINGS, before.map(<[u8]>::to_vec), after.to_vec())]);
+    assert!(replace(Some(b"another"), b"x").is_err());
+    assert!(replace(None, b"x").is_err(), "one that is there where none was");
     assert_eq!(std::fs::read(e.vcc.join(SETTINGS)).unwrap(), now);
-    root.replace(Path::new(SETTINGS), Some(&now), b"{}").unwrap();
+    replace(Some(&now), b"{}").unwrap();
     assert_eq!(std::fs::read(e.vcc.join(SETTINGS)).unwrap(), b"{}");
     // Nothing of a run is left beside them.
     let mut names: Vec<_> = std::fs::read_dir(&e.vcc).unwrap().flatten().map(|f| f.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
@@ -188,16 +197,17 @@ fn an_entry_goes_by_its_folder() {
         run(&e, p, true).unwrap();
     }
     run(&e, &a, false).unwrap();
-    assert_eq!(paths(&e), [b.display().to_string()]);
+    let kept = |p: &Path| plain(p).display().to_string();
+    assert_eq!(paths(&e), [kept(&b)]);
     // Not there: another case of its name is not it, and a folder that is there never goes as one that is not.
     let gone = e.root.join("Projects/Gone");
     std::fs::rename(&b, &gone).unwrap();
     run(&e, &gone, true).unwrap();
     std::fs::rename(&gone, &a).unwrap();
     run(&e, &PathBuf::from(gone.to_string_lossy().replace("Gone", "GONE")), false).unwrap();
-    assert!(paths(&e).contains(&gone.display().to_string()));
+    assert!(paths(&e).contains(&kept(&gone)));
     run(&e, &gone, false).unwrap();
-    assert_eq!(paths(&e), [b.display().to_string()]);
+    assert_eq!(paths(&e), [kept(&b)]);
     assert!(!Which::Gone(a.display().to_string()).is(&a.display().to_string()), "it is there");
     // Two folders whose names differ by case only, where the disk keeps them apart.
     let (x, y) = (e.root.join("Case/proj"), e.root.join("Case/PROJ"));
@@ -208,7 +218,7 @@ fn an_entry_goes_by_its_folder() {
             run(&e, p, true).unwrap();
         }
         run(&e, &x, false).unwrap();
-        assert!(paths(&e).contains(&y.display().to_string()) && !paths(&e).contains(&x.display().to_string()));
+        assert!(paths(&e).contains(&kept(&y)) && !paths(&e).contains(&kept(&x)));
     }
 }
 

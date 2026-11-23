@@ -660,7 +660,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                         state.u6.act(&ctx, tr("Opening the trial in Unity 6…"), move || {
                             let start = |program: &Path, project: &Path, log: &Path| orbiters_projects::start_logged(program, project, log, &unity);
                             // Found and probed again now: what was found earlier is not trusted at the launch.
-                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &|v, build| editors::find_build(v, Some(build)), &trial::is_open, &trial::alive, &start)?;
+                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &|v, build| editors::find_build(v, Some(build)), &trial::is_open, &trial::PROCESSES, &start)?;
                             Ok(tr!("Unity is starting. This opening's log: {log}", log = a.log.display()))
                         });
                     }
@@ -703,7 +703,9 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"),
         (tr("Unregister the trial"), icons::X, state.u6.busy().is_none(), "unregister"),
     ];
-    match buttons(ui, &list, false) {
+    // Where trials are only shown, nothing is changed of them.
+    let list = if state.u6.mac() { &list[..2] } else { &list[..] };
+    match buttons(ui, list, false) {
         Some(0) => {
             if let Some(original) = original {
                 state.open(&ctx, original);
@@ -715,12 +717,23 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         Some(2) => {
             let id = job.id.clone();
             state.u6.act(&ctx, tr("Unregistering the trial…"), move || {
-                let (left, _) = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
-                Ok(tr!("The trial stays at {path}; it is no longer listed. Add existing brings it back.", path = left.display()))
+                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                Ok(forgotten(&left, &tr!("The trial stays at {path}; it is no longer listed. Add existing brings it back.", path = left.at.display())))
             });
         }
         _ => {}
     }
+}
+
+/// What taking a trial off did: `gone` when its entries went; else which ones stay, and why.
+fn forgotten(left: &trial::Forgotten, gone: &str) -> String {
+    if left.still_listed.is_empty() {
+        return gone.to_string();
+    }
+    tr!(
+        "It is not shown here any more. Creator Companion's list still names {paths}: that folder is not there now (or another one is), so Orbiters does not remove an entry it cannot tell apart. Remove it there yourself when you no longer need it.",
+        paths = left.still_listed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+    )
 }
 
 /// The gallery's rows for trials that are not projects (yet): being made, stopped, not where they were.
@@ -799,7 +812,8 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         };
         item(&mut inner, glyph, tint, &tr!("{name}, a Unity 6 trial of {original}", name = job.trial.name, original = job.source.name), Some(&format!("{}\n{text}", job.trial.path.display())));
         let mut list: Vec<(&str, &str, bool, &str)> = vec![];
-        if matches!(status, trial::Status::Unlisted) {
+        let mac = state.u6.mac();
+        if matches!(status, trial::Status::Unlisted) && !mac {
             list.push((tr("List it"), icons::PLUS, state.u6.busy().is_none(), "list"));
         }
         if matches!(status, trial::Status::Running) {
@@ -810,7 +824,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             if state.u6.present(&job.trial.path) {
                 list.push((tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"));
             }
-            if !matches!(status, trial::Status::Uncertain(_)) {
+            if !matches!(status, trial::Status::Uncertain(_)) && !mac {
                 list.push((tr("Take it off"), icons::X, state.u6.busy().is_none(), "forget"));
             }
         }
@@ -842,8 +856,8 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             }
             // Off VCC's list too when it is on it; its folder stays, and stays known.
             Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
-                let (left, there) = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
-                Ok(if there { tr!("It is off the lists. Its folder stays at {path}.", path = left.display()) } else { tr("It is off the lists.").to_string() })
+                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                Ok(forgotten(&left, &if left.there { tr!("It is off the lists. Its folder stays at {path}.", path = left.at.display()) } else { tr("It is off the lists.").to_string() }))
             }),
             _ => {}
         }

@@ -1264,6 +1264,10 @@ impl State {
             // It ends in an upload of the avatar: leave for that first, from the project as it is now.
             let leave = orbiters_projects::unity6::authority::upload(&orbiters_projects::data_dir(), &project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
             orbiters_projects::runtime()?.block_on(vpm::install_my_avatar(&orbiters_projects::vcc_dir(), &project.path))?;
+            // Asked again now that its packages changed (a request asks it itself, when it is written).
+            if !nano {
+                leave.still(&project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
+            }
             let request = if nano {
                 let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), server.api(), env!("ORBITERS_VERSION"))?;
                 setup::write(&project.path, &r, &leave)?;

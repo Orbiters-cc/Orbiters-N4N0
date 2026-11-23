@@ -30,10 +30,12 @@ const OF_THE_SDK: [&str; 7] = [
 const ID: usize = 5 + 36;
 /// A line is looked at whole up to this; what is past it is only looked through for the field's name.
 const LINE: usize = 64 * 1024;
+const FIELD: &[u8] = b"blueprintId";
 
-/// Whether the file can carry a Pipeline Manager, by its kind.
+/// Whether the file can carry a Pipeline Manager, by its kind (a project's settings are no objects of a scene).
 pub fn carries(at: &Path) -> bool {
-    ["unity", "prefab", "asset"].iter().any(|x| at.extension().is_some_and(|e| e.eq_ignore_ascii_case(x)))
+    let settings = at.components().next().is_some_and(|c| c.as_os_str().eq_ignore_ascii_case("ProjectSettings"));
+    !settings && ["unity", "prefab", "asset"].iter().any(|x| at.extension().is_some_and(|e| e.eq_ignore_ascii_case(x)))
 }
 
 /// Whether `at` is in one of VRChat's own packages of the project.
@@ -121,16 +123,22 @@ fn serialized(head: &[u8], len: u64) -> bool {
     }
 }
 
-/// One line into `line` (its end left out), as far as [`LINE`]; whether there was one, and whether what is past that has the
-/// field's name in it.
-fn next_line(r: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<(bool, bool)> {
-    const FIELD: &[u8] = b"blueprintId";
+/// One line into `line` (its end left out), as far as [`LINE`].
+struct Next {
+    any: bool,
+    /// It went on past that.
+    cut: bool,
+    /// And what is past it has the field's name in it.
+    beyond: bool,
+}
+
+fn next_line(r: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Next> {
     line.clear();
-    let (mut any, mut beyond, mut tail) = (false, false, Vec::<u8>::new());
+    let (mut any, mut beyond, mut cut, mut tail) = (false, false, false, Vec::<u8>::new());
     loop {
         let piece = r.fill_buf()?;
         if piece.is_empty() {
-            return Ok((any, beyond));
+            return Ok(Next { any, cut, beyond });
         }
         any = true;
         let end = piece.iter().position(|b| *b == b'\n');
@@ -138,6 +146,11 @@ fn next_line(r: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<(bool, bool
         let room = LINE - line.len();
         line.extend_from_slice(&part[..part.len().min(room)]);
         if part.len() > room {
+            if !cut {
+                // The name may begin before the cut.
+                tail.extend_from_slice(&line[line.len().saturating_sub(FIELD.len())..]);
+            }
+            cut = true;
             tail.drain(..tail.len().saturating_sub(FIELD.len()));
             tail.extend_from_slice(&part[room..]);
             beyond |= says(&tail, FIELD);
@@ -145,7 +158,7 @@ fn next_line(r: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<(bool, bool
         let used = end.map_or(piece.len(), |e| e + 1);
         r.consume(used);
         if end.is_some() {
-            return Ok((true, beyond));
+            return Ok(Next { any: true, cut, beyond });
         }
     }
 }
@@ -160,15 +173,15 @@ fn text(file: impl Read) -> io::Result<(BTreeSet<String>, bool)> {
         Some(line[at..].to_vec())
     };
     loop {
-        let (any, beyond) = next_line(&mut r, &mut line)?;
-        if !any {
+        let next = next_line(&mut r, &mut line)?;
+        if !next.any {
             return Ok((ids, whole));
         }
-        // Past the part that was looked at, or not text at all.
-        whole &= !beyond && !line.contains(&0);
         if says(&line, b"propertyPath:") {
-            property = says(&line, b"blueprintId");
+            property = says(&line, FIELD);
         }
+        // Not text at all; or a line too long to be looked at whole that has to do with one.
+        whole &= !line.contains(&0) && !(next.cut && (next.beyond || property || says(&line, FIELD)));
         let value = after(&line, b"blueprintId:").or_else(|| property.then(|| after(&line, b"value:")).flatten());
         let Some(value) = value else { continue };
         let mut here = BTreeSet::new();

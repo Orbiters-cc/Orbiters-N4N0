@@ -22,6 +22,9 @@ use vrc_get_vpm::ProjectType;
 
 const SETTINGS: &str = "settings.json";
 const DATABASE: &str = "vcc.liteDb";
+const LOG: &str = "vcc-log.liteDb";
+const PAGE: usize = 8192;
+const MAGIC: &[u8] = b"** This is a LiteDB file **";
 const LIST: &str = "userProjects";
 const PROJECTS: &str = "projects";
 
@@ -157,12 +160,9 @@ pub(crate) fn add(root: &ListRoot, project: &Path, here: &Which) -> anyhow::Resu
 /// One file's next contents: its name, what it holds now, what it will.
 type Edit = Option<(&'static str, Option<Vec<u8>>, Vec<u8>)>;
 
-/// Both were worked out before either is written: one in a form not known here leaves both as they are.
+/// Both were worked out before either is written: one in a form not known here, or in use, leaves both as they are.
 fn write(root: &ListRoot, edits: [Edit; 2]) -> anyhow::Result<()> {
-    for (name, before, after) in edits.into_iter().flatten() {
-        root.replace(Path::new(name), before.as_deref(), &after)?;
-    }
-    Ok(())
+    root.replace(&edits.into_iter().flatten().collect::<Vec<_>>())
 }
 
 /// Takes every entry `which` means off the list in `root`.
@@ -195,8 +195,14 @@ fn documents(db: &LiteDBFile) -> Vec<(String, Vec<Document>)> {
 
 fn edit_database(root: &ListRoot, edit: impl FnOnce(&mut LiteDBFile) -> anyhow::Result<bool>) -> anyhow::Result<Edit> {
     let name = Path::new(DATABASE);
+    // Changes the database has not taken in yet are in a log beside it: what is written here would be lost under them.
+    if root.read(Path::new(LOG))?.is_some_and(|log| !log.is_empty()) {
+        return Err(unknown(DATABASE, tr("it was not closed: open and close Creator Companion once")));
+    }
     let before = root.read(name)?;
     let mut db = match &before {
+        // The parser takes whole pages and leaves the rest out: what is not all of it is not taken for an empty one.
+        Some(bytes) if bytes.is_empty() || bytes.len() % PAGE != 0 || bytes.get(32..32 + MAGIC.len()) != Some(MAGIC) => return Err(unknown(DATABASE, tr("it is not a database"))),
         Some(bytes) => LiteDBFile::parse(bytes).map_err(|e| unknown(DATABASE, e))?,
         None => LiteDBFile::new(),
     };

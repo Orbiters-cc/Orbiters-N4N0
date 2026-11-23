@@ -450,7 +450,11 @@ fn the_record_follows_the_member_not_the_name() {
             let account = rt.account.as_mut().unwrap();
             (account.user, account.username) = (Some(id.into()), Some(name.into()));
         }
+        // VRChat's session is theirs, verified for them, as the sign-in publishes it.
+        c.test_signed_in();
         c.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: name.into() });
+        let stamp = c.vrchat_now().unwrap();
+        assert!(c.publish_login(&stamp, |st, _| (st.allowed, st.user) = (true, Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), ..Default::default() }))));
     };
     let (c, w, _) = world();
     as_member(&c, "1", "tester");
@@ -459,6 +463,9 @@ fn the_record_follows_the_member_not_the_name() {
         Reply::Ledger { entries, .. } => entries.iter().any(|e| e.op == op),
         r => panic!("{r:?}"),
     };
+    // Renamed, before anything is verified again: still theirs.
+    c.update(|s| s.account.state = crate::state::AccountState::SignedIn { username: "Renamed".into() });
+    assert!(shown(&c));
     as_member(&c, "1", "Renamed");
     assert!(shown(&c));
     assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op: op.clone() }));

@@ -213,6 +213,38 @@ The service's own looks (3 to 5 % of a core with nothing open, seen by thread on
 the engine's session records once a second instead of ten times, every process on the Mac every 30 s instead of 3, and beside
 a game the network every 2 s instead of twice a second and the processes' CPU every 15 s instead of 3.
 
+### What cuts a frame, a sharper upscale, presentation, `spindump` (2026-11-23, 23:05 to 23:45; no VRChat start)
+
+After three VRChat starts with the timeline (22:20 to 22:41: 39.2 shown frames a second at 45 % per side, 31.3 at 58, 18.6 at 100, the
+GPU the limit; the main scene drawn in 4 to 8 encoder pieces too many, some 90 % of the cuts on command-buffer boundaries). Branches
+`perf-timeline` of Orbiters-cc/voile-lkd, neptune, dxmt and Obelisk; nothing released. All numbers, conditions and commands:
+voile-lkd's `tests/timeline/results/2026-11-23-switches.md` and `docs/wsd-switches.md`.
+
+- **DXMT cuts the scene for a query nobody waits for.** The timeline now records what committed each command buffer and ended each pass
+  (`otl.py --splits`). The owned client (266 draws on a blended 2x target, 21.5 ms of GPU) runs at 46.4 frames a second; **with one event
+  query ended a frame, 36.4**: 2.1 cuts of the target a frame, all by DXMT's stall flush. Neptune's host looks at every ended query every
+  100 us without asking for a flush; DXMT, after 64 looks (6.4 ms), flushes at each look until the GPU reaches the query. VRChat's own
+  recordings have its print: 40 % of the gaps between command buffers are 100 to 120 us at 45 %, hardly any is shorter; 17.5 command
+  buffers a frame beside two `Flush`. On a hot, busy Mac (thermal pressure 2, as in those starts) the same pair gave 24.5 and 14.2
+  frames a second, with 5.8 cuts (disturbed runs: the direction, not a size). A cut costs this client 1.6 to 3.6 ms (blended content; flat scenes: 0.4). An occlusion query ended
+  in the middle of a scene with target changes cuts it too; timestamps and readbacks do; `Map(WRITE_DISCARD)`, `NO_OVERWRITE`, dynamic
+  textures and uploads nothing reads do not. DXMT is unchanged: the fix is proposed, not made.
+- **MetalFX Spatial in `wsd`** (off, `OBELISK_WSD_UPSCALE=metalfx`): 1.5 ms of GPU a frame at full clock against 0.06 to 0.12 for today's draw (3 to
+  5.6 ms when the GPU idles at a low clock), to 2940 x 1912 from 1323 x 860 or 1705 x 1109; 1.2 dB nearer to the frame drawn at full size than
+  macOS's stretch, text and thin lines visibly sharper. It makes no frame faster.
+- **Presented as it arrives** (off, `OBELISK_WSD_PRESENT=arrival`): 26.6 instead of 39.6 ms from the client's stamp to the screen at 40 frames a
+  second, 32.2 instead of 45.6 at 30, the same even cadence. `presentDrawable:atTime:`, two drawables and no display sync are worse or uneven.
+- **One more place in the guest's display queue** changes nothing where the GPU always has work; with a slow CPU frame in four it gives 45.7
+  instead of 39.8 frames a second and costs 12 to 18 ms of latency. Only the guest's driver can give it.
+- **`spindump` was macOS writing a disk-writes report of its own Launch Services** (`lsd`, over 2 GB in ten hours), not a hang report: each start
+  rewrote the game's app bundle, which macOS registers again by saving a 12 MB database; a day of some 180 test starts crossed the limit
+  during the 45 % start. `launch.sh` of the branch leaves an unchanged bundle alone (measured: 0 instead of 12 MB a start); it reaches
+  players with the next obelisk-cli made from it.
+- **"VRChat was not frontmost all along" was true**: Safari was in front in every look (`wsd`: `app_active=0`), the game shown over it. macOS gives
+  the front to no program that the active app neither started nor yields to. The timeline's own bench (voile-lkd `tools/timeline/bench.py`)
+  brings the game's app to the front and names what was there instead; `tools/mac-bench/bench.py` here is to take that over. Whether a
+  start from Home gets the keyboard was not looked at.
+
 ### Next (not done)
 
 1. One VRChat start per condition (58, 100, 45) with the timeline and the encoder times: the split of the fence wait, the GPU's

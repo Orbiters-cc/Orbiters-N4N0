@@ -636,7 +636,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     assert!(front(&mut w), "the composer");
     w.state.open.as_mut().unwrap().composer = None;
     assert!(!front(&mut w), "closed");
-    w.state.open.as_mut().unwrap().role_editor = Some(page::RoleEditor::new(None, Default::default()));
+    w.state.open.as_mut().unwrap().role_editor = Some(page::RoleEditor::new(Default::default()));
     assert!(front(&mut w), "the role editor");
     w.state.open.as_mut().unwrap().role_editor = None;
     w.state.studio = Some(studio::Studio::new(card(), "usr_test", None));
@@ -660,7 +660,7 @@ fn a_key_held_from_the_opener_confirms_nothing() {
         let mut o = page::Open::new(card(), &Drafts::default());
         o.answer(Kind::Open(G.into()), Reply::Opened(page));
         o.tab = page::Tab::Roles;
-        o.role_editor = Some(page::RoleEditor::new(Some(baseline), edit));
+        o.role_editor = Some(page::RoleEditor::of(baseline, edit));
         r.w.state.open = Some(o);
         orbiters_ui::widgets::watch_controls();
         r.w.drawn(6, vec![], show_page);
@@ -951,6 +951,8 @@ struct Cell {
 /// and the service's real handler, over the real link.
 fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
     let mut r = rig();
+    // One of the two uploads to a VRChat that keeps its own encoding of a picture.
+    r.world.lock().unwrap().reencodes = kind == Wrote::UploadIcon;
     let write = r.write(kind);
     // The very same again, later: an upload's own bytes, staged anew.
     let bytes = match &write {

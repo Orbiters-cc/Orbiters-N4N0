@@ -219,7 +219,11 @@ pub(crate) fn parse_group(v: &Value) -> Option<Group> {
         return None;
     }
     let ((icon_id, icon_known), (banner_id, banner_known)) = (picture(v, "iconId"), picture(v, "bannerId"));
+    let (nameplate_id, nameplate_known) = picture(v, "nameplateId");
     Some(Group {
+        nameplate_id,
+        nameplate_known,
+        words_known: ["name", "description", "rules"].iter().all(|k| v.get(*k).is_some_and(Value::is_string)) && v.get("links").is_some_and(Value::is_array),
         icon_id,
         icon_known,
         banner_id,
@@ -378,7 +382,9 @@ pub fn role_create_body(draft: &RoleDraft) -> String {
     .to_string()
 }
 
-/// `updateGroupRole`: only the fields that changed (M2, M4). `order` is never sent (reorder is not in v1).
+/// `updateGroupRole`: only the fields that changed (M2, M4), each a value of its own. The schema requires none, and VRCX
+/// sends the owner's role its words without its rights: neither `permissions` (the whole list, with no condition) nor `order`
+/// is ever sent.
 pub fn role_update_body(change: &RoleChange) -> String {
     let mut m = Map::new();
     if let Some(v) = &change.name {
@@ -386,9 +392,6 @@ pub fn role_update_body(change: &RoleChange) -> String {
     }
     if let Some(v) = &change.description {
         m.insert("description".into(), json!(v));
-    }
-    if let Some(v) = &change.permissions {
-        m.insert("permissions".into(), json!(g::in_order(v)));
     }
     if let Some(v) = change.self_assignable {
         m.insert("isSelfAssignable".into(), json!(v));
@@ -703,13 +706,13 @@ impl Client {
     }
 
     /// `POST /file/image` (multipart: `tag`, `file`): a PNG into the account's own gallery or icons, the file made.
-    /// Its own step: nothing about a group changes here (M6).
-    pub fn upload_image(&mut self, tag: FileTag, png: Vec<u8>) -> GroupResult<InventoryFile> {
+    /// Its own step: nothing about a group changes here (M6). VRChat may keep other bytes than those it was given: what it
+    /// answers is its own file, told apart by its id, its owner and its kind (that it is a new one is the caller's to see).
+    pub fn upload_image(&mut self, tag: FileTag, png: Vec<u8>) -> GroupResult<FileDetail> {
         if png.len() > UPLOAD_MAX || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
             return Err(Failure::Invalid);
         }
         self.authenticated().map_err(|e| Failure::of(e, false))?;
-        let (md5, size) = (md5_base64(&png), png.len() as u64);
         let form = Form { fields: vec![("tag", tag.wire().to_string())], file_name: "orbiters.png", mime: "image/png", bytes: png };
         let answer = self.group_call("POST", "/file/image", None, Some(form))?;
         // One of this account's, of the kind asked (the schema requires both): another file's answer settles nothing (J2).
@@ -717,11 +720,7 @@ impl Client {
         if self.me().ok().as_deref() != Some(made.owner.as_str()) || !made.tags.as_ref().is_some_and(|t| t.iter().any(|t| t == tag.wire())) {
             return Err(Failure::Unknown);
         }
-        // Of these bytes, when VRChat says of which (verify3 Major 4).
-        if made.size.is_some_and(|n| n != size) || made.md5.as_ref().is_some_and(|m| *m != md5) {
-            return Err(Failure::Unknown);
-        }
-        Ok(made.file)
+        Ok(made)
     }
 
     /// `PUT /groups/{g}` with one picture's file id: the group as VRChat now has it.
@@ -823,7 +822,6 @@ mod tests {
         // verify3 Minor 2: sets go in one order, whatever the order they were chosen in.
         let chosen = PostDraft { role_ids: vec!["grol_b".into(), "grol_a".into(), "grol_b".into()], ..Default::default() };
         assert_eq!(body(&chosen)["roleIds"], json!(["grol_a", "grol_b"]));
-        assert_eq!(role_update_body(&RoleChange { permissions: Some(vec!["b".into(), "a".into()]), ..Default::default() }), r#"{"permissions":["a","b"]}"#);
         assert!(role_create_body(&RoleDraft { permissions: vec!["b".into(), "a".into()], ..Default::default() }).contains(r#"["a","b"]"#));
     }
 
@@ -843,8 +841,11 @@ mod tests {
         assert_eq!(art_body(ArtSlot::Banner, "file_1"), r#"{"bannerId":"file_1"}"#);
         assert_eq!(art_body(ArtSlot::Icon, "file_2"), r#"{"iconId":"file_2"}"#);
         assert!(!role_create_body(&RoleDraft::default()).contains("requiresPurchase"));
-        assert_eq!(role_update_body(&RoleChange { permissions: Some(vec![]), ..Default::default() }), r#"{"permissions":[]}"#);
-        assert!(!role_update_body(&RoleChange { name: Some("x".into()), ..Default::default() }).contains("order"));
+        // Every change of a role there is: no rights, no order.
+        let every = RoleChange { name: Some("x".into()), description: Some("y".into()), self_assignable: Some(true), added_on_join: Some(false), requires_two_factor: Some(true) };
+        let sent: Value = serde_json::from_str(&role_update_body(&every)).unwrap();
+        assert_eq!(sent, json!({"name": "x", "description": "y", "isSelfAssignable": true, "isAddedOnJoin": false, "requiresTwoFactor": true}));
+        assert_eq!(role_update_body(&RoleChange { name: Some("x".into()), ..Default::default() }), r#"{"name":"x"}"#);
     }
 
     /// M5: 403 and 404 are told apart, and no server text is kept.
@@ -940,11 +941,6 @@ mod tests {
     fn mismatched_or_malformed_write_answers_are_unknown() {
         let png = b"\x89PNG\r\n\x1a\nx".to_vec();
         let file = |id: &str, owner: &str, tag: &str| json!({"id": id, "ownerId": owner, "tags": [tag], "versions": [{"version": 1, "file": {"url": format!("https://api.vrchat.cloud/api/1/file/{id}/1/file"), "md5": file_md5(&png), "sizeInBytes": png.len()}}]});
-        let with = |key: &str, v: Value| {
-            let mut f = file("file_up", "usr_test", "gallery");
-            f["versions"][0]["file"][key] = v;
-            f
-        };
         let post = |id: &str, title: &str, text: &str, roles: Value, image: Value| json!({"id": id, "groupId": G, "authorId": "usr_test", "title": title, "text": text, "visibility": "group", "roleIds": roles, "imageId": image});
         let draft = RoleDraft { name: "New".into(), ..Default::default() };
         let rename = RoleChange { name: Some("New".into()), ..Default::default() };
@@ -973,7 +969,7 @@ mod tests {
             ("delete role", &drop_role, json!([owner(), role_json("grol_b", "B", 3, &[])]), vec![json!([owner(), role_json("grol_a", "A", 3, &[])]), json!({}), json!([]), json!([role_json("grol_b", "B", 3, &[])])]),
             ("new post", &publish, post("gpos_1", "t", "x", json!([]), json!(null)), vec![post("gpos_1", "t", "another", json!([]), json!(null)), post("gpos_1", "t", "x", json!(["grol_a"]), json!(null)), json!({"id": "gpos_1", "authorId": "usr_test", "title": "t", "text": "x"})]),
             ("delete post", &remove, json!({"success": {"message": "Group Post was deleted!", "status_code": 200}}), vec![json!({}), json!({"success": {}}), json!({"success": {"status_code": 500}})]),
-            ("upload", &upload, file("file_up", "usr_test", "gallery"), vec![file("file_up", "usr_other", "gallery"), file("file_up", "usr_test", "icon"), json!({"id": "file_up"}), with("sizeInBytes", json!(7)), with("md5", json!("AAAAAAAAAAAAAAAAAAAAAA=="))]),
+            ("upload", &upload, file("file_up", "usr_test", "gallery"), vec![file("file_up", "usr_other", "gallery"), file("file_up", "usr_test", "icon"), json!({"id": "file_up"})]),
         ];
         for (what, call, right, wrong) in table {
             let (mut c, _) = mock_signed_in(vec![raw_response(200, &right.to_string())]);
@@ -1036,7 +1032,7 @@ mod tests {
         let files = page.items;
         assert_eq!(files, [InventoryFile { id: "file_new".into(), url: "https://api.vrchat.cloud/api/1/file/file_new/1/file".into() }]);
         let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
-        assert_eq!(c.upload_image(FileTag::Icon, png.clone()).unwrap().id, "file_new");
+        assert_eq!(c.upload_image(FileTag::Icon, png.clone()).unwrap().file.id, "file_new");
         let one = c.picture_file("file_new").unwrap();
         assert_eq!((one.owner.as_str(), one.version, one.tags.map(|t| t.len())), ("usr_test", Some(1), Some(2)));
         assert_eq!(c.picture_file("file_new"), Err(Failure::BadAnswer), "another file's answer");
@@ -1142,7 +1138,7 @@ mod tests {
             let (mut c, rx) = serve(vec![Script::Answer(200, file, &[])]);
             let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
             png.extend((0..=255u8).cycle().take(4000));
-            assert_eq!(c.upload_image(FileTag::Gallery, png.clone()).map(|f| f.id), Ok("file_up".into()));
+            assert_eq!(c.upload_image(FileTag::Gallery, png.clone()).map(|f| f.file.id), Ok("file_up".into()));
             let seen = next(&rx);
             assert!(seen.head.starts_with("POST /api/1/file/image "), "{}", seen.head);
             let lower = seen.head.to_ascii_lowercase();

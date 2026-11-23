@@ -28,7 +28,7 @@ use super::vrchat_login::Presence;
 use super::Controller;
 pub use super::groups_ledger::{Answer, By, Closing, Entry, Evidence, Key, Kind, Ledger, Not, State, Stop, Target, Warning};
 use super::groups_ledger::{known_id, FORMAT, SETTLES_AFTER_MS};
-use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Missing, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Why};
+use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Missing, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, RoleField, Why};
 use orbiters_core::vrchat_api::{Client, GroupFailure, GroupFile, GroupInventory, Members, Posts};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -157,7 +157,8 @@ impl Staged {
 pub enum Write {
     MemberRole { group: String, user: String, role: String, add: bool },
     CreateRole { group: String, draft: RoleDraft },
-    EditRole { group: String, baseline: Role, edit: RoleDraft },
+    /// A role's words and flags: not its rights (`RoleEdit`).
+    EditRole { group: String, baseline: Role, edit: RoleEdit },
     DeleteRole { group: String, role: String },
     /// `of`: the new post being written it comes from (an id of the window's), cleared when this very one is done.
     CreatePost { group: String, draft: PostDraft, of: String },
@@ -318,11 +319,13 @@ pub enum Done {
     /// The member's roles as VRChat now has them (the committed state, M3).
     MemberRoles { user: String, role_ids: Vec<String> },
     Role(Role),
-    Roles(Vec<Role>),
+    /// The roles as VRChat now has them, and what moved of the one changed beside what was asked.
+    Roles { roles: Vec<Role>, beside: g::RoleParts },
     Post(Post),
     PostDeleted { post: String },
     Uploaded(InventoryFile),
-    Group(Box<Group>),
+    /// The group as VRChat now has it, and what moved beside the picture asked.
+    Group { group: Box<Group>, beside: g::GroupParts },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -336,7 +339,8 @@ pub enum Outcome {
 }
 
 /// Something VRChat shows that the write may have made: its id, its words or address (shown, never kept), when, and whether
-/// it is exactly what was asked. It says nothing of who made it.
+/// it is exactly what was asked, where that can be said (VRChat may keep other bytes of a picture than those it was given:
+/// the same ones say it is it, other ones say nothing). It says nothing of who made it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
@@ -344,7 +348,7 @@ pub struct Candidate {
     /// A picture's address.
     pub url: String,
     pub at: Option<String>,
-    pub same: bool,
+    pub same: Option<bool>,
 }
 
 /// Why a check cannot tell.
@@ -475,6 +479,9 @@ struct Intent {
     file: Option<Filed>,
     /// What was in the slot (an apply's).
     previous: Option<String>,
+    /// The pictures there before an upload (hashed), and whether the list was read to its end.
+    before: Vec<String>,
+    before_whole: bool,
     /// The entries of the ledger its person was warned of.
     told: Vec<String>,
     at: Instant,
@@ -569,20 +576,8 @@ fn read<T>(r: Result<T, GroupFailure>) -> Result<T, Failure> {
 
 /// The same role for the purpose of a write made against `then`: its rights, rank, words and flags unchanged.
 fn same_role(then: &Role, now: &Role) -> Result<(), Failure> {
-    let mut a = then.permissions.clone();
-    let mut b = now.permissions.clone();
-    a.sort();
-    b.sort();
-    let parts = g::RoleParts {
-        name: then.name != now.name,
-        description: then.description != now.description,
-        permissions: a != b || then.known != now.known,
-        self_assignable: then.self_assignable != now.self_assignable,
-        added_on_join: then.added_on_join != now.added_on_join,
-        two_factor: then.requires_two_factor != now.requires_two_factor,
-        standing: then.whole != now.whole || then.order != now.order || then.default_role != now.default_role || then.management != now.management || then.requires_purchase != now.requires_purchase,
-    };
-    if parts == g::RoleParts::default() { Ok(()) } else { Err(Failure::RoleChanged(parts)) }
+    let parts = then.differs(now);
+    if parts.any() { Err(Failure::RoleChanged(parts)) } else { Ok(()) }
 }
 
 /// The post as the person saw it, or what of it is not.
@@ -826,8 +821,8 @@ impl Controller {
         Ok(None)
     }
 
-    /// The account's own newest pictures of `tag`, with what tells them apart.
-    fn groups_inventory(&self, scope: &Scope, tag: FileTag) -> Result<Vec<GroupFile>, Failure> {
+    /// The account's own newest pictures of `tag`, with what tells them apart, and whether every one was seen.
+    fn groups_inventory(&self, scope: &Scope, tag: FileTag) -> Result<(Vec<GroupFile>, bool), Failure> {
         let mut out = Vec::new();
         let mut offset = 0;
         for _ in 0..INVENTORY_PAGES {
@@ -836,10 +831,10 @@ impl Controller {
             let last = page.raw < orbiters_core::vrchat_api::GROUP_PAGE;
             out.extend(page.details);
             if last {
-                break;
+                return Ok((out, true));
             }
         }
-        Ok(out)
+        Ok((out, false))
     }
 
     /// The file `id`: by its id, or, when VRChat does not give it so, on the first pages of the account's pictures of its
@@ -910,6 +905,7 @@ impl Controller {
             return Ok(Reply::MaySent { op: gone });
         }
         let (warning, told) = book.conflicts(&entry);
+        let before = if entry.kind.tag().is_some() { entry.evidence.before.clone().unwrap_or_default() } else { Vec::new() };
         let sealed = Sealed {
             op: op.clone(),
             group: entry.group.clone(),
@@ -931,7 +927,7 @@ impl Controller {
             let oldest = rt.intents.iter().min_by_key(|i| i.at).map(|i| i.sealed.op.clone()).unwrap_or_default();
             rt.end_unsent(|i| i.sealed.op == oldest);
         }
-        rt.intents.push(Intent { scope: scope.clone(), link, sealed: sealed.clone(), picture: ready.picture, offset: ready.offset, file: ready.file, previous: ready.previous, told, at: Instant::now() });
+        rt.intents.push(Intent { scope: scope.clone(), link, sealed: sealed.clone(), picture: ready.picture, offset: ready.offset, file: ready.file, previous: ready.previous, before, before_whole: ready.before_whole, told, at: Instant::now() });
         Ok(Reply::Prepared(Box::new(sealed)))
     }
 
@@ -1022,7 +1018,12 @@ impl Controller {
                 Ok(Ready { evidence, labels, ..Ready::new(Write::CreateRole { group, draft }, permit, &page.group) })
             }
             Write::EditRole { group, baseline, edit } => {
-                let edit = RoleDraft { name: g::label(&edit.name, g::ROLE_NAME_MAX), description: g::text(&edit.description, g::ROLE_DESCRIPTION_MAX), ..edit };
+                // The person's own words are cleaned; those they left as they were are no part of the change.
+                let edit = RoleEdit {
+                    name: if edit.name == baseline.name { edit.name } else { g::label(&edit.name, g::ROLE_NAME_MAX) },
+                    description: if edit.description == baseline.description { edit.description } else { g::text(&edit.description, g::ROLE_DESCRIPTION_MAX) },
+                    ..edit
+                };
                 let page = self.groups_open(scope, &group)?;
                 let now = role_of(&page.group, &baseline.id).ok_or(Failure::Api(GroupFailure::NotFound))?;
                 if !now.whole {
@@ -1034,11 +1035,10 @@ impl Controller {
                 if change.is_empty() {
                     return Err(Failure::Api(GroupFailure::Invalid));
                 }
-                let permit = authority(&Action::EditRole { role: &now.id, change: &change }, &page.group, me, page.catalogue.as_deref())?;
+                let permit = authority(&Action::EditRole { role: &now.id, change: &change }, &page.group, me, None)?;
                 let fields = change.fields();
                 let evidence = Evidence { wanted: Some(now.with(&change).digest_of(&fields)), role_fields: fields, ..Default::default() };
-                let rights: Vec<String> = now.permissions.iter().chain(&edit.permissions).cloned().collect();
-                let labels = names(&page.group, page.catalogue.as_deref(), &[], &rights);
+                let labels = names(&page.group, page.catalogue.as_deref(), &[], &now.permissions);
                 Ok(Ready { role: Some(now.clone()), evidence, labels, ..Ready::new(Write::EditRole { group, baseline: now, edit }, permit, &page.group) })
             }
             Write::DeleteRole { group, role } => {
@@ -1085,7 +1085,7 @@ impl Controller {
                 let value = self.groups_read(scope, |c| c.current_user_value().map_err(|_| GroupFailure::Unavailable))?;
                 let permit = permit(g::can_upload(me, &group, own_tags(&value, me).as_deref()))?;
                 let found = self.groups_read(scope, |c| c.group(&group))?;
-                let files = self.groups_inventory(scope, tag)?;
+                let (files, before_whole) = self.groups_inventory(scope, tag)?;
                 let evidence = Evidence {
                     content: Some(staged.sha256.clone()),
                     before: Some(files.iter().map(|f| known_id(&f.file.id)).collect()),
@@ -1094,7 +1094,7 @@ impl Controller {
                     ..Default::default()
                 };
                 let sealed = SealedArt { file: None, sha256: staged.sha256.clone(), size: staged.size, version: None };
-                Ok(Ready { evidence, art: Some(sealed), ..Ready::new(Write::Upload { tag, group, staged, art }, permit, &found) })
+                Ok(Ready { evidence, before_whole, art: Some(sealed), ..Ready::new(Write::Upload { tag, group, staged, art }, permit, &found) })
             }
             Write::ApplyArt { group, slot, file } => {
                 if !g::is_file_id(&file) {
@@ -1218,9 +1218,9 @@ impl Controller {
         let mut catalogue: Option<Vec<PermissionInfo>> = None;
         let mut permit: Option<Permit> = None;
         let mut png: Option<Vec<u8>> = None;
+        let mut group_now: Option<Group> = None;
         match write {
             Write::CreateRole { group, draft } if !draft.permissions.is_empty() => catalogue = stop!(read(c.group_permission_catalogue(group))),
-            Write::EditRole { group, baseline, edit } if RoleChange::between(baseline, edit).permissions.is_some() => catalogue = stop!(read(c.group_permission_catalogue(group))),
             Write::DeletePost { group, .. } => {
                 let found = stop!(read(c.group(group)));
                 permit = Some(stop!(authority(&Action::Post, &found, me, None)));
@@ -1275,7 +1275,7 @@ impl Controller {
             Write::EditRole { group, baseline, edit } => {
                 let found = stop!(read(c.group(group)));
                 let change = RoleChange::between(baseline, edit);
-                permit = Some(stop!(authority(&Action::EditRole { role: &baseline.id, change: &change }, &found, me, catalogue.as_deref())));
+                permit = Some(stop!(authority(&Action::EditRole { role: &baseline.id, change: &change }, &found, me, None)));
                 stop!(self.groups_same_role(&found, &baseline.id, sealed));
             }
             Write::DeleteRole { group, role } => {
@@ -1314,6 +1314,7 @@ impl Controller {
                 if now != intent.previous.as_deref() {
                     return Gone::Stopped(Failure::Changed);
                 }
+                group_now = Some(found);
             }
             Write::Upload { group, .. } => {
                 let value = stop!(read(c.current_user_value().map_err(|_| GroupFailure::Unavailable)));
@@ -1325,7 +1326,7 @@ impl Controller {
         if *scope != Scope::of(&self.view()) {
             return Gone::Stopped(Failure::AccountChanged);
         }
-        self.groups_send(c, me, &permit, sealed, png)
+        self.groups_send(c, me, &permit, intent, group_now.as_ref(), png)
     }
 
     /// The role as sealed is the role as read now.
@@ -1336,8 +1337,8 @@ impl Controller {
 
     /// The request itself. It takes the proof the rules gave on the last read, for exactly this; there is no other way to
     /// VRChat's group writes in this program.
-    fn groups_send(&self, c: &mut Client, me: &str, permit: &Permit, sealed: &Sealed, png: Option<Vec<u8>>) -> Gone {
-        let write = &sealed.write;
+    fn groups_send(&self, c: &mut Client, me: &str, permit: &Permit, intent: &Intent, group_now: Option<&Group>, png: Option<Vec<u8>>) -> Gone {
+        let (sealed, write) = (&intent.sealed, &intent.sealed.write);
         let change = match write {
             Write::EditRole { baseline, edit, .. } => RoleChange::between(baseline, edit),
             _ => RoleChange::default(),
@@ -1361,13 +1362,29 @@ impl Controller {
         Gone::Sent(match write {
             Write::MemberRole { group, user, role, add } => c.set_member_role(group, user, role, *add).map(|role_ids| Done::MemberRoles { user: user.clone(), role_ids }),
             Write::CreateRole { group, draft } => c.create_role(group, draft).map(Done::Role),
-            Write::EditRole { group, baseline, .. } => c.update_role(group, &baseline.id, &change).map(Done::Roles),
-            Write::DeleteRole { group, role } => c.delete_role(group, role).map(Done::Roles),
+            Write::EditRole { group, baseline, .. } => c.update_role(group, &baseline.id, &change).map(|roles| {
+                // The role as just read, with the change: whatever else of it VRChat's answer has otherwise is said.
+                let beside = match (sealed.role.as_ref(), roles.iter().find(|r| r.id == baseline.id)) {
+                    (Some(then), Some(now)) => then.with(&change).differs(now),
+                    _ => g::RoleParts::default(),
+                };
+                Done::Roles { roles, beside }
+            }),
+            Write::DeleteRole { group, role } => c.delete_role(group, role).map(|roles| Done::Roles { roles, beside: g::RoleParts::default() }),
             Write::CreatePost { group, draft, .. } => c.create_post(group, draft).map(Done::Post),
             Write::DeletePost { group, post } => c.delete_post(group, &post.id).map(|_| Done::PostDeleted { post: post.id.clone() }),
-            Write::ApplyArt { group, slot, file } => c.set_group_art(group, *slot, file).map(|g| Done::Group(Box::new(g))),
+            Write::ApplyArt { group, slot, file } => c.set_group_art(group, *slot, file).map(|now| Done::Group { beside: group_now.map(|then| then.moved_beside(*slot, &now)).unwrap_or_default(), group: Box::new(now) }),
             Write::Upload { tag, .. } => match png {
-                Some(png) => c.upload_image(*tag, png).map(Done::Uploaded),
+                Some(png) => {
+                    let asked = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+                    // VRChat's own new file (it may keep other bytes than those it was given): not one that was there, by a
+                    // list read to its end, or else by the time it says it was made.
+                    c.upload_image(*tag, png).and_then(|made| {
+                        let before = intent.before.contains(&known_id(&made.file.id));
+                        let since = made.created_at.as_deref().and_then(millis).is_some_and(|at| at >= asked - CLOCKS_DIFFER_MS);
+                        if before || !(since || intent.before_whole) { Err(GroupFailure::Unknown) } else { Ok(Done::Uploaded(made.file)) }
+                    })
+                }
                 None => return Gone::Stopped(Failure::Expired),
             },
         })
@@ -1479,7 +1496,7 @@ impl Controller {
             Kind::CreateRole => {
                 let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
                 let same = |r: &Role| r.whole && Some(r.digest_of(&RoleField::ALL)) == e.evidence.content;
-                Seen::Candidates(roles.iter().filter(|r| !there_before(&r.id)).map(|r| Candidate { id: r.id.clone(), label: g::label(&r.name, g::ROLE_NAME_MAX), url: String::new(), at: r.created_at.clone(), same: same(r) }).take(CANDIDATES_MAX).collect())
+                Seen::Candidates(roles.iter().filter(|r| !there_before(&r.id)).map(|r| Candidate { id: r.id.clone(), label: g::label(&r.name, g::ROLE_NAME_MAX), url: String::new(), at: r.created_at.clone(), same: Some(same(r)) }).take(CANDIDATES_MAX).collect())
             }
             Kind::EditRole => {
                 let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
@@ -1513,7 +1530,7 @@ impl Controller {
                     found
                         .iter()
                         .filter(|p| p.author_id == me && made_by_then(p) && !there_before(&p.id))
-                        .map(|p| Candidate { id: p.id.clone(), label: g::label(&p.title, g::POST_TITLE_MAX), url: String::new(), at: p.created_at.clone(), same: same(p) })
+                        .map(|p| Candidate { id: p.id.clone(), label: g::label(&p.title, g::POST_TITLE_MAX), url: String::new(), at: p.created_at.clone(), same: Some(same(p)) })
                         .take(CANDIDATES_MAX)
                         .collect(),
                 )
@@ -1536,15 +1553,17 @@ impl Controller {
             }
             Kind::UploadGallery | Kind::UploadIcon => {
                 let Some(tag) = e.kind.tag() else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
-                // The very bytes sent, by VRChat's own hash and size of them, in the account's own pictures of that kind.
-                let same = |f: &GroupFile| f.md5.is_some() && f.md5 == e.evidence.md5 && f.size.is_some() && f.size == e.evidence.size;
-                let early = e.prepared_at - CLOCKS_DIFFER_MS;
+                // What is there since: the account's own, of that kind, not there before, made since it was asked. Not by its
+                // bytes: VRChat may keep others. The same bytes are a bonus.
+                let same = |f: &GroupFile| (f.md5.is_some() && f.md5 == e.evidence.md5 && f.size.is_some() && f.size == e.evidence.size).then_some(true);
+                let of_kind = |f: &GroupFile| f.tags.as_ref().is_none_or(|t| t.iter().any(|t| t == tag.wire()));
+                let early = e.dispatched_at.unwrap_or(e.prepared_at) - CLOCKS_DIFFER_MS;
                 let made_by_then = |f: &GroupFile| f.created_at.as_deref().and_then(millis).is_none_or(|at| at >= early);
-                let files = self.groups_inventory(scope, tag)?;
+                let (files, _) = self.groups_inventory(scope, tag)?;
                 Seen::Candidates(
                     files
                         .iter()
-                        .filter(|f| f.owner == me && made_by_then(f) && !there_before(&f.file.id))
+                        .filter(|f| f.owner == me && of_kind(f) && made_by_then(f) && !there_before(&f.file.id))
                         .map(|f| Candidate { id: f.file.id.clone(), label: String::new(), url: f.file.url.clone(), at: f.created_at.clone(), same: same(f) })
                         .take(CANDIDATES_MAX)
                         .collect(),
@@ -1605,13 +1624,14 @@ struct Ready {
     offset: usize,
     file: Option<Filed>,
     previous: Option<String>,
+    before_whole: bool,
     labels: Vec<(String, String)>,
     evidence: Evidence,
 }
 
 impl Ready {
     fn new(write: Write, permit: Permit, group: &Group) -> Self {
-        Self { write, permit, group_name: g::label(&group.name, 64), role: None, post: None, member: None, art: None, picture: None, offset: 0, file: None, previous: None, labels: Vec::new(), evidence: Evidence::default() }
+        Self { write, permit, group_name: g::label(&group.name, 64), role: None, post: None, member: None, art: None, picture: None, offset: 0, file: None, previous: None, before_whole: false, labels: Vec::new(), evidence: Evidence::default() }
     }
 }
 

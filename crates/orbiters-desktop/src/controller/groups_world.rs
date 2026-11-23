@@ -78,6 +78,8 @@ pub(crate) struct World {
     pub by_id: bool,
     /// Reads of group data are refused (403).
     pub refuses: bool,
+    /// VRChat keeps other bytes of a picture than those it was given (its own encoding of it).
+    pub reencodes: bool,
     made: u32,
 }
 
@@ -131,6 +133,7 @@ impl Default for World {
             done: Vec::new(),
             by_id: true,
             refuses: false,
+            reencodes: false,
             made: 0,
         }
     }
@@ -238,7 +241,10 @@ impl World {
                 self.group()
             }
             ("POST", ["", "file", "image"]) => {
-                let (tag, bytes) = r.upload.clone().unwrap();
+                let (tag, mut bytes) = r.upload.clone().unwrap();
+                if self.reencodes {
+                    bytes.truncate(bytes.len() / 2);
+                }
                 let v = file(&format!("file_up{}", self.made), &tag, "usr_test", &bytes);
                 self.files.push((tag, v.clone()));
                 v
@@ -338,7 +344,7 @@ pub(crate) fn write_of(kind: Kind, ask: &dyn Fn(Request) -> Reply) -> Write {
         Kind::CreateRole => Write::CreateRole { group, draft: RoleDraft { name: "Greeters".into(), description: "Say hello".into(), permissions: vec!["group-instance-join".into()], ..Default::default() } },
         Kind::EditRole => {
             let baseline = role("grol_artist");
-            let edit = RoleDraft { name: "Painters".into(), requires_two_factor: true, ..RoleDraft::of(&baseline) };
+            let edit = RoleEdit { name: "Painters".into(), requires_two_factor: true, ..RoleEdit::of(&baseline) };
             Write::EditRole { group, baseline, edit }
         }
         Kind::DeleteRole => Write::DeleteRole { group, role: "grol_events".into() },

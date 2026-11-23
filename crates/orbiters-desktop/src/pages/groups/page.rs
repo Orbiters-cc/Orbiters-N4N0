@@ -7,7 +7,7 @@ use super::art::Drafts;
 use crate::controller::groups::{Done, Failure, Outcome, Page, Reply, Request, Sealed, Write};
 use crate::pages::Cx;
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui};
-use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, GroupCard, InventoryFile, Member, Missing, Post, PostDraft, Role, RoleChange, RoleDraft, Visibility};
+use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, GroupCard, InventoryFile, Member, Missing, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, Visibility};
 use orbiters_core::vrchat_api::GROUP_PAGE as PAGE;
 use orbiters_i18n::tr;
 use orbiters_ui::icons;
@@ -64,13 +64,27 @@ pub(crate) struct PostList {
 
 pub(crate) struct RoleEditor {
     number: u64,
-    pub baseline: Option<Role>,
-    pub draft: RoleDraft,
+    form: RoleForm,
+}
+
+/// A new role, or one that is there as it was read and its words and flags as they are edited.
+enum RoleForm {
+    New(RoleDraft),
+    Of(Box<Role>, RoleEdit),
 }
 
 impl RoleEditor {
-    pub fn new(baseline: Option<Role>, draft: RoleDraft) -> Self {
-        Self { number: editor_number(), baseline, draft }
+    pub fn new(draft: RoleDraft) -> Self {
+        Self { number: editor_number(), form: RoleForm::New(draft) }
+    }
+    pub fn of(baseline: Role, edit: RoleEdit) -> Self {
+        Self { number: editor_number(), form: RoleForm::Of(Box::new(baseline), edit) }
+    }
+    fn baseline(&self) -> Option<&Role> {
+        match &self.form {
+            RoleForm::New(_) => None,
+            RoleForm::Of(b, _) => Some(b),
+        }
     }
 }
 
@@ -280,7 +294,7 @@ impl Open {
                     }
                     self.clear_role_editor(sealed, sent);
                 }
-                Done::Roles(roles) => {
+                Done::Roles { roles, .. } => {
                     if let Some(p) = self.page.as_mut() {
                         p.group.roles = Some(roles);
                     }
@@ -300,7 +314,7 @@ impl Open {
                 }
                 Done::PostDeleted { post } => self.posts.items.retain(|p| p.id != post),
                 Done::Uploaded(_) => {}
-                Done::Group(group) => {
+                Done::Group { group, .. } => {
                     if let Some(p) = self.page.as_mut() {
                         p.group.icon_id = group.icon_id.clone();
                         p.group.icon_url = group.icon_url.clone();
@@ -324,9 +338,9 @@ impl Open {
     }
 
     fn clear_role_editor(&mut self, sealed: Option<&Sealed>, sent: Option<u64>) {
-        let same = |e: &RoleEditor| match sealed.map(|s| &s.write) {
-            Some(Write::CreateRole { draft, .. }) => e.baseline.is_none() && e.draft.as_role().digest_of(&g::RoleField::ALL) == draft.as_role().digest_of(&g::RoleField::ALL),
-            Some(Write::EditRole { baseline, edit, .. }) => e.baseline.as_ref().is_some_and(|b| b.id == baseline.id) && e.draft.as_role().digest_of(&g::RoleField::ALL) == edit.as_role().digest_of(&g::RoleField::ALL),
+        let same = |e: &RoleEditor| match (&e.form, sealed.map(|s| &s.write)) {
+            (RoleForm::New(d), Some(Write::CreateRole { draft, .. })) => d.as_role().digest_of(&g::RoleField::ALL) == draft.as_role().digest_of(&g::RoleField::ALL),
+            (RoleForm::Of(b, e), Some(Write::EditRole { baseline, edit, .. })) => b.id == baseline.id && RoleChange::between(b, e) == RoleChange::between(baseline, edit),
             _ => false,
         };
         if self.role_editor.as_ref().is_some_and(|e| Some(e.number) == sent && same(e)) {
@@ -433,16 +447,6 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
             }
             if change.description.is_some() {
                 line(ui, tr("Description"), &edit.description);
-            }
-            if let Some(after) = &change.permissions {
-                let added: Vec<String> = after.iter().filter(|p| !baseline.permissions.contains(p)).cloned().collect();
-                let removed: Vec<String> = baseline.permissions.iter().filter(|p| !after.contains(p)).cloned().collect();
-                if !added.is_empty() {
-                    line(ui, tr("Rights given"), &rights(&added));
-                }
-                if !removed.is_empty() {
-                    line(ui, tr("Rights taken"), &rights(&removed));
-                }
             }
             for (on, label) in [(change.self_assignable, tr("Members can take it themselves")), (change.added_on_join, tr("Given to everyone who joins")), (change.requires_two_factor, tr("Needs two-factor authentication"))] {
                 if let Some(on) = on {
@@ -1153,33 +1157,39 @@ fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
     if o.page.as_ref().is_some_and(|p| p.group.roles.is_none()) {
         note(ui, tr("VRChat did not give this group's roles: nothing about them can be changed from here."), theme::WARN);
     }
-    if o.role_editor.as_ref().is_none_or(|e| e.baseline.is_some()) {
+    if o.role_editor.as_ref().is_none_or(|e| e.baseline().is_some()) {
         let b = widgets::Button::new(tr("New role")).icon(icons::PLUS).variant(widgets::Variant::Primary).enabled(can_create.allowed() && !busy).id_salt("role-new");
         let b = match authority_text(&can_create) {
             Some(why) => b.hint(why),
             None => b,
         };
         if b.show(ui).clicked() {
-            o.role_editor = Some(RoleEditor::new(None, RoleDraft::default()));
+            o.role_editor = Some(RoleEditor::new(RoleDraft::default()));
         }
         unknown(ui, &can_create, "roles", acts);
     }
-    if o.role_editor.as_ref().is_some_and(|e| e.baseline.is_none()) {
+    // Rights are chosen when a role is made; those of a role that is there are only read here.
+    if !roles.is_empty() && can_create.allowed() {
+        rights_on_the_web(ui, "roles", acts);
+    }
+    if o.role_editor.as_ref().is_some_and(|e| e.baseline().is_none()) {
         role_editor(ui, o, catalogue.as_deref(), busy, acts);
     }
     for r in &roles {
-        if o.role_editor.as_ref().and_then(|e| e.baseline.as_ref()).is_some_and(|b| b.id == r.id) {
+        if o.role_editor.as_ref().and_then(|e| e.baseline()).is_some_and(|b| b.id == r.id) {
             role_editor(ui, o, catalogue.as_deref(), busy, acts);
             continue;
         }
         let rename = RoleChange { name: Some(String::new()), ..Default::default() };
-        let rights = RoleChange { permissions: Some(r.permissions.clone()), ..Default::default() };
-        let editable = r.whole && (o.can(Action::EditRole { role: &r.id, change: &rename }).allowed() || o.can(Action::EditRole { role: &r.id, change: &rights }).allowed());
+        let editable = r.whole && o.can(Action::EditRole { role: &r.id, change: &rename }).allowed();
         let deletable = o.can(Action::DeleteRole { role: &r.id });
         let w = ui.available_width();
         let p = ui.painter().clone();
         let desc = if r.description.is_empty() { None } else { Some(p.layout_job(Txt::new(g::text(&r.description, g::ROLE_DESCRIPTION_MAX), 12.5).color(theme::FG_3).line_height(18.0).job(w - 260.0))) };
-        let h = 64.0 + desc.as_ref().map_or(0.0, |d| d.size().y + 4.0);
+        // Its rights by name, as VRChat has them: read, not changed, here.
+        let named = (!r.is_owner_role() && !r.permissions.is_empty()).then(|| p.layout_job(Txt::new(rights_text(&r.permissions, catalogue.as_deref()), 12.0).color(theme::FG_2).line_height(17.0).job(w - 64.0)));
+        let dh = desc.as_ref().map_or(0.0, |d| d.size().y + 4.0);
+        let h = 64.0 + dh + named.as_ref().map_or(0.0, |n| n.size().y + 6.0);
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         widgets::frame(&p, rect, 14.0, theme::surface());
         let glyph = if r.is_owner_role() { icons::SHIELD_CHECK } else if r.default_role { icons::USERS_THREE } else if r.management { icons::SHIELD_CHECK } else { icons::TAG };
@@ -1213,9 +1223,12 @@ fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
         if let Some(d) = desc {
             p.galley(pos2(rect.left() + 44.0, rect.top() + 58.0), d, theme::FG_3);
         }
+        if let Some(n) = named {
+            p.galley(pos2(rect.left() + 44.0, rect.top() + 58.0 + dh), n, theme::FG_2);
+        }
         let edit = Rect::from_min_size(pos2(rect.right() - 212.0, rect.top() + 14.0), vec2(96.0, 32.0));
         if editable && widgets::Button::new(tr("Edit")).icon(icons::PENCIL_SIMPLE).size(widgets::Size::Sm).enabled(!busy).id_salt(("role-edit", r.id.as_str())).show_at(ui, edit).clicked() {
-            o.role_editor = Some(RoleEditor::new(Some(r.clone()), RoleDraft::of(r)));
+            o.role_editor = Some(RoleEditor::of(r.clone(), RoleEdit::of(r)));
         }
         let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
         if deletable.allowed() {
@@ -1227,28 +1240,34 @@ fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
     }
 }
 
+/// Rights by VRChat's names for them, or their keys.
+fn rights_text(list: &[String], catalogue: Option<&[g::PermissionInfo]>) -> String {
+    list.iter().map(|key| catalogue.unwrap_or_default().iter().find(|p| p.name == *key).map(listed_label).unwrap_or_else(|| g::label(key, 64))).collect::<Vec<_>>().join(", ")
+}
+
+/// Where the rights of a role that is there are changed, and why not here.
+fn rights_on_the_web(ui: &mut Ui, salt: &str, acts: &mut Vec<Act>) {
+    note(ui, tr("The rights of an existing role are changed on vrchat.com: VRChat takes the whole list at once, so a change made here could undo another manager's."), theme::FG_3);
+    button_row(ui, |ui| {
+        if widgets::Button::new(tr("Change rights on vrchat.com")).icon(icons::ARROW_SQUARE_OUT).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("role-rights-web", salt)).show(ui).clicked() {
+            acts.push(Act::Web);
+        }
+    });
+}
+
 fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]>, busy: bool, acts: &mut Vec<Act>) {
     let group = o.id.clone();
-    let can_rights = |o: &Open, ed: &RoleEditor| match &ed.baseline {
-        Some(b) => o.can(Action::EditRole { role: &b.id, change: &RoleChange { permissions: Some(b.permissions.clone()), ..Default::default() } }).allowed() && !b.is_owner_role(),
-        None => true,
-    };
     let Some(ed) = o.role_editor.as_ref() else { return };
-    let title = if ed.baseline.is_some() { tr("Change the role") } else { tr("New role") };
-    let rights_ok = can_rights(o, ed);
-    let fixed = ed.baseline.as_ref().is_some_and(|b| b.default_role);
-    let owner_role = ed.baseline.as_ref().is_some_and(|b| b.is_owner_role());
+    let title = if ed.baseline().is_some() { tr("Change the role") } else { tr("New role") };
+    let owner_role = ed.baseline().is_some_and(|b| b.is_owner_role());
     let mut save: Option<Rect> = None;
     let mut cancel = false;
-    let verdict = {
-        let ed = o.role_editor.as_ref().unwrap();
-        match &ed.baseline {
-            Some(b) => {
-                let change = RoleChange::between(b, &ed.draft);
-                if change.is_empty() { None } else { Some(o.can(Action::EditRole { role: &b.id, change: &change })) }
-            }
-            None => (!ed.draft.name.trim().is_empty()).then(|| o.can(Action::CreateRole { draft: &ed.draft })),
+    let verdict = match &ed.form {
+        RoleForm::Of(b, edit) => {
+            let change = RoleChange::between(b, edit);
+            if change.is_empty() { None } else { Some(o.can(Action::EditRole { role: &b.id, change: &change })) }
         }
+        RoleForm::New(draft) => (!draft.name.trim().is_empty()).then(|| o.can(Action::CreateRole { draft })),
     };
     let ed = o.role_editor.as_mut().unwrap();
     card(ui, icons::PENCIL_SIMPLE, title, |ui| {
@@ -1256,41 +1275,56 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
         if busy {
             ui.disable();
         }
-        if !fixed {
-            ui.label(egui::RichText::new(tr("Name")).color(theme::FG_3).size(12.5));
-            widgets::text_field(ui, "role-name", &mut ed.draft.name, tr("A short name"), ui.available_width().min(420.0), false);
-            ed.draft.name = ed.draft.name.chars().take(g::ROLE_NAME_MAX).collect();
-            ui.label(egui::RichText::new(tr("Description")).color(theme::FG_3).size(12.5));
-            multiline(ui, "role-description", &mut ed.draft.description, tr("What this role is for"), g::ROLE_DESCRIPTION_MAX, 2);
-        } else {
-            note(ui, tr("Everyone's role keeps its name: only its rights change, with the right to manage the default role."), theme::FG_3);
+        let as_it_was = ed.baseline().map(|b| b.name.clone());
+        let (name, description, self_assignable, added_on_join, two_factor) = match &mut ed.form {
+            RoleForm::New(d) => (&mut d.name, &mut d.description, &mut d.self_assignable, &mut d.added_on_join, &mut d.requires_two_factor),
+            RoleForm::Of(_, e) => (&mut e.name, &mut e.description, &mut e.self_assignable, &mut e.added_on_join, &mut e.requires_two_factor),
+        };
+        ui.label(egui::RichText::new(tr("Name")).color(theme::FG_3).size(12.5));
+        widgets::text_field(ui, "role-name", name, tr("A short name"), ui.available_width().min(420.0), false);
+        if as_it_was.as_ref() != Some(&*name) {
+            *name = name.chars().take(g::ROLE_NAME_MAX).collect();
         }
-        if !fixed && !owner_role {
+        ui.label(egui::RichText::new(tr("Description")).color(theme::FG_3).size(12.5));
+        multiline(ui, "role-description", description, tr("What this role is for"), g::ROLE_DESCRIPTION_MAX, 2);
+        if !owner_role {
             for (value, label, help) in [
-                (&mut ed.draft.self_assignable, tr("Members can take it themselves"), tr("Anyone in the group can give it to themselves.")),
-                (&mut ed.draft.added_on_join, tr("Given to everyone who joins"), tr("New members get it as they join.")),
+                (self_assignable, tr("Members can take it themselves"), tr("Anyone in the group can give it to themselves.")),
+                (added_on_join, tr("Given to everyone who joins"), tr("New members get it as they join.")),
+                (two_factor, tr("Needs two-factor authentication"), tr("Only members with two-factor authentication on can have it.")),
             ] {
                 toggle_row(ui, label, help, value);
             }
         }
-        if !fixed && !owner_role {
-            toggle_row(ui, tr("Needs two-factor authentication"), tr("Only members with two-factor authentication on can have it."), &mut ed.draft.requires_two_factor);
-        }
-        // Rights: from VRChat's catalogue; those this account cannot give are shown but locked; the wildcard never.
-        match catalogue {
-            Some(cat) if rights_ok => {
-                ui.label(egui::RichText::new(tr("Rights")).color(theme::FG_3).size(12.5));
-                for perm in cat.iter().filter(|p| p.name != g::ALL) {
-                    let mut on = ed.draft.permissions.contains(&perm.name);
-                    let before = on;
-                    let label = listed_label(perm);
-                    ui.add_enabled_ui(perm.allowed_to_add, |ui| toggle_row(ui, &label, &perm.help, &mut on));
-                    if on != before {
-                        ed.draft.permissions = g::toggled(&ed.draft.permissions, &perm.name, on, cat);
+        match &mut ed.form {
+            // A new role's rights, from VRChat's catalogue: those this account cannot give are shown but locked; the
+            // wildcard never.
+            RoleForm::New(draft) => match catalogue {
+                Some(cat) => {
+                    ui.label(egui::RichText::new(tr("Rights")).color(theme::FG_3).size(12.5));
+                    for perm in cat.iter().filter(|p| p.name != g::ALL) {
+                        let mut on = draft.permissions.contains(&perm.name);
+                        let before = on;
+                        let label = listed_label(perm);
+                        ui.add_enabled_ui(perm.allowed_to_add, |ui| toggle_row(ui, &label, &perm.help, &mut on));
+                        if on != before {
+                            draft.permissions = g::toggled(&draft.permissions, &perm.name, on, cat);
+                        }
                     }
                 }
+                None => note(ui, tr("VRChat did not give the list of rights: the role can be made without any."), theme::FG_3),
+            },
+            RoleForm::Of(role, _) => {
+                ui.label(egui::RichText::new(tr("Rights")).color(theme::FG_3).size(12.5));
+                if owner_role {
+                    note(ui, tr("Every right"), theme::FG_2);
+                } else {
+                    if !role.permissions.is_empty() {
+                        note(ui, &rights_text(&role.permissions, catalogue), theme::FG_2);
+                    }
+                    rights_on_the_web(ui, "role-editor", acts);
+                }
             }
-            _ => note(ui, tr("Its rights cannot be changed from here by your role."), theme::FG_3),
         }
         match &verdict {
             Some(a @ Authority::Unknown(_)) => unknown(ui, a, "role-editor", acts),
@@ -1315,9 +1349,9 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
         o.role_editor = None;
     } else if let Some(rect) = save {
         let ed = o.role_editor.as_ref().unwrap();
-        let write = match &ed.baseline {
-            Some(b) => Write::EditRole { group, baseline: b.clone(), edit: ed.draft.clone() },
-            None => Write::CreateRole { group, draft: ed.draft.clone() },
+        let write = match &ed.form {
+            RoleForm::Of(b, edit) => Write::EditRole { group, baseline: (**b).clone(), edit: edit.clone() },
+            RoleForm::New(draft) => Write::CreateRole { group, draft: draft.clone() },
         };
         acts.push(Act::Write(write, rect));
     }
@@ -1593,7 +1627,7 @@ mod tests {
         let sealed = Sealed::made_up(Write::CreateRole { group: "grp_1".into(), draft: role.clone() }, true);
         let after = |draft: RoleDraft| {
             let mut o = open_as(&["*"], &["grol_owner"]);
-            let e = RoleEditor::new(None, draft);
+            let e = RoleEditor::new(draft);
             o.sent_editor = Some(e.number);
             o.role_editor = Some(e);
             o.ended(Some(&sealed), Outcome::Done(Done::Role(Role::default())));
@@ -1635,7 +1669,7 @@ mod tests {
             let mut o = open_as(&["*"], &["grol_owner"]);
             o.page.as_mut().unwrap().group.roles.as_mut().unwrap().truncate(3);
             match what {
-                "the role's Save" => o.role_editor = Some(RoleEditor::new(None, RoleDraft { name: "n".into(), ..Default::default() })),
+                "the role's Save" => o.role_editor = Some(RoleEditor::new(RoleDraft { name: "n".into(), ..Default::default() })),
                 "the post's Review" => o.composer = Some(Composer::new(PostDraft { title: "t".into(), text: "x".into(), ..Default::default() })),
                 "a post's Delete" => o.posts = PostList { items: vec![Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), complete: true, ..Default::default() }], started: true, ..Default::default() },
                 _ => {}
@@ -1681,7 +1715,7 @@ mod tests {
         let shown = |id: &str| {
             let mut o = open_as(&["*"], &["grol_owner"]);
             let r = o.roles().iter().find(|r| r.id == id).unwrap().clone();
-            o.role_editor = Some(RoleEditor::new(Some(r.clone()), RoleDraft::of(&r)));
+            o.role_editor = Some(RoleEditor::of(r.clone(), RoleEdit::of(&r)));
             let ctx = egui::Context::default();
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| role_editor(ui, &mut o, Some(&[]), false, &mut Vec::new()));
@@ -1691,6 +1725,31 @@ mod tests {
         for flag in [tr("Needs two-factor authentication"), tr("Members can take it themselves"), tr("Given to everyone who joins")] {
             assert!(!shown("grol_owner").contains(flag) && shown("grol_artist").contains(flag), "{flag}");
         }
+    }
+
+    /// A role that is there: its rights are named and changed on vrchat.com, with no switch for one; everyone's has no
+    /// Edit. A new one has its rights to choose.
+    #[test]
+    fn the_rights_of_a_role_that_is_there_are_read_only() {
+        let cat = [g::PermissionInfo { name: "group-instance-moderate".into(), display_name: "Moderate instances".into(), allowed_to_add: true, ..Default::default() }];
+        let shown = |editor: RoleEditor| {
+            let mut o = open_as(&["*"], &["grol_owner"]);
+            o.role_editor = Some(editor);
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| role_editor(ui, &mut o, Some(&cat), false, &mut Vec::new()));
+            out.textures_delta.clear();
+            words(&out)
+        };
+        let r = open_as(&["*"], &["grol_owner"]).roles().iter().find(|r| r.id == "grol_mod").unwrap().clone();
+        let (edits, makes) = (shown(RoleEditor::of(r.clone(), RoleEdit::of(&r))), shown(RoleEditor::new(RoleDraft::default())));
+        assert!(edits.contains("Moderate instances") && edits.contains(tr("Change rights on vrchat.com")), "{edits}");
+        assert!(makes.contains("Moderate instances") && !makes.contains(tr("Change rights on vrchat.com")), "{makes}");
+        let mut o = open_as(&["*"], &["grol_owner"]);
+        let roles = o.page.as_mut().unwrap().group.roles.as_mut().unwrap();
+        roles.push(Role { id: "grol_all".into(), name: "Everyone".into(), order: Some(9), default_role: true, known: true, whole: true, permissions: vec!["group-instance-moderate".into()], ..Default::default() });
+        let change = RoleChange { name: Some("x".into()), ..Default::default() };
+        assert!(!o.can(Action::EditRole { role: "grol_all", change: &change }).allowed());
     }
 
     /// What VRChat left out is explained, with a way to read it again; what the rules refuse is said as such.

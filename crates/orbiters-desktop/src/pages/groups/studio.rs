@@ -196,7 +196,7 @@ impl Studio {
     /// A write of this group's that ended (what was uploaded is the ledger's to say).
     pub(crate) fn ended(&mut self, sealed: Option<&Sealed>, outcome: &Outcome) {
         use crate::controller::groups::Done;
-        if let (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group(g))) = (sealed.map(|p| &p.write), outcome) {
+        if let (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group { group: g, .. })) = (sealed.map(|p| &p.write), outcome) {
             self.applied = true;
             self.card.banner_url = g.banner_url.clone();
         }

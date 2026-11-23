@@ -158,7 +158,7 @@ fn a_check_says_what_vrchat_shows_now() {
             later(&c);
             let seen = if entry(&c, &op).open() { check(&c, &op) } else { soon.clone() };
             let shape = match &seen {
-                Observation::Candidates(l) => format!("{} shown, {} exactly it", l.len(), l.iter().filter(|c| c.same).count()),
+                Observation::Candidates(l) => format!("{} shown, {} exactly it", l.len(), l.iter().filter(|c| c.same == Some(true)).count()),
                 o => format!("{o:?}"),
             };
             let want = match (kind, done) {
@@ -252,7 +252,7 @@ fn the_persons_decision_is_kept_as_theirs() {
     // The post is there with another audience (someone changed it): shown, not concluded.
     w.lock().unwrap().posts[0]["roleIds"] = json!([]);
     let Observation::Candidates(list) = check(&c, &op) else { panic!() };
-    assert_eq!((list.len(), list[0].same), (1, false));
+    assert_eq!((list.len(), list[0].same), (1, Some(false)));
     assert_eq!(decide(&c, &op, Choice::Shows { made: Some("gpos_1".into()) }), Reply::Failed(Failure::Api(GroupFailure::Invalid)), "not one of those shown");
     assert_eq!(decide(&c, &op, Choice::Again), Reply::Failed(Failure::NotKept), "a check that cannot tell is no ground for again");
     assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op: op.clone() }), "the same does not go meanwhile");
@@ -303,7 +303,7 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
     let (c, w, _) = world();
     lost(&c, &w, Kind::EditRole, false);
     let Write::EditRole { group, baseline, edit } = the(&c, Kind::EditRole) else { panic!() };
-    let other = prepare(&c, Write::EditRole { group: group.clone(), baseline: baseline.clone(), edit: RoleDraft { name: "Another".into(), ..edit } }).unwrap();
+    let other = prepare(&c, Write::EditRole { group: group.clone(), baseline: baseline.clone(), edit: RoleEdit { name: "Another".into(), ..edit } }).unwrap();
     assert_eq!((other.warning, other.confirm), (Some(Warning::AnotherMayHaveGone), true));
     let gone = prepare(&c, Write::DeleteRole { group, role: baseline.id }).unwrap();
     assert_eq!(gone.warning, Some(Warning::AnotherMayHaveGone), "its deletion is of the same role");
@@ -843,12 +843,137 @@ fn a_picture_applied_is_the_one_that_was_shown() {
             }
         }
     }
-    // An upload's answer about other bytes settles nothing.
+}
+
+/// An upload is done by VRChat's own new file of the kind asked, whatever bytes it keeps of it: not by one that was there,
+/// another's, of another kind, or, with no time said, against a list not read to its end.
+#[test]
+fn an_upload_is_its_new_file_not_its_bytes() {
+    let answered = |of: &dyn Fn(&[u8]) -> Value, many: bool| {
+        let (c, w, _) = world();
+        if many {
+            w.lock().unwrap().files = (0..260).map(|i| ("gallery".to_string(), super::world::file(&format!("file_m{i}"), "gallery", "usr_test", b"x"))).collect();
+        }
+        let write = the(&c, Kind::UploadGallery);
+        let Write::Upload { staged, .. } = &write else { panic!() };
+        let bytes = staged.read().unwrap();
+        let s = prepare(&c, write).unwrap();
+        w.lock().unwrap().fault = Some(Fault::Answer { done: false, status: 200, body: of(&bytes) });
+        commit(&c, &s)
+    };
+    let file = super::world::file;
+    let without_time = |mut f: Value| {
+        f["versions"][1].as_object_mut().unwrap().remove("created_at");
+        f
+    };
+    let old = |mut f: Value| {
+        f["versions"][1]["created_at"] = json!("2020-01-01T00:00:00Z");
+        f
+    };
+    for (what, outcome) in [
+        ("re-encoded", answered(&|_| file("file_up9", "gallery", "usr_test", b"the same picture, in other bytes"), false)),
+        ("the very bytes", answered(&|b| file("file_up9", "gallery", "usr_test", b), false)),
+        ("no time, all there was read", answered(&|b| without_time(file("file_up9", "gallery", "usr_test", b)), false)),
+        ("another clock, all there was read", answered(&|b| old(file("file_up9", "gallery", "usr_test", b)), false)),
+        ("made since, more there than is read", answered(&|_| file("file_up9", "gallery", "usr_test", b"other bytes"), true)),
+    ] {
+        assert!(matches!(&outcome, Outcome::Done(Done::Uploaded(f)) if f.id == "file_up9"), "{what}: {outcome:?}");
+    }
+    for (what, outcome) in [
+        ("there before", answered(&|b| file("file_gal1", "gallery", "usr_test", b), false)),
+        ("another's", answered(&|b| file("file_up9", "gallery", OTHERS_ID, b), false)),
+        ("of another kind", answered(&|b| file("file_up9", "icon", "usr_test", b), false)),
+        ("no time, more there than is read", answered(&|b| without_time(file("file_up9", "gallery", "usr_test", b)), true)),
+        ("old, more there than is read", answered(&|b| old(file("file_up9", "gallery", "usr_test", b)), true)),
+    ] {
+        assert_eq!(outcome, Outcome::Unknown, "{what}");
+    }
+}
+
+/// An upload of which the answer was lost, kept by VRChat in bytes of its own: Check offers it, as added since.
+#[test]
+fn a_lost_upload_is_found_re_encoded() {
+    for tag in [Kind::UploadGallery, Kind::UploadIcon] {
+        let (c, w, _) = world();
+        w.lock().unwrap().reencodes = true;
+        let op = lost(&c, &w, tag, true);
+        let Observation::Candidates(list) = check(&c, &op) else { panic!() };
+        assert_eq!(list.iter().map(|c| (c.id.as_str(), c.same)).collect::<Vec<_>>(), [("file_up1", None)], "{tag:?}");
+        assert!(entry(&c, &op).open(), "only the person says which it is");
+        assert_eq!(decide(&c, &op, Choice::Shows { made: Some("file_up1".into()) }), Reply::Decided { op: op.clone() });
+        assert!(!entry(&c, &op).open());
+    }
+}
+
+/// The rights of a role that is there are sent by nothing: an edit's body has what the person changed, and no list; and
+/// everyone's role, which has its rights alone to change, is not edited.
+#[test]
+fn rights_of_an_existing_role_are_never_sent() {
+    let (c, _, sent) = world();
+    let s = prepare(&c, the(&c, Kind::EditRole)).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(Done::Roles { beside, .. }) if !beside.any()));
+    let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
+    assert_eq!(bodies, [json!({"name": "Painters", "requiresTwoFactor": true})]);
     let (c, w, _) = world();
-    let s = prepare(&c, the(&c, Kind::UploadGallery)).unwrap();
-    let f = super::world::file("file_wrong", "gallery", "usr_test", b"completely different bytes");
-    w.lock().unwrap().fault = Some(Fault::Answer { done: false, status: 200, body: f });
-    assert_eq!(commit(&c, &s), Outcome::Unknown);
+    let id = {
+        let mut w = w.lock().unwrap();
+        w.roles[2]["defaultRole"] = json!(true);
+        w.roles[2]["id"].as_str().unwrap().to_string()
+    };
+    let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
+    let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == id).unwrap();
+    let edit = RoleEdit { name: "Painters".into(), ..RoleEdit::of(&baseline) };
+    assert_eq!(prepare(&c, Write::EditRole { group: G.into(), baseline, edit }), failed(Failure::Withheld(Why::FixedRole)));
+}
+
+/// Words the person left as they are, whatever VRChat let them be, are not sent back tidied or cut with a flag's change.
+#[test]
+fn words_left_as_they_are_are_not_sent_back() {
+    let (c, w, sent) = world();
+    w.lock().unwrap().roles[2]["name"] = json!(format!("  Artists\u{200b} {} ", "x".repeat(g::ROLE_NAME_MAX)));
+    w.lock().unwrap().roles[2]["description"] = json!("long ".repeat(g::ROLE_DESCRIPTION_MAX));
+    let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
+    let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == "grol_artist").unwrap();
+    let edit = RoleEdit { requires_two_factor: true, ..RoleEdit::of(&baseline) };
+    let s = prepare(&c, Write::EditRole { group: G.into(), baseline, edit }).unwrap();
+    commit(&c, &s);
+    let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
+    assert_eq!(bodies, [json!({"requiresTwoFactor": true})]);
+}
+
+/// Done, and VRChat's answer has another part of the role changed: it is said.
+#[test]
+fn a_role_whose_rights_moved_under_a_rename_is_said() {
+    let (c, w, _) = world();
+    let s = prepare(&c, the(&c, Kind::EditRole)).unwrap();
+    let mut roles = w.lock().unwrap().roles.clone();
+    let at = roles.iter().position(|r| r["id"] == "grol_artist").unwrap();
+    roles[at]["name"] = json!("Painters");
+    roles[at]["requiresTwoFactor"] = json!(true);
+    roles[at]["permissions"] = json!(["group-bans-manage"]);
+    w.lock().unwrap().fault = Some(Fault::Answer { done: true, status: 200, body: json!(roles) });
+    let outcome = commit(&c, &s);
+    assert!(matches!(&outcome, Outcome::Done(Done::Roles { beside, .. }) if *beside == g::RoleParts { permissions: true, ..Default::default() }), "{outcome:?}");
+}
+
+/// The same of a group's picture.
+#[test]
+fn another_picture_moved_under_an_apply_is_said() {
+    for (kind, beside) in [(Kind::ApplyBanner, true), (Kind::ApplyBanner, false)] {
+        let (c, w, sent) = world();
+        w.lock().unwrap().icon = json!("file_ico1");
+        let s = prepare(&c, the(&c, kind)).unwrap();
+        let mut body = w.lock().unwrap().group();
+        body["bannerId"] = json!("file_gal1");
+        if beside {
+            body["iconId"] = Value::Null;
+        }
+        w.lock().unwrap().fault = Some(Fault::Answer { done: true, status: 200, body });
+        let outcome = commit(&c, &s);
+        assert!(matches!(&outcome, Outcome::Done(Done::Group { beside: p, .. }) if *p == g::GroupParts { icon: beside, ..Default::default() }), "{outcome:?}");
+        let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
+        assert_eq!(bodies, [json!({"bannerId": "file_gal1"})], "only what the person chose");
+    }
 }
 
 /// J6: the owner's role keeps its two-factor flag and every other one; only its words change. N3: a post made public
@@ -858,8 +983,8 @@ fn fixed_flags_and_the_public_switch() {
     let (c, _, _) = world();
     let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
     let owner = page.group.roles.unwrap().into_iter().find(|r| r.id == "grol_owner").unwrap();
-    let edit = |f: fn(&mut RoleDraft)| {
-        let mut d = RoleDraft::of(&owner);
+    let edit = |f: fn(&mut RoleEdit)| {
+        let mut d = RoleEdit::of(&owner);
         f(&mut d);
         prepare(&c, Write::EditRole { group: G.into(), baseline: owner.clone(), edit: d })
     };

@@ -635,7 +635,12 @@ impl State {
         // Its view went meanwhile: what came of it is told, and no other view takes anything from it (B-F).
         if !mine {
             match outcome {
-                Outcome::Done(done) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(&done)),
+                Outcome::Done(done) => {
+                    cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(&done));
+                    if let Some(beside) = beside_text(&done) {
+                        cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, beside);
+                    }
+                }
                 Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, failure_text(f)),
                 Outcome::Unknown => {}
             }
@@ -778,7 +783,8 @@ impl State {
         }
         self.said = match &outcome {
             Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
-            _ => None,
+            Outcome::Done(done) => beside_text(done),
+            Outcome::Unknown => None,
         };
         // Without one: refused as it was being prepared, for the view still waiting for it.
         let group = sealed.as_ref().map(|s| s.group.clone());
@@ -812,13 +818,49 @@ fn done_text(done: &crate::controller::groups::Done) -> String {
     match done {
         Done::MemberRoles { .. } => tr("The member's roles are updated."),
         Done::Role(_) => tr("The role was created."),
-        Done::Roles(_) => tr("The roles are updated."),
+        Done::Roles { .. } => tr("The roles are updated."),
         Done::Post(_) => tr("The post is on VRChat."),
         Done::PostDeleted { .. } => tr("The post was deleted."),
         Done::Uploaded(_) => tr("The picture is in your VRChat inventory."),
-        Done::Group(_) => tr("The group's picture is changed."),
+        Done::Group { .. } => tr("The group's picture is changed."),
     }
     .to_string()
+}
+
+/// What VRChat's answer to a done write has otherwise than it was, beside what was asked: someone else's change of the same
+/// moment, or VRChat's own. It is done; this is for the person to look at.
+fn beside_text(done: &crate::controller::groups::Done) -> Option<String> {
+    use crate::controller::groups::Done;
+    let what: Vec<&str> = match done {
+        Done::Roles { beside, .. } => named(&role_parts(beside)),
+        Done::Group { beside: p, .. } => named(&[
+            (p.banner, tr("Group banner")),
+            (p.icon, tr("Group icon")),
+            (p.nameplate, tr("Nameplate banner")),
+            (p.name, tr("Name")),
+            (p.description, tr("Description")),
+            (p.rules, tr("Rules")),
+            (p.links, tr("Links")),
+        ]),
+        _ => Vec::new(),
+    };
+    (!what.is_empty()).then(|| orbiters_i18n::tr!("Done, but VRChat's answer shows more changed than was asked ({what}): someone else's change meanwhile, or VRChat's. Look at it on vrchat.com.", what = what.join(", ")))
+}
+
+fn named<'a>(parts: &[(bool, &'a str)]) -> Vec<&'a str> {
+    parts.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect()
+}
+
+fn role_parts(p: &orbiters_core::groups::RoleParts) -> [(bool, &'static str); 7] {
+    [
+        (p.name, tr("Name")),
+        (p.description, tr("Description")),
+        (p.permissions, tr("Its rights")),
+        (p.self_assignable, tr("Members can take it themselves")),
+        (p.added_on_join, tr("Given to everyone who joins")),
+        (p.two_factor, tr("Needs two-factor authentication")),
+        (p.standing, tr("Its place among the roles")),
+    ]
 }
 
 /// A refusal in the person's words for the write it refused: a 403 to an upload is no group role's (Major 4).
@@ -832,7 +874,7 @@ pub(crate) fn failure_text_for(write: Option<&Write>, f: Failure) -> String {
 
 /// What someone else changed meanwhile, by the names of its parts; and what is left open, said (design 6).
 fn changed_text(parts: &[(bool, &str)]) -> String {
-    let what: Vec<&str> = parts.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+    let what = named(parts);
     orbiters_i18n::tr!(
         "Someone changed it on VRChat since you opened it ({what}), so nothing was sent. It is read again just before each send; VRChat offers no way to close the instant between.",
         what = what.join(", ")
@@ -861,15 +903,7 @@ pub(crate) fn failure_text(f: Failure) -> String {
             return changed_text(&[(p.title, tr("Title")), (p.text, tr("Text")), (p.visibility, tr("Who sees it")), (p.roles, tr("Restricted to")), (p.image, tr("Picture"))]);
         }
         Failure::RoleChanged(p) => {
-            return changed_text(&[
-                (p.name, tr("Name")),
-                (p.description, tr("Description")),
-                (p.permissions, tr("Its rights")),
-                (p.self_assignable, tr("Members can take it themselves")),
-                (p.added_on_join, tr("Given to everyone who joins")),
-                (p.two_factor, tr("Needs two-factor authentication")),
-                (p.standing, tr("Its place among the roles")),
-            ]);
+            return changed_text(&role_parts(&p));
         }
         Failure::Rejoined => tr("This person left and rejoined: look again. Nothing was sent."),
         Failure::MaySent => tr("This may already have been sent: check first."),
@@ -1101,7 +1135,11 @@ fn candidate_row(ui: &mut Ui, op: &str, c: &Candidate, thumb: Option<&egui::Text
     }
     let name = if c.label.is_empty() { tr("A picture").to_string() } else { c.label.clone() };
     let when = c.at.as_deref().map(super::local_time).unwrap_or_else(|| "—".to_string()); // i18n: not shown
-    let same = if c.same { tr("exactly what you asked for") } else { tr("not exactly what you asked for") };
+    let same = match c.same {
+        Some(true) => tr("exactly what you asked for"),
+        Some(false) => tr("not exactly what you asked for"),
+        None => tr("added since you asked"),
+    };
     widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::FG_2), rect.right() - bw - 28.0 - x);
     let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let r = widgets::Button::new(tr("This is it")).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
@@ -1525,10 +1563,18 @@ mod tests {
         use crate::controller::groups::Done;
         let role = orbiters_core::groups::Role { name: "Secret Role Name".into(), ..Default::default() };
         let post = orbiters_core::groups::Post { title: "Secret Post Title".into(), ..Default::default() };
-        for done in [Done::Role(role.clone()), Done::Roles(vec![role]), Done::Post(post), Done::MemberRoles { user: "usr_x".into(), role_ids: vec![] }] {
+        for done in [Done::Role(role.clone()), Done::Roles { roles: vec![role], beside: Default::default() }, Done::Post(post), Done::MemberRoles { user: "usr_x".into(), role_ids: vec![] }] {
             let text = done_text(&done);
             assert!(!text.contains("Secret") && !text.contains("usr_"), "{text}");
         }
+        let parts = orbiters_core::groups::RoleParts { permissions: true, ..Default::default() };
+        let said = beside_text(&Done::Roles { roles: vec![orbiters_core::groups::Role { name: "Secret Role Name".into(), ..Default::default() }], beside: parts }).unwrap();
+        assert!(said.contains(tr("Its rights")) && !said.contains("Secret"), "{said}");
+        let group = Box::new(orbiters_core::groups::Group { name: "Secret Group".into(), ..Default::default() });
+        let icon = orbiters_core::groups::GroupParts { icon: true, ..Default::default() };
+        let said = beside_text(&Done::Group { group: group.clone(), beside: icon }).unwrap();
+        assert!(said.contains(tr("Group icon")) && !said.contains("Secret"), "{said}");
+        assert_eq!(beside_text(&Done::Group { group, beside: Default::default() }), None);
         for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::PostChanged(Default::default()), Failure::RoleChanged(Default::default()), Failure::Rejoined, Failure::Since, Failure::RecordUnreadable, Failure::OtherOwner, Failure::Withheld(Why::RoleAtOrAbove), Failure::NotRead(Missing::RoleOrder), Failure::MaySent, Failure::NotKept, Failure::Offline, Failure::Lost] {
             assert!(!failure_text(f).is_empty());
         }

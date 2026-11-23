@@ -369,9 +369,8 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 }
                 "groups-roles-edit" => {
                     let r = roles()[3].clone();
-                    let mut draft = RoleDraft::of(&r);
-                    draft.permissions = s(&["group-instance-join"]);
-                    open.role_editor = Some(crate::pages::groups::RoleEditor::new(Some(r), draft));
+                    let edit = RoleEdit { name: "Featured artists".into(), ..RoleEdit::of(&r) };
+                    open.role_editor = Some(crate::pages::groups::RoleEditor::of(r, edit));
                 }
                 "groups-posts-compose" => {
                     open.composer = Some(crate::pages::groups::Composer::new(PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
@@ -389,9 +388,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 "groups-confirm-take-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[1].user_id.clone(), role: "grol_artist".into(), add: false }, Some(r[3].clone()))),
                 "groups-confirm-new-role" => Some(prepared(Write::CreateRole { group: G1.into(), draft: RoleDraft { name: "Greeters".into(), description: "Welcome new members.".into(), permissions: s(&["group-instance-join"]), self_assignable: true, ..Default::default() } }, None)),
                 "groups-confirm-edit-role" => {
-                    let mut edit = RoleDraft::of(&r[3]);
-                    edit.name = "Featured artists".into();
-                    edit.permissions = s(&["group-instance-moderate"]);
+                    let edit = RoleEdit { name: "Featured artists".into(), requires_two_factor: true, ..RoleEdit::of(&r[3]) };
                     Some(prepared(Write::EditRole { group: G1.into(), baseline: r[3].clone(), edit }, Some(r[3].clone())))
                 }
                 "groups-confirm-delete-role" => Some(prepared(Write::DeleteRole { group: G1.into(), role: "grol_events".into() }, Some(r[4].clone()))),
@@ -406,7 +403,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             match n {
                 "groups-outcome-unknown" => {
                     if let Some(e) = entry(&Scope::of(snapshot), "op-unknown", Kind::CreatePost, Stands::Unknown, None) {
-                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), url: String::new(), at: Some("2026-11-21T19:00:00Z".into()), same: false }];
+                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), url: String::new(), at: Some("2026-11-21T19:00:00Z".into()), same: Some(false) }];
                         stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
                     }
                 }
@@ -416,7 +413,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     }
                     if let Some(e) = entry(&Scope::of(snapshot), "op-up", Kind::UploadGallery, Stands::Unknown, None) {
                         stage::picture(ctx, state, "https://api.vrchat.cloud/api/1/file/file_up/1/file", color_image(&landscape(480, 270, 1)));
-                        let list = vec![crate::controller::groups::Candidate { id: "file_00000000-0000-4000-8000-0000000a11ce".into(), label: String::new(), url: "https://api.vrchat.cloud/api/1/file/file_up/1/file".into(), at: Some("2026-11-21T19:00:00Z".into()), same: true }];
+                        let list = vec![crate::controller::groups::Candidate { id: "file_00000000-0000-4000-8000-0000000a11ce".into(), label: String::new(), url: "https://api.vrchat.cloud/api/1/file/file_up/1/file".into(), at: Some("2026-11-21T19:00:00Z".into()), same: None }];
                         stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
                     }
                 }

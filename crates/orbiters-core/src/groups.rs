@@ -64,9 +64,9 @@ pub struct Abilities {
 }
 
 pub fn abilities(permissions: &[String]) -> Abilities {
-    const HERE: [&str; 6] = [ANNOUNCEMENT_MANAGE, DATA_MANAGE, DEFAULT_ROLE_MANAGE, MEMBERS_MANAGE, ROLES_ASSIGN, ROLES_MANAGE];
+    const HERE: [&str; 5] = [ANNOUNCEMENT_MANAGE, DATA_MANAGE, MEMBERS_MANAGE, ROLES_ASSIGN, ROLES_MANAGE];
     Abilities {
-        roles: has(permissions, ROLES_MANAGE) || has(permissions, DEFAULT_ROLE_MANAGE),
+        roles: has(permissions, ROLES_MANAGE),
         assign: has(permissions, ROLES_ASSIGN),
         posts: has(permissions, ANNOUNCEMENT_MANAGE),
         art: has(permissions, DATA_MANAGE),
@@ -169,6 +169,14 @@ pub struct Group {
     pub icon_known: bool,
     #[serde(default)]
     pub banner_known: bool,
+    /// The nameplate banner's file, read only to see that an apply left it as it was: this version never sends it (B4).
+    #[serde(default)]
+    pub nameplate_id: Option<String>,
+    #[serde(default)]
+    pub nameplate_known: bool,
+    /// Its name, description, rules and links were all in the answer.
+    #[serde(default)]
+    pub words_known: bool,
     /// `None` when VRChat did not give it: never shown as zero (N1).
     pub member_count: Option<u32>,
     pub online_count: Option<u32>,
@@ -179,7 +187,39 @@ pub struct Group {
     pub roles: Option<Vec<Role>>,
 }
 
+/// The parts of a group that moved with a picture's change, beside the slot asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupParts {
+    pub banner: bool,
+    pub icon: bool,
+    pub nameplate: bool,
+    pub name: bool,
+    pub description: bool,
+    pub rules: bool,
+    pub links: bool,
+}
+
+impl GroupParts {
+    pub fn any(&self) -> bool {
+        *self != Self::default()
+    }
+}
+
 impl Group {
+    /// What is not the same in `now`, the same group in the answer to a change of `slot`: every part both say.
+    pub fn moved_beside(&self, slot: ArtSlot, now: &Group) -> GroupParts {
+        let picture = |known: (bool, bool), a: &Option<String>, b: &Option<String>| known.0 && known.1 && a != b;
+        let words = self.words_known && now.words_known;
+        GroupParts {
+            banner: slot != ArtSlot::Banner && picture((self.banner_known, now.banner_known), &self.banner_id, &now.banner_id),
+            icon: slot != ArtSlot::Icon && picture((self.icon_known, now.icon_known), &self.icon_id, &now.icon_id),
+            nameplate: picture((self.nameplate_known, now.nameplate_known), &self.nameplate_id, &now.nameplate_id),
+            name: words && self.name != now.name,
+            description: words && self.description != now.description,
+            rules: words && self.rules != now.rules,
+            links: words && self.links != now.links,
+        }
+    }
     /// The file in a slot: `Some(None)` for none, `None` when VRChat's answer did not say.
     pub fn art(&self, slot: ArtSlot) -> Option<Option<&str>> {
         match slot {
@@ -434,13 +474,31 @@ impl Role {
         if let Some(v) = &change.description {
             r.description = v.clone();
         }
-        if let Some(v) = &change.permissions {
-            r.permissions = v.clone();
-        }
         r.self_assignable = change.self_assignable.unwrap_or(r.self_assignable);
         r.added_on_join = change.added_on_join.unwrap_or(r.added_on_join);
         r.requires_two_factor = change.requires_two_factor.unwrap_or(r.requires_two_factor);
         r
+    }
+}
+
+impl Role {
+    /// What is not the same in `now`, the same role read again.
+    pub fn differs(&self, now: &Role) -> RoleParts {
+        RoleParts {
+            name: self.name != now.name,
+            description: self.description != now.description,
+            permissions: joined(&self.permissions) != joined(&now.permissions) || self.known != now.known,
+            self_assignable: self.self_assignable != now.self_assignable,
+            added_on_join: self.added_on_join != now.added_on_join,
+            two_factor: self.requires_two_factor != now.requires_two_factor,
+            standing: self.whole != now.whole || self.order != now.order || self.default_role != now.default_role || self.management != now.management || self.requires_purchase != now.requires_purchase,
+        }
+    }
+}
+
+impl RoleParts {
+    pub fn any(&self) -> bool {
+        *self != Self::default()
     }
 }
 
@@ -537,42 +595,42 @@ pub struct RoleDraft {
     pub requires_two_factor: bool,
 }
 
-impl RoleDraft {
+/// A role's words and flags as the person edits them. Not its rights: VRChat takes the whole list of them and no condition,
+/// so a right another manager removed meanwhile would be put back. They are chosen when a role is created, and changed on
+/// vrchat.com.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleEdit {
+    pub name: String,
+    pub description: String,
+    pub self_assignable: bool,
+    pub added_on_join: bool,
+    pub requires_two_factor: bool,
+}
+
+impl RoleEdit {
     pub fn of(role: &Role) -> Self {
-        Self {
-            name: role.name.clone(),
-            description: role.description.clone(),
-            permissions: role.permissions.clone(),
-            self_assignable: role.self_assignable,
-            added_on_join: role.added_on_join,
-            requires_two_factor: role.requires_two_factor,
-        }
+        Self { name: role.name.clone(), description: role.description.clone(), self_assignable: role.self_assignable, added_on_join: role.added_on_join, requires_two_factor: role.requires_two_factor }
     }
 }
 
-/// The fields of a role edit that differ from the baseline it was made against: only those are sent (M2, M4), so a right
-/// this version does not know is kept by being left out.
+/// The fields of a role edit that differ from the baseline it was made against: only those are sent (M2, M4), each a value of
+/// its own that the person chose; nothing that was read is sent back.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleChange {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub permissions: Option<Vec<String>>,
     pub self_assignable: Option<bool>,
     pub added_on_join: Option<bool>,
     pub requires_two_factor: Option<bool>,
 }
 
-fn same_set(a: &[String], b: &[String]) -> bool {
-    a.len() == b.len() && a.iter().all(|x| b.contains(x)) && b.iter().all(|x| a.contains(x))
-}
-
 impl RoleChange {
-    pub fn between(baseline: &Role, edited: &RoleDraft) -> Self {
+    pub fn between(baseline: &Role, edited: &RoleEdit) -> Self {
         let changed = |a: bool, b: bool| (a != b).then_some(b);
         Self {
-            name: (edited.name.trim() != baseline.name).then(|| edited.name.trim().to_string()),
+            // Untouched, whatever its spaces, it is no change: what was read is not sent back tidied.
+            name: (edited.name != baseline.name && edited.name.trim() != baseline.name).then(|| edited.name.trim().to_string()),
             description: (edited.description != baseline.description).then(|| edited.description.clone()),
-            permissions: (!same_set(&baseline.permissions, &edited.permissions)).then(|| edited.permissions.clone()),
             self_assignable: changed(baseline.self_assignable, edited.self_assignable),
             added_on_join: changed(baseline.added_on_join, edited.added_on_join),
             requires_two_factor: changed(baseline.requires_two_factor, edited.requires_two_factor),
@@ -589,28 +647,21 @@ impl RoleChange {
             Some(false) => "0", // i18n: not shown (a record's words)
         };
         let words = |t: &Option<String>| t.as_deref().map_or_else(|| "-".to_string(), |t| format!("+{}", canonical(t))); // i18n: not shown (a record's words)
-        let rights = self.permissions.as_deref().map_or_else(|| "-".to_string(), |p| format!("+{}", joined(p))); // i18n: not shown (a record's words)
-        digest(&[&words(&self.name), &words(&self.description), &rights, flag(self.self_assignable), flag(self.added_on_join), flag(self.requires_two_factor)])
+        digest(&[&words(&self.name), &words(&self.description), flag(self.self_assignable), flag(self.added_on_join), flag(self.requires_two_factor)])
     }
     /// The parts it changes.
     pub fn fields(&self) -> Vec<RoleField> {
-        let on = [self.name.is_some(), self.description.is_some(), self.permissions.is_some(), self.self_assignable.is_some(), self.added_on_join.is_some(), self.requires_two_factor.is_some()];
-        RoleField::ALL.into_iter().zip(on).filter(|(_, o)| *o).map(|(f, _)| f).collect()
+        let parts = [RoleField::Name, RoleField::Description, RoleField::SelfAssignable, RoleField::AddedOnJoin, RoleField::TwoFactor];
+        let on = [self.name.is_some(), self.description.is_some(), self.self_assignable.is_some(), self.added_on_join.is_some(), self.requires_two_factor.is_some()];
+        parts.into_iter().zip(on).filter(|(_, o)| *o).map(|(f, _)| f).collect()
     }
-    /// Nothing but its words: all the owner's role, and Everyone's even less, lets change (J6). The interface offers
-    /// exactly what this allows.
+    /// Nothing but its words: all the owner's role lets change (J6). The interface offers exactly what this allows.
     pub fn only_words(&self) -> bool {
-        self.permissions.is_none() && self.self_assignable.is_none() && self.added_on_join.is_none() && self.requires_two_factor.is_none()
+        self.self_assignable.is_none() && self.added_on_join.is_none() && self.requires_two_factor.is_none()
     }
     /// It changes what members may do, now or when they join (M2): confirmed before it is sent.
     pub fn consequential(&self) -> bool {
-        self.permissions.is_some() || self.self_assignable.is_some() || self.added_on_join.is_some() || self.requires_two_factor.is_some()
-    }
-    fn touches_details(&self) -> bool {
-        self.name.is_some() || self.description.is_some() || self.requires_two_factor.is_some()
-    }
-    fn touches_flags(&self) -> bool {
-        self.self_assignable.is_some() || self.added_on_join.is_some()
+        !self.only_words()
     }
 }
 
@@ -843,32 +894,27 @@ fn below(actor: &Actor, roles: &[Role], role: &Role) -> Result<(), No> {
     if order > top { Ok(()) } else { Err(Why::RoleAtOrAbove.into()) }
 }
 
-/// Every right added or removed between `from` and `to` may be given by this account (VRChat's `allowedToAdd`), every
-/// right ADDED is one the account holds itself (no one gives more than they have, Major 11), and every right of `to` has
-/// what it depends on.
-fn grantable(actor: &[String], from: &[String], to: &[String], catalogue: Option<&[PermissionInfo]>) -> Result<(), No> {
-    if to.iter().any(|p| p == ALL) {
+/// Every right a new role is given may be given by this account (VRChat's `allowedToAdd`), is one the account holds itself
+/// (no one gives more than they have, Major 11), and has what it depends on.
+fn grantable(actor: &[String], rights: &[String], catalogue: Option<&[PermissionInfo]>) -> Result<(), No> {
+    if rights.iter().any(|p| p == ALL) {
         return Err(Why::NotGrantable.into());
     }
-    if to.iter().filter(|p| !from.contains(p)).any(|p| !has(actor, p)) {
+    if rights.iter().any(|p| !has(actor, p)) {
         return Err(Why::Escalation.into());
     }
-    let changed: Vec<&String> = to.iter().filter(|p| !from.contains(p)).chain(from.iter().filter(|p| !to.contains(p))).collect();
-    if changed.is_empty() {
+    if rights.is_empty() {
         return Ok(());
     }
     let catalogue = catalogue.ok_or(Missing::Catalogue)?;
-    for p in &changed {
-        match catalogue.iter().find(|c| c.name == **p) {
-            Some(c) if c.allowed_to_add => {}
-            _ => return Err(Why::NotGrantable.into()),
-        }
-    }
-    for p in to {
-        if let Some(c) = catalogue.iter().find(|c| c.name == *p) {
-            if c.depends_on.iter().any(|d| !to.contains(d)) {
-                return Err(Why::Prerequisite.into());
+    for p in rights {
+        match catalogue.iter().find(|c| c.name == *p) {
+            Some(c) if c.allowed_to_add => {
+                if c.depends_on.iter().any(|d| !rights.contains(d)) {
+                    return Err(Why::Prerequisite.into());
+                }
             }
+            _ => return Err(Why::NotGrantable.into()),
         }
     }
     Ok(())
@@ -950,23 +996,15 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
             right(ROLES_MANAGE)?;
             // The account's own rank must be known: a new role lands below it.
             top_order(actor, catalogue.roles.ok_or(Missing::Roles)?)?;
-            grantable(rights, &[], &draft.permissions, catalogue.permissions)?;
+            grantable(rights, &draft.permissions, catalogue.permissions)?;
             Ok(!draft.permissions.is_empty() || draft.self_assignable || draft.added_on_join || draft.requires_two_factor)
         }
         Action::EditRole { role, change } => {
             let (roles, role) = role_of(role)?;
             let confirm = change.consequential() || role.privileged();
             if role.default_role {
-                // Everyone's: only its rights change, with both rights (VRCX, and the wiki's Manage Default Role).
-                if change.touches_details() || change.touches_flags() {
-                    return Err(Why::FixedRole.into());
-                }
-                right(DEFAULT_ROLE_MANAGE)?;
-                right(ROLES_MANAGE)?;
-                if let Some(to) = &change.permissions {
-                    grantable(rights, &role.permissions, to, catalogue.permissions)?;
-                }
-                return Ok(confirm);
+                // Everyone's: only its rights change, and those on vrchat.com.
+                return Err(Why::FixedRole.into());
             }
             if role.is_owner_role() {
                 // Only its holder, and only its words (J6).
@@ -983,12 +1021,8 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
             // Opening a role that holds rights to more people (members take it, everyone joining gets it) confers those
             // rights: only with every one of them held by the account itself (Major 11).
             let widening = change.self_assignable == Some(true) || change.added_on_join == Some(true);
-            let held_after = change.permissions.as_deref().unwrap_or(&role.permissions);
-            if widening && held_after.iter().any(|p| !has(rights, p)) {
+            if widening && role.permissions.iter().any(|p| !has(rights, p)) {
                 return Err(Why::Escalation.into());
-            }
-            if let Some(to) = &change.permissions {
-                grantable(rights, &role.permissions, to, catalogue.permissions)?;
             }
             Ok(confirm)
         }
@@ -1151,10 +1185,7 @@ mod tests {
         let other = "usr_00000000-0000-4000-8000-000000000001";
         let assign = |role| Action::AssignRole { role, user: other, add: true };
         let rename = RoleChange { name: Some("New".into()), ..Default::default() };
-        let rights = RoleChange { permissions: Some(s(&["group-instance-join", "group-instance-moderate"])), ..Default::default() };
-        let wildcard = RoleChange { permissions: Some(s(&["*"])), ..Default::default() };
-        let manage = RoleChange { permissions: Some(s(&[ROLES_MANAGE])), ..Default::default() };
-        let lonely = RoleChange { permissions: Some(s(&[ROLES_ASSIGN])), ..Default::default() };
+        let made = |rights: &[&str]| RoleDraft { permissions: s(rights), ..Default::default() };
         use Got::*;
         let table: Vec<(&str, Got, Got)> = vec![
             ("owner assigns admin", can(assign("grol_admin"), &owner, &cat), Allowed),
@@ -1170,26 +1201,22 @@ mod tests {
             ("unknown role", can(assign("grol_gone"), &owner, &cat), Unknown(Missing::RoleDefinition)),
             ("admin renames below", can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Allowed),
             ("admin cannot rename own", can(Action::EditRole { role: "grol_admin", change: &rename }, &admin, &cat), Withheld(Why::RoleAtOrAbove)),
-            ("admin cannot grant rights it lacks", can(Action::EditRole { role: "grol_artist", change: &rights }, &admin, &cat), Withheld(Why::Escalation)),
-            ("a holder grants rights it holds", can(Action::EditRole { role: "grol_artist", change: &rights }, &rich_admin, &cat), Allowed),
             ("no widening a privileged role without its rights", can(Action::EditRole { role: "grol_mod", change: &open_up }, &admin, &cat), Withheld(Why::Escalation)),
             ("the owner widens it", can(Action::EditRole { role: "grol_mod", change: &open_up }, &owner, &cat), Allowed),
-            ("never the wildcard", can(Action::EditRole { role: "grol_artist", change: &wildcard }, &owner, &cat), Withheld(Why::NotGrantable)),
-            ("not a right one may not add", can(Action::EditRole { role: "grol_artist", change: &manage }, &admin, &cat), Withheld(Why::NotGrantable)),
-            ("a right without its prerequisite", can(Action::EditRole { role: "grol_artist", change: &lonely }, &admin, &cat), Withheld(Why::Prerequisite)),
             ("owner renames own role", can(Action::EditRole { role: "grol_owner", change: &rename }, &owner, &cat), Allowed),
             ("owner role two-factor fixed (J6)", can(Action::EditRole { role: "grol_owner", change: &RoleChange { requires_two_factor: Some(true), ..Default::default() } }, &owner, &cat), Withheld(Why::OwnerRole)),
-            ("owner role rights fixed", can(Action::EditRole { role: "grol_owner", change: &rights }, &owner, &cat), Withheld(Why::OwnerRole)),
             ("admin cannot touch owner role", can(Action::EditRole { role: "grol_owner", change: &rename }, &admin, &cat), Withheld(Why::RoleAtOrAbove)),
+            ("Everyone's flags fixed", can(Action::EditRole { role: "grol_everyone", change: &open_up }, &owner, &cat), Withheld(Why::FixedRole)),
             ("Everyone's name fixed", can(Action::EditRole { role: "grol_everyone", change: &rename }, &owner, &cat), Withheld(Why::FixedRole)),
-            ("Everyone's rights need default-role", can(Action::EditRole { role: "grol_everyone", change: &rights }, &admin, &cat), Withheld(Why::NoPermission)),
-            ("owner edits Everyone's rights", can(Action::EditRole { role: "grol_everyone", change: &rights }, &owner, &cat), Allowed),
             ("delete below", can(Action::DeleteRole { role: "grol_artist" }, &admin, &cat), Allowed),
             ("never delete Everyone", can(Action::DeleteRole { role: "grol_everyone" }, &owner, &cat), Withheld(Why::FixedRole)),
             ("never delete owner role", can(Action::DeleteRole { role: "grol_owner" }, &owner, &cat), Withheld(Why::FixedRole)),
             ("moderator cannot delete", can(Action::DeleteRole { role: "grol_artist" }, &moderator, &cat), Withheld(Why::NoPermission)),
             ("create with rights it lacks", can(Action::CreateRole { draft: &RoleDraft { permissions: s(&["group-instance-join"]), ..Default::default() } }, &admin, &cat), Withheld(Why::Escalation)),
             ("create with rights it holds", can(Action::CreateRole { draft: &RoleDraft { permissions: s(&["group-instance-join"]), ..Default::default() } }, &rich_admin, &cat), Allowed),
+            ("never created with the wildcard", can(Action::CreateRole { draft: &made(&["*"]) }, &owner, &cat), Withheld(Why::NotGrantable)),
+            ("not created with a right one may not add", can(Action::CreateRole { draft: &made(&[ROLES_MANAGE]) }, &admin, &cat), Withheld(Why::NotGrantable)),
+            ("not created with a right without its prerequisite", can(Action::CreateRole { draft: &made(&[ROLES_ASSIGN]) }, &admin, &cat), Withheld(Why::Prerequisite)),
             ("posts need announcements", can(Action::Post, &admin, &cat), Withheld(Why::NoPermission)),
             ("owner posts", can(Action::Post, &owner, &cat), Allowed),
             ("art needs group data", can(Action::ApplyArt, &moderator, &cat), Withheld(Why::NoPermission)),
@@ -1328,9 +1355,9 @@ mod tests {
         let role = RoleDraft { name: "Greeters".into(), permissions: s(&["a", "b"]), ..Default::default() };
         assert_eq!(role.canonical(), RoleDraft { name: "Greeters ".into(), permissions: s(&["b", "a"]), ..role.clone() }.canonical());
         assert_ne!(role.canonical(), RoleDraft { self_assignable: true, ..role.clone() }.canonical());
-        let change = RoleChange { permissions: Some(s(&["a", "b"])), ..Default::default() };
-        assert_eq!(change.canonical(), RoleChange { permissions: Some(s(&["b", "a"])), ..Default::default() }.canonical());
-        assert_ne!(change.canonical(), RoleChange { permissions: Some(vec![]), ..Default::default() }.canonical());
+        let change = RoleChange { name: Some("Caf\u{e9}".into()), ..Default::default() };
+        assert_eq!(change.canonical(), RoleChange { name: Some(" Cafe\u{301}".into()), ..Default::default() }.canonical());
+        assert_ne!(change.canonical(), RoleChange { self_assignable: Some(true), ..change.clone() }.canonical());
         assert_ne!(RoleChange { name: Some("-".into()), ..Default::default() }.canonical(), RoleChange::default().canonical(), "a name of that word is not no name");
     }
 
@@ -1358,11 +1385,12 @@ mod tests {
         let roles = self::roles();
         let cat = Catalogue { roles: Some(&roles), permissions: None };
         // A right the admin holds: only the missing catalogue stands in the way.
-        let rights = RoleChange { permissions: Some(s(&[MEMBERS_MANAGE])), ..Default::default() };
-        assert_eq!(can(Action::EditRole { role: "grol_mod", change: &rights }, &admin, &cat), Got::Unknown(Missing::Catalogue), "no catalogue, no right changes");
+        let made = |right: &str| RoleDraft { permissions: s(&[right]), ..Default::default() };
+        assert_eq!(can(Action::CreateRole { draft: &made(MEMBERS_MANAGE) }, &admin, &cat), Got::Unknown(Missing::Catalogue), "no catalogue, no rights given");
         // A right the admin lacks is refused for that, whatever the catalogue says.
-        let unheld = RoleChange { permissions: Some(s(&["group-instance-join"])), ..Default::default() };
-        assert_eq!(can(Action::EditRole { role: "grol_mod", change: &unheld }, &admin, &cat), Got::Withheld(Why::Escalation));
+        assert_eq!(can(Action::CreateRole { draft: &made("group-instance-join") }, &admin, &cat), Got::Withheld(Why::Escalation));
+        // Words and flags need no catalogue.
+        assert_eq!(can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Got::Allowed);
         let nobody: Vec<String> = vec![];
         let roleless = Actor { role_ids: Some(&nobody), ..admin };
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &roleless, &cat), Got::Unknown(Missing::Membership));
@@ -1382,6 +1410,8 @@ mod tests {
         assert!(!listed(&s(&["group-some-future-right"]), false), "unknown strings grant nothing");
         let a = abilities(&s(&["group-instance-moderate"]));
         assert!(a.elsewhere && !a.roles && !a.posts && !a.art && !a.assign);
+        let d = abilities(&s(&[DEFAULT_ROLE_MANAGE]));
+        assert!(d.elsewhere && !d.roles, "Everyone's rights are changed on vrchat.com");
         let o = abilities(&s(&["*"]));
         assert!(o.roles && o.assign && o.posts && o.art && o.elsewhere);
     }
@@ -1389,16 +1419,36 @@ mod tests {
     #[test]
     fn edits_send_only_what_changed_and_consequential_ones_are_confirmed() {
         let base = Role { permissions: s(&["b", "a"]), name: "Artists".into(), ..role("grol_a", 3, &[]) };
-        let base = Role { permissions: s(&["b", "a"]), ..base };
-        let mut draft = RoleDraft::of(&base);
-        draft.permissions = s(&["a", "b"]);
-        assert!(RoleChange::between(&base, &draft).is_empty(), "the same rights in another order are no change");
-        draft.name = " Painters ".into();
-        let c = RoleChange::between(&base, &draft);
+        let mut edit = RoleEdit::of(&base);
+        assert!(RoleChange::between(&base, &edit).is_empty());
+        let spaced = Role { name: " Artists ".into(), ..base.clone() };
+        assert!(RoleChange::between(&spaced, &RoleEdit::of(&spaced)).is_empty(), "what was not touched is not sent back tidied");
+        edit.name = " Painters ".into();
+        let c = RoleChange::between(&base, &edit);
         assert_eq!(c.name.as_deref(), Some("Painters"));
-        assert!(c.permissions.is_none() && !c.consequential());
-        draft.requires_two_factor = true;
-        assert!(RoleChange::between(&base, &draft).consequential());
+        assert_eq!((c.fields(), c.consequential()), (vec![RoleField::Name], false));
+        edit.requires_two_factor = true;
+        let c = RoleChange::between(&base, &edit);
+        assert_eq!((c.fields(), c.consequential()), (vec![RoleField::Name, RoleField::TwoFactor], true));
+        assert_eq!(base.with(&c).permissions, base.permissions, "its rights are no part of a change");
+    }
+
+    /// What moved beside what was asked: a role's other parts, a group's other pictures and words; what one of the two
+    /// answers leaves out says nothing.
+    #[test]
+    fn what_moved_beside_is_seen() {
+        let a = Role { permissions: s(&["a", "b"]), ..role("grol_a", 3, &[]) };
+        assert!(!a.differs(&Role { permissions: s(&["b", "a"]), ..a.clone() }).any(), "an order is no change");
+        assert_eq!(a.differs(&Role { permissions: s(&["a"]), ..a.clone() }), RoleParts { permissions: true, ..Default::default() });
+        assert_eq!(a.differs(&Role { order: Some(9), ..a.clone() }), RoleParts { standing: true, ..Default::default() });
+        let g = Group { banner_id: Some("file_b".into()), icon_id: Some("file_i".into()), nameplate_id: Some("file_n".into()), banner_known: true, icon_known: true, nameplate_known: true, words_known: true, description: "d".into(), ..Default::default() };
+        let after = Group { banner_id: Some("file_new".into()), ..g.clone() };
+        assert!(!g.moved_beside(ArtSlot::Banner, &after).any(), "the slot asked");
+        assert_eq!(g.moved_beside(ArtSlot::Icon, &after), GroupParts { banner: true, ..Default::default() });
+        assert_eq!(g.moved_beside(ArtSlot::Banner, &Group { icon_id: None, nameplate_id: None, ..after.clone() }), GroupParts { icon: true, nameplate: true, ..Default::default() });
+        assert!(!g.moved_beside(ArtSlot::Banner, &Group { icon_id: None, icon_known: false, ..after.clone() }).any(), "not said is not gone");
+        assert!(!g.moved_beside(ArtSlot::Banner, &Group { words_known: false, description: String::new(), ..after.clone() }).any());
+        assert!(g.moved_beside(ArtSlot::Banner, &Group { description: String::new(), ..after }).description);
     }
 
     #[test]

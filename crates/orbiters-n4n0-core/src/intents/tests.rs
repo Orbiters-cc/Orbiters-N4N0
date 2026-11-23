@@ -7,7 +7,7 @@ use crate::tools::{self, Action};
 use serde_json::json;
 
 fn all() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
 }
 
 /// A call of every intent with its parameters filled in, as a model would make it.
@@ -69,7 +69,7 @@ fn every_intent_is_described_parsed_and_said() {
 
 #[test]
 fn the_tools_fit_what_the_server_takes() {
-    let all = tools::specs(true);
+    let all = tools::specs(true, true);
     assert!(all.len() <= 32, "the server takes at most 32 client tools: {}", all.len());
     let names: Vec<&str> = all.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for group in Group::ALL {
@@ -471,7 +471,7 @@ fn more_tools_are_one_call_away() {
     use route::ToolGroup as T;
     use std::collections::BTreeSet;
     let open: BTreeSet<T> = [T::Profile].into();
-    let tools = tools::specs_for(false, &open);
+    let tools = tools::specs_for(false, &open, true);
     assert_eq!(tools[0]["name"], tools::MORE);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["orbiters_more", "orbiters_profile"]);
@@ -480,7 +480,7 @@ fn more_tools_are_one_call_away() {
     assert_eq!(tools::parse("orbiters_more", &json!({ "groups": ["friends", "nope"] })), Ok(Action::OpenTools { groups: vec![T::Friends] }));
     assert!(tools::parse("orbiters_more", &json!({ "groups": [] })).is_err());
     // Every client tool belongs to exactly one group (or is the opener).
-    for t in tools::specs(true) {
+    for t in tools::specs(true, true) {
         assert!(route::group_of(t["name"].as_str().unwrap()).is_some(), "{}", t["name"]);
     }
 }
@@ -497,8 +497,8 @@ fn tokens(tools: &[Value]) -> usize {
 #[test]
 fn the_tools_of_a_turn_stay_within_their_token_budget() {
     use route::route;
-    let all = tokens(&tools::specs(true));
-    let budget = |sentence: &str| tokens(&tools::specs_for(false, &route(sentence, &[])));
+    let all = tokens(&tools::specs(true, true));
+    let budget = |sentence: &str| tokens(&tools::specs_for(false, &route(sentence, &[]), true));
     let greeting = budget("heyoo");
     let toggle = budget("turn on fast walk");
     let orange = budget("put me in orange");
@@ -518,9 +518,137 @@ fn the_tools_of_a_turn_stay_within_their_token_budget() {
 #[ignore]
 fn dump_tool_specs() {
     use std::collections::BTreeSet;
-    println!("TOOLSJSON-ALL {}", serde_json::Value::Array(tools::specs(false)));
+    println!("TOOLSJSON-ALL {}", serde_json::Value::Array(tools::specs(false, true)));
     for (name, sentence) in [("greeting", "heyoo"), ("toggle", "turn on fast walk"), ("orange", "put me in orange"), ("multi", "take a 3D picture in ten seconds then share it with Kira")] {
         let groups: BTreeSet<_> = route::route(sentence, &[]);
-        println!("TOOLSJSON-{name} {}", serde_json::Value::Array(tools::specs_for(false, &groups)));
+        println!("TOOLSJSON-{name} {}", serde_json::Value::Array(tools::specs_for(false, &groups, true)));
+    }
+}
+
+/// A call of every tool that is not an intent, the one that does the most it can.
+fn legacy_samples() -> Vec<(&'static str, Value)> {
+    vec![
+        ("orbiters_more", json!({ "groups": ["friends"] })),
+        ("set_avatar_control", json!({ "control": "Hoodie", "on": true })),
+        ("find_avatar_controls", json!({ "search": "hoodie" })),
+        ("hold_avatar_control", json!({ "control": "Hoodie", "on": true })),
+        ("set_avatar_parameter", json!({ "name": "Hoodie", "value": 1 })),
+        ("take_photo", json!({})),
+        ("save_video", json!({})),
+        ("list_saved_videos", json!({})),
+        ("copy_to_clipboard", json!({ "text": "x" })),
+        ("set_afk_message", json!({ "enabled": true })),
+        ("control_media", json!({ "action": "pause" })),
+        ("n4n0_light", json!({ "on": true })),
+        ("n4n0_mood", json!({ "mood": "happy" })),
+    ]
+}
+
+/// Verify3-r21 B4: every tool offered to the model declares what it does, and no line of the catalogue is of a tool that is
+/// not there.
+#[test]
+fn every_tool_declares_what_it_does() {
+    use std::collections::BTreeSet;
+    let offered: BTreeSet<String> = tools::specs_for(true, &route::ToolGroup::ALL.into_iter().collect(), true)
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .filter(|n| Group::of_tool(n).is_none())
+        .collect();
+    let declared: BTreeSet<String> = tools::TOOLS.iter().map(|(n, _)| n.to_string()).collect();
+    let parsed: BTreeSet<String> = legacy_samples().into_iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(offered, declared);
+    assert_eq!(parsed, declared, "each has a sample here");
+    for (name, input) in legacy_samples() {
+        let action = tools::parse(name, &input).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let line = tools::TOOLS.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert_eq!(action.effect(), line, "{name}");
+        assert!(!line.from_account, "{name}: the older tools send nothing from an account");
+    }
+    // What only asks changes nothing.
+    assert!(!Action::Media { command: None, volume_change: None }.effect().changes);
+    // An intent's is its own line of the catalogue.
+    for spec in CATALOGUE {
+        let intent = parse(spec.group.tool(), &sample(spec.name)).unwrap().unwrap();
+        let effect = Action::App(intent).effect();
+        assert_eq!((effect.changes, effect.reads_others, effect.from_account), (spec.changes, spec.reads_others, spec.risk == Risk::Confirm), "{}", spec.name);
+        assert!(spec.risk != Risk::Confirm || spec.changes, "{}: what is sent changes something", spec.name);
+    }
+}
+
+/// Every intent: after other people's text was read, nothing that changes something runs, whatever its class.
+#[test]
+fn a_tainted_turn_runs_nothing_that_changes_something() {
+    for spec in CATALOGUE {
+        let intent = parse(spec.group.tool(), &sample(spec.name)).unwrap().unwrap();
+        let gate = gate(&intent, &all(), true);
+        if spec.changes {
+            assert_ne!(gate, Gate::Run, "{}", spec.name);
+        }
+    }
+}
+
+/// The release switch (verify3-r21 G): without it what is sent from an account is not offered, and is never run nor asked
+/// about: the page where the person does it opens. All the rest is as it was.
+#[test]
+fn without_the_switch_nothing_is_done_from_an_account() {
+    let off = Facts { actions: false, ..all() };
+    let mut behind = Vec::new();
+    for spec in CATALOGUE {
+        let intent = parse(spec.group.tool(), &sample(spec.name)).unwrap().unwrap();
+        let account = spec.risk == Risk::Confirm;
+        if account {
+            behind.push(spec.name);
+        }
+        assert_eq!(offered(spec, false), !account, "{}", spec.name);
+        assert!(offered(spec, true), "{}", spec.name);
+        for tainted in [false, true] {
+            let (with, without) = (gate(&intent, &all(), tainted), gate(&intent, &off, tainted));
+            if account {
+                assert_eq!(without, Gate::Instead(intent.instead()), "{}", spec.name);
+                assert!(!matches!(with, Gate::Instead(_) | Gate::Run), "{}: {with:?}", spec.name);
+                // Whatever else is missing.
+                assert!(matches!(gate(&intent, &Facts::default(), tainted), Gate::Instead(_)), "{}", spec.name);
+            } else {
+                assert_eq!(with, without, "{}", spec.name);
+            }
+        }
+    }
+    behind.sort_unstable();
+    assert_eq!(
+        behind,
+        [
+            "accept_invite", "answer_call", "boop", "call", "go_to_instance", "go_to_world", "history_drop", "invite_me", "play", "request_invite",
+            "set_bio", "set_status", "set_status_text", "share_capture", "suggest", "world_comment", "world_label", "world_like", "youtube_drop"
+        ]
+    );
+    // The intents offered: each group's tool lists its own.
+    let named = |actions| -> std::collections::BTreeSet<String> {
+        tools::specs_for(true, &route::ToolGroup::ALL.into_iter().collect(), actions)
+            .iter()
+            .filter(|t| Group::of_tool(t["name"].as_str().unwrap()).is_some())
+            .flat_map(|t| t["input_schema"]["properties"]["intent"]["enum"].as_array().cloned().unwrap_or_default())
+            .map(|i| i.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (with, without) = (named(true), named(false));
+    let all: std::collections::BTreeSet<String> = CATALOGUE.iter().map(|s| s.name.to_string()).collect();
+    assert_eq!(with, all);
+    assert_eq!(all.difference(&without).map(String::as_str).collect::<Vec<_>>(), behind);
+}
+
+/// What waits for a yes after other people's text was read asks in words of its own, in the five languages.
+#[test]
+fn the_older_tools_ask_in_words() {
+    use orbiters_i18n::{in_language, Language};
+    for (name, input) in legacy_samples() {
+        let action = tools::parse(name, &input).unwrap();
+        if !action.effect().changes || name == "n4n0_mood" {
+            continue;
+        }
+        let english = in_language(Language::En, || crate::policy::ask(&action, None));
+        assert!(english.starts_with("N4N0 "), "{name}: {english}");
+        for language in [Language::Fr, Language::Es, Language::PtBr, Language::Ja] {
+            assert_ne!(in_language(language, || crate::policy::ask(&action, None)), english, "{name} in {language:?}");
+        }
     }
 }

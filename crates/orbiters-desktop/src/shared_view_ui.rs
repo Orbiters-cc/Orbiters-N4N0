@@ -72,7 +72,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
         let place = where_(offer);
         let size = crate::mismatch::fitting(&p, &place, &[12.5, 11.5, 10.5], room);
         widgets::text_truncated(&p, pos2(words, rect.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room);
-        if show.width(w).show_at(ui, at).clicked() {
+        if show.width(w).confirm_at(ui, at) {
             ctl.shared_view(SharedViewCommand::Answer { id: offer.id, accept: true });
         }
         if Button::new("").icon(icons::X).variant(Variant::Ghost).hint(tr(NOT_NOW)).width(32.0).show_at(ui, close).clicked() {

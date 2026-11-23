@@ -238,31 +238,72 @@ pub fn activated(resp: &Response) -> bool {
     }
 }
 
+/// What a fresh control knows of itself: the last frame it was drawn in, as which stage (a button whose words change is
+/// another control under the same id), and whether everything was let go since it appeared.
+#[derive(Clone, Copy)]
+struct Armed {
+    frame: u64,
+    stage: u64,
+    armed: bool,
+}
+
+/// Whether a press of `resp` can be one made on it, as it stands: in its first frame none can, and neither Enter, Space nor
+/// the pointer's button held as it appeared can press it until all of them were seen up (verify3-r21 B7: the press that
+/// opens a confirmation never confirms it). Asked every frame the control is drawn.
+fn armed(resp: &Response, stage: u64) -> bool {
+    let ctx = &resp.ctx;
+    let frame = ctx.cumulative_frame_nr();
+    let held = ctx.input(|i| i.key_down(egui::Key::Enter) || i.key_down(egui::Key::Space) || i.pointer.primary_down());
+    let key = resp.id.with("fresh-armed");
+    let before = ctx.data(|d| d.get_temp::<Armed>(key));
+    let (now, usable) = match before {
+        // Drawn again in one frame (another pass of it): its press was the first time's.
+        Some(a) if a.stage == stage && a.frame == frame => (a, false),
+        Some(a) if a.stage == stage && a.frame + 1 == frame => (Armed { frame, stage, armed: a.armed || !held }, a.armed),
+        _ => (Armed { frame, stage, armed: !held }, false),
+    };
+    ctx.data_mut(|d| d.insert_temp(key, now));
+    usable
+}
+
 /// Whether the click `resp` has this frame is a held key's: egui makes a click of the focused widget of every Enter or
 /// Space, a held one's repeats included. Not a pointer's, not an accessibility tool's (even beside an unrelated repeat),
-/// not a fresh press of the key.
+/// not a fresh press of the key. A fresh press is taken here: no other control of the frame has it too.
 fn held_key_click(resp: &Response) -> bool {
     if !resp.clicked() || resp.clicked_by(egui::PointerButton::Primary) {
         return false;
     }
     let id = resp.id;
-    resp.ctx.input(|i| {
-        let asked = i.has_accesskit_action_request(id, egui::accesskit::Action::Click);
-        let fresh = i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Space, pressed: true, repeat: false, .. }));
-        !asked && !fresh
+    resp.ctx.input_mut(|i| {
+        if i.has_accesskit_action_request(id, egui::accesskit::Action::Click) {
+            return false;
+        }
+        let press = |e: &egui::Event| matches!(e, egui::Event::Key { key: egui::Key::Enter | egui::Key::Space, pressed: true, repeat: false, .. });
+        let fresh = i.events.iter().any(press);
+        i.events.retain(|e| !press(e));
+        !fresh
     })
 }
 
-/// A click of the person's own: a pointer's, an accessibility tool's, or a fresh press of Enter or Space on the focused
-/// widget, never a held key's repeats. For what is hard to take back or reaches someone else: send, approve, delete, sign
-/// out, share, invite, start the game. (Also [`Button::confirm`].)
-pub fn activated_fresh(resp: &Response) -> bool {
-    resp.clicked() && !held_key_click(resp)
+fn fresh(resp: &Response, stage: u64, pressed: bool) -> bool {
+    let asked = resp.ctx.input(|i| i.has_accesskit_action_request(resp.id, egui::accesskit::Action::Click));
+    let armed = armed(resp, stage);
+    pressed && (armed || asked) && !held_key_click(resp)
 }
 
-/// [`activated`] (on pointer down) as [`activated_fresh`]: never a held key's repeats.
+/// A click of the person's own: a pointer's, an accessibility tool's, or a fresh press of Enter or Space on the focused
+/// widget, made once it was there: never a held key's repeats, nor a key or button already down when it appeared, nor the
+/// press another control of the frame took. For what is hard to take back or reaches someone else: send, approve, delete,
+/// sign out, share, invite, start the game. Asked every frame the control is drawn. (Also [`Button::confirm`], which tells
+/// a button whose words changed from the one before.)
+pub fn activated_fresh(resp: &Response) -> bool {
+    fresh(resp, 0, resp.clicked())
+}
+
+/// [`activated`] (on pointer down) as [`activated_fresh`].
 pub fn pressed_fresh(resp: &Response) -> bool {
-    activated(resp) && !held_key_click(resp)
+    let pressed = activated(resp);
+    fresh(resp, 0, pressed)
 }
 
 fn press_id() -> egui::Id {
@@ -365,14 +406,26 @@ impl<'a> Button<'a> {
     }
 
     /// [`Button::show`] for what is hard to take back or reaches someone else: true on a press of the person's own
-    /// ([`activated_fresh`]).
+    /// ([`activated_fresh`]). "Delete" turned into "Delete it?" is another control, that press of "Delete" not its own.
     pub fn confirm(self, ui: &mut Ui) -> bool {
-        activated_fresh(&self.show(ui))
+        let stage = self.stage();
+        let resp = self.show(ui);
+        fresh(&resp, stage, resp.clicked())
     }
 
     /// [`Button::confirm`] in a given rect, as [`Button::show_at`].
     pub fn confirm_at(self, ui: &mut Ui, rect: Rect) -> bool {
-        activated_fresh(&self.show_at(ui, rect))
+        let stage = self.stage();
+        let resp = self.show_at(ui, rect);
+        fresh(&resp, stage, resp.clicked())
+    }
+
+    /// Its words, as what tells a stage from the next.
+    fn stage(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        orbiters_i18n::english_of(self.label).hash(&mut h);
+        h.finish() | 1
     }
 
     /// What tells this button from others with the same label and icon in one place (rows of a list), for
@@ -1418,6 +1471,127 @@ mod tests {
         pressing(&ctx, vec![Event::PointerMoved(p), button(true)], false);
         let (clicked, fresh, _) = pressing(&ctx, vec![key(Key::Enter, true), button(false)], false);
         assert_eq!((clicked, fresh), (true, true), "a pointer's press beside a held key's repeat");
+    }
+
+    /// A button under one id, "Delete" then (once pressed) "Delete it?", as the pages confirm a deletion: frame by frame.
+    struct Deletion {
+        ctx: egui::Context,
+        confirming: bool,
+        deleted: usize,
+        /// Another control drawn after it under the same focus when it was pressed.
+        id: Option<Id>,
+    }
+
+    impl Deletion {
+        fn new() -> Self {
+            let mut d = Self { ctx: egui::Context::default(), confirming: false, deleted: 0, id: None };
+            d.frame(Vec::new(), false);
+            d.frame(Vec::new(), true);
+            d
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>, focus: bool) {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), events, ..Default::default() };
+            let Self { ctx, confirming, deleted, id } = self;
+            let mut out = ctx.clone().run_ui(input, |ui| {
+                let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(100.0, 40.0));
+                *id = Some(ui.scope_id().with("button").with_salt(IdSalt::new("d")));
+                if focus {
+                    ui.memory_mut(|m| m.request_focus(id.unwrap()));
+                }
+                if Button::new(if *confirming { "Delete it?" } else { "Delete" }).id_salt("d").confirm_at(ui, rect) {
+                    if *confirming {
+                        *deleted += 1;
+                    }
+                    *confirming = !*confirming;
+                }
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    fn enter(pressed: bool) -> egui::Event {
+        egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Verify3-r21 B7: a key that was down when a control appeared never presses it, however long it is held; let go and
+    /// pressed again, it does.
+    #[test]
+    fn a_key_already_down_presses_nothing_that_appeared() {
+        let mut d = Deletion::new();
+        // Held from the first press on: egui makes a click of every frame it repeats in.
+        for _ in 0..8 {
+            d.frame(vec![enter(true)], false);
+        }
+        assert!(d.confirming && d.deleted == 0, "one held Enter confirms nothing ({} deleted)", d.deleted);
+        // Let go as it is pressed anew in one frame's events: still not seen up.
+        d.frame(vec![enter(false), enter(true)], false);
+        assert_eq!(d.deleted, 0);
+        d.frame(vec![enter(false)], false);
+        d.frame(Vec::new(), false);
+        d.frame(vec![enter(true)], false);
+        assert_eq!(d.deleted, 1, "a new press does");
+        // The next "Delete" under it does not take that press either.
+        for _ in 0..4 {
+            d.frame(vec![enter(true)], false);
+        }
+        assert!(!d.confirming && d.deleted == 1);
+    }
+
+    /// The pointer's button held as the confirmation appeared under it: its letting go is not a press of it.
+    #[test]
+    fn a_pointer_already_down_presses_nothing_that_appeared() {
+        use egui::{Event, Modifiers, PointerButton};
+        let mut d = Deletion::new();
+        let p = pos2(30.0, 30.0);
+        let button = |pressed: bool| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        d.frame(vec![Event::PointerMoved(p)], false);
+        d.frame(vec![button(true)], false);
+        d.confirming = true;
+        d.frame(Vec::new(), false);
+        d.frame(vec![button(false)], false);
+        assert_eq!(d.deleted, 0, "a press that began on what was there before");
+        d.frame(vec![button(true)], false);
+        d.frame(vec![button(false)], false);
+        assert_eq!(d.deleted, 1);
+    }
+
+    /// One press is one control's: what appears in the same frame under the same focus, and another control of that frame, do
+    /// not take it too.
+    #[test]
+    fn one_press_is_one_controls() {
+        let ctx = egui::Context::default();
+        let mut pressed = Vec::new();
+        let mut run = |events: Vec<egui::Event>, focus: bool| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(100.0, 40.0));
+                let id = ui.scope_id().with("button").with_salt(IdSalt::new("d"));
+                if focus {
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+                if Button::new("Delete").id_salt("d").confirm_at(ui, rect) {
+                    pressed.push("first");
+                    // The focus moves on, to a control of the same frame.
+                    let other = ui.scope_id().with("button").with_salt(IdSalt::new("other"));
+                    ui.memory_mut(|m| m.request_focus(other));
+                    if Button::new("Delete it?").id_salt("d").confirm_at(ui, rect) {
+                        pressed.push("same id");
+                    }
+                }
+                if Button::new("Other").id_salt("other").confirm_at(ui, rect.translate(vec2(0.0, 60.0))) {
+                    pressed.push("other");
+                }
+                if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, .. }))) {
+                    pressed.push("the page's own shortcut");
+                }
+            });
+            out.textures_delta.clear();
+        };
+        run(Vec::new(), true);
+        run(Vec::new(), true);
+        run(vec![enter(true)], false);
+        assert_eq!(pressed, ["first"]);
     }
 
     #[test]

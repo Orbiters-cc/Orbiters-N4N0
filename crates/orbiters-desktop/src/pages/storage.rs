@@ -239,7 +239,7 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
                 p.confirming = false;
             }
             let label = tr!("Delete {size}", size = format::bytes(freeing as f64));
-            if Button::new(&label).icon(icons::TRASH).variant(Variant::Danger).width(confirm.width()).id_salt("storage-delete").show_at(ui, confirm).clicked() {
+            if Button::new(&label).icon(icons::TRASH).variant(Variant::Danger).width(confirm.width()).id_salt("storage-delete").confirm_at(ui, confirm) {
                 let delete = if whole { ov.unviewed.iter().map(|(d, _)| d.clone()).collect() } else { Vec::new() };
                 action = Some(PopoverAction::CleanUp { trim: ov.trim.clone(), delete });
             }
@@ -574,8 +574,7 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
         .enabled(ready)
         .width(confirm.width())
         .id_salt("trim-delete")
-        .show_at(&mut bu, confirm)
-        .clicked()
+        .confirm_at(&mut bu, confirm)
     {
         answer = Some(true);
     }

@@ -167,7 +167,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
             }
         }
         let rb = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the package")).size(32.0, 15.0).danger().id_salt(("remove", &pkg.name));
-        if !busy && widgets::activated(&rb.show_at(ui, rm)) {
+        if !busy && widgets::pressed_fresh(&rb.show_at(ui, rm)) {
             package_action(state, &ctx, project, vpm::Change::Remove(pkg.name.clone()), &tr!("Removing {package}…", package = pkg.display_name), &pkg.name);
         }
     });

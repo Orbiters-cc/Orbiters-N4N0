@@ -98,13 +98,21 @@ impl Host for Link {
         self.with(|c| c.identity_epoch()).unwrap_or(orbiters_n4n0::FIRST_EPOCH)
     }
 
+    fn signed_as(&self) -> orbiters_n4n0::status::SignedAs {
+        self.with(|c| c.signed_as()).unwrap_or_default()
+    }
+
     fn account_for(&self, epoch: u64) -> Option<(Api, String)> {
         self.with(|c| c.account_api_of(epoch)).flatten()
     }
 
     /// With the VRChat account connected in Settings, when there is one (REQUEST20 4).
-    fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
-        self.with(|c| c.previous_instance_invite(location)).flatten()
+    fn invite_self(&self, location: &str, account: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        self.with(|c| c.previous_instance_invite(location, account)).flatten()
+    }
+
+    fn invite_account(&self) -> Option<String> {
+        self.with(|c| c.previous_instance_account()).flatten()
     }
 
     /// On the OSC action thread, in order with the record toggle.
@@ -175,9 +183,10 @@ impl Host for Link {
         self.with(|c| c.menu_captures_list());
     }
 
-    /// A 3D capture shared from N4N0's menu, as Photos & captures shares it.
+    /// A 3D capture shared from N4N0's menu, as Photos & captures shares it (asked under N4N0's fence: the identity is the
+    /// one it was asked for).
     fn share_capture(&self, ask: orbiters_n4n0_core::captures::ShareAsk) -> Result<(), String> {
-        self.with(|c| c.menu_capture_share(ask)).unwrap_or(Ok(()))
+        self.with(|c| c.menu_capture_share(ask, c.identity_epoch())).unwrap_or(Ok(()))
     }
 
     /// The VRChat friends for N4N0's Share to … (the member's VRChat session, else VRCX's or VRCNext's).

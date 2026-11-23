@@ -24,6 +24,7 @@ mod launcher_live;
 pub mod maps;
 pub mod notice_log;
 pub mod obelisk;
+pub mod origin;
 pub mod osc;
 pub mod picture_sources;
 pub mod pipeline;
@@ -104,7 +105,7 @@ pub fn http_tls() -> ureq::tls::TlsConfig {
 
 /// An HTTP client that can reach `https` addresses ([`http_tls`]), with these timeouts.
 pub fn http_agent(connect: Option<std::time::Duration>, whole: Option<std::time::Duration>) -> ureq::Agent {
-    ureq::Agent::config_builder().tls_config(http_tls()).timeout_connect(connect).timeout_global(whole).build().new_agent()
+    ureq::Agent::config_builder().middleware(origin::guard).tls_config(http_tls()).timeout_connect(connect).timeout_global(whole).build().new_agent()
 }
 
 /// Current time as ISO 8601 UTC with second precision, e.g. `2026-10-20T01:23:45Z`.

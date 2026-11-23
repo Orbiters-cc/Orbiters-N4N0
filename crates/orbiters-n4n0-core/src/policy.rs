@@ -226,6 +226,12 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
         Action::SetParameter { name, value: v } => tr!("N4N0 asks to set {control} to {value}.", control = named(name), value = value(*v)),
         Action::CopyToClipboard { text } => tr!("N4N0 asks to copy to your clipboard: {text}", text = quoted(text, ASKED_CHARS)),
         Action::SetAfkMessage { text, enabled } => {
+            if text.is_none() {
+                return match enabled {
+                    Some(false) => tr("N4N0 asks to turn your AFK message off.").into(),
+                    _ => tr("N4N0 asks to turn your AFK message on.").into(),
+                };
+            }
             let text = quoted(text.as_deref().unwrap_or_default(), ASKED_CHARS);
             match enabled {
                 Some(true) => tr!("N4N0 asks to show {text} to people while you are away, and to turn it on.", text = text),
@@ -235,8 +241,15 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
         }
         // The app's intents ask in their own words.
         Action::App(intent) => crate::intents::ask(intent),
-        // Nothing else waits for a yes ([`TurnPolicy::review`]).
-        other => what(other, control), // i18n: not shown
+        // After other people's text was read, these wait for a yes too ([`crate::tools::Effect`]).
+        Action::Hold { control: name, release: true, .. } => tr!("N4N0 asks to let go of {control}.", control = named(name)),
+        Action::TakePhoto { .. } => tr("N4N0 asks to take a picture with VRChat's camera.").into(),
+        Action::SaveVideo => tr("N4N0 asks to save the world's video.").into(),
+        Action::Media { .. } => tr("N4N0 asks to change what plays on your computer, or its volume.").into(),
+        Action::Light { on: Some(false), .. } => tr("N4N0 asks to turn its light off.").into(),
+        Action::Light { .. } => tr("N4N0 asks to turn its light on, or to change it.").into(),
+        // Nothing of these ever waits: they change nothing, or are not done instead (a mood).
+        Action::FindControls { .. } | Action::ListSavedVideos | Action::OpenTools { .. } | Action::Mood { .. } => what(action, control), // i18n: not shown
     };
     match control.filter(|c| c.nsfw) {
         Some(c) => format!("{asked} {}", tr!("The avatar's menu tags {control} as nsfw.", control = quoted(&c.path, NAME_CHARS))),

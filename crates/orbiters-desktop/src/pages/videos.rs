@@ -837,7 +837,7 @@ fn list_view(ui: &mut Ui, cx: &Cx, state: &mut State, id: &str, rows: &[Row], no
         let delete = Button::new(if confirming { tr("Delete it?") } else { tr("Delete") }).icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm);
         let delete = delete.id_salt(("videos-list-delete", id));
         let dw = delete.desired_width(ui);
-        if delete.show_at(ui, Rect::from_min_size(pos2(header.right() - dw, header.center().y - 16.0), vec2(dw, 32.0))).clicked() {
+        if delete.confirm_at(ui, Rect::from_min_size(pos2(header.right() - dw, header.center().y - 16.0), vec2(dw, 32.0))) {
             acts.push(Act::Delete);
         }
         let rename = Button::new(tr("Rename")).icon(icons::PENCIL_SIMPLE).variant(Variant::Ghost).size(Size::Sm).id_salt(("videos-list-rename", id));

@@ -1168,14 +1168,14 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             if ringing {
                 let answer = Button::new(tr("Answer")).icon(icons::PHONE).variant(Variant::Primary);
                 let w = answer.desired_width(ui);
-                if answer.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
+                if answer.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                     acts.push(Act::Press(Target::Answer));
                 }
                 x += w + 8.0;
             }
             let end = Button::new(if ringing { tr("Decline") } else { tr("Hang up") }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt("orbiters-home-hang-up");
             let w = end.desired_width(ui);
-            if end.show_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))).clicked() {
+            if end.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                 acts.push(Act::Press(Target::HangUp));
             }
             ui.add_space(8.0);
@@ -1376,7 +1376,7 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                     if drop {
                         let hint = tr("Drop it in the world as a card: whoever grabs it copies the link");
                         let button = Button::new(tr("Drop")).icon(icons::HAND_DEPOSIT).size(Size::Sm).variant(Variant::Primary).width(96.0).hint(hint);
-                        if button.id_salt("orbiters-home-drop-playing").show(ui).clicked() {
+                        if button.id_salt("orbiters-home-drop-playing").confirm(ui) {
                             acts.push(Act::Press(Target::DropPlaying));
                         }
                     }
@@ -1544,7 +1544,7 @@ fn suggest(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
         let button = Button::new(label).icon(icons::PAPER_PLANE_TILT).variant(Variant::Primary).enabled(ready);
         let bw = button.desired_width(ui);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-        if button.show_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))).clicked() {
+        if button.confirm_at(ui, Rect::from_min_size(pos2(row.right() - bw, row.top()), vec2(bw, 36.0))) {
             acts.push(Act::Press(Target::SuggestSend));
         }
     });
@@ -1703,7 +1703,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec
                 let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::FG_3);
                 widgets::text_truncated(p, pos2(r.left(), r.center().y + 11.0), Align2::LEFT_CENTER, &meta, room);
             }
-            if invite.show_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))).clicked() {
+            if invite.confirm_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))) {
                 acts.push(Act::Press(Target::InviteMe(i as u8)));
             }
         });

@@ -845,6 +845,9 @@ impl Controller {
         }
         {
             let rt = self.account_runtime.lock().unwrap();
+            if rt.unknown && rt.read.is_none() {
+                return None;
+            }
             if let Some((server, _)) = rt.read {
                 return rt.account.as_ref().filter(|_| server == Server::current()).map(|a| Owner::of(server, a));
             }

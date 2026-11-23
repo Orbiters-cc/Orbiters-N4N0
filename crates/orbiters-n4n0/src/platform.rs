@@ -126,6 +126,14 @@ pub trait Host: Send + Sync + 'static {
     fn identity_epoch(&self) -> u64 {
         crate::FIRST_EPOCH
     }
+    /// Who the identity is ([`crate::status::SignedAs`]): a member, nobody, or not known yet.
+    fn signed_as(&self) -> crate::status::SignedAs {
+        if self.account().is_some() {
+            crate::status::SignedAs::Member
+        } else {
+            crate::status::SignedAs::Nobody
+        }
+    }
     /// The account of identity `epoch`: `None` once another member (or nobody) is signed in, checked in the same step as
     /// the credential is read.
     fn account_for(&self, epoch: u64) -> Option<(Api, String)> {
@@ -134,7 +142,13 @@ pub trait Host: Send + Sync + 'static {
     /// Previous instances' Invite me with the person's own VRChat account, when one is connected in the app (REQUEST20
     /// 4): VRChat's invite to oneself to `location` (`wrld_…:<instance>`), and how it went. `None`: no VRChat account
     /// is connected here, and nothing was sent (Orbiters' own account is asked instead). Called on a thread of its own.
-    fn invite_self(&self, _location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+    /// `account`: the VRChat account it is for, [`Host::invite_account`]'s as it was accepted: another one connected since
+    /// sends nothing.
+    fn invite_self(&self, _location: &str, _account: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        None
+    }
+    /// The VRChat account [`Host::invite_self`] would send from now (its user id), when one is connected.
+    fn invite_account(&self) -> Option<String> {
         None
     }
     /// Runs `action` after what OSC messages asked for before it, off the OSC receiving thread ([`Actions`]). False when
@@ -359,6 +373,9 @@ pub struct Files {
     pub avatars: PathBuf,
     /// The speech models.
     pub models: PathBuf,
+    /// The member's conversation with N4N0, kept for the next start (`n4n0/conversation.dat` in the config folder, sealed for
+    /// this user).
+    pub conversation: PathBuf,
 }
 
 impl Files {
@@ -370,12 +387,13 @@ impl Files {
             states: orbiters_n4n0_core::states::file(),
             avatars: orbiters_core::paths::avatars_dir(),
             models: orbiters_core::paths::models_dir(),
+            conversation: orbiters_core::paths::config_dir().join("n4n0").join("conversation.dat"),
         }
     }
 
     /// All of them in `dir` (tests).
     pub fn in_dir(dir: &Path) -> Self {
-        Self { videos: dir.join("videos.json"), states: dir.join("avatar-states.json"), avatars: dir.join("Avatars"), models: dir.join("Models") }
+        Self { videos: dir.join("videos.json"), states: dir.join("avatar-states.json"), avatars: dir.join("Avatars"), models: dir.join("Models"), conversation: dir.join("conversation.dat") }
     }
 }
 

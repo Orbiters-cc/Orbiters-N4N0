@@ -369,6 +369,8 @@ struct Asked {
     since: Instant,
     /// What was asked, to ask it again once after a "not ready" ([`after_refusal`]).
     ask: orbiters_n4n0_core::captures::ShareAsk,
+    /// Whose it is.
+    epoch: u64,
     retried: bool,
     retry_at: Option<Instant>,
     /// The refused job, while its retry is not listed yet.
@@ -597,8 +599,13 @@ impl super::Controller {
         }
     }
 
-    /// What a surface asked.
-    pub fn explorer_command(self: &Shared, command: Command) {
+    /// What a surface asked, while it showed the member of `epoch`: what is shared is shared as them, or not at all.
+    pub fn explorer_command(self: &Shared, command: Command, epoch: u64) {
+        let shares = matches!(command, Command::SharePublic { .. } | Command::ShareCapture { .. } | Command::ShareTo { .. });
+        let acting = self.n4n0.acting(epoch);
+        if shares && acting.is_none() {
+            return self.n4n0.refuse_other_identity();
+        }
         let status = self.explorer_status();
         match command {
             Command::NoticeTake { .. } | Command::NoticeDismiss { .. } => {
@@ -640,16 +647,16 @@ impl super::Controller {
                     self.update(|st| st.explorer.offer = None);
                 }
             }
-            Command::SharePublic { offer, confirmed } => self.explorer_share(offer, true, Vec::new(), confirmed),
-            Command::ShareCapture { key, confirmed } => self.explorer_share_capture(key, confirmed),
-            Command::ShareTo { offer, recipients } => self.explorer_share(offer, false, recipients, false),
+            Command::SharePublic { offer, confirmed } => self.explorer_share(offer, true, Vec::new(), confirmed, epoch),
+            Command::ShareCapture { key, confirmed } => self.explorer_share_capture(key, confirmed, epoch),
+            Command::ShareTo { offer, recipients } => self.explorer_share(offer, false, recipients, false, epoch),
         }
     }
 
     /// "Share 3D capture" (REQUEST18 3): the capture the tile offers now, and only it, becomes the offer (the one a picture
     /// just taken has, kept when it is that capture) and is shared publicly through it: the same question the first time,
     /// the same Photos & captures job, the same confirmation by Orbiters' answer. Not while another picture's share runs.
-    fn explorer_share_capture(self: &Shared, key: String, confirmed: bool) {
+    fn explorer_share_capture(self: &Shared, key: String, confirmed: bool, epoch: u64) {
         let status = self.explorer_status();
         let Some(here) = status.share_here.filter(|h| offer_id(&h.key) == offer_id(&key)) else { return };
         let id = offer_id(&here.key);
@@ -675,7 +682,7 @@ impl super::Controller {
             }
             None => false,
         });
-        self.explorer_share(id, true, Vec::new(), confirmed);
+        self.explorer_share(id, true, Vec::new(), confirmed, epoch);
     }
 
     /// What "Share 3D capture" offers, looked for again (on a thread) when the world, the account, a capture being made or
@@ -723,7 +730,7 @@ impl super::Controller {
         });
     }
 
-    fn explorer_share(self: &Shared, offer: u64, public: bool, recipients: Vec<(String, String)>, confirmed: bool) {
+    fn explorer_share(self: &Shared, offer: u64, public: bool, recipients: Vec<(String, String)>, confirmed: bool, epoch: u64) {
         let Some(o) = self.explorer_status().offer.filter(|o| o.id == offer) else { return };
         let step = if public { &o.public } else { &o.people };
         // One share of a picture at a time (N4N0's menu keeps one ask per capture); a public one done stays done.
@@ -765,9 +772,9 @@ impl super::Controller {
                 ..Default::default()
             };
             let ask_again = ask.clone();
-            match ctl.menu_capture_share(ask) {
+            match ctl.menu_capture_share(ask, epoch) {
                 Ok(()) => {
-                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now(), ask: ask_again, retried: false, retry_at: None, skip_job: None };
+                    let asked = Asked { public, people: recipients.iter().map(|r| r.0.clone()).collect(), since: Instant::now(), ask: ask_again, epoch, retried: false, retry_at: None, skip_job: None };
                     let mut s = ctl.explorer.lock().unwrap();
                     if public {
                         s.public = Some(asked);
@@ -791,9 +798,9 @@ impl super::Controller {
                 if Instant::now() >= at {
                     asked.retry_at = None;
                     asked.since = Instant::now();
-                    let (ctl, ask, id) = (self.clone(), asked.ask.clone(), offer.id);
+                    let (ctl, ask, id, epoch) = (self.clone(), asked.ask.clone(), offer.id, asked.epoch);
                     std::thread::spawn(move || {
-                        if let Err(message) = ctl.menu_capture_share(ask) {
+                        if let Err(message) = ctl.menu_capture_share(ask, epoch) {
                             ctl.update(|st| {
                                 if let Some(o) = st.explorer.offer.as_mut().filter(|o| o.id == id) {
                                     if public {

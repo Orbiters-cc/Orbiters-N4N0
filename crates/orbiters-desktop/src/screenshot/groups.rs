@@ -163,7 +163,8 @@ fn card(i: u32, name: &str, code: &str, owner: bool, rights: &[&str], members: u
         discriminator: format!("{:04}", 11 * i),
         icon_url: format!("https://api.vrchat.cloud/api/1/file/file_icon{i}/1/file"),
         banner_url: format!("https://api.vrchat.cloud/api/1/file/file_banner{i}/1/file"),
-        member_count: members,
+        member_count: Some(members),
+        named: true,
         online_count: Some(members / 9),
         owner,
         permissions: s(rights),
@@ -181,7 +182,7 @@ fn cards() -> Vec<GroupCard> {
 }
 
 fn roles() -> Vec<Role> {
-    let r = |id: &str, name: &str, order: i64, perms: &[&str]| Role { id: id.into(), name: name.into(), order: Some(order), permissions: s(perms), ..Default::default() };
+    let r = |id: &str, name: &str, order: i64, perms: &[&str]| Role { id: id.into(), name: name.into(), order: Some(order), permissions: s(perms), known: true, ..Default::default() };
     vec![
         Role { description: "Founded the group.".into(), ..r("grol_owner", "Owner", 0, &["*"]) },
         Role { management: true, description: "Keeps the group running: roles, posts and members.".into(), ..r("grol_admin", "Admins", 1, &["group-roles-manage", "group-roles-assign", "group-members-manage", "group-announcement-manage"]) },
@@ -219,7 +220,7 @@ fn page(owner: bool) -> GroupPage {
             links: s(&["https://example.org/made-up-makers"]),
             icon_url: c.icon_url.clone(),
             banner_url: c.banner_url.clone(),
-            member_count: c.member_count,
+            member_count: c.member_count.unwrap_or(0),
             online_count: c.online_count,
             owner_id: if owner { ME.into() } else { "usr_00000000-0000-4000-8000-00000000e0ff".into() },
             privacy: "default".into(),
@@ -243,20 +244,22 @@ fn members() -> Vec<Member> {
             icon_url: format!("https://api.vrchat.cloud/api/1/file/file_member{i}/1/file"),
             role_ids: s(r),
             joined_at: None,
+            roles_known: true,
+            group_id: None,
         })
         .collect()
 }
 
 fn posts() -> Vec<Post> {
     vec![
-        Post { id: "gpos_1".into(), title: "Saturday showcase".into(), text: "Bring what you made this week: worlds, avatars, props. We start at 20:00 in the gallery world.".into(), visibility: Visibility::Group, created_at: "2026-11-21T19:00:00Z".into(), ..Default::default() },
-        Post { id: "gpos_2".into(), title: "New role for artists".into(), text: "Artists of the month now get their own role and colour.".into(), visibility: Visibility::Public, created_at: "2026-11-18T10:30:00Z".into(), ..Default::default() },
-        Post { id: "gpos_3".into(), title: "Staff briefing".into(), text: "Event staff: meet ten minutes early.".into(), visibility: Visibility::Group, role_ids: s(&["grol_staff"]), created_at: "2026-11-15T09:00:00Z".into(), ..Default::default() },
+        Post { id: "gpos_1".into(), title: "Saturday showcase".into(), text: "Bring what you made this week: worlds, avatars, props. We start at 20:00 in the gallery world.".into(), visibility: Visibility::Group, created_at: Some("2026-11-21T19:00:00Z".into()), complete: true, ..Default::default() },
+        Post { id: "gpos_2".into(), title: "New role for artists".into(), text: "Artists of the month now get their own role and colour.".into(), visibility: Visibility::Public, created_at: Some("2026-11-18T10:30:00Z".into()), complete: true, ..Default::default() },
+        Post { id: "gpos_3".into(), title: "Staff briefing".into(), text: "Event staff: meet ten minutes early.".into(), visibility: Visibility::Group, role_ids: s(&["grol_staff"]), created_at: Some("2026-11-15T09:00:00Z".into()), complete: true, ..Default::default() },
     ]
 }
 
 fn prepared(write: Write, role: Option<Role>) -> Prepared {
-    Prepared { op: "op".into(), write, confirm: true, role }
+    Prepared { op: "op".into(), write, confirm: true, role, post: None, member: Some(Member { user_id: members()[0].user_id.clone(), membership_id: "gmem_00000000-0000-4000-8000-00000000c001".into(), ..Default::default() }) }
 }
 
 pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &Snapshot, f: u32) {
@@ -294,7 +297,8 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             studio.set_crop(Target::Centered, Crop { zoom: 1.2, cx: 0.5, cy: 0.4, turns: 0 });
             if n == "groups-studio-exported" {
                 studio.exported = vec![(Target::GroupBanner, "Made-up Makers - group-banner.png".into(), 2_811_204), (Target::Anchored, "Made-up Makers - nameplate-anchored-2048x385.png".into(), 902_117), (Target::Centered, "Made-up Makers - nameplate-centered-2048x472.png".into(), 1_061_490)];
-                studio.uploaded = Some(InventoryFile { id: "file_up".into(), url: String::new() });
+                let rev = studio.revision();
+                studio.uploaded = Some((InventoryFile { id: "file_up".into(), url: String::new() }, Some(rev)));
             }
             if n == "groups-studio-empty" {
                 stage::studio_empty(state, cards()[0].clone());
@@ -329,9 +333,9 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 "groups-posts-compose" => {
                     open.composer = Some(crate::pages::groups::Composer { baseline: None, draft: PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() } });
                 }
-                "groups-look-uploaded" => open.uploaded = Some((ArtSlot::Banner, InventoryFile { id: "file_up".into(), url: String::new() })),
-                "groups-outcome-refused" => open.ended(None, Outcome::Refused(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),
-                "groups-outcome-unknown" => open.ended(None, Outcome::Unknown),
+                "groups-look-uploaded" => {}
+                "groups-outcome-refused" => {}
+                "groups-outcome-unknown" => {}
                 "groups-outcome-done" => open.ended(None, Outcome::Done(Done::MemberRoles { user: members()[2].user_id.clone(), role_ids: s(&["grol_artist"]) })),
                 _ => {}
             }
@@ -355,10 +359,17 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     Some(prepared(Write::EditPost { group: G1.into(), baseline: p, edit }, None))
                 }
                 "groups-confirm-delete-post" => Some(prepared(Write::DeletePost { group: G1.into(), post: posts()[2].clone() }, None)),
-                "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, png: vec![0; 2_811_204] }, None)),
+                "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, group: G1.into(), staged: crate::controller::groups::Staged { name: "00000000-0000-4000-8000-000000000000.png".into(), size: 2_811_204, sha256: String::new() } }, None)),
                 "groups-confirm-apply" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Banner, file: "file_up".into() }, None)),
                 _ => None,
             };
+            // The page-level states that are the window's, not the page's (uncertain writes, refusals, uploads kept).
+            match n {
+                "groups-outcome-unknown" => stage::uncertain(state, "op-unknown", Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "x".into(), ..Default::default() } }, None),
+                "groups-outcome-refused" => state.said = Some(crate::pages::groups::failure_text(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),
+                "groups-look-uploaded" => state.drafts.set_uploaded(crate::pages::groups::art::UploadedRef { group: G1.into(), slot: ArtSlot::Banner, file: InventoryFile { id: "file_up".into(), url: cards()[1].banner_url.clone() }, revision: None }),
+                _ => {}
+            }
             if let Some(p) = confirm {
                 stage::confirming(state, p, origin);
             }

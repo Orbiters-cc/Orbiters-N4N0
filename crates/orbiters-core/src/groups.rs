@@ -83,10 +83,14 @@ pub struct GroupCard {
     pub discriminator: String,
     pub icon_url: String,
     pub banner_url: String,
-    pub member_count: u32,
+    /// `None` when not read yet: never shown as zero (Major 7).
+    pub member_count: Option<u32>,
     pub online_count: Option<u32>,
     pub owner: bool,
     pub permissions: Vec<String>,
+    /// Its name and pictures were read (a hidden membership's are read when its card comes into view, Major 7).
+    #[serde(default)]
+    pub named: bool,
 }
 
 impl GroupCard {
@@ -142,6 +146,10 @@ pub struct Role {
     pub requires_two_factor: bool,
     pub requires_purchase: bool,
     pub updated_at: Option<String>,
+    /// Every field the rules decide by was in VRChat's answer (its rights, rank and the default/management/purchase
+    /// flags). A role read without them authorises nothing and counts as privileged (verify-r22 Blocker 4).
+    #[serde(default)]
+    pub known: bool,
 }
 
 impl Role {
@@ -151,7 +159,7 @@ impl Role {
     }
     /// A grant or removal of this role changes what someone may do (M3): it is confirmed.
     pub fn privileged(&self) -> bool {
-        self.management || !self.permissions.is_empty()
+        !self.known || self.management || !self.permissions.is_empty()
     }
 }
 
@@ -176,6 +184,12 @@ pub struct Member {
     pub icon_url: String,
     pub role_ids: Vec<String>,
     pub joined_at: Option<String>,
+    /// VRChat's answer held the member's role arrays: only then are their roles known (absent ≠ empty, Blocker 4).
+    #[serde(default)]
+    pub roles_known: bool,
+    /// The group the record says it is of, when it says.
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 impl Member {
@@ -211,8 +225,28 @@ pub struct Post {
     pub image_id: Option<String>,
     pub image_url: String,
     pub author_id: String,
-    pub created_at: String,
-    pub updated_at: String,
+    /// When it was made, only when VRChat's text is a real RFC 3339 time (Minor 1).
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Its audience was read whole (every role id kept, none over the limit): only then may it be edited or deleted
+    /// from here (Blocker 3).
+    #[serde(default)]
+    pub complete: bool,
+}
+
+/// A time from VRChat, kept only when it parses as RFC 3339.
+pub fn time(s: &str) -> Option<String> {
+    let s = s.trim();
+    (s.len() <= 40 && time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).is_ok()).then(|| s.to_string())
+}
+
+/// The post's audience and content as one comparable value: what an edit or a deletion was made against.
+pub fn same_post(a: &Post, b: &Post) -> bool {
+    let mut ra = a.role_ids.clone();
+    let mut rb = b.role_ids.clone();
+    ra.sort();
+    rb.sort();
+    a.id == b.id && a.title == b.title && a.text == b.text && a.visibility == b.visibility && ra == rb && a.image_id == b.image_id
 }
 
 /// A picture of the account's own VRChat inventory (`/files?tag=gallery|icon`): its file id (what a group stores) and
@@ -235,6 +269,27 @@ impl FileTag {
         match self {
             FileTag::Gallery => "gallery", // i18n: not shown (VRChat's API value)
             FileTag::Icon => "icon", // i18n: not shown (VRChat's API value)
+        }
+    }
+}
+
+/// How the nameplate banner is applied: the seam DESIGN22's revision asks for (B4). This version has only
+/// [`NameplateApply::Unavailable`]: it exports both modes and links to the group's page on vrchat.com. Nothing builds a
+/// `nameplateId`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NameplateApply {
+    #[default]
+    Unavailable,
+}
+
+impl NameplateApply {
+    /// What this version can do with a nameplate banner.
+    pub const fn current() -> Self {
+        NameplateApply::Unavailable
+    }
+    pub const fn can_apply(self) -> bool {
+        match self {
+            NameplateApply::Unavailable => false,
         }
     }
 }
@@ -360,6 +415,13 @@ pub enum Why {
     MissingData,
     /// The role is not one members may take themselves.
     NotSelfAssignable,
+    /// A right (or a flag on a role holding rights) the account does not hold itself: no one gives more than they have
+    /// (Major 11).
+    Escalation,
+    /// The account cannot upload to its VRChat inventory (VRChat+ is needed for gallery and icon uploads, Major 4).
+    NotEligible,
+    /// The picture is not one of the account's own inventory of that kind (Major 4).
+    NotYourPicture,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,11 +492,15 @@ fn below(actor: &Actor, roles: &[Role], role: &Role) -> Verdict {
     }
 }
 
-/// Every right added or removed between `from` and `to` may be given by this account, and every right of `to` has what
-/// it depends on.
-fn grantable(from: &[String], to: &[String], catalogue: Option<&[PermissionInfo]>) -> Verdict {
+/// Every right added or removed between `from` and `to` may be given by this account (VRChat's `allowedToAdd`), every
+/// right ADDED is one the account holds itself (no one gives more than they have, Major 11), and every right of `to` has
+/// what it depends on.
+fn grantable(actor: &[String], from: &[String], to: &[String], catalogue: Option<&[PermissionInfo]>) -> Verdict {
     if to.iter().any(|p| p == ALL) {
         return Verdict::Withheld(Why::NotGrantable);
+    }
+    if to.iter().filter(|p| !from.contains(p)).any(|p| !has(actor, p)) {
+        return Verdict::Withheld(Why::Escalation);
     }
     let changed: Vec<&String> = to.iter().filter(|p| !from.contains(p)).chain(from.iter().filter(|p| !to.contains(p))).collect();
     if changed.is_empty() {
@@ -468,6 +534,10 @@ pub fn can(action: Action, actor: &Actor, catalogue: &Catalogue) -> Verdict {
         Action::ApplyArt => if has(rights, DATA_MANAGE) { Allowed } else { Withheld(Why::NoPermission) },
         Action::AssignRole { role, user, .. } => {
             let (Some(roles), Some(role)) = (catalogue.roles, role_of(role)) else { return Withheld(Why::MissingData) };
+            // A role read without its rights, rank or flags: nothing says it is harmless (Blocker 4).
+            if !role.known {
+                return Withheld(Why::MissingData);
+            }
             if role.default_role {
                 return Withheld(Why::FixedRole);
             }
@@ -499,13 +569,18 @@ pub fn can(action: Action, actor: &Actor, catalogue: &Catalogue) -> Verdict {
             if !has(rights, ROLES_MANAGE) {
                 return Withheld(Why::NoPermission);
             }
-            if catalogue.roles.is_none() {
+            // The account's own rank must be known: a new role lands below it.
+            let Some(roles) = catalogue.roles else { return Withheld(Why::MissingData) };
+            if top_order(actor, roles).is_none() {
                 return Withheld(Why::MissingData);
             }
-            grantable(&[], &draft.permissions, catalogue.permissions)
+            grantable(rights, &[], &draft.permissions, catalogue.permissions)
         }
         Action::EditRole { role, change } => {
             let (Some(roles), Some(role)) = (catalogue.roles, role_of(role)) else { return Withheld(Why::MissingData) };
+            if !role.known {
+                return Withheld(Why::MissingData);
+            }
             if role.default_role {
                 // Everyone's: only its rights change, with both rights (VRCX, and the wiki's Manage Default Role).
                 if change.touches_details() || change.touches_flags() {
@@ -515,7 +590,7 @@ pub fn can(action: Action, actor: &Actor, catalogue: &Catalogue) -> Verdict {
                     return Withheld(Why::NoPermission);
                 }
                 return match &change.permissions {
-                    Some(to) => grantable(&role.permissions, to, catalogue.permissions),
+                    Some(to) => grantable(rights, &role.permissions, to, catalogue.permissions),
                     None => Allowed,
                 };
             }
@@ -536,13 +611,23 @@ pub fn can(action: Action, actor: &Actor, catalogue: &Catalogue) -> Verdict {
                 Allowed => {}
                 no => return no,
             }
+            // Opening a role that holds rights to more people (members take it, everyone joining gets it) confers those
+            // rights: only with every one of them held by the account itself (Major 11).
+            let widening = change.self_assignable == Some(true) || change.added_on_join == Some(true);
+            let held_after = change.permissions.as_deref().unwrap_or(&role.permissions);
+            if widening && held_after.iter().any(|p| !has(rights, p)) {
+                return Withheld(Why::Escalation);
+            }
             match &change.permissions {
-                Some(to) => grantable(&role.permissions, to, catalogue.permissions),
+                Some(to) => grantable(rights, &role.permissions, to, catalogue.permissions),
                 None => Allowed,
             }
         }
         Action::DeleteRole { role } => {
             let (Some(roles), Some(role)) = (catalogue.roles, role_of(role)) else { return Withheld(Why::MissingData) };
+            if !role.known {
+                return Withheld(Why::MissingData);
+            }
             if role.default_role || role.is_owner_role() {
                 return Withheld(Why::FixedRole);
             }
@@ -641,7 +726,7 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
     fn role(id: &str, order: i64, perms: &[&str]) -> Role {
-        Role { id: id.into(), name: id.into(), order: Some(order), permissions: s(perms), ..Default::default() }
+        Role { id: id.into(), name: id.into(), order: Some(order), permissions: s(perms), known: true, ..Default::default() }
     }
     fn roles() -> Vec<Role> {
         vec![
@@ -680,6 +765,9 @@ mod tests {
         let admin = Actor { user_id: "usr_admin", permissions: &admin_perms, role_ids: &admin_roles, status: "member" };
         let assigner = Actor { user_id: "usr_admin", permissions: &assign_only, role_ids: &admin_roles, status: "member" };
         let moderator = Actor { user_id: "usr_mod", permissions: &mod_perms, role_ids: &mod_roles, status: "member" };
+        let rich_perms = s(&[ROLES_MANAGE, ROLES_ASSIGN, MEMBERS_MANAGE, "group-instance-join", "group-instance-moderate"]);
+        let rich_admin = Actor { permissions: &rich_perms, ..admin };
+        let open_up = RoleChange { self_assignable: Some(true), ..Default::default() };
         let other = "usr_00000000-0000-4000-8000-000000000001";
         let assign = |role| Action::AssignRole { role, user: other, add: true };
         let rename = RoleChange { name: Some("New".into()), ..Default::default() };
@@ -702,7 +790,10 @@ mod tests {
             ("unknown role", can(assign("grol_gone"), &owner, &cat), Withheld(Why::MissingData)),
             ("admin renames below", can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Allowed),
             ("admin cannot rename own", can(Action::EditRole { role: "grol_admin", change: &rename }, &admin, &cat), Withheld(Why::RoleAtOrAbove)),
-            ("admin grants allowed rights", can(Action::EditRole { role: "grol_artist", change: &rights }, &admin, &cat), Allowed),
+            ("admin cannot grant rights it lacks", can(Action::EditRole { role: "grol_artist", change: &rights }, &admin, &cat), Withheld(Why::Escalation)),
+            ("a holder grants rights it holds", can(Action::EditRole { role: "grol_artist", change: &rights }, &rich_admin, &cat), Allowed),
+            ("no widening a privileged role without its rights", can(Action::EditRole { role: "grol_mod", change: &open_up }, &admin, &cat), Withheld(Why::Escalation)),
+            ("the owner widens it", can(Action::EditRole { role: "grol_mod", change: &open_up }, &owner, &cat), Allowed),
             ("never the wildcard", can(Action::EditRole { role: "grol_artist", change: &wildcard }, &owner, &cat), Withheld(Why::NotGrantable)),
             ("not a right one may not add", can(Action::EditRole { role: "grol_artist", change: &manage }, &admin, &cat), Withheld(Why::NotGrantable)),
             ("a right without its prerequisite", can(Action::EditRole { role: "grol_artist", change: &lonely }, &admin, &cat), Withheld(Why::Prerequisite)),
@@ -716,7 +807,8 @@ mod tests {
             ("never delete Everyone", can(Action::DeleteRole { role: "grol_everyone" }, &owner, &cat), Withheld(Why::FixedRole)),
             ("never delete owner role", can(Action::DeleteRole { role: "grol_owner" }, &owner, &cat), Withheld(Why::FixedRole)),
             ("moderator cannot delete", can(Action::DeleteRole { role: "grol_artist" }, &moderator, &cat), Withheld(Why::NoPermission)),
-            ("create with grantable rights", can(Action::CreateRole { draft: &RoleDraft { permissions: s(&["group-instance-join"]), ..Default::default() } }, &admin, &cat), Allowed),
+            ("create with rights it lacks", can(Action::CreateRole { draft: &RoleDraft { permissions: s(&["group-instance-join"]), ..Default::default() } }, &admin, &cat), Withheld(Why::Escalation)),
+            ("create with rights it holds", can(Action::CreateRole { draft: &RoleDraft { permissions: s(&["group-instance-join"]), ..Default::default() } }, &rich_admin, &cat), Allowed),
             ("posts need announcements", can(Action::Post, &admin, &cat), Withheld(Why::NoPermission)),
             ("owner posts", can(Action::Post, &owner, &cat), Allowed),
             ("art needs group data", can(Action::ApplyArt, &moderator, &cat), Withheld(Why::NoPermission)),
@@ -724,6 +816,21 @@ mod tests {
         for (row, got, want) in table {
             assert_eq!(got, want, "{row}");
         }
+    }
+
+    /// Blocker 4: a role read without its rights or flags is no cosmetic role: it is never given from here, and counts
+    /// as privileged (so anything about it is confirmed).
+    #[test]
+    fn a_role_read_without_its_rights_authorises_nothing() {
+        let owner_perms = s(&["*"]);
+        let owner_roles = s(&["grol_owner"]);
+        let owner = Actor { user_id: "usr_owner", permissions: &owner_perms, role_ids: &owner_roles, status: "member" };
+        let mut roles = roles();
+        roles[3].known = false; // "grol_artist" arrived without its permission list
+        let cat = Catalogue { roles: Some(&roles), permissions: None };
+        assert!(roles[3].privileged(), "unknown means privileged");
+        assert_eq!(can(Action::AssignRole { role: "grol_artist", user: "usr_x", add: true }, &owner, &cat), Verdict::Withheld(Why::MissingData));
+        assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &owner, &cat), Verdict::Withheld(Why::MissingData));
     }
 
     /// Missing order or role data never turns into a right to edit everything.

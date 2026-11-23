@@ -529,14 +529,19 @@ impl Service {
             ToService::Groups { id, scope, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
+                    use crate::controller::groups::{Failure, Reply};
                     if !crate::controller::groups::allowed_from(role) {
-                        mailbox.post(ToClient::Groups { id, reply: crate::controller::groups::Reply::Failed(crate::controller::groups::Failure::NotHere) });
-                    } else {
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::NotHere) });
+                    } else if let Some(admitted) = ctl.groups_admit() {
+                        // Taken in before its thread starts: a few at once, the rest told to wait (verify-r22 Major 9).
                         let ctl = ctl.clone();
                         std::thread::spawn(move || {
+                            let _admitted = admitted;
                             let reply = ctl.groups(link, scope, request);
                             mailbox.post(ToClient::Groups { id, reply });
                         });
+                    } else {
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::Busy) });
                     }
                 }
             }

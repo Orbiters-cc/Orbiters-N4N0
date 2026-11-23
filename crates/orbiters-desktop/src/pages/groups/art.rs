@@ -200,7 +200,8 @@ impl Crop {
     }
 }
 
-/// The target's picture from `src`: every pixel sampled (bilinear) where the crop puts it.
+/// The target's picture from `src`: every pixel sampled (bilinear, in premultiplied alpha: a transparent pixel lends no
+/// colour to its neighbours, Major 10) where the crop puts it.
 pub fn render(src: &image::RgbaImage, target: Target, crop: Crop) -> image::RgbaImage {
     let (tw, th) = target.size();
     let size = (src.width(), src.height());
@@ -223,15 +224,21 @@ fn sample(src: &image::RgbaImage, x: f32, y: f32, sw: f32, sh: f32) -> image::Rg
     if fx < 1e-4 && fy < 1e-4 {
         return *src.get_pixel(x0, y0);
     }
-    let p = |a: u32, b: u32| src.get_pixel(a, b).0.map(|c| c as f32);
+    // Premultiplied: colour weighted by its alpha, then divided back.
+    let p = |a: u32, b: u32| {
+        let [r, g, b2, al] = src.get_pixel(a, b).0.map(|c| c as f32);
+        [r * al / 255.0, g * al / 255.0, b2 * al / 255.0, al]
+    };
     let (a, b, c, d) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
-    let mut out = [0u8; 4];
+    let mut mixed = [0f32; 4];
     for i in 0..4 {
         let top = a[i] + (b[i] - a[i]) * fx;
         let bottom = c[i] + (d[i] - c[i]) * fx;
-        out[i] = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+        mixed[i] = top + (bottom - top) * fy;
     }
-    image::Rgba(out)
+    let alpha = mixed[3];
+    let colour = |v: f32| if alpha <= 0.0 { 0 } else { (v * 255.0 / alpha).round().clamp(0.0, 255.0) as u8 };
+    image::Rgba([colour(mixed[0]), colour(mixed[1]), colour(mixed[2]), alpha.round().clamp(0.0, 255.0) as u8])
 }
 
 /// A lossless PNG of `img`: no metadata, alpha kept (m2).
@@ -250,23 +257,40 @@ pub fn file_stem(group: &str, target: Target) -> String {
     if name.is_empty() { target.file_part().to_string() } else { format!("{name} - {}", target.file_part()) }
 }
 
-/// Writes `bytes` to `dir/<stem>.png`, or `<stem> (2).png`… : never over a file that is there (m2, M12).
+/// Writes `bytes` to `dir/<stem>.png`, or `<stem> (2).png`… : never over a file that is there (m2, M12), and never a
+/// part of one: the bytes go whole to a hidden temporary file first, which then takes the first free name by a hard link
+/// (that fails rather than replace) and goes away (Minor 3). A failure leaves nothing behind.
 pub fn save_new(dir: &Path, stem: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".{}.part", uuid::Uuid::new_v4()));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    let mut result = Err(std::io::Error::other("too many files of that name")); // i18n: not shown (io error, never displayed raw)
     for n in 1..1000 {
         let name = if n == 1 { format!("{stem}.png") } else { format!("{stem} ({n}).png") };
         let path = dir.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(bytes)?;
-                return Ok(path);
+        match std::fs::hard_link(&temp, &path) {
+            Ok(()) => {
+                result = Ok(path);
+                break;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
         }
     }
-    Err(std::io::Error::other("too many files of that name")) // i18n: not shown (io error, never displayed raw)
+    let _ = std::fs::remove_file(&temp);
+    result
 }
 
 /// Where exports go: `Pictures/Orbiters/Group banners` (the test folders in tests and the screenshot harness).
@@ -276,23 +300,72 @@ pub fn export_dir() -> PathBuf {
 
 /// The largest picture read, either side: past this it is scaled down on reading.
 const SOURCE_MAX: u32 = 8192;
+/// Pixels decoded at most (Major 5): a studio's source or a recent picture, and a picture of the page.
+pub const SOURCE_PIXELS: u64 = 40_000_000;
+pub const PICTURE_PIXELS: u64 = 16_000_000;
+/// A picture file read at most.
+pub const SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// One large decode at a time in the window (sources, recent pictures, gallery pictures).
+static DECODING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A picture file as it should be seen: its orientation applied (JPEG's EXIF), at most [`SOURCE_MAX`] a side.
+/// A picture file as it should be seen, within bounds: its size checked before reading.
 pub fn load_source(path: &Path) -> anyhow::Result<image::RgbaImage> {
+    let len = std::fs::metadata(path)?.len();
+    anyhow::ensure!(len <= SOURCE_BYTES, "picture file too large"); // i18n: not shown (worded by the studio)
     let bytes = std::fs::read(path)?;
     decode_source(&bytes)
 }
 
 pub fn decode_source(bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
+    decode_bounded(bytes, SOURCE_PIXELS)
+}
+
+/// Decodes a picture within bounds (Major 5): its size read from its header first and refused past `max_pixels`, the
+/// decoder's own allocation limit set, one at a time; then its orientation applied (EXIF) and its colours turned into
+/// sRGB from its ICC profile when it has one (Major 10); at most [`SOURCE_MAX`] a side.
+pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> anyhow::Result<image::RgbaImage> {
     use image::ImageDecoder;
-    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?.into_decoder()?;
+    anyhow::ensure!(bytes.len() as u64 <= SOURCE_BYTES, "picture too large"); // i18n: not shown (worded by the studio)
+    let _one = DECODING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    limits.max_alloc = Some(max_pixels * 8 + 16 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder()?;
+    let (w, h) = decoder.dimensions();
+    anyhow::ensure!(w as u64 * h as u64 <= max_pixels && w > 0 && h > 0, "picture has too many pixels"); // i18n: not shown (worded by the studio)
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let icc = decoder.icc_profile().ok().flatten();
     let mut img = image::DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
     if img.width() > SOURCE_MAX || img.height() > SOURCE_MAX {
         img = img.resize(SOURCE_MAX, SOURCE_MAX, image::imageops::FilterType::Triangle);
     }
-    Ok(img.to_rgba8())
+    let mut rgba = img.to_rgba8();
+    if let Some(icc) = icc {
+        to_srgb(&mut rgba, &icc)?;
+    }
+    Ok(rgba)
+}
+
+/// The pixels turned from the colour space their ICC profile describes into sRGB, alpha untouched.
+pub fn to_srgb(img: &mut image::RgbaImage, icc: &[u8]) -> anyhow::Result<()> {
+    let source = moxcms::ColorProfile::new_from_slice(icc).map_err(|_| anyhow::anyhow!("unreadable colour profile"))?; // i18n: not shown (worded by the studio)
+    let srgb = moxcms::ColorProfile::new_srgb();
+    let transform = source
+        .create_transform_8bit(moxcms::Layout::Rgba, &srgb, moxcms::Layout::Rgba, moxcms::TransformOptions::default())
+        .map_err(|_| anyhow::anyhow!("unsupported colour profile"))?; // i18n: not shown (worded by the studio)
+    let input = img.as_raw().clone();
+    let mut output = vec![0u8; input.len()];
+    transform.transform(&input, &mut output).map_err(|_| anyhow::anyhow!("colour conversion failed"))?; // i18n: not shown (worded by the studio)
+    // The alpha as it was.
+    for (o, i) in output.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
+        o[3] = i[3];
+    }
+    *img = image::RgbaImage::from_raw(img.width(), img.height(), output).ok_or_else(|| anyhow::anyhow!("colour conversion failed"))?; // i18n: not shown (worded by the studio)
+    Ok(())
 }
 
 /// Where the picture came from, remembered with the crops.
@@ -346,6 +419,95 @@ pub fn store_saved(account: &str, group: &str, saved: &Saved) {
             let _ = orbiters_core::write_atomic_private(&file, &bytes);
         }
     }
+}
+
+/// A write whose outcome is not known yet: kept on disk with the account until a check settles it (Blockers 1, 2).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Uncertain {
+    pub op: String,
+    pub write: crate::controller::groups::Write,
+    /// What the last check saw (running, inconclusive), when one ran.
+    pub observation: Option<crate::controller::groups::Observation>,
+}
+
+/// The post the operator was writing in a group (Major 8).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComposerDraft {
+    pub baseline: Option<orbiters_core::groups::Post>,
+    pub draft: orbiters_core::groups::PostDraft,
+}
+
+/// A picture uploaded to the account's inventory and not applied to its group yet (Major 8), with the studio's art
+/// revision it was made from when it came from the studio (Blocker 5).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UploadedRef {
+    pub group: String,
+    pub slot: orbiters_core::groups::ArtSlot,
+    pub file: orbiters_core::groups::InventoryFile,
+    pub revision: Option<u64>,
+}
+
+/// One account's own unfinished work in its groups. No roster, no posts list, nobody else's data beyond the target of
+/// its own pending write.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Drafts {
+    pub uncertain: Vec<Uncertain>,
+    /// Group id and its draft (a list, never a map keyed by anything numeric).
+    pub composers: Vec<(String, ComposerDraft)>,
+    pub uploaded: Vec<UploadedRef>,
+}
+
+impl Drafts {
+    pub fn composer(&self, group: &str) -> Option<&ComposerDraft> {
+        self.composers.iter().find(|(g, _)| g == group).map(|(_, d)| d)
+    }
+    pub fn set_composer(&mut self, group: &str, draft: Option<ComposerDraft>) {
+        self.composers.retain(|(g, _)| g != group);
+        if let Some(d) = draft {
+            self.composers.push((group.to_string(), d));
+            while self.composers.len() > 32 {
+                self.composers.remove(0);
+            }
+        }
+    }
+    pub fn uploaded(&self, group: &str, slot: orbiters_core::groups::ArtSlot) -> Option<&UploadedRef> {
+        self.uploaded.iter().find(|u| u.group == group && u.slot == slot)
+    }
+    pub fn set_uploaded(&mut self, up: UploadedRef) {
+        self.uploaded.retain(|u| !(u.group == up.group && u.slot == up.slot));
+        self.uploaded.push(up);
+        while self.uploaded.len() > 32 {
+            self.uploaded.remove(0);
+        }
+    }
+    pub fn clear_uploaded(&mut self, group: &str, slot: orbiters_core::groups::ArtSlot) {
+        self.uploaded.retain(|u| !(u.group == group && u.slot == slot));
+    }
+}
+
+/// The file of one account's drafts, under the local data folder.
+pub fn drafts_file(account: &str) -> Option<PathBuf> {
+    orbiters_core::vrchat_accounts::is_user_id(account).then(|| orbiters_core::paths::local_data_root().join("group-drafts").join(format!("{account}.json")))
+}
+
+pub fn load_drafts(account: &str) -> Drafts {
+    drafts_file(account).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+pub fn store_drafts(account: &str, drafts: &Drafts) {
+    if let Some(file) = drafts_file(account) {
+        if let (Some(dir), Ok(bytes)) = (file.parent(), serde_json::to_vec(drafts)) {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = orbiters_core::write_atomic_private(&file, &bytes);
+        }
+    }
+}
+
+/// The studio's art as one number: its source and the group banner's crop (what an upload was made from, Blocker 5).
+pub fn revision(source: Option<&Source>, crop: Crop) -> u64 {
+    // FNV-1a over a plain description: the same art gives the same number on every run.
+    let text = format!("{:?}|{:.5}|{:.5}|{:.5}|{}", source, crop.zoom, crop.cx, crop.cy, crop.turns);
+    text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
 }
 
 #[cfg(test)]

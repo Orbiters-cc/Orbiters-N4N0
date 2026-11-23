@@ -45,12 +45,13 @@ struct Photo {
 }
 
 enum Loading {
-    Source(mpsc::Receiver<Result<(image::RgbaImage, Source), String>>),
+    /// A picture being opened, with the number of the choice it answers (only the latest is taken, Blocker 5).
+    Source(u64, mpsc::Receiver<Result<(image::RgbaImage, Source), String>>),
     Photos(mpsc::Receiver<Vec<(PathBuf, Option<egui::ColorImage>)>>),
 }
 
-/// What an export gives: each target's file and its size, or why it failed.
-type Exported = Result<Vec<(Target, PathBuf, u64)>, String>;
+/// What an export gives: for each target, its file and size, or why it failed (each said apart, Minor 3).
+type Exported = Vec<(Target, Result<(PathBuf, u64), String>)>;
 
 pub(crate) struct Studio {
     pub card: GroupCard,
@@ -67,8 +68,20 @@ pub(crate) struct Studio {
     exporting: Option<mpsc::Receiver<Exported>>,
     /// The upload's PNG being made, then on its way (prepare → confirm → commit).
     making_upload: Option<mpsc::Receiver<Result<Vec<u8>, String>>>,
-    /// Uploaded to the gallery, the group not changed yet (M6).
-    pub uploaded: Option<InventoryFile>,
+    /// Uploaded to the gallery, the group not changed yet (M6), with the art revision it was made from (Blocker 5).
+    pub uploaded: Option<(InventoryFile, Option<u64>)>,
+    /// The revision of the upload being prepared, confirmed and sent.
+    upload_revision: Option<u64>,
+    /// The uploaded art as a picture, for the apply's confirmation.
+    uploaded_art: Option<egui::TextureHandle>,
+    /// Each picture chosen gets a number; only the latest one's arrives (Blocker 5).
+    choice: u64,
+    /// The gallery picture asked for in full, when that is the latest choice.
+    wanted_source: Option<String>,
+    /// A number for this visit's sources: an upload made from another source is never applied to this art.
+    source_nonce: u64,
+    /// The gallery tiles in view at the last frame: only their pictures are asked (Major 6).
+    visible_urls: Vec<String>,
     pub applied: bool,
     gallery: Option<(Vec<InventoryFile>, usize, bool, bool)>,
     photos: Option<Vec<Photo>>,
@@ -78,9 +91,11 @@ pub(crate) struct Studio {
 }
 
 impl Studio {
-    pub fn new(card: GroupCard, account: &str, source: Option<image::RgbaImage>) -> Self {
+    pub fn new(card: GroupCard, account: &str, source: Option<image::RgbaImage>, drafts: &art::Drafts) -> Self {
         let staged = source.is_some();
         let saved = if staged { Saved::default() } else { art::load_saved(account, &card.id) };
+        // An upload made earlier and not applied: kept, but its revision ties it to the art it was made from (Major 8).
+        let uploaded = drafts.uploaded(&card.id, ArtSlot::Banner).map(|u| (u.file.clone(), u.revision));
         Self {
             card,
             account: account.to_string(),
@@ -94,7 +109,13 @@ impl Studio {
             exported: Vec::new(),
             exporting: None,
             making_upload: None,
-            uploaded: None,
+            uploaded,
+            upload_revision: None,
+            uploaded_art: None,
+            choice: 0,
+            wanted_source: None,
+            source_nonce: 0,
+            visible_urls: Vec::new(),
             applied: false,
             gallery: None,
             photos: None,
@@ -105,7 +126,7 @@ impl Studio {
     }
     /// The screenshot review: the studio before any picture.
     pub fn staged_empty(card: GroupCard) -> Self {
-        let mut s = Self::new(card, "", Some(image::RgbaImage::new(1, 1)));
+        let mut s = Self::new(card, "", Some(image::RgbaImage::new(1, 1)), &art::Drafts::default());
         s.pending = None;
         s.asked_source = true;
         s
@@ -121,12 +142,13 @@ impl Studio {
     }
     pub(crate) fn answer(&mut self, kind: Kind, reply: Reply) {
         match (kind, reply) {
-            (Kind::Inventory { tag: FileTag::Gallery, offset }, Reply::Inventory(files)) => {
+            (Kind::Inventory { tag: FileTag::Gallery, offset }, Reply::Inventory(page)) => {
                 if let Some((list, at, more, loading)) = self.gallery.as_mut().filter(|g| g.1 == offset) {
-                    *more = files.len() >= orbiters_core::vrchat_api::GROUP_PAGE;
-                    *at += files.len().max(1);
+                    // By what VRChat gave, unusable entries included (Minor 5).
+                    *more = page.raw >= orbiters_core::vrchat_api::GROUP_PAGE;
+                    *at += page.raw.max(1);
                     *loading = false;
-                    for f in files {
+                    for f in page.items {
                         if !list.iter().any(|x| x.id == f.id) {
                             list.push(f);
                         }
@@ -146,23 +168,44 @@ impl Studio {
             _ => {}
         }
     }
-    /// A picture of the account's gallery, read in full for the studio (its source already noted).
-    pub(crate) fn source_arrived(&mut self, img: Option<image::RgbaImage>) {
+    /// A picture of the account's gallery, read in full for the studio: taken only when it is still the latest choice
+    /// (an older choice arriving late never replaces a newer one, Blocker 5).
+    pub(crate) fn source_arrived(&mut self, url: &str, img: Option<image::RgbaImage>) {
+        if self.wanted_source.as_deref() != Some(url) {
+            return;
+        }
+        self.wanted_source = None;
         match img {
             Some(img) => {
-                self.pending = Some(img);
-                self.error = None;
+                self.take_source(img);
                 self.remember();
             }
             None => self.error = Some(tr("That picture could not be read.").into()),
         }
     }
+    fn take_source(&mut self, img: image::RgbaImage) {
+        self.pending = Some(img);
+        self.source_nonce += 1;
+        self.error = None;
+    }
+    /// The art as it is now (source and group banner crop): what an upload is bound to (Blocker 5).
+    pub(crate) fn revision(&self) -> u64 {
+        art::revision(self.saved.source.as_ref(), self.saved.crop(Target::GroupBanner)) ^ self.source_nonce.wrapping_mul(0x9e3779b97f4a7c15)
+    }
+    /// The revision of the upload under way, for the uploaded picture's record.
+    pub(crate) fn uploaded_revision(&self) -> Option<u64> {
+        self.upload_revision
+    }
+    /// Whether the uploaded picture is the art shown now: only then is it applied from here.
+    pub(crate) fn upload_matches(&self) -> bool {
+        self.uploaded.as_ref().is_some_and(|(_, r)| *r == Some(self.revision()))
+    }
     /// A write that ended: the studio takes its upload and its apply (M6). Whether it was the studio's.
     pub(crate) fn ended(&mut self, prepared: Option<&Prepared>, outcome: &Outcome) -> bool {
         use crate::controller::groups::Done;
         match (prepared.map(|p| &p.write), outcome) {
-            (Some(Write::Upload { tag: FileTag::Gallery, .. }), Outcome::Done(Done::Uploaded(f))) => {
-                self.uploaded = Some(f.clone());
+            (Some(Write::Upload { tag: FileTag::Gallery, group, .. }), Outcome::Done(Done::Uploaded(f))) if *group == self.card.id => {
+                self.uploaded = Some((f.clone(), self.upload_revision));
                 self.error = None;
                 true
             }
@@ -172,18 +215,8 @@ impl Studio {
                 self.card.banner_url = g.banner_url.clone();
                 true
             }
-            (Some(Write::Upload { .. } | Write::ApplyArt { .. }), Outcome::Refused(f)) => {
-                self.error = Some(failure_text(*f));
-                true
-            }
-            (Some(Write::Upload { .. } | Write::ApplyArt { .. }), Outcome::Unknown) => {
-                self.error = Some(tr("VRChat may have done it: its answer was lost. Look at your gallery or the group on vrchat.com before trying again.").into());
-                true
-            }
-            (None, Outcome::Refused(f)) => {
-                self.error = Some(failure_text(*f));
-                true
-            }
+            // Refusals and unknowns are said by the window's warnings, with their check.
+            (Some(Write::Upload { .. } | Write::ApplyArt { .. }), Outcome::Refused(_) | Outcome::Unknown) | (None, Outcome::Refused(_)) => true,
             _ => false,
         }
     }
@@ -193,7 +226,10 @@ impl Studio {
 }
 
 /// Picture files on a thread of their own: the full picture, oriented.
-fn load_file(ctx: &egui::Context, path: PathBuf) -> Loading {
+fn load_file(ctx: &egui::Context, studio: &mut Studio, path: PathBuf) -> Loading {
+    studio.choice += 1;
+    studio.wanted_source = None;
+    let choice = studio.choice;
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     // Work of the window while it runs: it does not rest to the tray in the middle of it.
@@ -204,7 +240,7 @@ fn load_file(ctx: &egui::Context, path: PathBuf) -> Loading {
         let _ = tx.send(r);
         ctx.request_repaint();
     });
-    Loading::Source(rx)
+    Loading::Source(choice, rx)
 }
 
 /// The newest pictures of the person's VRChat pictures folder and the folders added in Settings, with thumbnails.
@@ -241,7 +277,8 @@ fn recent_photos(ctx: &egui::Context, folders: Vec<PathBuf>) -> Loading {
             .into_iter()
             .take(PHOTOS_MAX)
             .map(|(_, path)| {
-                let thumb = image::open(&path).ok().map(|i| i.thumbnail(320, 180).to_rgba8()).map(|t| egui::ColorImage::from_rgba_unmultiplied([t.width() as usize, t.height() as usize], t.as_raw()));
+                // Within the same bounds as a source (size first, pixels from the header, one at a time, Major 5).
+                let thumb = art::load_source(&path).ok().map(|i| image::imageops::thumbnail(&i, 320.min(i.width()), ((320.0 * i.height() as f32 / i.width() as f32) as u32).clamp(1, 320))).map(|t| egui::ColorImage::from_rgba_unmultiplied([t.width() as usize, t.height() as usize], t.as_raw()));
                 (path, thumb)
             })
             .collect();
@@ -357,7 +394,8 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // A picture dropped on the window.
     let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
     if let Some(path) = dropped.into_iter().next() {
-        studio.loading.push(load_file(&ctx, path));
+        let l = load_file(&ctx, studio, path);
+        studio.loading.push(l);
     }
     let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
     // The remembered source, once.
@@ -368,16 +406,21 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         None
     };
     match remembered {
-        Some(Source::File(path)) if path.is_file() => studio.loading.push(load_file(&ctx, path)),
+        Some(Source::File(path)) if path.is_file() => {
+            let l = load_file(&ctx, studio, path);
+            studio.loading.push(l);
+        }
         Some(Source::Inventory { url, .. }) => {
             if let Some(scope) = &scope {
+                studio.choice += 1;
+                studio.wanted_source = Some(url.clone());
                 state.jobs.ask(&ctx, cx.ctl, scope, Kind::Source(url.clone()), Request::Picture { url });
             }
         }
         _ => {}
     }
-    // The gallery's pictures, from memory (asked for the tiles shown).
-    let urls: Vec<String> = state.studio.as_ref().and_then(|s| s.gallery.as_ref()).map(|g| g.0.iter().map(|f| f.url.clone()).collect()).unwrap_or_default();
+    // The gallery's pictures in view at the last frame, from memory or asked (never the whole gallery, Major 6).
+    let urls: Vec<String> = state.studio.as_ref().map(|s| s.visible_urls.clone()).unwrap_or_default();
     let mut thumbs: HashMap<String, egui::TextureHandle> = HashMap::new();
     if let Some(scope) = &scope {
         for url in urls {
@@ -399,6 +442,10 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: 32, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 16.0);
             ui.set_max_width(ui.available_width().min(1080.0));
+            // An upload or apply whose outcome is not known, with its check (Blocker 2).
+            let group = state.studio.as_ref().map(|st| st.card.id.clone()).unwrap_or_default();
+            let ctx = ui.ctx().clone();
+            super::uncertain_panel(ui, &ctx, cx.ctl, state, &group);
             let Some(studio) = state.studio.as_mut() else { return };
             body(ui, cx, studio, &thumbs, busy, hovering_files, &mut acts);
         });
@@ -414,17 +461,18 @@ fn take_loading(ctx: &egui::Context, studio: &mut Studio) {
     let loading = std::mem::take(&mut studio.loading);
     for l in loading {
         match l {
-            Loading::Source(rx) => match rx.try_recv() {
+            Loading::Source(choice, rx) => match rx.try_recv() {
+                // An older choice that arrives late is dropped (Blocker 5).
+                Ok(_) if choice != studio.choice => {}
                 Ok(Ok((img, source))) => {
-                    studio.pending = Some(img);
+                    studio.take_source(img);
                     studio.saved.source = Some(source);
-                    studio.error = None;
                     studio.photos = None;
                     studio.gallery = None;
                     studio.remember();
                 }
                 Ok(Err(e)) => studio.error = Some(e),
-                Err(mpsc::TryRecvError::Empty) => keep.push(Loading::Source(rx)),
+                Err(mpsc::TryRecvError::Empty) => keep.push(Loading::Source(choice, rx)),
                 Err(_) => {}
             },
             Loading::Photos(rx) => match rx.try_recv() {
@@ -439,12 +487,14 @@ fn take_loading(ctx: &egui::Context, studio: &mut Studio) {
     studio.loading = keep;
     if let Some(rx) = &studio.exporting {
         match rx.try_recv() {
-            Ok(Ok(files)) => {
-                studio.exported.extend(files);
-                studio.exporting = None;
-            }
-            Ok(Err(e)) => {
-                studio.error = Some(e);
+            Ok(results) => {
+                // Each target said apart: the ones written are listed even when another failed (Minor 3).
+                for (t, r) in results {
+                    match r {
+                        Ok((path, size)) => studio.exported.push((t, path, size)),
+                        Err(e) => studio.error = Some(format!("{}: {e}", label(t))),
+                    }
+                }
                 studio.exporting = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -612,6 +662,12 @@ fn legend(ui: &mut Ui, target: Target) {
 
 /// The account's gallery or its Photos & captures, as rows of the page (no scrolling of their own).
 fn choosers(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egui::TextureHandle>, acts: &mut Vec<Act>) {
+    let mut visible_out: Vec<String> = Vec::new();
+    choosers_drawn(ui, studio, thumbs, acts, &mut visible_out);
+    studio.visible_urls = visible_out;
+}
+
+fn choosers_drawn(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egui::TextureHandle>, acts: &mut Vec<Act>, visible_out: &mut Vec<String>) {
     let w = ui.available_width();
     if let Some((files, _, more, loading)) = &studio.gallery {
         let (tile_w, tile_h) = (176.0, 99.0);
@@ -622,8 +678,13 @@ fn choosers(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egui::Tex
         }
         let rows = files.len().div_ceil(cols);
         let (area, _) = ui.allocate_exact_size(vec2(w, (rows as f32 * (tile_h + 10.0) - 10.0).max(0.0)), Sense::hover());
+        let mut visible = Vec::new();
         for (i, f) in files.iter().enumerate() {
             let r = Rect::from_min_size(area.min + vec2((i % cols) as f32 * (tile_w + 10.0), (i / cols) as f32 * (tile_h + 10.0)), vec2(tile_w, tile_h));
+            if !ui.is_rect_visible(r.expand(100.0)) {
+                continue;
+            }
+            visible.push(f.url.clone());
             let resp = ui.interact(r, Id::unique(("studio-gallery", f.id.as_str())), Sense::click());
             let p = ui.painter();
             widgets::frame(p, r, 12.0, theme::INK_750);
@@ -637,6 +698,7 @@ fn choosers(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egui::Tex
                 acts.push(Act::UseInventory(f.clone()));
             }
         }
+        visible_out.extend(visible);
         if *loading {
             ui.label(egui::RichText::new(tr("Loading…")).color(theme::FG_3).size(12.5));
         } else if *more && widgets::Button::new(tr("Load more")).size(widgets::Size::Sm).id_salt("studio-gallery-more").show(ui).clicked() {
@@ -778,29 +840,31 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
         }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            match &studio.uploaded {
-                None => {
-                    let r = widgets::Button::new(tr("Upload to my gallery, then apply")).icon(icons::UPLOAD_SIMPLE).enabled(art && has && !busy && studio.making_upload.is_none()).id_salt("studio-upload").show(ui);
-                    if r.clicked() {
-                        acts.push(Act::Upload(r.rect));
-                    }
+            // The upload applied from here is only the one made from the art shown now (Blocker 5).
+            if studio.upload_matches() {
+                let r = widgets::Button::new(tr("Apply as the group's banner")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(art && !busy).id_salt("studio-apply").show(ui);
+                if widgets::deliberate(&r) {
+                    acts.push(Act::Apply(r.rect));
                 }
-                Some(_) => {
-                    let r = widgets::Button::new(tr("Apply as the group's banner")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(art && !busy).id_salt("studio-apply").show(ui);
-                    if r.clicked() {
-                        acts.push(Act::Apply(r.rect));
-                    }
+            } else {
+                let r = widgets::Button::new(tr("Upload to my gallery, then apply")).icon(icons::UPLOAD_SIMPLE).enabled(art && has && !busy && studio.making_upload.is_none()).id_salt("studio-upload").show(ui);
+                if widgets::deliberate(&r) {
+                    acts.push(Act::Upload(r.rect));
                 }
             }
         });
-        if studio.uploaded.is_some() {
+        if studio.upload_matches() {
             ui.label(egui::RichText::new(tr("Uploaded to your VRChat gallery. The group is unchanged until you apply it.")).color(theme::WARN).size(12.5));
+        } else if studio.uploaded.is_some() {
+            ui.label(egui::RichText::new(tr("The art changed since its upload: upload it again to apply it here. The earlier upload can be applied from the group's Look tab, where it is shown.")).color(theme::FG_3).size(12.5));
         }
         if studio.applied {
             ui.label(egui::RichText::new(tr("The group's banner is changed.")).color(theme::ACCENT).size(12.5));
         }
     } else {
-        ui.label(egui::RichText::new(tr("Direct apply is not available in this version: VRChat has not opened the nameplate slot to tools yet. Export both modes and upload them on the group's page on vrchat.com.")).color(theme::WARN).size(12.5));
+        if !orbiters_core::groups::NameplateApply::current().can_apply() {
+            ui.label(egui::RichText::new(tr("Direct apply is unavailable in this version. Export both modes and upload them on the group's page on vrchat.com.")).color(theme::WARN).size(12.5));
+        }
         if widgets::Button::new(tr("Open on vrchat.com")).icon(icons::ARROW_SQUARE_OUT).variant(widgets::Variant::Ghost).id_salt("studio-web").show(ui).clicked() {
             acts.push(Act::Web);
         }
@@ -815,7 +879,8 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
         Act::Target(t) => studio.target = t,
         Act::PickFile => {
             if let Some(path) = rfd::FileDialog::new().set_title(tr("Choose a picture")).add_filter(tr("Pictures"), &["png", "jpg", "jpeg", "webp"]).pick_file() {
-                studio.loading.push(load_file(ctx, path));
+                let l = load_file(ctx, studio, path);
+                studio.loading.push(l);
             }
         }
         Act::Gallery => {
@@ -848,11 +913,16 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
         Act::UseInventory(f) => {
             if let Some(scope) = scope {
                 studio.gallery = None;
+                studio.choice += 1;
+                studio.wanted_source = Some(f.url.clone());
                 studio.saved.source = Some(Source::Inventory { id: f.id.clone(), url: f.url.clone() });
                 state.jobs.ask(ctx, cx.ctl, &scope, Kind::Source(f.url.clone()), Request::Picture { url: f.url });
             }
         }
-        Act::UsePhoto(path) => studio.loading.push(load_file(ctx, path)),
+        Act::UsePhoto(path) => {
+            let l = load_file(ctx, studio, path);
+            studio.loading.push(l);
+        }
         Act::Export(all) => {
             let Some(loaded) = studio.source.as_ref() else { return };
             let full = loaded.full.clone();
@@ -865,14 +935,15 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             std::thread::spawn(move || {
                 let _working = working;
                 let dir = art::export_dir();
-                let r = targets
+                let r: Exported = targets
                     .into_iter()
                     .map(|(t, c)| {
-                        let png = art::encode_png(&art::render(&full, t, c)).map_err(|_| tr("The picture could not be made.").to_string())?;
-                        let path = art::save_new(&dir, &art::file_stem(&name, t), &png).map_err(|_| tr("The file could not be written.").to_string())?;
-                        Ok((t, path, png.len() as u64))
+                        let one = art::encode_png(&art::render(&full, t, c)).map_err(|_| tr("The picture could not be made.").to_string()).and_then(|png| {
+                            art::save_new(&dir, &art::file_stem(&name, t), &png).map(|path| (path, png.len() as u64)).map_err(|_| tr("The file could not be written.").to_string())
+                        });
+                        (t, one)
                     })
-                    .collect::<Result<Vec<_>, String>>();
+                    .collect();
                 let _ = tx.send(r);
                 ctx2.request_repaint();
             });
@@ -886,16 +957,38 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             let Some(loaded) = studio.source.as_ref() else { return };
             let full = loaded.full.clone();
             let crop = studio.saved.crop(Target::GroupBanner);
-            // Made here (it takes a moment), then prepared: the confirmation shows it before anything goes.
-            let png = art::render(&full, Target::GroupBanner, crop);
-            match art::encode_png(&png) {
-                Ok(bytes) => state.prepare(ctx, cx.ctl, Write::Upload { tag: FileTag::Gallery, png: bytes }, origin),
-                Err(_) => studio.error = Some(tr("The picture could not be made.").into()),
-            }
+            // Made here (it takes a moment), then staged for the service and prepared: the confirmation shows it before
+            // anything goes, and the upload is bound to this art and this group (Blocker 5, Major 1).
+            let rendered = art::render(&full, Target::GroupBanner, crop);
+            let bytes = match art::encode_png(&rendered) {
+                Ok(b) => b,
+                Err(_) => {
+                    studio.error = Some(tr("The picture could not be made.").into());
+                    return;
+                }
+            };
+            let staged = match super::stage_upload(&bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    studio.error = Some(tr("The file could not be written.").into());
+                    return;
+                }
+            };
+            let thumb = image::imageops::thumbnail(&rendered, 480, 270);
+            let tex = ctx.load_texture("group-upload-preview", egui::ColorImage::from_rgba_unmultiplied([thumb.width() as usize, thumb.height() as usize], thumb.as_raw()), egui::TextureOptions::LINEAR);
+            studio.upload_revision = Some(studio.revision());
+            studio.uploaded_art = Some(tex.clone());
+            let group = studio.card.id.clone();
+            state.confirm_art = Some(tex);
+            state.prepare(ctx, cx.ctl, Write::Upload { tag: FileTag::Gallery, group, staged }, origin);
         }
         Act::Apply(origin) => {
-            if let Some(f) = studio.uploaded.clone() {
+            if !studio.upload_matches() {
+                return;
+            }
+            if let Some((f, _)) = studio.uploaded.clone() {
                 let group = studio.card.id.clone();
+                state.confirm_art = studio.uploaded_art.clone();
                 state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot: ArtSlot::Banner, file: f.id }, origin);
             }
         }

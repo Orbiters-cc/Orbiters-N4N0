@@ -958,10 +958,12 @@ impl Client {
         self.groups.lock().unwrap().insert(id.clone(), tx);
         if self.state.lock().unwrap().closed {
             self.groups.lock().unwrap().remove(&id);
-            return Reply::Failed(Failure::Api(orbiters_core::vrchat_api::GroupFailure::Unavailable));
+            return Reply::Failed(Failure::Lost);
         }
         self.send(&ToService::Groups { id: id.clone(), scope, request });
-        let reply = rx.recv_timeout(Duration::from_secs(150)).unwrap_or(Reply::Failed(Failure::Api(orbiters_core::vrchat_api::GroupFailure::Unavailable)));
+        // No answer (the link closed, the mailbox let it go, the time ran out): the request may have been carried out,
+        // so it is "lost", never "unavailable" (verify-r22 Blocker 1).
+        let reply = rx.recv_timeout(Duration::from_secs(150)).unwrap_or(Reply::Failed(Failure::Lost));
         self.groups.lock().unwrap().remove(&id);
         reply
     }

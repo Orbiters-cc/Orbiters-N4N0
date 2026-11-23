@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 mod groups;
 mod social;
-pub use groups::{art_body, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
+pub use groups::{art_body, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
 pub use social::{boop_body, own_profile_body, own_status_body};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
@@ -1054,9 +1054,11 @@ impl Client {
         self.permitted()?;
         let unknown = ambiguous(method, family);
         let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None, form }).map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
-        // Backoff survives a revoked grant. No response data or cookies do.
+        // Backoff survives a revoked grant. No response data or cookies do. A 429 that came back to a write that went out
+        // proves nothing about what the server did with it: unknown, the back-off kept (verify-r22 Major 2).
         if response.status == 429 {
-            return Err(self.back_off(&response));
+            let refused = self.back_off(&response);
+            return Err(if unknown { Error::OutcomeUnknown } else { refused });
         }
         self.permitted().map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
         let before = self.cookies.clone();
@@ -1064,9 +1066,10 @@ impl Client {
             self.cookies.absorb(&response.cookies);
         }
         if !before.auth.is_empty() && self.cookies.auth.is_empty() {
-            // VRChat deleted the cookie: that session is over.
+            // VRChat deleted the cookie: that session is over. A write it answered otherwise than with a 401 may still
+            // have been done (Major 2).
             self.end();
-            return Err(Error::Unauthorized);
+            return Err(if unknown && response.status != 401 { Error::OutcomeUnknown } else { Error::Unauthorized });
         }
         if accept.contains(&response.status) {
             return Ok(response);
@@ -1961,6 +1964,9 @@ pub(crate) mod tests {
     }
     pub(super) fn raw_response(status: u16, body: &str) -> Response {
         response(status, body, &[])
+    }
+    pub(super) fn raw_response_with_cookie(status: u16, body: &str, cookie: &str) -> Response {
+        response(status, body, &[cookie])
     }
     /// A session VRChat ended: its 401, and the same to the look that confirms it.
     pub(crate) fn expired_session() -> Client {

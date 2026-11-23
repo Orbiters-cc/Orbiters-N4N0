@@ -1,5 +1,5 @@
 {
-  "Again in {n} s: one at a time keeps it fun": "{n} 秒後にもう一度：一回ずつが楽しい",
+  "Again in {n} s": "あと {n} 秒",
   "Boop again in {n} s": "{n} 秒後にもう一度ブープ",
   "From {app}'s copy, {when}": "{app} のコピー（{when}）",
   "Nobody matches “{text}”": "「{text}」に一致する人はいません",

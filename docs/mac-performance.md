@@ -204,6 +204,11 @@ window's process over 10 s, nobody touching it, the Mac busy with builds):
 | covered, nothing changing | 137 % | 0.0 % |
 | covered, five times a second | 137 % | 1.3 % |
 
+Since the ninth verification (2026-11-23, not measured again) "covered" is only what is certain: the window is not on screen, or
+a full-screen game's is over it. Where that cannot be told (no list of windows, another app's window over it, which may be clear in
+places) it is drawn once a second; and once, at once, when macOS says something that may have it show (in front, back from the
+Dock, the Space, the displays) or what it shows of the service's state changes, at most four times a second.
+
 The service's own looks (3 to 5 % of a core with nothing open, seen by thread on the running app, not measured again) are fewer:
 the engine's session records once a second instead of ten times, every process on the Mac every 30 s instead of 3, and beside
 a game the network every 2 s instead of twice a second and the processes' CPU every 15 s instead of 3.

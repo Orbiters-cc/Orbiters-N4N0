@@ -196,22 +196,45 @@ fn timestamp(line: &str) -> (&str, &str) {
     ("", line)
 }
 
-/// `line` without what its quotes hold, however they are written: a quote ends at the same spelling of it. Where one does not
-/// end, nothing from the first one on.
+/// The quotes a line may be written with.
+const QUOTES: [char; 9] = ['"', '\'', '`', '\u{201c}', '\u{201d}', '\u{2018}', '\u{2019}', '\u{ab}', '\u{bb}'];
+
+/// The quotes that end with another one than they begin with.
+const PAIRS: [(char, char); 4] = [('\u{201c}', '\u{201d}'), ('\u{2018}', '\u{2019}'), ('\u{ab}', '\u{bb}'), ('\u{bb}', '\u{ab}')];
+
+/// `line` without what its quotes hold, however they are written: a quote ends at the same spelling of it, or at the one it is
+/// paired with written alike, as often as it began. Where one does not end, nothing from the first one on.
 fn unquoted(line: &str) -> String {
-    const QUOTES: [char; 9] = ['"', '\'', '`', '\u{201c}', '\u{201d}', '\u{2018}', '\u{2019}', '\u{ab}', '\u{bb}'];
     let mut outside = String::new();
-    let mut open: Option<&str> = None;
+    // What it began with, as read and as written, what ends it, and how many of it are open.
+    let mut open: Option<(char, &str, char, u32)> = None;
     let mut first = None;
     let mut rest = line;
     while let Some((c, n)) = logical(rest) {
         let (spelling, after) = rest.split_at(n);
-        match open {
-            Some(begun) if begun == spelling => open = None,
-            Some(_) => {}
+        match &mut open {
+            Some((begin, begun, end, _)) if begin == end => {
+                if *begun == spelling {
+                    open = None;
+                }
+            }
+            Some((begin, begun, end, deep)) => {
+                let same = n == begun.len();
+                // (an apostrophe in a word ends nothing)
+                let apostrophe = c == '\u{2019}' && logical(after).is_some_and(|(next, _)| next.is_alphanumeric());
+                if same && c == *begin {
+                    *deep += 1;
+                } else if same && c == *end && !apostrophe {
+                    *deep -= 1;
+                }
+                if *deep == 0 {
+                    open = None;
+                }
+            }
             None => {
                 if QUOTES.contains(&c) {
-                    open = Some(spelling);
+                    let end = PAIRS.iter().find(|(begin, _)| *begin == c).map_or(c, |(_, end)| *end);
+                    open = Some((c, spelling, end, 1));
                     first.get_or_insert(outside.len());
                 }
                 outside.push_str(spelling);
@@ -246,7 +269,8 @@ fn counters(line: &str) -> Vec<String> {
 const LAYERS: usize = 5;
 
 /// The character at the start of `s` as it reads once decoded, and how many bytes of `s` it takes: `%5F`, `%255F` (encoded
-/// again, up to [`LAYERS`] times), `\u005f`, a JSON escape of a percent sign, `_` and `\/` are what they say.
+/// again, up to [`LAYERS`] times), `\u005f`, a JSON escape of a percent sign, `_` and `\/` are what they say, and so is a quote
+/// that is not ASCII (`%E2%80%9C`, `\u201c`).
 fn logical(s: &str) -> Option<(char, usize)> {
     decoded(s, LAYERS)
 }
@@ -257,19 +281,36 @@ fn decoded(s: &str, layers: usize) -> Option<(char, usize)> {
         return s.chars().next().map(|c| (c, c.len_utf8()));
     };
     let (first, length) = decoded(s, below)?;
-    let hex = |mut at: usize, digits: usize| -> Option<(char, usize)> {
+    let hex = |mut at: usize, digits: usize| -> Option<(u32, usize)> {
         let mut value = 0;
         for _ in 0..digits {
             let (c, n) = decoded(&s[at..], below)?;
             value = value * 16 + c.to_digit(16)?;
             at += n;
         }
-        Some((char::from_u32(value).filter(char::is_ascii)?, at))
+        Some((value, at))
+    };
+    let known = |c: char| (c.is_ascii() || QUOTES.contains(&c)).then_some(c);
+    // A byte, and those that go on with it where it begins a character of several.
+    let bytes = |at: usize| -> Option<(char, usize)> {
+        let (byte, mut at) = hex(at, 2)?;
+        let mut utf8 = vec![byte as u8];
+        for _ in 1..match byte {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            _ => 1,
+        } {
+            let (c, n) = decoded(&s[at..], below)?;
+            let (next, after) = hex(at + n, 2).filter(|_| c == '%')?;
+            utf8.push(next as u8);
+            at = after;
+        }
+        Some((known(std::str::from_utf8(&utf8).ok()?.chars().next()?)?, at))
     };
     let read = match first {
-        '%' => hex(length, 2),
+        '%' => bytes(length),
         '\\' => match decoded(&s[length..], below) {
-            Some(('u', n)) => hex(length + n, 4),
+            Some(('u', n)) => hex(length + n, 4).and_then(|(value, at)| Some((known(char::from_u32(value)?)?, at))),
             Some((c @ ('/' | '"' | '\'' | '\\'), n)) => Some((c, length + n)),
             _ => None,
         },
@@ -1138,12 +1179,29 @@ mod tests {
             r#""alpha frame=86420 omega"#,
             r#""alpha 86420 presents (12 shown events) omega""#,
             r#""alpha" "86420 frames""#,
+            // Ninth verification (the verifier's fixture): quotes that are not ASCII, encoded; nested; cut short; with another end.
+            "%E2%80%9Calpha frame=86420 omega%E2%80%9D",
+            "%e2%80%98alpha frame=86420 omega%e2%80%99",
+            "%C2%ABalpha frame=86420 omega%C2%BB",
+            "%25E2%2580%259Calpha frame=86420 omega%25E2%2580%259D",
+            r#"\u201calpha frame=86420 omega\u201d"#,
+            "%E2%80%9Calpha %E2%80%9Cbeta%E2%80%9D frame=86420 omega%E2%80%9D",
+            "%E2%80%9Calpha %e2%80%9cbeta%E2%80%9D frame=86420 omega%E2%80%9D",
+            "\u{201c}alpha \u{201c}beta\u{201d} frame=86420 omega\u{201d}",
+            "\u{2018}it\u{2019}s frame=86420 who\u{2019}s\u{2019}",
+            "%E2%80%9Calpha frame=86420 omega",
+            "%E2%80%9Calpha frame=86420 omega\u{201d} frame=86420",
+            "%E2%80%9Calpha\u{201d} frame=86420 omega%E2%80%9D",
         ] {
             kept(&format!("token={quoted}"), "", "");
             kept(&format!("frames=7 token={quoted}"), "", "frames=7");
         }
         kept(r#"token="alpha frame=86420 omega" 60 presents, frame=3"#, "", "60 presents frame=3");
         kept(r#"token="alpha" 60 "beta" presents"#, "", "");
+        // Once they end, what follows is outside them.
+        for quoted in ["\u{201c}alpha\u{201d}", "%E2%80%9Calpha%E2%80%9D", "\u{ab}alpha\u{bb}", "\u{2018}alpha\u{2019}", r#"\u201calpha\u201d"#] {
+            kept(&format!("token={quoted} 12 presents"), "", "12 presents");
+        }
         kept(r#"frames=7 token="alpha"beta frame=86420 omega""#, "", "frames=7");
         // What is not such a time, level or count is not one: no digits or words of a name or a value go by them.
         for line in [

@@ -52,6 +52,9 @@ pub struct App {
     /// Minimised for long while VRChat runs: the countdown to closing to the tray (`crate::window_rest`), on its clock.
     #[cfg(target_os = "macos")]
     cover: crate::mac_cover::Cover,
+    /// What was last told of the service's state that the window shows.
+    #[cfg(target_os = "macos")]
+    told: Option<Told>,
     rest: crate::window_rest::Rest,
     rest_clock: std::time::Instant,
     #[cfg(windows)]
@@ -78,6 +81,8 @@ impl App {
         round_corners(cc);
         #[cfg(target_os = "macos")]
         crate::mac::install_window_menu(ctl.clone());
+        #[cfg(target_os = "macos")]
+        crate::mac_cover::watch(&cc.egui_ctx);
         let mut app = Self::offline(ctl);
         app.windowed = true;
         app.gpu = cc.wgpu_render_state.as_ref().map(crate::gpu::Handles::of_window);
@@ -118,6 +123,8 @@ impl App {
             usage_told: false,
             #[cfg(target_os = "macos")]
             cover: Default::default(),
+            #[cfg(target_os = "macos")]
+            told: None,
             rest: Default::default(),
             rest_clock: std::time::Instant::now(),
             #[cfg(windows)]
@@ -256,6 +263,12 @@ impl App {
     /// Notices from the controller become toasts.
     fn drain_notices(&mut self, ctx: &egui::Context) {
         for n in self.ctl.take_notices() {
+            // Shown at once, however the window is held (mac_cover.rs).
+            #[cfg(target_os = "macos")]
+            {
+                self.cover.wake();
+                ctx.request_repaint();
+            }
             match n {
                 Notice::Toast { kind, message } => {
                     let kind = match kind {
@@ -902,12 +915,14 @@ pub fn window_icon() -> egui::IconData {
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(not(target_os = "macos"))]
+        let _ = frame;
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         // A Mac's window that macOS called covered is not drawn (eframe skips it), and macOS does not always say when
         // it shows again (mac_cover.rs).
         #[cfg(target_os = "macos")]
-        let game_in_front = self.windowed && self.follow_cover(ctx, focused);
+        let game_in_front = self.windowed && self.follow_cover(ctx, focused, crate::mac_cover::native(frame));
         #[cfg(not(target_os = "macos"))]
         let game_in_front = false;
         if self.ctl.take_show() {
@@ -1028,15 +1043,26 @@ impl App {
         page || orbiters_ui::front::held(ctx)
     }
 
-    /// A Mac's window held hidden: drawn only when it shows after all. Whether a game of the engine is in front.
+    /// A Mac's window held hidden: drawn only when it shows after all, or has something to show. Whether a game of the engine
+    /// is in front.
     #[cfg(target_os = "macos")]
-    fn follow_cover(&mut self, ctx: &egui::Context, focused: bool) -> bool {
-        use crate::mac_cover::Step;
-        let (minimized, hidden) = ctx.input(|i| (i.viewport().minimized == Some(true), i.viewport().occluded == Some(true)));
+    fn follow_cover(&mut self, ctx: &egui::Context, focused: bool, native: crate::mac_cover::Native) -> bool {
+        use crate::mac_cover::{look, woken, Step, LOOK_GAME};
+        let told = Told::of(&self.ctl.view());
+        if woken() || self.told.replace(told.clone()).is_some_and(|before| before != told) {
+            self.cover.wake();
+        }
+        let (said, hidden) = ctx.input(|i| (i.viewport().minimized == Some(true), i.viewport().occluded == Some(true)));
+        // eframe asks macOS once, as the window is made, and never again: it is told.
+        let (minimized, correct) = self.cover.minimized(said, native.minimized);
+        if let Some(is) = correct {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(is));
+        }
         if minimized {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(LOOK_GAME));
             return false;
         }
-        match self.cover.step(self.rest_clock.elapsed().as_secs_f64(), hidden, focused, crate::mac_cover::look) {
+        match self.cover.step(self.rest_clock.elapsed().as_secs_f64(), hidden, focused, || look(native.id)) {
             Step::AsAsked => {}
             Step::Draw(again) => {
                 // (asking for it asks for a frame now: only ever when this one is to be drawn)
@@ -1111,6 +1137,53 @@ impl App {
     }
 }
 
+/// What the window shows of the service's state whatever its page (its side bar, Home): a change of it is drawn at once even
+/// where the window is held hidden (mac_cover.rs). Nothing in it changes but when something happened.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct Told {
+    vrchat: (bool, Option<String>, Option<String>),
+    launcher: Arc<orbiters_core::launcher::LauncherState>,
+    account: Arc<crate::state::AccountStatus>,
+    settings: Arc<orbiters_core::settings::Settings>,
+    capture: CaptureState,
+    update: std::mem::Discriminant<UpdateState>,
+    osc: (bool, bool, Option<u16>),
+    lan: (std::mem::Discriminant<crate::state::LanLink>, Option<String>),
+    call: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Told {
+    fn of(snap: &Snapshot) -> Told {
+        Told {
+            vrchat: (snap.vrchat.running, snap.vrchat.world.world_id.clone(), snap.vrchat.world.world_name.clone()),
+            launcher: snap.launcher.arc(),
+            account: snap.account.arc(),
+            settings: snap.settings.arc(),
+            capture: snap.capture.state,
+            update: std::mem::discriminant(&snap.update.state),
+            osc: (snap.osc.listening, snap.osc.advertising, snap.osc.port),
+            lan: (std::mem::discriminant(&snap.lan.link), snap.lan.peer_label.clone()),
+            call: snap.n4n0.calls.call.is_some(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl PartialEq for Told {
+    fn eq(&self, other: &Told) -> bool {
+        // (a part nothing changed is the very same one: looked into only where it is not)
+        fn same<T: PartialEq>(a: &Arc<T>, b: &Arc<T>) -> bool {
+            Arc::ptr_eq(a, b) || a == b
+        }
+        same(&self.launcher, &other.launcher)
+            && same(&self.account, &other.account)
+            && same(&self.settings, &other.settings)
+            && (&self.vrchat, self.capture, self.update, self.osc, &self.lan, self.call) == (&other.vrchat, other.capture, other.update, other.osc, &other.lan, other.call)
+    }
+}
+
 /// The Capture tab's name, as a window closed to the tray on it saved it and N4N0's assistant names it: it took its
 /// place in Photos & captures (REQUEST21 5).
 const CAPTURE_PAGE: &str = "Capture"; // i18n: not shown (the window's own page names)
@@ -1143,6 +1216,38 @@ impl App {
 mod tests {
     use super::*;
     use pages::capture::Part;
+
+    /// Ninth verification: a window macOS alone put back from the Dock (its picture there pressed) is told to eframe, which holds
+    /// it minimized for ever otherwise, and drawn at once where it is held hidden too; a change of what it shows as well.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_window_put_back_from_the_dock_by_macos_is_drawn_again() {
+        use crate::mac_cover::{woken, Native, WATCHING};
+        let _watching = WATCHING.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = woken();
+        let mut app = App::offline(Arc::new(pages::capture::tests::Recorder::default()));
+        let ctx = egui::Context::default();
+        let pass = |app: &mut App, said: bool, occluded: bool, native: bool| {
+            let info = egui::ViewportInfo { minimized: Some(said), occluded: Some(occluded), ..Default::default() };
+            let input = egui::RawInput { viewports: std::iter::once((egui::ViewportId::ROOT, info)).collect(), ..Default::default() };
+            let out = ctx.run_logic(&input, |ctx| {
+                app.follow_cover(ctx, false, Native { id: Some(u32::MAX), minimized: Some(native) });
+            });
+            out.viewport_commands.into_values().flatten().collect::<Vec<_>>()
+        };
+        assert!(pass(&mut app, true, true, true).is_empty(), "in the Dock: nothing to tell");
+        assert_eq!(pass(&mut app, true, false, false), [ViewportCommand::Minimized(false)]);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        app.cover = Default::default();
+        assert_eq!(pass(&mut app, true, true, false), [ViewportCommand::Minimized(false), ViewportCommand::RequestPaintWhileHidden], "held hidden too");
+        // Told, and hidden for certain (its number is none macOS lists): no more frames, until what it shows changes.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(pass(&mut app, false, true, false).is_empty());
+        app.told.as_mut().unwrap().vrchat.0 ^= true;
+        assert_eq!(pass(&mut app, false, true, false), [ViewportCommand::RequestPaintWhileHidden]);
+        // Minimized by macOS alone (Command M): told as well.
+        assert_eq!(pass(&mut app, false, false, true), [ViewportCommand::Minimized(true)]);
+    }
 
     /// REQUEST21 5: the Capture tab left the sidebar; every way that opened it opens Photos & captures with its capture
     /// element open on the part it showed: a window closed to the tray on it, N4N0's assistant opening "the capture

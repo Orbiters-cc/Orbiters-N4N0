@@ -301,6 +301,9 @@ pub(crate) fn copy_keeping_then(
         bail!("{}", tr("The source folder no longer exists."));
     }
     let source = std::fs::canonicalize(source)?;
+    // Everything about the destination is checked before anything is made (r22 verification, blocker 1): a folder made on
+    // the way to a place then refused would be left behind, inside the very project being copied.
+    check_destination(&source, destination, project)?;
     let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
     std::fs::create_dir_all(parent)?;
     let parent = std::fs::canonicalize(parent)?;
@@ -539,22 +542,76 @@ pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
     Ok(total)
 }
 
+/// Where a copy of `source` (canonical) may go, decided from what exists before anything is created: the nearest existing
+/// folder above `destination` and every folder above that one are looked at by identity (a different spelling, a junction
+/// or a SUBST drive still names the same folder). The copy never goes inside the source, and a project's copy never goes
+/// inside any Unity project (`project`; a package copied into its own project's `Packages` is not a project copy).
+pub(crate) fn check_destination(source: &Path, destination: &Path, project: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(destination.is_absolute(), "{}", tr("Choose an absolute destination folder."));
+    anyhow::ensure!(!destination.components().any(|c| matches!(c, std::path::Component::ParentDir)), "{}", tr("Choose a destination folder"));
+    let source_id = crate::owned::id_of(source).ok();
+    let mut existing = destination.parent().with_context(|| tr("Choose a destination folder"))?;
+    while !existing.exists() {
+        existing = existing.parent().with_context(|| tr("Choose a destination folder"))?;
+    }
+    let existing = std::fs::canonicalize(existing)?;
+    if existing.starts_with(source) {
+        bail!("{}", tr("Create the copy outside the source project."));
+    }
+    for folder in existing.ancestors() {
+        if source_id.is_some() && crate::owned::id_of(folder).ok() == source_id {
+            bail!("{}", tr("Create the copy outside the source project."));
+        }
+        if project && folder.join("ProjectSettings/ProjectVersion.txt").is_file() {
+            bail!("{}", tr!("{path} is inside the Unity project {project}: choose a folder outside any Unity project.", path = destination.display(), project = folder.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the folder `copy` holds what `origin` holds: the same files at the same sizes (what a copy made earlier must
+/// match before it is taken as this package's).
+fn same_tree(origin: &Path, copy: &Path) -> bool {
+    let list = |root: &Path| -> Option<std::collections::BTreeMap<PathBuf, u64>> {
+        let mut out = std::collections::BTreeMap::new();
+        for e in walkdir::WalkDir::new(root).follow_links(true) {
+            let e = e.ok()?;
+            if e.file_type().is_file() {
+                out.insert(e.path().strip_prefix(root).ok()?.to_path_buf(), e.metadata().ok()?.len());
+            }
+        }
+        Some(out)
+    };
+    matches!((list(origin), list(copy)), (Some(a), Some(b)) if a == b)
+}
+
 /// Materialize external UPM folder dependencies so a moved duplicate does not depend on its source location.
 pub(crate) fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     let path = destination.join("Packages/manifest.json");
     if !path.is_file() { return Ok(()); }
     let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    // Where each local package comes from is the source's manifest's word: the copy's may have been rewritten already
+    // (a finish tried again), and its entries then name the copy's own folders.
+    let origins: serde_json::Value = std::fs::read(source.join("Packages/manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| manifest.clone());
     let mut changed = false;
     if let Some(dependencies) = manifest["dependencies"].as_object_mut() {
         for (name, value) in dependencies {
-            let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) else { continue };
+            let Some(local) = origins["dependencies"][name.as_str()].as_str().and_then(|s| s.strip_prefix("file:")).map(str::to_string) else { continue };
+            let local = local.as_str();
             anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
             let at = source.join("Packages").join(local);
             let origin = at.canonicalize().with_context(|| tr!("Required local package {name} is unavailable at {path}", name = name, path = at.display()))?;
             let target = destination.join("Packages").join(name);
             if origin.is_dir() {
-                if !target.exists() { copy_keeping_then(&origin, &target, Keep::default(), false, cancel, progress, |_| {})?; }
-                *value = serde_json::Value::String(format!("file:{name}"));
+                if !target.exists() {
+                    copy_keeping_then(&origin, &target, Keep::default(), false, cancel, progress, |_| {})?;
+                } else if !same_tree(&origin, &target) {
+                    // A folder of that name made earlier (a retry) or shipped in the project is taken only when it is the same package.
+                    bail!("{}", tr!("{path} in the copy is not the same as {name} at {origin}: Orbiters does not replace it.", path = target.display(), name = name, origin = origin.display()));
+                }
+                let now = serde_json::Value::String(format!("file:{name}"));
+                changed |= *value != now;
+                *value = now;
             } else {
                 let filename = format!("{name}.tgz");
                 let to = destination.join("Packages").join(&filename);
@@ -569,9 +626,10 @@ pub(crate) fn copy_local_packages(source: &Path, destination: &Path, cancel: &At
                 } else {
                     std::fs::copy(&origin, &to)?;
                 }
-                *value = serde_json::Value::String(format!("file:{filename}"));
+                let now = serde_json::Value::String(format!("file:{filename}"));
+                changed |= *value != now;
+                *value = now;
             }
-            changed = true;
         }
     }
     if changed { crate::write_json(&path, &manifest)?; }

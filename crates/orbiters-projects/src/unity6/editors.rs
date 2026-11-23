@@ -110,7 +110,18 @@ impl Found {
 
 /// Judges what a program said against the version wanted.
 pub fn judge(identity: Option<&Identity>, wanted: &str) -> Check {
+    judge_build(identity, wanted, None)
+}
+
+/// [`judge`], with the build (changeset) the project names when it names one: a program of another build is not it.
+/// A program whose processor could not be read is not verified.
+pub fn judge_build(identity: Option<&Identity>, wanted: &str, revision: Option<&str>) -> Check {
     let Some(id) = identity else { return Check::Unverified };
+    if let (Some(have), Some(want)) = (id.changeset.as_deref(), revision) {
+        if !have.eq_ignore_ascii_case(want) {
+            return Check::Wrong(tr!("it is Unity {found} of another build ({have})", found = id.version, have = have));
+        }
+    }
     let same = match (UnityVersion::parse(&id.version), UnityVersion::parse(wanted)) {
         (Some(a), Some(b)) => a == b && a.to_string() == b.to_string(),
         _ => id.version == wanted,
@@ -118,7 +129,10 @@ pub fn judge(identity: Option<&Identity>, wanted: &str) -> Check {
     if !same {
         return Check::Wrong(tr!("it is Unity {found}, not {wanted}", found = id.version, wanted = wanted));
     }
-    if !id.arch.is_empty() && !id.arch.contains(&Arch::here()) && Arch::here() != Arch::Other {
+    if id.arch.is_empty() {
+        return Check::Unverified;
+    }
+    if !id.arch.contains(&Arch::here()) && Arch::here() != Arch::Other {
         // Apple silicon runs an Intel editor through Rosetta: slower, not refused.
         let rosetta = cfg!(target_os = "macos") && Arch::here() == Arch::Arm64 && id.arch.contains(&Arch::X86_64);
         if !rosetta {
@@ -131,6 +145,11 @@ pub fn judge(identity: Option<&Identity>, wanted: &str) -> Check {
 /// Checks `hints` (in order) for `version` with `probe`: the first exact one, else the first that exists unverified,
 /// else what was found of other versions. Relative or empty paths and programs that are not there are left out.
 pub fn find_with(version: &str, hints: Vec<(PathBuf, Hint)>, probe: &dyn Fn(&Path) -> Option<Identity>) -> Found {
+    find_build_with(version, None, hints, probe)
+}
+
+/// [`find_with`] for a project naming its build (`revision`).
+pub fn find_build_with(version: &str, revision: Option<&str>, hints: Vec<(PathBuf, Hint)>, probe: &dyn Fn(&Path) -> Option<Identity>) -> Found {
     let mut unverified = None;
     let mut wrong = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -139,7 +158,7 @@ pub fn find_with(version: &str, hints: Vec<(PathBuf, Hint)>, probe: &dyn Fn(&Pat
             continue;
         }
         let identity = probe(&program);
-        let check = judge(identity.as_ref(), version);
+        let check = judge_build(identity.as_ref(), version, revision);
         let candidate = Candidate { modules: modules(&program), program, hint, check: check.clone(), identity };
         match check {
             Check::Verified => return Found::Exact(candidate),
@@ -155,17 +174,27 @@ pub fn find_with(version: &str, hints: Vec<(PathBuf, Hint)>, probe: &dyn Fn(&Pat
     }
 }
 
-/// [`find_with`] over every place this computer names, with the program's own answer.
+/// [`find_with`] over every place this computer names, with the program's own answer, read now.
 pub fn find(version: &str) -> Found {
+    find_build(version, None)
+}
+
+/// [`find`] for a project naming its build. A version that does not parse names no folder at all.
+pub fn find_build(version: &str, revision: Option<&str>) -> Found {
+    if UnityVersion::parse(version).is_none() {
+        return Found::Missing { wrong: vec![] };
+    }
     let mut hints = located_hints(&crate::data_dir(), version);
     hints.extend(crate::discovery::editor_hints(version));
-    let found = find_with(version, hints, &probe);
-    if found.usable().is_some() {
+    let found = find_build_with(version, revision, hints, &probe);
+    // An exact one ends the search; an unverified one does not keep VCC's database from being asked.
+    if matches!(found, Found::Exact(_)) {
         return found;
     }
     // VCC's or ALCOM's database, the slow source (bounded), only when nothing else had it.
     let more: Vec<_> = crate::discovery::database_editors(version).into_iter().map(|p| (p, Hint::VccDatabase)).collect();
-    match find_with(version, more, &probe) {
+    match find_build_with(version, revision, more, &probe) {
+        Found::Unverified(_) if matches!(found, Found::Unverified(_)) => found,
         Found::Missing { wrong } => match found {
             Found::Missing { wrong: mut before } => {
                 before.extend(wrong);
@@ -269,6 +298,11 @@ pub fn macho_arch(head: &[u8]) -> Vec<Arch> {
             let n = head.get(4..8).map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap())) as usize;
             (0..n.min(8)).filter_map(|i| head.get(8 + i * 20..12 + i * 20)).map(|b| cpu(u32::from_be_bytes(b.try_into().unwrap()))).collect()
         }
+        // The same with 64-bit offsets: 32 bytes per processor.
+        [0xca, 0xfe, 0xba, 0xbf] => {
+            let n = head.get(4..8).map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap())) as usize;
+            (0..n.min(8)).filter_map(|i| head.get(8 + i * 32..12 + i * 32)).map(|b| cpu(u32::from_be_bytes(b.try_into().unwrap()))).collect()
+        }
         [0xcf, 0xfa, 0xed, 0xfe] => head.get(4..8).map(|b| vec![cpu(u32::from_le_bytes(b.try_into().unwrap()))]).unwrap_or_default(),
         _ => vec![],
     }
@@ -295,8 +329,8 @@ pub fn probe(program: &Path) -> Option<Identity> {
         // .../Unity.app/Contents/MacOS/Unity → .../Unity.app/Contents/Info.plist
         let plist = plist::Value::from_file(program.parent()?.parent()?.join("Info.plist")).ok()?;
         let dict = plist.as_dictionary()?;
-        let text = dict.get("CFBundleVersion").and_then(|v| v.as_string()).or_else(|| dict.get("CFBundleShortVersionString").and_then(|v| v.as_string()))?;
-        let (version, _) = parse_product_version(text)?;
+        // The first of the two that is a Unity version (one can hold something else).
+        let (version, _) = ["CFBundleVersion", "CFBundleShortVersionString"].iter().find_map(|k| dict.get(k).and_then(|v| v.as_string()).and_then(parse_product_version))?;
         let changeset = dict.get("UnityBuildNumber").and_then(|v| v.as_string()).map(str::to_string);
         Some(Identity { version, changeset, arch: macho_arch(&head_of(program)) })
     }
@@ -411,6 +445,12 @@ mod tests {
         if !(cfg!(target_os = "macos") && Arch::here() == Arch::Arm64) {
             assert!(matches!(judge(Some(&foreign), "6000.0.67f1"), Check::Wrong(_)), "built for another processor");
         }
+        // Verification blocker 4: another build of the same version, or a program whose processor is unknown, is not it.
+        let build = |c: &str| Identity { version: "6000.0.67f1".into(), changeset: Some(c.into()), arch: vec![Arch::here()] };
+        assert_eq!(judge_build(Some(&build("78a1c2bbeb6a")), "6000.0.67f1", Some("78a1c2bbeb6a")), Check::Verified);
+        assert!(matches!(judge_build(Some(&build("61dfb374e36f")), "6000.0.67f1", Some("78a1c2bbeb6a")), Check::Wrong(_)));
+        assert_eq!(judge(Some(&Identity { version: "6000.0.67f1".into(), changeset: None, arch: vec![] }), "6000.0.67f1"), Check::Unverified);
+        assert_eq!(find_build("six", None), Found::Missing { wrong: vec![] }, "no folder is built from a version that does not parse");
         assert_eq!(parse_product_version("6000.0.67f1_78a1c2bbeb6a"), Some(("6000.0.67f1".into(), Some("78a1c2bbeb6a".into()))));
         assert_eq!(parse_product_version("2022.3.22f1"), Some(("2022.3.22f1".into(), None)));
         assert_eq!(parse_product_version("8,0,3326,52219"), None, "a program that is not Unity says no Unity version");
@@ -432,6 +472,10 @@ mod tests {
         fat.extend([0x01, 0, 0, 0x0c]);
         fat.extend([0u8; 16]);
         assert_eq!(macho_arch(&fat), vec![Arch::X86_64, Arch::Arm64]);
+        let mut fat64 = vec![0xca, 0xfe, 0xba, 0xbf, 0, 0, 0, 1];
+        fat64.extend([0x01, 0, 0, 0x0c]);
+        fat64.extend([0u8; 28]);
+        assert_eq!(macho_arch(&fat64), vec![Arch::Arm64]);
         assert_eq!(macho_arch(&[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01]), vec![Arch::Arm64]);
     }
 

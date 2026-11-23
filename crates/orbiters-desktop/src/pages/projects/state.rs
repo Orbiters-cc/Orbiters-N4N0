@@ -314,6 +314,8 @@ pub struct State {
     pub(super) was_scanning: bool,
     /// VRChat's move to Unity 6: standings, trials, editors, the Try on Unity 6 sheet (`unity6`).
     pub(super) u6: super::unity6::U6,
+    /// Counts the scan's updates taken in (what depends on the list of projects is rebuilt only when it changes).
+    pub(super) scan_serial: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -457,6 +459,7 @@ impl Default for State {
             scroll_fix: None,
             was_scanning: false,
             u6: Default::default(),
+            scan_serial: 0,
         }
     }
 }
@@ -713,7 +716,10 @@ impl State {
                     // A list read before a change made here would undo it.
                     ScanEvent::Hidden(list) if self.hidden_changes == 0 => self.hidden = list,
                     ScanEvent::Hidden(_) => {}
-                    ScanEvent::Update(scan) => self.scan = scan,
+                    ScanEvent::Update(scan) => {
+                        self.scan = scan;
+                        self.scan_serial += 1;
+                    }
                     ScanEvent::Done(result) => {
                         done = true;
                         match result {

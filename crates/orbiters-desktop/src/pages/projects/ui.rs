@@ -290,14 +290,15 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else {
         grid(ui, cx, state, &registered);
     }
-    // Unity 6 trials not (yet) projects: being made, stopped, or not where they were (AGENTS.md: a retained copy is visible).
-    super::unity6_card::job_rows(ui, state);
     if !proposals.is_empty() {
         ui.add_space(32.0);
         section_title(ui, tr("Found on this computer"), Some(proposals_n), Some(tr("Add one to manage its avatars and packages here, in VCC and in ALCOM.")));
         ui.add_space(10.0);
         found(ui, cx, state, &proposals);
     }
+    // Unity 6 trials not (yet) projects: being made, stopped, or not where they were (AGENTS.md: a retained copy is
+    // visible). Last in the gallery, so a row arriving later never moves the cards or rows above it (verification's major 6).
+    super::unity6_card::job_rows(ui, state);
 }
 
 fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {

@@ -34,6 +34,10 @@ pub fn data_dir() -> PathBuf {
     if let Some(roots) = orbiters_core::paths::roots() {
         return roots.local_data.clone();
     }
+    // This crate's own tests never read or write the person's app data.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("orbiters-projects-tests-{}", std::process::id()));
+    #[allow(unreachable_code)]
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Orbiters")
 }
 
@@ -320,10 +324,22 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
         tr!("Something else holds {name}'s lock (its Temp/UnityLockfile): Unity still quitting, or Orbiters repairing its storage. Try again in a moment.", name = project.name)
     );
     // Read again now, not as the scan saw it: Creator Companion or another tool may have changed it since (M6).
-    let unity = unity6::standing::EditorStamp::read(&project.path).text;
-    anyhow::ensure!(!unity.is_empty(), "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
-    // Only that exact editor: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
-    let editor = choose_editor(&unity, unity6::editors::find(&unity))?;
+    let stamp = unity6::standing::EditorStamp::read(&project.path);
+    anyhow::ensure!(stamp.parsed, "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
+    // A Unity 6 trial keeps its protections whoever opens it (the page, the bridge, the Toolkit's update): one waiting for
+    // Creator Companion is not opened, one on Unity 6 opens through its own launcher, with a log of its own.
+    match unity6::trial::guard(&data_dir(), &project.path) {
+        unity6::trial::Guard::Free => {}
+        unity6::trial::Guard::Blocked(why) => anyhow::bail!("{why}"),
+        unity6::trial::Guard::Unity6(job) => {
+            let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
+            unity6::trial::launch(&data_dir(), &job.id, &|v| unity6::editors::find(v), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
+            return Ok(Opened { already_open: false, moved: None });
+        }
+    }
+    let unity = stamp.text.clone();
+    // Only that exact editor and build: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
+    let editor = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
     let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
     let moved = storage::preflight(&project.path).unwrap_or_else(|e| {
@@ -346,7 +362,14 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
 /// said); never another one, which is named instead.
 fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<PathBuf> {
     match found {
-        unity6::editors::Found::Exact(c) | unity6::editors::Found::Unverified(c) => Ok(c.program),
+        unity6::editors::Found::Exact(c) => Ok(c.program),
+        // A program that says nothing of itself is used only where Unity Hub itself put that version (its own folder named
+        // after it); anything else must say what it is.
+        unity6::editors::Found::Unverified(c) if matches!(c.hint, unity6::editors::Hint::HubFolder | unity6::editors::Hint::HubSecondary) => Ok(c.program),
+        unity6::editors::Found::Unverified(c) => anyhow::bail!(
+            "{}",
+            tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = c.program.display(), version = unity)
+        ),
         unity6::editors::Found::Missing { wrong } => match wrong.first() {
             Some(other) => anyhow::bail!(
                 "{}",
@@ -356,6 +379,19 @@ fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<P
         },
     }
 }
+
+/// An editor that started and ended at once (its exit status when the system gave one, and the sentence saying so): a
+/// different fact from a program that could not be started at all.
+#[derive(Debug)]
+pub struct QuitAtOnce(pub Option<String>, pub String);
+
+impl std::fmt::Display for QuitAtOnce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for QuitAtOnce {}
 
 /// The editor being started, so that each way it can fail is told as one whole sentence (a sentence cut in pieces cannot be translated).
 #[derive(Clone, Copy)]
@@ -375,19 +411,14 @@ impl Starting<'_> {
         anyhow::anyhow!("{}", tr!("Unity {unity} ({editor}) could not be watched: {why}", unity = unity, editor = editor, why = why))
     }
 
-    /// It ended at once, with `status` when the system says one.
+    /// It ended at once, with `status` when the system says one ([`QuitAtOnce`], told apart from a program that never started).
     fn quit(&self, status: Option<std::process::ExitStatus>) -> anyhow::Error {
         let (unity, editor) = (self.unity, self.editor.display());
-        match status {
-            Some(status) => anyhow::anyhow!(
-                "{}",
-                tr!("Unity {unity} ({editor}) quit right after starting ({status}). Its log is at {log}.", unity = unity, editor = editor, status = status, log = EDITOR_LOG)
-            ),
-            None => anyhow::anyhow!(
-                "{}",
-                tr!("Unity {unity} ({editor}) quit right after starting. Its log is at {log}.", unity = unity, editor = editor, log = EDITOR_LOG)
-            ),
-        }
+        let message = match status {
+            Some(status) => tr!("Unity {unity} ({editor}) quit right after starting ({status}). Its log is at {log}.", unity = unity, editor = editor, status = status, log = EDITOR_LOG),
+            None => tr!("Unity {unity} ({editor}) quit right after starting. Its log is at {log}.", unity = unity, editor = editor, log = EDITOR_LOG),
+        };
+        anyhow::Error::new(QuitAtOnce(status.map(|s| s.to_string()), message))
     }
 }
 
@@ -657,6 +688,11 @@ mod open_tests {
         let error = format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![wrong] }).unwrap_err());
         assert!(error.contains("another version") && error.contains("6000.0.67f1"), "{error}");
         assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![] }).unwrap_err()).contains("not installed"));
+        // Verification blocker 4: a program found by another tool's hint that says nothing of itself is not used.
+        let mut vcc_hint = candidate("D:/Elsewhere/Unity.exe", Check::Unverified);
+        vcc_hint.hint = Hint::VccSettings;
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Unverified(vcc_hint)).unwrap_err()).contains("could not be verified"));
+        assert!(choose_editor("6000.0.67f1", Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_ok(), "Hub's own folder of that version");
         let exact = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Verified);
         assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap(), PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
         // The scan saw 2022; Creator Companion changed the file since: the file is what counts, and a file naming no

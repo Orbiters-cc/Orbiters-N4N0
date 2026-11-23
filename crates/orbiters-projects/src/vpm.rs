@@ -369,6 +369,11 @@ pub enum Change {
     Plan { install: Vec<(String, String)>, remove: Vec<String>, prerelease: bool },
 }
 pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<()> {
+    // A Unity 6 trial waiting for Creator Companion (or not finished) keeps its packages, whoever asks (the page, the
+    // bridge, the Toolkit's update): verification blocker 3.
+    if let crate::unity6::trial::Guard::Blocked(why) = crate::unity6::trial::guard(&crate::data_dir(), path) {
+        bail!("{why}");
+    }
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;

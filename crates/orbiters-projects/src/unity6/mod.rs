@@ -14,6 +14,7 @@ pub mod trial;
 pub mod vcc;
 
 use orbiters_i18n::tr;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// The release key the served release list must be signed with.
@@ -33,30 +34,58 @@ pub struct Pair {
 /// trials and where they stand. It only reads: no network, no resolver, no write anywhere.
 #[derive(Clone, Debug)]
 pub struct Look {
+    /// The list shown (built in, or a verified served copy): display only.
     pub matrix: matrix::Matrix,
+    /// The projects this look was asked for, in order: an answer for another list is not applied.
+    pub projects: Vec<PathBuf>,
+    /// Standings by the built-in list only: they decide actions, so a served row never does (verification's major 7).
     pub standings: Vec<(PathBuf, standing::Standing)>,
+    /// Each standing's place by [`crate::discovery::key`] of its path.
+    pub index: HashMap<String, usize>,
     pub trials: Vec<(trial::Job, trial::Status)>,
     pub pairs: Vec<Pair>,
+    /// Whether the record can be trusted.
+    pub health: trial::Health,
+    /// Keys of trial folders that are there now (the page never asks the disk while drawing).
+    pub present: HashSet<String>,
+}
+
+impl Look {
+    pub fn standing(&self, path: &Path) -> Option<&standing::Standing> {
+        self.index.get(&crate::discovery::key(path)).map(|&i| &self.standings[i].1)
+    }
 }
 
 /// [`Look`] for `projects`, with the record in `dir` (app data). `running`: the trials this window is preparing.
 pub fn look(dir: &Path, projects: &[PathBuf], running: &[String]) -> Look {
     let matrix = matrix::load(dir, key().as_ref());
-    let standings = projects.iter().map(|p| (p.clone(), standing::read(p, &matrix))).collect();
-    let trials: Vec<(trial::Job, trial::Status)> = trial::jobs(dir)
+    let policy = matrix::Matrix::built_in();
+    let standings: Vec<(PathBuf, standing::Standing)> = projects.iter().map(|p| (p.clone(), standing::read(p, &policy))).collect();
+    let index = standings.iter().enumerate().map(|(i, (p, _))| (crate::discovery::key(p), i)).collect();
+    let record = trial::record(dir);
+    let trials: Vec<(trial::Job, trial::Status)> = record
+        .jobs
         .into_iter()
         .map(|j| {
-            let s = trial::status(&j, running.contains(&j.id), &matrix);
+            let s = trial::status(&j, running.contains(&j.id));
             (j, s)
         })
         .collect();
+    // Lineage needs a positive match of both folders (verification's major 10).
     let pairs = trials
         .iter()
         .filter(|(_, s)| !matches!(s, trial::Status::Replaced | trial::Status::Missing | trial::Status::Failed { .. } | trial::Status::Interrupted { complete: false }))
-        .filter(|(j, _)| j.source.id.is_none_or(|id| crate::owned::is_same(&j.source.path, id)))
+        .filter(|(j, _)| j.source_verified())
         .map(|(j, _)| Pair { original: j.source.path.clone(), trial: j.unity6().path.clone(), job: j.id.clone() })
         .collect();
-    Look { matrix, standings, trials, pairs }
+    let present = trials
+        .iter()
+        .flat_map(|(j, _)| [Some(&j.trial), j.migrated.as_ref()])
+        .flatten()
+        .filter(|p| p.path.exists())
+        .map(|p| crate::discovery::key(&p.path))
+        .collect();
+    Look { matrix, projects: projects.to_vec(), standings, index, trials, pairs, health: record.health, present }
 }
 
 /// What is in the way of a trial, said in a sentence each.
@@ -71,6 +100,8 @@ pub fn describe_blockers(blockers: &[trial::Blocker]) -> String {
                 tr!("Only its Library holds {packages}: a copy without Library would lose them. Open it once in Unity 2022 so they are installed.", packages = names.join(", "))
             }
             trial::Blocker::LocalMissing(names) => tr!("Local packages it uses are not where it says: {packages}.", packages = names.join(", ")),
+            trial::Blocker::Unsupported(names) => tr!("A copy could not keep these packages whole: {packages}. Make them ordinary packages of the project first.", packages = names.join(", ")),
+            trial::Blocker::Trial => tr("This project is itself a Unity 6 trial, or the trials record cannot be read.").to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")

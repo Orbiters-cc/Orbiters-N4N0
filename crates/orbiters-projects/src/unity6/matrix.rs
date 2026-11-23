@@ -319,6 +319,19 @@ pub fn sign(json: &str, private_key: &[u8]) -> anyhow::Result<String> {
 struct Kept {
     verified: u64,
     envelope: String,
+    /// The highest serial ever accepted here: a copy below it is a rollback, whatever the file holds now.
+    #[serde(default)]
+    high: u64,
+}
+
+/// The kept file, read only when it is no longer than a served copy can be (with its few fields around it).
+fn read_kept(dir: &Path) -> Option<Kept> {
+    let path = kept_path(dir);
+    let len = std::fs::metadata(&path).ok()?.len();
+    if len > 2 * MAX_BYTES as u64 + 1024 {
+        return None;
+    }
+    serde_json::from_slice::<Kept>(&std::fs::read(path).ok()?).ok()
 }
 
 fn kept_path(dir: &Path) -> PathBuf {
@@ -330,7 +343,7 @@ fn kept_path(dir: &Path) -> PathBuf {
 pub fn load(dir: &Path, key: Option<&[u8; 32]>) -> Matrix {
     let built = Matrix::built_in();
     let Some(key) = key else { return built };
-    let Some(kept) = std::fs::read(kept_path(dir)).ok().and_then(|b| serde_json::from_slice::<Kept>(&b).ok()) else { return built };
+    let Some(kept) = read_kept(dir) else { return built };
     match open(kept.envelope.as_bytes(), key) {
         Ok(data) if data.serial >= built.data.serial => Matrix { data, origin: Origin::Served { verified: kept.verified }, built_in: built.built_in },
         _ => built,
@@ -358,15 +371,26 @@ pub trait Fetch {
 pub fn refresh(dir: &Path, key: &[u8; 32], fetch: &dyn Fetch, url: &str, now: u64) -> anyhow::Result<Refresh> {
     let bytes = fetch.get(url, MAX_BYTES)?;
     let data = open(&bytes, key)?;
+    let incoming: Envelope = serde_json::from_slice(&bytes)?;
+    // Compared and kept under one lock across processes: two refreshes never pass each other (verification's major 9).
+    std::fs::create_dir_all(dir)?;
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("unity6-data.lock"))?;
+    lock.lock()?;
+    let kept = read_kept(dir);
     let current = load(dir, Some(key));
+    let high = kept.as_ref().map_or(0, |k| k.high).max(current.data.serial);
     anyhow::ensure!(
-        data.serial >= current.data.serial,
+        data.serial >= high,
         "{}",
-        tr!("the release list served (number {served}) is older than the one kept (number {kept})", served = data.serial, kept = current.data.serial)
+        tr!("the release list served (number {served}) is older than the one kept (number {kept})", served = data.serial, kept = high)
     );
     let same = data.serial == current.data.serial;
+    if same && current.origin != Origin::BuiltIn {
+        let kept_data = kept.as_ref().and_then(|k| serde_json::from_str::<Envelope>(&k.envelope).ok()).map(|e| e.data);
+        anyhow::ensure!(kept_data.as_deref() == Some(incoming.data.as_str()), "{}", tr("the release list served has the number of the one kept, with other contents"));
+    }
     let envelope = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{}", tr("the release list cannot be read")))?;
-    crate::write_json(&kept_path(dir), &Kept { verified: now, envelope })?;
+    crate::write_json(&kept_path(dir), &Kept { verified: now, envelope, high: high.max(data.serial) })?;
     Ok(if same { Refresh::Same } else { Refresh::Newer(data.serial) })
 }
 
@@ -520,6 +544,19 @@ mod tests {
         // The same copy again: verified again, its age starts over.
         assert_eq!(refresh(dir.path(), &public, &Fake::answering(newer.into_bytes()), url, 5_000).unwrap(), Refresh::Same);
         assert_eq!(load(dir.path(), Some(&public)).age(5_000), Some(0));
+
+        // Verification major 9: the same number with other contents is refused.
+        let mut other: serde_json::Value = serde_json::from_str(&served(2, true)).unwrap();
+        other["verified"] = "2026-11-30".into();
+        assert!(refresh(dir.path(), &public, &Fake::answering(sign(&other.to_string(), &private).unwrap().into_bytes()), url, 5_500).is_err());
+        // A newer one, then the kept file put back to the older one: the older one is still a rollback.
+        let older_kept = std::fs::read(dir.path().join(KEPT_FILE)).unwrap();
+        refresh(dir.path(), &public, &Fake::answering(sign(&served(7, false), &private).unwrap().into_bytes()), url, 5_600).unwrap();
+        let mut back: serde_json::Value = serde_json::from_slice(&older_kept).unwrap();
+        back["high"] = 7.into();
+        std::fs::write(dir.path().join(KEPT_FILE), back.to_string()).unwrap();
+        assert!(refresh(dir.path(), &public, &Fake::answering(sign(&served(3, false), &private).unwrap().into_bytes()), url, 5_700).is_err());
+        std::fs::write(dir.path().join(KEPT_FILE), &older_kept).unwrap();
 
         // A network failure: the kept copy stays.
         let failing = Fake { answer: RefCell::new(Err(anyhow::anyhow!("offline"))), asked: RefCell::default() };

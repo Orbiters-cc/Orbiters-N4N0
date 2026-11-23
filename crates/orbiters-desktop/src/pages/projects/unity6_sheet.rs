@@ -62,13 +62,15 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
     }
     let source = project.path.clone();
     let target = state.u6.matrix().unity6_target().cloned();
-    let editor_missing = target.as_ref().is_some_and(|t| state.u6.editors.get(&t.unity).is_none_or(|f| f.usable().is_none()));
+    // Unity 6000 counts as installed only when verified; the modules counted are those the project's 2022 editor has.
+    let editor_missing = target.as_ref().is_some_and(|t| !matches!(state.u6.editors.get(&t.unity), Some(orbiters_projects::unity6::editors::Found::Exact(_))));
+    let modules = state.u6.standing(&project.path).and_then(|s| state.u6.editors.get(&s.editor.text)).and_then(|f| f.usable().map(|c| c.modules)).unwrap_or_default();
     state.u6.sheet.check = Job::spawn(ctx, move || {
         let checked: Checked = (|| -> anyhow::Result<_> {
             let destination = PathBuf::from(&key.0).join(&key.1);
             let copy = orbiters_projects::templates::duplication_bytes(&source, orbiters_projects::templates::Keep::default())?;
             let library = orbiters_projects::size::lookup(&source).size.map(|s| s.library);
-            let editor = target.as_ref().and_then(|t| t.size_here()).filter(|_| editor_missing).map(|s| (budget::editor_install_folder(), s.download + s.installed));
+            let editor = target.as_ref().and_then(|t| t.size_here()).filter(|_| editor_missing).map(|s| budget::EditorNeed::of(s, modules.android, modules.ios));
             let (demands, guessed) = budget::demands(&destination, copy, library, editor);
             let plan = budget::plan(demands, &budget::Disks, guessed);
             let s = standing::read(&source, &unity6::matrix::Matrix::built_in());
@@ -87,7 +89,8 @@ fn need_label(n: budget::Need) -> &'static str {
     match n {
         budget::Need::Copy => tr("The trial's files, measured"),
         budget::Need::Import => tr("Unity 6's first import, estimated"),
-        budget::Need::Editor => tr("Unity 6000 to download and install"),
+        budget::Need::Editor => tr("Unity 6000 and its modules, installed"),
+        budget::Need::Download => tr("Unity 6000 and its modules, downloaded first"),
         budget::Need::Margin => tr("Room kept free for Unity's temporary files"),
     }
 }

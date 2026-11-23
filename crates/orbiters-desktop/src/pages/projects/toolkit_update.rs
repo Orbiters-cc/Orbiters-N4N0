@@ -18,13 +18,21 @@ pub enum ToolkitOffer {
     Looking,
     /// No project here holds it.
     NotHere,
+    /// Not offered, and why: several projects hold it, or only a Unity 6 trial does (verification's blocker 3).
+    Refused(String),
 }
 
-/// Among `projects`, the one that holds the avatar `id`: a project VCC lists before one merely found on a disk, then the
-/// first found. The same blueprint ID can be in several: uploading from any of them updates the same avatar.
-pub fn project_of<'a>(projects: &'a [Project], id: &str) -> Option<&'a Project> {
-    let holds = |p: &&Project| !p.missing && p.avatars.iter().any(|a| a.id == id);
-    projects.iter().filter(|p| p.registered).find(holds).or_else(|| projects.iter().find(holds))
+/// Among `projects`, the one that holds the avatar `id`, never a Unity 6 trial (`trial`): a trial shares its original's
+/// avatar IDs, and an upload from Unity 6 would end the avatar's uploads from Unity 2022. A project VCC lists comes before
+/// one merely found on a disk. Several listed projects holding it is not decided here: `Err` names them.
+pub fn project_of<'a>(projects: &'a [Project], id: &str, trial: impl Fn(&Project) -> bool) -> Result<Option<&'a Project>, Vec<String>> {
+    let holds = |p: &&Project| !p.missing && p.avatars.iter().any(|a| a.id == id) && !trial(p);
+    let listed: Vec<&Project> = projects.iter().filter(|p| p.registered).filter(holds).collect();
+    match listed.len() {
+        0 => Ok(projects.iter().find(holds)),
+        1 => Ok(Some(listed[0])),
+        _ => Err(listed.iter().map(|p| p.name.clone()).collect()),
+    }
 }
 
 /// What the person reads when no project here holds the avatar.
@@ -38,10 +46,15 @@ pub fn refusal(avatar: Option<&str>) -> String {
 impl State {
     /// [`ToolkitOffer`] of the avatar `id`.
     pub fn toolkit_offer(&self, id: &str) -> ToolkitOffer {
-        match project_of(&self.scan.projects, id) {
-            Some(p) => ToolkitOffer::Project(p.name.clone()),
-            None if self.scanning() || !self.started => ToolkitOffer::Looking,
-            None => ToolkitOffer::NotHere,
+        let is_trial = |p: &Project| self.u6.trial_at(&p.path).is_some();
+        match project_of(&self.scan.projects, id, is_trial) {
+            Ok(Some(p)) => ToolkitOffer::Project(p.name.clone()),
+            Err(names) => ToolkitOffer::Refused(tr!("This avatar is in several of your projects ({names}): update the Toolkit in the one you upload from, in Unity projects.", names = names.join(", "))),
+            Ok(None) if self.scan.projects.iter().any(|p| !p.missing && is_trial(p) && p.avatars.iter().any(|a| a.id == id)) => ToolkitOffer::Refused(
+                tr("Only a Unity 6 trial holds this avatar here. Uploading it from Unity 6 would end its uploads from Unity 2022, so Orbiters does not prepare an upload from it.").to_string(),
+            ),
+            Ok(None) if self.scanning() || !self.started => ToolkitOffer::Looking,
+            Ok(None) => ToolkitOffer::NotHere,
         }
     }
 
@@ -53,7 +66,8 @@ impl State {
 
     /// Updates the Toolkit in the project that holds the avatar `id`, then opens it in Unity (or brings it forward).
     pub fn update_toolkit(&mut self, ctx: &egui::Context, id: &str, avatar: Option<&str>) {
-        let Some(project) = project_of(&self.scan.projects, id).cloned() else { return };
+        let is_trial = |p: &Project| self.u6.trial_at(&p.path).is_some();
+        let Ok(Some(project)) = project_of(&self.scan.projects, id, is_trial).map(|p| p.cloned()) else { return };
         let name = project.name.clone();
         let avatar = avatar.map(str::to_string);
         self.task(ctx, &tr!("Updating Orbiters Toolkit in {name}…", name = name), move || {
@@ -109,9 +123,22 @@ mod tests {
             project("listed", true, false, &["avtr_a", "avtr_b"]),
             project("other", true, false, &["avtr_c"]),
         ];
-        assert_eq!(project_of(&projects, "avtr_a").map(|p| p.name.as_str()), Some("listed"));
-        assert_eq!(project_of(&projects[..2], "avtr_a").map(|p| p.name.as_str()), Some("found on a disk"));
-        assert!(project_of(&projects, "avtr_z").is_none());
+        let none = |_: &Project| false;
+        assert_eq!(project_of(&projects, "avtr_a", none).unwrap().map(|p| p.name.as_str()), Some("listed"));
+        assert_eq!(project_of(&projects[..2], "avtr_a", none).unwrap().map(|p| p.name.as_str()), Some("found on a disk"));
+        assert!(project_of(&projects, "avtr_z", none).unwrap().is_none());
+    }
+
+    /// Verification blocker 3: a Unity 6 trial sharing the avatar's ID is never the one prepared for an upload, and two
+    /// listed projects holding it are not decided by order.
+    #[test]
+    fn a_trial_or_an_ambiguous_avatar_is_never_picked_for_an_upload() {
+        let projects = [project("listed", true, false, &["avtr_a"]), project("listed (Unity 6)", true, false, &["avtr_a"])];
+        let trial = |p: &Project| p.name.ends_with("(Unity 6)");
+        assert_eq!(project_of(&projects, "avtr_a", trial).unwrap().map(|p| p.name.as_str()), Some("listed"));
+        assert!(project_of(&projects[1..], "avtr_a", trial).unwrap().is_none(), "a trial alone is not offered");
+        let two = [project("one", true, false, &["avtr_a"]), project("two", true, false, &["avtr_a"])];
+        assert_eq!(project_of(&two, "avtr_a", |_: &Project| false).unwrap_err(), vec!["one".to_string(), "two".to_string()]);
     }
 
     /// A polite no, which does not send the person looking for a problem.

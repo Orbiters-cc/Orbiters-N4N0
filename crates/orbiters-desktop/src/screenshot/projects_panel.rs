@@ -64,6 +64,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         // VRChat's move to Unity 6 (`pages/projects/unity6_fixtures.rs`): stand-in projects generated in the sandbox.
         "projects-u6-gallery",
         "projects-u6-jobs",
+        "projects-u6-damaged",
         "projects-u6-panel-avatar",
         "projects-u6-packages",
         "projects-u6-panel-world",

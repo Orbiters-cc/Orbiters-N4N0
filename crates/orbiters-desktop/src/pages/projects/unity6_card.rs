@@ -281,7 +281,10 @@ fn package_rows(ui: &mut Ui, state: &State, rows: &[compat::Row]) {
             Some(u) => tr!("Declares Unity {unity} or later (a minimum, not a test).", unity = u),
             None => tr("Declares no Unity version.").to_string(),
         });
-        if let Some(range) = &r.sdk_range {
+        if let Some(asked) = &r.requested {
+            lines.push(tr!("Its manifest asks for {asked}.", asked = asked));
+        }
+        for range in &r.sdk_ranges {
             lines.push(match range.admits_target {
                 Some(compat::Admits::Yes) => tr!("Its SDK range {range} takes SDK {sdk}.", range = range.range, sdk = target),
                 Some(compat::Admits::No) => tr!("Its SDK range {range} leaves out SDK {sdk}.", range = range.range, sdk = target),
@@ -295,7 +298,7 @@ fn package_rows(ui: &mut Ui, state: &State, rows: &[compat::Row]) {
                     matrix::IssueKind::Publisher => tr("Publisher"),
                     matrix::IssueKind::Report => tr("Reported"),
                 };
-                lines.push(format!("{who} ({}): {}", issue.date, issue.text()));
+                lines.push(format!("{who} ({}): {} {}", issue.date, issue.text(), issue.link));
             }
         }
         lines.push(tr("Tested on Unity 6 by Orbiters: no evidence.").to_string());
@@ -303,7 +306,7 @@ fn package_rows(ui: &mut Ui, state: &State, rows: &[compat::Row]) {
             Some(v) => format!("{} {v}", r.display),
             None => r.display.clone(),
         };
-        let tint = if r.sdk_range.as_ref().is_some_and(|s| s.admits_target == Some(compat::Admits::No)) { theme::WARN } else { theme::FG_3 };
+        let tint = if r.sdk_ranges.iter().any(|s| s.admits_target == Some(compat::Admits::No)) { theme::WARN } else { theme::FG_3 };
         item(ui, art::glyph::PACKAGE, tint, &title, Some(&lines.join("\n")));
     }
 }
@@ -410,16 +413,18 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
     };
     item(ui, icons::CUBE, theme::FG_3, &title, Some(&sentence(s, &m)));
     if let Some(t) = &target {
-        para(
-            ui,
-            &tr!(
-                "VRChat's Unity 6 SDK is in open beta: SDK {sdk} on Unity {unity}. VRChat has announced no date for its release and none for the end of Unity 2022.",
-                sdk = t.sdk,
-                unity = t.unity
-            ),
-            12.0,
-            theme::FG_3,
-        );
+        let events = &state.u6.matrix().data.events;
+        let mut text = match (&events.unity6_stable, t.channel) {
+            (Some(day), _) => tr!("VRChat released its Unity 6 SDK on {day}. Orbiters' trial target is SDK {sdk} on Unity {unity}.", day = day, sdk = t.sdk, unity = t.unity),
+            (None, matrix::Channel::Beta) => tr!("VRChat's Unity 6 SDK is in open beta: SDK {sdk} on Unity {unity}. VRChat has announced no date for its release.", sdk = t.sdk, unity = t.unity),
+            (None, matrix::Channel::Stable) => tr!("Orbiters' trial target is SDK {sdk} on Unity {unity}.", sdk = t.sdk, unity = t.unity),
+        };
+        text.push(' ');
+        text.push_str(&match &events.unity2022_retirement {
+            Some(day) => tr!("VRChat stops accepting uploads from Unity 2022 on {day}.", day = day),
+            None => tr("VRChat has announced no end date for Unity 2022.").to_string(),
+        });
+        para(ui, &text, 12.0, theme::FG_3);
     }
     release_list(ui, &m);
     // Its trials.
@@ -543,7 +548,7 @@ fn outcome_text(o: &outcome::Outcome) -> (Tone, String) {
     match o {
         outcome::Outcome::DidNotStart(why) => (Tone::Danger, tr!("Unity did not start: {why}", why = why)),
         outcome::Outcome::ExitedAtOnce(_) => (Tone::Danger, tr("Unity quit right after starting.").to_string()),
-        outcome::Outcome::Importing => (Tone::Info, tr("Unity is open and importing the project.").to_string()),
+        outcome::Outcome::Importing => (Tone::Info, tr("Unity is open, and its log shows the first import begun.").to_string()),
         outcome::Outcome::SafeMode { errors, .. } => (Tone::Warn, format!("{}\n{}", tr("Unity opened in Safe Mode: it holds back the project's scripts until their errors are fixed."), list(errors))),
         outcome::Outcome::CompilerErrors { errors, .. } => (
             Tone::Warn,
@@ -551,15 +556,20 @@ fn outcome_text(o: &outcome::Outcome) -> (Tone, String) {
         ),
         outcome::Outcome::Imported { running: true } => (Tone::Ok, tr("The import finished with no compiler error in this log. Unity is open: VRChat's Upgrade Wizard may be waiting for you there. Then check with the SDK's Build & Test.").to_string()),
         outcome::Outcome::Imported { running: false } => (Tone::Ok, tr("The import finished with no compiler error in this log, and Unity is closed. Check with the SDK's Build & Test.").to_string()),
-        outcome::Outcome::Undetermined(why) => (
-            Tone::Off,
-            match why {
+        outcome::Outcome::Undetermined { why, running } => {
+            let mut text = match why {
                 outcome::Unknown::NoLog => tr("Cannot tell: Unity wrote no log for this opening."),
                 outcome::Unknown::Empty => tr("Cannot tell: the log is empty."),
                 outcome::Unknown::EndedEarly => tr("Cannot tell: Unity closed before its log said the import finished."),
+                outcome::Unknown::NotYet => tr("Cannot tell yet: its log says nothing Orbiters reads so far."),
             }
-            .to_string(),
-        ),
+            .to_string();
+            if *running {
+                text.push(' ');
+                text.push_str(tr("Unity is still running."));
+            }
+            (Tone::Off, text)
+        }
     }
 }
 
@@ -574,7 +584,11 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         Some(&tr!("Made {day}. Fixes made to the original after that day are not in the trial: before moving for good, make a fresh trial.", day = day(job.forked()))),
     );
     ids_warning(ui, worlds);
+    if state.u6.mac() {
+        para(ui, tr("On a Mac, Creator Companion's migration and opening a trial in Unity 6 from Orbiters are not available: this trial is shown for what its files say. Its migration is done on Windows."), 12.0, theme::FG_3);
+    }
     match status {
+        _ if state.u6.mac() => {}
         trial::Status::Waiting { vcc_copy } => {
             art::caps(ui, tr("Next, in Creator Companion"));
             para(ui, tr("Orbiters does not change the trial's packages or editor version: Creator Companion migrates it, as VRChat's guide describes. Until then the trial stays on Unity 2022 and is not opened from here."), 12.0, theme::FG_3);
@@ -599,18 +613,18 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
             let found = state.u6.editors.get(&version).cloned();
             let candidate = found.as_ref().and_then(|f| match f {
                 editors::Found::Exact(c) => Some(c.clone()),
-                editors::Found::Unverified(c) if c.hint == editors::Hint::Located => Some(c.clone()),
                 _ => None,
             });
             let open = state.session(&job.unity6().path).open();
             if !open {
                 let enabled = candidate.is_some() && state.u6.busy().is_none();
                 if buttons(ui, &[(tr("Open in Unity 6"), icons::PLAY, enabled, "open-u6")], true).is_some() {
-                    if let Some(c) = candidate {
+                    if candidate.is_some() {
                         let (id, unity) = (job.id.clone(), version.clone());
                         state.u6.act(&ctx, tr("Opening the trial in Unity 6…"), move || {
                             let start = |program: &Path, project: &Path, log: &Path| orbiters_projects::start_logged(program, project, log, &unity);
-                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &c, &trial::is_open, &start)?;
+                            // Found and probed again now: what was found earlier is not trusted at the launch.
+                            let a = trial::launch(&orbiters_projects::data_dir(), &id, &|v| editors::find(v), &trial::is_open, &trial::alive, &start)?;
                             Ok(tr!("Unity is starting. This opening's log: {log}", log = a.log.display()))
                         });
                     }
@@ -634,7 +648,8 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
             }
             if let Some(last) = job.attempts.last() {
                 let log = last.log.clone();
-                if buttons(ui, &[(tr("Show the last log"), icons::FOLDER_OPEN, log.exists(), "log")], false).is_some() {
+                let written = !matches!(state.u6.outcomes.get(&(job.id.clone(), last.n)), None | Some(outcome::Outcome::Undetermined { why: outcome::Unknown::NoLog, .. }));
+                if buttons(ui, &[(tr("Show the last log"), icons::FOLDER_OPEN, written, "log")], false).is_some() {
                     let _ = orbiters_projects::reveal(&log);
                 }
             }
@@ -647,7 +662,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
     }
     // What can always be done with a trial: nothing here deletes it.
     let list = [
-        (tr("Show the original"), icons::ARROW_LEFT, true, "original"),
+        (tr("Show the original"), icons::ARROW_LEFT, !state.u6.trials_of(&job.source.path).is_empty(), "original"),
         (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"),
         (tr("Unregister the trial"), icons::X, state.u6.busy().is_none(), "unregister"),
     ];
@@ -671,6 +686,28 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
 pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
     let jobs: Vec<(trial::Job, trial::Status)> = state.u6.jobs().into_iter().cloned().collect();
+    let damaged = match state.u6.health() {
+        trial::Health::Damaged { why, backup } => Some((why, backup)),
+        trial::Health::Fine => None,
+    };
+    if jobs.is_empty() && damaged.is_none() {
+        return;
+    }
+    if let Some((why, backup)) = damaged {
+        ui.add_space(28.0);
+        let text = if backup {
+            tr!("The Unity 6 trials record cannot be read ({why}). Its last good copy is shown and keeps the trials protected; Orbiters changes nothing in it until it is set aside.", why = why)
+        } else {
+            tr!("The Unity 6 trials record cannot be read ({why}), and there is no good copy of it. Orbiters changes nothing in it until it is set aside.", why = why)
+        };
+        notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &text);
+        if buttons(ui, &[(tr("Set the damaged record aside"), icons::ARROW_COUNTER_CLOCKWISE, state.u6.busy().is_none(), "set-aside")], false).is_some() {
+            state.u6.act(&ctx, tr("Setting the damaged record aside…"), || {
+                let aside = trial::set_aside(&orbiters_projects::data_dir())?;
+                Ok(tr!("The damaged record is kept at {path}.", path = aside.display()))
+            });
+        }
+    }
     if jobs.is_empty() {
         return;
     }
@@ -698,6 +735,11 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 format!("{} {}", job.error.clone().unwrap_or_default(), if *kept { tr("Part of the copy is still in this folder.") } else { tr("Nothing of it is left.") }),
             ),
             trial::Status::RegistrationFailed => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied, but it could not be listed.").to_string())),
+            trial::Status::Unfinished => (
+                icons::WARNING_CIRCLE,
+                theme::WARN,
+                format!("{} {}", tr("The trial is listed but not independent of the original yet: it is not ready for Creator Companion."), job.error.clone().unwrap_or_default()),
+            ),
             trial::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
             trial::Status::Replaced => (icons::PROHIBIT, theme::FG_3, tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
             _ => continue,
@@ -707,10 +749,13 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         if matches!(status, trial::Status::Interrupted { complete: true } | trial::Status::RegistrationFailed) {
             list.push((tr("List it"), icons::PLUS, state.u6.busy().is_none(), "list"));
         }
+        if matches!(status, trial::Status::Unfinished) {
+            list.push((tr("Finish it"), icons::CHECK, state.u6.busy().is_none(), "list"));
+        }
         if matches!(status, trial::Status::Running) {
             list.push((tr("Stop copying"), icons::X, true, "stop"));
         } else {
-            if job.trial.path.exists() {
+            if state.u6.present(&job.trial.path) {
                 list.push((tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"));
             }
             list.push((tr("Forget this entry"), icons::X, state.u6.busy().is_none(), "forget"));

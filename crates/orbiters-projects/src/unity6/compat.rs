@@ -42,6 +42,8 @@ pub enum Admits {
 /// What a package's own manifest declares about the SDK: a range over `com.vrchat.*`, and whether the target SDK is in it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkRange {
+    /// The SDK package it constrains.
+    pub package: String,
     pub range: String,
     pub admits_target: Option<Admits>,
 }
@@ -63,7 +65,10 @@ pub struct Row {
     pub source: Source,
     /// Its manifest's `unity` (with `unityRelease`): the oldest editor it asks for.
     pub unity_min: Option<String>,
-    pub sdk_range: Option<SdkRange>,
+    /// Every SDK constraint its manifest declares (verification's minor 2: not only the first).
+    pub sdk_ranges: Vec<SdkRange>,
+    /// What `Packages/manifest.json` asks for, when that differs from what is installed (Unity's lock).
+    pub requested: Option<String>,
     /// Indices into the release list's issues that are about this package and version.
     pub issues: Vec<usize>,
 }
@@ -93,15 +98,16 @@ pub fn packages(project: &Path, matrix: &Matrix, target: &str) -> Vec<Row> {
             Some(r) => format!("{u}.{r}"),
             None => u,
         });
-        let sdk_range = m["vpmDependencies"].as_object().and_then(|deps| {
-            deps.iter().find(|(k, _)| sdk(k)).and_then(|(_, v)| text(v)).map(|range| SdkRange {
-                admits_target: target.as_ref().and_then(|t| admits(&range, t)),
-                range,
-            })
-        });
+        let sdk_ranges = m["vpmDependencies"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, _)| sdk(k))
+            .filter_map(|(k, v)| text(v).map(|range| SdkRange { package: k.clone(), admits_target: target.as_ref().and_then(|t| admits(&range, t)), range }))
+            .collect();
         let version = text(&m["version"]);
         let issues = matrix.data.issues.iter().enumerate().filter(|(_, i)| i.package == name && i.applies(version.as_deref())).map(|(k, _)| k).collect();
-        Row { name: name.to_string(), display: text(&m["displayName"]).unwrap_or_else(|| name.to_string()), version, source, unity_min, sdk_range, issues }
+        Row { name: name.to_string(), display: text(&m["displayName"]).unwrap_or_else(|| name.to_string()), version, source, unity_min, sdk_ranges, requested: None, issues }
     };
     for name in locked.keys().filter(|n| !sdk(n) && !n.contains(['/', '\\'])) {
         rows.insert(name.clone(), describe(name, Source::Vpm, read_manifest(name)));
@@ -116,24 +122,32 @@ pub fn packages(project: &Path, matrix: &Matrix, target: &str) -> Vec<Row> {
             rows.insert(name.clone(), describe(&name, source, read_manifest(&name)));
         }
     }
-    for (name, value) in &upm_deps {
-        if rows.contains_key(name) || name.starts_with("com.unity.modules.") || sdk(name) {
+    // Unity's package manager: what its lock says is installed (direct and brought in by others), what the manifest asks.
+    let lock = json(&project.join("Packages/packages-lock.json")).unwrap_or_default();
+    let locked_upm = lock["dependencies"].as_object().cloned().unwrap_or_default();
+    let mut names: Vec<String> = upm_deps.keys().chain(locked_upm.keys()).cloned().collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        if rows.contains_key(&name) || name.starts_with("com.unity.modules.") || sdk(&name) {
             continue;
         }
-        let v = value.as_str().unwrap_or_default();
-        let source = if v.starts_with("file:") {
+        let asked = upm_deps.get(&name).and_then(|v| v.as_str()).map(str::to_string);
+        let entry = &locked_upm.get(&name).cloned().unwrap_or_default();
+        let from = entry["source"].as_str().map(str::to_string).or_else(|| asked.clone()).unwrap_or_default();
+        let source = if from == "local" || from.starts_with("file:") {
             Source::UpmLocal
-        } else if v.starts_with("git") || v.contains(".git") || v.starts_with("https://") {
+        } else if from == "git" || from.starts_with("git") || from.contains(".git") || from.starts_with("https://") {
             Source::UpmGit
+        } else if from == "embedded" {
+            Source::Embedded
         } else {
             Source::UpmRegistry
         };
-        // Unity's own packages are listed by name and version only: the editor brings their Unity 6 versions.
-        if source == Source::UpmRegistry && name.starts_with("com.unity.") {
-            continue;
-        }
-        let mut row = describe(name, source, None);
-        row.version = (source == Source::UpmRegistry).then(|| v.to_string());
+        let mut row = describe(&name, source, None);
+        let installed = text(&entry["version"]).filter(|_| source == Source::UpmRegistry);
+        row.version = installed.clone().or_else(|| asked.clone().filter(|_| source == Source::UpmRegistry));
+        row.requested = asked.filter(|a| installed.as_deref() != Some(a.as_str()));
         rows.insert(name.clone(), row);
     }
     rows.into_values().collect()
@@ -204,6 +218,8 @@ pub struct Checklist {
     pub text_assets: bool,
     /// The look stopped at its limits before the end.
     pub cut: bool,
+    /// Files it could not read (too large, unreadable, a link), up to a few: what is not found may be in them.
+    pub skipped: Vec<String>,
 }
 
 /// The most files and bytes the look reads, and of one file.
@@ -226,14 +242,44 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
     };
     let (mut files, mut bytes, mut scenes, mut cut) = (0usize, 0u64, 0usize, false);
     let mut tmp_in_assets = false;
-    let walker = walkdir::WalkDir::new(project.join("Assets")).follow_links(false).into_iter().filter_entry(|e| {
-        let n = e.file_name().to_string_lossy();
-        !(e.file_type().is_dir() && (n.starts_with('.') || n.ends_with('~')))
+    let mut skipped: Vec<String> = vec![];
+    let mut skip = |rel: String| {
+        if skipped.len() < 20 {
+            skipped.push(rel);
+        }
+    };
+    // Assets, and the packages embedded in Packages (their code is the project's too); not the SDK's or VPM's own.
+    let locked: Vec<String> = serde_json::from_str::<serde_json::Value>(&vpm).ok().and_then(|v| v["locked"].as_object().map(|m| m.keys().cloned().collect())).unwrap_or_default();
+    let mut roots = vec![project.join("Assets")];
+    if let Ok(entries) = std::fs::read_dir(project.join("Packages")) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if e.path().join("package.json").is_file() && !locked.contains(&n) && !n.starts_with("com.vrchat.") {
+                roots.push(e.path());
+            }
+        }
+    }
+    let walker = roots.into_iter().flat_map(|root| {
+        walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
+            let n = e.file_name().to_string_lossy();
+            !(e.file_type().is_dir() && (n.starts_with('.') || n.ends_with('~')))
+        })
     });
-    for e in walker.flatten() {
+    for e in walker {
+        let e = match e {
+            Ok(e) => e,
+            Err(err) => {
+                skip(err.path().and_then(|p| p.strip_prefix(project).ok()).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default());
+                continue;
+            }
+        };
         if cancel.load(Ordering::Relaxed) {
             cut = true;
             break;
+        }
+        if e.path_is_symlink() || std::fs::symlink_metadata(e.path()).is_ok_and(|m| crate::owned::is_link(&m)) {
+            skip(e.path().strip_prefix(project).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default());
+            continue;
         }
         if !e.file_type().is_file() {
             if e.file_type().is_dir() && e.file_name() == "TextMesh Pro" { // i18n: not shown (a folder name Unity makes)
@@ -250,8 +296,10 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
         if !wanted {
             continue;
         }
+        let rel = e.path().strip_prefix(project).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         let len = e.metadata().map(|m| m.len()).unwrap_or(0);
         if len > MAX_FILE {
+            skip(rel);
             continue;
         }
         files += 1;
@@ -260,9 +308,11 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
             cut = true;
             break;
         }
-        let Ok(body) = std::fs::read(e.path()) else { continue };
+        let Ok(body) = std::fs::read(e.path()) else {
+            skip(rel);
+            continue;
+        };
         let body = String::from_utf8_lossy(&body);
-        let rel = e.path().strip_prefix(project).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         match ext.as_str() {
             "cs" => {
                 if body.contains("UdonSharpBehaviour") {
@@ -293,8 +343,8 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
                 if body.lines().any(|l| l.trim() == "ringBufferMode: 2") { // i18n: not shown (a line of a scene file)
                     note(Item::RingBuffer, &rel);
                 }
-                // NavMeshAgent is class 195, NavMeshObstacle 208.
-                if body.contains("--- !u!195 ") && body.contains("--- !u!208 ") {
+                // NavMeshAgent is class 195, NavMeshObstacle 208: both on the same GameObject (verification's major 8).
+                if body.contains("--- !u!195 ") && body.contains("--- !u!208 ") && same_object(&body, "195", "208") {
                     note(Item::NavMesh, &rel);
                 }
                 if body.contains("m_fontAsset:") && body.contains("m_fontColor") {
@@ -332,12 +382,31 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
             // Names generated at build time (VRCFury, Modular Avatar) are only known once built.
             Item::ParameterNames => if generators { Seen::Found } else { Seen::CannotTell },
             _ if has(item) => Seen::Found,
-            _ if (needs_text && !text_assets) || cut => Seen::CannotTell,
+            _ if (needs_text && !text_assets) || cut || !skipped.is_empty() => Seen::CannotTell,
             _ => Seen::NotFound,
         };
         checks.push(Check { item, seen, at: found.get(&(item as u8)).cloned().unwrap_or_default() });
     }
-    Checklist { content: Some(content), checks, scenes, text_assets, cut }
+    Checklist { content: Some(content), checks, scenes, text_assets, cut, skipped }
+}
+
+/// Whether a text scene or prefab has components of classes `a` and `b` on one GameObject (their `m_GameObject`).
+fn same_object(body: &str, a: &str, b: &str) -> bool {
+    let (mut of_a, mut of_b) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    let mut class = "";
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("--- !u!") {
+            class = rest.split_whitespace().next().unwrap_or("");
+        } else if let Some(go) = line.trim().strip_prefix("m_GameObject: {fileID: ") {
+            let id = go.trim_end_matches('}').trim().to_string();
+            if class == a {
+                of_a.insert(id);
+            } else if class == b {
+                of_b.insert(id);
+            }
+        }
+    }
+    of_a.intersection(&of_b).next().is_some()
 }
 
 #[cfg(test)]
@@ -367,13 +436,14 @@ mod tests {
         let rows = packages(root, &Matrix::built_in(), "3.11.0-beta.1");
         let by = |n: &str| rows.iter().find(|r| r.name == n).unwrap_or_else(|| panic!("{n} missing: {rows:?}"));
         assert!(rows.iter().all(|r| !r.name.starts_with("com.vrchat.")), "the SDK is the standing's");
-        assert!(rows.iter().all(|r| r.name != "com.unity.timeline" && r.name != "com.unity.modules.ai"), "Unity's own come with the editor");
+        assert!(rows.iter().all(|r| r.name != "com.unity.modules.ai"), "Unity's built-in modules come with the editor");
+        assert_eq!(by("com.unity.timeline").version.as_deref(), Some("1.7.5"), "Unity's packages are listed too (verification's minor 2)");
         let poi = by("com.poiyomi.toon");
-        assert_eq!((poi.source, poi.unity_min.as_deref(), &poi.sdk_range), (Source::Vpm, Some("2019.4"), &None));
+        assert_eq!((poi.source, poi.unity_min.as_deref(), poi.sdk_ranges.is_empty()), (Source::Vpm, Some("2019.4"), true));
         assert!(poi.issues.is_empty(), "9.3.64 is not what the publisher's statement is about");
         let gm = by("vrchat.blackstartx.gesture-manager");
         // `<3.11.0` leaves out 3.11.0, and takes 3.11.0-beta.1 only when pre-releases count: said as such.
-        assert_eq!(gm.sdk_range, Some(SdkRange { range: ">=3.5.0 <3.11.0".into(), admits_target: Some(Admits::DependsOnPrerelease) }));
+        assert_eq!(gm.sdk_ranges, vec![SdkRange { package: "com.vrchat.avatars".into(), range: ">=3.5.0 <3.11.0".into(), admits_target: Some(Admits::DependsOnPrerelease) }]);
         let beta: Version = "3.11.0-beta.1".parse().unwrap();
         assert_eq!(admits(">=3.2.0 <3.10.0", &beta), Some(Admits::No), "AV3 Manager 2.1.2's kind of range");
         // A beta target is inside an open range only when pre-releases count (vrc-get's default leaves them out).
@@ -393,7 +463,8 @@ mod tests {
         let root = temp.path();
         project(root, Some(U2022), &[("com.vrchat.base", "3.10.6"), ("com.vrchat.worlds", "3.10.6")], &[]);
         write(root, "Assets/Scripts/Door.cs", "class Door : UdonSharpBehaviour { void F(Rigidbody r) { r.velocity = v; r.AddForce(f, ForceMode.VelocityChange); } }");
-        write(root, "Assets/Main.unity", "--- !u!195 &1\nNavMeshAgent:\n--- !u!208 &2\nNavMeshObstacle:\n  ringBufferMode: 2\n");
+        write(root, "Assets/Main.unity", "--- !u!195 &1\nNavMeshAgent:\n  m_GameObject: {fileID: 10}\n--- !u!208 &2\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n  ringBufferMode: 2\n");
+        write(root, "Assets/Apart.unity", "--- !u!195 &1\nNavMeshAgent:\n  m_GameObject: {fileID: 10}\n--- !u!208 &2\nNavMeshObstacle:\n  m_GameObject: {fileID: 20}\n");
         let cancel = AtomicBool::new(false);
         // Assets not saved as text: what only scenes and prefabs show cannot be told, unless it was seen anyway.
         let c = checklist(root, Content::Worlds, &cancel);
@@ -405,7 +476,11 @@ mod tests {
         assert_eq!(seen(&c, Item::UdonGraph), Some(Seen::CannotTell));
         assert_eq!(seen(&c, Item::CustomUasm), Some(Seen::NotFound));
         assert_eq!(seen(&c, Item::ParameterNames), None, "an avatar matter, not a world's");
-        assert_eq!((c.scenes, c.text_assets, c.cut), (1, false, false));
+        assert_eq!((c.scenes, c.text_assets, c.cut), (2, false, false));
+        // Verification major 8: an agent and an obstacle on two different objects of a scene are no conflict.
+        assert_eq!(c.checks.iter().find(|x| x.item == Item::NavMesh).unwrap().at, ["Assets/Main.unity"]);
+        assert!(same_object("--- !u!195 &1\n  m_GameObject: {fileID: 7}\n--- !u!208 &2\n  m_GameObject: {fileID: 7}\n", "195", "208"));
+        assert!(!same_object("--- !u!195 &1\n  m_GameObject: {fileID: 7}\n--- !u!208 &2\n  m_GameObject: {fileID: 8}\n", "195", "208"));
         assert_eq!(c.checks.iter().find(|x| x.item == Item::ForceModes).unwrap().at, ["Assets/Scripts/Door.cs"]);
         // Saved as text: not found is said.
         write(root, "ProjectSettings/EditorSettings.asset", "EditorSettings:\n  m_SerializationMode: 2\n");
@@ -416,6 +491,17 @@ mod tests {
         let c = checklist(root, Content::Avatars, &cancel);
         assert_eq!(seen(&c, Item::UdonSharp), None);
         assert_eq!(seen(&c, Item::ParameterNames), Some(Seen::CannotTell));
+        // Verification major 8: a file too large to read makes "not found" a "cannot tell", and is named.
+        write(root, "Assets/Huge.cs", &"x".repeat(MAX_FILE as usize + 1));
+        let c = checklist(root, Content::Worlds, &cancel);
+        assert_eq!(c.skipped, ["Assets/Huge.cs"]);
+        assert_eq!(seen(&c, Item::CustomUasm), Some(Seen::CannotTell));
+        std::fs::remove_file(root.join("Assets/Huge.cs")).unwrap();
+        // Code in a package embedded in Packages is looked at too.
+        write(root, "Packages/my.embedded/package.json", r#"{"name":"my.embedded"}"#);
+        write(root, "Packages/my.embedded/Runtime/Push.cs", "void F() { body.AddForce(v, ForceMode.Acceleration); }");
+        let c = checklist(root, Content::Worlds, &cancel);
+        assert!(c.checks.iter().find(|x| x.item == Item::ForceModes).unwrap().at.contains(&"Packages/my.embedded/Runtime/Push.cs".to_string()));
         // Stopped: what was not seen cannot be told.
         cancel.store(true, Ordering::Relaxed);
         let c = checklist(root, Content::Worlds, &cancel);

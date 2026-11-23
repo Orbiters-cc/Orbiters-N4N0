@@ -77,6 +77,9 @@ fn job(id: &str, original: &str, name: &str, at: &str, phase: trial::Phase, erro
         error: error.map(Into::into),
         attempts: vec![],
         migrated: None,
+        siblings: vec![],
+        localized: vec![],
+        import_high: 0,
     }
 }
 
@@ -148,7 +151,7 @@ impl State {
                 _ => return None,
             })
         };
-        let standings = self.scan.projects.iter().filter_map(|p| by_name(&p.name).map(|s| (p.path.clone(), s))).collect();
+        let standings: Vec<(PathBuf, standing::Standing)> = self.scan.projects.iter().filter_map(|p| by_name(&p.name).map(|s| (p.path.clone(), s))).collect();
         let mut mine = job("trial-1", "My avatars", "My avatars (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Prepared, None); // i18n: not shown (sample data of the screenshot scenes)
         let other_disk = if cfg!(target_os = "macos") { "/Volumes/Archive/Unity projects" } else { "E:/Unity projects" }; // i18n: not shown (sample data of the screenshot scenes)
         let mut trials = vec![];
@@ -165,7 +168,7 @@ impl State {
                 outcome::Outcome::Importing,
             ],
             "projects-u6-outcomes-b" => vec![
-                outcome::Outcome::Undetermined(outcome::Unknown::EndedEarly),
+                outcome::Outcome::Undetermined { why: outcome::Unknown::EndedEarly, running: false },
                 outcome::Outcome::CompilerErrors {
                     errors: vec![
                         diag("Packages/com.vrlabs.av3manager/Editor/Manager.cs", 212, "CS0246", "The type or namespace name 'AnimatorControllerLayer' could not be found"), // i18n: not shown (sample data of the screenshot scenes)
@@ -181,20 +184,32 @@ impl State {
         for (i, o) in outcomes.iter().enumerate() {
             let n = i as u32 + 1;
             let start = matches!(o, outcome::Outcome::DidNotStart(_)).then(|| o.clone());
-            mine.attempts.push(trial::Attempt { n, started: discovery::now() - (4 - i as u64) * 3600, log: PathBuf::from(format!("attempt-{n}.log")), editor: PathBuf::from("Unity.exe"), unity: "6000.0.67f1".into(), start });
+            mine.attempts.push(trial::Attempt { n, started: discovery::now() - (4 - i as u64) * 3600, log: PathBuf::from(format!("attempt-{n}.log")), editor: PathBuf::from("Unity.exe"), unity: "6000.0.67f1".into(), start, pid: None, reserved: false });
             self.u6.outcomes.insert((mine.id.clone(), n), o.clone());
         }
         trials.push((mine, status));
-        if name == "projects-u6-gallery" || name == "projects-u6-jobs" {
+        if matches!(name, "projects-u6-gallery" | "projects-u6-jobs" | "projects-u6-damaged") {
             trials.push((job("trial-2", "Club outfits", "Club outfits (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Copying, None), trial::Status::Interrupted { complete: false })); // i18n: not shown (sample data of the screenshot scenes)
             trials.push((
                 job("trial-3", "Test world", "Test world (Unity 6)", STAND_IN_PROJECTS, trial::Phase::RegistrationFailed, Some("The trial is at H:/Unity projects/Test world (Unity 6), but it could not be listed: settings.json is locked by another program.")), // i18n: not shown (sample data of the screenshot scenes)
                 trial::Status::RegistrationFailed,
             ));
             trials.push((job("trial-4", "Avatar backup", "Avatar backup (Unity 6)", other_disk, trial::Phase::Prepared, None), trial::Status::Missing)); // i18n: not shown (sample data of the screenshot scenes)
+            trials.push((
+                job("trial-5", "Weekend avatar", "Weekend avatar (Unity 6)", STAND_IN_PROJECTS, trial::Phase::Registered, Some("The trial is listed at H:/Unity projects/Weekend avatar (Unity 6), but its local packages could not be copied: Required local package com.example.tool is unavailable at D:/Packages/com.example.tool")), // i18n: not shown (sample data of the screenshot scenes)
+                trial::Status::Unfinished,
+            ));
         }
         let pairs = vec![unity6::Pair { original: first.path.clone(), trial: trial_path.clone(), job: "trial-1".into() }];
-        self.u6.look = Some(unity6::Look { matrix: m.clone(), standings, trials, pairs });
+        let standings: Vec<(PathBuf, standing::Standing)> = standings;
+        let index = standings.iter().enumerate().map(|(i, (p, _))| (discovery::key(p), i)).collect();
+        let present = trials.iter().filter(|(_, s)| !matches!(s, trial::Status::Missing)).map(|(j, _)| discovery::key(&j.trial.path)).collect();
+        let health = if name == "projects-u6-damaged" {
+            trial::Health::Damaged { why: "it is not a record Orbiters can read (EOF while parsing an object at line 41 column 3)".into(), backup: true } // i18n: not shown (sample data of the screenshot scenes)
+        } else {
+            trial::Health::Fine
+        };
+        self.u6.look = Some(unity6::Look { matrix: m.clone(), projects: vec![], standings, index, trials, pairs, health, present });
         self.u6.fixture = Some(Fixture { mac: name == "projects-u6-mac" });
 
         // Editors and Creator Companions.
@@ -225,9 +240,9 @@ impl State {
         }
         self.u6.show_packages = name == "projects-u6-packages";
         match name {
-            "projects-u6-gallery" | "projects-u6-jobs" => {
+            "projects-u6-gallery" | "projects-u6-jobs" | "projects-u6-damaged" => {
                 self.selected = Some(first.path.clone());
-                if name == "projects-u6-jobs" {
+                if name != "projects-u6-gallery" {
                     self.scroll_gallery = Some(620.0);
                 }
             }
@@ -280,7 +295,7 @@ impl State {
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                         phase: String::from(orbiters_i18n::mark("Copying project")),
                     }));
-                    self.u6.run = Some(Run { recorded: Arc::new(Mutex::new(Some("trial-1".into()))), job: Default::default(), cancel: Default::default(), progress });
+                    self.u6.run = Some(Run { shown: true, recorded: Arc::new(Mutex::new(Some("trial-1".into()))), job: Default::default(), cancel: Default::default(), progress });
                 }
             }
             _ => {

@@ -67,6 +67,9 @@ pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -
     })
 }
 pub fn write(project: &Path, request: &Request) -> anyhow::Result<()> {
+    if let crate::unity6::trial::Guard::Blocked(why) = crate::unity6::trial::guard(&crate::data_dir(), project) {
+        bail!("{why}");
+    }
     if request.schema != 1 || uuid::Uuid::parse_str(&request.id)?.to_string() != request.id {
         bail!("{}", tr("Invalid setup request id or schema"));
     }

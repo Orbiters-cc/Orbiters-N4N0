@@ -24,6 +24,8 @@ pub enum Unknown {
     Empty,
     /// Unity ended before the log said the import finished.
     EndedEarly,
+    /// Unity runs, and its log says nothing this reads yet.
+    NotYet,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ pub enum Outcome {
     DidNotStart(String),
     /// It ended right after starting (its exit status, when the system gave one).
     ExitedAtOnce(Option<String>),
-    /// Still running, the import not finished according to the log.
+    /// Still running, the log showing the first import begun and not finished.
     Importing,
     /// Unity entered Safe Mode: it holds back the project's scripts until their errors are fixed.
     SafeMode { errors: Vec<Diagnostic>, running: bool },
@@ -41,8 +43,8 @@ pub enum Outcome {
     /// The log says the first import finished, and lists no compiler error. `running`: Unity is still open (the SDK's
     /// Upgrade Wizard may be waiting).
     Imported { running: bool },
-    /// The log does not tell.
-    Undetermined(Unknown),
+    /// The log does not tell; `running`: Unity's process still runs (a separate fact).
+    Undetermined { why: Unknown, running: bool },
 }
 
 impl Outcome {
@@ -52,7 +54,7 @@ impl Outcome {
             Outcome::DidNotStart(_) | Outcome::ExitedAtOnce(_) => true,
             Outcome::SafeMode { running, .. } | Outcome::CompilerErrors { running, .. } | Outcome::Imported { running } => !running,
             Outcome::Importing => false,
-            Outcome::Undetermined(_) => true,
+            Outcome::Undetermined { running, .. } => !running,
         }
     }
 }
@@ -71,14 +73,20 @@ fn diagnostic(line: &str) -> Option<Diagnostic> {
 /// The most compiler errors kept from one log.
 const KEEP: usize = 50;
 
+/// The line Unity writes when its first import has finished: `Asset Pipeline Refresh (id=…): Total: … seconds -
+/// Initiated by InitialRefreshV2(…)`. Only that whole line counts, never a mention of the operation.
+fn import_finished(line: &str) -> bool {
+    line.contains("Asset Pipeline Refresh") && line.contains("Total:") && line.contains("InitialRefreshV2")
+}
+
 /// What `log` (the attempt's file, `None` when there is none) says, Unity running or not.
 pub fn judge(log: Option<&str>, running: bool) -> Outcome {
-    let Some(text) = log else { return if running { Outcome::Importing } else { Outcome::Undetermined(Unknown::NoLog) } };
+    let Some(text) = log else { return Outcome::Undetermined { why: Unknown::NoLog, running } };
     if text.trim().is_empty() {
-        return if running { Outcome::Importing } else { Outcome::Undetermined(Unknown::Empty) };
+        return Outcome::Undetermined { why: Unknown::Empty, running };
     }
     let mut errors: Vec<Diagnostic> = vec![];
-    let (mut safe_mode, mut imported) = (false, false);
+    let (mut safe_mode, mut imported, mut began) = (false, false, false);
     for line in text.lines() {
         if let Some(d) = diagnostic(line) {
             if errors.len() < KEEP && !errors.contains(&d) {
@@ -89,8 +97,10 @@ pub fn judge(log: Option<&str>, running: bool) -> Outcome {
         if lower.contains("entering safe mode") || lower.contains("[safe mode]") || lower.contains("safe mode is active") {
             safe_mode = true;
         }
-        if line.contains("InitialRefreshV2") || line.contains("Initial Refresh End") {
+        if import_finished(line) {
             imported = true;
+        } else if line.contains("InitialRefreshV2") {
+            began = true;
         }
     }
     if safe_mode {
@@ -99,19 +109,27 @@ pub fn judge(log: Option<&str>, running: bool) -> Outcome {
         Outcome::CompilerErrors { errors, running }
     } else if imported {
         Outcome::Imported { running }
-    } else if running {
+    } else if running && began {
         Outcome::Importing
+    } else if running {
+        Outcome::Undetermined { why: Unknown::NotYet, running }
     } else {
-        Outcome::Undetermined(Unknown::EndedEarly)
+        Outcome::Undetermined { why: Unknown::EndedEarly, running }
     }
 }
 
-/// [`judge`] on the file at `path`.
+/// The most of a log read: its end (where the outcome is), so a huge log costs no more than this.
+const TAIL: u64 = 8 * 1024 * 1024;
+
+/// [`judge`] on the end of the file at `path`.
 pub fn read(path: &std::path::Path, running: bool) -> Outcome {
-    match std::fs::read(path) {
-        Ok(bytes) => judge(Some(&String::from_utf8_lossy(&bytes)), running),
-        Err(_) => judge(None, running),
-    }
+    use std::io::{Read as _, Seek as _};
+    let Ok(mut file) = std::fs::File::open(path) else { return judge(None, running) };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(std::io::SeekFrom::Start(len.saturating_sub(TAIL)));
+    let mut bytes = vec![];
+    let _ = file.take(TAIL).read_to_end(&mut bytes);
+    judge(Some(&String::from_utf8_lossy(&bytes)), running)
 }
 
 #[cfg(test)]
@@ -124,11 +142,16 @@ mod tests {
 
     #[test]
     fn each_outcome_is_what_the_log_and_the_process_show() {
-        assert_eq!(judge(None, false), Outcome::Undetermined(Unknown::NoLog));
-        assert_eq!(judge(Some(""), false), Outcome::Undetermined(Unknown::Empty));
-        assert_eq!(judge(Some(START), true), Outcome::Importing);
+        assert_eq!(judge(None, false), Outcome::Undetermined { why: Unknown::NoLog, running: false });
+        assert_eq!(judge(Some(""), false), Outcome::Undetermined { why: Unknown::Empty, running: false });
+        // Verification major 4: running with no log, or a log saying nothing read here, is not "importing".
+        assert_eq!(judge(None, true), Outcome::Undetermined { why: Unknown::NoLog, running: true });
+        assert_eq!(judge(Some(START), true), Outcome::Undetermined { why: Unknown::NotYet, running: true });
+        // A mention of the operation is not its end.
+        assert_eq!(judge(Some(&format!("{START}InitialRefreshV2 started\n")), false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
+        assert_eq!(judge(Some(&format!("{START}InitialRefreshV2 started\n")), true), Outcome::Importing);
         // Ended with a log cut short: nothing is claimed.
-        assert_eq!(judge(Some(START), false), Outcome::Undetermined(Unknown::EndedEarly));
+        assert_eq!(judge(Some(START), false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
         assert_eq!(judge(Some(&format!("{START}{IMPORT}")), true), Outcome::Imported { running: true });
         assert_eq!(judge(Some(&format!("{START}{IMPORT}")), false), Outcome::Imported { running: false });
         let errors = judge(Some(&format!("{START}{ERROR}{ERROR}{IMPORT}")), true);
@@ -145,10 +168,10 @@ mod tests {
     fn a_log_file_missing_or_truncated_cannot_tell() {
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("attempt-1.log");
-        assert_eq!(read(&log, false), Outcome::Undetermined(Unknown::NoLog));
+        assert_eq!(read(&log, false), Outcome::Undetermined { why: Unknown::NoLog, running: false });
         std::fs::write(&log, &START[..20]).unwrap();
-        assert_eq!(read(&log, false), Outcome::Undetermined(Unknown::EndedEarly));
+        assert_eq!(read(&log, false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
         std::fs::write(&log, [0xffu8, 0xfe, 0x00]).unwrap();
-        assert_eq!(read(&log, false), Outcome::Undetermined(Unknown::EndedEarly));
+        assert_eq!(read(&log, false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
     }
 }

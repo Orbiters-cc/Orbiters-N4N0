@@ -436,7 +436,9 @@ impl Editors {
 /// the trials Orbiters recorded of it or as it. No tool migrates, opens Unity 6 or uploads.
 fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unity6::trial::Job, unity6::trial::Status)]) -> Value {
     use unity6::standing::{Content, State};
-    let s = unity6::standing::read(path, matrix);
+    // Policy facts come from the built-in release list only (verification's major 7).
+    let _ = matrix;
+    let s = unity6::standing::read(path, &unity6::matrix::Matrix::built_in());
     let state = match s.state {
         State::NotVrchat => "not_vrchat",
         State::LegacySdk => "legacy_sdk_in_assets",
@@ -450,11 +452,13 @@ fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unit
         State::LineUnknown => "line_unknown",
     };
     let key = discovery::key(path);
-    let as_trial = trials.iter().find(|(j, s)| !matches!(s, unity6::trial::Status::Replaced) && (discovery::key(&j.unity6().path) == key || discovery::key(&j.trial.path) == key));
+    // By identity, not by path alone (verification's major 10): a folder replaced at a recorded path is not the one recorded.
+    let here = |place: &unity6::trial::Place| discovery::key(&place.path) == key && place.verified() == Some(true);
+    let as_trial = trials.iter().find(|(j, s)| !matches!(s, unity6::trial::Status::Replaced) && (here(j.unity6()) || here(&j.trial)));
     let of_it: Vec<Value> = trials
         .iter()
-        .filter(|(j, _)| discovery::key(&j.source.path) == key)
-        .map(|(j, st)| json!({ "trial": j.unity6().path, "status": format!("{st:?}"), "made": j.created }))
+        .filter(|(j, _)| here(&j.source))
+        .map(|(j, st)| json!({ "trial": j.unity6().path, "status": st.name(), "made": j.created }))
         .collect();
     let mut out = json!({
         "state": state,
@@ -469,7 +473,13 @@ fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unit
         "beta": s.beta,
         "content": s.sdk.content.map(|c| match c { Content::Avatars => "avatars", Content::Worlds => "worlds", Content::Base => "base" }),
         "history": if as_trial.is_some() { "a Unity 6 trial Orbiters recorded" } else { "not recorded by Orbiters" },
-        "trial_of": as_trial.map(|(j, st)| json!({ "original": j.source.path, "status": format!("{st:?}"), "made": j.created })),
+        "trial_of": as_trial.map(|(j, st)| json!({
+            "original": j.source.path,
+            "original_is_still_there": match j.source.verified() { Some(true) => "yes", Some(false) if j.source.path.exists() => "replaced", Some(false) => "missing", None => "cannot_tell" },
+            "status": st.name(),
+            "made": j.created,
+            "can_be_opened_or_changed": matches!(st, unity6::trial::Status::OnUnity6) && j.migrated.as_ref().is_none_or(|m| here(m)),
+        })),
         "trials": of_it,
     });
     if as_trial.is_some() {
@@ -499,12 +509,28 @@ fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, 
     })
 }
 
+/// The trial target and the dated facts of the transition, the same in both tools (verification's minor 1).
+fn unity6_target_json(matrix: &unity6::matrix::Matrix) -> Value {
+    let Some(t) = matrix.unity6_target() else { return Value::Null };
+    json!({
+        "sdk": t.sdk,
+        "unity": t.unity,
+        "changeset": t.changeset,
+        "channel": match t.channel { unity6::matrix::Channel::Beta => "beta", unity6::matrix::Channel::Stable => "stable" },
+        "hub_link": t.hub_link(),
+        "guide": "https://vrc-beta-docs.netlify.app/sdk/upgrade/unity-6000/",
+        "unity6_stable_since": matrix.data.events.unity6_stable,
+        "unity2022_uploads_end": matrix.data.events.unity2022_retirement,
+        "release_list_checked": matrix.data.verified,
+    })
+}
+
 /// The release list kept in app data and the trials recorded there (read only, no network).
 fn unity6_facts() -> (unity6::matrix::Matrix, Vec<(unity6::trial::Job, unity6::trial::Status)>) {
     let dir = orbiters_projects::data_dir();
     let matrix = unity6::matrix::load(&dir, unity6::key().as_ref());
     let trials = unity6::trial::jobs(&dir).into_iter().map(|j| {
-        let s = unity6::trial::status(&j, false, &matrix);
+        let s = unity6::trial::status(&j, false);
         (j, s)
     }).collect();
     (matrix, trials)
@@ -814,6 +840,7 @@ impl Projects {
             "last_full_scan": scan.last_full,
             "scanning": scanning,
             "scan_job": started,
+            "unity6_target": unity6_target_json(&matrix),
             "vcc_folder": root(),
         }))
     }
@@ -827,9 +854,7 @@ impl Projects {
         if !project.missing {
             let (matrix, trials) = unity6_facts();
             out["unity_line"] = unity_line_json(&project.path, &matrix, &trials);
-            if let Some(t) = matrix.unity6_target() {
-                out["unity6_target"] = json!({ "sdk": t.sdk, "unity": t.unity, "changeset": t.changeset, "channel": "beta", "hub_link": t.hub_link(), "guide": "https://vrc-beta-docs.netlify.app/sdk/upgrade/unity-6000/" });
-            }
+            out["unity6_target"] = unity6_target_json(&matrix);
         }
         if project.missing {
             out["next"] = json!("Its folder is missing: connect its disk, or remove it from the list with unity_manage_project.");
@@ -2032,6 +2057,10 @@ mod tests {
 #[cfg(test)]
 mod unity6_tests {
     use super::*;
+
+    fn call() -> Call {
+        Call { client_gone: Arc::new(AtomicBool::new(false)), stop_at_start: 0 }
+    }
     use unity6::trial::{Job, Phase, Place, Status, Target};
 
     fn project(at: &Path, editor: &str, sdk: &str, line: &str) {
@@ -2060,24 +2089,47 @@ mod unity6_tests {
         assert_eq!((v["state"].as_str(), v["sdk_installed"].as_str(), v["beta"].as_bool(), v["content"].as_str()), (Some("on_2022"), Some("3.10.6"), Some(false), Some("avatars")));
         assert_eq!(v["history"], "not recorded by Orbiters");
         assert!(v["upload_warning"].is_null() && v["trial_of"].is_null());
+        let place = |p: &Path, name: &str| Place { path: p.to_path_buf(), id: orbiters_projects::owned::id_of(p).ok(), name: name.into() };
         let job = Job {
-            id: "t1".into(),
+            id: "1".repeat(32),
             created: 1_763_800_000,
-            source: Place { path: original.clone(), id: None, name: "Avatar".into() },
-            trial: Place { path: trial.clone(), id: None, name: "Avatar (Unity 6)".into() },
+            source: place(&original, "Avatar"),
+            trial: place(&trial, "Avatar (Unity 6)"),
             phase: Phase::Prepared,
             target: Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
             error: None,
             attempts: vec![],
             migrated: None,
+            siblings: vec![],
+            localized: vec![],
+            import_high: 0,
         };
-        let trials = vec![(job, Status::OnUnity6)];
+        let trials = vec![(job.clone(), Status::OnUnity6)];
         let v = unity_line_json(&original, &m, &trials);
         assert_eq!(v["trials"].as_array().unwrap().len(), 1);
+        assert_eq!(v["trials"][0]["status"], "on_unity6", "a stable name, not a debug string");
         let v = unity_line_json(&trial, &m, &trials);
         assert_eq!((v["state"].as_str(), v["beta"].as_bool()), (Some("on_unity6"), Some(true)));
         assert_eq!(v["trial_of"]["original"], json!(original));
+        assert_eq!(v["trial_of"]["original_is_still_there"], "yes");
         assert!(v["upload_warning"].as_str().unwrap().contains("Unity 2022"));
+        // Verification major 10: another folder put at the original's path is not its original any more.
+        std::fs::rename(&original, temp.join("Avatar moved")).unwrap();
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        assert!(unity_line_json(&original, &m, &trials)["trials"].as_array().unwrap().is_empty());
+        assert_eq!(unity_line_json(&trial, &m, &trials)["trial_of"]["original_is_still_there"], "replaced");
+        // Verification minor 1: both tools say the target and its dated facts the same way.
+        let projects = Projects::default();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let data = |a: Answer| match a {
+            Answer::Data(v) => v,
+            _ => panic!("data"),
+        };
+        let list = data(projects.call("unity_list_projects", &json!({}), &call(), None).unwrap());
+        let get = data(projects.call("unity_get_project", &json!({ "path": original }), &call(), None).unwrap());
+        assert_eq!(list["unity6_target"], get["unity6_target"]);
+        assert_eq!((list["unity6_target"]["channel"].as_str(), list["unity6_target"]["unity2022_uploads_end"].is_null()), (Some("beta"), true));
+        assert_eq!(list["projects"][0]["unity_line"]["state"], "on_2022");
         assert!(GUIDE.contains("unity_line") && GUIDE.contains("no tool migrates"));
         let _ = std::fs::remove_dir_all(&temp);
     }

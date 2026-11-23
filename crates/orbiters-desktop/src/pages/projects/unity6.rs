@@ -20,6 +20,8 @@ const OUTCOME_EVERY: Duration = Duration::from_secs(3);
 
 /// A trial being made by this window.
 pub(crate) struct Run {
+    /// Whether the job's record was already shown (a look asked for as soon as it exists, verification's major 6).
+    pub shown: bool,
     pub recorded: Arc<Mutex<Option<String>>>,
     pub job: Job<Result<trial::Job, String>>,
     pub cancel: Arc<AtomicBool>,
@@ -94,6 +96,8 @@ pub(crate) struct U6 {
     pub error: Option<String>,
     /// The compatibility view's packages shown.
     pub show_packages: bool,
+    /// The scan's serial the gallery list was last taken at.
+    pub scan_seen: Option<u64>,
     /// Screenshots: the panel scrolls to the Unity 6 card on its next frame.
     pub scroll_to: bool,
     pub fixture: Option<Fixture>,
@@ -101,8 +105,7 @@ pub(crate) struct U6 {
 
 impl U6 {
     pub fn standing(&self, path: &Path) -> Option<&standing::Standing> {
-        let key = orbiters_projects::discovery::key(path);
-        self.look.as_ref()?.standings.iter().find(|(p, _)| orbiters_projects::discovery::key(p) == key).map(|(_, s)| s)
+        self.look.as_ref()?.standing(path)
     }
 
     pub fn matrix(&self) -> matrix::Matrix {
@@ -117,10 +120,25 @@ impl U6 {
         })
     }
 
-    /// Whether the project at `path` is a trial still waiting for Creator Companion's migration: nothing opens it or
-    /// changes its packages from here then (the revision of DESIGN22, 4e).
+    /// Whether the project at `path` is a trial that nothing opens or changes from here now: waiting for Creator
+    /// Companion's migration, not finished, or the first copy after Creator Companion's own copy was taken (the
+    /// revision of DESIGN22, 4e). The library's [`trial::guard`] says the same to every other entry point.
     pub fn waiting(&self, path: &Path) -> bool {
-        self.trial_at(path).is_some_and(|(_, s)| matches!(s, trial::Status::Waiting { .. }))
+        let key = orbiters_projects::discovery::key(path);
+        self.trial_at(path).is_some_and(|(j, s)| {
+            let first_after_adoption = j.migrated.is_some() && orbiters_projects::discovery::key(&j.trial.path) == key;
+            first_after_adoption || !matches!(s, trial::Status::OnUnity6)
+        })
+    }
+
+    /// Whether the trial folder at `path` was there at the last look (the page never asks the disk while drawing).
+    pub fn present(&self, path: &Path) -> bool {
+        self.look.as_ref().is_some_and(|l| l.present.contains(&orbiters_projects::discovery::key(path)))
+    }
+
+    /// The trials record's health at the last look.
+    pub fn health(&self) -> trial::Health {
+        self.look.as_ref().map(|l| l.health.clone()).unwrap_or(trial::Health::Fine)
     }
 
     /// The trials of the original at `path` (both folders still the ones recorded).
@@ -145,6 +163,11 @@ impl U6 {
         if generation <= self.applied {
             return false;
         }
+        // An answer for another list of projects than the one the gallery shows now is not taken (verification's major 6).
+        if self.fixture.is_none() && look.projects != self.looked {
+            self.again = true;
+            return false;
+        }
         self.applied = generation;
         self.look = Some(look);
         true
@@ -164,6 +187,7 @@ impl U6 {
             self.looked = projects;
             return;
         }
+        ctx.request_repaint();
         self.asked += 1;
         let generation = self.asked;
         let running = self.running_ids();
@@ -173,16 +197,31 @@ impl U6 {
         self.look_job = Job::spawn(ctx, move || (generation, unity6::look(&dir, &projects, &running)));
     }
 
-    /// Takes in what workers answered; asks again what changed.
-    pub fn poll(&mut self, ctx: &egui::Context, projects: Vec<PathBuf>, server: orbiters_core::account::Server) {
+    /// Takes in what workers answered; asks again what changed. `projects`: the gallery's list, `None` when it did
+    /// not change since the last frame (nothing is rebuilt then).
+    pub fn poll(&mut self, ctx: &egui::Context, projects: Option<Vec<PathBuf>>, server: orbiters_core::account::Server) {
+        if let Some(projects) = projects {
+            if projects != self.looked {
+                self.looked = projects;
+                self.again = true;
+            }
+        }
         if let Some((generation, look)) = self.look_job.take() {
             self.apply(generation, look);
         }
         if self.fixture.is_some() {
             return;
         }
-        if (self.again || projects != self.looked) && !self.look_job.running() {
-            self.ask(ctx, projects);
+        // A trial being made shows in the gallery as soon as it is recorded.
+        if let Some(run) = self.run.as_mut() {
+            if !run.shown && run.recorded.lock().unwrap().is_some() {
+                run.shown = true;
+                self.again = true;
+            }
+        }
+        if self.again && !self.look_job.running() {
+            let list = self.looked.clone();
+            self.ask(ctx, list);
         }
         if let Some(found) = self.editor_job.take() {
             self.editors.extend(found);
@@ -295,7 +334,11 @@ impl U6 {
 impl State {
     /// What the projects listed need of the transition, each frame: answers taken in, new looks asked.
     pub(super) fn poll_unity6(&mut self, ctx: &egui::Context, cx: &mut crate::pages::Cx) {
-        let projects: Vec<PathBuf> = self.scan.projects.iter().filter(|p| !p.missing).map(|p| p.path.clone()).collect();
+        // The list is rebuilt only when the scan changed it (verification's minor 3: not every frame).
+        let projects = (self.u6.scan_seen != Some(self.scan_serial)).then(|| {
+            self.u6.scan_seen = Some(self.scan_serial);
+            self.scan.projects.iter().filter(|p| !p.missing).map(|p| p.path.clone()).collect()
+        });
         let server = super::state::server(cx);
         self.u6.poll(ctx, projects, server);
         if let Some(r) = self.u6.action.take() {
@@ -346,20 +389,22 @@ impl State {
         let cancel = Arc::new(AtomicBool::new(false));
         let progress: SharedProgress = Arc::new(Mutex::new(Default::default()));
         let (rec, stop, prog, from) = (recorded.clone(), cancel.clone(), progress.clone(), source.clone());
-        let editor_missing = self.u6.editors.get(&target.unity).is_none_or(|f| f.usable().is_none());
-        let size = target.size_here().map(|s| s.installed + s.download).filter(|_| editor_missing);
+        // Unity 6000 counts as installed only when verified; its modules are those the project's 2022 editor has.
+        let editor_missing = !matches!(self.u6.editors.get(&target.unity), Some(editors::Found::Exact(_)));
+        let modules = self.u6.standing(&source).and_then(|s| self.u6.editors.get(&s.editor.text)).and_then(|f| f.usable().map(|c| c.modules)).unwrap_or_default();
+        let need = target.size_here().filter(|_| editor_missing).map(|s| unity6::budget::EditorNeed::of(s, modules.android, modules.ios));
         let working = super::super::Working::begin();
         let job = Job::spawn(ctx, move || {
             let _working = working;
             let dir = orbiters_projects::data_dir();
             let vcc = orbiters_projects::vcc_dir();
             let library = orbiters_projects::size::lookup(&from).size.map(|s| s.library);
-            let budget = |copy: u64| -> anyhow::Result<()> {
-                let editor = size.map(|b| (unity6::budget::editor_install_folder(), b));
-                let (demands, guessed) = unity6::budget::demands(&parent.join(&name), copy, library, editor);
+            let budget = |copy: u64| -> anyhow::Result<u64> {
+                let (demands, guessed) = unity6::budget::demands(&parent.join(&name), copy, library, need.clone());
+                let high = demands.iter().find(|d| d.need == unity6::budget::Need::Import).map_or(0, |d| d.bytes);
                 let plan = unity6::budget::plan(demands, &unity6::budget::Disks, guessed);
                 anyhow::ensure!(plan.fits(), "{}", tr("Not enough room on a disk for the trial, checked again just now: choose another place or free some space."));
-                Ok(())
+                Ok(high)
             };
             let recorded = |j: &trial::Job| *rec.lock().unwrap() = Some(j.id.clone());
             let open = |p: &Path| trial::is_open(p);
@@ -367,7 +412,7 @@ impl State {
             trial::prepare(trial::Prepare { dir: &dir, vcc: &vcc, source: &from, parent: &parent, name: &name, target: t, open: &open, budget: &budget, recorded: &recorded }, &stop, &prog)
                 .map_err(|e| format!("{e:#}"))
         });
-        self.u6.run = Some(Run { recorded, job, cancel, progress });
+        self.u6.run = Some(Run { shown: false, recorded, job, cancel, progress });
         self.u6.sheet.step = Step::Copying;
     }
 }
@@ -385,12 +430,32 @@ mod tests {
     use super::*;
 
     fn look(states: &[(&str, standing::State)]) -> unity6::Look {
+        let standings: Vec<(PathBuf, standing::Standing)> = states.iter().map(|(p, s)| (PathBuf::from(p), standing::Standing { state: *s, ..Default::default() })).collect();
+        let index = standings.iter().enumerate().map(|(i, (p, _))| (orbiters_projects::discovery::key(p), i)).collect();
         unity6::Look {
             matrix: matrix::Matrix::built_in(),
-            standings: states.iter().map(|(p, s)| (PathBuf::from(p), standing::Standing { state: *s, ..Default::default() })).collect(),
+            projects: vec![],
+            standings,
+            index,
             trials: vec![],
             pairs: vec![],
+            health: trial::Health::Fine,
+            present: Default::default(),
         }
+    }
+
+    /// Verification major 6: an answer for another list of projects than the gallery's now is not taken, and asks again.
+    #[test]
+    fn a_look_for_an_older_list_of_projects_is_not_taken() {
+        let mut state = State::default();
+        state.u6.looked = vec![PathBuf::from("H:/Unity projects/A"), PathBuf::from("H:/Unity projects/B")];
+        let mut stale = look(&[("H:/Unity projects/A", standing::State::On2022)]);
+        stale.projects = vec![PathBuf::from("H:/Unity projects/A")];
+        assert!(!state.u6.apply(5, stale));
+        assert!(state.u6.look.is_none() && state.u6.again, "dropped, and a new look is due");
+        let mut fresh = look(&[("H:/Unity projects/A", standing::State::On2022)]);
+        fresh.projects = state.u6.looked.clone();
+        assert!(state.u6.apply(6, fresh));
     }
 
     /// M10: a late answer (asked before the one shown) is dropped; answers never touch the selection.
@@ -413,7 +478,7 @@ mod tests {
         let mut state = State::default();
         let path = PathBuf::from("H:/Unity projects/My avatars (Unity 6)");
         let job = trial::Job {
-            id: "t".into(),
+            id: "0".repeat(32),
             created: 0,
             source: trial::Place { path: PathBuf::from("H:/Unity projects/My avatars"), id: None, name: "My avatars".into() },
             trial: trial::Place { path: path.clone(), id: None, name: "My avatars (Unity 6)".into() },
@@ -422,6 +487,9 @@ mod tests {
             error: None,
             attempts: vec![],
             migrated: None,
+            siblings: vec![],
+            localized: vec![],
+            import_high: 0,
         };
         let mut l = look(&[]);
         l.trials = vec![(job, trial::Status::Waiting { vcc_copy: None })];
@@ -433,5 +501,42 @@ mod tests {
         let ctx = egui::Context::default();
         state.open_unity(&ctx, &project, false);
         assert!(!state.action.running() && state.error.as_deref().is_some_and(|e| e.contains("Creator Companion")));
+        // Not finished, or the first copy once Creator Companion's own copy was taken: the same.
+        let mut l = look(&[]);
+        l.trials = vec![(trial_job(&path, None), trial::Status::Unfinished)];
+        state.u6.apply(2, l);
+        assert!(state.u6.waiting(&path));
+        let mut l = look(&[]);
+        l.trials = vec![(trial_job(&path, Some(PathBuf::from("H:/Unity projects/My avatars (Unity 6)-Migrated"))), trial::Status::OnUnity6)];
+        state.u6.apply(3, l);
+        assert!(state.u6.waiting(&path), "the first copy keeps its guard");
+        assert!(!state.u6.waiting(Path::new("H:/Unity projects/My avatars (Unity 6)-Migrated")), "the migrated copy is a Unity 6 trial");
+    }
+
+    fn trial_job(path: &Path, migrated: Option<PathBuf>) -> trial::Job {
+        trial::Job {
+            id: "1".repeat(32),
+            created: 0,
+            source: trial::Place { path: PathBuf::from("H:/Unity projects/My avatars"), id: None, name: "My avatars".into() },
+            trial: trial::Place { path: path.to_path_buf(), id: None, name: "My avatars (Unity 6)".into() },
+            phase: trial::Phase::Prepared,
+            target: trial::Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
+            error: None,
+            attempts: vec![],
+            migrated: migrated.map(|p| trial::Place { name: "x".into(), path: p, id: None }),
+            siblings: vec![],
+            localized: vec![],
+            import_high: 0,
+        }
+    }
+    /// Verification minor 3: what the page draws comes from the look's snapshot, never from the disk while drawing.
+    #[test]
+    fn the_page_draws_from_the_snapshot() {
+        let mut state = State::default();
+        let mut l = look(&[("Q:/Not/Here", standing::State::On2022)]);
+        l.present.insert(orbiters_projects::discovery::key(Path::new("Q:/Not/Here/Trial")));
+        state.u6.apply(1, l);
+        assert!(state.u6.present(Path::new("Q:/Not/Here/Trial")), "said present as the worker saw it, though no such disk exists here");
+        assert!(state.u6.standing(Path::new("q:\\not\\here")).is_some(), "found by its key");
     }
 }

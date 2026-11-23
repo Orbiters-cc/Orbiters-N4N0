@@ -14,8 +14,10 @@ pub enum Need {
     Copy,
     /// The Library Unity 6 builds on first open, estimated.
     Import,
-    /// Unity 6000 and the modules chosen, from Unity's published sizes (downloads and the install).
+    /// Unity 6000 and the modules its 2022 editor has, installed, from Unity's published sizes.
     Editor,
+    /// The same, downloaded first (where Unity Hub downloads).
+    Download,
     /// Room kept free for Unity's and the system's temporary files.
     Margin,
 }
@@ -101,12 +103,48 @@ impl Room for Disks {
             let key = crate::mac::room_key(&v);
             Some((key, free))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
-            let id = crate::owned::id_of(dir).ok()?;
-            Some((format!("volume-{}", id.volume), free))
+            let _ = free;
+            windows_volume(dir)
+        }
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let dev = std::fs::metadata(dir).ok()?.dev();
+            Some((format!("device-{dev}"), free))
         }
     }
+}
+
+/// The volume that really holds `dir` (through junctions, links and mounted folders: the folder is resolved first) and
+/// the room free on that same volume, so the two always describe one disk (verification's blocker 6).
+#[cfg(windows)]
+fn windows_volume(dir: &Path) -> Option<(String, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() };
+    let text = |b: &[u16]| String::from_utf16_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]);
+    let target = std::fs::canonicalize(dir).ok()?;
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut mount = vec![0u16; 1024];
+    // SAFETY: valid null-terminated strings and buffers of the given lengths.
+    unsafe { GetVolumePathNameW(PCWSTR(target.as_ptr()), &mut mount) }.ok()?;
+    let mount = text(&mount);
+    // `\\?\C:\` is named `C:\` by the other calls; a `\\?\Volume{…}\` path is the volume's own name already.
+    let plain = match mount.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() <= 3 && rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => mount.clone(),
+    };
+    let mut name = vec![0u16; 128];
+    let key = match unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(wide(&plain).as_ptr()), &mut name) } {
+        Ok(()) => text(&name),
+        Err(_) => plain.clone(),
+    };
+    let mut free = 0u64;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide(&plain).as_ptr()), Some(&mut free), None, None) }.ok()?;
+    Some((key.to_lowercase(), free))
 }
 
 /// Groups `demands` by real volume and puts each volume's free room beside them.
@@ -123,17 +161,42 @@ pub fn plan(demands: Vec<Demand>, room: &dyn Room, import_guessed: bool) -> Budg
     Budget { volumes: volumes.into_iter().map(|(_, v)| v).collect(), import_guessed }
 }
 
+/// What installing the editor takes, when it is missing: its installed bytes where Unity Hub installs, its download
+/// where Unity Hub downloads, each with the modules counted in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorNeed {
+    pub install_at: PathBuf,
+    pub installed: u64,
+    pub download_at: PathBuf,
+    pub download: u64,
+}
+
+impl EditorNeed {
+    /// From a release row's sizes on this computer, with Android (and its SDK, NDK, JDK) and iOS when `android`/`ios`.
+    pub fn of(size: &super::matrix::EditorSize, android: bool, ios: bool) -> Self {
+        let mut need = Self { install_at: editor_install_folder(), installed: size.installed, download_at: std::env::temp_dir(), download: size.download };
+        for (wanted, module) in [(android, size.android), (ios, size.ios)] {
+            if let (true, Some([d, i])) = (wanted, module) {
+                need.download += d;
+                need.installed += i;
+            }
+        }
+        need
+    }
+}
+
 /// The demands of a trial of a project whose copy takes `copy` bytes (measured) and whose Library took `library`,
-/// copied into `trial`; with the editor's install (`editor`: where it goes and its bytes) when it is missing.
-pub fn demands(trial: &Path, copy: u64, library: Option<u64>, editor: Option<(PathBuf, u64)>) -> (Vec<Demand>, bool) {
+/// copied into `trial`; with the editor's install and download (`editor`) when it is missing.
+pub fn demands(trial: &Path, copy: u64, library: Option<u64>, editor: Option<EditorNeed>) -> (Vec<Demand>, bool) {
     let (low, high, guessed) = import_estimate(copy, library);
     let mut out = vec![
         Demand { need: Need::Copy, at: trial.to_path_buf(), bytes: copy, low: None },
         Demand { need: Need::Import, at: trial.to_path_buf(), bytes: high, low: Some(low) },
         Demand { need: Need::Margin, at: trial.to_path_buf(), bytes: MARGIN, low: None },
     ];
-    if let Some((at, bytes)) = editor {
-        out.push(Demand { need: Need::Editor, at, bytes, low: None });
+    if let Some(e) = editor {
+        out.push(Demand { need: Need::Editor, at: e.install_at, bytes: e.installed, low: None });
+        out.push(Demand { need: Need::Download, at: e.download_at, bytes: e.download, low: None });
     }
     (out, guessed)
 }
@@ -144,7 +207,7 @@ pub fn editor_install_folder() -> PathBuf {
     let secondary = hub
         .and_then(|h| std::fs::read_to_string(h.join("secondaryInstallPath.json")).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.as_str().map(str::trim).map(ToOwned::to_owned))
+        .and_then(|v| v.as_str().or_else(|| v["secondaryInstallPath"].as_str()).map(str::trim).map(ToOwned::to_owned))
         .map(PathBuf::from)
         .filter(|p| p.is_absolute());
     secondary.unwrap_or_else(|| if cfg!(target_os = "macos") { PathBuf::from("/Applications/Unity/Hub/Editor") } else { PathBuf::from(r"C:\Program Files\Unity\Hub\Editor") })
@@ -170,7 +233,8 @@ mod tests {
     fn demands_on_one_volume_add_up_and_each_volume_is_judged() {
         let room = Fake(HashMap::from([("C", ("one", 30 * GB)), ("D", ("one", 30 * GB)), ("H", ("two", 17 * GB))]));
         // The trial on H, the editor on C: H must hold copy + import + margin.
-        let (d, guessed) = demands(Path::new("H/Projects/Trial"), 5 * GB, Some(4 * GB), Some((PathBuf::from("C/Unity"), 13 * GB)));
+        let editor = |at: &str| EditorNeed { install_at: PathBuf::from(at), installed: 13 * GB, download_at: PathBuf::from(at), download: 0 };
+        let (d, guessed) = demands(Path::new("H/Projects/Trial"), 5 * GB, Some(4 * GB), Some(editor("C/Unity")));
         let b = plan(d, &room, guessed);
         assert_eq!(b.volumes.len(), 2);
         assert!(!guessed);
@@ -179,10 +243,14 @@ mod tests {
         assert!(!h.fits(), "17 GB free on H is less than {}", h.total());
         assert!(!b.fits());
         // On D, which shares C's room with the editor: one volume, the demands summed against its room.
-        let (d, _) = demands(Path::new("D/Trial"), 5 * GB, Some(4 * GB), Some((PathBuf::from("C/Unity"), 13 * GB)));
+        let (d, _) = demands(Path::new("D/Trial"), 5 * GB, Some(4 * GB), Some(editor("C/Unity")));
         let b = plan(d, &room, false);
         assert_eq!(b.volumes.len(), 1);
         assert_eq!(b.volumes[0].total(), 5 * GB + 8 * GB + MARGIN + 13 * GB);
+        // Verification blocker 6: the modules the 2022 editor has are counted, and the download lands where Hub downloads.
+        let size = super::super::matrix::EditorSize { download: 4 * GB, installed: 8 * GB, android: Some([2 * GB, 6 * GB]), ios: Some([GB, GB]) };
+        let need = EditorNeed::of(&size, true, false);
+        assert_eq!((need.download, need.installed), (6 * GB, 14 * GB));
         assert!(!b.volumes[0].fits(), "30 GB free is less than the sum, though each alone fits");
         // Editor installed already: only the trial's needs.
         let (d, _) = demands(Path::new("D/Trial"), 5 * GB, Some(4 * GB), None);
@@ -198,6 +266,23 @@ mod tests {
         // Absent, or tiny (redirected elsewhere): from the copy's size, wider.
         assert_eq!(import_estimate(1_000, None), (1_000, 3_000, true));
         assert_eq!(import_estimate(1_000, Some(10)), (1_000, 3_000, true));
+    }
+
+    /// Verification blocker 6: a junction is keyed by the volume it leads to, as its free room is. Across two volumes this
+    /// needs a folder on another one (`ORBITERS_TEST_OTHER_VOLUME`); on one volume it checks the same rule.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_is_counted_on_the_volume_it_leads_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let other = std::env::var_os("ORBITERS_TEST_OTHER_VOLUME").map(PathBuf::from).unwrap_or_else(|| temp.path().join("elsewhere"));
+        let target = other.join(format!("u6-junction-{}", std::process::id()));
+        std::fs::create_dir_all(&target).unwrap();
+        let link = temp.path().join("link");
+        junction::create(&target, &link).unwrap();
+        let (through, there) = (Disks.of(&link.join("Trial")).unwrap(), Disks.of(&target).unwrap());
+        assert_eq!(through.0, there.0, "the junction's key is its target's volume");
+        let _ = junction::delete(&link);
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     #[test]

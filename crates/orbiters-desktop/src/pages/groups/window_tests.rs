@@ -226,27 +226,24 @@ fn the_service_admits_a_few_requests_at_once() {
     let (client, _between) = linked_through(&service, Role::Window);
     let ctl: Ctl = Arc::new(Remote(client));
     let (tx, rx) = mpsc::channel();
-    let threads: Vec<_> = (0..12)
-        .map(|i| {
-            let (ctl, scope, tx) = (ctl.clone(), Scope::of(&snap), tx.clone());
-            std::thread::spawn(move || tx.send(ctl.groups(scope, Request::Check { op: format!("op-{i}"), write: post() })).unwrap())
-        })
-        .collect();
     let mut replies = Vec::new();
-    let start = Instant::now();
-    while replies.len() < 12 - crate::controller::groups::ADMIT_MAX && start.elapsed() < Duration::from_secs(5) {
-        if let Ok(r) = rx.recv_timeout(Duration::from_millis(50)) {
-            replies.push(r);
+    let (entered, busy) = std::thread::scope(|s| {
+        for i in 0..12 {
+            let (ctl, scope, tx) = (ctl.clone(), Scope::of(&snap), tx.clone());
+            s.spawn(move || tx.send(ctl.groups(scope, Request::Check { op: format!("op-{i}"), write: post() })).unwrap());
         }
-    }
-    let entered = service.ctl.groups_entered();
-    let busy = replies.iter().filter(|r| **r == Reply::Failed(Failure::Busy)).count();
-    let (open, cv) = &*gate;
-    *open.lock().unwrap() = true;
-    cv.notify_all();
-    for t in threads {
-        t.join().unwrap();
-    }
+        let start = Instant::now();
+        while replies.len() < 12 - crate::controller::groups::ADMIT_MAX && start.elapsed() < Duration::from_secs(5) {
+            if let Ok(r) = rx.recv_timeout(Duration::from_millis(50)) {
+                replies.push(r);
+            }
+        }
+        let counted = (service.ctl.groups_entered(), replies.iter().filter(|r| **r == Reply::Failed(Failure::Busy)).count());
+        let (open, cv) = &*gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+        counted
+    });
     let rest: Vec<Reply> = rx.try_iter().collect();
     assert!(entered <= crate::controller::groups::ADMIT_MAX as u64, "{entered} reached the controller: admission comes first ({replies:?}, then {rest:?})");
     assert_eq!(busy, 12 - crate::controller::groups::ADMIT_MAX, "told to wait while the others run: {replies:?}");

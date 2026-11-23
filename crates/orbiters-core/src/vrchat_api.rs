@@ -1053,12 +1053,14 @@ impl Client {
         let cookie = if session_host { self.cookies.header() } else { String::new() };
         self.permitted()?;
         let unknown = ambiguous(method, family);
+        // The groups' own policy (verify-r22 Major 2): an invite or an instance VRChat rate-limits says so, as before.
+        let group_write = method != "GET" && family == groups::WRITES;
         let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None, form }).map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
-        // Backoff survives a revoked grant. No response data or cookies do. A 429 that came back to a write that went out
+        // Backoff survives a revoked grant. No response data or cookies do. A 429 that came back to a group write that went out
         // proves nothing about what the server did with it: unknown, the back-off kept (verify-r22 Major 2).
         if response.status == 429 {
             let refused = self.back_off(&response);
-            return Err(if unknown { Error::OutcomeUnknown } else { refused });
+            return Err(if group_write { Error::OutcomeUnknown } else { refused });
         }
         self.permitted().map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
         let before = self.cookies.clone();
@@ -1066,10 +1068,10 @@ impl Client {
             self.cookies.absorb(&response.cookies);
         }
         if !before.auth.is_empty() && self.cookies.auth.is_empty() {
-            // VRChat deleted the cookie: that session is over. A write it answered otherwise than with a 401 may still
+            // VRChat deleted the cookie: that session is over. A group write it answered otherwise than with a 401 may still
             // have been done (Major 2).
             self.end();
-            return Err(if unknown && response.status != 401 { Error::OutcomeUnknown } else { Error::Unauthorized });
+            return Err(if group_write && response.status != 401 { Error::OutcomeUnknown } else { Error::Unauthorized });
         }
         if accept.contains(&response.status) {
             return Ok(response);

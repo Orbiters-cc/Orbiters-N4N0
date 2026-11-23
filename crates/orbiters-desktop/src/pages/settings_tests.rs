@@ -163,6 +163,9 @@ impl Harness {
     }
 }
 
+/// The kinds of control that keep a choice (the others are buttons: actions, or a row's own Save).
+const CHOICES: [&str; 8] = ["toggle", "slider", "segments", "step-slider", "text-field", "dropdown", "chip", "tile"];
+
 /// The gates the harness opens: no window GPU to choose here.
 const HERE: Open = Open { bridge: true, vrchat_login: true, gpu_choice: false, gpu_split: false };
 
@@ -206,6 +209,22 @@ impl Harness {
                 out.push(format!("{card} › control {key:?}"));
             }
         }
+        // A row is one setting: its own control is claimed by where it is, but a second control that keeps a choice in
+        // the same row is another setting, which must be named by an entry (claimed by key, not by position).
+        for (card, label, row) in &self.state.seen {
+            let undeclared: Vec<&str> = self
+                .state
+                .seen_controls
+                .iter()
+                .zip(&self.state.seen_kinds)
+                .filter(|((c, _, r), kind)| c == card && row.contains(r.center()) && CHOICES.contains(kind))
+                .map(|((_, k, _), _)| k.as_str())
+                .filter(|k| !ENTRIES.iter().any(|e| e.group == group && e.card == *card && e.controls.contains(k)))
+                .collect();
+            if undeclared.len() > 1 {
+                out.push(format!("{card} › row {label:?} holds {} settings named by no entry: {undeclared:?}", undeclared.len()));
+            }
+        }
         out
     }
 }
@@ -246,9 +265,10 @@ fn a_control_missing_from_the_registry_is_caught_on_a_broad_card() {
     assert_eq!(h.unclaimed(Group::Vrchat), vec!["FPS booster › control \"booster-another-slider\"".to_string()]);
 }
 
-/// And the other way, in both states: with every dependency on, every setting that can show here is drawn where the
-/// registry says (a row of it, a control of it, or its whole card); with them off, each setting that needs another is
-/// not drawn, the one it needs is, and a search result for it leads there.
+/// And the other way, in both states (every dependency on, every dependency off): every setting that can show here is
+/// drawn where the registry says (a row of it, a control of it, or its whole card) exactly when what it needs is so; when
+/// it is not, the setting it needs is drawn and a search result leads there. No setting is skipped. (Each dependency's
+/// other states, mixed ones included, are in `every_dependency_in_each_of_its_states`.)
 #[test]
 fn every_setting_of_the_registry_is_drawn_where_it_says() {
     let drawn = |h: &Harness, e: &registry::Entry| {
@@ -257,34 +277,39 @@ fn every_setting_of_the_registry_is_drawn_where_it_says() {
         let control = h.state.seen_controls.iter().any(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str()));
         card.is_some() && (row || control || e.whole)
     };
-    let mut h = Harness::new();
-    for group in registry::groups(&HERE) {
-        h.open(group.id());
-        for e in registry::of_group(group, &HERE) {
-            assert!(drawn(&h, e), "dependencies on: {} is not drawn in {group:?} › {}", e.id, e.card);
+    let mut wrong = Vec::new();
+    for off in [false, true] {
+        let mut h = Harness::new();
+        if off {
+            h.dependencies_off();
+        }
+        let state = if off { "off" } else { "on" };
+        for group in registry::groups(&HERE) {
+            h.open(group.id());
+            for e in registry::of_group(group, &HERE) {
+                match super::hidden_by(e, &h.snap) {
+                    None => {
+                        if !drawn(&h, e) {
+                            wrong.push(format!("dependencies {state}: {} shows here, and is not drawn in {group:?} › {}", e.id, e.card));
+                        }
+                    }
+                    Some((needs, when)) => {
+                        if drawn(&h, e) {
+                            wrong.push(format!("dependencies {state}: {} is drawn while {when:?}", e.id));
+                        }
+                        let parent = registry::entry(needs.parent).expect("its parent is an entry");
+                        if parent.group != e.group || !drawn(&h, parent) {
+                            wrong.push(format!("dependencies {state}: {} is hidden, and {} that shows it is not drawn beside it", e.id, parent.id));
+                        }
+                        if target_of(e, &h.snap).id != parent.id {
+                            wrong.push(format!("dependencies {state}: a result for {} does not lead to {}", e.id, parent.id));
+                        }
+                    }
+                }
+            }
         }
     }
-    let mut h = Harness::new();
-    h.dependencies_off();
-    let mut hidden = 0;
-    for group in registry::groups(&HERE) {
-        h.open(group.id());
-        for e in registry::of_group(group, &HERE) {
-            let Some(needs) = e.needs else { continue };
-            assert!(!(needs.met)(&h.snap), "{}: its dependency is still met", e.id);
-            let why = (
-                h.state.seen.iter().filter(|(c, label, _)| *c == e.card && e.has_row(label)).map(|(_, l, _)| l.clone()).collect::<Vec<_>>(),
-                h.state.seen_controls.iter().filter(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str())).map(|(_, k, _)| k.clone()).collect::<Vec<_>>(),
-            );
-            assert!(!drawn(&h, e), "dependencies off: {} is drawn while {:?} is not so: {why:?}", e.id, needs.when);
-            let parent = registry::entry(needs.parent).expect("its parent is an entry");
-            assert_eq!(parent.group, e.group, "{}: what shows it is in another sub-tab", e.id);
-            assert!(drawn(&h, parent), "dependencies off: {} is hidden, and {} that shows it is not drawn", e.id, parent.id);
-            assert_eq!(target_of(e, &h.snap).id, parent.id, "{}: a result for it leads to {}", e.id, parent.id);
-            hidden += 1;
-        }
-    }
-    assert!(hidden >= 12, "only {hidden} settings were tested hidden");
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// Major 10's case: Direct calls searched with Calls off. The result says what it needs; Enter opens Calls' sub-tab and
@@ -679,4 +704,215 @@ fn every_control_fits_at_the_smallest_window() {
         });
     }
     assert!(wrong.is_empty(), "{} controls do not fit:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+// ---- verify2-r21 m1 / Major 10: every dependency in each of its states; persisting controls; rows with two settings ----
+
+/// What hides `e` here, said in English, or nothing when it shows.
+fn hint_of(e: &registry::Entry, snap: &Snapshot) -> Option<&'static str> {
+    super::hidden_by(e, snap).map(|(_, when)| when)
+}
+
+/// The settings that need another to show, every one of them, by id: the count is exact, so a dependency added or lost
+/// without its states below fails here.
+const DEPENDENT: [&str; 17] = [
+    "account.explorer-points",
+    "n4n0.afk-message",
+    "n4n0.direct-calls",
+    "vr.camera-find",
+    "vr.watch-hand",
+    "vr.walk-strength",
+    "vr.walk-driver",
+    "capture.voice-mic",
+    "vrchat.priority",
+    "vrchat.main-thread",
+    "vrchat.frame-cap",
+    "vrchat.video-decoding",
+    "vrchat.tiny-window",
+    "vrchat.perf-hint-mute",
+    "translate.server",
+    "translate.model",
+    "translate.orbiters-agreement",
+];
+
+#[test]
+fn the_settings_that_need_another_are_exactly_these() {
+    let mut declared: Vec<&str> = ENTRIES.iter().filter(|e| e.needs.is_some()).map(|e| e.id).collect();
+    declared.sort_unstable();
+    let mut expected = DEPENDENT.to_vec();
+    expected.sort_unstable();
+    assert_eq!(declared, expected, "{} declared", declared.len());
+}
+
+/// One state of a dependency: its name, how to put the made-up state in it, and whether the setting shows then (with
+/// the English of what the search says while it does not).
+type DepState = (&'static str, fn(&mut Harness), Option<&'static str>);
+
+fn signed_in(h: &mut Harness) {
+    h.snap.account.state = AccountState::SignedIn { username: "TestMember".into() };
+}
+
+/// Every dependency, in each of its states: the account's (signed in, out, offline, expired), calls not open to this
+/// account with Calls on or off, each translator with and without models, an agreement given or not, a hint or none.
+fn dependency_states() -> Vec<(&'static str, Vec<DepState>)> {
+    use orbiters_core::settings::TranslateProvider as P;
+    vec![
+        (
+            "account.explorer-points",
+            vec![
+                ("signed in", signed_in as fn(&mut Harness), None),
+                ("offline, known", |h| h.snap.account.state = AccountState::Offline { username: Some("TestMember".into()) }, None),
+                ("signed out", |h| h.snap.account.state = AccountState::SignedOut, Some("Shown once you are signed in to Orbiters")),
+                ("sign-in expired", |h| h.snap.account.state = AccountState::Expired { username: Some("TestMember".into()) }, Some("Shown once you are signed in to Orbiters")),
+            ],
+        ),
+        ("n4n0.afk-message", vec![("AFK on", |h| h.snap.settings.n4n0.afk_message_enabled = true, None), ("AFK off", |h| h.snap.settings.n4n0.afk_message_enabled = false, Some("Shown when AFK message is on"))]),
+        (
+            "n4n0.direct-calls",
+            vec![
+                ("calls open, on", |h| { h.snap.n4n0.calls.link = crate::state::CallLink::Off; h.snap.settings.n4n0.calls = true; }, None),
+                ("calls open, off", |h| { h.snap.n4n0.calls.link = crate::state::CallLink::Off; h.snap.settings.n4n0.calls = false; }, Some("Shown when Calls is on")),
+                // Not open to this account: Calls is on and greyed, nothing to turn on.
+                ("not open to the account, Calls on", |h| { h.snap.n4n0.calls.link = crate::state::CallLink::ComingSoon; h.snap.settings.n4n0.calls = true; }, Some("Coming soon: calls aren't open for your account yet")),
+                ("not open to the account, Calls off", |h| { h.snap.n4n0.calls.link = crate::state::CallLink::ComingSoon; h.snap.settings.n4n0.calls = false; }, Some("Coming soon: calls aren't open for your account yet")),
+            ],
+        ),
+        ("vr.camera-find", vec![("tiles on", |h| h.snap.settings.orbit.camera_tiles = true, None), ("tiles off", |h| h.snap.settings.orbit.camera_tiles = false, Some("Shown when Around the camera is on"))]),
+        ("vr.watch-hand", vec![("watch on", |h| h.snap.settings.floating.watch = true, None), ("watch off", |h| h.snap.settings.floating.watch = false, Some("Shown when Orbiters watch is on"))]),
+        ("vr.walk-strength", vec![("walk on", |h| h.snap.settings.walk_boost.enabled = true, None), ("walk off", |h| h.snap.settings.walk_boost.enabled = false, Some("Shown when Walk boost is on"))]),
+        ("vr.walk-driver", vec![("walk on", |h| h.snap.settings.walk_boost.enabled = true, None), ("walk off", |h| h.snap.settings.walk_boost.enabled = false, Some("Shown when Walk boost is on"))]),
+        ("capture.voice-mic", vec![("voice on", |h| h.snap.settings.performance.record_mic = true, None), ("voice off", |h| h.snap.settings.performance.record_mic = false, Some("Shown when Your voice is on"))]),
+        ("vrchat.priority", vec![("options on", |h| h.snap.settings.launch.performance = true, None), ("options off", |h| h.snap.settings.launch.performance = false, Some("Shown when Performance launch options is on"))]),
+        ("vrchat.main-thread", vec![("options on", |h| h.snap.settings.launch.performance = true, None), ("options off", |h| h.snap.settings.launch.performance = false, Some("Shown when Performance launch options is on"))]),
+        ("vrchat.frame-cap", vec![("options on", |h| h.snap.settings.launch.performance = true, None), ("options off", |h| h.snap.settings.launch.performance = false, Some("Shown when Performance launch options is on"))]),
+        ("vrchat.video-decoding", vec![("options on", |h| h.snap.settings.launch.performance = true, None), ("options off", |h| h.snap.settings.launch.performance = false, Some("Shown when Performance launch options is on"))]),
+        ("vrchat.tiny-window", vec![("options on", |h| h.snap.settings.launch.performance = true, None), ("options off", |h| h.snap.settings.launch.performance = false, Some("Shown when Performance launch options is on"))]),
+        (
+            "vrchat.perf-hint-mute",
+            vec![
+                ("a hint", |h| { h.snap.perf.set(crate::perf::PerfView { hint: Some(crate::perf::Hint { key: "reconstruct_gpu".into(), part: None }), report: None }); }, None),
+                ("no hint", |h| { h.snap.perf.set(crate::perf::PerfView::default()); }, Some("Shown while N4N0 has a performance hint for you")),
+            ],
+        ),
+        (
+            "translate.server",
+            vec![
+                ("AI server", |h| h.snap.settings.translate.provider = P::Address, None),
+                ("this computer", |h| h.snap.settings.translate.provider = P::ThisComputer, Some("Shown when Translator is “AI server”")),
+                ("Orbiters", |h| h.snap.settings.translate.provider = P::Orbiters, Some("Shown when Translator is “AI server”")),
+            ],
+        ),
+        (
+            "translate.model",
+            vec![
+                ("AI server with models", |h| { h.snap.settings.translate.provider = P::Address; models(h, true); }, None),
+                ("this computer with models", |h| { h.snap.settings.translate.provider = P::ThisComputer; models(h, true); }, None),
+                ("AI server, no model yet", |h| { h.snap.settings.translate.provider = P::Address; models(h, false); }, Some("Shown once the AI app or server offers models")),
+                ("this computer, no model yet", |h| { h.snap.settings.translate.provider = P::ThisComputer; models(h, false); }, Some("Shown once the AI app or server offers models")),
+                ("Orbiters, models listed", |h| { h.snap.settings.translate.provider = P::Orbiters; models(h, true); }, Some("Not with Orbiters as the translator")),
+            ],
+        ),
+        (
+            "translate.orbiters-agreement",
+            vec![
+                ("Orbiters, not agreed", |h| { h.snap.settings.translate.provider = P::Orbiters; agreed(h, false); }, None),
+                ("Orbiters, agreed", |h| { h.snap.settings.translate.provider = P::Orbiters; agreed(h, true); }, Some("Already agreed to")),
+                ("AI server", |h| { h.snap.settings.translate.provider = P::Address; agreed(h, false); }, Some("Shown when Translator is “Orbiters”")),
+                ("this computer", |h| { h.snap.settings.translate.provider = P::ThisComputer; agreed(h, false); }, Some("Shown when Translator is “Orbiters”")),
+            ],
+        ),
+    ]
+}
+
+fn models(h: &mut Harness, some: bool) {
+    let models = if some { vec!["made-up-model".to_string()] } else { Vec::new() };
+    h.snap.translate.set(crate::state::TranslateStatus { models, ..Default::default() });
+}
+
+fn agreed(h: &mut Harness, yes: bool) {
+    h.snap.settings.translate.orbiters_agreed = yes;
+    h.snap.settings.translate.orbiters_agreed_window = yes;
+}
+
+/// Each dependency in each of its states: shown exactly when its condition holds; while it does not, not drawn, the
+/// search says the condition that is actually unmet, and a result leads to (and lights) the setting that shows it.
+#[test]
+fn every_dependency_in_each_of_its_states() {
+    let states = dependency_states();
+    let mut covered: Vec<&str> = states.iter().map(|(id, _)| *id).collect();
+    covered.sort_unstable();
+    let mut all = DEPENDENT.to_vec();
+    all.sort_unstable();
+    assert_eq!(covered, all, "every dependency has its states here");
+    let mut wrong = Vec::new();
+    for (id, cases) in states {
+        let Some(e) = registry::entry(id) else {
+            wrong.push(format!("{id} is no entry"));
+            continue;
+        };
+        for (name, set, said) in cases {
+            let mut h = Harness::new();
+            set(&mut h);
+            h.open(e.group.id());
+            let drawn = h.state.seen.iter().any(|(c, label, _)| *c == e.card && e.has_row(label))
+                || h.state.seen_controls.iter().any(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str()));
+            let hint = hint_of(e, &h.snap);
+            if hint != said {
+                wrong.push(format!("{id} ({name}): the search says {hint:?}, expected {said:?}"));
+            }
+            if drawn != said.is_none() {
+                wrong.push(format!("{id} ({name}): drawn {drawn}, expected {}", said.is_none()));
+            }
+            if said.is_some() {
+                let parent = e.needs.map(|n| n.parent).unwrap_or_default();
+                let target = target_of(e, &h.snap).id;
+                if target != parent {
+                    wrong.push(format!("{id} ({name}): a result leads to {target}, not {parent}"));
+                }
+                // The setting that shows it is drawn, to be lit.
+                let p = registry::entry(parent).expect("parent");
+                let shown = h.state.seen.iter().any(|(c, label, _)| *c == p.card && p.has_row(label))
+                    || h.state.seen_controls.iter().any(|(c, k, _)| *c == p.card && p.controls.contains(&k.as_str()))
+                    || (p.whole && h.state.seen_cards.iter().any(|(c, _)| *c == p.card));
+                if !shown {
+                    wrong.push(format!("{id} ({name}): {parent}, which shows it, is not drawn"));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{} wrong:\n{}", wrong.len(), wrong.join("\n"));
+}
+
+/// Controls that keep a choice are settings, found by the search, never "actions that change no setting": Don't tell
+/// me again (a hint muted for good) and I agree (the agreement for translation by Orbiters).
+#[test]
+fn controls_that_keep_a_choice_are_settings() {
+    for (card, key, id) in [("Performance report", "Don't tell me again", "vrchat.perf-hint-mute"), ("Translation in VR", "I agree", "translate.orbiters-agreement")] {
+        assert!(!registry::is_action(card, key), "{key:?} keeps a choice: it is no action");
+        let e = registry::entry(id).unwrap_or_else(|| panic!("{id} is no entry"));
+        assert_eq!(registry::claim(e.group, card, key, egui::pos2(0.0, 0.0), &[]), registry::Claim::Setting(id));
+        assert!(registry::search(&e.shown(e.title).to_lowercase(), &HERE).iter().any(|f| f.entry.id == id), "{id} is found by its name");
+    }
+    assert!(registry::search("don't tell me again", &HERE).iter().any(|f| f.entry.id == "vrchat.perf-hint-mute"));
+    assert!(registry::search("agree orbiters", &HERE).iter().any(|f| f.entry.id == "translate.orbiters-agreement"));
+}
+
+/// A second setting put inside a row already claimed by a setting is caught: it needs its own entry, even though it
+/// sits in another setting's row.
+#[test]
+fn a_second_setting_inside_a_registered_row_is_caught() {
+    let mut h = Harness::new();
+    h.open("voice");
+    let row = h.row("Wake word");
+    let inside = Rect::from_center_size(pos2(row.right() - 120.0, row.center().y), vec2(48.0, 28.0));
+    assert!(h.unclaimed(Group::Voice).is_empty());
+    add_control(&mut h, "N4N0's ears", "n4n0-wake-sensitivity", "slider", inside);
+    let unclaimed = h.unclaimed(Group::Voice);
+    assert!(unclaimed.iter().any(|u| u.contains("n4n0-wake-sensitivity")), "{unclaimed:?}");
+}
+
+/// Tests: a control as if drawn at `rect` in `card` (a second setting slipped into a row).
+fn add_control(h: &mut Harness, card: &'static str, key: &str, kind: &'static str, rect: Rect) {
+    h.state.seen_controls.push((card, key.to_owned(), rect));
+    h.state.seen_kinds.push(kind);
 }

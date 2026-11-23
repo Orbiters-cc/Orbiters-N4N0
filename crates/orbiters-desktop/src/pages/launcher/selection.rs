@@ -268,6 +268,8 @@ pub struct Desk {
     pressed: Option<(f64, u64)>,
     /// The page's pass Where was last drawn in.
     drawn: u64,
+    /// The picture asked for the place chosen, and the generation it was asked under: once each.
+    picture: Option<(u64, String)>,
     /// Pictures of the page: nothing is asked, and what was handed in stays.
     quiet: bool,
 }
@@ -286,6 +288,7 @@ impl Default for Desk {
             rx,
             pressed: None,
             drawn: 0,
+            picture: None,
             quiet: false,
         }
     }
@@ -352,6 +355,23 @@ impl Desk {
         }
         self.again(Verified::Unverified);
         true
+    }
+
+    /// Whether the picture at `url` may be asked for the card `key`: it is the one chosen (a row or a card that is not asks
+    /// for nothing), and this is the first ask for it under this choice. A choice replaced asks for nothing more, so what
+    /// comes late for it is nobody's.
+    pub fn may_ask_picture(&mut self, key: &str, url: &str) -> bool {
+        let generation = self.selection.generation;
+        if self.selection.destination.key() != Some(key) || self.picture.as_ref().is_some_and(|(g, u)| *g == generation && u == url) {
+            return false;
+        }
+        self.picture = Some((generation, url.to_string()));
+        true
+    }
+
+    /// Whether the card `key` is what is chosen.
+    pub fn is_chosen(&self, key: &str) -> bool {
+        self.selection.destination.key() == Some(key)
     }
 
     /// The same destination under a new generation.

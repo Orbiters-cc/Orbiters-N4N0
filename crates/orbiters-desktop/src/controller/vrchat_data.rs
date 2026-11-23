@@ -29,6 +29,11 @@ impl Scope {
             revision: s.vrchat_login.revision,
         }
     }
+
+    /// Whether a VRChat account is signed in and may be used: what is asked with it can be answered.
+    pub fn signed_in(&self) -> bool {
+        self.allowed && self.user.is_some()
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {

@@ -297,29 +297,37 @@ pub(crate) fn within<T: Send + 'static>(limit: std::time::Duration, f: impl FnOn
 /// Opens `project` in its Unity version and returns once the editor has started (or was already there). Always prompt:
 /// never a long operation, which [`storage::repair`] is, asked for separately. Call on a worker.
 pub fn open_project(project: &discovery::Project) -> anyhow::Result<Opened> {
-    open_limited(project, true)
+    open_limited(project, true, unity6::authority::Caller::Window)
+}
+
+/// [`open_project`] for a tool of the bridge: never a project on Unity 6.
+pub fn open_project_from_bridge(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, true, unity6::authority::Caller::Bridge)
 }
 
 /// [`open_project`] without its storage step: Unity is started and Orbiters changes nothing of the project itself. For an
 /// original about to be tried on Unity 6, which Orbiters never writes to.
 pub fn open_project_as_is(project: &discovery::Project) -> anyhow::Result<Opened> {
-    open_limited(project, false)
+    open_limited(project, false, unity6::authority::Caller::Window)
 }
 
-fn open_limited(project: &discovery::Project, tidy: bool) -> anyhow::Result<Opened> {
+fn open_limited(project: &discovery::Project, tidy: bool, caller: unity6::authority::Caller) -> anyhow::Result<Opened> {
     let name = project.name.clone();
     let p = project.clone();
-    within(OPEN_LIMIT, move || open_now(&p, tidy)).unwrap_or_else(|| {
+    within(OPEN_LIMIT, move || open_now(&p, tidy, caller)).unwrap_or_else(|| {
         anyhow::bail!("{}", tr!("Opening {name} is taking too long: its disk or Unity's list of editors is not answering. Unity may still open by itself.", name = name))
     })
 }
 
-fn open_now(project: &discovery::Project, tidy: bool) -> anyhow::Result<Opened> {
+fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority::Caller) -> anyhow::Result<Opened> {
     anyhow::ensure!(
         discovery::is_project(&project.path),
         "{}",
         tr!("{name} is not at {path} any more. If it is on a disk that is not connected, connect it and try again.", name = project.name, path = project.path.display())
     );
+    // What may happen to it, before anything at all does (even bringing an editor forward): a Unity 6 trial keeps its
+    // protections whoever opens it.
+    let way = unity6::authority::allow(&data_dir(), &project.path, unity6::authority::Action::Open(caller)).map_err(|why| anyhow::anyhow!("{why}"))?;
     let locked = unity_open(&project.path);
     let editors = editor::running();
     if let Some(open) = editor::of(&editors, &project.path, locked) {
@@ -336,23 +344,25 @@ fn open_now(project: &discovery::Project, tidy: bool) -> anyhow::Result<Opened> 
     // Read again now, not as the scan saw it: Creator Companion or another tool may have changed it since (M6).
     let stamp = unity6::standing::EditorStamp::read(&project.path);
     anyhow::ensure!(stamp.parsed, "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
-    // A Unity 6 trial keeps its protections whoever opens it (the page, the bridge, the Toolkit's update): one waiting for
-    // Creator Companion is not opened, one on Unity 6 opens through its own launcher, with a log of its own.
-    match unity6::trial::guard(&data_dir(), &project.path) {
-        unity6::trial::Guard::Free => {}
-        unity6::trial::Guard::Blocked(why) => anyhow::bail!("{why}"),
-        unity6::trial::Guard::Unity6(job) => {
-            let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
-            unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
-            return Ok(Opened { already_open: false, moved: None });
-        }
+    if let unity6::authority::Way::Trial(job) = way {
+        let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
+        unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::alive, &start)?;
+        return Ok(Opened { already_open: false, moved: None });
     }
     let unity = stamp.text.clone();
     // Only that exact editor and build: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
-    let editor = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
+    let chosen = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
+    let editor = chosen.program.clone();
     let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
     let moved = if tidy { preflight(&project.path) } else { None };
+    // The program itself again, held until it has started: nothing was put in its place since.
+    let _held = unity6::gate::hold_program(&editor)?;
+    anyhow::ensure!(
+        unity6::editors::probe(&editor) == chosen.identity,
+        "{}",
+        tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = editor.display(), version = project.unity)
+    );
     #[cfg(not(target_os = "macos"))]
     let started = {
         let mut command = hidden_command(&editor);
@@ -372,14 +382,11 @@ fn preflight(project: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The program Open uses for a project on `unity`: exactly that version (or, said nothing of itself, found where a hint
-/// said); never another one, which is named instead.
-fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<PathBuf> {
+/// The program Open uses for a project on `unity`: one that says it is exactly that version, of the build the project names,
+/// for this computer; never another one, which is named instead.
+fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<unity6::editors::Candidate> {
     match found {
-        unity6::editors::Found::Exact(c) => Ok(c.program),
-        // A program that says nothing of itself is used only where Unity Hub itself put that version (its own folder named
-        // after it); anything else must say what it is.
-        unity6::editors::Found::Unverified(c) if matches!(c.hint, unity6::editors::Hint::HubFolder | unity6::editors::Hint::HubSecondary) => Ok(c.program),
+        unity6::editors::Found::Exact(c) => Ok(c),
         unity6::editors::Found::Unverified(c) => anyhow::bail!(
             "{}",
             tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = c.program.display(), version = unity)
@@ -706,9 +713,9 @@ mod open_tests {
         let mut vcc_hint = candidate("D:/Elsewhere/Unity.exe", Check::Unverified);
         vcc_hint.hint = Hint::VccSettings;
         assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Unverified(vcc_hint)).unwrap_err()).contains("could not be verified"));
-        assert!(choose_editor("6000.0.67f1", Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_ok(), "Hub's own folder of that version");
+        assert!(choose_editor("6000.0.67f1", Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_err(), "not even in Hub's own folder of that version");
         let exact = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Verified);
-        assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap(), PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
+        assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap().program, PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
         // The scan saw 2022; Creator Companion changed the file since: the file is what counts, and a file naming no
         // version stops Open before any editor is looked for.
         let temp = tempfile::tempdir().unwrap();
@@ -717,7 +724,7 @@ mod open_tests {
         assert_eq!(unity6::standing::EditorStamp::read(temp.path()).text, "6000.0.67f1");
         std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "nothing\n").unwrap();
         let project = discovery::Project { name: "Changed".into(), path: temp.path().to_path_buf(), unity: "2022.3.22f1".into(), ..Default::default() };
-        let error = format!("{:#}", open_now(&project, true).unwrap_err());
+        let error = format!("{:#}", open_now(&project, true, unity6::authority::Caller::Window).unwrap_err());
         assert!(error.contains("does not say which Unity version"), "{error}");
     }
 
@@ -726,7 +733,7 @@ mod open_tests {
         // Unity would make a new, empty project there.
         let temp = tempfile::tempdir().unwrap();
         let project = discovery::Project { name: "Gone".into(), path: temp.path().join("gone"), unity: "2022.3.22f1".into(), ..Default::default() };
-        let error = open_now(&project, true).unwrap_err();
+        let error = open_now(&project, true, unity6::authority::Caller::Window).unwrap_err();
         assert!(format!("{error:#}").contains("is not at"), "{error:#}");
         assert!(!temp.path().join("gone").exists());
     }

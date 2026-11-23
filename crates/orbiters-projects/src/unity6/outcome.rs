@@ -26,6 +26,8 @@ pub enum Unknown {
     EndedEarly,
     /// Unity runs, and its log says nothing this reads yet.
     NotYet,
+    /// The log is there and could not be read.
+    Unreadable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +43,12 @@ pub enum Outcome {
     /// The log lists compiler errors.
     CompilerErrors { errors: Vec<Diagnostic>, running: bool },
     /// The log says the first import finished, and lists no compiler error. `running`: Unity is still open (the SDK's
-    /// Upgrade Wizard may be waiting).
-    Imported { running: bool },
+    /// Upgrade Wizard may be waiting). `cut`: only the log's end was read, so an error before it would not be seen.
+    Imported {
+        running: bool,
+        #[serde(default)]
+        cut: bool,
+    },
     /// The log does not tell; `running`: Unity's process still runs (a separate fact).
     Undetermined { why: Unknown, running: bool },
 }
@@ -52,7 +58,7 @@ impl Outcome {
     pub fn ended(&self) -> bool {
         match self {
             Outcome::DidNotStart(_) | Outcome::ExitedAtOnce(_) => true,
-            Outcome::SafeMode { running, .. } | Outcome::CompilerErrors { running, .. } | Outcome::Imported { running } => !running,
+            Outcome::SafeMode { running, .. } | Outcome::CompilerErrors { running, .. } | Outcome::Imported { running, .. } => !running,
             Outcome::Importing => false,
             Outcome::Undetermined { running, .. } => !running,
         }
@@ -73,14 +79,28 @@ fn diagnostic(line: &str) -> Option<Diagnostic> {
 /// The most compiler errors kept from one log.
 const KEEP: usize = 50;
 
-/// The line Unity writes when its first import has finished: `Asset Pipeline Refresh (id=…): Total: … seconds -
-/// Initiated by InitialRefreshV2(…)`. Only that whole line counts, never a mention of the operation.
+/// The line Unity writes when its first import has finished, the whole of it and nothing else:
+/// `Asset Pipeline Refresh (id=<hex>): Total: <seconds> seconds - Initiated by InitialRefreshV2(<options>)`.
 fn import_finished(line: &str) -> bool {
-    line.contains("Asset Pipeline Refresh") && line.contains("Total:") && line.contains("InitialRefreshV2")
+    let parse = || -> Option<()> {
+        let rest = line.trim().strip_prefix("Asset Pipeline Refresh (id=")?;
+        let (id, rest) = rest.split_once("): Total: ")?;
+        let (seconds, rest) = rest.split_once(" seconds - Initiated by InitialRefreshV2(")?;
+        let options = rest.strip_suffix(')')?;
+        let hex = !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit());
+        let named = options.bytes().all(|b| b.is_ascii_alphanumeric() || b" |,_".contains(&b));
+        (hex && named && seconds.parse::<f64>().is_ok_and(|s| s.is_finite() && s >= 0.0)).then_some(())
+    };
+    parse().is_some()
 }
 
 /// What `log` (the attempt's file, `None` when there is none) says, Unity running or not.
 pub fn judge(log: Option<&str>, running: bool) -> Outcome {
+    judge_part(log, running, false)
+}
+
+/// [`judge`] of a log's end (`cut`: what came before it was not read).
+fn judge_part(log: Option<&str>, running: bool, cut: bool) -> Outcome {
     let Some(text) = log else { return Outcome::Undetermined { why: Unknown::NoLog, running } };
     if text.trim().is_empty() {
         return Outcome::Undetermined { why: Unknown::Empty, running };
@@ -108,7 +128,7 @@ pub fn judge(log: Option<&str>, running: bool) -> Outcome {
     } else if !errors.is_empty() {
         Outcome::CompilerErrors { errors, running }
     } else if imported {
-        Outcome::Imported { running }
+        Outcome::Imported { running, cut }
     } else if running && began {
         Outcome::Importing
     } else if running {
@@ -125,11 +145,19 @@ const TAIL: u64 = 8 * 1024 * 1024;
 pub fn read(path: &std::path::Path, running: bool) -> Outcome {
     use std::io::{Read as _, Seek as _};
     let Ok(mut file) = std::fs::File::open(path) else { return judge(None, running) };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let _ = file.seek(std::io::SeekFrom::Start(len.saturating_sub(TAIL)));
     let mut bytes = vec![];
-    let _ = file.take(TAIL).read_to_end(&mut bytes);
-    judge(Some(&String::from_utf8_lossy(&bytes)), running)
+    let got = (|| -> std::io::Result<bool> {
+        let len = file.metadata()?.len();
+        let from = len.saturating_sub(TAIL);
+        file.seek(std::io::SeekFrom::Start(from))?;
+        file.take(TAIL).read_to_end(&mut bytes)?;
+        Ok(from > 0)
+    })();
+    match got {
+        Ok(cut) => judge_part(Some(&String::from_utf8_lossy(&bytes)), running, cut),
+        // Part of it could not be read: what it says is not known.
+        Err(_) => Outcome::Undetermined { why: Unknown::Unreadable, running },
+    }
 }
 
 #[cfg(test)]
@@ -137,7 +165,7 @@ mod tests {
     use super::*;
 
     const START: &str = "Built from '6000.0/staging' branch; Version is '6000.0.67f1 (78a1c2bbeb6a)'\n[Package Manager] Done resolving packages\n";
-    const IMPORT: &str = "Asset Pipeline Refresh (id=1a2b): Total: 812.403 seconds - Initiated by InitialRefreshV2(ForceSynchronousImport)\n";
+    const IMPORT: &str = "Asset Pipeline Refresh (id=1a2bc3d4): Total: 812.403 seconds - Initiated by InitialRefreshV2(ForceSynchronousImport)\n";
     const ERROR: &str = "Assets/Scripts/Door.cs(12,5): error CS0246: The type or namespace name 'Foo' could not be found\n";
 
     #[test]
@@ -152,16 +180,16 @@ mod tests {
         assert_eq!(judge(Some(&format!("{START}InitialRefreshV2 started\n")), true), Outcome::Importing);
         // Ended with a log cut short: nothing is claimed.
         assert_eq!(judge(Some(START), false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
-        assert_eq!(judge(Some(&format!("{START}{IMPORT}")), true), Outcome::Imported { running: true });
-        assert_eq!(judge(Some(&format!("{START}{IMPORT}")), false), Outcome::Imported { running: false });
+        assert_eq!(judge(Some(&format!("{START}{IMPORT}")), true), Outcome::Imported { running: true, cut: false });
+        assert_eq!(judge(Some(&format!("{START}{IMPORT}")), false), Outcome::Imported { running: false, cut: false });
         let errors = judge(Some(&format!("{START}{ERROR}{ERROR}{IMPORT}")), true);
         let Outcome::CompilerErrors { errors, running: true } = errors else { panic!("{errors:?}") };
         assert_eq!(errors, vec![Diagnostic { file: "Assets/Scripts/Door.cs".into(), line: 12, code: "CS0246".into(), message: "The type or namespace name 'Foo' could not be found".into() }]);
         let safe = judge(Some(&format!("{START}{ERROR}Entering Safe Mode\n")), true);
         assert!(matches!(safe, Outcome::SafeMode { ref errors, running: true } if errors.len() == 1), "{safe:?}");
         // A warning or a line that only looks like an error is not one.
-        assert_eq!(judge(Some(&format!("{START}Assets/A.cs(1,1): warning CS0618: obsolete\nerror: something (not a compiler line)\n{IMPORT}")), false), Outcome::Imported { running: false });
-        assert!(Outcome::Imported { running: false }.ended() && !Outcome::Importing.ended());
+        assert_eq!(judge(Some(&format!("{START}Assets/A.cs(1,1): warning CS0618: obsolete\nerror: something (not a compiler line)\n{IMPORT}")), false), Outcome::Imported { running: false, cut: false });
+        assert!(Outcome::Imported { running: false, cut: false }.ended() && !Outcome::Importing.ended());
     }
 
     #[test]

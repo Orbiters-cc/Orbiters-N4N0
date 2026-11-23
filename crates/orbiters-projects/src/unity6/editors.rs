@@ -132,6 +132,10 @@ pub fn judge_build(identity: Option<&Identity>, wanted: &str, revision: Option<&
     if id.arch.is_empty() {
         return Check::Unverified;
     }
+    // A build asked for needs a program that names its own.
+    if revision.is_some() && id.changeset.is_none() {
+        return Check::Unverified;
+    }
     if !id.arch.contains(&Arch::here()) && Arch::here() != Arch::Other {
         // Apple silicon runs an Intel editor through Rosetta: slower, not refused.
         let rosetta = cfg!(target_os = "macos") && Arch::here() == Arch::Arm64 && id.arch.contains(&Arch::X86_64);
@@ -237,7 +241,7 @@ pub fn locate(dir: &Path, program: &Path, version: &str, probe: &dyn Fn(&Path) -
     let mut list = located(dir);
     list.retain(|l| !(l.version == version && crate::discovery::key(&l.program) == crate::discovery::key(&program)));
     list.push(Located { program: program.clone(), version: version.to_string(), verified: check == Check::Verified });
-    crate::write_json(&dir.join(LOCATED_FILE), &list)?;
+    super::gate::AppRoot::open(dir)?.replace_json(Path::new(LOCATED_FILE), &list)?;
     Ok(Candidate { modules: modules(&program), program, hint: Hint::Located, check, identity })
 }
 
@@ -330,8 +334,8 @@ pub fn probe(program: &Path) -> Option<Identity> {
         let plist = plist::Value::from_file(program.parent()?.parent()?.join("Info.plist")).ok()?;
         let dict = plist.as_dictionary()?;
         // The first of the two that is a Unity version (one can hold something else).
-        let (version, _) = ["CFBundleVersion", "CFBundleShortVersionString"].iter().find_map(|k| dict.get(k).and_then(|v| v.as_string()).and_then(parse_product_version))?;
-        let changeset = dict.get("UnityBuildNumber").and_then(|v| v.as_string()).map(str::to_string);
+        let (version, carried) = ["CFBundleVersion", "CFBundleShortVersionString"].iter().find_map(|k| dict.get(k).and_then(|v| v.as_string()).and_then(parse_product_version))?;
+        let changeset = dict.get("UnityBuildNumber").and_then(|v| v.as_string()).map(str::to_string).filter(|s| !s.is_empty()).or(carried);
         Some(Identity { version, changeset, arch: macho_arch(&head_of(program)) })
     }
     #[cfg(not(any(windows, target_os = "macos")))]

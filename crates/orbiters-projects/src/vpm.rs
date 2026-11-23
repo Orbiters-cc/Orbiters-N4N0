@@ -368,12 +368,15 @@ pub enum Change {
     /// Any failure puts the project's manifest back and restores its packages.
     Plan { install: Vec<(String, String)>, remove: Vec<String>, prerelease: bool },
 }
+fn may_change(path: &Path) -> anyhow::Result<()> {
+    use crate::unity6::authority::{allow, Action};
+    allow(&crate::data_dir(), path, Action::Packages).map(|_| ()).map_err(|why| anyhow::anyhow!("{why}"))
+}
+
 pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<()> {
-    // A Unity 6 trial waiting for Creator Companion (or not finished) keeps its packages, whoever asks (the page, the
-    // bridge, the Toolkit's update): verification blocker 3.
-    if let crate::unity6::trial::Guard::Blocked(why) = crate::unity6::trial::guard(&crate::data_dir(), path) {
-        bail!("{why}");
-    }
+    // A Unity 6 trial keeps its packages until Creator Companion migrated it, whoever asks (the page, the bridge, the
+    // Toolkit's update).
+    may_change(path)?;
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let io = DefaultEnvironmentIo::new(root.into());
     let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
@@ -826,6 +829,8 @@ fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<()> {
 }
 /// Installs the latest releases of `names` from the Orbiters repository, adding it (or turning it back on) first.
 pub async fn install_orbiters(root: &Path, path: &Path, names: &[&str]) -> anyhow::Result<()> {
+    // Before the repository is added or turned on for it.
+    may_change(path)?;
     add_repo(root, ORBITERS_REPOSITORY, BTreeMap::new()).await?;
     // Ensure an existing disabled Orbiters repo is enabled before resolving its packages.
     let io = DefaultEnvironmentIo::new(root.into());

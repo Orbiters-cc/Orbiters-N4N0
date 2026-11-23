@@ -69,8 +69,9 @@ pub struct Row {
     pub sdk_ranges: Vec<SdkRange>,
     /// What `Packages/manifest.json` asks for, when that differs from what is installed (Unity's lock).
     pub requested: Option<String>,
-    /// Indices into the release list's issues that are about this package and version.
-    pub issues: Vec<usize>,
+    /// The release list's issues about this package and version, as that list says them (not a place in a list that may
+    /// be replaced).
+    pub issues: Vec<super::matrix::Issue>,
 }
 
 fn json(path: &Path) -> Option<serde_json::Value> {
@@ -106,8 +107,7 @@ pub fn packages(project: &Path, matrix: &Matrix, target: &str) -> Vec<Row> {
             .filter_map(|(k, v)| text(v).map(|range| SdkRange { package: k.clone(), admits_target: target.as_ref().and_then(|t| admits(&range, t)), range }))
             .collect();
         let version = text(&m["version"]);
-        let issues = matrix.data.issues.iter().enumerate().filter(|(_, i)| i.package == name && i.applies(version.as_deref())).map(|(k, _)| k).collect();
-        Row { name: name.to_string(), display: text(&m["displayName"]).unwrap_or_else(|| name.to_string()), version, source, unity_min, sdk_ranges, requested: None, issues }
+        Row { name: name.to_string(), display: text(&m["displayName"]).unwrap_or_else(|| name.to_string()), version, source, unity_min, sdk_ranges, requested: None, issues: vec![] }
     };
     for name in locked.keys().filter(|n| !sdk(n) && !n.contains(['/', '\\'])) {
         rows.insert(name.clone(), describe(name, Source::Vpm, read_manifest(name)));
@@ -146,11 +146,18 @@ pub fn packages(project: &Path, matrix: &Matrix, target: &str) -> Vec<Row> {
         };
         let mut row = describe(&name, source, None);
         let installed = text(&entry["version"]).filter(|_| source == Source::UpmRegistry);
-        row.version = installed.clone().or_else(|| asked.clone().filter(|_| source == Source::UpmRegistry));
+        // Installed only by the lock's word; what is asked for is a request, never a version.
+        row.version = installed.clone();
         row.requested = asked.filter(|a| installed.as_deref() != Some(a.as_str()));
         rows.insert(name.clone(), row);
     }
-    rows.into_values().collect()
+    // Issues are matched once each version is known.
+    rows.into_values()
+        .map(|mut row| {
+            row.issues = matrix.data.issues.iter().filter(|i| i.package == row.name && i.applies(row.version.as_deref())).cloned().collect();
+            row
+        })
+        .collect()
 }
 
 /// Whether an item of the checklist was seen in the project's files.
@@ -231,8 +238,14 @@ const AT_MOST: usize = 3;
 /// Looks through `project`'s Assets (and its local packages) for what the checklist asks, within the limits above.
 pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Checklist {
     let text_assets = std::fs::read_to_string(project.join("ProjectSettings/EditorSettings.asset")).is_ok_and(|s| s.lines().any(|l| l.trim() == "m_SerializationMode: 2"));
-    let upm = std::fs::read_to_string(project.join("Packages/manifest.json")).unwrap_or_default();
-    let vpm = std::fs::read_to_string(project.join("Packages/vpm-manifest.json")).unwrap_or_default();
+    let mut unread: Vec<String> = vec![];
+    let mut manifest = |rel: &str| {
+        std::fs::read_to_string(project.join(rel)).unwrap_or_else(|_| {
+            unread.push(rel.to_string());
+            String::new()
+        })
+    };
+    let (upm, vpm) = (manifest("Packages/manifest.json"), manifest("Packages/vpm-manifest.json"));
     let mut found: BTreeMap<u8, Vec<String>> = BTreeMap::new();
     let mut note = |item: Item, rel: &str| {
         let list = found.entry(item as u8).or_default();
@@ -242,7 +255,7 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
     };
     let (mut files, mut bytes, mut scenes, mut cut) = (0usize, 0u64, 0usize, false);
     let mut tmp_in_assets = false;
-    let mut skipped: Vec<String> = vec![];
+    let mut skipped: Vec<String> = unread;
     let mut skip = |rel: String| {
         if skipped.len() < 20 {
             skipped.push(rel);
@@ -251,13 +264,26 @@ pub fn checklist(project: &Path, content: Content, cancel: &AtomicBool) -> Check
     // Assets, and the packages embedded in Packages (their code is the project's too); not the SDK's or VPM's own.
     let locked: Vec<String> = serde_json::from_str::<serde_json::Value>(&vpm).ok().and_then(|v| v["locked"].as_object().map(|m| m.keys().cloned().collect())).unwrap_or_default();
     let mut roots = vec![project.join("Assets")];
-    if let Ok(entries) = std::fs::read_dir(project.join("Packages")) {
-        for e in entries.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if e.path().join("package.json").is_file() && !locked.contains(&n) && !n.starts_with("com.vrchat.") {
-                roots.push(e.path());
+    match std::fs::read_dir(project.join("Packages")) {
+        Ok(entries) => {
+            for e in entries {
+                // A package folder that cannot be listed or looked into may hold what is asked.
+                let Ok(e) = e else {
+                    skip("Packages".to_string());
+                    continue;
+                };
+                let n = e.file_name().to_string_lossy().into_owned();
+                if locked.contains(&n) || n.starts_with("com.vrchat.") {
+                    continue;
+                }
+                match std::fs::metadata(e.path().join("package.json")) {
+                    Ok(m) if m.is_file() => roots.push(e.path()),
+                    Err(e2) if e2.kind() != std::io::ErrorKind::NotFound && e2.kind() != std::io::ErrorKind::NotADirectory => skip(format!("Packages/{n}")),
+                    _ => {}
+                }
             }
         }
+        Err(_) => skip("Packages".to_string()),
     }
     let walker = roots.into_iter().flat_map(|root| {
         walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {

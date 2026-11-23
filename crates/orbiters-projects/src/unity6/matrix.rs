@@ -25,6 +25,7 @@ pub const STALE_SECS: u64 = 14 * 24 * 3600;
 pub const REFRESH_SECS: u64 = 12 * 3600;
 /// The file in app data holding the last served copy that passed every check.
 pub const KEPT_FILE: &str = "unity6-data.json";
+const HIGH_FILE: &str = "unity6-data.high.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -334,6 +335,12 @@ fn read_kept(dir: &Path) -> Option<Kept> {
     serde_json::from_slice::<Kept>(&std::fs::read(path).ok()?).ok()
 }
 
+/// The highest serial ever taken here.
+fn highest(dir: &Path, kept: Option<&Kept>) -> u64 {
+    let apart = std::fs::read(dir.join(HIGH_FILE)).ok().and_then(|b| serde_json::from_slice::<u64>(&b).ok()).unwrap_or(0);
+    apart.max(kept.map_or(0, |k| k.high))
+}
+
 fn kept_path(dir: &Path) -> PathBuf {
     dir.join(KEPT_FILE)
 }
@@ -345,7 +352,8 @@ pub fn load(dir: &Path, key: Option<&[u8; 32]>) -> Matrix {
     let Some(key) = key else { return built };
     let Some(kept) = read_kept(dir) else { return built };
     match open(kept.envelope.as_bytes(), key) {
-        Ok(data) if data.serial >= built.data.serial => Matrix { data, origin: Origin::Served { verified: kept.verified }, built_in: built.built_in },
+        // Never one older than the highest ever taken here, whatever the kept file holds now.
+        Ok(data) if data.serial >= built.data.serial && data.serial >= highest(dir, Some(&kept)) => Matrix { data, origin: Origin::Served { verified: kept.verified }, built_in: built.built_in },
         _ => built,
     }
 }
@@ -373,24 +381,30 @@ pub fn refresh(dir: &Path, key: &[u8; 32], fetch: &dyn Fetch, url: &str, now: u6
     let data = open(&bytes, key)?;
     let incoming: Envelope = serde_json::from_slice(&bytes)?;
     // Compared and kept under one lock across processes: two refreshes never pass each other (verification's major 9).
-    std::fs::create_dir_all(dir)?;
-    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("unity6-data.lock"))?;
-    lock.lock()?;
+    let app = super::gate::AppRoot::open(dir)?;
+    let _lock = app.lock(Path::new("unity6-data.lock"))?;
     let kept = read_kept(dir);
     let current = load(dir, Some(key));
-    let high = kept.as_ref().map_or(0, |k| k.high).max(current.data.serial);
+    let high = highest(dir, kept.as_ref()).max(current.data.serial);
     anyhow::ensure!(
         data.serial >= high,
         "{}",
         tr!("the release list served (number {served}) is older than the one kept (number {kept})", served = data.serial, kept = high)
     );
     let same = data.serial == current.data.serial;
-    if same && current.origin != Origin::BuiltIn {
-        let kept_data = kept.as_ref().and_then(|k| serde_json::from_str::<Envelope>(&k.envelope).ok()).map(|e| e.data);
-        anyhow::ensure!(kept_data.as_deref() == Some(incoming.data.as_str()), "{}", tr("the release list served has the number of the one kept, with other contents"));
+    if same {
+        // The same number is the same list, byte for byte (or, against the built-in one, by what it says).
+        let equal = match current.origin {
+            Origin::BuiltIn => serde_json::to_value(&data)? == serde_json::to_value(&current.data)?,
+            _ => kept.as_ref().and_then(|k| serde_json::from_str::<Envelope>(&k.envelope).ok()).map(|e| e.data).as_deref() == Some(incoming.data.as_str()),
+        };
+        anyhow::ensure!(equal, "{}", tr("the release list served has the number of the one kept, with other contents"));
     }
     let envelope = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{}", tr("the release list cannot be read")))?;
-    crate::write_json(&kept_path(dir), &Kept { verified: now, envelope, high: high.max(data.serial) })?;
+    let high = high.max(data.serial);
+    // The highest serial ever taken, kept apart as well: putting an older kept file back does not lower it.
+    app.replace_json(Path::new(HIGH_FILE), &high)?;
+    app.replace_json(Path::new(KEPT_FILE), &Kept { verified: now, envelope, high })?;
     Ok(if same { Refresh::Same } else { Refresh::Newer(data.serial) })
 }
 

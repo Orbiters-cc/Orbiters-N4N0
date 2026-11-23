@@ -162,7 +162,7 @@ pub struct Keep {
 /// called Library or Temp) is copied.
 /// What a copy leaves out: [`excluded`] for a project (`project`), only Git's and Node's folders for a package folder
 /// (PROJECTS-37: a package's own Library, Logs or Temp folder is part of it), and never a copy's marker at the top.
-fn left_out(name: &str, depth: usize, dir: bool, keep: Keep, project: bool) -> bool {
+pub(crate) fn left_out(name: &str, depth: usize, dir: bool, keep: Keep, project: bool) -> bool {
     if depth == 1 && !dir && name == INCOMPLETE {
         return true;
     }
@@ -288,7 +288,7 @@ fn stopped(destination: &Path, made: Made) -> anyhow::Error {
 
 /// [`copy_keeping`], running `made` once its folder exists (a test stops the copy, or swaps the folder, there).
 /// `project`: the project rules of what is left out (a package's folder is copied whole but for Git's and Node's).
-pub(crate) fn copy_keeping_then(
+fn copy_keeping_then(
     source: &Path,
     destination: &Path,
     keep: Keep,
@@ -303,17 +303,11 @@ pub(crate) fn copy_keeping_then(
     let source = std::fs::canonicalize(source)?;
     // Everything about the destination is checked before anything is made (r22 verification, blocker 1): a folder made on
     // the way to a place then refused would be left behind, inside the very project being copied.
-    check_destination(&source, destination, project)?;
-    let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
-    std::fs::create_dir_all(parent)?;
-    // Again, now that every folder above exists: none of them was swapped for a link into a project meanwhile.
-    check_destination(&source, destination, project)?;
-    let parent = std::fs::canonicalize(parent)?;
-    if parent.starts_with(&source) {
-        bail!("{}", tr("Create the copy outside the source project."));
-    }
+    check_destination(&source, destination, project, &[])?;
     anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
     let mut files = vec![];
+    // Where the source's links lead: a copy inside one of those would be seen in the source (r22's second verification, N1).
+    let mut linked = vec![];
     // Folders too, empty ones included (PROJECTS-41): an empty asset folder has its .meta beside it.
     let mut folders = vec![];
     for entry in walkdir::WalkDir::new(&source)
@@ -325,12 +319,20 @@ pub(crate) fn copy_keeping_then(
             bail!("{}", tr!("Copy stopped before anything was copied to {path}.", path = destination.display()));
         }
         let e = entry?;
+        if e.path_is_symlink() || std::fs::symlink_metadata(e.path()).is_ok_and(|m| crate::owned::is_link(&m)) {
+            linked.push(std::fs::canonicalize(e.path())?);
+        }
         if e.file_type().is_file() {
             files.push(e.path().to_path_buf());
         } else if e.file_type().is_dir() && e.depth() > 0 {
             folders.push(e.path().to_path_buf());
         }
     }
+    check_destination(&source, destination, project, &linked)?;
+    let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
+    std::fs::create_dir_all(parent)?;
+    // Again, now that every folder above exists: none of them was swapped for a link into a project meanwhile.
+    check_destination(&source, destination, project, &linked)?;
     std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
     // Held at once: its identity is the held folder's, and nothing can take its place until the copy is done.
     let root = crate::owned::Pinned::open(destination)?;
@@ -456,6 +458,10 @@ async fn make(
     if !parent.is_absolute() {
         bail!("{}", tr("Choose an absolute destination folder."));
     }
+    if copy.is_some() {
+        use crate::unity6::authority::{allow, Action};
+        allow(&crate::data_dir(), source, Action::Duplicate).map_err(|why| anyhow::anyhow!("{why}"))?;
+    }
     let destination = parent.join(name);
     let required = duplication_bytes(source, copy.unwrap_or_default())?;
     let free = crate::size::free_space(parent).with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
@@ -548,7 +554,7 @@ pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
 /// folder above `destination` and every folder above that one are looked at by identity (a different spelling, a junction
 /// or a SUBST drive still names the same folder). The copy never goes inside the source, and a project's copy never goes
 /// inside any Unity project (`project`; a package copied into its own project's `Packages` is not a project copy).
-pub(crate) fn check_destination(source: &Path, destination: &Path, project: bool) -> anyhow::Result<()> {
+fn check_destination(source: &Path, destination: &Path, project: bool, linked: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::ensure!(destination.is_absolute(), "{}", tr("Choose an absolute destination folder."));
     anyhow::ensure!(!destination.components().any(|c| matches!(c, std::path::Component::ParentDir)), "{}", tr("Choose a destination folder"));
     let source_id = crate::owned::id_of(source).ok();
@@ -557,7 +563,7 @@ pub(crate) fn check_destination(source: &Path, destination: &Path, project: bool
         existing = existing.parent().with_context(|| tr("Choose a destination folder"))?;
     }
     let existing = std::fs::canonicalize(existing)?;
-    if existing.starts_with(source) {
+    if existing.starts_with(source) || linked.iter().any(|l| existing.starts_with(l)) {
         bail!("{}", tr("Create the copy outside the source project."));
     }
     for folder in existing.ancestors() {
@@ -571,67 +577,22 @@ pub(crate) fn check_destination(source: &Path, destination: &Path, project: bool
     Ok(())
 }
 
-/// Every file a copy of `source` (without Library) reads, with its length and modification time: two of them equal means
-/// nothing the copy reads changed between, an edit in place included (a folder's own time does not show one).
-pub(crate) fn inventory(source: &Path) -> anyhow::Result<std::collections::BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>> {
-    let mut out = std::collections::BTreeMap::new();
-    for e in walkdir::WalkDir::new(source)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(|e| !left_out(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), Keep::default(), true))
-    {
-        let e = e?;
-        if e.file_type().is_file() {
-            let m = e.metadata()?;
-            out.insert(e.path().to_path_buf(), (m.len(), m.modified().ok()));
-        }
-    }
-    Ok(out)
-}
-
-/// Whether the folder `copy` holds what `origin` holds: the same files at the same sizes (what a copy made earlier must
-/// match before it is taken as this package's).
-fn same_tree(origin: &Path, copy: &Path) -> bool {
-    let list = |root: &Path| -> Option<std::collections::BTreeMap<PathBuf, u64>> {
-        let mut out = std::collections::BTreeMap::new();
-        for e in walkdir::WalkDir::new(root).follow_links(true) {
-            let e = e.ok()?;
-            if e.file_type().is_file() {
-                out.insert(e.path().strip_prefix(root).ok()?.to_path_buf(), e.metadata().ok()?.len());
-            }
-        }
-        Some(out)
-    };
-    matches!((list(origin), list(copy)), (Some(a), Some(b)) if a == b)
-}
-
 /// Materialize external UPM folder dependencies so a moved duplicate does not depend on its source location.
-pub(crate) fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
+fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     let path = destination.join("Packages/manifest.json");
     if !path.is_file() { return Ok(()); }
     let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    // Where each local package comes from is the source's manifest's word: the copy's may have been rewritten already
-    // (a finish tried again), and its entries then name the copy's own folders.
-    let origins: serde_json::Value = std::fs::read(source.join("Packages/manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| manifest.clone());
     let mut changed = false;
     if let Some(dependencies) = manifest["dependencies"].as_object_mut() {
         for (name, value) in dependencies {
-            let Some(local) = origins["dependencies"][name.as_str()].as_str().and_then(|s| s.strip_prefix("file:")).map(str::to_string) else { continue };
-            let local = local.as_str();
+            let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) else { continue };
             anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
             let at = source.join("Packages").join(local);
             let origin = at.canonicalize().with_context(|| tr!("Required local package {name} is unavailable at {path}", name = name, path = at.display()))?;
             let target = destination.join("Packages").join(name);
             if origin.is_dir() {
-                if !target.exists() {
-                    copy_keeping_then(&origin, &target, Keep::default(), false, cancel, progress, |_| {})?;
-                } else if !same_tree(&origin, &target) {
-                    // A folder of that name made earlier (a retry) or shipped in the project is taken only when it is the same package.
-                    bail!("{}", tr!("{path} in the copy is not the same as {name} at {origin}: Orbiters does not replace it.", path = target.display(), name = name, origin = origin.display()));
-                }
-                let now = serde_json::Value::String(format!("file:{name}"));
-                changed |= *value != now;
-                *value = now;
+                if !target.exists() { copy_keeping_then(&origin, &target, Keep::default(), false, cancel, progress, |_| {})?; }
+                *value = serde_json::Value::String(format!("file:{name}"));
             } else {
                 let filename = format!("{name}.tgz");
                 let to = destination.join("Packages").join(&filename);
@@ -646,10 +607,9 @@ pub(crate) fn copy_local_packages(source: &Path, destination: &Path, cancel: &At
                 } else {
                     std::fs::copy(&origin, &to)?;
                 }
-                let now = serde_json::Value::String(format!("file:{filename}"));
-                changed |= *value != now;
-                *value = now;
+                *value = serde_json::Value::String(format!("file:{filename}"));
             }
+            changed = true;
         }
     }
     if changed { crate::write_json(&path, &manifest)?; }
@@ -703,6 +663,11 @@ pub(crate) fn installed_dependencies_complete(project: &Path) -> anyhow::Result<
 /// product name (under which the editor keeps the project's PlayerPrefs) changed to `name` when it was `from` (the
 /// copied project's name), or always without `from` (a template's). The other lines and every line's ending stay.
 pub fn retarget(settings: &str, name: &str, from: Option<&str>) -> String {
+    retarget_with(settings, name, from, &uuid::Uuid::new_v4().simple().to_string())
+}
+
+/// [`retarget`] with the product GUID to give it.
+pub(crate) fn retarget_with(settings: &str, name: &str, from: Option<&str>, guid: &str) -> String {
     let mut out = String::with_capacity(settings.len() + 64);
     for line in settings.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
@@ -710,7 +675,7 @@ pub fn retarget(settings: &str, name: &str, from: Option<&str>) -> String {
         let trimmed = body.trim_start();
         let indent = &body[..body.len() - trimmed.len()];
         if trimmed.starts_with("productGUID:") {
-            out.push_str(&format!("{indent}productGUID: {}{end}", uuid::Uuid::new_v4().simple()));
+            out.push_str(&format!("{indent}productGUID: {guid}{end}"));
         } else if trimmed.strip_prefix("productName:").is_some_and(|v| from.is_none_or(|f| unquote(v.trim()) == f)) {
             out.push_str(&format!("{indent}productName: {}{end}", serde_json::to_string(name).unwrap()));
         } else {

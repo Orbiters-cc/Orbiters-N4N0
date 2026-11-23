@@ -138,10 +138,9 @@ fn windows_volume(dir: &Path) -> Option<(String, u64)> {
         _ => mount.clone(),
     };
     let mut name = vec![0u16; 128];
-    let key = match unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(wide(&plain).as_ptr()), &mut name) } {
-        Ok(()) => text(&name),
-        Err(_) => plain.clone(),
-    };
+    // A volume this computer cannot name (a network share under any spelling) is not measured: no room is known there.
+    unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(wide(&plain).as_ptr()), &mut name) }.ok()?;
+    let key = text(&name);
     let mut free = 0u64;
     unsafe { GetDiskFreeSpaceExW(PCWSTR(wide(&plain).as_ptr()), Some(&mut free), None, None) }.ok()?;
     Some((key.to_lowercase(), free))
@@ -154,7 +153,14 @@ pub fn plan(demands: Vec<Demand>, room: &dyn Room, import_guessed: bool) -> Budg
         let found = room.of(&d.at);
         let key = found.as_ref().map(|(k, _)| k.clone());
         match volumes.iter_mut().find(|(k, _)| k.is_some() && *k == key) {
-            Some((_, v)) => v.needs.push(d),
+            Some((_, v)) => {
+                v.needs.push(d);
+                // Two folders of one disk can have different room (a quota): the lesser of the two counts.
+                v.free = match (v.free, found.map(|(_, f)| f)) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    _ => None,
+                };
+            }
             None => volumes.push((key, Volume { at: d.at.clone(), free: found.map(|(_, f)| f), needs: vec![d] })),
         }
     }
@@ -172,6 +178,28 @@ pub struct EditorNeed {
 }
 
 impl EditorNeed {
+    /// What adding modules to the editor installed here takes: `None` when it needs none.
+    pub fn modules(size: &super::matrix::EditorSize, android: bool, ios: bool) -> Option<Self> {
+        let mut need = Self { install_at: editor_install_folder(), installed: 0, download_at: std::env::temp_dir(), download: 0 };
+        for (wanted, module) in [(android, size.android), (ios, size.ios)] {
+            if let (true, Some([d, i])) = (wanted, module) {
+                need.download += d;
+                need.installed += i;
+            }
+        }
+        (need.installed > 0).then_some(need)
+    }
+
+    /// What the editor `size` takes here, seen now: all of it when it is not verified here, else the modules it lacks of
+    /// those the project's 2022 editor has (every module, when that editor cannot be told).
+    pub fn here(size: &super::matrix::EditorSize, unity6: &super::editors::Found, unity2022: &super::editors::Found) -> Option<Self> {
+        let wanted = unity2022.usable().map(|c| c.modules).unwrap_or(super::editors::Modules { android: true, android_tools: true, ios: true });
+        match unity6 {
+            super::editors::Found::Exact(c) => Self::modules(size, wanted.android && !c.modules.android, wanted.ios && !c.modules.ios),
+            _ => Some(Self::of(size, wanted.android, wanted.ios)),
+        }
+    }
+
     /// From a release row's sizes on this computer, with Android (and its SDK, NDK, JDK) and iOS when `android`/`ios`.
     pub fn of(size: &super::matrix::EditorSize, android: bool, ios: bool) -> Self {
         let mut need = Self { install_at: editor_install_folder(), installed: size.installed, download_at: std::env::temp_dir(), download: size.download };

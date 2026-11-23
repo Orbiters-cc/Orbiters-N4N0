@@ -51,7 +51,7 @@ pub fn chosen(dir: &Path) -> Option<Vcc> {
 /// Keeps the person's choice of a Creator Companion (its program or folder), when it is one.
 pub fn choose(dir: &Path, path: &Path) -> anyhow::Result<Vcc> {
     let vcc = read(path).ok_or_else(|| anyhow::anyhow!("{}", orbiters_i18n::tr!("{path} is not a VRChat Creator Companion.", path = path.display())))?;
-    crate::write_json(&dir.join(CHOSEN_FILE), &vcc.folder)?;
+    super::gate::AppRoot::open(dir)?.replace_json(Path::new(CHOSEN_FILE), &vcc.folder)?;
     Ok(vcc)
 }
 

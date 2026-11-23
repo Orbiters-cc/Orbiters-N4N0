@@ -126,7 +126,11 @@ fn setup_request_matches_contract() {
     let mut r = setup::request(avatar, 30, "https://api.orbiters.cc/", "0.3.3").unwrap();
     r.id = "5f0c4d1e-8a8b-4d58-9a3a-2b7c1c4f0e11".into();
     r.created_utc = "2026-10-29T01:50:00Z".into();
-    setup::write(temp.path(), &r).unwrap();
+    std::fs::create_dir_all(temp.path().join("ProjectSettings")).unwrap();
+    std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1
+").unwrap();
+    let leave = orbiters_projects::unity6::authority::upload(&temp.path().join("app"), temp.path()).unwrap();
+    setup::write(temp.path(), &r, &leave).unwrap();
     let p = temp.path().join("UserSettings/Orbiters/SetupRequests").join(format!("{}.json", r.id));
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     assert_eq!(

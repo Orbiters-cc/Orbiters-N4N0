@@ -4,11 +4,15 @@
 //! needs ([`budget`]); the trial itself, handed to Creator Companion for the migration ([`trial`], [`vcc`]); and what
 //! each opening in Unity 6 showed ([`outcome`]).
 
+pub mod authority;
 pub mod budget;
 pub mod compat;
 pub mod editors;
+pub mod gate;
+pub mod journal;
 pub mod matrix;
 pub mod outcome;
+pub mod payload;
 pub mod standing;
 pub mod trial;
 pub mod vcc;
@@ -42,6 +46,7 @@ pub struct Look {
     pub standings: Vec<(PathBuf, standing::Standing)>,
     /// Each standing's place by [`crate::discovery::key`] of its path.
     pub index: HashMap<String, usize>,
+    /// The trials shown (those taken off are not).
     pub trials: Vec<(trial::Job, trial::Status)>,
     pub pairs: Vec<Pair>,
     /// Whether the record can be trusted.
@@ -56,34 +61,19 @@ impl Look {
     }
 }
 
-/// [`Look`] for `projects`, with the record in `dir` (app data). `running`: the trials this window is preparing.
-pub fn look(dir: &Path, projects: &[PathBuf], running: &[String]) -> Look {
+/// [`Look`] for `projects`, with the record in `dir` (app data).
+pub fn look(dir: &Path, projects: &[PathBuf]) -> Look {
     let matrix = matrix::load(dir, key().as_ref());
     let policy = matrix::Matrix::built_in();
     let standings: Vec<(PathBuf, standing::Standing)> = projects.iter().map(|p| (p.clone(), standing::read(p, &policy))).collect();
     let index = standings.iter().enumerate().map(|(i, (p, _))| (crate::discovery::key(p), i)).collect();
-    let record = trial::record(dir);
-    let trials: Vec<(trial::Job, trial::Status)> = record
-        .jobs
-        .into_iter()
-        .map(|j| {
-            let s = trial::status(&j, running.contains(&j.id));
-            (j, s)
-        })
-        .collect();
-    // Lineage needs a positive match of both folders (verification's major 10): the original where it was recorded, or
-    // the listed project that is that very folder, moved or renamed since.
-    let original = |j: &trial::Job| {
-        if j.source_verified() {
-            return Some(j.source.path.clone());
-        }
-        let id = j.source.id?;
-        projects.iter().find(|p| crate::owned::id_of(p).is_ok_and(|now| now == id)).cloned()
-    };
+    let record = journal::read(dir);
+    let trials: Vec<(trial::Job, trial::Status)> =
+        record.jobs.iter().map(|j| (j.clone(), trial::status(dir, &record, j))).filter(|(_, s)| !matches!(s, trial::Status::Abandoned)).collect();
     let pairs = trials
         .iter()
-        .filter(|(_, s)| !matches!(s, trial::Status::Replaced | trial::Status::Missing | trial::Status::Failed { .. } | trial::Status::Interrupted { complete: false }))
-        .filter_map(|(j, _)| Some(Pair { original: original(j)?, trial: j.unity6().path.clone(), job: j.id.clone() }))
+        .filter(|(_, s)| !matches!(s, trial::Status::Replaced | trial::Status::Missing | trial::Status::Failed { .. } | trial::Status::Interrupted | trial::Status::Uncertain(_)))
+        .filter_map(|(j, _)| Some(Pair { original: original_of(j, projects)?, trial: j.unity6().path.clone(), job: j.id.clone() }))
         .collect();
     let present = trials
         .iter()
@@ -92,7 +82,18 @@ pub fn look(dir: &Path, projects: &[PathBuf], running: &[String]) -> Look {
         .filter(|p| p.path.exists())
         .map(|p| crate::discovery::key(&p.path))
         .collect();
-    Look { matrix, projects: projects.to_vec(), standings, index, trials, pairs, health: record.health, present }
+    Look { matrix, projects: projects.to_vec(), standings, index, trials, pairs, health: record.health(), present }
+}
+
+/// Where the original of `job` is now: lineage needs a positive match (verification's major 10), the original where it was
+/// recorded, or the project of `projects` that is that very folder, moved or renamed since. The window and the bridge both
+/// ask this.
+pub fn original_of(job: &trial::Job, projects: &[PathBuf]) -> Option<PathBuf> {
+    if job.source_verified() {
+        return Some(job.source.path.clone());
+    }
+    let id = job.source.id?;
+    projects.iter().find(|p| crate::owned::id_of(p).is_ok_and(|now| now == id)).cloned()
 }
 
 /// What is in the way of a trial, said in a sentence each.
@@ -108,7 +109,8 @@ pub fn describe_blockers(blockers: &[trial::Blocker]) -> String {
             }
             trial::Blocker::LocalMissing(names) => tr!("Local packages it uses are not where it says: {packages}.", packages = names.join(", ")),
             trial::Blocker::Unsupported(names) => tr!("A copy could not keep these packages whole: {packages}. Make them ordinary packages of the project first.", packages = names.join(", ")),
-            trial::Blocker::Trial => tr("This project is itself a Unity 6 trial, or the trials record cannot be read.").to_string(),
+            trial::Blocker::Unreadable(why) => tr!("Part of it cannot be read: {why}", why = why),
+            trial::Blocker::Trial(why) => why.clone(),
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -153,7 +155,7 @@ pub(crate) mod tests {
         standing::tests::project(&projects[2], Some(standing::tests::U2022), &[], &[]);
         set_read_only(temp.path(), true);
         let before = snapshot(temp.path());
-        let l = look(&app, &projects, &[]);
+        let l = look(&app, &projects);
         let after = snapshot(temp.path());
         set_read_only(temp.path(), false);
         assert_eq!(before, after, "nothing written anywhere");

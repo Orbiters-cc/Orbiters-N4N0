@@ -129,7 +129,7 @@ pub fn slider<T: Copy + PartialEq>(ui: &mut Ui, id_salt: impl egui::AsIdSalt, va
     let id = ui.scope_id().with(id_salt);
     let height = look.thumb_r * 2.0 + 6.0 + look.label_dy + 4.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-    crate::widgets::mark_control(&key, "step slider", rect);
+    crate::widgets::mark_control(&key, "step-slider", rect);
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     let n = steps.len();
     let xs = stops(rect, n);

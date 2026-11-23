@@ -526,7 +526,7 @@ impl<'a> IconButton<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         note_control(ui.ctx(), self.label, rect, true);
-        mark_control(orbiters_i18n::english_of(self.label), "icon button", rect);
+        mark_control(orbiters_i18n::english_of(self.label), "icon-button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -541,7 +541,7 @@ impl<'a> IconButton<'a> {
         let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);
-        mark_control(orbiters_i18n::english_of(self.label), "icon button", rect);
+        mark_control(orbiters_i18n::english_of(self.label), "icon-button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -832,7 +832,7 @@ pub fn text_field(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: &mut String,
     let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    mark_control(&key, "text field", rect);
+    mark_control(&key, "text-field", rect);
     field_frame(ui, rect, id, value, hint, Well { mono, leading: None, radius: 12.0, clear: false })
 }
 
@@ -849,7 +849,7 @@ pub fn search_field_clearable(ui: &mut Ui, id_salt: impl egui::AsIdSalt, value: 
     let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-    mark_control(&key, "search field", rect);
+    mark_control(&key, "search-field", rect);
     field_frame(ui, rect, id, value, hint, Well { mono: false, leading: Some(icons::MAGNIFYING_GLASS), radius: 20.0, clear: true })
 }
 

@@ -918,8 +918,9 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
             });
             widgets::separator(ui);
             let placeholder = snap.sources.first().map(|s| s.name.clone()).unwrap_or_else(|| "VRChat".into());
-            widgets::field(ui, tr("Spout sender"), Some(tr("Leave empty to pick VRChat's Stream camera automatically.")), 290.0, |ui| {
-                if let Some(text) = form::text_row(ui, texts, "spout-sender", &base.spout_sender, &placeholder, 208.0, false) {
+            let (room, field) = form::text_row_width(ui, ui.available_width(), 208.0);
+            widgets::field(ui, tr("Spout sender"), Some(tr("Leave empty to pick VRChat's Stream camera automatically.")), room, |ui| {
+                if let Some(text) = form::text_row(ui, texts, "spout-sender", &base.spout_sender, &placeholder, field, false) {
                     draft.spout_sender = text;
                     apply = true;
                 }
@@ -955,8 +956,11 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
             );
             widgets::separator(ui);
         }
-        widgets::field(ui, tr("Capture notice"), Some(tr("The consent reminder shown before the first capture.")), 120.0, |ui| {
-            if Button::new(tr("Show again")).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+        // As wide as its button says it in the language (French's is wider than English's).
+        let again = Button::new(tr("Show again")).variant(Variant::Ghost).size(Size::Sm);
+        let room = again.desired_width(ui).max(120.0);
+        widgets::field(ui, tr("Capture notice"), Some(tr("The consent reminder shown before the first capture.")), room, |ui| {
+            if again.show(ui).clicked() {
                 draft.consent_acknowledged = false;
                 apply = true;
             }
@@ -1069,12 +1073,12 @@ fn performance_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, mi
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                if source_chip(ui, "perf-mic", default_mic(), draft.performance.mic_device.is_empty()).clicked() {
+                if source_chip(ui, "perf-mic-device", default_mic(), draft.performance.mic_device.is_empty()).clicked() {
                     draft.performance.mic_device.clear();
                     apply = true;
                 }
                 for m in &snap.mics {
-                    if source_chip(ui, "perf-mic", &m.name, draft.performance.mic_device == m.id).clicked() {
+                    if source_chip(ui, "perf-mic-device", &m.name, draft.performance.mic_device == m.id).clicked() {
                         draft.performance.mic_device = m.id.clone();
                         apply = true;
                     }

@@ -110,6 +110,8 @@ impl Harness {
         snap.bridge.allowed = true;
         // Calls open to this account (they start as "coming soon", their switch greyed).
         snap.n4n0.calls.link = crate::state::CallLink::Off;
+        // The bridge listening: its address, token, controls and recent actions show.
+        snap.bridge.listening = true;
         Self { ctx, recorder, ctl, snap, toasts: Toasts::default(), state: State::default(), time: 0.0, size: vec2(1280.0, 820.0), go: None }
     }
 
@@ -270,7 +272,11 @@ fn every_setting_of_the_registry_is_drawn_where_it_says() {
         for e in registry::of_group(group, &HERE) {
             let Some(needs) = e.needs else { continue };
             assert!(!(needs.met)(&h.snap), "{}: its dependency is still met", e.id);
-            assert!(!drawn(&h, e), "dependencies off: {} is drawn while {:?} is not so", e.id, needs.when);
+            let why = (
+                h.state.seen.iter().filter(|(c, label, _)| *c == e.card && e.has_row(label)).map(|(_, l, _)| l.clone()).collect::<Vec<_>>(),
+                h.state.seen_controls.iter().filter(|(c, k, _)| *c == e.card && e.controls.contains(&k.as_str())).map(|(_, k, _)| k.clone()).collect::<Vec<_>>(),
+            );
+            assert!(!drawn(&h, e), "dependencies off: {} is drawn while {:?} is not so: {why:?}", e.id, needs.when);
             let parent = registry::entry(needs.parent).expect("its parent is an entry");
             assert_eq!(parent.group, e.group, "{}: what shows it is in another sub-tab", e.id);
             assert!(drawn(&h, parent), "dependencies off: {} is hidden, and {} that shows it is not drawn", e.id, parent.id);
@@ -631,7 +637,8 @@ fn every_bridge_action_is_reachable() {
     h.size = vec2(1280.0, 8000.0);
     h.snap.bridge.log = (1..=80).map(|i| crate::bridge::LogLine { at: 1_795_000_000 + i, text: format!("made-up action {i}"), ok: true }).collect();
     let texts = super::super::rest::texts(&h.open("vrchat.bridge"));
-    assert!(texts.contains("made-up action 80") && !texts.contains("made-up action 1\n"), "the last actions only");
+    assert!(texts.contains("made-up action 80"), "the last action: {texts}");
+    assert!(!texts.contains("made-up action 1\n"), "the last actions only");
     let mut presses = 0;
     while press_control(&mut h, "Show more (") {
         presses += 1;
@@ -646,6 +653,7 @@ fn every_bridge_action_is_reachable() {
 /// nothing goes past the page.
 #[test]
 fn every_control_fits_at_the_smallest_window() {
+    let mut wrong = Vec::new();
     for language in [Language::En, Language::Fr] {
         in_language(language, || {
             let mut h = Harness::new();
@@ -653,15 +661,22 @@ fn every_control_fits_at_the_smallest_window() {
             for group in registry::groups(&HERE) {
                 h.open(group.id());
                 for (label, control, text_w) in &h.state.seen_fields {
-                    assert!(*text_w >= 120.0, "{language:?} {group:?}: the row {label:?} leaves its text {text_w:.0} pt beside its control");
+                    if *text_w < 120.0 {
+                        wrong.push(format!("{language:?} {group:?}: the row {label:?} leaves its text {text_w:.0} pt beside its control"));
+                    }
                     for (_, key, r) in h.state.seen_controls.iter().filter(|(_, _, r)| control.contains(r.center())) {
-                        assert!(r.left() >= control.left() - 0.5, "{language:?} {group:?}: {key:?} in {label:?} runs over its row's text: {r:?} in {control:?}");
+                        if r.left() < control.left() - 0.5 {
+                            wrong.push(format!("{language:?} {group:?}: {key:?} in {label:?} runs {:.0} pt over its row's text", control.left() - r.left()));
+                        }
                     }
                 }
                 for (card, key, r) in &h.state.seen_controls {
-                    assert!(r.left() >= 0.0 && r.right() <= 808.0 - 24.0, "{language:?} {group:?} › {card}: {key:?} goes past the page: {r:?}");
+                    if r.left() < 0.0 || r.right() > 808.0 - 24.0 {
+                        wrong.push(format!("{language:?} {group:?} › {card}: {key:?} goes past the page: {r:?}"));
+                    }
                 }
             }
         });
     }
+    assert!(wrong.is_empty(), "{} controls do not fit:\n{}", wrong.len(), wrong.join("\n"));
 }

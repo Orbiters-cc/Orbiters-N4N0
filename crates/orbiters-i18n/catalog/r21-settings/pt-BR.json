@@ -165,5 +165,6 @@
   "wrist watch hand left right": "pulso relógio mão esquerda direita",
   "{count} matching setting": "{count} configuração correspondente",
   "{count} matching settings": "{count} configurações correspondentes",
-  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ para mover, Enter para abrir, Esc para limpar"
+  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ para mover, Enter para abrir, Esc para limpar",
+  "resolution render scale pixels sharp fast Mac": "resolução escala de renderização pixels nítido rápido Mac"
 }

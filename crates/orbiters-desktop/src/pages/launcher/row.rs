@@ -448,8 +448,11 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let request = states::request(&state.data, &friend, state.requested.get(&friend.id).copied(), clock, now);
     let booped = state.booped.get(&friend.id).cloned();
     let boop = states::boop(&state.data, &friend, booped.as_ref().map(|b| b.0), clock, now);
+    // An instance that takes the account without asking: Select (into Where) in Request's place (REQUEST23); both words
+    // get the wider one's room, so a row never jumps between them.
+    let select = (request == Reach::Ready).then(|| super::previous::friend_selectable(state, &friend)).flatten();
     let request_w = match request {
-        Reach::Ready => pill_width(ui, tr_ctx("request invite, short", "Request")),
+        Reach::Ready => pill_width(ui, tr_ctx("request invite, short", "Request")).max(pill_width(ui, tr_ctx("choose an instance", "Select"))),
         Reach::Sent => pill_width(ui, tr_ctx("sent", "Sent")),
         Reach::Cooling(_) => 74.0,
         _ => 0.0,
@@ -472,7 +475,16 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
         // A person is in a favourite group and in their section: one button each, told apart by the section.
         let salt = format!("{group}/{}", friend.id);
         q.multiply_opacity(reveal);
-        if request_w > 0.0 {
+        if let (true, Some(place)) = (request_w > 0.0, select.as_ref()) {
+            let r = Rect::from_min_max(pos2(right - request_w, card.center().y - 15.0), pos2(right, card.center().y + 15.0));
+            let label = tr_ctx("choose an instance", "Select");
+            let hint = orbiters_i18n::tr!("Choose {name}'s instance in Where: Play starts VRChat there", name = friend.name);
+            if reach_pill(&mut q, r, ("launcher-select", salt.as_str()), Reach::Ready, icons::CROSSHAIR, label, None, clock) {
+                super::previous::select_friend(state, cx, &friend.id, &friend.name, place);
+            }
+            q.interact(r, Id::unique(("launcher-select-hint", salt.as_str())), Sense::hover()).on_hover_text(hint);
+            right = r.left() - 6.0;
+        } else if request_w > 0.0 {
             let r = Rect::from_min_max(pos2(right - request_w, card.center().y - 15.0), pos2(right, card.center().y + 15.0));
             // Short on the row, so the name keeps its room; the whole words in its tooltip and the profile.
             let label = tr_ctx("request invite, short", "Request");

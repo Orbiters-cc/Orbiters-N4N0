@@ -597,15 +597,15 @@ impl Service {
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::N4n0 { command: N4n0Command::Talk { down } } => {
+            ToService::N4n0 { command: N4n0Command::Talk { down, stamp } } => {
                 if role == Role::Overlay {
-                    ctl.n4n0_app_talk(down, true);
+                    ctl.n4n0_app_talk(down, true, stamp);
                 } else {
                     // Held through the runtime's transition, as a link's close holds it: a press, a release and a close
                     // are taken one at a time (verify-controller, AD-1).
                     let mut talk = self.talk.lock().unwrap();
                     if talk.talk(link, down) {
-                        ctl.n4n0_app_talk(down, false);
+                        ctl.n4n0_app_talk(down, false, stamp);
                     }
                 }
             }
@@ -920,7 +920,7 @@ fn orbit_gone(held_talk: bool, held_ask: bool) -> Vec<crate::ipc::N4n0Command> {
     use crate::ipc::N4n0Command;
     let mut out = Vec::new();
     if held_talk {
-        out.push(N4n0Command::Talk { down: false });
+        out.push(N4n0Command::Talk { down: false, stamp: None });
     }
     out.push(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
     if held_ask {

@@ -5,7 +5,7 @@ use super::row::{boop_button, burst, emoji_icon, reach_pill};
 use super::states::{self, Reach};
 use super::{access_icon, access_name, cover_uv, person_picture, rank_color, rank_name, region_tag, status_color, status_name, Cx, State};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Key, LayerId, Order, Pos2, Rect, Sense, Ui, UiBuilder};
-use orbiters_core::launcher::{Action, Friend, InstanceAccess, Platform, Profile, Whereabouts};
+use orbiters_core::launcher::{Action, Friend, Platform, Profile, Whereabouts};
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -29,7 +29,16 @@ pub(super) fn covers(ctx: &egui::Context) -> bool {
 /// The profile shown: the contract's, once it is this person's; their row's meanwhile.
 fn profile(state: &State, id: &str) -> Option<Profile> {
     match &state.data.profile {
-        Some(p) if p.friend.id == id => Some(p.clone()),
+        Some(p) if p.friend.id == id => {
+            let mut p = p.clone();
+            // Where they are as the list says it now: the profile was read when the window opened, and Join and Select
+            // must not name an instance they have left since (REQUEST23).
+            if let Some(now) = state.data.friend(id) {
+                p.friend.presence = now.presence;
+                p.friend.whereabouts = now.whereabouts.clone();
+            }
+            Some(p)
+        }
         _ => state.data.friend(id).map(|f| Profile { friend: f.clone(), loading: true, ..Default::default() }),
     }
 }
@@ -64,6 +73,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cloc
 
     // The whole window dims (the sidebar too): one thing at a time.
     let screen = ctx.content_rect();
+    orbiters_ui::front::layer(&ctx, layer(), closing.is_none());
     let mut over = ui.new_child(UiBuilder::new().max_rect(screen).layer_id(layer()));
     over.set_clip_rect(screen);
     let scrim = over.interact(screen, Id::unique("launcher-profile-scrim"), Sense::click());
@@ -293,19 +303,27 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let x = pic.right() + 14.0;
     let now = state.now();
     let reach = states::request(&state.data, friend, state.requested.get(&friend.id).copied(), clock, now);
-    let label = tr("Request invite");
+    // An instance that takes the account without asking: Select (into Where) in Request invite's place (REQUEST23).
+    let select = (reach == Reach::Ready).then(|| super::previous::friend_selectable(state, friend)).flatten();
+    let label = if select.is_some() { tr_ctx("choose an instance", "Select") } else { tr("Request invite") };
+    let wide = |l: &str| widgets::text_size(ui, &Txt::new(l, 12.5).weight(weight::SEMIBOLD)).x + 46.0;
     let pill_w = match reach {
-        Reach::Ready | Reach::Sent => widgets::text_size(ui, &Txt::new(label, 12.5).weight(weight::SEMIBOLD)).x + 46.0,
+        // As wide as what it says: Select leaves the world's name its room beside Join.
+        Reach::Ready => wide(label),
+        Reach::Sent => wide(tr("Request invite")),
         Reach::Cooling(_) => 80.0,
         _ => 0.0,
     };
-    // Join where the instance takes anyone it shows to the account (public, friends+, friends, a group's public or
-    // plus): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
+    // Join where the instance takes the account without asking (the rule Where and Select use, REQUEST23: public,
+    // friends+, friends-only of a friend, a group's public one; a group's plus one no longer, its membership not known
+    // here): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
+    let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
+    let me = state.places.previous.me.clone().unwrap_or_default();
     let join = match &friend.whereabouts {
         Whereabouts::World(place)
             if state.data.possible.play
                 && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
-                && matches!(place.access, InstanceAccess::Public | InstanceAccess::FriendsPlus | InstanceAccess::Friends | InstanceAccess::GroupPublic | InstanceAccess::GroupPlus) =>
+                && super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)) =>
         {
             Some(place.clone())
         }
@@ -319,7 +337,16 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     widgets::text_truncated(&p, pos2(x, r.bottom() - 22.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), room);
     if pill_w > 0.0 {
         let pr = Rect::from_min_size(pos2(r.right() - 14.0 - pill_w, r.center().y - 18.0), vec2(pill_w, 36.0));
-        if reach_pill(ui, pr, ("launcher-modal-request", friend.id.as_str()), reach, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
+        if let Some(place) = &select {
+            if reach_pill(ui, pr, ("launcher-modal-select", friend.id.as_str()), Reach::Ready, icons::CROSSHAIR, label, None, clock) {
+                super::previous::select_friend(state, cx, &friend.id, &friend.name, place);
+                // Back to Home, where Where shows it chosen.
+                if let Some(m) = state.modal.as_mut() {
+                    m.closing = Some(clock);
+                }
+                state.act(cx, clock, Action::CloseProfile);
+            }
+        } else if reach_pill(ui, pr, ("launcher-modal-request", friend.id.as_str()), reach, icons::PAPER_PLANE_TILT, label, state.requested.get(&friend.id).copied(), clock) {
             state.act(cx, clock, Action::RequestInvite { to: friend.id.clone() });
         }
     }

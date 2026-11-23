@@ -46,7 +46,29 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         hero_play(ui, cx, state, index, play);
         return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| start_trouble(ui, cx, state, rect, &trouble));
     }
+    // A Mac about to start VRChat in Low Power Mode while on power: said, with where to change it (never changed here).
+    #[cfg(target_os = "macos")]
+    if matches!(play, PlayState::Ready | PlayState::Starting(_)) && crate::mac_display::low_power_on_power() {
+        hero_play(ui, cx, state, index, play);
+        return super::super::block(ui, cx, index + 1, LINE_H, low_power);
+    }
     hero_play(ui, cx, state, index, play)
+}
+
+/// Low Power Mode is on while the Mac is on power: a neutral line and a button to Battery settings.
+#[cfg(target_os = "macos")]
+fn low_power(ui: &mut Ui, rect: Rect) {
+    let button = widgets::Button::new(tr("Battery settings")).variant(widgets::Variant::Secondary).id_salt("launcher-low-power");
+    let bw = button.desired_width(ui);
+    let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::INFO, 17.0, theme::FG_3);
+    let line = tr("Low Power Mode is on while this Mac is plugged in: VRChat may run slower.");
+    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+    if button.show_at(ui, at).clicked() {
+        crate::mac_display::open_battery_settings();
+    }
 }
 
 /// Home's Play part on a PC in Desktop only, or on a Mac.
@@ -322,7 +344,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let id = Id::unique(("launcher-play", mode == LaunchMode::Vr, big));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     widgets::note_control(&ctx, label, rect, enabled);
-    let pressed = enabled && widgets::activated(&resp);
+    let pressed = enabled && widgets::pressed_fresh(&resp);
     let hover = anim::toggle(&ctx, id.with("hover"), enabled && resp.hovered(), Spring::SNAPPY);
     let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));

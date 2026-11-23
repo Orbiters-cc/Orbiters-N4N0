@@ -305,7 +305,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     };
     let mut left = ui.new_child(UiBuilder::new().max_rect(content).id_salt("home-content"));
     let margin_right = if right_margin.is_some() { 20 } else { 32 };
-    egui::ScrollArea::vertical().id_salt(("home", page)).auto_shrink([false, false]).scroll_bar_rect(super::below_bar(&left, cx)).show(&mut left, |ui| {
+    // A friend's instance just chosen with Select (REQUEST23): Home's top, where Where shows it chosen.
+    let mut scroll = egui::ScrollArea::vertical().id_salt(("home", page));
+    if launcher.places.take_reveal() {
+        scroll = scroll.vertical_scroll_offset(0.0);
+    }
+    scroll.auto_shrink([false, false]).scroll_bar_rect(super::below_bar(&left, cx)).show(&mut left, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 32, right: margin_right, top: 8 + cx.top as i8, bottom: 40 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             match page {
@@ -2743,5 +2748,207 @@ mod tests {
         frames_until(&mut h, "asked", |h| !h.recorder.asked.lock().unwrap().is_empty());
         assert!(h.recorder.asked.lock().unwrap()[0].starts_with("Instance"), "{:?}", h.recorder.asked.lock().unwrap());
         assert_eq!(sent(), 0, "still nothing to Orbiters about these worlds");
+    }
+
+    /// REQUEST23: the sample's friends with "Nova Sample" in a friends+ instance (joinable without asking) and "Pixel Fox"
+    /// in someone else's invite instance (not), Where signed in (or `connecting`).
+    fn friends_in_instances(connecting: bool) -> (Harness, orbiters_core::launcher::Place, String) {
+        use orbiters_core::launcher::{InstanceAccess, Place, Presence, Source, Whereabouts};
+        let mut h = Harness::new();
+        let mut data = orbiters_core::launcher::sample();
+        let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
+        let joinable = Place {
+            world_id: "wrld_00000000-0000-4000-8000-000000000a01".into(),
+            world_name: "Lantern Garden".into(),
+            world_picture: String::new(),
+            instance_id: "77123~hidden(usr_00000000-0000-4000-8000-0000000000aa)~region(eu)".into(),
+            access: InstanceAccess::FriendsPlus,
+            region: "eu".into(),
+        };
+        let invite = Place { instance_id: "88~private(usr_00000000-0000-4000-8000-0000000000bb)~region(eu)".into(), access: InstanceAccess::Invite, ..joinable.clone() };
+        for f in data.friends.iter_mut() {
+            if f.name == "Nova Sample" {
+                (f.presence, f.whereabouts) = (Presence::InGame, Whereabouts::World(joinable.clone()));
+            }
+            if f.name == "Pixel Fox" {
+                (f.presence, f.whereabouts) = (Presence::InGame, Whereabouts::World(invite.clone()));
+            }
+        }
+        {
+            let l = h.state.launcher_mut();
+            l.set_data(Arc::new(data));
+            l.stand_in(1_795_000_000, "");
+            l.places.stand_in(Some(crate::pages::launcher::destinations::HistoryView::default()), Vec::new(), None, true);
+        }
+        if connecting {
+            h.snap.vrchat_login.restoring = true;
+            h.snap.vrchat_login.known = Some(vrchat_user(&me, &name));
+        } else {
+            h.snap.vrchat_login.allowed = true;
+            h.snap.vrchat_login.user = Some(vrchat_user(&me, &name));
+        }
+        h.settle();
+        (h, joinable, me)
+    }
+
+    fn friend_id(h: &mut Harness, name: &str) -> String {
+        h.state.launcher_mut().data_for_tests().friends.iter().find(|f| f.name == name).unwrap().id.clone()
+    }
+
+    fn open_profile_of(h: &mut Harness, name: &str) {
+        let id = friend_id(h, name);
+        let ctx = h.ctx.clone();
+        h.state.launcher_mut().open_profile(&ctx, &id, Rect::from_min_size(pos2(800.0, 300.0), vec2(200.0, 50.0)));
+        h.settle();
+    }
+
+    /// REQUEST23: a friend in an instance that takes the account without asking shows Select where Request was; Select
+    /// asks nothing of the account (no invite request, no start): the instance becomes Where's choice (once VRChat says
+    /// it is open, the existing check), Play starts VRChat in it exactly as the friend's location names it, and when the
+    /// friend leaves it the choice goes back to Home and the row says so. Someone else's invite instance keeps Request.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn select_on_a_friend_chooses_their_instance_in_where() {
+        use orbiters_core::launcher::{Action, Presence, Whereabouts};
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        open_profile_of(&mut h, "Pixel Fox");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_some(), "an invite instance: Request stays");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Select").is_none());
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        open_profile_of(&mut h, "Nova Sample");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_none(), "Select in its place");
+        let before = h.recorder.launcher.lock().unwrap().len();
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Select");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        let key_of = format!("previous:{}:{}", place.world_id, place.instance_id);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(key_of.as_str()));
+        let sent: Vec<_> = h.recorder.launcher.lock().unwrap()[before..].to_vec();
+        let close_only = |a: &Action| matches!(a, Action::CloseProfile) || matches!(a, Action::As { action, .. } if matches!(**action, Action::CloseProfile));
+        assert!(sent.iter().all(close_only), "Select asks nothing of the account: {sent:?}");
+        assert_eq!(h.recorder.asked.lock().unwrap().as_slice(), [format!("Instance {{ world: {:?}, instance: {:?} }}", place.world_id, place.instance_id)], "only the existing open check");
+        assert!(h.state.launcher_mut().modal_open().is_none(), "back to Home, Where in view");
+        click(&mut h, "Play in VR");
+        let last = match h.recorder.launcher.lock().unwrap().last().cloned() {
+            Some(Action::As { action, .. }) => *action,
+            Some(other) => other,
+            None => unreachable!(),
+        };
+        let Action::PlayAt { destination, .. } = last else { panic!("{last:?}") };
+        assert_eq!((destination.world_id.as_str(), destination.instance_id.as_str()), (place.world_id.as_str(), place.instance_id.as_str()));
+        // The friend leaves for another instance: the choice goes back to Home, said quietly.
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        for f in data.friends.iter_mut().filter(|f| f.name == "Nova Sample") {
+            (f.presence, f.whereabouts) = (Presence::InGame, Whereabouts::Private);
+        }
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
+        assert!(h.state.launcher_mut().places.notice().is_some_and(|n| n.contains("Nova Sample")), "{:?}", h.state.launcher_mut().places.notice());
+    }
+
+    /// REQUEST23: the same on a friend's row of the list, under the pointer: Select where Request was (its pill as wide
+    /// as Request's), and a press chooses the instance without opening the profile or sending anything.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_friends_row_selects_their_instance() {
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, _) = friends_in_instances(false);
+        // The row's pill appears under the pointer: down the side panel until a row shows `label`.
+        let over = |h: &mut Harness, label: &str| {
+            for y in (60..760).step_by(12) {
+                for _ in 0..12 {
+                    h.frame(vec![Event::PointerMoved(pos2(800.0, y as f32))]);
+                }
+                if let Some((r, _)) = orbiters_ui::widgets::control(&h.ctx, label).filter(|(r, _)| r.left() > 721.0) {
+                    return r;
+                }
+            }
+            panic!("no row shows {label}");
+        };
+        let request = over(&mut h, "Request");
+        let select = over(&mut h, "Select");
+        assert_eq!(select.width(), request.width(), "no jump between the two");
+        let before = h.recorder.launcher.lock().unwrap().len();
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Select");
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        let key_of = format!("previous:{}:{}", place.world_id, place.instance_id);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(key_of.as_str()));
+        assert!(h.recorder.launcher.lock().unwrap()[before..].iter().all(|a| !matches!(a, Action::As { .. })), "nothing asked of the account");
+        assert!(h.state.launcher_mut().modal_open().is_none(), "the row's profile did not open");
+    }
+
+    /// REQUEST23: VRChat saying the friend's instance is closed, or not answering, chooses nothing and the line under
+    /// Where says which (no sheet's row does); on another account's profile, Request stays.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn select_on_a_closed_instance_chooses_nothing_and_says_so() {
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        for (open, said) in [(Some(false), "closed"), (None, "did not say")] {
+            let (mut h, place, _) = friends_in_instances(false);
+            // The answer held back a moment: until it comes the line says it is being asked.
+            h.recorder.alive_by.lock().unwrap().insert(place.instance_id.clone(), (open, Duration::from_millis(1000)));
+            open_profile_of(&mut h, "Nova Sample");
+            click(&mut h, "Select");
+            assert!(h.state.launcher_mut().places.checking_line().is_some_and(|l| l.contains("Nova Sample")), "being asked: said");
+            frames_until(&mut h, "answered", |h| h.state.launcher_mut().places.notice().is_some());
+            let line = h.state.launcher_mut().places.notice().unwrap().to_string();
+            assert!(line.contains("Nova Sample") && line.contains(said), "{line}");
+            assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
+            assert!(h.state.launcher_mut().places.checking_line().is_none());
+            assert!(h.recorder.launcher.lock().unwrap().iter().all(|a| !matches!(a, Action::PlayAt { .. })));
+        }
+        // Another account's profile chosen under Play: this account cannot start VRChat there, Request as before.
+        let (mut h, _, _) = friends_in_instances(false);
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), running: None, starting: None, assistant: false }];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        open_profile_of(&mut h, "Nova Sample");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Select").is_none(), "no Select on another account's profile");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_some());
+    }
+
+    /// REQUEST23: while VRChat's session is restored, Select holds the friend's instance (nothing chosen, nothing asked)
+    /// until VRChat says who is signed in; with VRChat running on the profile chosen (Where hidden), the profile keeps
+    /// Request invite as before.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn select_waits_while_vrchat_connects_and_is_not_offered_while_it_runs() {
+        use orbiters_core::launcher::{Game, GameProfile, LaunchMode, Source};
+        orbiters_ui::widgets::watch_controls();
+        let (mut h, place, me) = friends_in_instances(true);
+        open_profile_of(&mut h, "Nova Sample");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Select").is_some(), "Select offered while connecting (held)");
+        {
+            click(&mut h, "Select");
+            assert_eq!(h.state.launcher_mut().places.chosen_key(), None, "held while connecting");
+            assert!(h.state.launcher_mut().places.checking_line().is_some_and(|l| l.contains("Nova Sample")), "said under Where");
+            assert!(h.recorder.asked.lock().unwrap().is_empty());
+            *h.recorder.alive.lock().unwrap() = Some(true);
+            let name = h.snap.vrchat_login.known.clone().unwrap().display_name;
+            h.snap.vrchat_login.restoring = false;
+            h.snap.vrchat_login.known = None;
+            h.snap.vrchat_login.allowed = true;
+            h.snap.vrchat_login.user = Some(vrchat_user(&me, &name));
+            frames_until(&mut h, "chosen once verified", |h| h.state.launcher_mut().places.chosen_key().is_some());
+            assert!(h.recorder.asked.lock().unwrap()[0].contains(&place.instance_id));
+        }
+        // VRChat running on the profile chosen: Where is hidden, Request invite as before.
+        let (mut h, _, _) = friends_in_instances(false);
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        let Source::SignedIn { name, .. } = data.source.clone() else { unreachable!() };
+        data.game = Game::Running(LaunchMode::Vr);
+        data.profiles = vec![GameProfile { profile: 0, account: Some(name), running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        open_profile_of(&mut h, "Nova Sample");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Select").is_none(), "no Select while VRChat runs on the profile");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_some());
     }
 }

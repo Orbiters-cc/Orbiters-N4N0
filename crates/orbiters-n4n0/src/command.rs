@@ -18,13 +18,50 @@ pub enum MenuHolder {
     Screen,
 }
 
+/// The first identity epoch of a runtime (anonymous, before any account is read). Epochs only grow from it: 0 is never
+/// a real epoch, and no default value of a stamp is one either.
+pub const FIRST_EPOCH: u64 = 1;
+
+/// Where a person's input was captured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    /// The window's chat (typed, its cards' Yes and No, its microphone).
+    Window,
+    /// The SteamVR overlay's Ask page (and the overlay's own microphone).
+    Overlay,
+    /// The avatar's N4N0 menu, and listens N4N0 starts by itself (the wake word, hands-free).
+    Avatar,
+    /// A phone's screen.
+    Phone,
+}
+
+/// What a person's input saw when it was captured, taken by the surface that captured it and carried unchanged to the
+/// service (verify2-r21): the Orbiters identity's epoch it was shown (`N4n0Status::account_epoch`), the question N4N0
+/// asked that was shown or said to the person at that moment (`None`: none — the input then never answers one), and
+/// the surface's own sequence number. The service accepts an input only for the epoch signed in now, and takes it as
+/// an answer only to the question it names. An input without a stamp (an older process) is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub epoch: u64,
+    #[serde(default)]
+    pub question: Option<u64>,
+    pub surface: Surface,
+    pub seq: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
     /// Page-scoped Ask lifecycle. Enter defaults to Auto; leaving cancels and releases capture.
     AskPage { open: bool },
-    /// First user Talk press takes over this visit; `down` holds/releases the manual sentence.
-    AskTalk { down: bool },
+    /// First user Talk press takes over this visit; `down` holds/releases the manual sentence. A press carries the
+    /// stamp taken when it was pressed: what is heard is answered as of then.
+    AskTalk {
+        down: bool,
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
     /// Audio output owns this gate until playback drains, so the answer cannot become input.
     AskPlayback { active: bool },
     /// The "Talk with N4N0?" button the wake word put up during a call: pressed (`accept`), N4N0 listens; else it goes.
@@ -43,30 +80,28 @@ pub enum Command {
     /// for a message that is not waiting any more or before its moment.
     RetryTurn {
         id: u64,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
-    /// A surface's Yes or No (the Ask page's, the window chat's card) to what N4N0 asked to do, for the question it showed
-    /// (`question`: the number in its `N4n0Confirmation::approve_url`). An answer for a question that is no longer the one
-    /// waiting answers nothing (verify-r21 1): a late Yes never runs the next question, a late No never drops it. Without
-    /// a number (0) it answers nothing either.
+    /// A surface's Yes or No (the Ask page's, the window chat's card) to what N4N0 asked to do, stamped when it was
+    /// pressed with the question it showed: it answers that question only, for the account it was shown to.
     AskAnswer {
         yes: bool,
         #[serde(default)]
-        question: u64,
+        stamp: Option<Stamp>,
     },
-    /// A question typed in the window or the overlay, with the question N4N0 asked that the surface showed when it was
-    /// sent (`None`: none): a typed yes or no answers that question only.
+    /// A sentence typed in the window or the overlay, stamped when it was sent (see [`Stamp`]).
     Ask {
         text: String,
         #[serde(default)]
-        question: Option<u64>,
+        stamp: Option<Stamp>,
     },
-    /// Another Orbiters account (or nobody) is signed in now (the controller's identity gate): N4N0 forgets everything of
-    /// the one before — the conversation, its lines, what it asked, its action log — and what was under way for it
-    /// comes back to nothing (verify-r21 3).
-    ForgetAccount,
-    /// The window's or the overlay's Talk button, pressed or let go.
+    /// The window's or the overlay's Talk button, pressed or let go. A press carries the stamp taken then: the sentence
+    /// heard is answered as of the press, however late its recognition ends.
     Talk {
         down: bool,
+        #[serde(default)]
+        stamp: Option<Stamp>,
     },
     /// Shows a text on the panel as it is (tries the panel).
     Say {
@@ -248,7 +283,7 @@ mod tests {
     #[test]
     fn commands_keep_their_json() {
         let json = |c: &Command| serde_json::to_string(c).unwrap();
-        assert_eq!(json(&Command::Talk { down: true }), r#"{"kind":"talk","down":true}"#);
+        assert_eq!(json(&Command::Talk { down: false, stamp: None }), r#"{"kind":"talk","down":false,"stamp":null}"#);
         assert_eq!(json(&Command::Photo3DIn { seconds: 3 }), r#"{"kind":"photo_3d_in","seconds":3}"#);
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
         assert_eq!(json(&Command::TestFace { face: Some(N4n0Face::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);

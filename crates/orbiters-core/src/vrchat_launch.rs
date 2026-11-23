@@ -65,6 +65,9 @@ pub struct LaunchSettings {
     /// Home's profile choice says whose each one is (REQUEST15 7a; not a setting, written as they are seen).
     #[serde(with = "profile_keys")]
     pub profiles: std::collections::BTreeMap<u32, String>,
+    /// On a Mac: the share of the display's drawing resolution, per side, Home's Play has VRChat draw at (25 to 100, 100
+    /// being the panel's real pixels; macOS scales the picture to the screen). Not used elsewhere.
+    pub mac_render_percent: u32,
 }
 
 impl Default for LaunchSettings {
@@ -81,6 +84,7 @@ impl Default for LaunchSettings {
             last_mode: LaunchMode::Vr,
             desktop_window: None,
             profiles: std::collections::BTreeMap::new(),
+            mac_render_percent: crate::obelisk::DEFAULT_RENDER_PERCENT,
         }
     }
 }

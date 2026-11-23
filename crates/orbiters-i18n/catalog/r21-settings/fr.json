@@ -165,5 +165,6 @@
   "wrist watch hand left right": "poignet montre main gauche droite",
   "{count} matching setting": "{count} paramètre correspondant",
   "{count} matching settings": "{count} paramètres correspondants",
-  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ pour se déplacer, Entrée pour ouvrir, Échap pour effacer"
+  "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ pour se déplacer, Entrée pour ouvrir, Échap pour effacer",
+  "resolution render scale pixels sharp fast Mac": "résolution échelle de rendu pixels net rapide Mac"
 }

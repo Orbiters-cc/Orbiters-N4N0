@@ -1038,7 +1038,7 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
         return;
     }
     let rect = pop.rect;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
+    let area = orbiters_ui::front::area(ctx, id, Order::Foreground, !closing).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         ui.multiply_opacity(pop.opacity);
         if closing {

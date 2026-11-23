@@ -668,7 +668,8 @@ impl Game for MacGame {
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
         let window = self.own_window(pid)?;
-        let (width, height) = native::content_pixels(&window, native::scale_of(&window), native::title_points(&window, native::display_frame(&window)));
+        // The bridge's own starts take no render percent: the game's pixels are the content's (R2).
+        let (width, height) = native::guest_pixels(&window, native::scale_of(&window), native::title_points(&window, native::display_frame(&window)), 100);
         Some(GameWindow { handle: window.id as isize, width, height })
     }
 

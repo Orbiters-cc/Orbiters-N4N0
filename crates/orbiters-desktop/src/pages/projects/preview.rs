@@ -942,7 +942,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let (wid, closing) = (morph.id(), morph.is_closing());
     let mut close = false;
     let mut act: Option<WindowAct> = None;
-    egui::Area::new(wid.with("area")).order(Order::Foreground).fixed_pos(area.min).fade_in(false).show(&ctx, |ui| {
+    orbiters_ui::front::area(&ctx, wid.with("area"), Order::Foreground, !closing).fixed_pos(area.min).fade_in(false).show(&ctx, |ui| {
         ui.set_min_size(area.size());
         let backdrop = ui.interact(area, wid.with("backdrop"), Sense::click());
         viewer::paint_backdrop(&ui.painter().with_clip_rect(screen), screen, &f);

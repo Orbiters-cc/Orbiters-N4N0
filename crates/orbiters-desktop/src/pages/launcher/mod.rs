@@ -351,6 +351,18 @@ impl State {
         self.chosen_profile = Some(profile);
     }
 
+    /// The list's data (tests).
+    #[cfg(test)]
+    pub fn data_for_tests(&self) -> Arc<LauncherState> {
+        self.data.clone()
+    }
+
+    /// The profile window open, whose (tests).
+    #[cfg(test)]
+    pub fn modal_open(&self) -> Option<&str> {
+        self.modal.as_ref().filter(|m| m.closing.is_none()).map(|m| m.id.as_str())
+    }
+
     /// Opens a person's profile as if their row was pressed at `from`.
     pub fn open_profile(&mut self, ctx: &egui::Context, id: &str, from: Rect) {
         self.modal = Some(Modal { id: id.to_string(), from, opened: anim::time(ctx), closing: None });
@@ -723,6 +735,7 @@ pub fn over_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     if let Some(since) = state.drawer {
         let open = anim::spring_from(&ctx, Id::unique(("launcher-drawer", since.to_bits())), [0.0], [1.0], Spring::EXPAND)[0];
         let layer = LayerId::new(Order::Middle, Id::unique("launcher-drawer-layer"));
+        orbiters_ui::front::layer(&ctx, layer, true);
         let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer));
         let scrim = over.interact(page, Id::unique("launcher-drawer-scrim"), Sense::click());
         over.painter().rect_filled(page, 0.0, theme::black(0.45 * open.clamp(0.0, 1.0)));

@@ -23,7 +23,11 @@
   "N4N0's assistant is off: turn it on in Orbiters - N4N0 › Settings › Voice & assistant.": "N4N0のアシスタントはオフです。Orbiters - N4N0 › 設定 › 音声とアシスタントでオンにしてください。",
   "N4N0 prepared something that needs your approval: see N4N0's chat at the top of Orbiters - N4N0.": "N4N0があなたの承認が必要な内容を用意しました。Orbiters - N4N0上部のN4N0のチャットを確認してください。",
   "Calls are off: Orbiters - N4N0 › Settings › N4N0 companion": "通話はオフです：Orbiters - N4N0 › 設定 › N4N0 コンパニオン",
-  "That answer was for a question N4N0 no longer asks: nothing was done. Answer the one shown now.": "その返答はN4N0がもう尋ねていない質問へのものでした。何も実行されていません。今表示されている質問に答えてください。",
+  "That came from an older part of Orbiters - N4N0: nothing was done. Send it again.": "これはOrbiters - N4N0の古い部分から届きました。何も実行されていません。もう一度送ってください。",
+  "That was for the Orbiters account signed in before: nothing was done.": "それは前にサインインしていたOrbitersアカウント宛てのものでした。何も実行されていません。",
+  "N4N0 asked something else meanwhile: nothing was done. It asks now: {question}": "その間にN4N0は別のことを尋ねました。何も実行されていません。今の質問：{question}",
+  "N4N0 no longer asks that: nothing was done.": "N4N0はもうそれを尋ねていません。何も実行されていません。",
+  "Answer N4N0's question with its Yes or No: nothing was done.": "N4N0の質問には「はい」か「いいえ」のボタンで答えてください。何も実行されていません。",
   "Answer sent": "返答を送信しました",
   "Turn it on in Orbiters - N4N0 › Settings › Voice & assistant": "Orbiters - N4N0 › 設定 › 音声とアシスタントでオンにしてください",
   "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Orbiters - N4N0 › 設定 › 音声とアシスタントで耳をインストールしてください"

@@ -801,6 +801,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let id = Id::unique("mine-picker");
     let pop = popup::popover(&ctx, id.with(opened.to_bits()), anchor, base, true);
     let layer = egui::LayerId::new(Order::Foreground, id);
+    orbiters_ui::front::layer(&ctx, layer, true);
     let mut over = ui.new_child(UiBuilder::new().max_rect(screen).layer_id(layer));
     over.multiply_opacity(pop.opacity);
     let rect = pop.rect;

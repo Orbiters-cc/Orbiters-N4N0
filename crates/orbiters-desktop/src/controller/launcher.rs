@@ -69,6 +69,8 @@ pub trait Machine: Send + Sync {
     fn installed(&self) -> bool;
     /// Starts VRChat with these arguments (after `-applaunch 438100`).
     fn start(&self, args: &[String]) -> Result<(), String>;
+    /// On a Mac, the render scale Home's next start asks for (25 to 100 %); nothing elsewhere.
+    fn set_render_percent(&self, _percent: u32) {}
     /// Starts one more VRChat beside those running, with these arguments (`--profile=N` among them): through VRChat's own
     /// launcher, as the bridge does, since Steam starts a game once.
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
@@ -188,6 +190,8 @@ pub struct MacMachine {
     /// Home's own starts not told yet: each failure is told by its launch id, never another start's (the bridge's), and a
     /// later start does not hide an earlier one's.
     home_launch: std::sync::Mutex<Vec<u64>>,
+    /// The render scale Home's next Play asks for (Settings, `LaunchSettings::mac_render_percent`).
+    render: std::sync::atomic::AtomicU32,
 }
 
 impl MacMachine {
@@ -213,6 +217,7 @@ impl MacMachine {
             play: Arc::new(super::obelisk_cli::Play::new(orbiters_core::paths::config_dir().join("obelisk-start-gate.json"))),
             signed_out: AtomicBool::new(false),
             home_launch: std::sync::Mutex::new(Vec::new()),
+            render: std::sync::atomic::AtomicU32::new(orbiters_core::obelisk::DEFAULT_RENDER_PERCENT),
         }
     }
 }
@@ -233,9 +238,18 @@ impl MacMachine {
         orbiters_core::obelisk::program(&self.tools)
     }
 
-    /// Starts VRChat with `args` through the shared start: its launch id, or why not.
+    /// Home's start of VRChat with `args` through the shared start, at the render scale chosen in Settings (`render`,
+    /// 25 to 100 % of the display's drawing resolution, the panel's pixels at most): its launch id, or why not. The
+    /// bridge's starts (`start_launch_reserved`) keep the engine's own size, which its coordinates are measured in.
     pub fn start_launch(&self, args: &[String]) -> Result<u64, super::obelisk_cli::Refused> {
-        self.start_launch_reserved(args, None)
+        let program = self.program().ok_or_else(|| super::obelisk_cli::Refused::Failed(tr("VRChat is not set up on this Mac yet.").to_string()))?;
+        let render = self.render.load(Ordering::Relaxed);
+        #[cfg(target_os = "macos")]
+        let sizes = crate::mac_display::sizes();
+        #[cfg(not(target_os = "macos"))]
+        let sizes: Option<((u32, u32), (u32, u32))> = None;
+        let percent = sizes.map(|(backing, panel)| orbiters_core::obelisk::render_percent(render, backing.0, panel.0));
+        self.play.start_rendered(&program, &self.library, args, percent)
     }
 
     /// The same, with the reservation `token` the bridge took before it created the instance (`Play::reserve`).
@@ -280,6 +294,10 @@ impl Machine for MacMachine {
 
     fn direct(&self) -> bool {
         true
+    }
+
+    fn set_render_percent(&self, percent: u32) {
+        self.render.store(percent, Ordering::Relaxed);
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
@@ -2069,6 +2087,7 @@ impl Controller {
         } else {
             Vec::new()
         };
+        machine.set_render_percent(self.view().settings.launch.mac_render_percent);
         match machine.start(&args) {
             Ok(()) => {
                 // Bound to the account it was asked on.

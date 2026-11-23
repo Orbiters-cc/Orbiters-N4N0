@@ -119,6 +119,18 @@ pub trait Host: Send + Sync + 'static {
     fn notify(&self, kind: NoticeKind, message: String);
     /// The Orbiters account the assistant asks with and link cards are dropped with: its API and credential.
     fn account(&self) -> Option<(Api, String)>;
+    /// The Orbiters identity's epoch: a number that moves exactly when the member signed in changes (the environment and
+    /// the member, never the credential), in the step that installs the next one, and is never 0. The authority the gate
+    /// and the fence ask ([`crate::N4n0::pause_effects`] comes before it moves). An app with one identity keeps
+    /// [`crate::FIRST_EPOCH`].
+    fn identity_epoch(&self) -> u64 {
+        crate::FIRST_EPOCH
+    }
+    /// The account of identity `epoch`: `None` once another member (or nobody) is signed in, checked in the same step as
+    /// the credential is read.
+    fn account_for(&self, epoch: u64) -> Option<(Api, String)> {
+        (epoch == self.identity_epoch()).then(|| self.account()).flatten()
+    }
     /// Previous instances' Invite me with the person's own VRChat account, when one is connected in the app (REQUEST20
     /// 4): VRChat's invite to oneself to `location` (`wrld_…:<instance>`), and how it went. `None`: no VRChat account
     /// is connected here, and nothing was sent (Orbiters' own account is asked instead). Called on a thread of its own.

@@ -324,7 +324,7 @@ impl App {
         let body = Rect::from_min_max(pos2(full.left(), full.top() + TITLE_H), full.max);
         // The shortcut to N4N0's bar, Esc, and the keys of the page while the bar or the chat has the keyboard.
         if content_ready {
-            let modal = self.modal_up(&ctx, &snap);
+            let modal = self.modal_up(&ctx);
             self.chat.before_page(&ctx, &snap, modal);
         }
         if content_ready {
@@ -812,7 +812,7 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
     if t < SPLASH + SPLASH_FADE {
         ctx.request_repaint();
     }
-    egui::Area::new(Id::unique("orbiters-splash")).order(egui::Order::Foreground).fixed_pos(full.min).interactable(true).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, Id::unique("orbiters-splash"), egui::Order::Foreground, true).fixed_pos(full.min).interactable(true).show(ctx, |ui| {
         let (_, _) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
         let mut p = ui.painter().clone();
         p.multiply_opacity(fade);
@@ -1017,9 +1017,10 @@ impl App {
         self.idle_facts(ctx, snap).iter().all(|(_, idle)| *idle)
     }
 
-    /// A sheet, dialog, window or menu of the page shown is up (or the first-use notice): the frontmost thing owns the
-    /// keyboard and the pointer, and N4N0's chat stands aside while it is (verify-r21 major 7).
-    pub(crate) fn modal_up(&self, ctx: &egui::Context, snap: &Snapshot) -> bool {
+    /// Something of the window's holds the foreground (a sheet, a dialog, a viewer, a list, the first-use notice): the
+    /// keyboard and the pointer are its own, and N4N0's chat stands aside (verify-r21 major 7). Each says so itself as it
+    /// is shown (`orbiters_ui::front`, verify2-r21 M5); what a page holds in its own layer is added at once.
+    pub(crate) fn modal_up(&self, ctx: &egui::Context) -> bool {
         let page = match self.page {
             Page::Home => self.home.modal_up(),
             Page::Sessions => self.sessions.holds(),
@@ -1028,7 +1029,7 @@ impl App {
             Page::Projects => self.projects.holds(),
             _ => false,
         };
-        page || orbiters_ui::popup::any_open(ctx) || !(self.usage_told || snap.settings.usage.told_all())
+        page || orbiters_ui::front::held(ctx)
     }
 
     /// One look at the countdown to closing to the tray: the offer up, taken down, or the window closing (as its

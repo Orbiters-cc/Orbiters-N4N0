@@ -1094,9 +1094,13 @@ mod tests {
         s.choice = 2;
         s.loading = vec![Loading::Source(1, rx_old), Loading::Source(2, rx_new)];
         tx_new.send(Ok((image::RgbaImage::new(10, 10), Source::File("C:/made-up/new.png".into())))).unwrap();
-        tx_old.send(Ok((image::RgbaImage::new(20, 20), Source::File("C:/made-up/old.png".into())))).unwrap();
         take_loading(&ctx, &mut s);
         assert_eq!(s.saved.source, Some(Source::File("C:/made-up/new.png".into())));
+        assert_eq!(s.pending.as_ref().map(|p| p.width()), Some(10));
+        // The older one's answer comes after it, at a later frame.
+        tx_old.send(Ok((image::RgbaImage::new(20, 20), Source::File("C:/made-up/old.png".into())))).unwrap();
+        take_loading(&ctx, &mut s);
+        assert_eq!(s.saved.source, Some(Source::File("C:/made-up/new.png".into())), "the newer choice stays");
         assert_eq!(s.pending.as_ref().map(|p| p.width()), Some(10));
         // A gallery picture asked before a newer choice: dropped too.
         s.wanted_source = Some("https://api.vrchat.cloud/api/1/file/file_new/1/file".into());

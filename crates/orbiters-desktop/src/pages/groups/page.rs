@@ -1698,24 +1698,34 @@ mod tests {
     #[test]
     fn the_composers_toggle_removes_the_picture_and_the_confirmation_says_so() {
         let baseline = Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), complete: true, ..Default::default() };
-        let mut removed = None;
-        // Each control in turn, with the keyboard: the toggle is one of them.
-        for tabs in 1..14 {
-            let mut o = open_as(&["*"], &["grol_owner"]);
-            o.composer = Some(Composer { baseline: Some(baseline.clone()), draft: PostDraft { title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), ..Default::default() } });
-            let mut frames = vec![vec![], vec![]];
-            for _ in 0..tabs {
-                frames.extend(press(egui::Key::Tab));
-            }
-            frames.extend(press(egui::Key::Space));
-            frames.push(vec![]);
-            compose(&mut o, false, frames);
-            if let Some(c) = o.composer.filter(|c| c.removes_picture()) {
-                removed = Some(c.draft);
-                break;
-            }
-        }
-        let edit = removed.expect("a control removes the picture");
+        let mut o = open_as(&["*"], &["grol_owner"]);
+        o.composer = Some(Composer { baseline: Some(baseline.clone()), draft: PostDraft { title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), ..Default::default() } });
+        let ctx = egui::Context::default();
+        let mut t = 0.0;
+        let mut frame = |o: &mut Open, events: Vec<egui::Event>| {
+            t += 0.1;
+            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), time: Some(t), ..Default::default() };
+            input.events = events;
+            let mut out = ctx.run_ui(input, |ui| composer(ui, o, false, &mut Vec::new()));
+            out.textures_delta.clear();
+            out
+        };
+        frame(&mut o, vec![]);
+        let out = frame(&mut o, vec![]);
+        // The toggle is drawn left of its label (its switch is 48 x 28).
+        let label = out.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == tr("Keep the post's picture") => Some(t.pos),
+            _ => None,
+        });
+        let label = label.expect("the composer of a post with a picture offers to remove it");
+        let at = pos2(label.x - 34.0, label.y + 14.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&mut o, vec![egui::Event::PointerMoved(at)]);
+        frame(&mut o, vec![press(true)]);
+        frame(&mut o, vec![press(false)]);
+        let c = o.composer.expect("still being written");
+        assert!(c.removes_picture(), "the toggle removes the picture");
+        let edit = c.draft;
         let said = confirmed(&prepared(Write::EditPost { group: "grp_1".into(), baseline, edit }), &Names::default());
         assert!(said.contains(tr("Removed from the post")), "{said}");
     }

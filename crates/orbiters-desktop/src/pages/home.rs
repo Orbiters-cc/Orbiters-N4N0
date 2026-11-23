@@ -2725,4 +2725,279 @@ mod tests {
         assert!(h.recorder.asked.lock().unwrap()[0].starts_with("Instance"), "{:?}", h.recorder.asked.lock().unwrap());
         assert_eq!(sent(), 0, "still nothing to Orbiters about these worlds");
     }
+
+    // --- verify2-r21 M3 and M4: Where's destination is one value with one owner. ---
+
+    /// A row of the history (made-up), `n` its number, of a kind the account can rejoin by its link.
+    #[cfg(not(target_os = "macos"))]
+    fn row_of(n: u32, name: &str) -> crate::pages::launcher::previous::Visit {
+        crate::pages::launcher::previous::Visit {
+            world_id: format!("wrld_00000000-0000-4000-8000-{:012}", 860 + n),
+            instance: format!("{}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)", 4240 + n),
+            name: name.into(),
+            at: 1_794_990_000,
+        }
+    }
+
+    /// What was sent to start VRChat, unwrapped of the account it is bound to.
+    #[cfg(not(target_os = "macos"))]
+    fn starts(h: &Harness) -> Vec<orbiters_core::launcher::Action> {
+        use orbiters_core::launcher::Action;
+        let bare = |a: Action| match a {
+            Action::As { action, .. } => *action,
+            a => a,
+        };
+        let start = |a: &Action| matches!(a, Action::Play { .. } | Action::PlayOn { .. } | Action::PlayAt { .. } | Action::AcceptInvite { .. } | Action::AcceptInviteOn { .. });
+        h.recorder.launcher.lock().unwrap().iter().cloned().map(bare).filter(start).collect()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn instance_checks(h: &Harness) -> usize {
+        h.recorder.asked.lock().unwrap().iter().filter(|a| a.starts_with("Instance")).count()
+    }
+
+    /// Frames and time, for what comes late to come.
+    #[cfg(not(target_os = "macos"))]
+    fn let_pass(h: &mut Harness, ms: u64) {
+        let until = std::time::Instant::now() + Duration::from_millis(ms);
+        while std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+            h.frame(Vec::new());
+        }
+    }
+
+    /// Presses `label` when it takes a press; whether it did.
+    #[cfg(not(target_os = "macos"))]
+    fn try_click(h: &mut Harness, label: &str) -> bool {
+        match orbiters_ui::widgets::control(&h.ctx, label) {
+            Some((_, true)) => {
+                click(h, label);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `row_of(1)` chosen and open, its "open" older than a minute, the sheet put away.
+    #[cfg(not(target_os = "macos"))]
+    fn chosen_and_aged(rows: Vec<crate::pages::launcher::previous::Visit>) -> Harness {
+        use crate::pages::launcher::previous::OPEN_FOR;
+        orbiters_ui::widgets::watch_controls();
+        let first = rows[0].name.clone();
+        let mut h = where_signed_in(rows);
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Previous instances");
+        click(&mut h, &first);
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        h.state.launcher_mut().places.previous.age_check(OPEN_FOR + Duration::from_secs(5));
+        h
+    }
+
+    /// verify2-r21 M4, the verifier's own fixture: a pick made while Play's recheck is under way leaves Play usable.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_play_recovers_after_replacing_pick() {
+        let visit = row_of(1, "Harbor Market");
+        let mut h = chosen_and_aged(vec![visit.clone()]);
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(550)));
+        click(&mut h, "Play in VR");
+        assert!(h.state.launcher_mut().places.previous.rechecking());
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        frames_until(&mut h, "replacement chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        assert!(instance_checks(&h) >= 3);
+        assert!(h.state.launcher_mut().places.making().is_none(), "replacement resolved but Play is permanently busy");
+        // And Play goes where the choice is, once.
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        click(&mut h, "Play in VR");
+        frames_until(&mut h, "a start", |h| !starts(h).is_empty());
+        let_pass(&mut h, 700);
+        assert_eq!(starts(&h).len(), 1, "{:?}", starts(&h));
+    }
+
+    /// verify2-r21 M4: the earlier pick's worker, past its own check of the generation, stands still while the later
+    /// pick's answer arrives, then finishes: the later answer is neither lost nor replaced.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_a_stale_worker_never_erases_the_current_reply() {
+        use crate::pages::launcher::previous::PAUSE;
+        orbiters_ui::widgets::watch_controls();
+        let (a, b) = (row_of(11, "Harbor Market"), row_of(12, "Snowy Cabin"));
+        let mut h = where_signed_in(vec![a.clone(), b.clone()]);
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        let (go, held) = std::sync::mpsc::channel::<()>();
+        *PAUSE.lock().unwrap() = Some((a.instance.clone(), held));
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        std::thread::sleep(Duration::from_millis(150));
+        // No frame between B's answer and A's: both wait for the window.
+        let (r, _) = orbiters_ui::widgets::control(&h.ctx, "Snowy Cabin").unwrap();
+        h.press(r.center());
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = go.send(());
+        std::thread::sleep(Duration::from_millis(150));
+        h.release(r.center());
+        let_pass(&mut h, 400);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(b.key().as_str()), "the later pick's answer");
+    }
+
+    /// verify2-r21 M3: the sheet put away while VRChat connects, with a pick held: Play starts nothing else (not VRChat's
+    /// own start, not a card chosen before).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_play_after_dismissing_the_sheet_while_connecting_starts_nothing_else() {
+        use orbiters_core::launcher::{Action, Source};
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(21, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        let Source::SignedIn { user_id: me, name } = h.state.launcher_mut().data.source.clone() else { panic!() };
+        let mut data = (*h.state.launcher_mut().data).clone();
+        data.source = Source::Nothing;
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.snap.vrchat_login.user = None;
+        h.snap.vrchat_login.allowed = false;
+        h.snap.vrchat_login.restoring = true;
+        h.snap.vrchat_login.known = Some(vrchat_user(&me, &name));
+        h.settle();
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        try_click(&mut h, "Play in VR");
+        let_pass(&mut h, 100);
+        assert!(starts(&h).is_empty(), "Play while the pick is held: {:?}", starts(&h));
+        // VRChat says who it is: the pick is checked, and Play goes there.
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        h.snap.vrchat_login.restoring = false;
+        h.snap.vrchat_login.known = None;
+        h.snap.vrchat_login.allowed = true;
+        h.snap.vrchat_login.user = Some(vrchat_user(&me, &name));
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        click(&mut h, "Play in VR");
+        let_pass(&mut h, 60);
+        let sent = starts(&h);
+        assert!(matches!(sent.as_slice(), [Action::PlayAt { destination, .. }] if destination.instance_id == visit.instance), "{sent:?}");
+    }
+
+    /// verify2-r21 M3: a card chosen before, then a pick being checked when the sheet is put away: Play never launches
+    /// the earlier card.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_a_pending_pick_is_what_play_goes_to_not_the_card_before() {
+        use orbiters_core::launcher::{Action, InviteKind};
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(31, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        let invite = h.state.launcher_mut().data.invites.iter().find(|i| i.kind == InviteKind::Invite).cloned().unwrap();
+        let invite_world = invite.place.as_ref().unwrap().world_name.clone();
+        click(&mut h, &invite_world);
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(format!("invite:{}", invite.id).as_str()));
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(1500)));
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        try_click(&mut h, "Play in VR");
+        let_pass(&mut h, 2200);
+        let sent = starts(&h);
+        assert!(sent.iter().all(|a| matches!(a, Action::PlayAt { destination, .. } if destination.instance_id == visit.instance)), "the earlier card: {sent:?}");
+    }
+
+    /// verify2-r21 M3: the profile chosen changes while Play's recheck is under way: nothing starts when the answer comes.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_a_profile_change_during_a_check_launches_nothing() {
+        use orbiters_core::launcher::GameProfile;
+        let visit = row_of(41, "Harbor Market");
+        let mut h = chosen_and_aged(vec![visit.clone()]);
+        let mut data = (*h.state.launcher_mut().data).clone();
+        let plain = |profile| GameProfile { profile, account: None, running: None, starting: None, assistant: false };
+        data.profiles = vec![plain(0), plain(1)];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        h.state.launcher_mut().places.previous.age_check(Duration::from_secs(65));
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(500)));
+        click(&mut h, "Play in VR");
+        h.state.launcher_mut().stand_in_profile(1);
+        let_pass(&mut h, 1500);
+        assert!(starts(&h).is_empty(), "started on the profile left: {:?}", starts(&h));
+        assert!(h.state.launcher_mut().places.making().is_none(), "busy ended");
+    }
+
+    /// verify2-r21 M3: an answer asked for one account is never an "open" for another: it is asked again as the new one.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_an_account_change_during_a_check_asks_again() {
+        use orbiters_core::launcher::Source;
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(51, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(400)));
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        // The other account signs in before the answer comes, its friends list with it.
+        let other = "usr_00000000-0000-4000-8000-0000000000ee";
+        let mut data = (*h.state.launcher_mut().data).clone();
+        let Source::SignedIn { name, .. } = data.source.clone() else { panic!() };
+        data.source = Source::SignedIn { user_id: other.into(), name: name.clone() };
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.snap.vrchat_login.user = Some(vrchat_user(other, &name));
+        frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
+        assert!(instance_checks(&h) >= 2, "the answer for the account before counted for this one");
+    }
+
+    /// verify2-r21 M3: VRChat starts running on the profile during Play's recheck (Where hides); when it stops, nothing is
+    /// launched for the press made long before.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_a_press_is_not_honoured_after_where_was_hidden() {
+        use orbiters_core::launcher::{Game, GameProfile, LaunchMode};
+        let visit = row_of(61, "Harbor Market");
+        let mut h = chosen_and_aged(vec![visit.clone()]);
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(300)));
+        click(&mut h, "Play in VR");
+        let before = h.state.launcher_mut().data.clone();
+        let mut data = (*before).clone();
+        data.game = Game::Running(LaunchMode::Vr);
+        data.profiles = vec![GameProfile { profile: 0, account: None, running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        let_pass(&mut h, 700);
+        h.state.launcher_mut().set_data(before);
+        let_pass(&mut h, 400);
+        assert!(starts(&h).is_empty(), "launched for an old press: {:?}", starts(&h));
+        assert!(h.state.launcher_mut().places.making().is_none(), "busy ended");
+    }
+
+    /// verify2-r21 M3: Play pressed twice, and again while its recheck is under way, starts VRChat once.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_playing_twice_or_during_a_recheck_starts_once() {
+        use orbiters_core::launcher::Action;
+        let visit = row_of(71, "Harbor Market");
+        let mut h = chosen_and_aged(vec![visit.clone()]);
+        h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(300)));
+        let (r, _) = orbiters_ui::widgets::control(&h.ctx, "Play in VR").unwrap();
+        for _ in 0..2 {
+            h.press(r.center());
+            h.release(r.center());
+        }
+        try_click(&mut h, "Play in Desktop");
+        let_pass(&mut h, 900);
+        let sent = starts(&h);
+        assert!(matches!(sent.as_slice(), [Action::PlayAt { destination, mode: orbiters_core::launcher::LaunchMode::Vr, .. }] if destination.instance_id == visit.instance), "{sent:?}");
+        // A fresh "open", pressed twice in a row: once too.
+        let (r, _) = orbiters_ui::widgets::control(&h.ctx, "Play in VR").unwrap();
+        for _ in 0..60 {
+            h.frame(Vec::new());
+        }
+        for _ in 0..2 {
+            h.press(r.center());
+            h.release(r.center());
+        }
+        let_pass(&mut h, 100);
+        assert_eq!(starts(&h).len(), 2, "one more: {:?}", starts(&h));
+    }
 }

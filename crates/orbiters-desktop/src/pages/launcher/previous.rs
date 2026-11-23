@@ -370,6 +370,24 @@ fn pick(state: &mut State, cx: &Cx, visit: &Visit) {
     }
 }
 
+/// Tests: the worker asking about this instance stands still, its answer in hand, until told (verify2-r21 M4).
+#[cfg(test)]
+pub(in crate::pages) static PAUSE: Mutex<Option<(String, std::sync::mpsc::Receiver<()>)>> = Mutex::new(None);
+
+#[cfg(test)]
+fn pause_before_publishing(instance: &str) {
+    let held = {
+        let mut p = PAUSE.lock().unwrap();
+        match p.as_ref() {
+            Some((i, _)) if i == instance => p.take(),
+            _ => None,
+        }
+    };
+    if let Some((_, held)) = held {
+        let _ = held.recv_timeout(Duration::from_secs(3));
+    }
+}
+
 /// Asks VRChat whether `visit` is still open, for the current pick's generation (a later pick, or another place
 /// chosen, drops this answer before it can replace anything).
 /// `again`: the choice stands while it is asked again (Play on an old "open"), else the pick shows as being asked.
@@ -387,6 +405,8 @@ fn ask(state: &mut State, cx: &Cx, visit: &Visit, again: bool) {
     };
     let (ctl, answer, current, ctx) = (cx.ctl.clone(), state.places.previous.answer.clone(), state.places.previous.generation.clone(), state.ctx.clone());
     let (world, instance, location) = (visit.world_id.clone(), visit.instance.clone(), visit.location());
+    #[cfg(test)]
+    let paused = instance.clone();
     // A read into memory (whether VRChat says the instance is open): nothing of the window's work.
     let started = std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
         let open = match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
@@ -395,6 +415,8 @@ fn ask(state: &mut State, cx: &Cx, visit: &Visit, again: bool) {
         };
         // Only the current pick's answer is kept: an older one never overwrites it.
         if current.load(Ordering::SeqCst) == generation {
+            #[cfg(test)]
+            pause_before_publishing(&paused);
             *answer.lock().unwrap_or_else(|e| e.into_inner()) = Some(Answer { generation, location, open, at: Instant::now() });
             if let Some(ctx) = ctx {
                 ctx.request_repaint();

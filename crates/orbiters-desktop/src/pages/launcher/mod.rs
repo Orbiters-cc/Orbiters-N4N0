@@ -81,7 +81,7 @@ struct Modal {
 }
 
 pub struct State {
-    data: Arc<LauncherState>,
+    pub(in crate::pages) data: Arc<LauncherState>,
     query: String,
     /// Sections closed by the person, kept between runs.
     folded: HashSet<String>,

@@ -2625,6 +2625,22 @@ pub(crate) mod tests {
         assert_eq!(seen.lock().unwrap().len(), 1, "no logout");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// verify2-r21 M6: the session file's copy cannot be deleted: VRChat is still told (the cookie is in memory until then).
+    #[test]
+    fn a_copy_that_cannot_be_deleted_does_not_keep_vrchat_from_being_told() {
+        let dir = session_dir("locked-copy");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, seen) = mock(vec![response(200, "", &[])]);
+        c.store = Some(path.clone());
+        std::fs::write(&path, b"made-up").unwrap();
+        // A directory of that name: no system deletes it as a file.
+        std::fs::create_dir_all(backup_of(&path)).unwrap();
+        let _ = c.sign_out();
+        assert!(!path.exists(), "the session file is gone");
+        assert!(c.cookies.header().is_empty() && !c.signed_in(), "gone from memory");
+        assert!(seen.lock().unwrap().iter().any(|r| r.url.ends_with("/logout")), "VRChat was told");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// r20: a new grant (another Orbiters identity or environment) goes on with the session in memory: nothing read again,
     /// nothing asked of VRChat, and the earlier grant's client keeps nothing.
     #[test]
@@ -2910,6 +2926,12 @@ pub fn test_server(
 #[cfg(feature = "test-support")]
 pub fn set_test_cookie(client: &mut Client, auth: &str) {
     client.cookies.auth = auth.into();
+}
+
+/// Another crate's test keeps the fake's session in a file of its own (made-up bytes), with its copy beside it.
+#[cfg(feature = "test-support")]
+pub fn set_test_store(client: &mut Client, path: &std::path::Path) {
+    client.store = Some(path.to_path_buf());
 }
 
 /// A client for another crate's tests: no saved session file, and any HTTP request panics.

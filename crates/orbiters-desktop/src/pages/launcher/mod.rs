@@ -15,6 +15,7 @@ mod modal;
 pub mod points;
 pub mod previous;
 mod row;
+pub mod selection;
 pub mod states;
 
 pub use hero::hero;

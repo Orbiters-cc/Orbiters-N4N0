@@ -44,13 +44,15 @@
   "Smoothing back to the values measured to match VRChat": "スムージングをVRChatに合うよう測定した値に戻しました",
   "default measured smoothing back": "初期値 測定 スムージング 戻す",
   "World ID": "ワールドID",
-  "{name} has closed since you chose it: choose a new instance of its world, or another place.": "{name}は選んだ後に閉じられました。このワールドの新しいインスタンスか、別の場所を選んでください。",
   "choose an instance\u0004Select": "選択",
   "Choose {name}'s instance in Where: Play starts VRChat there": "{name}のインスタンスを「行き先」で選びます：「プレイ」でそこからVRChatを起動します",
   "With {name}": "{name}と一緒",
   "{name} has left that instance: Play starts VRChat at home.": "{name}はそのインスタンスを離れました：「プレイ」でホームワールドからVRChatを起動します。",
-  "{name}'s instance is closed now: Play starts VRChat at home.": "{name}のインスタンスは閉じられています：「プレイ」でホームワールドからVRChatを起動します。",
-  "VRChat did not say whether {name}'s instance is open: Play starts VRChat at home.": "{name}のインスタンスが開いているかVRChatから返答がありません：「プレイ」でホームワールドからVRChatを起動します。",
   "Connecting to VRChat: {name}'s instance is checked next…": "VRChatに接続中：次に{name}のインスタンスを確認します…",
-  "Asking VRChat whether {name}'s instance is open…": "{name}のインスタンスが開いているかVRChatに問い合わせ中…"
+  "Asking VRChat whether {name}'s instance is open…": "{name}のインスタンスが開いているかVRChatに問い合わせ中…",
+  "{name}'s instance is closed now: choose a new instance of its world, or another place.": "{name}のインスタンスは閉じられています：そのワールドの新しいインスタンスか、別の場所を選んでください。",
+  "{name} is closed now: choose a new instance of its world, or another place.": "{name}は閉じられています：そのワールドの新しいインスタンスか、別の場所を選んでください。",
+  "VRChat is not signed in for this profile: choose a new instance of {name}, or another place.": "このプロフィールではVRChatにサインインしていません：{name}の新しいインスタンスか、別の場所を選んでください。",
+  "VRChat did not say whether {name}'s instance is open: Play asks again, or choose a new instance of its world.": "{name}のインスタンスが開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせるか、そのワールドの新しいインスタンスを選んでください。",
+  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "{name}が開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせるか、そのワールドの新しいインスタンスを選んでください。"
 }

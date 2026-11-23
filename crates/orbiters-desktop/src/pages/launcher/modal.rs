@@ -317,7 +317,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     // friends+, friends-only of a friend, a group's public one; a group's plus one no longer, its membership not known
     // here): the Play path with that instance (the running VRChat's own way when one runs). Private ones: ask.
     let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-    let me = state.places.previous.me.clone().unwrap_or_default();
+    let me = state.places.desk.asker().account.clone().unwrap_or_default();
     let join = match &friend.whereabouts {
         Whereabouts::World(place)
             if state.data.possible.play

@@ -2490,8 +2490,7 @@ mod tests {
         assert!(orbiters_ui::widgets::control(&h.ctx, "Sign in to VRChat").is_none(), "no sign-in while connecting");
         click(&mut h, "Previous instances");
         click(&mut h, "Harbor Market");
-        let picked = h.state.launcher_mut().places.previous.picked.clone().expect("the pick is kept");
-        assert!(!picked.new, "not turned into a new public instance while connecting");
+        assert_eq!(h.state.launcher_mut().places.desk.selection().instance(), Some(&rows[0]), "kept, not turned into a new public instance while connecting");
         assert_eq!(h.state.launcher_mut().places.chosen_key(), None, "not chosen before it was checked");
         assert!(h.recorder.asked.lock().unwrap().is_empty(), "nothing asked of VRChat before it says who is signed in");
         // VRChat says who it is; the friends list is still being read.
@@ -2641,11 +2640,11 @@ mod tests {
         assert_eq!(instances(&h), 1);
         assert_eq!(h.recorder.launcher.lock().unwrap().len(), 1);
         // Older than that, closed meanwhile: asked again, nothing starts, the choice goes, and the page says why.
-        h.state.launcher_mut().places.previous.age_check(OPEN_FOR + Duration::from_secs(5));
+        h.state.launcher_mut().places.desk.age_check(OPEN_FOR + Duration::from_secs(5));
         *h.recorder.alive.lock().unwrap() = Some(false);
         click(&mut h, "Play in VR");
         frames_until(&mut h, "asked again", |h| h.recorder.asked.lock().unwrap().iter().filter(|a| a.starts_with("Instance")).count() == 2);
-        frames_until(&mut h, "answered", |h| !h.state.launcher_mut().places.previous.rechecking());
+        frames_until(&mut h, "answered", |h| !h.state.launcher_mut().places.desk.rechecking());
         assert_eq!(h.recorder.launcher.lock().unwrap().len(), 1, "a closed instance starts nothing");
         assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
         assert!(h.state.launcher_mut().places.notice().is_some_and(|n| n.contains("Harbor Market")), "{:?}", h.state.launcher_mut().places.notice());
@@ -2656,7 +2655,7 @@ mod tests {
         frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
         h.frame(vec![key(Key::Escape)]);
         h.settle();
-        h.state.launcher_mut().places.previous.age_check(OPEN_FOR + Duration::from_secs(5));
+        h.state.launcher_mut().places.desk.age_check(OPEN_FOR + Duration::from_secs(5));
         let asked = instances(&h);
         click(&mut h, "Play in VR");
         frames_until(&mut h, "started after asking", |h| h.recorder.launcher.lock().unwrap().len() == 2);
@@ -2796,7 +2795,7 @@ mod tests {
         frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
         h.frame(vec![key(Key::Escape)]);
         h.settle();
-        h.state.launcher_mut().places.previous.age_check(OPEN_FOR + Duration::from_secs(5));
+        h.state.launcher_mut().places.desk.age_check(OPEN_FOR + Duration::from_secs(5));
         h
     }
 
@@ -2808,7 +2807,7 @@ mod tests {
         let mut h = chosen_and_aged(vec![visit.clone()]);
         h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(550)));
         click(&mut h, "Play in VR");
-        assert!(h.state.launcher_mut().places.previous.rechecking());
+        assert!(h.state.launcher_mut().places.desk.rechecking());
         click(&mut h, "Previous instances");
         click(&mut h, "Harbor Market");
         frames_until(&mut h, "replacement chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
@@ -2923,7 +2922,7 @@ mod tests {
         data.profiles = vec![plain(0), plain(1)];
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
-        h.state.launcher_mut().places.previous.age_check(Duration::from_secs(65));
+        h.state.launcher_mut().places.desk.age_check(Duration::from_secs(65));
         h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(500)));
         click(&mut h, "Play in VR");
         h.state.launcher_mut().stand_in_profile(1);
@@ -3004,6 +3003,7 @@ mod tests {
         }
         let_pass(&mut h, 100);
         assert_eq!(starts(&h).len(), 2, "one more: {:?}", starts(&h));
+    }
 
     /// REQUEST23: the sample's friends with "Nova Sample" in a friends+ instance (joinable without asking) and "Pixel Fox"
     /// in someone else's invite instance (not), Where signed in (or `connecting`).
@@ -3152,7 +3152,7 @@ mod tests {
             click(&mut h, "Select");
             assert!(h.state.launcher_mut().places.checking_line().is_some_and(|l| l.contains("Nova Sample")), "being asked: said");
             frames_until(&mut h, "answered", |h| h.state.launcher_mut().places.notice().is_some());
-            let line = h.state.launcher_mut().places.notice().unwrap().to_string();
+            let line = h.state.launcher_mut().places.notice().unwrap();
             assert!(line.contains("Nova Sample") && line.contains(said), "{line}");
             assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
             assert!(h.state.launcher_mut().places.checking_line().is_none());

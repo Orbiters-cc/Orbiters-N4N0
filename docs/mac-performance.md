@@ -285,7 +285,9 @@ What these numbers allow (the fourth verification's verdicts), and no more:
   production (64 against 108 to 118 ms batch intervals), two starts per condition at most. Home's capped "100 %" on this
   panel is engine 87 %, which was never measured.
 - **"40 ms + 73 ms x pixel share" is an empirical fit** of three points (40.03 + 72.73 x share), not a fixed cost, a
-  floor or a bound; nothing below 58 % was measured, so nothing is said about it.
+  floor or a bound; nothing below 58 % was measured there, so nothing is said about it. (2026-11-23, later, as the owner's session
+  told it, in VRChat Home on this M3 Air: about 39 frames shown a second at 45 %, 31 at 58 %, 19 at 100 %; Home's default is 45 %
+  from 0.3.9-dev.45.)
 - **GPU busy 79 to 88.5 % and the render server at 17 to 20 % of a core are observations** (device-wide utilisation;
   start 1 has no CPU numbers), not a breakdown.
 - **What the host wait (fence wait) is made of is unknown**: without GPU clocks, per-command-buffer times, queue latency

@@ -8,7 +8,7 @@
 //! came; an end of the loss a counter that grew, in the swapchain it counts. A count repeated, one taken before the drop, one
 //! with no date and one that could not be read say neither; nor, once the loss is confirmed, does the first count of a swapchain,
 //! which is only where its own counting begins. The lines name no swapchain, so that as many counts as there are swapchains not
-//! known to have begun are taken for such firsts: only a count more than those is one that grew.
+//! known to have begun are taken for such firsts, however many there are: only a count more than those is one that grew.
 //!
 //! The tracker ([`Tracker`]) is pure and tested on every computer. One follower (`incident::follow`) feeds it what the
 //! engine's log says in the order it says it ([`LogEvent`]) and the frames the session's record counts, each reading with
@@ -84,8 +84,11 @@ struct Loss {
 pub(crate) struct Tracker {
     /// The last count said of each swapchain: the lines name none, and each counts from its own 0.
     presents: Vec<u64>,
-    /// The swapchains made whose first count is not known to have been said: a count may be that of one of them.
+    /// The swapchains made whose first count is not known to have been said: a count may be that of one of them. All of them,
+    /// however few counts are told apart.
     unstarted: usize,
+    /// The last counts no longer told apart (there were more than [`SWAPCHAINS`]): said again, one says nothing.
+    forgotten: std::collections::BTreeSet<u64>,
     shown: Option<u64>,
     grew_at: Option<f64>,
     /// When the presents were last said, and how far apart they were.
@@ -104,7 +107,7 @@ impl Tracker {
     /// swapchain's, which counted from its own 0, as is (`begins`) one that may be. The very first one has nothing to have
     /// grown from.
     fn count(&mut self, count: u64, begins: bool) -> bool {
-        if self.presents.contains(&count) {
+        if self.presents.contains(&count) || self.forgotten.contains(&count) {
             return false;
         }
         match self.presents.iter_mut().filter(|last| **last < count).max() {
@@ -116,7 +119,8 @@ impl Tracker {
         }
         let first = self.presents.is_empty();
         if self.presents.len() == SWAPCHAINS {
-            self.presents.remove(0);
+            let gone = self.presents.remove(0);
+            self.forgotten.insert(gone);
         }
         self.presents.push(count);
         !first && count > 0
@@ -132,7 +136,7 @@ impl Tracker {
                     Some(drop) => drop.said = 0,
                     None => self.dropped = Some(Loss { at, wall: look.wall, said: 0, shown: None }),
                 },
-                LogEvent::Swapchain => self.unstarted = (self.unstarted + 1).min(SWAPCHAINS),
+                LogEvent::Swapchain => self.unstarted = self.unstarted.saturating_add(1),
                 LogEvent::Presents(count) => {
                     let new = !self.presents.is_empty() && self.presents.iter().all(|last| count < *last);
                     // Confirmed lost, it is the first of a swapchain for as long as it may be.
@@ -554,6 +558,31 @@ mod tests {
         t.look(&log(1.0, &[Dropped]));
         assert_eq!(t.look(&log(2.0, &made())), Picture::Presenting);
         assert_ne!(t.look(&log(30.0, &[])), Picture::Lost);
+        // Tenth verification (the verifier's fixture): as many firsts as there are swapchains made, more than are told apart too;
+        // one more than they are is a frame, and the last count of one told apart no more is none, said again.
+        for made in [8, 9, 40] {
+            let mut t = Tracker::default();
+            t.look(&log(0.0, &[Presents(6000)]));
+            t.look(&log(1.0, &[Dropped]));
+            assert_eq!(t.look(&log(12.0, &[])), Picture::Lost);
+            t.look(&log(13.0, &vec![LogEvent::Swapchain; made]));
+            for n in 1..=made as u64 {
+                assert_eq!(t.look(&log(15.0 + n as f64, &[Presents(n * 60)])), Picture::Lost, "the first of {n} of {made}");
+            }
+            let end = 15.0 + made as f64;
+            for again in [6000, 60, 120] {
+                assert_eq!(t.look(&log(end + 1.0, &[Presents(again)])), Picture::Lost, "{again} said again, of {made}");
+            }
+            assert_eq!(t.look(&log(end + 2.0, &[Presents(made as u64 * 60 + 1)])), Picture::Presenting, "one grew");
+        }
+        // Where firsts are still to come, frames shown and dated end it all the same.
+        let mut t = Tracker::default();
+        t.look(&log(1.0, &[Dropped]));
+        assert_eq!(t.look(&log(12.0, &[])), Picture::Lost);
+        t.look(&log(13.0, &[LogEvent::Swapchain; 12]));
+        let seen = |at: f64, frames: u64| Look { at, wall: at, running: true, log: Some(Vec::new()), shown: Some(Shown { frames, at: Some(at) }), ..Default::default() };
+        assert_eq!(t.look(&seen(14.0, 10)), Picture::Lost);
+        assert_eq!(t.look(&seen(16.0, 11)), Picture::Presenting);
         // The shown frames alike: a count that starts again is a base.
         let shown = |at: f64, frames: u64| Look { at, wall: at, running: true, log: Some(Vec::new()), shown: Some(Shown { frames, at: Some(at) }), ..Default::default() };
         let mut t = Tracker::default();

@@ -1,0 +1,6 @@
+{
+  "it is not a whole database": "完全なデータベースではありません",
+  "it was not closed: open and close Creator Companion once": "閉じられていません。Creator Companion を一度開いて閉じてください",
+  "{file} of Creator Companion is not in a form Orbiters knows ({why}). Nothing was changed: add or remove the project in Creator Companion or ALCOM.": "Creator Companion の {file} は Orbiters が知らない形式です（{why}）。何も変更していません。プロジェクトの追加や削除は Creator Companion か ALCOM で行ってください。",
+  "{file} of Creator Companion or ALCOM is in use: close them, then try again. Nothing was changed.": "Creator Companion または ALCOM の {file} は使用中です。閉じてからもう一度お試しください。何も変更していません。"
+}

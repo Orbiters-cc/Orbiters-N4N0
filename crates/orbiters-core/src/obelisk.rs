@@ -623,8 +623,8 @@ pub enum Event {
     SignedIn { account: String },
     Progress { phase: Phase, fraction: Option<f32> },
     Installed,
-    /// The game's supervisor holds it.
-    Starting,
+    /// The game's supervisor holds it, as this Game session (0.1.10 and later say it).
+    Starting { session: Option<String> },
     /// The game runs: the engine's launcher of it, and its Game session (0.1.3 and later say it).
     Running { pid: Option<u32>, session: Option<String> },
     /// The game ended, after this many seconds and with this many frames shown, when the program knows; the Game session
@@ -689,7 +689,7 @@ pub fn event(line: &str) -> Option<Event> {
             fraction: value.get("fraction").and_then(serde_json::Value::as_f64).map(|f| (f as f32).clamp(0.0, 1.0)),
         },
         "installed" => Event::Installed,
-        "starting" => Event::Starting,
+        "starting" => Event::Starting { session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned) },
         "running" => Event::Running {
             pid: value.get("pid").and_then(serde_json::Value::as_u64).and_then(|pid| u32::try_from(pid).ok()),
             session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned),
@@ -717,9 +717,13 @@ pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://") || crate::vrchat_launch::is_profile_arg(a))).collect()
 }
 
-/// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
-/// draws (the owner's choice, 2026-11-23). The bridge's own starts take none (`render_percent`).
-pub const DEFAULT_RENDER_PERCENT: u32 = 58;
+/// The render scale of Home's Play on a Mac when the person chose none: 45 % per side, a fifth of the pixels the Mac
+/// draws (the owner's choice, 2026-11-23: about 39 frames a second in VRChat Home on an M3 Air, 31 at 58 %, 19 at 100 %). The
+/// bridge's own starts take none (`render_percent`).
+pub const DEFAULT_RENDER_PERCENT: u32 = 45;
+/// The default of before (0.3.9-dev.30 to dev.44), which the settings saved as any other value: one of those saved then is
+/// [`DEFAULT_RENDER_PERCENT`], once (`settings::migrated`).
+pub const EARLIER_RENDER_PERCENT: u32 = 58;
 /// The range Settings offers.
 pub const RENDER_PERCENTS: std::ops::RangeInclusive<u32> = 25..=100;
 
@@ -770,6 +774,9 @@ mod tests {
         let (backing, panel) = ((2940, 1912), (2560, 1664));
         assert_eq!(render_percent(58, backing.0, panel.0), 58);
         assert_eq!(render_size(58, backing, panel), (1705, 1109));
+        let (w, h) = render_size(DEFAULT_RENDER_PERCENT, backing, panel);
+        assert_eq!((DEFAULT_RENDER_PERCENT, render_percent(DEFAULT_RENDER_PERCENT, backing.0, panel.0), w, h), (45, 45, 1323, 860));
+        assert_eq!((w * h * 100 + 50 * 2940 * 1912 / 100) / (2940 * 1912), 20, "a fifth of the pixels");
         assert_eq!(render_percent(100, backing.0, panel.0), 87);
         assert_eq!(render_size(100, backing, panel), (2558, 1663));
         assert_eq!(render_percent(90, backing.0, panel.0), 87, "above the panel is the panel");
@@ -1108,7 +1115,8 @@ mod tests {
         assert_eq!(event(r#"{"event":"progress","app_id":438100,"phase":"downloading","bytes_done":5,"bytes_total":0,"fraction":null}"#), Some(Event::Progress { phase: Phase::Game, fraction: None }));
         assert_eq!(event(r#"{"event":"progress","app_id":438100,"phase":"verifying","fraction":7.0}"#), Some(Event::Progress { phase: Phase::Checking, fraction: Some(1.0) }));
         assert_eq!(event(r#"{"event":"installed","app_id":438100}"#), Some(Event::Installed));
-        assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting));
+        assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting { session: None }));
+        assert_eq!(event(r#"{"event":"starting","app_id":438100,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Starting { session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242), session: None }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":12777,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Running { pid: Some(12777), session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None, session: None }));

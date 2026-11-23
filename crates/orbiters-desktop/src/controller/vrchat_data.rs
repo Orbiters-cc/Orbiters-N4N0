@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Scope {
     development: bool,
     member: Option<String>,
+    /// Whom the VRChat account is verified for (verify3-r21 B6: a name can be another member's).
+    verified_for: Option<orbiters_core::launcher::VerifiedFor>,
     allowed: bool,
     user: Option<String>,
     revision: u64,
@@ -24,6 +26,7 @@ impl Scope {
         Self {
             development: s.settings.development,
             member: s.account.state.username().map(str::to_owned),
+            verified_for: s.vrchat_login.verified_for.clone(),
             allowed: s.vrchat_login.allowed,
             user: s.vrchat_login.user.as_ref().map(|u| u.id.clone()),
             revision: s.vrchat_login.revision,
@@ -53,6 +56,13 @@ pub enum Request {
     Instance {
         world: String,
         instance: String,
+    },
+    /// Whether it is open, as VRChat said at most `max_age_ms` ago, and how long ago that was: what Play goes by
+    /// (verify3-r21 M2).
+    InstanceSeen {
+        world: String,
+        instance: String,
+        max_age_ms: u64,
     },
     Image {
         url: String,
@@ -91,6 +101,7 @@ pub enum Response {
     Avatars { pictures: Vec<(String, super::vrchat_login::Picture)>, errors: Vec<String> },
     Friends(Vec<User>),
     Instance(Option<bool>),
+    InstanceSeen { open: Option<bool>, age_ms: u64 },
     /// The file's bytes, as base64 on the link (CTL2-1).
     Image(#[serde(with = "super::vrchat_login::bytes_b64")] Vec<u8>),
     Owned(Vec<String>),
@@ -131,6 +142,10 @@ impl InstancePermits {
         self.entries.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
         self.made.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
         self.made.push((scope.clone(), world.into(), id.into(), std::time::Instant::now()));
+    }
+    /// Whether it is an instance made for the account signed in, however long ago.
+    fn was_made(&self, world: &str, id: &str) -> bool {
+        self.made.iter().any(|(_, w, i, _)| w == world && i == id)
     }
     fn contains(&self, scope: &Scope, world: &str, id: &str) -> bool {
         self.entries.iter().chain(&self.made).any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
@@ -245,6 +260,10 @@ impl Controller {
                 }
                 Request::Friends => Response::Friends(source.friends()?),
                 Request::Instance { world, instance } => Response::Instance(source.instance_alive(&world, &instance)?),
+                Request::InstanceSeen { world, instance, max_age_ms } => {
+                    let (open, age) = source.instance_seen(&world, &instance, std::time::Duration::from_millis(max_age_ms))?;
+                    Response::InstanceSeen { open, age_ms: age.as_millis() as u64 }
+                }
                 Request::Image { url } => Response::Image(source.image(&url)?),
                 Request::Owned { ids } => {
                     anyhow::ensure!(ids.len() <= OWNED_BATCH, "{}", tr("Too many avatars and worlds asked about."));
@@ -265,6 +284,11 @@ impl Controller {
             return Err(tr("The account changed. Please try again.").into());
         }
         result
+    }
+
+    /// Whether the instance was made for the account signed in.
+    pub(crate) fn made_instance(&self, world: &str, instance: &str) -> bool {
+        self.instance_permits.lock().unwrap().was_made(world, instance)
     }
 
     fn vrchat_world_data(&self, scope: Scope, request: Request, deadline: std::time::Instant) -> Response {
@@ -339,7 +363,13 @@ impl Controller {
                         let went = match claim {
                             Some(Err(_)) => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
                             None if start => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
-                            _ => super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance),
+                            _ => {
+                                // A private instance is the account's own game's only: else the invite to oneself goes.
+                                let machine = self.launcher_machine_now();
+                                let bound = self.made_instance(&world, &instance);
+                                let may = |pid: Option<u32>| self.launcher_may_hand(machine.as_ref(), pid, &instance, bound, Some(user));
+                                super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance, &may)
+                            }
                         };
                         if went == Ok(super::travel::Went::Started) {
                             *started = Some(std::time::Instant::now());
@@ -395,9 +425,10 @@ impl Controller {
             return self.notify(NoticeKind::Error, tr("Only avatars' and worlds' pictures can be changed."));
         }
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut refused = None;
-        self.update_if(|s| {
-            let login = &mut s.vrchat_login;
+        let mut refused = Some(tr("The account changed. Please try again."));
+        let Some(stamp) = self.vrchat_now() else { return self.notify(NoticeKind::Error, tr("Sign in to VRChat in Settings to change pictures.")) };
+        self.publish_login(&stamp, |login, _| {
+            refused = None;
             if !login.allowed || login.user.is_none() {
                 refused = Some(tr("Sign in to VRChat in Settings to change pictures."));
             } else if login.upload.as_ref().is_some_and(PictureUpload::running) {
@@ -405,20 +436,20 @@ impl Controller {
             } else {
                 login.upload = Some(PictureUpload { serial, id: id.clone(), step: Some(Step::Checking), outcome: None });
             }
-            refused.is_none()
         });
         if let Some(message) = refused {
             return self.notify(NoticeKind::Error, message);
         }
         let ctl = self.clone();
+        let theirs = stamp.clone();
         let finish = move |ctl: &Controller, result: std::result::Result<(), String>| {
-            let ours = ctl.update_if(|s| match s.vrchat_login.upload.as_mut().filter(|u| u.serial == serial) {
-                Some(u) => {
+            let mut ours = false;
+            ctl.publish_login(&stamp, |login, _| {
+                if let Some(u) = login.upload.as_mut().filter(|u| u.serial == serial) {
                     u.step = None;
                     u.outcome = Some(result.clone());
-                    true
+                    ours = true;
                 }
-                None => false,
             });
             // An account change meanwhile discarded it with the rest of the session's state.
             if ours {
@@ -431,7 +462,7 @@ impl Controller {
         let spawned = std::thread::Builder::new().name("vrchat-picture".into()).spawn({
             let finish = finish.clone();
             move || {
-                let result = ctl.replace_picture(&scope, serial, &id, &path).map_err(|e| format!("{e:#}"));
+                let result = ctl.replace_picture(&scope, &theirs, serial, &id, &path).map_err(|e| format!("{e:#}"));
                 finish(&ctl, result);
             }
         });
@@ -439,16 +470,14 @@ impl Controller {
             finish(self, Err(tr("The upload could not start.").into()));
         }
     }
-    fn replace_picture(&self, scope: &Scope, serial: u64, id: &str, path: &Path) -> anyhow::Result<()> {
+    fn replace_picture(&self, scope: &Scope, stamp: &super::vrchat_scope::Stamp, serial: u64, id: &str, path: &Path) -> anyhow::Result<()> {
         let png = read_picture(path)?;
         anyhow::ensure!(*scope == Scope::of(&self.view()), "{}", tr("The account changed. Please try again."));
         self.vrchat_source().replace_image(id, &png, |step| {
-            self.update_if(|s| match s.vrchat_login.upload.as_mut().filter(|u| u.serial == serial) {
-                Some(u) => {
+            self.publish_login(stamp, |login, _| {
+                if let Some(u) = login.upload.as_mut().filter(|u| u.serial == serial) {
                     u.step = Some(step);
-                    true
                 }
-                None => false,
             });
         })?;
         keep_picture(&orbiters_projects::data_dir(), id, &png);
@@ -785,17 +814,12 @@ mod tests {
     }
     #[test]
     fn pictures_need_a_vrchat_session_and_go_one_at_a_time() {
-        use crate::state::AccountState;
-        use orbiters_core::account::Server;
         let c = Controller::new(orbiters_core::settings::Settings::default());
         c.vrchat_picture(Scope::of(&c.view()), "avtr_a".into(), "picture.png".into());
         assert!(c.view().vrchat_login.upload.is_none());
         assert!(c.take_notices().iter().any(|n| format!("{n:?}").contains("Sign in to VRChat")));
+        c.test_vrchat(vec![]);
         c.update(|s| {
-            s.account.state = AccountState::SignedIn { username: "tester".into() };
-            s.account.development = Server::current() == Server::Development;
-            s.vrchat_login.allowed = true;
-            s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() });
             s.vrchat_login.upload =
                 Some(super::super::vrchat_login::PictureUpload { serial: 0, id: "avtr_b".into(), step: Some(Step::Uploading), outcome: None });
         });
@@ -980,7 +1004,24 @@ mod tests {
     const MADE_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
     const KEEP_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075834";
     const DIRECT_WORLDS: [&str; 3] = ["wrld_266523e8-9161-40da-acd0-6bd82e075835", "wrld_266523e8-9161-40da-acd0-6bd82e075836", "wrld_266523e8-9161-40da-acd0-6bd82e075837"];
+    /// The VRChats of `fake`, signed in with the test client's account by their own logs.
+    struct Own(Vec<u32>, Option<&'static str>);
+    impl crate::controller::launcher::Machine for Own {
+        fn running(&self) -> Vec<(u32, bool)> {
+            self.0.iter().map(|pid| (*pid, false)).collect()
+        }
+        fn installed(&self) -> bool {
+            true
+        }
+        fn start(&self, _: &[String]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn roster(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
+            Some(self.0.iter().map(|pid| crate::state::VrchatRunShown { pid: *pid, profile_known: true, account_id: self.1.map(str::to_owned), ..Default::default() }).collect())
+        }
+    }
     fn fake_pc(ctl: &Controller, fake: crate::controller::travel::tests::Fake) -> std::sync::Arc<crate::controller::travel::tests::Fake> {
+        ctl.launcher_machine(std::sync::Arc::new(Own(fake.running.clone(), Some("usr_test"))));
         let fake = std::sync::Arc::new(fake);
         *ctl.travel.lock().unwrap() = Some(fake.clone() as std::sync::Arc<dyn crate::controller::travel::Travel>);
         fake
@@ -1031,6 +1072,32 @@ mod tests {
         let reply = ctl.vrchat_data(scope, Request::GoThere { world: KEEP_WORLD.into(), instance: REVIEW_ID.into() }).unwrap();
         assert!(matches!(reply, Response::Went(crate::controller::travel::Went::Direct)), "{reply:?}");
         assert_eq!(pc.written.lock().unwrap().len(), 1);
+    }
+
+    /// Tenth verification: Go there hands a private place to no VRChat that is not known to be signed in with the account it is
+    /// for, running or to be started: the invite to oneself goes, and says why. Nor one made for the account, whatever its kind.
+    #[test]
+    fn go_there_hands_a_private_place_to_no_other_account() {
+        use crate::controller::travel::{tests::Fake, Detour, Went};
+        for (access, id) in [(orbiters_core::vrchat_api::CreateAccess::FriendsPlus, MADE_ID), (orbiters_core::vrchat_api::CreateAccess::Public, "46657~region(eu)")] {
+            for (running, account) in [(vec![10], None), (vec![10], Some("usr_other")), (vec![], None)] {
+                let ctl = Controller::new(orbiters_core::settings::Settings::default());
+                let mut made = made_answer(MADE_WORLD);
+                made["instanceId"] = id.into();
+                if access == orbiters_core::vrchat_api::CreateAccess::Public {
+                    made["accessType"] = "public".into();
+                }
+                let (_, calls) = ctl.test_vrchat(vec![(200, made.clone()), (200, made), (200, serde_json::json!({}))]);
+                let pc = fake_pc(&ctl, Fake { server: running.first().copied(), running: running.clone(), ..Default::default() });
+                ctl.launcher_machine(std::sync::Arc::new(Own(running.clone(), account)));
+                let scope = Scope::of(&ctl.view());
+                ctl.vrchat_data(scope.clone(), Request::CreateInstance { world: MADE_WORLD.into(), access, region: orbiters_core::vrchat_api::InstanceRegion::Eu }).unwrap();
+                let reply = ctl.vrchat_data(scope, Request::GoThere { world: MADE_WORLD.into(), instance: id.into() }).unwrap();
+                assert!(matches!(reply, Response::Went(Went::Invited(Detour::OtherAccount))), "{reply:?}");
+                assert!(pc.written.lock().unwrap().is_empty() && pc.started.lock().unwrap().is_empty());
+                assert!(calls.lock().unwrap().last().unwrap().1.contains("/invite/myself/to/"));
+            }
+        }
     }
 
     /// L-go-direct: a new instance, then straight there through the person's own VRChat; no invite is sent.

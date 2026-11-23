@@ -819,7 +819,7 @@ mod tests {
             for pair in [c.account_api_of(old), c.account_api_of(c.identity_epoch()), c.account_api(), c.account_api_for().0, c.language_account().flatten()] {
                 assert!(pair.is_none(), "{what}: the previous credential, at {}", pair.unwrap().0.url(""));
             }
-            assert!(c.account_with_api().is_none() && c.usage_account().is_none() && c.calls_identity().is_none() && c.vrchat_owner().is_none(), "{what}");
+            assert!(c.account_with_api().is_none() && c.usage_account().is_none() && c.calls_identity().is_none() && c.vrchat_now().is_none(), "{what}");
             assert_eq!((lines(&c), c.signed_as()), (0, SignedAs::Unknown), "{what}");
         };
         nothing("between the two");

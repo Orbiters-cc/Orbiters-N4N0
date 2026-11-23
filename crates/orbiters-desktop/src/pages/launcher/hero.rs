@@ -530,7 +530,8 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             let b = widgets::Button::new(tr("Join now")).icon(icons::ARROW_RIGHT).variant(widgets::Variant::Primary).size(widgets::Size::Lg).id_salt("launcher-invite-join");
             let bw = b.desired_width(ui).max(160.0);
             if b.show_at(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh))).clicked() {
-                state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode });
+                // Into the game that runs, through the account's own invite: none is started for it if it is gone by then.
+                state.act(cx, clock, Action::AcceptInviteRunning { invite: invite.id.clone(), mode });
             }
         }
         _ => {

@@ -121,6 +121,12 @@ pub struct VrchatRunShown {
     pub profile_known: bool,
     /// The account signed in, once its log said.
     pub account: Option<String>,
+    /// That account's VRChat user id, while its log says it is the one signed in and its command line names one profile.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Its log says nobody is signed in (its sign-in page).
+    #[serde(default)]
+    pub signed_out: bool,
     pub world: Option<String>,
     /// Desktop or VR, once known.
     pub desktop: Option<bool>,

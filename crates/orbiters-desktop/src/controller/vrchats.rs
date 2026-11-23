@@ -28,6 +28,8 @@ pub(crate) struct LogFacts {
     pub args: Option<Vec<String>>,
     pub read_to: u64,
     pub account: Option<(String, String)>,
+    /// It asked for a sign-in, and nobody signed in since.
+    pub signed_out: bool,
     pub world: Option<String>,
     pub query: Option<u16>,
     pub osc_in: Option<u16>,
@@ -43,6 +45,7 @@ impl LogFacts {
         if let Some(account) = sessions::signed_in(text) {
             self.account = Some(account);
         }
+        self.signed_out = signed_out(text).unwrap_or(self.signed_out);
         if let Some(world) = text.lines().rev().find_map(|l| l.split_once("[Behaviour] Entering Room: ").map(|(_, w)| w.trim().to_string())) {
             self.world = Some(world);
         }
@@ -74,6 +77,14 @@ impl LogFacts {
         let args = self.args.as_deref()?;
         Some(args.iter().any(|a| a == "--no-vr") || self.vr_disabled)
     }
+}
+
+/// What a part of a VRChat's log says last of a sign-in: nobody is signed in (it asked for one), somebody is; `None` where it
+/// says neither.
+pub(crate) fn signed_out(text: &str) -> Option<bool> {
+    let asked = ["No cached credentials found", "AuthSelectionPage OnPageShown"].iter().filter_map(|said| text.rfind(said)).max(); // i18n: not shown (VRChat's log lines)
+    let signed = text.rfind("post login checks for ");
+    (asked.is_some() || signed.is_some()).then(|| asked > signed)
 }
 
 /// Which log is which VRChat's: a process keeps the log it was matched with while both last; a new one takes the log made
@@ -125,6 +136,8 @@ pub(crate) fn run_of(pid: u32, started_s: u64, log: Option<&Path>, facts: Option
         osc_in: osc.map(|o| o.0).or(facts.osc_in).unwrap_or(sessions::VRCHAT_OSC_IN),
         query: facts.query.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
         account: facts.account.clone(),
+        signed_out: facts.signed_out,
+        one_profile: facts.args.as_deref().is_some_and(|args| orbiters_core::vrchat_launch::profile_told(args) == Some(profile)),
         world: facts.world.clone(),
         desktop: facts.desktop(),
         camera: None,
@@ -234,6 +247,8 @@ pub(crate) fn shown(run: &VrchatRun, target: Option<u32>, chosen: Option<u32>) -
         profile: run.profile,
         profile_known: run.profile_known,
         account: run.account.as_ref().map(|(_, name)| name.clone()),
+        account_id: run.account.as_ref().filter(|_| run.profile_known && run.one_profile && !run.signed_out).map(|(id, _)| id.clone()),
+        signed_out: run.signed_out && run.profile_known && run.one_profile,
         world: run.world.clone(),
         desktop: run.desktop,
         camera: run.camera,
@@ -494,6 +509,7 @@ mod tests {
             log.push_str(&format!("2026.11.15 15:40:00 Debug      -  Arg: {arg}\n"));
         }
         let vr = run_of(51000, 1_794_757_200, None, Some(&facts(&log)));
+        assert!(vr.one_profile);
         assert_eq!((vr.profile, vr.osc_in, vr.desktop, vr.driver.clone()), (2, 9020, Some(false), Driver::Bridge));
         assert_eq!(sessions::default_target(std::slice::from_ref(&vr)).map(|r| r.pid), None, "alone, still not the person's");
         let own = run_of(37076, 1_794_749_922, None, Some(&facts(OWN_LOG)));
@@ -505,6 +521,29 @@ mod tests {
         assert_eq!(sides.target().map(|t| t.pid), Some(37076), "his own desktop VRChat is the target");
         let shown = shown(&runs[0], Some(37076), None);
         assert_eq!((shown.desktop, shown.driver), (Some(false), crate::state::VrchatDriverShown::Agent { session: "p2-0123…".into() }));
+    }
+
+    /// Whose private places a VRChat may be sent to is told by its own log, by the account's id: nobody's while it waits at its
+    /// sign-in page, nor where its command line names several profiles (which one it took is not known).
+    #[test]
+    fn an_account_is_proven_by_its_id_while_signed_in_on_one_profile() {
+        let id = |f: &LogFacts| {
+            let shown = shown(&run_of(37076, 1_794_749_922, None, Some(f)), None, None);
+            (shown.account_id, shown.signed_out)
+        };
+        let mine = Some("usr_1339e525-d75d-4832-9104-98dd89287681".to_string());
+        let mut f = facts(OWN_LOG);
+        assert_eq!(id(&f), (mine.clone(), false));
+        f.read("2026.11.15 14:00:00 Debug      -  [Authentication - x] AuthSelectionPage OnPageShown\n");
+        assert_eq!(id(&f), (None, true), "signed out in the game");
+        f.read("2026.11.15 14:01:00 Debug      -  [Behaviour] Entering Room: FRONTLINE KIZUNA\n");
+        assert_eq!(id(&f), (None, true));
+        f.read("2026.11.15 14:02:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
+        assert_eq!(id(&f), (Some("usr_2".into()), false));
+        let several = facts(&OWN_LOG.replace("--watch-worlds", "--profile=1"));
+        assert_eq!(id(&several), (None, false));
+        assert_eq!(signed_out("No cached credentials found\npost login checks for a (usr_1)\nAuthSelectionPage OnPageShown\n"), Some(true));
+        assert_eq!(signed_out("nothing"), None);
     }
 
     #[test]

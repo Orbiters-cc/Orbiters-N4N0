@@ -541,6 +541,7 @@ pub mod translate;
 pub mod travel;
 pub mod vrchat_data;
 pub mod vrchat_login;
+mod vrchat_scope;
 pub mod camera_tools;
 pub mod vr_audio;
 pub mod explorer;
@@ -812,8 +813,8 @@ impl Controller {
         let s = {
             let mut s = self.snapshot.lock().unwrap();
             // With the snapshot held: the account this very state is for, and no other.
-            let owner = self.vrchat_owner_of(&s.account);
-            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap(), owner.as_ref());
+            let now = self.vrchat_stamp_of(&s.account);
+            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap(), now.as_ref());
             s.settle(&previous);
             s.clone()
         };
@@ -4220,6 +4221,8 @@ mod tests {
             osc_in,
             query: None,
             account: Some((format!("usr_{account}"), account.to_string())),
+            signed_out: false,
+            one_profile: true,
             world: Some(world.to_string()),
             desktop: Some(true),
             camera: None,

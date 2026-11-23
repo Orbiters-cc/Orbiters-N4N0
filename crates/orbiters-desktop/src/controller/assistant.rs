@@ -212,7 +212,8 @@ impl Controller {
                 let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
                 let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                 let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                self.launcher_action(Home::Play { mode: self.launch_mode(), destination: Some(place) });
+                // For the account on show: a private one goes to no other's game (`vrchat_launch::handing`).
+                self.launcher_action(self.as_shown(Home::Play { mode: self.launch_mode(), destination: Some(place) }));
                 done()
             }
             // Home's Where: the places VRChat can start at, as its cards offer them (REQUEST20 2).
@@ -244,7 +245,7 @@ impl Controller {
                         let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
                         let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                         let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                        self.launcher_action(Home::Play { mode, destination: Some(place) });
+                        self.launcher_action(self.as_shown(Home::Play { mode, destination: Some(place) }));
                     }
                     (Some(_), "new") => {
                         let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();

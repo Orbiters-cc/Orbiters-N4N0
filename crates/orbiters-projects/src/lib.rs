@@ -25,6 +25,7 @@ pub mod suggestions;
 pub mod templates;
 pub mod unity6;
 pub mod updates;
+mod vcc_store;
 pub mod vpm;
 mod vpm_http;
 

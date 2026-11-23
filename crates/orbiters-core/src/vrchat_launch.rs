@@ -69,9 +69,16 @@ pub struct LaunchSettings {
     /// Home's profile choice says whose each one is (REQUEST15 7a; not a setting, written as they are seen).
     #[serde(with = "profile_keys")]
     pub profiles: std::collections::BTreeMap<u32, String>,
+    /// The account (its VRChat user id) each profile's own log last said is signed in on it: what a private destination is
+    /// held to ([`handing`]). Its name above is only a label. Gone as soon as its log says nobody is.
+    #[serde(with = "profile_keys")]
+    pub profile_ids: std::collections::BTreeMap<u32, String>,
     /// On a Mac: the share of the display's drawing resolution, per side, Home's Play has VRChat draw at (25 to 100, 100
     /// being the panel's real pixels; macOS scales the picture to the screen). Not used elsewhere.
     pub mac_render_percent: u32,
+    /// The default that was when these were saved: a file that says none was saved while it was 58 %, and its 58 was that
+    /// default as far as can be told (not a setting).
+    pub mac_render_default: u32,
 }
 
 impl Default for LaunchSettings {
@@ -88,7 +95,9 @@ impl Default for LaunchSettings {
             last_mode: LaunchMode::Vr,
             desktop_window: None,
             profiles: std::collections::BTreeMap::new(),
+            profile_ids: std::collections::BTreeMap::new(),
             mac_render_percent: crate::obelisk::DEFAULT_RENDER_PERCENT,
+            mac_render_default: crate::obelisk::DEFAULT_RENDER_PERCENT,
         }
     }
 }
@@ -230,6 +239,55 @@ pub fn profile_arg(profile: u32) -> Option<String> {
 /// Whether `arg` is one [`profile_arg`] makes, of a profile other than the default: `--profile=1` to `--profile=15`.
 pub fn is_profile_arg(arg: &str) -> bool {
     (1..=PROFILE_MAX).any(|profile| profile_arg(profile).as_deref() == Some(arg))
+}
+
+/// Whether anyone may be handed the link of `instance`: a public instance, a group's public one. Told by what it is made of
+/// (a kind VRChat adds later is private until it is known here).
+pub fn is_public_instance(instance: &str) -> bool {
+    use crate::launcher::InstanceAccess;
+    let known = |tag: &str| tag == "ageGate" || tag == "groupAccessType(public)" || ["region(", "group("].iter().any(|of| tag.starts_with(of));
+    is_instance_id(instance)
+        && instance.split('~').skip(1).all(known)
+        && matches!(crate::launcher_feed::access(instance).0, InstanceAccess::Public | InstanceAccess::GroupPublic)
+}
+
+/// The instance the link in `args` goes to, as [`link`] writes it: its world and its instance.
+pub fn destination_of(args: &[String]) -> Option<(&str, &str)> {
+    args.iter().rev().find_map(|arg| arg.strip_prefix("vrchat://launch?ref=orbiters.cc&id=")?.split_once(':'))
+}
+
+/// Whether a game may be handed a destination, by whose each is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handing {
+    Allowed,
+    /// The game's account is not known.
+    UnknownAccount,
+    /// The game's account is not the destination's, or nobody it is for is known.
+    OtherAccount,
+}
+
+/// The one rule for handing VRChat a destination, on every computer and for every way there is (a start, a link to a game that
+/// runs, a start made again): a `private` one (an instance not everyone may enter, an invite, one made for the account) goes
+/// only to a game whose account, by the user id its own log said, is the one it is for (`owner`). A public one goes to any.
+pub fn handing(private: bool, owner: Option<&str>, game: Option<&str>) -> Handing {
+    let said = |id: Option<&str>| id.map(str::to_owned).filter(|id| !id.is_empty());
+    match (private, said(owner), said(game)) {
+        (false, _, _) => Handing::Allowed,
+        (true, _, None) => Handing::UnknownAccount,
+        (true, owner, game) if owner == game => Handing::Allowed,
+        (true, _, _) => Handing::OtherAccount,
+    }
+}
+
+/// The profile a command line names, when it names exactly one (0: none named). `None` where it names several, or one that is
+/// no number: which of them the game takes is not known.
+pub fn profile_told(args: &[String]) -> Option<u32> {
+    let mut told = args.iter().filter(|a| a.as_str() == "--profile" || a.starts_with("--profile="));
+    match (told.next(), told.next()) {
+        (None, _) => Some(0),
+        (Some(one), None) => one.strip_prefix("--profile=").and_then(|p| p.parse().ok()),
+        _ => None,
+    }
 }
 
 /// VRChat's `--profile` in a command line (0 without one).
@@ -446,6 +504,57 @@ mod tests {
         assert_eq!(profile_of(&args(&["VRChat.exe"])), 0);
     }
 
+    /// A private destination goes to no game but its account's own, known by its id; a public one to any.
+    #[test]
+    fn a_private_destination_goes_only_to_the_account_it_is_for() {
+        let (a, b) = (Some("usr_a"), Some("usr_b"));
+        for owner in [None, Some(""), a, b] {
+            for game in [None, Some(""), a, b] {
+                assert_eq!(handing(false, owner, game), Handing::Allowed);
+                let known = game.is_some_and(|g| !g.is_empty());
+                let want = match (known, owner == game) {
+                    (false, _) => Handing::UnknownAccount,
+                    (true, true) => Handing::Allowed,
+                    (true, false) => Handing::OtherAccount,
+                };
+                assert_eq!(handing(true, owner, game), want, "{owner:?} {game:?}");
+            }
+        }
+        for public in ["12345", "1~region(eu)", "8~group(grp_x)~groupAccessType(public)~region(jp)"] {
+            assert!(is_public_instance(public), "{public}");
+        }
+        for private in [
+            "1~hidden(usr_a)~region(eu)",
+            "1~friends(usr_a)",
+            "1~private(usr_a)~region(eu)",
+            "1~private(usr_a)~canRequestInvite",
+            "1~group(grp_x)~groupAccessType(plus)",
+            "1~group(grp_x)~groupAccessType(members)",
+            "1~group(grp_x)",
+            "1~region(eu)~nonce(abc)",
+            "1~someNewKind(usr_a)~region(eu)",
+            "",
+        ] {
+            assert!(!is_public_instance(private), "{private}");
+        }
+        // What is really launched says where it goes, and on which profile.
+        let w = "wrld_00000000-0000-4000-8000-0000000000aa";
+        let args = arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), Vec::new(), 2, Some((w, "1~friends(usr_a)")));
+        assert_eq!(destination_of(&args), Some((w, "1~friends(usr_a)")));
+        assert_eq!(destination_of(&args[..args.len() - 1]), None);
+    }
+
+    /// Two profiles in one command line (a saved flag beside the one asked for) name none.
+    #[test]
+    fn a_command_line_with_several_profiles_names_none() {
+        let told = |a: &[&str]| profile_told(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(told(&["--no-vr"]), Some(0));
+        assert_eq!(told(&["--no-vr", "--profile=3"]), Some(3));
+        for several in [&["--profile=3", "--profile=2"][..], &["--profile=2", "--profile=2"], &["--profile=x"], &["--profile", "2"]] {
+            assert_eq!(told(several), None, "{several:?}");
+        }
+    }
+
     /// The service's messages are tagged, so what they carry is read from kept values, where a map's keys are text.
     #[test]
     fn the_profiles_seen_survive_a_tagged_message() {
@@ -456,6 +565,7 @@ mod tests {
         }
         let mut launch = LaunchSettings::default();
         launch.profiles = [(0, "Sample Me".to_string()), (3, "Sample Alt".to_string())].into();
+        launch.profile_ids = [(3, "usr_a".to_string())].into();
         let text = serde_json::to_string(&Message::State { launch: launch.clone() }).unwrap();
         assert!(text.contains(r#""profiles":{"0":"Sample Me","3":"Sample Alt"}"#), "the file's form is unchanged: {text}");
         let Message::State { launch: back } = serde_json::from_str(&text).unwrap();

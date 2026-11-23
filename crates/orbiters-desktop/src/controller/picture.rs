@@ -6,7 +6,8 @@
 //! a confirmed loss: the graphics of that run will not come back. A frame after it ends the loss.
 //! Both need evidence of their own: a confirmation one dated after the drop, and late enough after it to show that no frame
 //! came; an end of the loss a counter that grew, in the swapchain it counts. A count repeated, one taken before the drop, one
-//! with no date and one that could not be read say neither.
+//! with no date and one that could not be read say neither; nor, once the loss is confirmed, does the first count of a swapchain
+//! made since, which is only where its own counting begins.
 //!
 //! The tracker ([`Tracker`]) is pure and tested on every computer. One follower (`incident::follow`) feeds it what the
 //! engine's log says in the order it says it ([`LogEvent`]) and the frames the session's record counts, each reading with
@@ -131,6 +132,9 @@ impl Tracker {
                     }
                     match &mut self.dropped {
                         None => self.grew_at = Some(at),
+                        // Confirmed lost, the first count of a swapchain made since is where its counting begins: only
+                        // what it grows to afterwards is a frame.
+                        Some(_) if new && self.lost => {}
                         Some(drop) => {
                             drop.said += 1;
                             // A line may have been on its way to the log as the drop came; a second one, a swapchain made
@@ -470,5 +474,37 @@ mod tests {
         t.look(&log(1.0, &[Presents(600)]));
         assert_eq!(t.look(&log(12.0, &[])), Picture::Lost);
         assert_eq!(t.look(&log(13.0, &[Presents(660)])), Picture::Presenting);
+    }
+
+    /// Seventh verification (the verifier's fixture): once a loss is confirmed, the first count of another swapchain is only
+    /// where it begins; a later increase of it is the picture back.
+    #[test]
+    fn a_new_generation_after_a_confirmed_loss_only_begins_there() {
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Presents(600)]));
+        t.look(&log(1.0, &[Dropped]));
+        assert_eq!(t.look(&log(12.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&unread(13.0)), Picture::Lost);
+        assert_eq!(t.look(&log(14.0, &[Presents(60)])), Picture::Lost, "no increase was seen");
+        assert_eq!(t.look(&log(40.0, &[Presents(60)])), Picture::Lost, "said again");
+        assert_eq!(t.look(&log(41.0, &[Presents(120)])), Picture::Presenting);
+        // Both in one look: the second is the increase. A third swapchain begins anew too.
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Presents(600)]));
+        t.look(&log(1.0, &[Dropped]));
+        t.look(&log(12.0, &[]));
+        t.look(&log(12.5, &[Presents(60)]));
+        t.look(&log(13.0, &[Presents(10)]));
+        assert_eq!(t.look(&log(14.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&log(15.0, &[Presents(5), Presents(65)])), Picture::Presenting);
+        // The shown frames alike: a count that starts again is a base.
+        let shown = |at: f64, frames: u64| Look { at, wall: at, running: true, log: Some(Vec::new()), shown: Some(Shown { frames, at: Some(at) }), ..Default::default() };
+        let mut t = Tracker::default();
+        t.look(&shown(0.0, 500));
+        t.look(&Look { log: Some(vec![Dropped]), ..shown(1.0, 500) });
+        t.look(&shown(6.0, 500));
+        assert_eq!(t.look(&shown(12.0, 500)), Picture::Lost);
+        assert_eq!(t.look(&shown(17.0, 40)), Picture::Lost);
+        assert_eq!(t.look(&shown(22.0, 41)), Picture::Presenting);
     }
 }

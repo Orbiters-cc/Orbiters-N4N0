@@ -417,12 +417,20 @@ def summarize(lines, t0, t1, state, allow_locked, moves=()):
 
 
 def told(session, event, at):
-    """What the program's event says of the session: which it is, from its admission on (the first name said is the launch's
-    own), and that it runs."""
-    if event.get("event") in ("starting", "running"):
+    """What the program's event says of the session: which it is, by the admission of this very request alone (`starting`: the
+    first name said), and that it runs. A `running` that names another is somebody else's session, found again (`foreign`):
+    it is never this one, and says nothing of it."""
+    if event.get("event") == "starting":
         session["id"] = session["id"] or event.get("session_id")
-    if event.get("event") == "running" and session["running_at"] is None:
+    if event.get("event") == "running" and session["running_at"] is None and event.get("session_id") in (None, session["id"]):
         session["running_at"] = at
+
+
+def foreign(events):
+    """The session a `running` of the program's names that is not the one its own `starting` said, if any."""
+    own = next((e.get("session_id") for e in events if e.get("event") == "starting" and e.get("session_id")), None)
+    told = (e.get("session_id") for e in events if e.get("event") == "running")
+    return next((name for name in told if name is not None and name != own), None)
 
 
 def refused(events):
@@ -524,6 +532,9 @@ def measure(ending):
         while session["running_at"] is None and now() - t_start < START_DEADLINE:
             if any(e.get("event") in ("error", "exited") for _, e in events) or proc.poll() is not None:
                 break
+            if foreign([e for _, e in events]):
+                res["outcome"] = "error: the program follows another session than the one it started: nothing was asked to quit"
+                return status
             time.sleep(0.5)
         if session["running_at"] is None or session["id"] is None:
             res["outcome"] = "did not start: " + json.dumps([e for _, e in events if e.get("event") in ("error", "exited")])[:400]
@@ -586,7 +597,13 @@ def measure(ending):
             # Its last words are read.
             reader.join(5)
         res["session"] = session["id"]
-        resolved = close(cli, session["id"], proc, res, refused([e for _, e in events]))
+        said = [e for _, e in events]
+        if foreign(said):
+            # Which session is this run's is not known any more: none is asked to quit.
+            res["foreign_session"] = True
+            resolved = close(cli, None, proc, res)
+        else:
+            resolved = close(cli, session["id"], proc, res, refused(said))
         stop.set()
         for f in (eng, vrc):
             if f:

@@ -24,8 +24,6 @@ pub struct MacWindow {
     pub height: f64,
     pub layer: i64,
     pub on_screen: bool,
-    /// Its title, when macOS gives it (only to a process allowed to record the screen).
-    pub titled: bool,
 }
 
 /// The title bar of the engine's windows, in points (measured: a 640 x 360 content in a 640 x 392 frame).
@@ -119,7 +117,6 @@ mod imp {
         static kCGWindowBounds: CFTypeRef;
         static kCGWindowLayer: CFTypeRef;
         static kCGWindowIsOnscreen: CFTypeRef;
-        static kCGWindowName: CFTypeRef;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -191,7 +188,6 @@ mod imp {
                     height: rect.h,
                     layer: number(dict, kCGWindowLayer).unwrap_or(-1),
                     on_screen: !on.is_null() && CFBooleanGetValue(on),
-                    titled: !CFDictionaryGetValue(dict, kCGWindowName).is_null(),
                 });
             }
             CFRelease(array);
@@ -349,6 +345,12 @@ pub fn title_from_guest(frame_height: f64, scale: f64, guest_height: u32) -> Opt
     }
 }
 
+/// The title bar cut off a picture of a window, in points: the one its window server said it has, else the one the size the
+/// game renders shows; where neither tells, nothing is cut. A name macOS gives the window says nothing of its decorations.
+pub fn title_cut(said: Option<f64>, guest: Option<f64>) -> f64 {
+    said.or(guest).unwrap_or(0.0)
+}
+
 /// What the engine's window server says in its log of the windows it shows: whether each has a title bar, the window's own
 /// native fact, whatever size the game renders and however macOS stretches it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -498,7 +500,7 @@ mod tests {
     use super::*;
 
     fn w(id: u32, width: f64, height: f64, layer: i64, on_screen: bool) -> MacWindow {
-        MacWindow { id, owner: 7, x: 0.0, y: 0.0, width, height, layer, on_screen, titled: true }
+        MacWindow { id, owner: 7, x: 0.0, y: 0.0, width, height, layer, on_screen }
     }
 
     /// Fifth verification, finding 15: a swapchain that is not the window's size, stretched in a smaller borderless window,
@@ -596,6 +598,11 @@ mod tests {
         assert_eq!(title_from_guest(800.0, 2.0, 1600), Some(0.0));
         assert_eq!(title_from_guest(800.0, 2.0, 1100), None);
         assert_eq!(title_from_guest(800.0, 0.0, 1600), None);
+        // Seventh verification: a window whose style nothing tells is not cut (a name macOS gave it stood for a title bar).
+        assert_eq!(title_cut(None, title_from_guest(800.0, 2.0, 1100)), 0.0);
+        assert_eq!(title_cut(None, title_from_guest(392.0, 2.0, 720)), TITLE_BAR_POINTS);
+        assert_eq!(title_cut(Some(0.0), Some(TITLE_BAR_POINTS)), 0.0, "what its window server says comes first");
+        assert_eq!(title_cut(Some(TITLE_BAR_POINTS), None), TITLE_BAR_POINTS);
         // m17: a borderless game covering its display has no title bar to cut.
         let whole = MacWindow { x: 0.0, y: 0.0, width: 1470.0, height: 956.0, ..listed[2] };
         assert_eq!(title_points(&whole, Some((0.0, 0.0, 1470.0, 956.0))), 0.0);

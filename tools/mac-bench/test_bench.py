@@ -322,10 +322,15 @@ def current(session, phase, game):
     if how.get("foreign"):
         write("foreign", "Running", {"pid": 1})
 current("s-1", "Preparing", None)
-say(event="starting", app_id=438100, session_id="s-1")
+say(event="starting", app_id=438100, session_id=None if how.get("unnamed") else "s-1")
 time.sleep(1.5)  # the admission is seen well before it runs
 current("s-1", "Running", {"pid": 4242})
 if how.get("dies"):
+    sys.exit(1)
+if "recovered" in how:
+    # Its handoff was lost, and the program follows the session that runs in the library instead.
+    say(event="running", app_id=438100, pid=1, session_id=how["recovered"])
+    time.sleep(8)
     sys.exit(1)
 say(event="running", app_id=438100, pid=4242, session_id="s-1")
 link = sys.argv[-1]
@@ -408,6 +413,18 @@ class WholeRun(unittest.TestCase):
         # The program died before it said what it started: nothing is asked to quit, and the series stops.
         status, res, quit = self.run_with(foreign=True, dies_unnamed=True)
         self.assertEqual((status, res["session"], quit), (5, None, False), res["outcome"])
+
+    def test_a_session_the_program_found_instead_of_its_own_stops_the_series_untouched(self):
+        """Seventh verification (the verifier's follower fixture): the program recovered an unrelated session and named it in
+        `running`: an error, nothing of this Mac is asked to quit, and nothing more is started."""
+        for how in ({"unnamed": True}, {}):
+            status, res, quit = self.run_with(recovered="foreign", **how)
+            self.assertEqual((status, quit), (5, False), (how, res["outcome"]))
+            self.assertIn("another session", res["outcome"])
+            self.assertNotEqual(res["session"], "foreign")
+        session = {"id": None, "running_at": None}
+        bench.told(session, {"event": "running", "session_id": "foreign"}, 1.0)
+        self.assertEqual(session, {"id": None, "running_at": None})
 
     def test_each_run_that_does_not_go_as_planned_ends_its_session_and_says_so(self):
         for how, expected, outcome in (

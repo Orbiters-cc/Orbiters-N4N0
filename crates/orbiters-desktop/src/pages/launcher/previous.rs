@@ -104,6 +104,8 @@ pub struct Previous {
     /// the selection's own asker).
     pub(super) can_create: bool,
     pub(super) signed_in_elsewhere: bool,
+    /// Whose the profile chosen is is not known: nothing private goes to it.
+    pub(super) unproven: bool,
     /// VRChat's saved session is being restored: who is signed in is not known yet (Major 1).
     pub(super) connecting: bool,
 }
@@ -532,7 +534,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         // A saved session being restored: no sign-in offered; what is picked is asked once it is known (Major 1).
         Some(tr("Connecting to VRChat…"))
     } else if me.is_none() {
-        Some(if state.places.previous.signed_in_elsewhere {
+        Some(if state.places.previous.signed_in_elsewhere || state.places.previous.unproven {
             tr("These are this computer's: on this profile, Play opens a new public instance of the world chosen.")
         } else {
             tr("Sign in to VRChat to rejoin an instance: without it, Play opens a new public instance of its world.")

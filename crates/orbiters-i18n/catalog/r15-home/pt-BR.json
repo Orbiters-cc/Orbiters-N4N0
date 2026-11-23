@@ -67,5 +67,16 @@
   "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Um VRChat aberto há {m} min não disse o perfil. Se ele não estiver no perfil {n}, aperte Jogar de novo para abrir mesmo assim.",
   "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "Um VRChat ainda não disse o perfil: Jogar espera um minuto e depois pergunta a você antes de abrir outro.",
   "One VRChat runs at a time on a Mac: quit it to start on another profile.": "No Mac, só um VRChat roda por vez: feche-o para abrir em outro perfil.",
-  "Quit the VRChat running now first": "Feche primeiro o VRChat que está rodando"
+  "Quit the VRChat running now first": "Feche primeiro o VRChat que está rodando",
+  "This place is private: sign in to VRChat in Settings to go there.": "Este lugar é privado: entre no VRChat nas Configurações para ir até lá.",
+  "This profile's VRChat account is not the one this place is for: choose its profile.": "A conta do VRChat deste perfil não é a deste lugar: escolha o perfil dela.",
+  "Sign in on this profile first: its VRChat account is not known yet.": "Primeiro entre neste perfil: a conta do VRChat dele ainda não é conhecida.",
+  "VRChat is no longer running: choose a profile and press Play to start it there.": "O VRChat não está mais rodando: escolha um perfil e aperte Jogar para abri-lo lá.",
+  "VRChat was not started into the place asked for: choose it again.": "O VRChat não foi aberto no lugar pedido: escolha-o de novo.",
+  "This place is private, and the VRChat on this computer is not known to be signed in with your account.": "Este lugar é privado, e não se sabe se o VRChat deste computador está com a sua conta.",
+  "{file} cannot be written, and it keeps two VRChats from starting at once: give yourself permission to write it, then press Play again.": "Não é possível escrever em {file}, que impede que dois VRChats abram ao mesmo tempo: dê a si mesmo permissão de escrita e aperte Jogar de novo.",
+  "{file} cannot be written: the disk is full. Free some space, then press Play again.": "Não é possível escrever em {file}: o disco está cheio. Libere espaço e aperte Jogar de novo.",
+  "{file} cannot be written ({reason}): check its permissions and the free space on its disk, then press Play again.": "Não é possível escrever em {file} ({reason}): confira as permissões e o espaço livre no disco e aperte Jogar de novo.",
+  "Start without a place": "Abrir sem destino",
+  "Its account is not known yet": "A conta dele ainda não é conhecida"
 }

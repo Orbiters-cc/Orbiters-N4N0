@@ -36,6 +36,8 @@ pub enum Detour {
     LinkRefused,
     /// VRChat runs on another device of the network: links of this computer do not reach it.
     Remote,
+    /// The place is private and the VRChat here is not known to be signed in with the account it is for.
+    OtherAccount,
 }
 
 /// What the computer is asked, real or a test's.
@@ -90,15 +92,18 @@ pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut side_by_args: i
 }
 
 /// Takes the person to `world`'s `instance`: the way taken, or why there is none (words for the page).
+#[cfg(test)]
 pub fn go(travel: &dyn Travel, remote: bool, bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
     let running = travel.running();
     let chosen = route(remote, &running, bridge, |p| travel.own_osc_ports(p));
-    go_on(travel, chosen, &running, bridge, world, instance)
+    go_on(travel, chosen, &running, bridge, world, instance, &|_| true)
 }
 
 /// [`go`] along a route already chosen from `running` (the caller decided it once, under its start lock): the process
 /// list is not looked at again, so a VRChat that quits in between can never turn a pipe hand-off into a second start.
-pub fn go_on(travel: &dyn Travel, chosen: Route, running: &[u32], bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
+/// `may`: whether the VRChat of this process (`None`: one started on the default profile) may be handed this instance, asked
+/// of the very one that would take the link.
+pub fn go_on(travel: &dyn Travel, chosen: Route, running: &[u32], bridge: &Bridge, world: &str, instance: &str, may: &dyn Fn(Option<u32>) -> bool) -> Result<Went, GoFailure> {
     // Ids come from the network: only VRChat's own grammar reaches the pipe, the link or `launch.exe`.
     if !orbiters_core::vrchat_launch::is_destination(world, instance) {
         return Err(GoFailure::BadDestination);
@@ -107,13 +112,15 @@ pub fn go_on(travel: &dyn Travel, chosen: Route, running: &[u32], bridge: &Bridg
     match chosen {
         Route::Invite(why) => Err(GoFailure::Invite(why)),
         Route::BridgeBusy => Err(GoFailure::BridgeBusy),
+        Route::Start if !may(None) => Err(GoFailure::Invite(Detour::OtherAccount)),
         Route::Start => travel.start(&link).map(|()| Went::Started).map_err(GoFailure::Start),
         Route::Pipe => {
             let Ok((pipe, server)) = travel.connect() else { return Err(GoFailure::Invite(Detour::LinkRefused)) };
             // The person's: running, and none of the bridge's. Unknown or another: nothing is written.
-            let theirs = server.is_some_and(|s| running.contains(&s) && Some(s) != bridge.main && !bridge.sides.contains(&s) && !travel.own_osc_ports(s));
-            if !theirs {
-                return Err(GoFailure::Invite(Detour::OtherVrchat));
+            let theirs = server.filter(|s| running.contains(s) && Some(*s) != bridge.main && !bridge.sides.contains(s) && !travel.own_osc_ports(*s));
+            let Some(theirs) = theirs else { return Err(GoFailure::Invite(Detour::OtherVrchat)) };
+            if !may(Some(theirs)) {
+                return Err(GoFailure::Invite(Detour::OtherAccount));
             }
             pipe.send(&link).map(|()| Went::Direct).map_err(|_| GoFailure::Invite(Detour::LinkRefused))
         }
@@ -293,6 +300,20 @@ pub(crate) mod tests {
         assert_eq!(go(&pc, false, &none(), W, I), Ok(Went::Direct));
         assert_eq!(*pc.written.lock().unwrap(), [format!("vrchat://launch?ref=orbiters.cc&id={W}:{I}")]);
         assert!(pc.started.lock().unwrap().is_empty());
+    }
+
+    /// The VRChat that would take the link is asked whether it may: one that may not gets nothing, nor is one started.
+    #[test]
+    fn a_vrchat_of_another_account_never_gets_the_link() {
+        let pc = Fake { running: vec![10], server: Some(10), ..Default::default() };
+        let go = |pc: &Fake, chosen: Route, may: &dyn Fn(Option<u32>) -> bool| go_on(pc, chosen, &pc.running.clone(), &none(), W, I, may);
+        assert_eq!(go(&pc, Route::Pipe, &|pid| pid != Some(10)), Err(GoFailure::Invite(Detour::OtherAccount)));
+        assert!(pc.written.lock().unwrap().is_empty());
+        assert_eq!(go(&pc, Route::Pipe, &|pid| pid == Some(10)), Ok(Went::Direct));
+        let pc = Fake::default();
+        assert_eq!(go(&pc, Route::Start, &|pid| pid.is_some()), Err(GoFailure::Invite(Detour::OtherAccount)));
+        assert!(pc.started.lock().unwrap().is_empty());
+        assert_eq!(go(&pc, Route::Start, &|pid| pid.is_none()), Ok(Went::Started));
     }
 
     #[test]

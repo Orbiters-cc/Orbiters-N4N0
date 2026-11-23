@@ -32,7 +32,7 @@ use super::states::PlayState;
 use super::{access_icon, access_name, cover_uv, region_tag, Cx, State};
 use crate::controller::vrchat_data::{Request, Response, Scope, WorldError};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
-use orbiters_core::launcher::{Action, InstanceAccess, Invite, InviteKind, LaunchMode, Place, Source};
+use orbiters_core::launcher::{Action, GameProfile, InstanceAccess, Invite, InviteKind, LaunchMode, Place, Source};
 use orbiters_core::vrchat_api::{CreateAccess, InstanceRegion};
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
@@ -336,7 +336,10 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
     let mut events: Vec<&EventSoon> = i.events.iter().filter(|e| e.offered(i.now)).collect();
     events.sort_by_key(|e| e.starts_at);
     for e in events.into_iter().take(EVENTS_MAX) {
+        // Its private instance is the account's alone: without one to go with (none signed in, another's profile or one whose
+        // account is not known), VRChat starts at home, where the event's invite arrives.
         let place = e.location.as_deref().and_then(|l| orbiters_core::launcher_feed::place(l, ""));
+        let place = place.filter(|p| i.me.is_some() || orbiters_core::vrchat_launch::is_public_instance(&p.instance_id));
         let world = place.as_ref().map(|p| p.world_id.clone()).or_else(|| e.world_id.clone()).unwrap_or_default();
         if place.is_some() && taken(&out, &world) {
             continue;
@@ -718,6 +721,7 @@ impl Places {
         let s = self.desk.selection();
         s.instance().filter(|_| self.showing)?;
         match s.verified() {
+            Verified::Unverified | Verified::Unknown if self.previous.unproven => Some(tr("Its account is not known yet")),
             Verified::Closed => Some(tr("Closed now")),
             Verified::Unverified if self.previous.connecting => Some(tr("Connecting to VRChat…")),
             Verified::Unverified | Verified::Unknown if self.desk.asker().account.is_none() => Some(tr("Not signed in")),
@@ -730,17 +734,17 @@ impl Places {
     }
 }
 
-/// The account whose places are offered: the one signed in and on show, when the profile chosen is its own (or says
-/// no account); and whether VRChat can make instances for it.
-fn account(state: &State, cx: &Cx, profile_account: Option<&str>) -> (Option<String>, bool) {
-    let who = who(state, cx, profile_account);
+/// The account whose places are offered: the one signed in and on show, when the profile chosen is proven to be its own; and
+/// whether VRChat can make instances for it.
+fn account(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> (Option<String>, bool) {
+    let who = who(state, cx, profile);
     (who.me, who.can_create)
 }
 
 /// Who Where's places are for (verify-r21 Major 1).
 pub(super) struct Who {
     /// The VRChat account VRChat verified as signed in here (the sign-in's own `user`, not the friends list, which comes
-    /// seconds later), when the profile chosen under Play is its own (or says no account).
+    /// seconds later), when the profile chosen under Play is proven to be its own ([`orbiters_core::vrchat_launch::handing`]).
     pub me: Option<String>,
     /// Whether VRChat makes instances for it.
     pub can_create: bool,
@@ -748,24 +752,28 @@ pub(super) struct Who {
     pub connecting: bool,
     /// Signed in, but the profile chosen is another account's.
     pub elsewhere: bool,
+    /// Signed in, but whose the profile chosen is is not known: nothing private goes to it.
+    pub unproven: bool,
     /// The friends list is this account's own, read with its session (its invites can be offered).
     pub feed: bool,
 }
 
-pub(super) fn who(state: &State, cx: &Cx, profile_account: Option<&str>) -> Who {
+pub(super) fn who(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> Who {
     use crate::controller::vrchat_login::Presence;
+    use orbiters_core::vrchat_launch::{handing, Handing};
     let login = &cx.snap.vrchat_login;
-    let own = |name: &str| profile_account.is_none_or(|a| a.is_empty() || name.is_empty() || a == name);
+    let game = profile.and_then(|p| p.account_id.as_deref());
+    let own = |id: &str| handing(true, Some(id), game) == Handing::Allowed;
     let presence = login.presence();
     let verified = login.user.as_ref().filter(|_| login.allowed);
     let feed_of = |id: &str| matches!(&state.data.source, Source::SignedIn { user_id, .. } if user_id == id) && !state.stale();
     let staged = state.places.staged.as_ref();
     let (me, feed) = match (verified, presence, staged) {
-        (Some(u), _, _) if own(&u.display_name) => (Some(u.id.clone()), feed_of(&u.id)),
+        (Some(u), _, _) if own(&u.id) => (Some(u.id.clone()), feed_of(&u.id)),
         (Some(_), _, _) => (None, false),
         // Pictures of the page and tests that hand the friends list in alone (no sign-in in their snapshot): its account.
         (None, Presence::SignedOut, Some(_)) => match (&state.data.source, state.stale()) {
-            (Source::SignedIn { user_id, name }, false) if !user_id.is_empty() && own(name) => (Some(user_id.clone()), true),
+            (Source::SignedIn { user_id, .. }, false) if !user_id.is_empty() && own(user_id) => (Some(user_id.clone()), true),
             _ => (None, false),
         },
         _ => (None, false),
@@ -774,8 +782,16 @@ pub(super) fn who(state: &State, cx: &Cx, profile_account: Option<&str>) -> Who 
         Some(s) => s.signed_in && me.is_some(),
         None => me.is_some() && login.allowed,
     };
-    let elsewhere = me.is_none() && (verified.is_some() || matches!(state.data.source, Source::SignedIn { .. }) && staged.is_some()) && profile_account.is_some();
-    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere, feed }
+    let signed_in = match (verified, &state.data.source) {
+        (Some(u), _) => Some(u.display_name.as_str()),
+        (None, Source::SignedIn { name, .. }) if staged.is_some() && presence == Presence::SignedOut && !state.stale() => Some(name.as_str()),
+        _ => None,
+    };
+    // Another's: by its id, or where only a name was ever seen on it, by that label.
+    let label = profile.and_then(|p| p.account.as_deref()).filter(|a| !a.is_empty());
+    let others = game.is_some() || label.is_some_and(|label| signed_in.is_some_and(|name| !name.is_empty() && name != label));
+    let without = me.is_none() && signed_in.is_some();
+    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere: without && others, unproven: without && !others, feed }
 }
 
 /// The cards now, after the reads have been started where due.
@@ -856,7 +872,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     }
     let offered = super::states::profiles(&state.data, state.added_profile);
     let next = super::states::next_here(&offered, state.chosen_profile);
-    let profile_account = offered.iter().find(|p| p.profile == next).and_then(|p| p.account.clone());
+    let chosen_profile = offered.iter().find(|p| p.profile == next).cloned();
     let (play, profile) = (super::states::play_here(&state.data, &offered, next), Some(next));
     if !showing(play) {
         // VRChat runs on the profile chosen: the previous instances' sheet goes with Where, and so does a press of Play
@@ -868,12 +884,13 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     state.places.showing = true;
     let ctx = ui.ctx().clone();
     let clock = anim::time(&ctx);
-    let who = who(state, cx, profile_account.as_deref());
+    let who = who(state, cx, chosen_profile.as_ref());
     let (me, can_create) = (who.me.clone(), who.can_create);
     // What the previous instances' sheet allows (it is drawn over the page, after this): the account VRChat verified,
     // or that it is still connecting (verify-r21 Major 1).
     state.places.previous.can_create = can_create;
     state.places.previous.signed_in_elsewhere = who.elsewhere;
+    state.places.previous.unproven = who.unproven;
     state.places.previous.connecting = who.connecting;
     // The account and the profile chosen now first: an answer for another counts for nothing.
     state.places.desk.set_asker(Asker { account: me.clone(), profile });
@@ -900,7 +917,10 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     state.places.page = state.places.page.min(pages - 1);
     // r21: a saved session being restored says so; only a certain "signed out" offers the sign-in.
     let signed_out = cx.snap.vrchat_login.presence() == crate::controller::vrchat_login::Presence::SignedOut;
-    let hint = hint(state, &cards, me.is_some(), can_create, clock, profile_account.as_deref(), !signed_out);
+    let hint = hint(state, &cards, &who, clock, !signed_out);
+    // Whose the profile chosen is is not known: the way to know, a start without a place, at the line's end.
+    let offer_plain = who.unproven && play == PlayState::Ready;
+    let mut start_plain = false;
     // Signed out of VRChat: the way to sign in, at the line's end.
     let offer_sign_in = signed_out && !matches!(state.data.source, Source::SignedIn { .. }) && state.places.notice.is_none() && state.places.making().is_none() && state.places.held().is_none();
     let mut sign_in = false;
@@ -978,7 +998,14 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                 }
                 room -= bw + 8.0;
             }
-            if offer_new {
+            if offer_plain {
+                let b = widgets::Button::new(tr("Start without a place")).icon(icons::PLAY).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("where-start-plain");
+                let bw = b.desired_width(ui);
+                if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
+                    start_plain = true;
+                }
+                room -= bw + 8.0;
+            } else if offer_new {
                 let b = widgets::Button::new(tr("New instance of this world")).icon(icons::PLUS).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("where-new-instead");
                 let bw = b.desired_width(ui);
                 if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
@@ -998,6 +1025,13 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     if take_new {
         super::previous::take_new_of_chosen(state);
     }
+    if start_plain {
+        // VRChat's own start, on the profile chosen: its account is known once it was signed in there.
+        state.chosen_profile = Some(next);
+        state.places.desk.go_home();
+        let mode = if orbiters_core::vrchat_launch::VR_HERE { cx.snap.settings.launch.last_mode } else { LaunchMode::Desktop };
+        state.act(cx, clock, Action::PlayOn { mode, profile: next });
+    }
     if state.places.notice.as_ref().is_some_and(|(_, at)| clock - at < NOTICE_FOR) {
         super::super::frame_in(&ctx, NOTICE_FOR - (clock - state.places.notice.as_ref().map_or(clock, |n| n.1)));
     }
@@ -1012,7 +1046,12 @@ pub(super) enum Tone {
 
 /// The line under the cards, when there is something to say: an instance being made, a card that went or an instance
 /// that could not be made (for a while), an event that waits for its invite, why invites and Friends+ are missing.
-fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bool, clock: f64, profile_account: Option<&str>, connecting: bool) -> Option<(String, Tone)> {
+fn hint(state: &mut State, cards: &[Suggestion], who: &Who, clock: f64, connecting: bool) -> Option<(String, Tone)> {
+    let (signed_in, can_create) = (who.me.is_some(), who.can_create);
+    // First of all: nothing private goes to a profile whose account is not known.
+    if who.unproven && !state.stale() {
+        return Some((tr("Sign in on this profile first: its VRChat account is not known yet.").into(), Tone::Warn));
+    }
     if let Some((text, at)) = &state.places.notice {
         if clock - at < NOTICE_FOR {
             return Some((text.clone(), Tone::Warn));
@@ -1036,7 +1075,7 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
         return None;
     }
     match (&state.data.source, signed_in) {
-        (Source::SignedIn { name, .. }, false) if profile_account.is_some() => {
+        (Source::SignedIn { name, .. }, false) if who.elsewhere => {
             Some((orbiters_i18n::tr!("Invites and Friends+ instances are for {name}: choose their profile to use them.", name = name), Tone::Quiet))
         }
         // r21: a saved session being restored (or its list on the way) is not "signed out".
@@ -1513,8 +1552,8 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
     };
     // Its card is not there: nothing starts (the next frame says the choice went).
     let Some(card) = card else { return };
-    let profile_account = profile.and_then(|n| state.data.profiles.iter().find(|p| p.profile == n)).and_then(|p| p.account.clone());
-    let (me, can_create) = account(state, cx, profile_account.as_deref());
+    let on = profile.and_then(|n| state.data.profiles.iter().find(|p| p.profile == n));
+    let (me, can_create) = account(state, cx, on);
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     let plan = launch(&card, kind_of(state, &card, can_create), can_create, seed);
     if let Some(action) = action(&plan, mode, profile) {
@@ -1541,9 +1580,13 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
 /// VRChat starts in this instance: the selection said it is proven.
 pub(super) fn enter(state: &mut State, cx: &Cx, clock: f64, visit: &super::previous::Visit, mode: LaunchMode, profile: Option<u32>) {
     let Some(place) = orbiters_core::launcher_feed::place(&visit.location(), &visit.name) else { return };
-    if let Some(action) = action(&Launch::At(place), mode, profile) {
-        state.act(cx, clock, action);
-    }
+    let Some(action) = action(&Launch::At(place), mode, profile) else { return };
+    // It was found open for this account: it goes for this account, also while its friends list is still being read.
+    let action = match (&state.data.source, state.places.desk.asker().account.clone()) {
+        (Source::SignedIn { .. }, _) | (_, None) => action,
+        (_, Some(account)) => Action::As { account, action: Box::new(action) },
+    };
+    state.act(cx, clock, action);
 }
 
 /// Has VRChat make the new instance for the account signed in (the overlay's Go there's request). Going there is

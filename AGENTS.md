@@ -6,7 +6,9 @@
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
   `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
   VRChat itself does run on a Mac, one game at a time on the profile chosen on Home (`vrchat_launch::SEVERAL_HERE`; every start of
-  Home's carries it, a restart included, and an account is learnt only from that launch's own log), started by N4N0 through
+  Home's carries it, a restart included, and an account is learnt only from that launch's own log; a private place, an invite or an
+  instance made for the account signed in goes to no game, here or on Windows, whose account is not proven to be that one by its id:
+  `vrchat_launch::handing`, asked again at the hand-off of what is launched, `docs/vrchat-bridge.md`), started by N4N0 through
   Obelisk's engine without its window: `obelisk-cli`, built
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).

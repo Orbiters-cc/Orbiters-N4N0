@@ -963,7 +963,11 @@ impl eframe::App for App {
         self.ctl.set_background(!focused && (game_in_front || self.ctl.view().vrchat.runs_here()));
         // Minimized, no frame is drawn and only this runs: what the pages watch on their threads stops until the window
         // shows again (the microphones Settings listens to, Unity's editors, the folders).
-        pages::watch::follow_window(ctx);
+        #[cfg(target_os = "macos")]
+        let shown = self.cover.visible().filter(|_| self.windowed);
+        #[cfg(not(target_os = "macos"))]
+        let shown = None;
+        pages::watch::follow_window_as(ctx, shown);
         self.follow_rest(ctx);
         if self.ctl.should_close() {
             ctx.send_viewport_cmd(ViewportCommand::Close);

@@ -207,6 +207,21 @@ last known account is shown, or none. While a game starts or runs, whoever start
 as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
 `get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
+**A private place goes only to the game proven to be its account's** (2026-11-23, tenth verification), by one rule for every computer
+and every way there is (`vrchat_launch::handing`): anything but a public instance (`is_public_instance`: public, a group's public; a
+kind not known here is private), an invite whatever its instance, an instance made for the account signed in. Proven is by the user
+id the game's own log says (`VrchatRunShown::account_id`, never a name; nobody's while it is at its sign-in page or while its command
+line names several profiles), of the game that runs, else as that profile's own log last said (`LaunchSettings::profile_ids`,
+forgotten when it says nobody is signed in, and when a start asked for on it turns out to be on another: a saved flag). Not known is
+not eligible: Home says **Sign in on this profile first** with a start that goes to no place, and offers it no invite, no private
+event, no new instance of the account's. It is asked again at the hand-off, of the arguments launched (`launcher_may_start`: the
+link's instance, the profile they name), of the very process that takes a link on Windows (`launcher_may_hand`, else the account's
+own invite goes), at a restart after a lost picture, and before the bridge makes a private instance on a Mac (`game_account_unknown`;
+Windows' bridge is as it was). A press is one `Errand` (mode, profile, destination, account) through the set-up, a start under way and
+the hand-off; one whose account cannot be proven by then is dropped and said. Join into a game that runs (`JoinRunning`,
+`AcceptInviteRunning`) starts none. A saved `--profile` in the engine's `LaunchSettings` cannot be read before a start (the CLI has no
+command for it): it is only seen after, as above.
+
 How it is one verified game (`controller/bridge_mac.rs`):
 
 - **Start.** Through the very start Home's Play uses (`obelisk_cli::Play` in `MacMachine`): one start at a time, and **none within
@@ -250,9 +265,11 @@ How it is one verified game (`controller/bridge_mac.rs`):
   this N4N0 starts nothing either meanwhile, and reserves only to close that very game, for as long as the slot is held for it: a
   launch that has ended since it was looked at admits nothing. A wait after an early end that cannot be
   written keeps it too, until it is written at a later look or is over. The lock's own file says a start from before it is made
-  (its boot and time, then its session, then the end of a wait that could not be written): a holder that dies leaves it there, and the
-  next to take the slot reads it. Over by its session's record, it is what the record says; still running, nothing is started over
-  it; else it counts as an early end from when it was found, once.
+  (its boot and time, then the program that makes it, its session as soon as `starting` names it, and the end of a wait that could not
+  be written): a holder that dies leaves it there, and the next to take the slot reads it. Over by its session's record, it is what
+  the record says; while that session, or the program that makes it, or (where no session was said) any VRChat session of the engine's
+  records lives, by its supervisor or its game, nothing is reserved or started over it, whatever any wait says; else it counts as an
+  early end from when it was found, once. A slot file that cannot be written refuses the start with its path and what ends it.
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
 - **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose

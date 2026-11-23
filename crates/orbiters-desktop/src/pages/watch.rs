@@ -48,7 +48,13 @@ fn window(ctx: &egui::Context) -> Arc<Window> {
 /// Tells the watches whether the window is shown, from what the integration says of it now (minimized, hidden by the
 /// system). Call at every pass of the app's logic, which runs whether a frame is drawn or not.
 pub fn follow_window(ctx: &egui::Context) {
-    window_shown(ctx, ctx.input(|i| i.viewport().visible()) != Some(false));
+    follow_window_as(ctx, None);
+}
+
+/// [`follow_window`], where whether the window shows was decided already (`shown`: a Mac's, which eframe may hold hidden while it
+/// shows): the watches follow what it is drawn by.
+pub fn follow_window_as(ctx: &egui::Context, shown: Option<bool>) {
+    window_shown(ctx, shown.unwrap_or_else(|| ctx.input(|i| i.viewport().visible()) != Some(false)));
 }
 
 /// The window is shown, or no longer: then every watch's thread ends now, not at its next look.
@@ -521,6 +527,45 @@ mod tests {
         out.textures_delta.clear();
         let _ = ctx.run_logic(&input, follow_window);
         wait_for("looks without the focus", || looks.load(Ordering::SeqCst) >= 5);
+    }
+
+    /// Tenth verification (the verifier's fixture): a Mac's window that shows though eframe holds it hidden is drawn, and its pages
+    /// look again; certainly hidden, they do not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_window_shown_after_all_has_its_pages_look_again() {
+        use crate::mac_cover::{Cover, Seen};
+        let ctx = egui::Context::default();
+        let mut cover = Cover::default();
+        let mut watch = Watch::<u8, u32>::default();
+        let looks = Arc::new(AtomicU32::new(0));
+        let mut pass = |cover: &mut Cover, watch: &mut Watch<u8, u32>, tick: f64, shown: Option<bool>| {
+            let mut input = egui::RawInput { time: Some(tick), ..Default::default() };
+            input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+            let _ = cover.step(tick, true, false, || Seen { shown, game: false });
+            let mut output = ctx.run_ui(input, |ui| {
+                follow_window_as(ui.ctx(), cover.visible());
+                watch.keep(ui.ctx(), &0, Duration::from_millis(5), || {
+                    let looks = looks.clone();
+                    move || looks.fetch_add(1, Ordering::SeqCst)
+                });
+            });
+            output.textures_delta.clear();
+        };
+        for tick in 1..4 {
+            pass(&mut cover, &mut watch, f64::from(tick), Some(false));
+            wait_for("hidden: it ends before it looks", || watch.running.as_ref().unwrap().1.lock().ended);
+        }
+        assert_eq!(looks.load(Ordering::SeqCst), 0);
+        pass(&mut cover, &mut watch, 10.0, Some(true));
+        wait_for("shown: it looks", || looks.load(Ordering::SeqCst) > 0);
+        let before = looks.load(Ordering::SeqCst);
+        // Between two of its frames, and where it cannot be told, it goes on.
+        pass(&mut cover, &mut watch, 10.1, Some(true));
+        pass(&mut cover, &mut watch, 20.0, None);
+        wait_for("it goes on", || looks.load(Ordering::SeqCst) > before + 1);
+        pass(&mut cover, &mut watch, 30.0, Some(false));
+        wait_for("hidden again: it ends", || watch.running.as_ref().unwrap().1.lock().ended);
     }
 
     /// A look that panicked left its watch stranded: the thread was gone but never said so, and no frame started

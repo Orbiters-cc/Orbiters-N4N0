@@ -769,6 +769,7 @@ impl Game for MacGame {
         let _started = ctl.launcher_started_lock();
         // What tells a drawing game from a frozen window is the program's (its records' `shown`): no start without it.
         cli_fit(mac)?;
+        own_account(&ctl, &machine)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
         let at = SystemTime::now();
@@ -791,6 +792,8 @@ impl Game for MacGame {
         let Some(mac) = machine.as_mac() else { return Ok(()) };
         // The program must have what the bridge relies on before anything is made for a start.
         cli_fit(mac)?;
+        // Nor a private instance for a game that is not known to be its account's.
+        own_account(&ctl, &machine)?;
         self.release_start();
         let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
         // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
@@ -1060,6 +1063,19 @@ fn records_failure(trouble: &super::obelisk_cli::Trouble) -> Failure {
             "Tell the person: Orbiters - N4N0's Home shows the record and a Set aside button.", // i18n: not shown
         ),
     }
+}
+
+/// The bridge's private instances are the account's signed in in the app: they go to a VRChat proven to be that account's only
+/// (the rule Home's starts are held to, `vrchat_launch::handing`).
+fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>) -> Result<(), Failure> {
+    if ctl.launcher_is_own(machine.as_ref(), 0) {
+        return Ok(());
+    }
+    Err(Failure::new(
+        "game_account_unknown",
+        "VRChat's default profile on this Mac is not known to be signed in with the VRChat account signed in in Orbiters - N4N0, so no private instance goes to it.", // i18n: not shown (an AI client reads it)
+        "Ask the person to press Play on Home on profile 0, without a place, and to sign in there with that account once; then try again.", // i18n: not shown
+    ))
 }
 
 /// What a Mac's game answers for what its capabilities already refuse (a second line of defence).

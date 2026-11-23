@@ -321,11 +321,14 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let me = state.places.desk.asker().account.clone().unwrap_or_default();
     // Where one VRChat runs at a time (a Mac), one that is not up yet starts on the profile chosen: not into another
     // account's place (the rule Where has).
-    let starts = !orbiters_core::vrchat_launch::SEVERAL_HERE && state.data.game == orbiters_core::launcher::Game::NotRunning;
+    let idle = state.data.game == orbiters_core::launcher::Game::NotRunning;
+    let starts = !orbiters_core::vrchat_launch::SEVERAL_HERE && idle;
     let join = match &friend.whereabouts {
         Whereabouts::World(place)
             if state.data.possible.play
                 && !(starts && state.places.previous.signed_in_elsewhere)
+                // (nor into a private one on a profile whose account is not known)
+                && !(starts && state.places.previous.unproven && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
                 && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
                 && super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)) =>
         {
@@ -358,7 +361,10 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
         let right = r.right() - 14.0 - if pill_w > 0.0 { pill_w + 8.0 } else { 0.0 };
         let jr = Rect::from_min_size(pos2(right - join_w, r.center().y - 18.0), vec2(join_w, 36.0));
         if reach_pill(ui, jr, ("launcher-modal-join", friend.id.as_str()), Reach::Ready, icons::PLAY, join_label, None, clock) {
-            let action = if !starts {
+            let action = if !idle {
+                // Into the game that runs or starts: none is started for it if it is gone by then.
+                Action::JoinRunning { mode: cx.snap.settings.launch.last_mode, destination: place }
+            } else if !starts {
                 Action::Play { mode: cx.snap.settings.launch.last_mode, destination: Some(place) }
             } else {
                 let profile = states::next_here(&states::profiles(&state.data, state.added_profile), state.chosen_profile);

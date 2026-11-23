@@ -623,8 +623,8 @@ pub enum Event {
     SignedIn { account: String },
     Progress { phase: Phase, fraction: Option<f32> },
     Installed,
-    /// The game's supervisor holds it.
-    Starting,
+    /// The game's supervisor holds it, as this Game session (0.1.10 and later say it).
+    Starting { session: Option<String> },
     /// The game runs: the engine's launcher of it, and its Game session (0.1.3 and later say it).
     Running { pid: Option<u32>, session: Option<String> },
     /// The game ended, after this many seconds and with this many frames shown, when the program knows; the Game session
@@ -689,7 +689,7 @@ pub fn event(line: &str) -> Option<Event> {
             fraction: value.get("fraction").and_then(serde_json::Value::as_f64).map(|f| (f as f32).clamp(0.0, 1.0)),
         },
         "installed" => Event::Installed,
-        "starting" => Event::Starting,
+        "starting" => Event::Starting { session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned) },
         "running" => Event::Running {
             pid: value.get("pid").and_then(serde_json::Value::as_u64).and_then(|pid| u32::try_from(pid).ok()),
             session: value.get("session_id").and_then(serde_json::Value::as_str).map(str::to_owned),
@@ -1108,7 +1108,8 @@ mod tests {
         assert_eq!(event(r#"{"event":"progress","app_id":438100,"phase":"downloading","bytes_done":5,"bytes_total":0,"fraction":null}"#), Some(Event::Progress { phase: Phase::Game, fraction: None }));
         assert_eq!(event(r#"{"event":"progress","app_id":438100,"phase":"verifying","fraction":7.0}"#), Some(Event::Progress { phase: Phase::Checking, fraction: Some(1.0) }));
         assert_eq!(event(r#"{"event":"installed","app_id":438100}"#), Some(Event::Installed));
-        assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting));
+        assert_eq!(event(r#"{"event":"starting","app_id":438100}"#), Some(Event::Starting { session: None }));
+        assert_eq!(event(r#"{"event":"starting","app_id":438100,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Starting { session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":4242}"#), Some(Event::Running { pid: Some(4242), session: None }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":12777,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#), Some(Event::Running { pid: Some(12777), session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()) }));
         assert_eq!(event(r#"{"event":"running","app_id":438100,"pid":null}"#), Some(Event::Running { pid: None, session: None }));

@@ -300,6 +300,10 @@ pub struct GameProfile {
     pub profile: u32,
     /// The account last seen signed in on it (its VRChat log said so), when known.
     pub account: Option<String>,
+    /// That account's VRChat user id, when its own log said it (and has not said since that nobody is signed in): whose private
+    /// places the profile may be started into ([`crate::vrchat_launch::handing`]).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// A VRChat runs on it now, in this mode.
     pub running: Option<LaunchMode>,
     /// Started from here a moment ago and not yet seen running.
@@ -429,8 +433,12 @@ pub enum Action {
     ListPictures(PictureKind),
     /// Read the account's own profile (bio, icon, banner) for Home's card.
     ReadMine,
+    /// Send the VRChat that runs or starts here to `destination`; none is ever started for it.
+    JoinRunning { mode: LaunchMode, destination: Place },
     /// Accept an invite and play it in that mode (or send the running game there).
     AcceptInvite { invite: String, mode: LaunchMode },
+    /// Accept an invite into the VRChat that runs or starts here; none is ever started for it.
+    AcceptInviteRunning { invite: String, mode: LaunchMode },
     /// [`Action::AcceptInvite`] starting VRChat on `profile` (Home's Where, REQUEST20 2): the same one accept per invite,
     /// the same card going and coming back, the same hide at VRChat once there.
     AcceptInviteOn { invite: String, mode: LaunchMode, profile: u32 },
@@ -669,6 +677,10 @@ pub fn sample() -> LauncherState {
     };
     LauncherState {
         source: Source::SignedIn { user_id: me.id.clone(), name: me.name.clone() },
+        profiles: vec![
+            GameProfile { profile: 0, account: Some("Sample Me".into()), account_id: Some(me.id.clone()), ..GameProfile::default() },
+            GameProfile { profile: 1, account: Some("Sample Alt".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000a1".into()), ..GameProfile::default() },
+        ],
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },
         me: Some(me),
         friends,
@@ -681,10 +693,6 @@ pub fn sample() -> LauncherState {
         notice: None,
         loading: false,
         unresolved: 0,
-        profiles: vec![
-            GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
-            GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
-        ],
         engine_setup: None,
         picture_lost: None,
         engine_trouble: None,

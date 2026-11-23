@@ -55,6 +55,10 @@ pub struct Cover {
     focused: bool,
     /// A frame is due whatever the windows say.
     owed: bool,
+    /// eframe took the window for minimized (or not) where macOS says otherwise.
+    corrected: bool,
+    /// What was decided of the window at the last pass.
+    visible: Option<bool>,
 }
 
 impl Cover {
@@ -68,9 +72,20 @@ impl Cover {
     /// eframe where they differ: on a Mac it never asks again, so that a window put back from the Dock by macOS alone (its
     /// picture there pressed) would stay a hidden one to it.
     pub fn minimized(&mut self, said: bool, native: Option<bool>) -> (bool, Option<bool>) {
-        let Some(native) = native.filter(|native| *native != said) else { return (said, None) };
+        self.corrected = native.is_some_and(|native| native != said);
+        let minimized = native.unwrap_or(said);
+        self.visible = minimized.then_some(false);
+        if !self.corrected {
+            return (minimized, None);
+        }
         self.wake();
-        (native, Some(native))
+        (minimized, Some(minimized))
+    }
+
+    /// Whether the window shows, as decided at this pass and drawn by: what its pages look at follows it too (`pages::watch`).
+    /// `None`: as eframe says.
+    pub fn visible(&self) -> Option<bool> {
+        self.visible
     }
 
     /// One pass of the window's logic at `now` (seconds). `hidden`: eframe holds it hidden. `focused`: it has the keyboard.
@@ -81,6 +96,7 @@ impl Cover {
         }
         self.focused = focused;
         if !hidden {
+            self.visible = self.corrected.then_some(true);
             self.owed = false;
             match self.looked {
                 _ if focused => self.looked = None,
@@ -99,6 +115,8 @@ impl Cover {
                 seen
             }
         };
+        // (one that may show or not is drawn, so its pages look too)
+        self.visible = Some(focused || seen.shown != Some(false));
         let every = match seen.shown {
             _ if focused || self.owed => DRAW,
             Some(true) => DRAW,

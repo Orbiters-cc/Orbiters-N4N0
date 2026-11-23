@@ -889,10 +889,17 @@ fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime, argum
 pub(crate) struct Player {
     pub launcher: u32,
     pub birth: (u64, u32),
-    /// The VRChat profile its launcher starts it on, once its command line could be read.
+    /// The VRChat profile its launcher starts it on, once its command line could be read; `None` too where that names several
+    /// (a saved flag beside the one asked for): which one the game took is not known.
     pub profile: Option<u32>,
+    /// Its command line could be read, and names several.
+    pub several: bool,
     /// The account its own log says is signed in (its display name), once it said; `None` is "not known", never "nobody".
     pub account: Option<String>,
+    /// That account's VRChat user id, while it is the one signed in.
+    pub account_id: Option<String>,
+    /// Its own log says nobody is signed in (its sign-in page).
+    pub signed_out: bool,
 }
 
 static PLAYER: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
@@ -906,7 +913,10 @@ pub(crate) fn player() -> Option<Player> {
 #[derive(Debug, Default)]
 pub(crate) struct SignedIn {
     read: u64,
-    name: Option<String>,
+    /// The account last signed in: its id, its name.
+    who: Option<(String, String)>,
+    /// It asked for a sign-in since, and nobody signed in.
+    out: bool,
 }
 
 impl SignedIn {
@@ -921,9 +931,11 @@ impl SignedIn {
         match bytes.iter().rposition(|b| *b == b'\n') {
             Some(end) => {
                 self.read += end as u64 + 1;
-                if let Some((_, name)) = crate::bridge::sessions::signed_in(&String::from_utf8_lossy(&bytes[..=end])) {
-                    self.name = Some(name);
+                let text = String::from_utf8_lossy(&bytes[..=end]);
+                if let Some(who) = crate::bridge::sessions::signed_in(&text) {
+                    self.who = Some(who);
                 }
+                self.out = super::vrchats::signed_out(&text).unwrap_or(self.out);
             }
             // One line longer than a look: no line looked for.
             None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
@@ -932,7 +944,16 @@ impl SignedIn {
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+        self.who.as_ref().map(|(_, name)| name.as_str())
+    }
+
+    /// The id of the account that is signed in now; `None` where it is not known, or nobody is.
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.who.as_ref().filter(|_| !self.out).map(|(id, _)| id.as_str())
+    }
+
+    pub(crate) fn signed_out(&self) -> bool {
+        self.out
     }
 }
 
@@ -1026,8 +1047,10 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         if let Some(log) = &followed.vrchat {
             signed_in.read(log);
         }
-        let profile = followed.arguments.as_deref().map(orbiters_core::vrchat_launch::profile_of);
-        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, account: signed_in.name().map(str::to_owned) });
+        let profile = followed.arguments.as_deref().and_then(orbiters_core::vrchat_launch::profile_told);
+        let several = followed.arguments.is_some() && profile.is_none();
+        let (account, account_id) = (signed_in.name().map(str::to_owned), signed_in.id().map(str::to_owned));
+        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, several, account, account_id, signed_out: signed_in.signed_out() });
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();
@@ -1870,12 +1893,19 @@ mod tests {
         // The start's command line and its log agree on the profile.
         assert_eq!((orbiters_core::vrchat_launch::profile_of(&on(0)), orbiters_core::vrchat_launch::profile_of(&on(2))), (0, 2));
         write("14", 0, &login("Sample Me", 1));
+        let id = |file: &std::fs::File| {
+            let mut signed_in = SignedIn::default();
+            signed_in.read(file);
+            (signed_in.id().map(str::to_owned), signed_in.signed_out())
+        };
+        assert_eq!(id(&held(0).unwrap()), (Some("usr_00000000-0000-4000-8000-000000000001".into()), false), "by its id");
         assert_eq!(held(2).is_some(), false, "another profile's log is not this launch's");
         assert_eq!((who(0).as_deref(), who(2)), (Some("Sample Me"), None));
         // Its own, at the sign-in page: not known, never the other one's.
         write("15", 2, "2026.11.23 18:29:20 Debug      -  [Authentication - x] No cached credentials found\r\n");
         assert!(held(2).is_some());
         assert_eq!(who(2), None);
+        assert_eq!(id(&held(2).unwrap()), (None, true), "its sign-in page: nobody");
         // Signed in, read on as it grows; a line still being written says nothing yet; another account later is the one.
         let file = held(2).unwrap();
         let mut signed_in = SignedIn::default();
@@ -1895,6 +1925,11 @@ mod tests {
         signed_in.read(&file);
         assert_eq!(signed_in.name(), Some("Sample Third"));
         assert_eq!((who(2).as_deref(), who(0).as_deref()), (Some("Sample Third"), Some("Sample Me")), "read from its start, whole");
+        assert_eq!((signed_in.id(), signed_in.signed_out()), (Some("usr_00000000-0000-4000-8000-000000000003"), false));
+        // Back at its sign-in page: the last name stays a label, nobody is signed in.
+        log.write_all(b"2026.11.23 18:30:40 Debug      -  [Authentication - x] AuthSelectionPage OnPageShown\r\n").unwrap();
+        signed_in.read(&file);
+        assert_eq!((signed_in.name(), signed_in.id(), signed_in.signed_out()), (Some("Sample Third"), None, true));
         // Words that only look like it, of another line, name nobody.
         write("14", 0, "2026.11.23 18:31:00 Debug      -  post login checks for Sample Fake (not an id)\r\n");
         assert_eq!(who(0), None);

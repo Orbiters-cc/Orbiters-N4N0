@@ -132,6 +132,10 @@ impl InstancePermits {
         self.made.retain(|(s, _, _, at)| s == scope && at.elapsed().as_secs() < 300);
         self.made.push((scope.clone(), world.into(), id.into(), std::time::Instant::now()));
     }
+    /// Whether it is an instance made for the account signed in, however long ago.
+    fn was_made(&self, world: &str, id: &str) -> bool {
+        self.made.iter().any(|(_, w, i, _)| w == world && i == id)
+    }
     fn contains(&self, scope: &Scope, world: &str, id: &str) -> bool {
         self.entries.iter().chain(&self.made).any(|(s, w, i, at)| s == scope && w == world && i == id && at.elapsed().as_secs() < 300)
     }
@@ -267,6 +271,11 @@ impl Controller {
         result
     }
 
+    /// Whether the instance was made for the account signed in.
+    pub(crate) fn made_instance(&self, world: &str, instance: &str) -> bool {
+        self.instance_permits.lock().unwrap().was_made(world, instance)
+    }
+
     fn vrchat_world_data(&self, scope: Scope, request: Request, deadline: std::time::Instant) -> Response {
         scoped_world_work(&scope, || Scope::of(&self.view()), || {
             if !scope.allowed { return Err(WorldError::SignInRequired); }
@@ -339,7 +348,13 @@ impl Controller {
                         let went = match claim {
                             Some(Err(_)) => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
                             None if start => Err(super::travel::GoFailure::Invite(super::travel::Detour::Asked)),
-                            _ => super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance),
+                            _ => {
+                                // A private instance is the account's own game's only: else the invite to oneself goes.
+                                let machine = self.launcher_machine_now();
+                                let bound = self.made_instance(&world, &instance);
+                                let may = |pid: Option<u32>| self.launcher_may_hand(machine.as_ref(), pid, &instance, bound, Some(user));
+                                super::travel::go_on(travel.as_ref(), chosen, &processes, &bridge, &world, &instance, &may)
+                            }
                         };
                         if went == Ok(super::travel::Went::Started) {
                             *started = Some(std::time::Instant::now());
@@ -980,7 +995,24 @@ mod tests {
     const MADE_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
     const KEEP_WORLD: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075834";
     const DIRECT_WORLDS: [&str; 3] = ["wrld_266523e8-9161-40da-acd0-6bd82e075835", "wrld_266523e8-9161-40da-acd0-6bd82e075836", "wrld_266523e8-9161-40da-acd0-6bd82e075837"];
+    /// The VRChats of `fake`, signed in with the test client's account by their own logs.
+    struct Own(Vec<u32>, Option<&'static str>);
+    impl crate::controller::launcher::Machine for Own {
+        fn running(&self) -> Vec<(u32, bool)> {
+            self.0.iter().map(|pid| (*pid, false)).collect()
+        }
+        fn installed(&self) -> bool {
+            true
+        }
+        fn start(&self, _: &[String]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn roster(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
+            Some(self.0.iter().map(|pid| crate::state::VrchatRunShown { pid: *pid, profile_known: true, account_id: self.1.map(str::to_owned), ..Default::default() }).collect())
+        }
+    }
     fn fake_pc(ctl: &Controller, fake: crate::controller::travel::tests::Fake) -> std::sync::Arc<crate::controller::travel::tests::Fake> {
+        ctl.launcher_machine(std::sync::Arc::new(Own(fake.running.clone(), Some("usr_test"))));
         let fake = std::sync::Arc::new(fake);
         *ctl.travel.lock().unwrap() = Some(fake.clone() as std::sync::Arc<dyn crate::controller::travel::Travel>);
         fake
@@ -1031,6 +1063,32 @@ mod tests {
         let reply = ctl.vrchat_data(scope, Request::GoThere { world: KEEP_WORLD.into(), instance: REVIEW_ID.into() }).unwrap();
         assert!(matches!(reply, Response::Went(crate::controller::travel::Went::Direct)), "{reply:?}");
         assert_eq!(pc.written.lock().unwrap().len(), 1);
+    }
+
+    /// Tenth verification: Go there hands a private place to no VRChat that is not known to be signed in with the account it is
+    /// for, running or to be started: the invite to oneself goes, and says why. Nor one made for the account, whatever its kind.
+    #[test]
+    fn go_there_hands_a_private_place_to_no_other_account() {
+        use crate::controller::travel::{tests::Fake, Detour, Went};
+        for (access, id) in [(orbiters_core::vrchat_api::CreateAccess::FriendsPlus, MADE_ID), (orbiters_core::vrchat_api::CreateAccess::Public, "46657~region(eu)")] {
+            for (running, account) in [(vec![10], None), (vec![10], Some("usr_other")), (vec![], None)] {
+                let ctl = Controller::new(orbiters_core::settings::Settings::default());
+                let mut made = made_answer(MADE_WORLD);
+                made["instanceId"] = id.into();
+                if access == orbiters_core::vrchat_api::CreateAccess::Public {
+                    made["accessType"] = "public".into();
+                }
+                let (_, calls) = ctl.test_vrchat(vec![(200, made.clone()), (200, made), (200, serde_json::json!({}))]);
+                let pc = fake_pc(&ctl, Fake { server: running.first().copied(), running: running.clone(), ..Default::default() });
+                ctl.launcher_machine(std::sync::Arc::new(Own(running.clone(), account)));
+                let scope = Scope::of(&ctl.view());
+                ctl.vrchat_data(scope.clone(), Request::CreateInstance { world: MADE_WORLD.into(), access, region: orbiters_core::vrchat_api::InstanceRegion::Eu }).unwrap();
+                let reply = ctl.vrchat_data(scope, Request::GoThere { world: MADE_WORLD.into(), instance: id.into() }).unwrap();
+                assert!(matches!(reply, Response::Went(Went::Invited(Detour::OtherAccount))), "{reply:?}");
+                assert!(pc.written.lock().unwrap().is_empty() && pc.started.lock().unwrap().is_empty());
+                assert!(calls.lock().unwrap().last().unwrap().1.contains("/invite/myself/to/"));
+            }
+        }
     }
 
     /// L-go-direct: a new instance, then straight there through the person's own VRChat; no invite is sent.

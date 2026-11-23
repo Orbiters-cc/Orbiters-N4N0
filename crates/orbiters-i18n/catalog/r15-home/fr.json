@@ -67,5 +67,16 @@
   "A VRChat running for {m} min has not said its profile. If it is not on profile {n}, press Play again to start anyway.": "Un VRChat lancé depuis {m} min n’a pas dit son profil. S’il n’est pas sur le profil {n}, appuie encore sur Jouer pour lancer quand même.",
   "A VRChat has not said its profile yet: Play waits a minute for it, then asks you before it starts another.": "Un VRChat n’a pas encore dit son profil : Jouer l’attend une minute, puis te demande avant d’en lancer un autre.",
   "One VRChat runs at a time on a Mac: quit it to start on another profile.": "Sur un Mac, un seul VRChat tourne à la fois : quitte-le pour en lancer un sur un autre profil.",
-  "Quit the VRChat running now first": "Quitte d’abord le VRChat qui tourne"
+  "Quit the VRChat running now first": "Quitte d’abord le VRChat qui tourne",
+  "This place is private: sign in to VRChat in Settings to go there.": "Cet endroit est privé : connecte-toi à VRChat dans les Paramètres pour y aller.",
+  "This profile's VRChat account is not the one this place is for: choose its profile.": "Le compte VRChat de ce profil n’est pas celui à qui cet endroit est destiné : choisis son profil.",
+  "Sign in on this profile first: its VRChat account is not known yet.": "Connecte-toi d’abord sur ce profil : son compte VRChat n’est pas encore connu.",
+  "VRChat is no longer running: choose a profile and press Play to start it there.": "VRChat ne tourne plus : choisis un profil et appuie sur Jouer pour le lancer là.",
+  "VRChat was not started into the place asked for: choose it again.": "VRChat n’a pas été lancé dans l’endroit demandé : choisis-le de nouveau.",
+  "This place is private, and the VRChat on this computer is not known to be signed in with your account.": "Cet endroit est privé, et rien ne dit que le VRChat de cet ordinateur est connecté avec ton compte.",
+  "{file} cannot be written, and it keeps two VRChats from starting at once: give yourself permission to write it, then press Play again.": "Impossible d’écrire {file}, qui empêche deux VRChat de démarrer en même temps : donne-toi le droit d’y écrire, puis appuie encore sur Jouer.",
+  "{file} cannot be written: the disk is full. Free some space, then press Play again.": "Impossible d’écrire {file} : le disque est plein. Libère de la place, puis appuie encore sur Jouer.",
+  "{file} cannot be written ({reason}): check its permissions and the free space on its disk, then press Play again.": "Impossible d’écrire {file} ({reason}) : vérifie ses droits et la place libre sur son disque, puis appuie encore sur Jouer.",
+  "Start without a place": "Lancer sans destination",
+  "Its account is not known yet": "Son compte n’est pas encore connu"
 }

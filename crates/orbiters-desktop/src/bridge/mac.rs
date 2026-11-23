@@ -363,6 +363,8 @@ struct EngineWindow {
     /// Whether its style has a title bar; `None` once it may have changed unsaid.
     titled: Option<bool>,
     full_screen: bool,
+    /// Its content, in the window server's pixels, as last said.
+    size: (f64, f64),
 }
 
 impl EngineWindows {
@@ -378,9 +380,10 @@ impl EngineWindows {
         // `client 34529: window 1 800x450 px style 0x10`
         if let Some((client, made)) = said.strip_prefix("client ").and_then(|r| r.split_once(": window ")) {
             let (Some((id, rest)), true) = (made.split_once(' '), client.bytes().all(|b| b.is_ascii_digit())) else { return };
-            let (Ok(id), Some((_, style))) = (id.parse(), rest.split_once(" px style ")) else { return };
+            let (Ok(id), Some((size, style))) = (id.parse(), rest.split_once(" px style ")) else { return };
+            let Some(size) = Self::size(size) else { return };
             self.windows.retain(|w| w.id != id);
-            self.windows.push(EngineWindow { id, titled: Self::titled(style), full_screen: false });
+            self.windows.push(EngineWindow { id, titled: Self::titled(style), full_screen: false, size });
             let most = self.windows.len().saturating_sub(64);
             self.windows.drain(..most);
             return;
@@ -393,7 +396,12 @@ impl EngineWindows {
             return;
         }
         let Some(window) = self.windows.iter_mut().find(|w| w.id == id) else { return };
-        if let Some(style) = what.strip_prefix("style ") {
+        if let Some(frame) = what.strip_prefix("frame px (") {
+            // `(452,329 800x450) flags 0x1`
+            if let Some(size) = frame.split_once(')').and_then(|(frame, _)| Self::size(frame.split_once(' ')?.1)) {
+                window.size = size;
+            }
+        } else if let Some(style) = what.strip_prefix("style ") {
             window.titled = Self::titled(style);
         } else if what.starts_with("[fullscreen-on]") {
             window.full_screen = true;
@@ -404,12 +412,35 @@ impl EngineWindows {
         }
     }
 
-    /// The title bar, in points, of the game's window (the newest there is): `None` when it was not said.
-    pub fn title(&self) -> Option<f64> {
-        let window = self.windows.last()?;
-        match (window.full_screen, window.titled?) {
-            (true, _) | (_, false) => Some(0.0),
-            (false, true) => Some(TITLE_BAR_POINTS),
+    fn size(said: &str) -> Option<(f64, f64)> {
+        let (w, h) = said.split_once('x')?;
+        Some((f64::from(w.parse::<u32>().ok()?), f64::from(h.parse::<u32>().ok()?)))
+    }
+
+    /// The title bar, in points, of the window whose frame is `width` x `height` points on a display of `scale` backing pixels
+    /// per point, which it `covers` or not: what is said of the window of that very size, content and title bar together, and
+    /// of no other. `None` when none of them is it, or more than one that differ are.
+    pub fn title(&self, (width, height): (f64, f64), scale: f64, covers: bool) -> Option<f64> {
+        if scale <= 0.0 {
+            return None;
+        }
+        let near = |a: f64, b: f64| (a - b).abs() < 1.5;
+        let mut titles: Vec<f64> = self
+            .windows
+            .iter()
+            .filter_map(|w| {
+                if w.full_screen {
+                    // (its size was said before it went full screen)
+                    return covers.then_some(0.0);
+                }
+                let title = if w.titled? { TITLE_BAR_POINTS } else { 0.0 };
+                (near(w.size.0 / scale, width) && near(w.size.1 / scale + title, height)).then_some(title)
+            })
+            .collect();
+        titles.dedup();
+        match titles[..] {
+            [title] => Some(title),
+            _ => None,
         }
     }
 }
@@ -475,8 +506,10 @@ mod tests {
     /// nothing of the content is cut off.
     #[test]
     fn the_crop_is_the_window_s_own_title_bar_whatever_the_game_renders() {
+        // (the frame the window has on the screen: its content, and its title bar where it has one)
+        let frame = |content: (f64, f64), title: f64| (content.0, content.1 + title);
         let mut engine = EngineWindows::default();
-        assert_eq!(engine.title(), None);
+        assert_eq!(engine.title((1470.0, 956.0), 2.0, true), None);
         // As this Mac's engine wrote them on 2026-11-23 (the splash, then the game).
         for line in [
             "wsd: client 34529: window 1 800x450 px style 0x10",
@@ -487,31 +520,62 @@ mod tests {
         ] {
             engine.read(line);
         }
-        assert_eq!(engine.title(), Some(0.0));
+        assert_eq!(engine.title((1470.0, 956.0), 2.0, true), Some(0.0));
         // Borderless, 900 x 500 points, drawn from a 1280 x 720 swapchain: neither title height fits it.
         let mut engine = EngineWindows::default();
         engine.read("wsd: client 1: window 4 1800x1000 px style 0x10");
         assert_eq!(title_from_guest(500.0, 2.0, 720), None, "what the fallback cut 32 points off for");
         assert_eq!(title_points(&w(4, 900.0, 500.0, 0, true), Some((0.0, 0.0, 1470.0, 956.0))), TITLE_BAR_POINTS);
-        assert_eq!(engine.title(), Some(0.0));
-        assert_eq!(title_rows(1000, 500.0, engine.title().unwrap()), 0);
+        let (borderless, titled) = (frame((900.0, 500.0), 0.0), frame((900.0, 500.0), TITLE_BAR_POINTS));
+        assert_eq!(engine.title(borderless, 2.0, false), Some(0.0));
+        assert_eq!(title_rows(1000, 500.0, engine.title(borderless, 2.0, false).unwrap()), 0);
         // The same size with a title bar, restyled, a window above it gone.
         engine.read("wsd: window 4 style 0xf");
-        assert_eq!(engine.title(), Some(TITLE_BAR_POINTS));
+        assert_eq!(engine.title(titled, 2.0, false), Some(TITLE_BAR_POINTS));
+        // (sixth verification: a newer window's style is not this one's)
         engine.read("wsd: client 1: window 5 100x100 px style 0x10");
-        assert_eq!(engine.title(), Some(0.0));
+        assert_eq!(engine.title(titled, 2.0, false), Some(TITLE_BAR_POINTS));
+        assert_eq!(engine.title((50.0, 50.0), 2.0, false), Some(0.0));
         engine.read("wsd: window 5 [destroy]: x");
-        assert_eq!(engine.title(), Some(TITLE_BAR_POINTS));
+        assert_eq!(engine.title((50.0, 50.0), 2.0, false), None);
+        assert_eq!(engine.title(titled, 2.0, false), Some(TITLE_BAR_POINTS));
         engine.read("wsd: window 4 style 0x1f");
-        assert_eq!(engine.title(), Some(0.0), "borderless overrides the others");
+        assert_eq!(engine.title(borderless, 2.0, false), Some(0.0), "borderless overrides the others");
         // Out of full screen its style may have changed unsaid; a line that is not one changes nothing.
         engine.read("wsd: window 4 [fullscreen-on]: x");
         engine.read("wsd: window 4 [fullscreen-off]: x");
-        assert_eq!(engine.title(), None);
+        assert_eq!(engine.title(borderless, 2.0, false), None);
         for line in ["wsd: window 9 style 0x1", "wsd: window x style 0x1", "wsd: client 1: window", "window 4 style 0x1", ""] {
             engine.read(line);
         }
-        assert_eq!(engine.title(), None);
+        assert_eq!(engine.title(borderless, 2.0, false), None);
+    }
+
+    /// Sixth verification, finding 15 (the verifier's fixture): a large borderless window and a newer small titled one, each
+    /// with its own title bar; a frame that is neither's has none said.
+    #[test]
+    fn the_crop_is_the_captured_window_s_own_among_several() {
+        let mut engine = EngineWindows::default();
+        engine.read("wsd: client 4: window 1 1500x900 px style 0x10");
+        engine.read("wsd: client 4: window 2 300x150 px style 0x1");
+        assert_eq!(engine.title((750.0, 450.0), 2.0, false), Some(0.0));
+        assert_eq!(engine.title((1500.0, 900.0), 1.0, false), Some(0.0));
+        assert_eq!(engine.title((150.0, 75.0 + TITLE_BAR_POINTS), 2.0, false), Some(TITLE_BAR_POINTS));
+        assert_eq!(engine.title((750.0, 450.0 + TITLE_BAR_POINTS), 2.0, false), None, "the title bar is not that one's");
+        assert_eq!(engine.title((640.0, 392.0), 2.0, false), None);
+        assert_eq!(engine.title((750.0, 450.0), 0.0, false), None);
+        // Its size as last said; a name that says nothing readable changes nothing.
+        engine.read("wsd: window 1 frame px (452,329 800x450) flags 0x1");
+        engine.read("wsd: window 1 frame px (what");
+        assert_eq!(engine.title((400.0, 225.0), 2.0, false), Some(0.0));
+        assert_eq!(engine.title((750.0, 450.0), 2.0, false), None);
+        // Two that differ in nothing but their title bar, and whose frames are one: not told apart.
+        engine.read("wsd: client 4: window 3 800x386 px style 0x1");
+        assert_eq!(engine.title((400.0, 225.0), 2.0, false), None);
+        // Full screen it has none, and is the one that covers its display.
+        engine.read("wsd: window 3 [fullscreen-on]: x");
+        assert_eq!(engine.title((1470.0, 956.0), 2.0, true), Some(0.0));
+        assert_eq!(engine.title((400.0, 225.0), 2.0, false), Some(0.0));
     }
 
     #[test]

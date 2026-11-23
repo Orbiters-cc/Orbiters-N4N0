@@ -1945,12 +1945,12 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
     assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| !t.repairing));
 }
 
-/// A program in `root` that answers as obelisk-cli 0.1.9 does: `steam play` runs a game until `stop` is written, its session
+/// A program in `root` that answers as obelisk-cli 0.1.10 does: `steam play` runs a game until `stop` is written, its session
 /// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
 #[cfg(target_os = "macos")]
 fn pretend_program(root: &std::path::Path) -> MacMachine {
     use std::os::unix::fs::PermissionsExt;
-    let folder = root.join("tools/obelisk-cli-0.1.9-arm64");
+    let folder = root.join("tools/obelisk-cli-0.1.10-arm64");
     std::fs::create_dir_all(folder.join("SteamNative")).unwrap();
     std::fs::create_dir_all(root.join("library/SteamSessions")).unwrap();
     std::fs::write(folder.join("SteamNative/obelisk-steam-host"), "").unwrap();
@@ -1968,6 +1968,10 @@ case "$1 $2" in
 "steam play")
     if [ -e "$root/refuses" ]; then
         echo '{"event":"error","code":"engine_files","message":"m","key":"backend.runtime.engineFiles","engine":{"paths":["engine/wsd"],"reason":"why","action":"repair"}}'; exit 1
+    fi
+    if [ -e "$root/switch" ]; then echo 78 > "$root/account"; fi
+    if [ "$4" = --steam-id ] && [ "$5" != "$(cat "$root/account")" ]; then
+        echo '{"event":"error","code":"other_account","message":"m","key":null}'; exit 1
     fi
     n=$(($(cat "$root/count" 2>/dev/null || echo 0) + 1)); echo $n > "$root/count"; session="5e551011-0000-4000-8000-00000000000$n"
     record() { echo "{\"version\":2,\"id\":\"$session\",\"account_id\":77,\"phase\":\"$1\",\"store\":{\"app_id\":438100},\"played\":{\"seconds\":400,\"frames\":{\"count\":1000,\"measured\":true}},\"revision\":1}" > "$root/writing" && mv "$root/writing" "$root/library/SteamSessions/$session.v2.json"; }
@@ -2065,6 +2069,75 @@ fn a_restart_is_of_its_own_session_its_own_arguments_and_its_own_accounts() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Sixth verification, the restart finding (the verifier's fixture): the saved Steam account changes between the restart's
+/// last look at it and the session the program starts with: the program is told whom it is for, and starts nobody else's.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_restart_never_starts_on_an_account_that_changed_at_the_last_moment() {
+    use super::super::picture;
+    let _publishing = picture::PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("orbiters-restart-account-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    let session = |n: u32| format!("5e551011-0000-4000-8000-00000000000{n}");
+    let asked = || std::fs::read_to_string(root.join("asked")).unwrap_or_default();
+    machine.start_for(&[], Some("test-person")).unwrap();
+    eventually(|| machine.home_session_running(&session(1)));
+    picture::publish(Some((session(1), picture::Picture::Lost)));
+    std::fs::write(root.join("switch"), "").unwrap();
+    let _ = machine.restart_lost(&session(1), &|_| true);
+    eventually(|| asked().contains("steam play 438100 --steam-id 77") && machine.play.attached().is_none());
+    assert!(!machine.home_session_running(&session(2)));
+    assert!(orbiters_core::obelisk::session_record_of(&root.join("library"), &session(2)).unwrap().is_none(), "nothing started for another account");
+    let said = machine.play.launch(2).and_then(|l| l.failure).map(|f| f.code);
+    assert_eq!(said.as_deref(), Some("other_account"), "and Home says why");
+    // A start of the person's own (Play) names none: it is for whoever is signed in.
+    assert!(asked().lines().find(|l| l.starts_with("steam play")).is_some_and(|l| !l.contains("--steam-id")));
+    picture::publish(None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Sixth verification (the verifier's fixture): two coordinators of one computer never both reserve a start, nor start beside
+/// the other's; the slot is free again once it is given back or its start is over.
+#[test]
+#[cfg(target_os = "macos")]
+fn two_coordinators_never_both_reserve_a_start() {
+    use super::super::obelisk_cli::{Play, Refused};
+    let root = std::env::temp_dir().join(format!("orbiters-coordinators-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let machine = pretend_program(&{
+        std::fs::create_dir_all(&root).unwrap();
+        root.clone()
+    });
+    let (library, program) = (root.join("library"), machine.program().unwrap());
+    let new = || Arc::new(Play::new(root.join("config/gate.json")));
+    let (a, b) = (new(), new());
+    let token = a.reserve(&library, None).unwrap();
+    assert!(matches!(b.reserve(&library, None), Err(Refused::Busy)), "reserved by the other");
+    assert!(matches!(b.start_reserved(&program, &library, &[], None), Err(Refused::Busy)), "nor started beside it");
+    a.unreserve(token);
+    let token = b.reserve(&library, None).unwrap();
+    assert!(a.reserve(&library, None).is_err());
+    // Its start keeps it until it is over.
+    let id = b.start_reserved(&program, &library, &[], Some(token)).unwrap();
+    eventually(|| b.launch(id).is_some_and(|l| l.running));
+    assert!(matches!(a.reserve(&library, None), Err(Refused::Busy)));
+    std::fs::write(root.join("stop-5e551011-0000-4000-8000-000000000001"), "").unwrap();
+    eventually(|| b.attached().is_none());
+    let token = a.reserve(&library, None).unwrap();
+    a.unreserve(token);
+    // A start that could not be made lets go of it.
+    assert!(matches!(a.start_reserved(&root.join("no program"), &library, &[], None), Err(Refused::Failed(_))));
+    let token = b.reserve(&library, None).unwrap();
+    b.unreserve(token);
+    // One that is gone (its process ended) holds nothing.
+    let _ = a.reserve(&library, None).unwrap();
+    drop(a);
+    eventually(|| b.reserve(&library, None).is_ok());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Finding 5, end to end with the program: a start refused over the engine's files is kept with its paths, whoever it was
 /// for; a repair that fails leaves it, one that succeeds ends it.
 #[test]
@@ -2102,7 +2175,7 @@ fn a_program_too_old_starts_no_vrchat() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let machine = pretend_program(&root);
-    std::fs::rename(root.join("tools/obelisk-cli-0.1.9-arm64"), root.join("tools/obelisk-cli-0.1.8-arm64")).unwrap();
+    std::fs::rename(root.join("tools/obelisk-cli-0.1.10-arm64"), root.join("tools/obelisk-cli-0.1.9-arm64")).unwrap();
     assert!(machine.start(&[]).is_err());
     assert!(!root.join("asked").exists());
     let _ = std::fs::remove_dir_all(&root);

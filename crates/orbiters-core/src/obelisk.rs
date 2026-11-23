@@ -216,6 +216,10 @@ pub struct SessionRecord {
     pub quit_accepted: Option<(String, u64)>,
     /// The Steam account it runs for.
     pub account: Option<u64>,
+    /// The process of the session's supervisor and its birth, which writes the game's log and this record.
+    pub supervisor: Option<(u32, (u64, u32))>,
+    /// Its game's log does not hold what the game wrote (obelisk-cli 0.1.10: why, in the record).
+    pub log_failed: bool,
 }
 
 /// The frames a running game has shown so far, as its record says them (`shown`, obelisk-cli 0.1.5).
@@ -268,6 +272,7 @@ pub fn session_record(text: &str) -> Option<SessionRecord> {
     // Absent in records before obelisk-cli 0.1.5, which read the log the same way: measured.
     let measured = frames.and_then(|f| f.get("measured")).and_then(serde_json::Value::as_bool).unwrap_or(true);
     let game = record.get("game").filter(|g| g.is_object());
+    let birth = |g: &serde_json::Value| Some((g.get("birth_seconds")?.as_u64()?, u32::try_from(g.get("birth_microseconds")?.as_u64()?).ok()?));
     let shown = record.get("shown").filter(|s| s.is_object());
     Some(SessionRecord {
         id: record.get("id")?.as_str()?.to_string(),
@@ -275,12 +280,14 @@ pub fn session_record(text: &str) -> Option<SessionRecord> {
         game: game.and_then(|g| g.get("pid")).and_then(serde_json::Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1),
         seconds: played.and_then(|p| p.get("seconds")).and_then(serde_json::Value::as_u64),
         frames: frames.and_then(|f| f.get("count")).and_then(serde_json::Value::as_u64).filter(|_| measured),
-        game_birth: game.and_then(|g| Some((g.get("birth_seconds")?.as_u64()?, u32::try_from(g.get("birth_microseconds")?.as_u64()?).ok()?))),
+        game_birth: game.and_then(birth),
         shown: shown.and_then(|s| {
             Some(Shown { frames: s.get("frames")?.as_u64()?, at: s.get("at")?.as_u64()?, continuous: s.get("continuous")?.as_bool()? })
         }),
         quit_accepted: record.get("quit_accepted").and_then(boot_instant).map(|at| (at.boot, (at.seconds * 1000.0) as u64)),
         account: record.get("account_id").and_then(serde_json::Value::as_u64),
+        supervisor: record.get("supervisor").and_then(|s| Some((u32::try_from(s.get("pid")?.as_u64()?).ok()?, birth(s)?))),
+        log_failed: record.get("log_failure").is_some_and(|f| !f.is_null()),
     })
 }
 
@@ -557,9 +564,9 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
-/// The first obelisk-cli N4N0 starts VRChat with (0.1.9: one complete set of engine files, held for the whole session, and
-/// `engine repair`).
-pub const LEAST: (u32, u32, u32) = (0, 1, 9);
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.10: no engine file replaced while anything of it runs, a repair that
+/// is whole or nothing, a log that never disturbs the game, and `steam play --steam-id`).
+pub const LEAST: (u32, u32, u32) = (0, 1, 10);
 
 /// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
 /// release is not known to be.
@@ -776,10 +783,10 @@ mod tests {
     #[test]
     fn an_obelisk_cli_before_0_1_9_starts_no_vrchat() {
         let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
-        for old in ["obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+        for old in ["obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
             assert!(too_old(&at(old)), "{old}");
         }
-        for fit in ["obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+        for fit in ["obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.11-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
             assert!(!too_old(&at(fit)), "{fit}");
         }
     }

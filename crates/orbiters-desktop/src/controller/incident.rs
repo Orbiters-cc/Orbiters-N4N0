@@ -156,39 +156,40 @@ pub(crate) fn redact(line: &str) -> String {
     private(&credentials(line))
 }
 
-/// How many times over a value may be percent-encoded and still be read.
-const LAYERS: usize = 4;
+/// How many times over a value may be encoded (percent-encoded, or as JSON escapes it) and still be read.
+const LAYERS: usize = 5;
 
 /// The character at the start of `s` as it reads once decoded, and how many bytes of `s` it takes: `%5F`, `%255F` (encoded
-/// again, up to [`LAYERS`] times), `_` and `\/` are what they say.
+/// again, up to [`LAYERS`] times), `\u005f`, a JSON escape of a percent sign, `_` and `\/` are what they say.
 fn logical(s: &str) -> Option<(char, usize)> {
-    let bytes = s.as_bytes();
-    let hex = |at: usize, digits: usize| -> Option<u32> {
-        let text = s.get(at..at + digits)?;
-        text.bytes().all(|b| b.is_ascii_hexdigit()).then(|| u32::from_str_radix(text, 16).ok()).flatten()
+    decoded(s, LAYERS)
+}
+
+/// The same, `layers` of encoding taken off.
+fn decoded(s: &str, layers: usize) -> Option<(char, usize)> {
+    let Some(below) = layers.checked_sub(1) else {
+        return s.chars().next().map(|c| (c, c.len_utf8()));
     };
-    let mut decoded = match bytes.first()? {
-        b'%' => {
-            let mut at = 1;
-            let mut layers = 1;
-            // `%25` is a percent sign: what follows it is encoded once more.
-            while layers < LAYERS && s.get(at..at + 2) == Some("25") && hex(at + 2, 2).is_some() {
-                at += 2;
-                layers += 1;
-            }
-            hex(at, 2).and_then(char::from_u32).filter(char::is_ascii).map(|c| (c, at + 2))
+    let (first, length) = decoded(s, below)?;
+    let hex = |mut at: usize, digits: usize| -> Option<(char, usize)> {
+        let mut value = 0;
+        for _ in 0..digits {
+            let (c, n) = decoded(&s[at..], below)?;
+            value = value * 16 + c.to_digit(16)?;
+            at += n;
         }
-        b'\\' if bytes.get(1) == Some(&b'u') => hex(2, 4).and_then(char::from_u32).filter(char::is_ascii).map(|c| (c, 6)),
-        b'\\' if matches!(bytes.get(1), Some(b'/' | b'"' | b'\'')) => Some((bytes[1] as char, 2)),
+        Some((char::from_u32(value).filter(char::is_ascii)?, at))
+    };
+    let read = match first {
+        '%' => hex(length, 2),
+        '\\' => match decoded(&s[length..], below) {
+            Some(('u', n)) => hex(length + n, 4),
+            Some((c @ ('/' | '"' | '\'' | '\\'), n)) => Some((c, length + n)),
+            _ => None,
+        },
         _ => None,
     };
-    // A JSON escape of a percent sign: what it begins is encoded too.
-    if let Some(('%', n)) = decoded {
-        if let Some((c, more)) = hex(n, 2).and_then(char::from_u32).filter(char::is_ascii).map(|c| (c, 2)) {
-            decoded = Some((c, n + more));
-        }
-    }
-    decoded.or_else(|| s.chars().next().map(|c| (c, c.len_utf8())))
+    Some(read.unwrap_or((first, length)))
 }
 
 /// `s` reads as beginning with `word` (ASCII case ignored, under any encoding): how many bytes of `s` that takes.
@@ -221,9 +222,21 @@ fn location_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_-:~().%+=&?/#!$*@,;|^<>[]{}".contains(c)
 }
 
-/// The length of the run of location characters at the start of `s`.
+/// The length of the run of location characters at the start of `s`; whatever is inside parentheses is of it, to their
+/// close or to the end of the line when they are cut short.
 fn location_run(s: &str) -> usize {
-    run_of(s, location_char)
+    let mut depth = 0_usize;
+    let mut at = 0;
+    while let Some((c, n)) = logical(&s[at..]) {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if depth == 0 && !location_char(c) => break,
+            _ => {}
+        }
+        at += n;
+    }
+    at
 }
 
 /// An instance part at the start of `s` (`~name(`): its name and the length up to the value.
@@ -243,25 +256,27 @@ fn instance_part(s: &str) -> Option<(String, usize)> {
 const KEYS: [&str; 3] = ["nonce", "securename", "shortname"];
 
 /// One of [`KEYS`] at the start of `s` given a value (`nonce=…`, `nonce = …`, `"nonce":  "…"`, `nonce => '…'`, `nonce(…)`,
-/// encoded or not): the name and the length up to the value's own characters.
-fn keyed(s: &str) -> Option<(&'static str, usize)> {
+/// encoded or not): the name.
+fn keyed(s: &str) -> Option<&'static str> {
     let (key, mut at) = KEYS.iter().find_map(|key| Some((*key, reads(s, key)?)))?;
     let space = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '`' | '+');
     at += run_of(&s[at..], space);
-    let (separator, n) = logical(&s[at..])?;
-    if !matches!(separator, ':' | '=' | '(' | '[') {
-        return None;
-    }
-    at += n;
-    at += run_of(&s[at..], |c| space(c) || matches!(c, ':' | '=' | '>' | '(' | '['));
-    Some((key, at))
+    let (separator, _) = logical(&s[at..])?;
+    matches!(separator, ':' | '=' | '(' | '[').then_some(key)
 }
 
 /// Whatever says where or who, taken out.
 fn private(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
-    while !rest.is_empty() {
+    while let Some((begins, n)) = logical(rest) {
+        // Nothing looked for begins with any other character. One whole character as it reads: never the middle of an
+        // encoding, from which nothing would be found.
+        if !matches!(begins.to_ascii_lowercase(), 'v' | 'w' | '~' | 'u' | 'g' | 'n' | 's') {
+            out.push_str(&rest[..n]);
+            rest = &rest[n..];
+            continue;
+        }
         // a VRChat link, as it is or encoded: its scheme only
         if let Some(n) = reads(rest, "vrchat:/") {
             out.push_str("vrchat://[removed]");
@@ -282,8 +297,8 @@ fn private(line: &str) -> String {
                 out.push_str(&name);
                 out.push_str("([removed])");
                 let value = &rest[n..];
-                // up to its close, or to the end of the run when it is cut short
-                let inside = run_of(value, |c| c != ')' && location_char(c));
+                // up to its close, whatever is in it, or to the end of the line when it is cut short
+                let inside = run_of(value, |c| c != ')');
                 rest = &value[inside + reads(&value[inside..], ")").unwrap_or(0)..];
                 continue;
             }
@@ -300,38 +315,29 @@ fn private(line: &str) -> String {
                 continue;
             }
         }
-        // a nonce, or an instance's key, given as a value: the whole field
-        if let Some((name, n)) = keyed(rest) {
+        // a nonce, or an instance's key, given as a value: to the end of the line, for where a value ends is the line's own
+        // to say (quotes in quotes, spaces, encodings), and none of it may stay
+        if let Some(name) = keyed(rest) {
             out.push_str(name);
             out.push_str("=[removed]");
-            let value = &rest[n..];
-            rest = &value[location_run(value)..];
-            continue;
+            break;
         }
-        // One whole character as it reads: never the middle of an encoding, from which nothing would be found.
-        let n = logical(rest).map_or(rest.len(), |(_, n)| n);
         out.push_str(&rest[..n]);
         rest = &rest[n..];
     }
     out
 }
 
-/// A line with whatever follows a word that names a credential taken out.
+/// Words that name a credential.
+const WORDS: [&str; 12] = ["password", "passwd", "token", "secret", "cookie", "authorization", "auth=", "authcookie", "apikey", "api_key", "session_key", "ticket"]; // i18n: not shown (words looked for in logs)
+
+/// A line with whatever follows the first word that names a credential, as it is or under any encoding, taken out.
 fn credentials(line: &str) -> String {
-    const WORDS: [&str; 12] = ["password", "passwd", "token", "secret", "cookie", "authorization", "auth=", "authcookie", "apikey", "api_key", "session_key", "ticket"]; // i18n: not shown (words looked for in logs)
-    let lower = line.to_ascii_lowercase();
-    match WORDS.iter().filter_map(|w| lower.find(w).map(|i| i + w.len())).min() {
-        // The byte positions of the lowercase copy are the line's own (ASCII lowercasing keeps every length).
-        Some(end) if line.is_char_boundary(end) => return format!("{}[removed]", &line[..end]),
-        Some(_) => return "[removed]".into(),
-        None => {}
-    }
-    // The same words under an encoding.
-    if line.contains('%') || line.contains("\\u") {
-        for (at, _) in line.char_indices() {
-            if let Some(n) = WORDS.iter().find_map(|word| reads(&line[at..], word)) {
-                return format!("{}[removed]", &line[..at + n]);
-            }
+    for (at, _) in line.char_indices() {
+        let begins = logical(&line[at..]).map(|(c, _)| c.to_ascii_lowercase());
+        let words = WORDS.iter().filter(|word| word.chars().next() == begins);
+        if let Some(n) = words.filter_map(|word| reads(&line[at..], word)).min() {
+            return format!("{}[removed]", &line[..at + n]);
         }
     }
     line.to_string()
@@ -564,13 +570,33 @@ pub(crate) struct Followed {
     pub engine_log: PathBuf,
     pub engine: Option<std::fs::File>,
     pub vrchat: Option<std::fs::File>,
+    /// voile-lkd's recent-event ring, where its launch makes one.
+    pub ring: Option<std::fs::File>,
 }
 
 impl Followed {
     /// The same, holding the same files: taken when a capture is scheduled.
     pub(crate) fn held(&self) -> Followed {
         let same = |file: &Option<std::fs::File>| file.as_ref().and_then(|f| f.try_clone().ok());
-        Followed { session: self.session.clone(), launcher: self.launcher, birth: self.birth, engine_log: self.engine_log.clone(), engine: same(&self.engine), vrchat: same(&self.vrchat) }
+        Followed { session: self.session.clone(), launcher: self.launcher, birth: self.birth, engine_log: self.engine_log.clone(), engine: same(&self.engine), vrchat: same(&self.vrchat), ring: same(&self.ring) }
+    }
+
+    /// Opens what is this launch's and not held yet: made since its launcher was born and before now, while that launcher
+    /// `lives` (asked before and after: its session then is still the one that runs, and no other can have made them, for the
+    /// engine runs one at a time). Nothing is held that this cannot be said of.
+    fn associate(&mut self, vrchat_logs: &Path, lives: &dyn Fn() -> bool) {
+        if !lives() {
+            return;
+        }
+        let until = std::time::SystemTime::now();
+        let engine = if self.engine.is_none() { engine_log(&self.engine_log, self.birth, until) } else { None };
+        let vrchat = if self.vrchat.is_none() { vrchat_log(vrchat_logs, self.birth, until) } else { None };
+        let ring = if self.ring.is_none() { made_within(&ring_of(&self.engine_log), self.birth, until) } else { None };
+        if (engine.is_some() || vrchat.is_some() || ring.is_some()) && lives() {
+            self.engine = self.engine.take().or(engine);
+            self.vrchat = self.vrchat.take().or(vrchat);
+            self.ring = self.ring.take().or(ring);
+        }
     }
 }
 
@@ -656,8 +682,7 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
     // The logs, by the files held since they were found to be this session's, whatever is at their paths now; and the engine's recent events (attaches, ptrace and group stops).
     let engine_len = followed.engine.as_ref().and_then(|log| copy_tail(log, &dir.join("engine.log"), LOG_COPY).ok());
     let vrchat_len = followed.vrchat.as_ref().and_then(|log| copy_tail(log, &dir.join("vrchat.log"), LOG_COPY).ok());
-    // (the ring too only when it was made for this launch: each start makes a new one at its path)
-    let ring = engine_log(&ring_of(&followed.engine_log), followed.birth.0).and_then(|file| read_at(&file, 0, 4 << 20).ok()).map(|bytes| ring_lines(&bytes));
+    let ring = followed.ring.as_ref().and_then(|file| read_at(file, 0, 4 << 20).ok()).map(|bytes| ring_lines(&bytes));
     if let Some(lines) = &ring {
         std::fs::write(dir.join("lkd-events.txt"), lines.join("\n") + "\n")?;
     }
@@ -673,8 +698,8 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
                 let target = (*t).clone();
                 let pid = t.pid.to_string();
                 std::thread::spawn(move || match run_bounded("/usr/bin/sample", &[&pid, "2", "-mayDie", "-file", "/dev/stdout"], std::time::Duration::from_secs(20)) {
-                    // The number may have been used again while it was sampled: then it is nobody's sample.
-                    Ok(_) if birth_of(target.pid).is_some_and(|birth| birth != target.birth) => Some(format!("sample of {pid}: another process took its number")), // i18n: not shown (a file for whoever looks into it)
+                    // The number may have been used again while it was sampled, or it cannot be told: then it is nobody's sample.
+                    Ok(_) if !target.same(birth_of(target.pid), exe_of(target.pid).as_deref()) => Some(format!("sample of {pid}: not certain to be its process, discarded")), // i18n: not shown (a file for whoever looks into it)
                     Ok(text) => {
                         let clean = text.lines().map(redact).collect::<Vec<_>>().join("\n");
                         std::fs::write(&file, clean).err().map(|e| format!("{}: {e}", file.display()))
@@ -789,32 +814,45 @@ fn run_bounded(program: &str, args: &[&str], limit: std::time::Duration) -> Resu
     }
 }
 
-/// The first of VRChat's own logs in `dir` begun at or after `since` (Unix seconds), held open: this session's, which is the
-/// only one running (a later one is a later session's).
-fn vrchat_log(dir: &Path, since: u64) -> Option<std::fs::File> {
-    let mut logs: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+/// The first of VRChat's own logs in `dir` made from `birth` (its launcher's) to `until`, held open.
+fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime) -> Option<std::fs::File> {
+    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-        .filter_map(|e| Some((made(&e.metadata().ok()?)?, e.path())))
-        .filter(|(made, _)| made + 2 >= since)
+        .filter_map(|e| Some((e.metadata().ok()?.created().ok()?, e.path())))
+        .filter(|(made, _)| *made >= born_at(birth))
         .collect();
     logs.sort();
     let (at, path) = logs.into_iter().next()?;
-    let file = std::fs::File::open(path).ok()?;
     // The file found is the one opened.
-    (made(&file.metadata().ok()?)? == at).then_some(file)
+    made_within(&path, birth, until).filter(|file| file.metadata().and_then(|meta| meta.created()).is_ok_and(|made| made == at))
 }
 
-/// When a file was made (Unix seconds).
-fn made(meta: &std::fs::Metadata) -> Option<u64> {
-    meta.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+/// A process's birth as a time.
+fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::new(seconds, micros.saturating_mul(1000))
+}
+
+/// The file at `path`, held open, when it was made from `birth` to `until`.
+fn made_within(path: &Path, birth: (u64, u32), until: std::time::SystemTime) -> Option<std::fs::File> {
+    let file = std::fs::File::open(path).ok()?;
+    let made = file.metadata().ok()?.created().ok()?;
+    (made >= born_at(birth) && made <= until).then_some(file)
 }
 
 /// The engine's log at `path`, held open, when it is the one of the launch born at `birth`.
-fn engine_log(path: &Path, birth: u64) -> Option<std::fs::File> {
-    let file = std::fs::File::open(path).ok()?;
-    log_is_of(made(&file.metadata().ok()?)?, birth).then_some(file)
+fn engine_log(path: &Path, birth: (u64, u32), until: std::time::SystemTime) -> Option<std::fs::File> {
+    let file = made_within(path, birth, until)?;
+    let made = file.metadata().ok()?.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    log_is_of(made, birth.0).then_some(file)
+}
+
+/// The session the engine runs now, by its pointer in `library`.
+#[cfg(target_os = "macos")]
+fn pointer(library: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(orbiters_core::obelisk::sessions_dir(library).join(orbiters_core::obelisk::POINTER)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?.get("id")?.as_str().map(str::to_owned)
 }
 
 /// Follows the engine's sessions in `library` for as long as N4N0 runs (a Mac only), capturing each incident once.
@@ -826,11 +864,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         std::thread::sleep(EVERY);
         // A pointer or record that cannot be read for a moment (being rewritten) keeps what is followed: only a record that
         // says its session is over, or another session, starts afresh.
-        let pointer = std::fs::read_to_string(orbiters_core::obelisk::sessions_dir(&library).join(orbiters_core::obelisk::POINTER))
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_owned));
-        let Some(id) = pointer else { continue };
+        let Some(id) = pointer(&library) else { continue };
         let Ok(record) = orbiters_core::obelisk::session_record_of(&library, &id) else { continue };
         let Some(record) = record.filter(|r| !r.over()) else {
             current = None;
@@ -842,17 +876,12 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let alive = super::bridge_mac::born(launcher) == Some(birth);
         if current.as_ref().is_none_or(|(f, ..)| f.session != record.id || f.launcher != launcher || f.birth != birth) {
             let engine_log = orbiters_core::obelisk::engine_log(&home);
-            let followed = Followed { session: record.id.clone(), launcher, birth, engine_log, engine: None, vrchat: None };
+            let followed = Followed { session: record.id.clone(), launcher, birth, engine_log, engine: None, vrchat: None, ring: None };
             current = Some((followed, Detector::default(), Lines::default(), Lines::default(), super::picture::Tracker::default()));
         }
         let Some((followed, detector, engine_lines, vrchat_lines, picture)) = current.as_mut() else { continue };
         // Held once found to be this launch's (the engine's log is a new file each start; VRChat's begins a while after).
-        if followed.engine.is_none() {
-            followed.engine = engine_log(&followed.engine_log, birth.0);
-        }
-        if followed.vrchat.is_none() {
-            followed.vrchat = vrchat_log(&orbiters_core::obelisk::vrchat_log_dir(&library), birth.0);
-        }
+        followed.associate(&orbiters_core::obelisk::vrchat_log_dir(&library), &|| super::bridge_mac::born(launcher) == Some(birth) && pointer(&library).as_deref() == Some(&*id));
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();
@@ -875,6 +904,9 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         }
         // Once VRChat said it quits, it stays quitting.
         look.quitting |= detector.quit_at.is_some();
+        // A log its supervisor does not write (it is gone, or could not set it up) says nothing of frames, read or not.
+        let written = !record.log_failed && record.supervisor.is_none_or(|(pid, birth)| super::bridge_mac::born(pid) == Some(birth));
+        let graphics = graphics.filter(|_| written);
         // Its picture: one decision, for Home (the restart it offers), the bridge and this capture (R1: only a confirmed loss
         // of this very session is ever acted on).
         let seen = picture.look(&super::picture::Look {
@@ -1112,6 +1144,7 @@ mod tests {
             engine: Some(std::fs::File::open(&engine_log).unwrap()),
             engine_log: engine_log.clone(),
             vrchat: None,
+            ring: None,
         };
         // The next launch's log at the same path, while this session's is captured: this session's is.
         std::fs::rename(&engine_log, dir.join("engine.previous.log")).unwrap();
@@ -1396,5 +1429,148 @@ mod tests {
         assert!(log_is_of(1000, 1000) && log_is_of(1001, 1000) && log_is_of(998, 1000));
         assert!(!log_is_of(900, 1000), "the last launch's");
         assert!(!log_is_of(1200, 1000), "the next launch's");
+    }
+
+    /// Sixth verification (ruling 10): for every private field name the redactor knows, under every encoding and with every
+    /// separator it claims, with values that hold spaces, quotes and characters that are not ASCII, no byte of the value
+    /// survives, nor any encoding of it.
+    #[test]
+    fn no_byte_of_a_private_value_survives_any_encoding_or_separator() {
+        let percent = |s: &str, all: bool| -> String { s.bytes().map(|b| if all || !b.is_ascii_alphanumeric() { format!("%{b:02X}") } else { (b as char).to_string() }).collect() };
+        let json = |s: &str, all: bool| -> String {
+            s.chars()
+                .map(|c| match c {
+                    '"' => "\\\"".to_string(),
+                    c if all || !c.is_ascii() => c.encode_utf16(&mut [0; 2]).iter().map(|unit| format!("\\u{unit:04x}")).collect(),
+                    c => c.to_string(),
+                })
+                .collect()
+        };
+        type Encoding<'a> = (&'a str, Box<dyn Fn(&str) -> String + 'a>);
+        let mut encodings: Vec<Encoding> = vec![
+            ("plain", Box::new(|s| s.to_string())),
+            ("upper", Box::new(|s| s.to_uppercase())),
+            ("json", Box::new(move |s| json(s, false))),
+            ("json, all", Box::new(move |s| json(s, true))),
+            ("json of percent", Box::new(move |s| json(&percent(s, false), true))),
+        ];
+        for layers in 1..=LAYERS {
+            for all in [false, true] {
+                encodings.push(("percent", Box::new(move |s| (0..layers).fold(s.to_string(), |s, layer| percent(&s, all && layer == 0)))));
+            }
+        }
+        let values = ["first second", "it's \"quoted\" twice", "\u{2603}suffix\u{e9} \u{65e5}", "a\\\"b', c", "x)y z", "\u{1f512}", "q&w;e,r}t"];
+        let separators = [("=", ""), (" = ", ""), (": ", ""), ("\":\"", "\""), ("\" : \"", "\", \"x\": 1}"), (" => '", "'"), ("(", ")"), ("[", "]"), ("\\\":\\\"", "\\\"}")];
+        let mut tried = 0;
+        for name in KEYS.iter().chain(&WORDS) {
+            // (`auth=` carries its own separator)
+            for value in values {
+                for (separator, close) in separators {
+                    for (encoding, encode) in &encodings {
+                        for before in ["", "2026.11.23 08:06:37 Debug - ", "\u{e9}{\""] {
+                            let hidden = encode(&format!("{name}{separator}{value}{close}"));
+                            let out = redact(&format!("{before}{hidden} after"));
+                            let kept = out.strip_prefix(before).unwrap_or_else(|| panic!("{out:?}"));
+                            let named = kept.strip_suffix("[removed]").unwrap_or_else(|| panic!("{name} {separator:?} {value:?} {encoding}: {out:?}"));
+                            // What stays is the name (as it was written) and no more.
+                            let longest = encode(name).len().max(name.len()) + 1;
+                            assert!(named.len() <= longest, "{name} {separator:?} {value:?} {encoding}: {out:?}");
+                            tried += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tried > 30_000, "{tried}");
+        // Instance parts: to their close, whatever is in them; cut short, to the end of the line.
+        for part in ["private", "hidden", "friends", "group", "nonce", "shortName"] {
+            for value in ["first second", "it's \"quoted\"", "\u{2603}suffix"] {
+                for (_, encode) in &encodings {
+                    for line in [format!("~{part}({value})~region(eu)"), format!("wrld_4432ea9b:1~{part}({value})~region(eu)"), format!("~{part}({value}")] {
+                        let out = redact(&format!("in {} end", encode(&line)));
+                        for piece in value.split(' ') {
+                            assert!(!out.contains(piece) && !out.contains(&encode(piece)), "{piece:?} of {line:?}: {out:?}");
+                        }
+                    }
+                }
+            }
+        }
+        // The verifier's own.
+        for (line, secret) in [(r#"{"nonce": "first second"}"#, "second"), (r#"{"nonce":"\u{2603}suffix"}"#, "suffix"), ("%74oken=CANARY later cookie=other", "CANARY")] {
+            assert!(!redact(line).contains(secret), "{line}");
+        }
+    }
+
+    /// Sixth verification: the logs and the ring are held at the moment they are found to be this launch's, only those made
+    /// since its launcher was born and before that moment, and only while that launcher is sure to live.
+    #[test]
+    fn what_a_capture_reads_is_the_launch_s_own_from_the_moment_it_is_found() {
+        use std::io::Read as _;
+        let dir = std::env::temp_dir().join(format!("orbiters-incident-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("vrchat")).unwrap();
+        let now = || std::time::SystemTime::now();
+        let birth_of = |at: std::time::SystemTime| {
+            let since = at.duration_since(std::time::UNIX_EPOCH).unwrap();
+            (since.as_secs(), since.subsec_micros())
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let engine_log = dir.join("wine-438100.log");
+        let ring = ring_of(&engine_log);
+        let vrchat = |name: &str| dir.join("vrchat").join(format!("output_log_{name}.txt"));
+        // Another launch's, made before: never this one's, two seconds before or not.
+        for (path, text) in [(&engine_log, "old"), (&ring, "old"), (&vrchat("1"), "old")] {
+            std::fs::write(path, text).unwrap();
+        }
+        pause();
+        let birth = birth_of(now());
+        let followed = || Followed { session: "s".into(), launcher: 1, birth, engine_log: engine_log.clone(), engine: None, vrchat: None, ring: None };
+        let mut f = followed();
+        f.associate(&dir.join("vrchat"), &|| true);
+        assert!(f.engine.is_none() && f.vrchat.is_none() && f.ring.is_none());
+        // Its own.
+        pause();
+        for path in [&engine_log, &ring] {
+            std::fs::remove_file(path).unwrap();
+            std::fs::write(path, "mine").unwrap();
+        }
+        std::fs::write(vrchat("2"), "mine").unwrap();
+        // Its launcher gone, or gone while it was looked: nothing is held.
+        let mut gone = followed();
+        gone.associate(&dir.join("vrchat"), &|| false);
+        assert!(gone.engine.is_none() && gone.vrchat.is_none() && gone.ring.is_none());
+        let asked = std::cell::Cell::new(0);
+        gone.associate(&dir.join("vrchat"), &|| asked.replace(asked.get() + 1) == 0);
+        assert!(asked.get() == 2 && gone.engine.is_none() && gone.vrchat.is_none() && gone.ring.is_none());
+        f.associate(&dir.join("vrchat"), &|| true);
+        // The next launch's, put at their paths (or beside) before the capture reads them.
+        pause();
+        for path in [&engine_log, &ring] {
+            std::fs::remove_file(path).unwrap();
+            std::fs::write(path, "next").unwrap();
+        }
+        std::fs::write(vrchat("3"), "next").unwrap();
+        f.associate(&dir.join("vrchat"), &|| true);
+        let held = f.held();
+        for file in [&held.engine, &held.vrchat, &held.ring] {
+            let mut text = String::new();
+            file.as_ref().unwrap().try_clone().unwrap().read_to_string(&mut text).unwrap();
+            assert_eq!(text, "mine");
+        }
+        // Made after the moment it is looked: not found to be anyone's.
+        assert!(made_within(&vrchat("3"), birth, now() - std::time::Duration::from_secs(1)).is_none());
+        assert!(vrchat_log(&dir.join("vrchat"), birth, born_at(birth)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sixth verification: a sample whose process cannot be told to be the one chosen, after it was taken, is nobody's.
+    #[test]
+    fn an_ambiguous_sample_is_discarded() {
+        let target = Target { name: "game", pid: 42, birth: (7, 1), exe: "/x/fexdarwin-run".into() };
+        assert!(target.same(Some((7, 1)), Some("/x/fexdarwin-run")));
+        assert!(!target.same(None, Some("/x/fexdarwin-run")), "no birth to be read");
+        assert!(!target.same(Some((7, 1)), None));
+        assert!(!target.same(Some((7, 2)), Some("/x/fexdarwin-run")));
+        assert!(!target.same(Some((7, 1)), Some("/bin/sh")));
     }
 }

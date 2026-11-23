@@ -29,24 +29,29 @@ the frontmost app (`lsappinfo`), GPU utilisation (`ioreg`, device-wide) and the 
 process tree (`ps -M`). It starts `obelisk-cli steam play 438100 [--render-percent N]
 -- -screen-fullscreen 1 -window-mode borderless <link>`, waits (with deadlines) for the engine to say the game runs and for
 the local player to be in **the destination of the link** (world, instance and every tag it names: a fallback is no
-arrival) as **this start's own** VRChat log says it (the one whose command line holds the link), waits `--warm`
+arrival) as **this start's own** VRChat log says it (made since the start, one of the arguments its head lists being the link; held open
+from then on), waits `--warm`
 seconds and then until 20 s pass without a frame held over 250 ms (within 180 s, else nothing is scored), records `--windows` windows of `--window` seconds
 with nobody touching the game, takes 3 s stack samples only after them, and in every case (an arrival that never came, a
 failed start, an interruption) quits by session (`steam quit --session --wait 60`, never forced) and writes its results
-file with its `outcome`. The session is known from its **admission** (the record the engine makes for this launch), so that
-it is asked to quit whether or not the program that started it still lives; its own record says how it ended (`terminal`).
-A run whose session is not known to have ended exits with 5, and `session.sh` stops the series there, as it does after any
+file with its `outcome`. The session is the one **the program started here names** (its `starting` event, obelisk-cli 0.1.10),
+the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A run
+whose session is not known to have ended, or that may have started one it was never told the name of, exits with 5, and `session.sh` stops the series there, as it does after any
 run that failed.
 
 A window is **valid** only when all of it was seen: from its start to its end, never more than 5 s between two looks, the
 session lived, the screen was unlocked, this session's own window server was the frontmost app and the local player stayed
-in the destination; its submissions were counted over at least 90 % of it, and the shown frames of that window server (by
+in the destination; its submissions were read over at least 90 % of it, inside it, never more than 5 s apart (the line before
+the window is the rate's base and no coverage), and the shown frames of that window server (by
 the process and the time its `metal-HUD:` lines carry) fill as much of it, never more than 5 s apart; otherwise it is kept
 with `valid: false` and why, and never scored. `--allow-locked` scores production alone behind a locked screen, and says `production_only` in each window. Rates
 are counted, never reciprocal intervals: the presents (or shown events) between two lines of one swapchain generation
 divided by the time between those two lines (lines read together are one reading, the last of them: two batches read at
 once used to count one), the last line before the window included as its base, a count that went
 back (a new swapchain) never subtracted across, a measured zero kept as 0.
+
+Everything that decides a window is kept with its times in the results file (`observed`: the looks, the moves, the log's lines;
+each window's `from` and `to`), so that it can be scored again.
 
 `tools/mac-bench/test_bench.py` checks the scoring (boundary interval, generations, zero, coverage, validity), the arrival
 and the cleanup, without a game. **Results made by an earlier `bench.py`** (every file up to 2026-11-23) were scored by

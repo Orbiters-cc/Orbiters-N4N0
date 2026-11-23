@@ -43,7 +43,6 @@
   "Reconstruct this session first.": "先にこのセッションを再構築してください。",
   "Sign in first": "先にログインしてください",
   "Sign in to Orbiters first.": "先にOrbitersにログインしてください。",
-  "Signed out on this computer. VRChat could not confirm remote sign-out: {error}": "このコンピューターではログアウトしました。VRChat側でのログアウトは確認できませんでした：{error}",
   "Start VRChat and open its camera first.": "先にVRChatを起動して、そのカメラを開いてください。",
   "That file is empty.": "そのファイルは空です。",
   "That file is not a picture VRChat can show (PNG, JPEG, WebP or GIF).": "そのファイルはVRChatで表示できる画像ではありません（PNG、JPEG、WebP、GIF）。",

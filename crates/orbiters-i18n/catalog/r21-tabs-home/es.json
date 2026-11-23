@@ -54,5 +54,8 @@
   "{name} is closed now: choose a new instance of its world, or another place.": "{name} está cerrado: elige una nueva instancia de su mundo u otro lugar.",
   "VRChat is not signed in for this profile: choose a new instance of {name}, or another place.": "VRChat no tiene la sesión iniciada en este perfil: elige una nueva instancia de {name} u otro lugar.",
   "VRChat did not say whether {name}'s instance is open: Play asks again, or choose a new instance of its world.": "VRChat no dijo si la instancia de {name} está abierta: Jugar vuelve a preguntar, o elige una nueva instancia de su mundo.",
-  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "VRChat no dijo si {name} está abierto: Jugar vuelve a preguntar, o elige una nueva instancia de su mundo."
+  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "VRChat no dijo si {name} está abierto: Jugar vuelve a preguntar, o elige una nueva instancia de su mundo.",
+  "Signed out on this computer, but VRChat could not be told ({error}): the session may stay valid on VRChat's side until it expires.": "Se cerró la sesión en este equipo, pero no se pudo avisar a VRChat ({error}): la sesión puede seguir siendo válida en VRChat hasta que caduque.",
+  "VRChat could not be told either ({error}): the session may stay valid on VRChat's side until it expires.": "Tampoco se pudo avisar a VRChat ({error}): la sesión puede seguir siendo válida en VRChat hasta que caduque.",
+  "Signed out, but the saved VRChat session could not be fully removed from this computer. It is not used any more; removing it is tried again at the next start.": "Se cerró la sesión, pero la sesión de VRChat guardada no se pudo eliminar por completo de este equipo. Ya no se usa; se volverá a intentar eliminarla en el próximo inicio."
 }

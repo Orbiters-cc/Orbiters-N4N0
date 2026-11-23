@@ -54,5 +54,8 @@
   "{name} is closed now: choose a new instance of its world, or another place.": "{name}は閉じられています：そのワールドの新しいインスタンスか、別の場所を選んでください。",
   "VRChat is not signed in for this profile: choose a new instance of {name}, or another place.": "このプロフィールではVRChatにサインインしていません：{name}の新しいインスタンスか、別の場所を選んでください。",
   "VRChat did not say whether {name}'s instance is open: Play asks again, or choose a new instance of its world.": "{name}のインスタンスが開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせるか、そのワールドの新しいインスタンスを選んでください。",
-  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "{name}が開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせるか、そのワールドの新しいインスタンスを選んでください。"
+  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "{name}が開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせるか、そのワールドの新しいインスタンスを選んでください。",
+  "Signed out on this computer, but VRChat could not be told ({error}): the session may stay valid on VRChat's side until it expires.": "このコンピューターからサインアウトしましたが、VRChatに伝えられませんでした（{error}）：期限が切れるまで、VRChat側ではセッションが有効なままのことがあります。",
+  "VRChat could not be told either ({error}): the session may stay valid on VRChat's side until it expires.": "VRChatにも伝えられませんでした（{error}）：期限が切れるまで、VRChat側ではセッションが有効なままのことがあります。",
+  "Signed out, but the saved VRChat session could not be fully removed from this computer. It is not used any more; removing it is tried again at the next start.": "サインアウトしましたが、保存されたVRChatのセッションをこのコンピューターから完全には削除できませんでした。もう使われることはなく、次回の起動時に再び削除を試みます。"
 }

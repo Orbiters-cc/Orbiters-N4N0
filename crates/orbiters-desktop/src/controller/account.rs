@@ -108,6 +108,7 @@ impl Controller {
         // was read yet. Its file only; Orbiters is asked on the thread.
         let server = Server::current();
         if let Ok(saved) = account::read_saved(server) {
+            self.vrchat_login.lock().unwrap().at_launch = saved.as_ref().map(|a| super::vrchat_login::Owner::of(server, a));
             self.account_at_launch(server, saved.map(|a| a.username));
         }
         let ctl = self.clone();

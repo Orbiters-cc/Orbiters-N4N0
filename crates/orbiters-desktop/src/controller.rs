@@ -117,7 +117,7 @@ enum CapturePurpose { CameraOverlay, Short, Avatar }
 /// Lock order (read 2026-11-19, night review CTL-14 with the challenge's corrections; nothing checks it but reading): a
 /// lock on the left may be held while one on its right is taken, never the reverse.
 ///
-/// - `publishing` -> `snapshot` -> {`vrchat_login` (in `publish`), `trail`, `burst` (inside `update` closures)}.
+/// - `publishing` -> `snapshot` -> {`account_runtime` then `vrchat_login`, one after the other (in `publish`), `trail`, `burst` (inside `update` closures)}.
 ///   `update` lets `snapshot` go before it publishes.
 /// - `capture_start_gate` -> `osc_values` -> `snapshot` (`start_segment`), and -> `worker`. The gate is held across
 ///   VRChat's HTTP answers while a start reads them; a scan's flight takes it around each pose it sends (C-2).
@@ -799,7 +799,9 @@ impl Controller {
         let previous = self.view();
         let s = {
             let mut s = self.snapshot.lock().unwrap();
-            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap());
+            // With the snapshot held: the account this very state is for, and no other.
+            let owner = self.vrchat_owner_of(&s.account);
+            vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.lock().unwrap(), owner.as_ref());
             s.settle(&previous);
             s.clone()
         };

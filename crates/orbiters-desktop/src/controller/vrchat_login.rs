@@ -1542,6 +1542,8 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    use super::super::vrchat_scope::By;
+
     // --- verify3-r21 B6: no publish pairs one member's VRChat identity with another's Orbiters account. ---
 
     fn signed(name: &str) -> AccountState {
@@ -1648,6 +1650,28 @@ mod tests {
         c.update(|_| {});
         assert_eq!(wrong_pairs(&c, &key), Vec::new());
         assert!(c.view().launcher.friends.is_empty());
+    }
+
+    /// What was read before a member left is refused where it is written, also once they are back (another time of theirs):
+    /// what is on show by then stays as it is.
+    #[test]
+    fn verify3_a_late_write_is_refused_and_leaves_what_is_shown() {
+        let (c, _) = first_member(vec![]);
+        let old = c.vrchat_session().unwrap().by;
+        member(&c, Server::current(), "another-token", "2", "someone-else", signed("someone-else"));
+        member(&c, Server::current(), "fake", "1", "tester", signed("tester"));
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester(), "back");
+        c.test_list(their_list());
+        let before = c.view();
+        assert_eq!(before.launcher.friends.len(), 1);
+        assert!(!c.publish_login(&old.stamp, |st, _| st.known = Some(User { id: "usr_late".into(), ..Default::default() })));
+        assert!(!c.publish_launcher(&old, |l| l.friends.clear()));
+        assert!(!c.publish_launcher(&By { user: "usr_other".into(), ..c.vrchat_session().unwrap().by }, |l| l.friends.clear()));
+        c.update(|_| {});
+        let after = c.view();
+        assert_eq!((&after.vrchat_login, &after.launcher), (&before.vrchat_login, &before.launcher));
+        assert!(c.publish_launcher(&c.vrchat_session().unwrap().by, |l| l.friends.clear()), "their own, now");
     }
 
     /// The random walk's numbers (a xorshift: the same each run).

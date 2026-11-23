@@ -399,7 +399,8 @@ impl Controller {
         })
     }
 
-    /// An action's outcome, shown to the member who asked for it (`asked`: who it was then), or taken back.
+    /// An action's outcome, shown to the member who asked for it (`asked`: who it was then), or taken back (whoever is
+    /// there by then).
     pub(super) fn publish_notice(&self, asked: Option<&Stamp>, f: impl FnOnce(Option<&Notice>) -> Option<Option<Notice>>) {
         self.update_if(|s| {
             let now = self.vrchat_stamp_of(&s.account);
@@ -407,7 +408,7 @@ impl Controller {
                 (None, None) => true,
                 (a, b) => same(a, b.as_ref()),
             };
-            match f(s.launcher.notice.as_ref()).filter(|_| still) {
+            match f(s.launcher.notice.as_ref()).filter(|next| still || next.is_none()) {
                 Some(next) if next != s.launcher.notice => {
                     s.launcher.notice = next;
                     true

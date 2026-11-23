@@ -1418,10 +1418,10 @@ impl Controller {
                 if self.launcher.lock().unwrap().failures == 1 && self.vrchat_now().is_some_and(|n| n.same(&by.stamp)) {
                     self.notify(super::NoticeKind::Error, text.clone());
                 }
-                self.publish_launcher(by, |l| {
-                    l.loading = false;
-                    l.notice = Some(Notice::Error(text));
-                });
+                if self.vrchat_now().is_some_and(|n| n.same(&by.stamp)) {
+                    self.forget_launcher(|l| l.loading = false);
+                }
+                self.publish_notice(Some(&by.stamp), |_| Some(Some(Notice::Error(text))));
             }
         }
     }

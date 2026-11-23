@@ -1676,10 +1676,10 @@ mod tests {
             let change = {
                 let dice = dice.clone();
                 move |c: &Shared| {
-                    let roll = dice.lock().unwrap().roll(10);
+                    let roll = dice.lock().unwrap().roll(12);
                     match roll {
-                        0 | 1 => member(c, Server::current(), "fake", "1", "tester", signed("tester")),
-                        2 => member(c, Server::current(), "another-token", "2", "tester", signed("tester")),
+                        0..=2 | 10 => member(c, Server::current(), "fake", "1", "tester", signed("tester")),
+                        9 => member(c, Server::current(), "another-token", "2", "tester", signed("tester")),
                         3 => member(c, Server::current(), "a-third-token", "3", "", checking("")),
                         4 => member(c, other_server(), "fake", "1", "tester", signed("tester")),
                         5 => switching(c),
@@ -1699,7 +1699,7 @@ mod tests {
                     }
                 }));
             }
-            for _ in 0..80 {
+            for _ in 0..120 {
                 let roll = dice.lock().unwrap().roll(13);
                 match roll {
                     0..=2 => change(&c),
@@ -1734,7 +1734,7 @@ mod tests {
             drop(rt);
             assert_eq!(wrong_pairs(&c, &key), Vec::new(), "seed {seed}");
         }
-        assert!(looked > 2500 && shown > 300, "the walk went through it: {looked} published, {shown} with VRChat's");
+        assert!(looked > 3000 && shown > 300, "the walk went through it: {looked} published, {shown} with VRChat's");
     }
 
     /// verify3-r21 M4: VRChat could not be told, and part of the session was left here: cleaning that up later does not

@@ -357,10 +357,8 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
     Value::Array(tools)
 }
 
-/// The highest profile `go_to_world` starts the main session on: every number the start itself carries to VRChat
-/// (`LaunchPlan::profile`, written as `--profile=N` as it is). Home offers fewer (`vrchat_launch::PROFILE_MAX`) and side
-/// sessions go to 99 (their OSC ports); neither bounds the main session, whose account may be on any.
-const MAIN_PROFILE_MAX: u32 = u32::MAX;
+/// The highest profile `go_to_world` starts the main session on: Home's own, one policy for both. A side session's go to 99.
+const MAIN_PROFILE_MAX: u32 = orbiters_core::vrchat_launch::PROFILE_MAX;
 
 /// What an action of a tool needs beside what its schema says for every one of them: refused before anything is done for the
 /// call (a window focused or put back to its size, a network asked).
@@ -1642,7 +1640,12 @@ impl Bridge {
                 let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
                 return self.launch_side(s, plan, call);
             }
-            let profile = args["profile"].as_u64().and_then(|p| u32::try_from(p).ok());
+            let profile = match args["profile"].as_u64() {
+                None => None,
+                Some(asked) => Some(orbiters_core::vrchat_launch::main_profile(asked).ok_or_else(|| {
+                    Failure::new("bad_arguments", format!("The main session starts on profile 0 to {MAIN_PROFILE_MAX}."), "Pass one of those, or none.") // i18n: not shown (an AI client reads it)
+                })?),
+            };
             // Another profile for the main session must not be a side session's (two VRChats of one account) (BRIDGE-17 g).
             if let Some(p) = profile.filter(|p| *p > 0 && self.sides.lock().unwrap().iter().any(|x| x.profile == Some(*p))) {
                 return Err(Failure::new("profile_in_use", format!("Profile {p} is a side session's."), "Use that session (pass its id), or another profile."));
@@ -2130,6 +2133,14 @@ impl Bridge {
         Ok(Answer::Data(json!({ "camera": "open", "mode": "stream", "next": "aim_camera, then take_3d_picture." })))
     }
 
+    fn outside_window(x: u64, y: u64, width: u32, height: u32) -> Failure {
+        Failure::new(
+            "outside_window",
+            format!("({x}, {y}) is outside VRChat's window, which is {width} by {height}."),
+            "Take a screenshot: window pixel = image pixel / scale.",
+        )
+    }
+
     fn mouse(&self, s: &Session, args: &Value, call: &Call) -> Result<Answer, Failure> {
         let action = args["action"].as_str().unwrap_or_default();
         if let Some(rig) = s.vr() {
@@ -2137,6 +2148,15 @@ impl Bridge {
         }
         let (_, pid) = self.may_act(s)?;
         let window = self.window(s, pid)?;
+        // A point outside the size the coordinates are for lands nowhere: said before the window is focused or put back.
+        if matches!(action, "move" | "click") {
+            let (width, height) = s.run.lock().unwrap().size.unwrap_or((window.width, window.height));
+            if let (Some(x), Some(y)) = (args["x"].as_u64(), args["y"].as_u64()) {
+                if x >= u64::from(width) || y >= u64::from(height) {
+                    return Err(Self::outside_window(x, y, width, height));
+                }
+            }
+        }
         self.focus_for(s, &window)?;
         // The coordinates are for the size it started with (see fit_window), as the screenshots are. A window someone had
         // resized is put back first, and nothing is clicked on a page the agent has not seen at that size.
@@ -2160,11 +2180,7 @@ impl Bridge {
                 ));
             };
             if x >= window.width as u64 || y >= window.height as u64 {
-                return Err(Failure::new(
-                    "outside_window",
-                    format!("({x}, {y}) is outside VRChat's window, which is {} by {}.", window.width, window.height),
-                    "Take a screenshot: window pixel = image pixel / scale.",
-                ));
+                return Err(Self::outside_window(x, y, window.width, window.height));
             }
             Ok((x as u32, y as u32))
         };
@@ -3218,12 +3234,19 @@ mod tests {
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{}] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a", "other": 1 }] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }] })).is_none());
-        // Bridge verification 3, finding 4: go_to_world's profile is bounded as the launch takes it (u32); fifth
-        // verification, finding 13: and by nothing less (Home's 15, refused for a while; a side session's 99).
+        // Sixth verification, finding 13: the main session's profile has Home's own bound, one policy for both (until then
+        // any u32 was taken, Home's 15 and the argument helper's clamp beside it); a side session's is its own (99).
         // orbiters_environment's omitted action reaches its default (read), as before the validator.
         assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": 4294967297u64 })), Some("bad_arguments"));
-        for profile in [0, 1, orbiters_core::vrchat_launch::PROFILE_MAX, orbiters_core::vrchat_launch::PROFILE_MAX + 1, 99, 100, u32::MAX] {
+        for profile in [orbiters_core::vrchat_launch::PROFILE_MAX + 1, 99, 100, u32::MAX] {
+            assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": profile })), Some("bad_arguments"), "{profile}");
+            assert_eq!(orbiters_core::vrchat_launch::main_profile(u64::from(profile)), None, "Home refuses it too");
+        }
+        for profile in [0, 1, orbiters_core::vrchat_launch::PROFILE_MAX] {
             assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": profile })), None, "{profile}");
+            assert_eq!(orbiters_core::vrchat_launch::main_profile(u64::from(profile)), Some(profile));
+            let home = orbiters_core::vrchat_launch::profile_arg(profile);
+            assert!(home.is_none_or(|arg| arg == format!("--profile={profile}")), "as Home's argument");
             let plan = crate::bridge::game::LaunchPlan { world_id: "wrld_x".into(), instance: "1".into(), width: 1280, height: 720, profile: Some(profile), osc: None, vr: false };
             assert!(plan.args().contains(&format!("--profile={profile}")), "carried to VRChat as it is");
         }

@@ -1180,20 +1180,7 @@ impl Projects {
                 }
             }
             "apply_plan" => {
-                let pairs = |key: &str| -> Result<Vec<(String, String)>, Failure> {
-                    args[key]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .map(|v| match (v["name"].as_str().or(v[0].as_str()), v["version"].as_str().or(v[1].as_str())) {
-                                    (Some(n), Some(ver)) => Ok((n.to_string(), ver.to_string())),
-                                    _ => Err(bad("Each of install is {name, version}.", "Pass the plan's install as it came.")),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_else(|| Ok(vec![]))
-                };
-                let install = pairs("install")?;
+                let install = plan_pairs(&args["install"]).ok_or_else(|| bad("Each of install is {name, version} or [name, version].", "Pass the plan's install as it came."))?;
                 let remove: Vec<String> = args["remove"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
                 if install.is_empty() && remove.is_empty() {
                     return Err(bad("apply_plan needs the plan's install and remove.", "Pass them as a conflict's plan gave them."));
@@ -1202,10 +1189,7 @@ impl Projects {
                 (vpm::Change::Plan { install, remove, prerelease }, label)
             }
             "solve" => {
-                let requested: Vec<(String, String)> = args["install"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| Some((v["name"].as_str()?.to_string(), v["version"].as_str()?.to_string()))).collect())
-                    .unwrap_or_default();
+                let requested = plan_pairs(&args["install"]).ok_or_else(|| bad("Each of install is {name, version} or [name, version].", "Pass the plan's requested packages."))?;
                 if requested.is_empty() {
                     return Err(bad("solve needs install: the {name, version} asked for.", "Pass the plan's requested packages."));
                 }
@@ -1812,6 +1796,20 @@ impl Projects {
 }
 
 /// The tools as `tools/list` gives them, after the VRChat ones.
+/// The packages of `install` as the schema takes them: each {name, version}, or [name, version] as a conflict's plan gives
+/// it back (`coherent::Plan::install`); none when it is absent. `None` when an item is neither.
+pub(crate) fn plan_pairs(install: &Value) -> Option<Vec<(String, String)>> {
+    let Some(items) = install.as_array() else { return Some(Vec::new()) };
+    items
+        .iter()
+        .map(|v| match v {
+            Value::Object(_) => Some((v["name"].as_str()?.to_string(), v["version"].as_str()?.to_string())),
+            Value::Array(pair) if pair.len() == 2 => Some((pair[0].as_str()?.to_string(), pair[1].as_str()?.to_string())),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn list() -> Vec<Value> {
     let read_only = json!({ "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false });
     let acts = json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false });
@@ -1819,7 +1817,11 @@ pub fn list() -> Vec<Value> {
     let path = json!({ "type": "string", "description": "The project's folder, as unity_list_projects gives it." });
     let wait = json!({ "type": "number", "minimum": 0, "maximum": 50, "description": "How long to wait for the job, in seconds. Default 30." });
     let prerelease = json!({ "type": "boolean", "description": "With pre-release versions (the tab's switch). Default false." });
-    let pairs = json!({ "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "version": { "type": "string" } }, "required": ["name", "version"] } });
+    // Each pair as {name, version}, or as the conflict's plan gives it back: [name, version] (`coherent::Plan::install`).
+    let pairs = json!({ "type": "array", "items": { "anyOf": [
+        { "type": "object", "properties": { "name": { "type": "string" }, "version": { "type": "string" } }, "required": ["name", "version"] },
+        { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+    ] } });
     vec![
         json!({
             "name": "unity_list_projects",
@@ -1885,14 +1887,14 @@ pub fn list() -> Vec<Value> {
             "title": "VPM repositories",
             "description": "The VPM repositories VCC, ALCOM and the tab share: list; add a listing by its URL (with headers if it needs them); remove one of the person's; enable or disable one (disabled ones stay in VCC's settings, their packages are left out); refresh downloads every repository again; suggest searches Orbiters' catalog of known repositories.",
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "enum": ["list", "add", "remove", "enable", "disable", "refresh", "suggest"] },
+                "action": { "type": "string", "enum": ["list", "add", "remove", "enable", "disable", "refresh", "suggest"], "description": "Default list." },
                 "url": { "type": "string", "description": "For add: the listing's URL (index.json)." },
                 "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "For add: HTTP headers the repository needs." },
                 "id": { "type": "string", "description": "For remove, enable, disable: the repository's id or URL from list." },
                 "query": { "type": "string", "description": "For suggest: words in a repository's name, owner or packages." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "wait_s": wait,
-            }, "required": ["action"], "additionalProperties": false },
+            }, "additionalProperties": false },
             "annotations": acts,
         }),
         json!({
@@ -1901,9 +1903,9 @@ pub fn list() -> Vec<Value> {
             "description": "A project in Unity: status (whether Unity has it open, and is waiting on a dialog); open (in its own Unity version, as Open in Unity: a Library on a full disk that barely exists moves first; refused while the person uses the computer); show (brings it forward); save_and_exit (asks Unity to quit as its close button does: it offers to save modified scenes); kill (ends it at once, unsaved work lost: needs confirm).",
             "inputSchema": { "type": "object", "properties": {
                 "path": path,
-                "action": { "type": "string", "enum": ["status", "open", "show", "save_and_exit", "kill"] },
+                "action": { "type": "string", "enum": ["status", "open", "show", "save_and_exit", "kill"], "description": "Default status." },
                 "confirm": { "type": "boolean", "description": "For kill: the person agreed." },
-            }, "required": ["path", "action"], "additionalProperties": false },
+            }, "required": ["path"], "additionalProperties": false },
             "annotations": destructive,
         }),
         json!({
@@ -2193,6 +2195,33 @@ mod tests {
         assert_eq!(package_json(&p, false)["newest"], "1.1.0");
         assert_eq!(package_json(&p, true)["newest"], "2.0.0-beta.1");
         assert_eq!(package_json(&p, false)["versions"].as_array().unwrap().len(), 2);
+    }
+
+    /// Bridge verification 3, finding 4 (shared code, Windows' Unity workflows): a header map is checked value by value,
+    /// not refused whole; a conflict's plan passed back as it came (install as [name, version] pairs) fits the schema and
+    /// is read as the same packages, as are {name, version} objects; anything else is refused before anything is done.
+    #[test]
+    fn header_maps_and_a_solver_s_plan_round_trip_through_the_validator() {
+        let schema = |name: &str| list().into_iter().find(|t| t["name"] == name).unwrap()["inputSchema"].clone();
+        let refusal = |name: &str, args: Value| crate::bridge::tools::schema_refusal(name, &schema(name), &args);
+        let repo = json!({ "action": "add", "url": "https://vpm.example/index.json", "headers": { "Authorization": "Bearer x", "X-Api": "y" } });
+        assert!(refusal("unity_repositories", repo).is_none(), "a map of strings");
+        let bad = json!({ "action": "add", "url": "https://vpm.example/index.json", "headers": { "X-Api": 3 } });
+        assert!(refusal("unity_repositories", bad).is_some_and(|f| f.message.contains("headers.X-Api")), "each value checked");
+        // what the solver returns, serialized as it goes to the client
+        let plan = coherent::Plan { requested: vec![("a".into(), "1.0.0".into())], install: vec![("a".into(), "1.0.0".into()), ("b".into(), "2.1.0".into())], remove: vec!["c".into()], ..Default::default() };
+        let given = serde_json::to_value(&plan).unwrap();
+        let args = json!({ "path": "C:/p", "action": "apply_plan", "install": given["install"], "remove": given["remove"] });
+        assert!(refusal("unity_change_packages", args.clone()).is_none(), "the plan as it came");
+        assert_eq!(plan_pairs(&args["install"]).unwrap(), plan.install);
+        let objects = json!({ "path": "C:/p", "action": "solve", "install": [{ "name": "a", "version": "1.0.0" }] });
+        assert!(refusal("unity_change_packages", objects.clone()).is_none());
+        assert_eq!(plan_pairs(&objects["install"]).unwrap(), [("a".to_string(), "1.0.0".to_string())]);
+        for wrong in [json!([["a"]]), json!([["a", "1", "x"]]), json!([[1, 2]]), json!([{ "name": "a" }]), json!(["a"])] {
+            let args = json!({ "path": "C:/p", "action": "apply_plan", "install": wrong });
+            assert!(refusal("unity_change_packages", args.clone()).is_some(), "{args}");
+            assert!(plan_pairs(&args["install"]).is_none(), "{args}");
+        }
     }
 
     fn tempfile_dir() -> PathBuf {

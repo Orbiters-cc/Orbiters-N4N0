@@ -445,6 +445,12 @@ pub enum Action {
     InstallEngine,
     /// On a Mac: move the engine's damaged start record `file` ([`StartTrouble`]) out of its records, kept aside.
     SetAsideRecord { file: String },
+    /// On a Mac: the VRChat of Game session `session`, which Home showed as having lost its picture for good
+    /// ([`LauncherState::picture_lost`]): quit that very session and start it again as it was started, through the one
+    /// start (checked again first; nothing for a healthy game, nor for another session's).
+    RestartLostGame { session: String },
+    /// On a Mac: install what VRChat's engine is made of again ([`LauncherState::engine_trouble`]).
+    RepairEngine,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,
@@ -505,10 +511,33 @@ pub struct LauncherState {
     /// On a Mac: how getting Obelisk goes, from the press of its button until VRChat is in it.
     #[serde(default)]
     pub engine_setup: Option<EngineSetup>,
+    /// On a Mac: the VRChat Home started still runs and its graphics went for good (the engine's graphics server
+    /// dropped that very session, and no frame came since): Home offers to start it again. Never for a game that is only
+    /// covered, behind the lock screen or slow.
+    /// That VRChat's Game session: what the restart is of.
+    #[serde(default)]
+    pub picture_lost: Option<String>,
+    /// On a Mac: the files of the engine no game starts on, and what ends it.
+    #[serde(default)]
+    pub engine_trouble: Option<EngineTrouble>,
     /// On a Mac: a record of the engine's that cannot be read, which Home names (and, once it is known to be history,
     /// offers to set aside).
     #[serde(default)]
     pub start_trouble: Option<StartTrouble>,
+}
+
+/// The engine's files no VRChat starts on, on a Mac ([`LauncherState::engine_trouble`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineTrouble {
+    /// The files, by their path in the engine; none when they are not known.
+    pub paths: Vec<String>,
+    /// What ends it.
+    pub action: crate::obelisk::EngineAction,
+    /// It is being installed again now: how far, when that is known.
+    #[serde(default)]
+    pub repairing: bool,
+    #[serde(default)]
+    pub percent: Option<u8>,
 }
 
 /// A record of VRChat's engine on a Mac that cannot be read ([`LauncherState::start_trouble`]).
@@ -657,6 +686,8 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
         engine_setup: None,
+        picture_lost: None,
+        engine_trouble: None,
         start_trouble: None,
         mine: Some(MyProfile {
             loaded: true,

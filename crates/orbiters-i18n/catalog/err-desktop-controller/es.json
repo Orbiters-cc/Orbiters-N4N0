@@ -43,7 +43,6 @@
   "Reconstruct this session first.": "Primero reconstruye esta sesión.",
   "Sign in first": "Primero inicia sesión",
   "Sign in to Orbiters first.": "Primero inicia sesión en Orbiters.",
-  "Signed out on this computer. VRChat could not confirm remote sign-out: {error}": "Sesión cerrada en esta computadora. VRChat no pudo confirmar el cierre de sesión remoto: {error}",
   "Start VRChat and open its camera first.": "Primero inicia VRChat y abre su cámara.",
   "That file is empty.": "Ese archivo está vacío.",
   "That file is not a picture VRChat can show (PNG, JPEG, WebP or GIF).": "Ese archivo no es una imagen que VRChat pueda mostrar (PNG, JPEG, WebP o GIF).",

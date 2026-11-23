@@ -238,9 +238,9 @@ pub(super) const PREVIOUS: [&str; 10] = [
 
 /// REQUEST23: Select in Request's place on a friend whose instance takes the account without asking: their row under
 /// the pointer, beside one that keeps Request; their profile, and one that keeps Request invite; Home while VRChat is
-/// asked whether it is open, and once chosen.
-pub(super) const SELECT: [&str; 6] =
-    ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-asking", "launcher-select-home"];
+/// asked whether it is open, once VRChat said it is closed, and once chosen.
+pub(super) const SELECT: [&str; 7] =
+    ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-asking", "launcher-select-closed", "launcher-select-home"];
 
 /// Made-up instances of the history, newest first: world names of the sample, every kind, several regions.
 fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
@@ -263,7 +263,7 @@ fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
 
 /// Where's previous instances for a scenario (nothing read, nothing asked of VRChat).
 fn stage_previous(ctx: &egui::Context, state: &mut crate::pages::launcher::State, name: &str) {
-    use crate::pages::launcher::previous::Check;
+    use crate::pages::launcher::selection::{Origin, Verified};
     let rows = previous_rows();
     let previous = &mut state.places.previous;
     match name {
@@ -271,22 +271,18 @@ fn stage_previous(ctx: &egui::Context, state: &mut crate::pages::launcher::State
         "launcher-where-previous-empty" => previous.stand_in(Vec::new(), ""),
         _ => previous.stand_in(rows.clone(), ""),
     }
+    let checking = Verified::Checking { generation: 0, since: std::time::Instant::now() };
+    let open = Verified::Open { at: std::time::Instant::now(), by: Default::default() };
+    let mut stand = |n: usize, verified: Verified, new: bool| state.places.stand_in_instance(rows[n].clone(), Origin::Previous, verified, new);
     match name {
-        "launcher-where-previous-asking" => previous.stand_in_pick(rows[1].clone(), Check::Asking, false),
-        "launcher-where-previous-closed" | "launcher-where-previous-kind-list" => previous.stand_in_pick(rows[0].clone(), Check::Closed, false),
+        "launcher-where-previous-asking" => stand(1, checking, false),
+        "launcher-where-previous-closed" | "launcher-where-previous-kind-list" => stand(0, Verified::Closed, false),
         "launcher-where-previous-selected" => {
-            previous.stand_in_pick(rows[1].clone(), Check::Open, false);
-            previous.stand_in_close();
-            state.places.stand_in_choose(&rows[1].key(), &rows[1].name, true);
+            stand(1, open, false);
+            state.places.previous.stand_in_close();
         }
-        "launcher-where-previous-new" => {
-            previous.stand_in_pick(rows[0].clone(), Check::Closed, true);
-            state.places.stand_in_choose(&rows[0].key(), &rows[0].name, false);
-        }
-        "launcher-where-previous-signed-out" => {
-            previous.stand_in_pick(rows[2].clone(), Check::NotAsked, true);
-            state.places.stand_in_choose(&rows[2].key(), &rows[2].name, false);
-        }
+        "launcher-where-previous-new" => stand(0, Verified::Unverified, true),
+        "launcher-where-previous-signed-out" => stand(2, Verified::Unverified, true),
         _ => {}
     }
     let _ = ctx;
@@ -798,23 +794,19 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-select-modal" if f == 30 => state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         "launcher-request-modal" if f == 30 => state.open_profile(ctx, "usr_00000000-0000-4000-8000-000000000002", Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         // Home once Select was pressed on them, VRChat having said it is open.
-        "launcher-select-home" | "launcher-select-asking" if f == 1 => {
-            let asking = name == "launcher-select-asking";
-            use crate::pages::launcher::previous::{Check, Visit};
+        "launcher-select-home" | "launcher-select-asking" | "launcher-select-closed" if f == 1 => {
+            use crate::pages::launcher::previous::Visit;
+            use crate::pages::launcher::selection::{Origin, Verified};
             let friend = data(name).friend(nova).cloned();
             if let Some((friend, Whereabouts::World(place))) = friend.map(|f| (f.name.clone(), f.whereabouts)) {
+                let picture = (!place.world_picture.is_empty()).then_some(place.world_picture);
                 let visit = Visit { world_id: place.world_id, instance: place.instance_id, name: place.world_name, at: NOW as u64 };
-                let key = visit.key();
-                let title = visit.name.clone();
-                state.places.previous.stand_in(Vec::new(), "");
-                state.places.previous.stand_in_pick(visit, if asking { Check::Asking } else { Check::Open }, false);
-                state.places.previous.stand_in_close();
-                if let Some(p) = state.places.previous.picked.as_mut() {
-                    (p.with, p.picture) = (Some((nova.into(), friend)), (!place.world_picture.is_empty()).then_some(place.world_picture));
-                }
-                if !asking {
-                    state.places.stand_in_choose(&key, &title, true);
-                }
+                let verified = match name {
+                    "launcher-select-asking" => Verified::Checking { generation: 0, since: std::time::Instant::now() },
+                    "launcher-select-closed" => Verified::Closed,
+                    _ => Verified::Open { at: std::time::Instant::now(), by: Default::default() },
+                };
+                state.places.stand_in_instance(visit, Origin::Friend { id: nova.into(), name: friend, picture }, verified, false);
             }
         }
         "launcher-hover" => {

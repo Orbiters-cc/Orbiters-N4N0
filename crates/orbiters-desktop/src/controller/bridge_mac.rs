@@ -63,6 +63,141 @@ pub(super) fn born(pid: u32) -> Option<(u64, u32)> {
     process(pid).map(|p| p.birth)
 }
 
+/// The executable of process `pid` while it runs.
+pub(super) fn executable(pid: u32) -> Option<String> {
+    process(pid)?;
+    let mut buf = vec![0u8; 4 * libc::PATH_MAX as usize];
+    // SAFETY: the buffer and its length are ours.
+    let n = unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// The processes of this user, each read whole as one occupant of its number: its birth is the same before and after the
+/// rest of it was read (one that changed hands meanwhile is left out). Its processor share is over a short moment.
+pub(super) fn processes() -> Vec<super::incident::Proc> {
+    let first: Vec<(u32, Process, Option<Task>)> = pids().into_iter().filter_map(|pid| Some((pid, process(pid)?, task(pid)))).collect();
+    let began = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    let elapsed = began.elapsed().as_nanos() as f64;
+    let mut all: Vec<super::incident::Proc> = first
+        .into_iter()
+        .filter_map(|(pid, known, before)| {
+            let exe = executable(pid)?;
+            let after = task(pid);
+            // A process the kernel calls runnable sleeps while none of its threads runs.
+            let state = match state(pid).unwrap_or("?") {
+                "R" if after.is_some_and(|t| t.running == 0) => "S".to_string(),
+                state => state.to_string(),
+            };
+            let cpu = match (before, after) {
+                (Some(a), Some(b)) => (b.nanoseconds.saturating_sub(a.nanoseconds) as f64 / elapsed * 100.0) as f32,
+                _ => 0.0,
+            };
+            // Read last: everything above is of the process first seen, or nothing of it is kept.
+            let still = process(pid)?;
+            (still.birth == known.birth).then_some(super::incident::Proc {
+                pid,
+                ppid: still.parent,
+                birth: known.birth,
+                cpu,
+                rss_kb: after.or(before).map_or(0, |t| t.resident / 1024),
+                state,
+                exe,
+            })
+        })
+        .collect();
+    all.sort_by_key(|p| p.pid);
+    all
+}
+
+/// Every process number in use.
+fn pids() -> Vec<u32> {
+    // SAFETY: the buffer and its length are ours; a null one asks how many there are.
+    unsafe {
+        let count = libc::proc_listallpids(std::ptr::null_mut(), 0).max(0) as usize;
+        let mut list = vec![0i32; count + 256];
+        let got = libc::proc_listallpids(list.as_mut_ptr() as *mut libc::c_void, (list.len() * std::mem::size_of::<i32>()) as i32).max(0) as usize;
+        list.truncate(got.min(count + 256));
+        list.into_iter().filter_map(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1).collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Task {
+    resident: u64,
+    /// The processor time it used, in nanoseconds.
+    nanoseconds: u64,
+    /// How many of its threads run.
+    running: i32,
+}
+
+#[allow(deprecated)] // the timebase, which libc tells another crate to be taken from
+fn task(pid: u32) -> Option<Task> {
+    // SAFETY: plain queries into structures of ours, their sizes passed.
+    unsafe {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+        let got = libc::proc_pidinfo(pid as i32, libc::PROC_PIDTASKINFO, 0, &mut info as *mut _ as *mut libc::c_void, size);
+        if got != size {
+            return None;
+        }
+        // Counted in the processor's own ticks (125/3 of a nanosecond on Apple silicon).
+        let mut base = libc::mach_timebase_info { numer: 0, denom: 0 };
+        let known = libc::mach_timebase_info(&mut base) == 0 && base.denom != 0;
+        let ticks = info.pti_total_user as u128 + info.pti_total_system as u128;
+        let nanoseconds = if known { ticks * base.numer as u128 / base.denom as u128 } else { ticks };
+        Some(Task { resident: info.pti_resident_size, nanoseconds: nanoseconds as u64, running: info.pti_numrunning })
+    }
+}
+
+/// A process's state, as `ps` names it.
+fn state(pid: u32) -> Option<&'static str> {
+    // SAFETY: a plain query into a structure of ours, its size passed.
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let got = libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size);
+        (got == size).then_some(match info.pbi_status {
+            1 => "I",
+            2 => "R",
+            3 => "S",
+            4 => "T",
+            _ => "Z",
+        })
+    }
+}
+
+/// What process `pid`, born at `birth`, was started with (its arguments, its own name first, and its environment): `None`
+/// when it is another process by now, or will not say.
+pub(super) fn started_with(pid: u32, birth: (u64, u32)) -> Option<(Vec<String>, Vec<String>)> {
+    if born(pid) != Some(birth) {
+        return None;
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
+    let mut bytes = vec![0u8; 1 << 20];
+    let mut size = bytes.len();
+    // SAFETY: the buffer and its length are ours, and the kernel writes at most that many bytes.
+    let failed = unsafe { libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, bytes.as_mut_ptr() as *mut libc::c_void, &mut size, std::ptr::null_mut(), 0) };
+    if failed != 0 || born(pid) != Some(birth) {
+        return None;
+    }
+    bytes.truncate(size);
+    arguments_and_environment(&bytes)
+}
+
+/// Reads `KERN_PROCARGS2`: how many arguments, the executable's path, zeros, the arguments, then the environment, each ended
+/// by a zero.
+fn arguments_and_environment(bytes: &[u8]) -> Option<(Vec<String>, Vec<String>)> {
+    let count = usize::try_from(i32::from_ne_bytes(bytes.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &bytes[4..];
+    let path = rest.iter().position(|b| *b == 0)?;
+    let rest = &rest[path..];
+    let first = rest.iter().position(|b| *b != 0)?;
+    let mut words = rest[first..].split(|b| *b == 0).map(|w| String::from_utf8_lossy(w).into_owned());
+    let args: Vec<String> = words.by_ref().take(count).collect();
+    (args.len() == count).then(|| (args, words.take_while(|w| !w.is_empty()).collect()))
+}
+
 /// When process `pid` started (Unix seconds), while it runs.
 fn birth(pid: u32) -> Option<u64> {
     process(pid).map(|p| p.birth.0)
@@ -145,6 +280,11 @@ struct EngineLog {
     tail: Vec<u8>,
     /// The most presents its window server said so far (`neptune unixlib wsi (wsd): <n> presents`).
     presents: Option<u64>,
+    /// The size of the guest's last swapchain: what the game renders now (finding 10).
+    swapchain: Option<(u32, u32)>,
+    /// The windows its window server says it shows, and the last line not whole yet.
+    windows: native::EngineWindows,
+    line: Vec<u8>,
 }
 
 /// Whether the game draws: the frames its Game session's record says it has shown, as they grow.
@@ -182,7 +322,6 @@ struct Mine {
     /// The engine's log file at the launch (the previous start's): the one found after it is this start's.
     engine_before: Option<(u64, u64)>,
     engine: Option<EngineLog>,
-    renderer_lost: bool,
     /// The verified game.
     ident: Option<Ident>,
     /// This start's own VRChat log (its arguments name the launch link), which file it is and how long it was at the last
@@ -375,19 +514,22 @@ impl MacGame {
             if let Ok(file) = std::fs::File::open(obelisk::engine_log(&obelisk::home())) {
                 let key = file.metadata().ok().map(|m| file_key(&m));
                 if key.is_some() && key != mine.engine_before {
-                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new(), presents: None });
+                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new(), presents: None, swapchain: None, windows: Default::default(), line: Vec::new() });
                 }
             }
         }
-        let read = mine.engine.as_mut().map(|engine| (read_engine_log(engine), engine.presents));
-        if let Some((lost, presents)) = read {
-            mine.renderer_lost |= lost;
-            if let Some(presents) = presents {
-                // The first count read (a backlog, or the first line) is where it stands, not a growth.
+        let read = mine.engine.as_mut().and_then(|engine| {
+            read_engine_log(engine);
+            engine.presents
+        });
+        {
+            if let Some(presents) = read {
+                // The first count read (a backlog, or the first line) is where it stands, not a growth; a smaller count is
+                // a new swapchain counting from its own 0: its new base, not a growth.
                 if grown(mine.presents, presents) {
                     mine.presents_grew = Some(Instant::now());
                 }
-                mine.presents = Some(mine.presents.map_or(presents, |before| before.max(presents)));
+                mine.presents = Some(presents);
             }
         }
     }
@@ -410,6 +552,19 @@ impl MacGame {
         let Some((wsd, born)) = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) else { return false };
         // The very window chosen as the game's (not any window of the window server: its splash, a crash box).
         process(wsd).is_some_and(|p| p.parent == pid && p.birth == born) && native::game_window(&native::windows(), wsd).is_some_and(|w| w.id == id)
+    }
+
+    /// The title bar of the game's window `window`, in points: the window's own, as its window server says it; else from
+    /// the size the game renders (`swapchain`) and the frame when they say it; else none for a window covering its display
+    /// and the engine's 32 otherwise.
+    fn title_of(&self, window: &MacWindow, swapchain: Option<(u32, u32)>) -> f64 {
+        let said = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.windows.title());
+        if let Some(title) = said {
+            return title;
+        }
+        swapchain
+            .and_then(|(_, h)| native::title_from_guest(window.height, native::scale_of(window), h))
+            .unwrap_or_else(|| native::title_points(window, native::display_frame(window)))
     }
 
     /// Asks the program to quit the bridge's own game session, as the game's own Quit does: never forced.
@@ -444,32 +599,32 @@ pub(crate) fn grown(before: Option<u64>, now: u64) -> bool {
     before.is_some_and(|before| now > before)
 }
 
-/// The most presents the window server's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
-/// `… alive: 6452 presents, …`).
-fn presents_said(text: &str) -> Option<u64> {
-    text.lines()
-        .filter_map(|line| line.split_once("neptune unixlib wsi (wsd): ")) // i18n: not shown (the engine's log lines)
-        .filter_map(|(_, rest)| rest.trim_start_matches("alive: ").split_once(" presents").and_then(|(n, _)| n.trim().parse().ok()))
-        .max()
-}
-
-/// Reads what the held engine log gained since the last read, up to [`ENGINE_LOG_LOOK`] at a time (the rest next time):
-/// whether it says the game's graphics went.
-fn read_engine_log(engine: &mut EngineLog) -> bool {
+/// Reads what the held engine log gained since the last read, up to [`ENGINE_LOG_LOOK`] at a time (the rest next time).
+/// Whether the game's graphics went is the follower's one decision (`picture::of`).
+fn read_engine_log(engine: &mut EngineLog) {
     let len = engine.file.metadata().map_or(0, |m| m.len());
     if len <= engine.read || engine.file.seek(SeekFrom::Start(engine.read)).is_err() {
-        return false;
+        return;
     }
     let mut bytes = std::mem::take(&mut engine.tail);
     let before = bytes.len();
     let _ = (&mut engine.file).take(ENGINE_LOG_LOOK as u64).read_to_end(&mut bytes);
     engine.read += (bytes.len() - before) as u64;
+    for piece in bytes[before..].split_inclusive(|b| *b == b'\n') {
+        engine.line.extend_from_slice(piece);
+        if piece.ends_with(b"\n") {
+            let line = std::mem::take(&mut engine.line);
+            engine.windows.read(&String::from_utf8_lossy(&line));
+        } else if engine.line.len() > 1 << 16 {
+            engine.line.clear();
+        }
+    }
     let text = String::from_utf8_lossy(&bytes);
-    let lost = obelisk::renderer_lost(&text);
-    engine.presents = engine.presents.max(presents_said(&text));
+    // the last count said (each swapchain counts from its own 0: the largest would hide a new one's growth)
+    engine.presents = obelisk::presents_last(&text).or(engine.presents);
+    engine.swapchain = obelisk::swapchain_last(&text).or(engine.swapchain);
     // A line cut at the end is read again with what follows.
     engine.tail = bytes[bytes.len().saturating_sub(256)..].to_vec();
-    lost
 }
 
 /// The first obelisk-cli with `steam quit --session` (one step, checked by the program).
@@ -477,6 +632,10 @@ const CLI_SESSION_QUIT: (u32, u32, u32) = (0, 1, 3);
 /// The first obelisk-cli whose Game session records say the frames shown so far (`shown`): what tells a game that draws
 /// from a frozen window. The bridge starts no game with an older one.
 const CLI_SHOWN_FRAMES: (u32, u32, u32) = (0, 1, 5);
+
+/// The first obelisk-cli that starts a game on one complete set of engine files or not at all, holds it for the whole
+/// session, and says so when it does not (fifth verification): no start of VRChat with an older one, Home's or the bridge's.
+pub(super) const CLI_LEAST: (u32, u32, u32) = orbiters_core::obelisk::LEAST;
 
 /// What asks the program to quit the Game session `session`, with obelisk-cli `version`: only `steam quit --session`, which
 /// the program checks against the running session itself in one step. An older program's unqualified quit could end the
@@ -527,7 +686,8 @@ impl Game for MacGame {
                 let drawn = drawing(mine.continuous, mine.grew, mine.presents_grew, Instant::now());
                 // Lost only when the engine says so (or the game ends): frames that stop for a while (a long load, a
                 // suspended compositor) are no proof of drawing, which keeps the arrival from being given, and no loss.
-                seen.renderer_lost = mine.renderer_lost;
+                // The one decision Home and the incident capture use too, of this very session (a quit accepted is none).
+                seen.renderer_lost = mine.ident.as_ref().is_some_and(|i| super::picture::of(&i.session) == super::picture::Picture::Lost);
                 seen.desktop_mode = mine.args.as_ref().map(|a| a.iter().any(|x| x == "--no-vr"));
                 let mut mine = mine;
                 let link = mine.link.clone();
@@ -668,8 +828,13 @@ impl Game for MacGame {
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
         let window = self.own_window(pid)?;
-        // The bridge's own starts take no render percent: the game's pixels are the content's (R2).
-        let (width, height) = native::guest_pixels(&window, native::scale_of(&window), native::title_points(&window, native::display_frame(&window)), 100);
+        // The bridge's own starts are at 100 % (said to the engine explicitly): the game's pixels are the content's (R2).
+        // What the game renders is read from this start's own log (its last swapchain) when it is there; the window's
+        // title bar from that size and the frame, else from whether the frame covers its display.
+        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let scale = native::scale_of(&window);
+        let title = self.title_of(&window, swapchain);
+        let (width, height) = swapchain.unwrap_or_else(|| native::guest_pixels(&window, scale, title, 100));
         Some(GameWindow { handle: window.id as isize, width, height })
     }
 
@@ -717,7 +882,8 @@ impl Game for MacGame {
         }
         let image = image::load_from_memory(&png).map_err(|e| Failure::new("screenshot_failed", e.to_string(), "Try again in a moment."))?.to_rgba8(); // i18n: not shown
         // The title bar is the system's, not the game's: the picture is the content, as clicks and VRChat count it.
-        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, native::title_points(&f, native::display_frame(&f)))).min(image.height().saturating_sub(1));
+        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, self.title_of(&f, swapchain))).min(image.height().saturating_sub(1));
         let (width, height) = (image.width(), image.height() - top);
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for row in top..image.height() {
@@ -851,12 +1017,12 @@ fn start_wait_failure(wait: Duration) -> Failure {
 /// Whether the program has what the bridge relies on (`shown` frames, the session-qualified quit), refused before
 /// anything is made otherwise.
 fn cli_fit(mac: &super::launcher::MacMachine) -> Result<(), Failure> {
-    if mac.program().as_deref().and_then(program_version).is_some_and(|v| version_at_least(&v, CLI_SHOWN_FRAMES)) {
+    if mac.program().as_deref().and_then(program_version).is_some_and(|v| version_at_least(&v, CLI_SHOWN_FRAMES) && version_at_least(&v, CLI_LEAST)) {
         return Ok(());
     }
     Err(Failure::new(
         "start_failed",
-        "What runs VRChat on this Mac is too old for the bridge (it cannot tell whether the game draws), so nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "What runs VRChat on this Mac is too old for the bridge, so nothing was made or started.", // i18n: not shown (an AI client reads it)
         "Tell the person: Orbiters - N4N0 gets a newer version a little after it starts; reopen it, then call go_to_world again.", // i18n: not shown
     ))
 }
@@ -917,6 +1083,7 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
+        assert!(version_at_least("0.1.9", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.8", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);
@@ -926,7 +1093,7 @@ mod tests {
     /// and a log replaced or cut ends what its follower said.
     #[test]
     fn only_the_recorded_launcher_and_its_own_whole_log_are_the_bridge_s() {
-        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None };
+        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None, quit_accepted: None, account: None };
         assert!(record_names(&record("Running"), 33466, (1795387812, 431)));
         assert!(!record_names(&record("Running"), 33466, (1795387812, 432)), "the same number, another process");
         assert!(!record_names(&record("Running"), 33467, (1795387812, 431)));
@@ -975,7 +1142,44 @@ mod tests {
         assert!(!grown(Some(10), 10) && grown(Some(10), 11));
         // As this Mac's engine wrote them on 2026-11-22 23:56.
         let log = "neptune unixlib wsi (wsd): 6420 presents (4599 shown events), last 60: interval avg 55.840 ms\nneptune unixlib wsi (wsd): alive: 6452 presents, 4599 shown events, 7286 drains\nwsd: window 1 overlay: frame held 183.3 ms\n";
-        assert_eq!(presents_said(log), Some(6452));
-        assert_eq!(presents_said("nothing"), None);
+        assert_eq!(obelisk::presents_said(log), Some(6452));
+        assert_eq!(obelisk::presents_said("nothing"), None);
+        // Finding: each swapchain counts its own presents; the last count is where the current one stands.
+        assert_eq!(obelisk::presents_last(log), Some(6452));
+        assert_eq!(obelisk::presents_last("neptune unixlib wsi (wsd): 9000 presents (0 shown events)\nguest swapchain: created\nneptune unixlib wsi (wsd): 60 presents (0 shown events)\n"), Some(60));
+    }
+
+    /// What an incident decides a process's session from, on processes of this test's own.
+    #[test]
+    fn a_process_is_read_whole_with_what_it_was_started_with() {
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").env_clear().env("FEXDARWIN_SUPERVISOR_PID", "92600").env("OTHER", "a b").spawn().unwrap();
+        let pid = child.id();
+        // Its image may not be its own for a moment after the spawn.
+        for _ in 0..100 {
+            if executable(pid).as_deref() == Some("/bin/sleep") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let all = processes();
+        let one = all.iter().find(|p| p.pid == pid).expect("listed");
+        assert_eq!((one.ppid, one.exe.as_str(), one.birth), (std::process::id(), "/bin/sleep", born(pid).unwrap()));
+        assert!(one.rss_kb > 0 && one.cpu < 50.0);
+        assert!(all.iter().any(|p| p.pid == std::process::id()));
+        // (macOS gives a system program's arguments, and its environment only to itself.)
+        let (args, _) = started_with(pid, one.birth).unwrap();
+        assert_eq!(args[1], "30");
+        assert_eq!(started_with(pid, (one.birth.0, one.birth.1 + 1)), None, "another occupant of its number");
+        let birth = one.birth;
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(started_with(pid, birth), None, "gone");
+        // As the kernel lays it out: a count, the path, padding, the arguments (one empty), the environment.
+        let mut bytes = 3i32.to_ne_bytes().to_vec();
+        bytes.extend_from_slice(b"/L/engine/wsd\0\0\0\0wsd\0--dir\0\0A=1\0B=two words\0\0junk");
+        let read = arguments_and_environment(&bytes).unwrap();
+        assert_eq!(read, (vec!["wsd".into(), "--dir".into(), String::new()], vec!["A=1".into(), "B=two words".into()]));
+        assert_eq!(arguments_and_environment(b"\x01\0"), None);
+        assert_eq!(arguments_and_environment(&9i32.to_ne_bytes()), None);
     }
 }

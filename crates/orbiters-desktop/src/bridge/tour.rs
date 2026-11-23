@@ -37,9 +37,9 @@ pub fn list() -> Vec<Value> {
             "title": "Orbiters environment",
             "description": format!("Reads (action read) or switches (action switch, with to) the Orbiters environment Orbiters - N4N0 talks to: production (orbiters.cc, the real site everyone sees) or development (the server on this computer). It decides where label_world's labels and publish_3d_picture's pictures go, and under which account: get_state's `orbiters` says it at any time. {SWITCH_CHANGES} Switch only when the person asked for that environment, say so in your report, and switch back only if they asked you to. Refused while labels are still waiting to be sent (they would go to the other one) or a picture is being published."),
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "enum": ["read", "switch"] },
+                "action": { "type": "string", "enum": ["read", "switch"], "description": "Default read." },
                 "to": { "type": "string", "enum": ["production", "development"], "description": "For switch." },
-            }, "required": ["action"], "additionalProperties": false },
+            }, "additionalProperties": false },
             "annotations": acts,
         }),
         json!({

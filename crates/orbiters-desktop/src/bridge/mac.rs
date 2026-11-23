@@ -332,6 +332,88 @@ pub fn title_points(window: &MacWindow, display: Option<Frame>) -> f64 {
     }
 }
 
+/// The title bar of a window whose game renders `guest_height` pixels at `scale` backing pixels per point at 100 %: none
+/// or the engine's 32 points, when the frame says one of them exactly (borderless windows smaller than their display have
+/// none); `None` when it says neither (the caller keeps its own rule).
+pub fn title_from_guest(frame_height: f64, scale: f64, guest_height: u32) -> Option<f64> {
+    if scale <= 0.0 {
+        return None;
+    }
+    let extra = frame_height - guest_height as f64 / scale;
+    if extra.abs() < 1.5 {
+        Some(0.0)
+    } else if (extra - TITLE_BAR_POINTS).abs() < 1.5 {
+        Some(TITLE_BAR_POINTS)
+    } else {
+        None
+    }
+}
+
+/// What the engine's window server says in its log of the windows it shows: whether each has a title bar, the window's own
+/// native fact, whatever size the game renders and however macOS stretches it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EngineWindows {
+    /// The windows there are, oldest first.
+    windows: Vec<EngineWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EngineWindow {
+    id: u32,
+    /// Whether its style has a title bar; `None` once it may have changed unsaid.
+    titled: Option<bool>,
+    full_screen: bool,
+}
+
+impl EngineWindows {
+    /// A style's title bar: `WSD_STYLE_TITLED`, unless `WSD_STYLE_BORDERLESS` (which overrides every other).
+    fn titled(style: &str) -> Option<bool> {
+        let style = u32::from_str_radix(style.trim().strip_prefix("0x")?, 16).ok()?;
+        Some(style & 1 != 0 && style & 0x10 == 0)
+    }
+
+    /// Takes one line of the engine's log, whole.
+    pub fn read(&mut self, line: &str) {
+        let Some((_, said)) = line.split_once("wsd: ") else { return }; // i18n: not shown (the engine's log lines)
+        // `client 34529: window 1 800x450 px style 0x10`
+        if let Some((client, made)) = said.strip_prefix("client ").and_then(|r| r.split_once(": window ")) {
+            let (Some((id, rest)), true) = (made.split_once(' '), client.bytes().all(|b| b.is_ascii_digit())) else { return };
+            let (Ok(id), Some((_, style))) = (id.parse(), rest.split_once(" px style ")) else { return };
+            self.windows.retain(|w| w.id != id);
+            self.windows.push(EngineWindow { id, titled: Self::titled(style), full_screen: false });
+            let most = self.windows.len().saturating_sub(64);
+            self.windows.drain(..most);
+            return;
+        }
+        // `window 1 style 0x1`, `window 1 [fullscreen-on]: …`, `window 1 [destroy]: …`
+        let Some((id, what)) = said.strip_prefix("window ").and_then(|r| r.split_once(' ')) else { return };
+        let Ok(id) = id.parse::<u32>() else { return };
+        if what.starts_with("[destroy]") {
+            self.windows.retain(|w| w.id != id);
+            return;
+        }
+        let Some(window) = self.windows.iter_mut().find(|w| w.id == id) else { return };
+        if let Some(style) = what.strip_prefix("style ") {
+            window.titled = Self::titled(style);
+        } else if what.starts_with("[fullscreen-on]") {
+            window.full_screen = true;
+        } else if what.starts_with("[fullscreen-off]") {
+            // A style set while it was full screen applies now and was never said.
+            window.full_screen = false;
+            window.titled = None;
+        }
+    }
+
+    /// The title bar, in points, of the game's window (the newest there is): `None` when it was not said.
+    pub fn title(&self) -> Option<f64> {
+        let window = self.windows.last()?;
+        match (window.full_screen, window.titled?) {
+            (true, _) | (_, false) => Some(0.0),
+            (false, true) => Some(TITLE_BAR_POINTS),
+        }
+    }
+}
+
 /// How long one window capture may take.
 pub const CAPTURE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -388,6 +470,50 @@ mod tests {
         MacWindow { id, owner: 7, x: 0.0, y: 0.0, width, height, layer, on_screen, titled: true }
     }
 
+    /// Fifth verification, finding 15: a swapchain that is not the window's size, stretched in a smaller borderless window,
+    /// matches neither title height: the crop is the window's own native fact, as the engine's window server says it, and
+    /// nothing of the content is cut off.
+    #[test]
+    fn the_crop_is_the_window_s_own_title_bar_whatever_the_game_renders() {
+        let mut engine = EngineWindows::default();
+        assert_eq!(engine.title(), None);
+        // As this Mac's engine wrote them on 2026-11-23 (the splash, then the game).
+        for line in [
+            "wsd: client 34529: window 1 800x450 px style 0x10",
+            "wsd: window 1 frame px (452,329 800x450) flags 0x1",
+            "wsd: window 1 [destroy]: visible=0 occlusion_visible=0",
+            "wsd: client 34541: window 1 1705x1109 px style 0x10",
+            "wsd: window 1 [fullscreen-on]: visible=1 occlusion_visible=0",
+        ] {
+            engine.read(line);
+        }
+        assert_eq!(engine.title(), Some(0.0));
+        // Borderless, 900 x 500 points, drawn from a 1280 x 720 swapchain: neither title height fits it.
+        let mut engine = EngineWindows::default();
+        engine.read("wsd: client 1: window 4 1800x1000 px style 0x10");
+        assert_eq!(title_from_guest(500.0, 2.0, 720), None, "what the fallback cut 32 points off for");
+        assert_eq!(title_points(&w(4, 900.0, 500.0, 0, true), Some((0.0, 0.0, 1470.0, 956.0))), TITLE_BAR_POINTS);
+        assert_eq!(engine.title(), Some(0.0));
+        assert_eq!(title_rows(1000, 500.0, engine.title().unwrap()), 0);
+        // The same size with a title bar, restyled, a window above it gone.
+        engine.read("wsd: window 4 style 0xf");
+        assert_eq!(engine.title(), Some(TITLE_BAR_POINTS));
+        engine.read("wsd: client 1: window 5 100x100 px style 0x10");
+        assert_eq!(engine.title(), Some(0.0));
+        engine.read("wsd: window 5 [destroy]: x");
+        assert_eq!(engine.title(), Some(TITLE_BAR_POINTS));
+        engine.read("wsd: window 4 style 0x1f");
+        assert_eq!(engine.title(), Some(0.0), "borderless overrides the others");
+        // Out of full screen its style may have changed unsaid; a line that is not one changes nothing.
+        engine.read("wsd: window 4 [fullscreen-on]: x");
+        engine.read("wsd: window 4 [fullscreen-off]: x");
+        assert_eq!(engine.title(), None);
+        for line in ["wsd: window 9 style 0x1", "wsd: window x style 0x1", "wsd: client 1: window", "window 4 style 0x1", ""] {
+            engine.read(line);
+        }
+        assert_eq!(engine.title(), None);
+    }
+
     #[test]
     fn the_game_window_is_the_engine_s_big_shown_one() {
         // As macOS listed wsd's windows on 2026-11-22: strips off screen, the splash, the game.
@@ -399,6 +525,13 @@ mod tests {
         assert_eq!(content_pixels(&listed[2], 2.0, TITLE_BAR_POINTS), (1280, 720));
         assert_eq!(title_rows(784, 392.0, TITLE_BAR_POINTS), 64, "the capture of a 640 x 392 frame at scale 2");
         assert_eq!(title_rows(392, 392.0, TITLE_BAR_POINTS), 32);
+        // Finding 10: the title bar from the size the game renders: a 640 x 360 content in a 640 x 392 frame at scale 2
+        // has the engine's 32; a borderless window smaller than its display has none; a size that says neither is not
+        // guessed at.
+        assert_eq!(title_from_guest(392.0, 2.0, 720), Some(TITLE_BAR_POINTS));
+        assert_eq!(title_from_guest(800.0, 2.0, 1600), Some(0.0));
+        assert_eq!(title_from_guest(800.0, 2.0, 1100), None);
+        assert_eq!(title_from_guest(800.0, 0.0, 1600), None);
         // m17: a borderless game covering its display has no title bar to cut.
         let whole = MacWindow { x: 0.0, y: 0.0, width: 1470.0, height: 956.0, ..listed[2] };
         assert_eq!(title_points(&whole, Some((0.0, 0.0, 1470.0, 956.0))), 0.0);

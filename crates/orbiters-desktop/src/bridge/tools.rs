@@ -170,7 +170,7 @@ fn number(args: &Value, key: &str, default: f64) -> f64 {
 
 /// The schema keywords [`schema_refusal`] holds arguments to; a schema using any other is a test failure
 /// (`every_schema_uses_only_what_is_checked`), never an argument let through unchecked.
-pub const CHECKED_KEYWORDS: [&str; 19] = ["type", "enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "items", "minItems", "maxItems", "uniqueItems", "properties", "required", "additionalProperties", "description", "default"];
+pub const CHECKED_KEYWORDS: [&str; 21] = ["type", "enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "items", "minItems", "maxItems", "uniqueItems", "properties", "required", "additionalProperties", "anyOf", "oneOf", "description", "default"];
 
 /// Why `value` does not fit `spec` (one JSON Schema of the subset in [`CHECKED_KEYWORDS`]), `at` naming where it is.
 fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
@@ -189,6 +189,15 @@ fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
         "null" => value.is_null(),
         _ => false,
     };
+    // anyOf / oneOf: the value fits one of the forms (oneOf: exactly one), each checked whole.
+    if let Some(forms) = spec["anyOf"].as_array().or(spec["oneOf"].as_array()) {
+        let fits = forms.iter().filter(|form| misfit(form, value, at).is_none()).count();
+        let exactly_one = spec.get("oneOf").is_some();
+        if fits == 0 || (exactly_one && fits > 1) {
+            let first = forms.iter().find_map(|form| misfit(form, value, at));
+            return Some(first.unwrap_or_else(|| format!("{at} fits more than one of its forms")));
+        }
+    }
     // A null is an argument of its own: only where the schema says null (else leave the argument out).
     if value.is_null() && !types.contains(&"null") {
         return Some(format!("{at} must not be null (leave it out instead)"));
@@ -249,12 +258,19 @@ fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
                 return Some(format!("{at}.{required} is required"));
             }
         }
-        // An object of the schema's takes only what it names, unless it says otherwise.
+        // An object of the schema's takes only what it names, unless it says otherwise: `true` takes anything more, a
+        // schema takes more that fits it (a map of headers: every value a string), recursively.
+        let extra = spec.get("additionalProperties").filter(|e| e.is_object());
         let open = spec["additionalProperties"] == json!(true) || (properties.is_none() && spec.get("additionalProperties").is_none());
         for (key, item) in given {
             match properties.and_then(|p| p.get(key)) {
                 Some(each) => {
                     if let Some(why) = misfit(each, item, &format!("{at}.{key}")) {
+                        return Some(why);
+                    }
+                }
+                None if extra.is_some() => {
+                    if let Some(why) = misfit(extra.expect("checked"), item, &format!("{at}.{key}")) {
                         return Some(why);
                     }
                 }
@@ -341,6 +357,27 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
     Value::Array(tools)
 }
 
+/// The highest profile `go_to_world` starts the main session on: every number the start itself carries to VRChat
+/// (`LaunchPlan::profile`, written as `--profile=N` as it is). Home offers fewer (`vrchat_launch::PROFILE_MAX`) and side
+/// sessions go to 99 (their OSC ports); neither bounds the main session, whose account may be on any.
+const MAIN_PROFILE_MAX: u32 = u32::MAX;
+
+/// What an action of a tool needs beside what its schema says for every one of them: refused before anything is done for the
+/// call (a window focused or put back to its size, a network asked).
+pub fn action_refusal(name: &str, args: &Value) -> Option<Failure> {
+    let bad = |message: String, next: &str| Some(Failure::new("bad_arguments", message, next)); // i18n: not shown (an AI client reads it)
+    let action = args["action"].as_str().unwrap_or_default();
+    let missing = |key: &str| args[key].as_str().is_none_or(|v| v.trim().is_empty());
+    match (name, action) {
+        ("mouse", "move" | "click") if args["x"].as_u64().is_none() || args["y"].as_u64().is_none() => bad(format!("{action} needs x and y, in the window's pixels."), "See screenshot's window_width and window_height."), // i18n: not shown
+        ("mouse", "look") if [&args["dx"], &args["dy"]].iter().all(|v| v.as_i64().unwrap_or(0) == 0) => bad("look needs dx or dy.".into(), "Pass mouse counts: how far that turns depends on VRChat's sensitivity."), // i18n: not shown
+        ("unity_change_packages", "install" | "remove" | "update") if missing("package") => bad(format!("{action} needs package."), "Pass the package's name, as com.vrchat.avatars."), // i18n: not shown
+        ("unity_repositories", "add") if missing("url") => bad("add needs url: the repository's listing (index.json).".into(), "Pass its https URL."), // i18n: not shown
+        ("unity_repositories", "remove" | "enable" | "disable") if missing("id") => bad(format!("{action} needs id."), "Pass the repository's id (or URL) from list."), // i18n: not shown
+        _ => None,
+    }
+}
+
 /// The tools as `tools/list` gives them, in a fixed order.
 pub fn list() -> Value {
     let read_only = json!({ "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false });
@@ -372,7 +409,7 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_… from find_worlds." },
                 "region": { "type": "string", "enum": ["eu", "us", "use", "jp"], "description": "Where the instance runs. Default eu." },
-                "profile": { "type": "integer", "minimum": 0, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
+                "profile": { "type": "integer", "minimum": 0, "maximum": MAIN_PROFILE_MAX, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
                 "relaunch": { "type": "boolean", "description": "Side session: start its VRChat again in the instance instead of travelling in the running game. Only when travelling did not work: every start of VRChat starts Easy Anti-Cheat again, and long runs of starts have left its driver stuck until Windows restarted." },
             }, "required": ["world_id"], "additionalProperties": false },
             "annotations": acts,
@@ -631,7 +668,7 @@ impl Bridge {
         // On every computer the arguments are held to the tool list it gives before anything else: none it does not name,
         // none of another type (a number for `session` read as the main one, a text for `profile` ignored), no null.
         if refused.is_none() {
-            refused = tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, args));
+            refused = tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, args)).or_else(|| action_refusal(name, args));
         }
         let result = match name {
             _ if refused.is_some() => Err(refused.unwrap_or_else(|| Failure::new("not_on_this_computer", "", ""))),
@@ -1605,7 +1642,7 @@ impl Bridge {
                 let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
                 return self.launch_side(s, plan, call);
             }
-            let profile = args["profile"].as_u64().map(|p| p as u32);
+            let profile = args["profile"].as_u64().and_then(|p| u32::try_from(p).ok());
             // Another profile for the main session must not be a side session's (two VRChats of one account) (BRIDGE-17 g).
             if let Some(p) = profile.filter(|p| *p > 0 && self.sides.lock().unwrap().iter().any(|x| x.profile == Some(*p))) {
                 return Err(Failure::new("profile_in_use", format!("Profile {p} is a side session's."), "Use that session (pass its id), or another profile."));
@@ -3181,6 +3218,62 @@ mod tests {
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{}] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a", "other": 1 }] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }] })).is_none());
+        // Bridge verification 3, finding 4: go_to_world's profile is bounded as the launch takes it (u32); fifth
+        // verification, finding 13: and by nothing less (Home's 15, refused for a while; a side session's 99).
+        // orbiters_environment's omitted action reaches its default (read), as before the validator.
+        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": 4294967297u64 })), Some("bad_arguments"));
+        for profile in [0, 1, orbiters_core::vrchat_launch::PROFILE_MAX, orbiters_core::vrchat_launch::PROFILE_MAX + 1, 99, 100, u32::MAX] {
+            assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": profile })), None, "{profile}");
+            let plan = crate::bridge::game::LaunchPlan { world_id: "wrld_x".into(), instance: "1".into(), width: 1280, height: 720, profile: Some(profile), osc: None, vr: false };
+            assert!(plan.args().contains(&format!("--profile={profile}")), "carried to VRChat as it is");
+        }
+        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": -1 })), Some("bad_arguments"));
+        assert_eq!(check("open_session", json!({ "profile": 99 })), None);
+        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_arguments"));
+        // What a handler has a default for is not required (unity_repositories lists, unity_editor says its status).
+        assert_eq!(check("unity_repositories", json!({})), None);
+        assert_eq!(check("unity_repositories", json!({ "action": "erase" })), Some("bad_arguments"));
+        assert_eq!(check("unity_editor", json!({ "path": "C:\\p" })), None);
+        assert_eq!(check("unity_editor", json!({})), Some("bad_arguments"));
+        assert_eq!(check("orbiters_environment", json!({})), None);
+        assert_eq!(check("orbiters_environment", json!({ "action": "erase" })), Some("bad_arguments"));
+        // A schema-valued additionalProperties checks every further key, recursively; anyOf takes either form.
+        let map = json!({ "type": "object", "properties": { "m": { "type": "object", "additionalProperties": { "type": "object", "additionalProperties": { "type": "string" } } } } });
+        assert!(schema_refusal("t", &map, &json!({ "m": { "a": { "x": "1" }, "b": {} } })).is_none());
+        assert!(schema_refusal("t", &map, &json!({ "m": { "a": { "x": 1 } } })).is_some());
+        let either = json!({ "type": "object", "properties": { "v": { "anyOf": [{ "type": "string" }, { "type": "integer", "minimum": 0 }] } } });
+        assert!(schema_refusal("t", &either, &json!({ "v": "s" })).is_none());
+        assert!(schema_refusal("t", &either, &json!({ "v": 3 })).is_none());
+        assert!(schema_refusal("t", &either, &json!({ "v": -3 })).is_some());
+        assert!(schema_refusal("t", &either, &json!({ "v": true })).is_some());
+    }
+
+    /// Fifth verification, finding 13: what one action of a tool needs is refused before anything is done for the call.
+    #[test]
+    fn what_an_action_needs_is_refused_before_anything_is_done() {
+        let refused = |name: &str, args: Value| assert_eq!(action_refusal(name, &args).map(|f| f.code), Some("bad_arguments"), "{name} {args}");
+        let fits = |name: &str, args: Value| assert_eq!(action_refusal(name, &args).map(|f| f.code), None, "{name} {args}");
+        for args in [json!({ "action": "click" }), json!({ "action": "move" }), json!({ "action": "click", "x": 3 }), json!({ "action": "move", "y": 3 }), json!({ "action": "look" }), json!({ "action": "look", "x": 1, "y": 1 }), json!({ "action": "look", "dx": 0, "dy": 0 })] {
+            refused("mouse", args);
+        }
+        for args in [json!({ "action": "click", "x": 0, "y": 0 }), json!({ "action": "move", "x": 3, "y": 4 }), json!({ "action": "look", "dx": -5 }), json!({ "action": "look", "dy": 5 })] {
+            fits("mouse", args);
+        }
+        for action in ["install", "remove", "update"] {
+            refused("unity_change_packages", json!({ "path": "p", "action": action }));
+            fits("unity_change_packages", json!({ "path": "p", "action": action, "package": "com.x" }));
+        }
+        for action in ["restore", "update_all", "solve", "apply_plan"] {
+            fits("unity_change_packages", json!({ "path": "p", "action": action }));
+        }
+        refused("unity_repositories", json!({ "action": "add" }));
+        fits("unity_repositories", json!({ "action": "add", "url": "https://x/index.json" }));
+        for action in ["remove", "enable", "disable"] {
+            refused("unity_repositories", json!({ "action": action }));
+            fits("unity_repositories", json!({ "action": action, "id": "x" }));
+        }
+        fits("unity_repositories", json!({}));
+        fits("close_vrchat", json!({}));
     }
 
     /// Writes Windows' tool list to `$ORBITERS_TOOLS_OUT` (to check other computers' test calls against it).
@@ -3204,6 +3297,8 @@ mod tests {
                 match key.as_str() {
                     "properties" => value.as_object().into_iter().flatten().for_each(|(k, v)| walk(v, &format!("{at}.{k}"), found)),
                     "items" => walk(value, &format!("{at}[]"), found),
+                    "additionalProperties" => walk(value, &format!("{at}{{*}}"), found),
+                    "anyOf" | "oneOf" => value.as_array().into_iter().flatten().enumerate().for_each(|(n, v)| walk(v, &format!("{at}|{n}"), found)),
                     _ => {}
                 }
             }

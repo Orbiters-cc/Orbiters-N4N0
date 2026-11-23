@@ -388,16 +388,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// Which of the registry's gates are open here.
 fn open_here(cx: &Cx) -> Open {
-    let status = &cx.snap.vrchat_login;
-    let orbiters = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
-    let adapter = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice);
+    open_of(cx.snap, cx.gpu.map(|g| &g.adapter).filter(|a| a.choice).map(|a| a.integrated))
+}
+
+/// [`open_here`] for a snapshot, and whether the window's GPU can be chosen (and is the integrated one).
+fn open_of(snap: &Snapshot, gpu_integrated: Option<bool>) -> Open {
+    let status = &snap.vrchat_login;
+    let orbiters = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
     // As `vrchat_account` decides to draw its card (a saved session being restored shows too).
     let connecting = status.presence() == crate::controller::vrchat_login::Presence::Connecting && status.methods.is_empty();
     Open {
-        bridge: cx.snap.bridge.allowed,
+        bridge: snap.bridge.allowed,
         vrchat_login: (status.allowed || status.waiting || connecting) && orbiters,
-        gpu_choice: adapter.is_some(),
-        gpu_split: adapter.is_some_and(|a| !a.integrated),
+        gpu_choice: gpu_integrated.is_some(),
+        gpu_split: gpu_integrated == Some(false),
     }
 }
 

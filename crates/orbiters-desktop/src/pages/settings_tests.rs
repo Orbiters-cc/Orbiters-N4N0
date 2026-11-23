@@ -284,9 +284,11 @@ fn every_setting_of_the_registry_is_drawn_where_it_says() {
             h.dependencies_off();
         }
         let state = if off { "off" } else { "on" };
-        for group in registry::groups(&HERE) {
+        // The gates as the page itself opens them in this state (signed out, there is no VRChat account card).
+        let open = super::open_of(&h.snap, None);
+        for group in registry::groups(&open) {
             h.open(group.id());
-            for e in registry::of_group(group, &HERE) {
+            for e in registry::of_group(group, &open) {
                 match super::hidden_by(e, &h.snap) {
                     None => {
                         if !drawn(&h, e) {

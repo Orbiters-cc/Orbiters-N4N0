@@ -39,14 +39,26 @@ pub enum Command {
     Assistant { on: bool },
     /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
     AskRetry,
-    /// The Ask page's Yes or No to what N4N0 asked to do (the same as saying it).
+    /// A surface's Yes or No (the Ask page's, the window chat's card) to what N4N0 asked to do, for the question it showed
+    /// (`question`: the number in its `N4n0Confirmation::approve_url`). An answer for a question that is no longer the one
+    /// waiting answers nothing (verify-r21 1): a late Yes never runs the next question, a late No never drops it. Without
+    /// a number (0) it answers nothing either.
     AskAnswer {
         yes: bool,
+        #[serde(default)]
+        question: u64,
     },
-    /// A question typed in the window or the overlay.
+    /// A question typed in the window or the overlay, with the question N4N0 asked that the surface showed when it was
+    /// sent (`None`: none): a typed yes or no answers that question only.
     Ask {
         text: String,
+        #[serde(default)]
+        question: Option<u64>,
     },
+    /// Another Orbiters account (or nobody) is signed in now (the controller's identity gate): N4N0 forgets everything of
+    /// the one before — the conversation, its lines, what it asked, its action log — and what was under way for it
+    /// comes back to nothing (verify-r21 3).
+    ForgetAccount,
     /// The window's or the overlay's Talk button, pressed or let go.
     Talk {
         down: bool,

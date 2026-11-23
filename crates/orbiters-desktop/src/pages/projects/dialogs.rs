@@ -190,7 +190,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             widgets::text(ui.painter(), pr.center(), Align2::CENTER_CENTER, &t);
         } else {
             let b = IconButton::new(glyph::TRASH_SIMPLE, mark("Remove the repository")).size(32.0, 15.0).danger().id_salt(("repo-remove", &r.id));
-            if !busy && widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(slot.right() - 32.0, slot.top()), vec2(32.0, 32.0)))) {
+            if !busy && widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(slot.right() - 32.0, slot.top()), vec2(32.0, 32.0)))) {
                 let id = r.id.clone();
                 state.task(&ctx, tr("Removing the repository…"), move || {
                     orbiters_projects::runtime()?.block_on(vpm::remove_repo(&orbiters_projects::vcc_dir(), &id))?;

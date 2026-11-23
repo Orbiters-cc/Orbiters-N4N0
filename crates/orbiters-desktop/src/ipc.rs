@@ -120,7 +120,12 @@ pub enum ToService {
     /// Keep open, pressed on this offer in VR.
     KeepWindowOpen { id: u64 },
     /// The shared 3D view (`controller/shared_view.rs`).
-    SharedView { command: SharedViewCommand },
+    SharedView {
+        command: SharedViewCommand,
+        /// The Orbiters identity's epoch the surface showed as it was asked (0: none, and nothing is done for it).
+        #[serde(default)]
+        epoch: u64,
+    },
     SwitchDemoAvatar,
     StopCapture,
     /// The Orbiters window to the front.
@@ -220,17 +225,23 @@ pub enum ToService {
         world_id: String,
         world_name: String,
         paths: Vec<PathBuf>,
+        #[serde(default)]
+        epoch: u64,
     },
     /// Shares a session's reconstruction as a world's 3D preview.
     UploadPreview {
         world_id: String,
         world_name: String,
         session: PathBuf,
+        #[serde(default)]
+        epoch: u64,
     },
     /// Asks what this member added to the Map explorer (answered with `ToClient::Maps`).
     Maps,
     CaptureShare {
         request: Box<crate::controller::shares::Request>,
+        #[serde(default)]
+        epoch: u64,
     },
     /// Share to … opened on a 3D capture not uploaded yet: its upload files are made while friends are chosen.
     PrepareShare {
@@ -247,6 +258,8 @@ pub enum ToService {
     /// Explorer points: a press on the world notice or the camera's share buttons.
     Explorer {
         command: crate::controller::explorer::Command,
+        #[serde(default)]
+        epoch: u64,
     },
     /// Make VRChat find the OSC service again (it sends avatar parameters only to services it found).
     OscReconnect,
@@ -654,6 +667,8 @@ pub struct Client {
     /// The window is behind VRChat ([`Client::set_background`]).
     background: AtomicBool,
     repaint: Mutex<Option<egui::Context>>,
+    /// What this process's surface shows ([`crate::backend::Backend::shown`]).
+    pub(crate) shown: crate::backend::Shown,
 }
 
 /// While the window is behind VRChat it draws the service's news at most five times a second (the service sends up to
@@ -703,6 +718,7 @@ impl Client {
             close: AtomicBool::new(false),
             ended: Mutex::new(None),
             background: AtomicBool::new(false),
+            shown: Default::default(),
             repaint: Mutex::new(None),
         });
         client.say_state();

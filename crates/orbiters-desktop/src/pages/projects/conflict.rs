@@ -140,7 +140,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
             } else if b.removable {
                 let resp = Button::new(tr("Remove it too")).icon(glyph::TRASH_SIMPLE).variant(Variant::Danger).size(Size::Sm).width(132.0).enabled(!state.running()).id_salt(("conflict-remove", &b.name)).show_at(ui, br);
                 state.anchors.insert(format!("conflict-remove-{}", b.name), br);
-                if widgets::activated(&resp.on_hover_text(tr("Solves the plan again without it; nothing changes before you apply"))) {
+                if widgets::pressed_fresh(&resp.on_hover_text(tr("Solves the plan again without it; nothing changes before you apply"))) {
                     removing = Some(b.name.clone());
                 }
             } else {

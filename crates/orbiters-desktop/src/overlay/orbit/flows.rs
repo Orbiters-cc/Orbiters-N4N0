@@ -2018,6 +2018,45 @@ fn an_answer_on_the_ask_page_is_for_the_question_its_picture_shows() {
     }
 }
 
+/// Verify3-r21 B3 (the overlay): a question is said to be presented once the Ask page's picture with it was shown, once, for the
+/// member it shows; not from another page, and New conversation names the conversation that picture shows.
+#[test]
+fn the_ask_page_says_a_question_is_presented_when_its_picture_shows() {
+    use orbiters_n4n0::status::{N4n0Confirmation, VoiceReadiness, LOCAL_APPROVAL};
+    let question = |n: u64| N4n0Confirmation { id: format!("n4n0-{n}"), title: String::new(), summary: format!("N4N0 will do this if you say yes: {n}."), approve_url: format!("{LOCAL_APPROVAL}{n}") };
+    for worker in [false, true] {
+        let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = worker;
+        let presented = || -> Vec<String> { heard.said().into_iter().filter(|c| c.contains("Presented")).collect() };
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        snap.n4n0.voice.readiness = VoiceReadiness::Ready;
+        (snap.n4n0.account_epoch, snap.n4n0.conversation) = (3, 12);
+        snap.n4n0.lines = vec![orbiters_n4n0::status::N4n0Line { who: orbiters_n4n0::status::N4n0Who::You, text: "Boop Sam".into(), at_ms: 1, streaming: false }].into();
+        snap.n4n0.confirmations = vec![question(7)];
+        person.snap = Arc::new(snap.clone());
+        person.around = Some(Around::QuickMenu);
+        person.turns(5);
+        assert!(presented().is_empty(), "not from another page");
+        person.press(Action::Talk);
+        person.turns_until("said as presented", |_| !presented().is_empty());
+        for _ in 0..10 {
+            person.turn();
+        }
+        assert_eq!(presented().len(), 1, "worker {worker}: once: {:?}", presented());
+        assert!(presented()[0].contains("question: Some(7)") && presented()[0].contains("epoch: 3") && presented()[0].contains("Overlay"), "{:?}", presented());
+        snap.n4n0.confirmations = vec![question(8)];
+        person.snap = Arc::new(snap.clone());
+        person.turns_until("the next one", |_| presented().len() == 2);
+        assert!(presented()[1].contains("question: Some(8)"));
+        let act = person.find(Action::NewConversation);
+        assert!(act.is_some(), "worker {worker}");
+        person.press(Action::NewConversation);
+        let new = heard.said().into_iter().rfind(|c| c.contains("NewConversation")).expect("New conversation");
+        assert!(new.contains("conversation: Some(12)") && new.contains("epoch: 3"), "{new}");
+    }
+}
+
 /// Enzo (VR feedback F4): a test the booster runs can be stopped from its page, through the hand and the host: the engine is asked to stop it.
 #[test]
 fn the_booster_s_test_stops_from_its_page() {

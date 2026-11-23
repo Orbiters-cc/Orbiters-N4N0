@@ -256,7 +256,7 @@ pub fn account_path(server: Server) -> Option<PathBuf> {
 
 /// The account signed in for `server`, if any (an unreadable or tampered file reads as signed out, as in Unity).
 pub fn read(server: Server) -> Option<Account> {
-    read_file(store(), &account_path(server)?)
+    read_file(store(), &account_path(server)?).inspect(|a| crate::origin::issued(&a.token, server.api()))
 }
 
 /// The account signed in for `server`, telling "nobody" (no file, or an empty credential) from "could not be read now"
@@ -264,7 +264,7 @@ pub fn read(server: Server) -> Option<Account> {
 /// account it has on an `Err` and reads again; only `Ok(None)` is a sign-out.
 pub fn read_saved(server: Server) -> anyhow::Result<Option<Account>> {
     let Some(path) = account_path(server) else { return Ok(None) };
-    read_file_checked(store(), &path)
+    Ok(read_file_checked(store(), &path)?.inspect(|a| crate::origin::issued(&a.token, server.api())))
 }
 
 fn read_file_checked(store: &dyn CredentialStore, path: &Path) -> anyhow::Result<Option<Account>> {
@@ -286,6 +286,7 @@ pub fn modified(server: Server) -> Option<std::time::SystemTime> {
 /// Signs `account` in for every tool on `server`.
 pub fn save(server: Server, account: &Account) -> anyhow::Result<()> {
     let path = account_path(server).with_context(|| tr("no Unity preferences folder"))?;
+    crate::origin::issued(&account.token, server.api());
     write_file(store(), &path, account)?;
     let _ = std::fs::remove_file(path.with_file_name(server.legacy_file_name()));
     Ok(())
@@ -508,6 +509,8 @@ impl Api {
         }
         let tls = crate::http_tls();
         let agent = ureq::Agent::config_builder()
+            // A credential of another environment is refused here, before anything is sent.
+            .middleware(crate::origin::guard)
             .tls_config(tls)
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(90)))
@@ -554,6 +557,7 @@ impl Api {
         if account.token.trim().is_empty() {
             account.token = token.to_string();
         }
+        crate::origin::issued(&account.token, &self.base);
         Ok(Check::Valid(account))
     }
 
@@ -592,7 +596,10 @@ impl Api {
         };
         let status = response.status().as_u16();
         match Self::json::<Account>(response) {
-            Ok(account) if !account.token.trim().is_empty() => Exchange::Done(account),
+            Ok(account) if !account.token.trim().is_empty() => {
+                crate::origin::issued(&account.token, &self.base);
+                Exchange::Done(account)
+            }
             Ok(_) => Exchange::Ended(tr("Orbiters did not return a credential. Sign in again.").into()),
             Err(e) => {
                 let said = e.downcast_ref::<ApiError>().map(|api| api.message.clone()).filter(|m| !m.is_empty());

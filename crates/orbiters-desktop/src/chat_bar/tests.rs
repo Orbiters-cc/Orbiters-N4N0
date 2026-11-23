@@ -247,7 +247,17 @@ impl Recorder {
         *self.snap.lock().unwrap() = Arc::new(s);
     }
 
+    /// What was sent to N4N0, but what the window says of what it shows ([`Recorder::presented`]).
     fn sent(&self) -> Vec<N4n0Command> {
+        self.everything().into_iter().filter(|c| !matches!(c, N4n0Command::Presented { .. })).collect()
+    }
+
+    /// The questions said to be presented in this window, with whose they were.
+    fn presented(&self) -> Vec<(u64, u64)> {
+        self.everything().iter().filter_map(|c| if let N4n0Command::Presented { stamp: Some(Stamp { epoch, question: Some(q), surface: Surface::Window, .. }) } = c { Some((*epoch, *q)) } else { None }).collect()
+    }
+
+    fn everything(&self) -> Vec<N4n0Command> {
         self.n4n0.lock().unwrap().clone()
     }
 }
@@ -695,6 +705,73 @@ fn every_answer_from_the_chat_names_the_question_it_was_shown() {
     assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, stamp: Some(Stamp { question: Some(7), .. }) }) if text == "no"), "{:?}", w.backend.sent());
 }
 
+/// Verify3-r21 B3: the window says a question is presented once its card is in view in the open chat, once, and for the member
+/// shown; not while the chat is closed, nor for a card scrolled away or one of another member's.
+#[test]
+fn a_question_is_said_to_be_presented_when_its_card_is_in_view() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 5;
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, "N4N0 will do this if you say yes: Boop \"Sam\".")];
+    let mut w = Window::new(snap, 1280.0);
+    w.settle();
+    assert!(w.backend.presented().is_empty(), "the chat is closed: {:?}", w.backend.presented());
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    assert_eq!(w.backend.presented(), [(5, 7)]);
+    w.settle();
+    assert_eq!(w.backend.presented().len(), 1, "once");
+    // The next one, as it comes into view.
+    w.backend.set(|s| s.n4n0.confirmations = vec![local_question(8, "N4N0 will do this if you say yes: Boop \"Mira\".")]);
+    w.settle();
+    assert_eq!(w.backend.presented(), [(5, 7), (5, 8)]);
+    // Another member's window starts again, closed.
+    w.backend.set(|s| s.n4n0.account_epoch = 6);
+    w.settle();
+    assert_eq!(w.backend.presented().len(), 2);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    assert_eq!(w.backend.presented().last(), Some(&(6, 8)));
+}
+
+/// M8: New conversation in the window names the conversation the last frame showed, and whose.
+#[test]
+fn the_windows_new_conversation_names_the_one_it_shows() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 5;
+    snap.n4n0.conversation = 3;
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Hi", 1)].into();
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let (new, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("New conversation")).expect("New conversation");
+    w.press(new.center());
+    assert!(
+        matches!(w.backend.sent().last(), Some(N4n0Command::NewConversation { conversation: Some(3), stamp: Some(Stamp { epoch: 5, .. }) })),
+        "{:?}",
+        w.backend.sent()
+    );
+}
+
+/// While who is signed in is not known the chat says so and offers nothing; what is typed stays.
+#[test]
+fn signing_in_says_so_and_keeps_what_is_typed() {
+    let mut snap = ready();
+    snap.n4n0.signed_as = SignedAs::Unknown;
+    assert_eq!(gate(&snap), Gate::SigningIn);
+    assert_eq!(panel::status_line(&snap), orbiters_i18n::tr("Signing in…"));
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    w.type_text("hello");
+    w.key(Key::Enter, Modifiers::NONE);
+    assert!(w.backend.sent().is_empty(), "{:?}", w.backend.sent());
+    assert_eq!(w.chat().draft(), "hello");
+    // Signed out is another thing: it leads to the sign-in.
+    w.backend.set(|s| s.account.state = AccountState::SignedOut);
+    assert_eq!(gate(&w.backend.view()), Gate::SignedOut);
+}
+
 /// Blocker 2: egui turns a held Enter's (or Space's) repeats into clicks of the focused button; an answer button takes
 /// only a pointer's press, an accessibility tool's, or a fresh key press.
 #[test]
@@ -1001,6 +1078,7 @@ impl Real {
         let ctl = crate::controller::Controller::new(snap.settings.clone());
         ctl.set_snapshot(snap);
         ctl.sign_in_for_test("a");
+        ctl.assistant_actions_for_test(true);
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
         orbiters_ui::widgets::watch_controls();
@@ -1118,6 +1196,82 @@ fn a_s_draft_does_nothing_as_b_through_the_real_service() {
     // B's own.
     r.elsewhere("turn on fast walk");
     assert!(r.ctl.view().settings.walk_boost.enabled);
+}
+
+/// Verify3-r21 B3 through the window and the real service: the window's Yes counts once it presented the question, which it
+/// does as its card shows; a press whose frame showed the card of no presented question answers nothing.
+#[test]
+fn a_yes_counts_once_the_card_showed_through_the_real_service() {
+    use orbiters_n4n0_core::intents::Outcome;
+    let mut r = Real::new();
+    r.elsewhere("put me in orange");
+    let question = r.question().expect("asked");
+    // As a window that has drawn nothing of it would stamp it.
+    let blind = Stamp { epoch: r.ctl.identity_epoch(), question: Some(question), surface: Surface::Window, seq: orbiters_n4n0::next_input() };
+    r.ctl.n4n0_command(N4n0Command::AskAnswer { yes: true, stamp: Some(blind) });
+    assert_eq!(r.question(), Some(question), "nothing showed it yet");
+    r.open();
+    let (no, _) = orbiters_ui::widgets::control(&r.ctx, orbiters_i18n::tr("No, leave it")).expect("its card");
+    let button = |pressed| Event::PointerButton { pos: no.center(), button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    r.frame(vec![Event::PointerMoved(no.center())]);
+    r.frame(vec![button(true)]);
+    r.frame(vec![button(false)]);
+    r.frame(Vec::new());
+    assert_eq!(r.question(), None);
+    assert_eq!(r.outcomes().last(), Some(&Outcome::Declined));
+}
+
+/// Verify3-r21 B5 through the real service's message handler: what a window or the overlay sent while it showed A (or as an
+/// older process writes it, with no identity) shares, uploads, invites and starts nothing once B is signed in.
+#[test]
+fn what_was_sent_for_a_is_done_by_nobody_through_the_real_handler() {
+    use crate::ipc::{Role, ToService};
+    let service = crate::service::tests::service();
+    let ctl = service.controller().clone();
+    ctl.sign_in_for_test("a");
+    let a = ctl.identity_epoch();
+    ctl.sign_in_for_test("b");
+    let entry = crate::controller::shares::remote_entry(Default::default());
+    let request = crate::controller::shares::Request {
+        id: "late".into(),
+        server: orbiters_core::account::Server::current(),
+        entry,
+        extra: Vec::new(),
+        operation: crate::controller::shares::Operation::Unshare(Default::default()),
+    };
+    let messages = |epoch: u64| {
+        vec![
+            ToService::CaptureShare { request: Box::new(request.clone()), epoch },
+            ToService::UploadPictures { world_id: "wrld_1".into(), world_name: "W".into(), paths: vec!["x.png".into()], epoch },
+            ToService::UploadPreview { world_id: "wrld_1".into(), world_name: "W".into(), session: "x".into(), epoch },
+            ToService::Explorer { command: crate::controller::explorer::Command::ShareTo { offer: 1, recipients: vec![("usr_1".into(), "Sam".into())] }, epoch },
+            ToService::SharedView { command: crate::ipc::SharedViewCommand::Share { contact: "c".into(), capture: 1, revision: 1, reach: 1.0, moved: [0.0; 2] }, epoch },
+        ]
+    };
+    for epoch in [a, 0] {
+        for message in messages(epoch) {
+            // As it comes over the link; an older process' has no epoch at all.
+            let mut json = serde_json::to_value(&message).unwrap();
+            if epoch == 0 {
+                json.as_object_mut().unwrap().remove("epoch").expect("it carries one");
+            }
+            let message: ToService = serde_json::from_value(json).unwrap();
+            let what = format!("{message:?}");
+            service.handle_for_test(Role::Window, message);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while ctl.view().capture_shares.iter().any(|j| j.outcome.is_none()) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let view = ctl.view();
+            assert!(view.uploads.is_empty(), "{what}");
+            for job in view.capture_shares.iter() {
+                let Some(crate::controller::shares::Outcome::Failed { message, .. }) = &job.outcome else { panic!("{what}: {:?}", job.outcome) };
+                assert!(message.contains("signed in before"), "{what}: {message}");
+            }
+            assert!(view.shared_view.outgoing.is_none(), "{what}");
+            ctl.update(|s| s.capture_shares.clear());
+        }
+    }
 }
 
 // --- Request23: Retry on a failed turn ---

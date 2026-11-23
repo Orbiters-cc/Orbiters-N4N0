@@ -210,20 +210,66 @@ const SHARES_AT_ONCE: usize = 3;
 /// Where a share reports its stage.
 pub type Report<'a> = &'a (dyn Fn(Stage) + Sync);
 
-fn run_request(request: Request, report: Report) -> anyhow::Result<Outcome> {
+/// Whose a share is: the account as it was when it was accepted (its credential, its server and its records), whoever is
+/// signed in by the time it runs.
+#[derive(Clone)]
+pub struct Whose {
+    server: Server,
+    api: Api,
+    token: String,
+    user: Option<String>,
+}
+
+impl Whose {
+    /// The member of `epoch`, while they are the one signed in on `server`.
+    fn of(ctl: &super::Controller, epoch: u64, server: Server) -> anyhow::Result<Self> {
+        let (on, account) = ctl.member_of(epoch).ok_or_else(signed_out)?;
+        anyhow::ensure!(on == server, "{}", tr("Sign in to Orbiters in Settings first."));
+        Ok(Self::with(server, account))
+    }
+
+    /// The account saved for `server`, read once (what has no window behind it: the bridge, a developer's command).
+    pub fn saved(server: Server) -> anyhow::Result<Self> {
+        Ok(Self::with(server, account::read(server).ok_or_else(signed_out)?))
+    }
+
+    fn with(server: Server, account: account::Account) -> Self {
+        Self { server, api: Api::new(server), token: account.token, user: account.user }
+    }
+
+    /// Their API and credential.
+    pub fn api(&self) -> (Api, String) {
+        (self.api.clone(), self.token.clone())
+    }
+
+    /// What they uploaded from this computer ([`uploads`]).
+    pub fn uploads(&self) -> Vec<(PathBuf, Item)> {
+        uploads_in(self.records())
+    }
+
+    /// The file of what they uploaded from this computer.
+    fn records(&self) -> anyhow::Result<PathBuf> {
+        records_of(self.server, self.user.as_deref())
+    }
+}
+
+fn signed_out() -> anyhow::Error {
+    anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first."))
+}
+
+fn run_request(request: Request, whose: &Whose, report: Report) -> anyhow::Result<Outcome> {
     match request.operation {
-        Operation::Share(r) if request.extra.is_empty() => share(request.server, request.entry, r, report).map(Outcome::Shared),
+        Operation::Share(r) if request.extra.is_empty() => share_as(whose, request.entry, r, report).map(Outcome::Shared),
         Operation::Share(r) => {
             let entries = std::iter::once(request.entry).chain(request.extra).collect();
-            share_all(entries, report, |entry| share(request.server, entry, r.clone(), &|_| {})).map(Outcome::Shared)
+            share_all(entries, report, |entry| share_as(whose, entry, r.clone(), &|_| {})).map(Outcome::Shared)
         }
-        Operation::Unshare(r) => unshare(request.server, request.entry, r).map(Outcome::Unshared),
+        Operation::Unshare(r) => unshare(whose, request.entry, r).map(Outcome::Unshared),
         Operation::Answer { id, approve, acknowledge_explicit } => {
-            let (api, token) = api(request.server)?;
-            Ok(Outcome::Answered(api.answer_capture_request(&token, id, approve, acknowledge_explicit)?.request))
+            Ok(Outcome::Answered(whose.api.answer_capture_request(&whose.token, id, approve, acknowledge_explicit)?.request))
         }
-        Operation::Download => download(request.server, request.entry.remote.ok_or_else(|| anyhow::anyhow!("{}", tr("No uploaded item")))?).map(Outcome::Downloaded),
-        Operation::Update => update(request.server, request.entry, report).map(|(item, edits)| Outcome::Updated { item, edits }),
+        Operation::Download => download(whose, request.entry.remote.ok_or_else(|| anyhow::anyhow!("{}", tr("No uploaded item")))?).map(Outcome::Downloaded),
+        Operation::Update => update(whose, request.entry, report).map(|(item, edits)| Outcome::Updated { item, edits }),
     }
 }
 /// A share of several items ([`SHARES_AT_ONCE`] at a time, none started after one failed): the first item's answer, or
@@ -257,28 +303,20 @@ fn share_all(entries: Vec<Entry>, report: Report, one: impl Fn(Entry) -> anyhow:
 }
 
 impl super::Controller {
-    /// The tray owns each mutation until completion, even if the submitting window closes.
-    pub fn capture_share(self: &super::Shared, request: Request) {
+    /// The tray owns each mutation until completion, even if the submitting window closes. As the member of `epoch`, whom
+    /// the surface showed: their account is taken while they are known to be signed in (a handover waits), and the whole job
+    /// is theirs; anyone else signed in since, nothing is done and it says so.
+    pub fn capture_share(self: &super::Shared, request: Request, epoch: u64) {
+        let acting = self.n4n0.acting(epoch);
+        let whose = match &acting {
+            Some(_) => Whose::of(self, epoch, request.server),
+            None => Err(anyhow::anyhow!("{}", tr("That was for the Orbiters account signed in before: nothing was done."))),
+        };
         #[cfg(test)]
         if let Some(work) = test_work(&request.entry.key) {
             return self.capture_share_with(request, move |r, report| work(r, report));
         }
-        self.capture_share_with(request, run_request);
-    }
-    /// [`Self::capture_share`] of one item as `account` (none: nobody is signed in), whoever is saved by the time it runs.
-    pub(super) fn capture_share_as(self: &super::Shared, request: Request, account: Option<(Api, String)>) {
-        #[cfg(test)]
-        if test_work(&request.entry.key).is_some() {
-            return self.capture_share(request);
-        }
-        self.capture_share_with(request, move |request, report| match request.operation {
-            Operation::Share(r) if request.extra.is_empty() => {
-                let signed_out = || anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first."));
-                let account = account.filter(|(api, _)| api.url("") == Api::new(request.server).url("")).ok_or_else(signed_out);
-                share_as(account, request.server, request.entry, r, report).map(Outcome::Shared)
-            }
-            _ => run_request(request, report),
-        });
+        self.capture_share_with(request, move |request, report| run_request(request, &whose?, report));
     }
     pub(crate) fn capture_share_with(
         self: &super::Shared,
@@ -733,8 +771,8 @@ pub fn session_picture_size(width: u32, height: u32) -> Option<[u32; 2]> {
     (r.y1 > r.y0).then_some([width, r.y1 - r.y0])
 }
 pub fn api(server: Server) -> anyhow::Result<(Api, String)> {
-    let account = account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
-    Ok((Api::new(server), account.token))
+    let whose = Whose::saved(server)?;
+    Ok((whose.api, whose.token))
 }
 pub fn feed(server: Server, query: shares::Query) -> anyhow::Result<shares::Feed> {
     let (api, token) = api(server)?;
@@ -882,13 +920,19 @@ fn edits_now(entry: &Entry) -> anyhow::Result<Option<String>> {
 }
 fn records_path(server: Server) -> anyhow::Result<PathBuf> {
     let account = account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in first")))?;
-    let user = account.user.ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters did not identify this account")))?;
+    records_of(server, account.user.as_deref())
+}
+fn records_of(server: Server, user: Option<&str>) -> anyhow::Result<PathBuf> {
+    let user = user.ok_or_else(|| anyhow::anyhow!("{}", tr("Orbiters did not identify this account")))?;
     anyhow::ensure!(user.chars().all(|c| c.is_ascii_digit()), "{}", tr("Invalid account id"));
     Ok(orbiters_core::paths::config_dir().join(format!("capture-uploads-{}-{user}.json", if server == Server::Development { "dev" } else { "prod" })))
 }
 /// What this account uploaded from this computer: each session's or picture's upload as the server last answered it.
 pub fn uploads(server: Server) -> Vec<(PathBuf, Item)> {
-    records_path(server).map(|p| read_records(&p)).unwrap_or_default().into_iter().filter_map(|r| r.item.map(|item| (r.path, item))).collect()
+    uploads_in(records_path(server))
+}
+fn uploads_in(records: anyhow::Result<PathBuf>) -> Vec<(PathBuf, Item)> {
+    records.map(|p| read_records(&p)).unwrap_or_default().into_iter().filter_map(|r| r.item.map(|item| (r.path, item))).collect()
 }
 /// Writes, as the upload records of an account, that the capture or picture at `path` was uploaded as `item` (tests
 /// of what is made from those records).
@@ -974,8 +1018,10 @@ fn save_record_edits(records: anyhow::Result<&Path>, entry: &Entry, item: &Item,
 pub fn keep_pictures_on_orbiters(dir: &Path) -> Vec<String> {
     let mut problems = Vec::new();
     for server in [Server::Production, Server::Development] {
-        let Ok(file) = records_path(server) else { continue };
-        let result = api(server).and_then(|(api, token)| keep_picture_with(&api, &token, &file, dir));
+        // The account and its records from one read of who is signed in there.
+        let Ok(whose) = Whose::saved(server) else { continue };
+        let Ok(file) = whose.records() else { continue };
+        let result = keep_picture_with(&whose.api, &whose.token, &file, dir);
         match result {
             Ok(Some(id)) => share_log(&format!("3D capture {} gave capture {id} its picture before its folder was deleted", dir.display())), // i18n: not shown
             Ok(None) => {}
@@ -1055,14 +1101,13 @@ impl Drop for Changing {
 /// capture whose splats were edited since: its files on Orbiters are replaced first ([`update_with`]), so what is shared
 /// is what its 3D view shows. How long each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
 pub fn share(server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
-    share_as(api(server), server, entry, request, report)
+    share_as(&Whose::saved(server)?, entry, request, report)
 }
-/// [`share`] as `account`.
-fn share_as(account: anyhow::Result<(Api, String)>, server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
+/// [`share`] as `whose`.
+fn share_as(whose: &Whose, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
     let started = Instant::now();
     let mut steps = Vec::new();
-    let result =
-        account.and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps, &super::maps::web_preview));
+    let result = share_with(&whose.api, &whose.token, whose.records(), &entry, &request, report, &mut steps, &super::maps::web_preview);
     let whom = match (request.public, request.recipients.len()) {
         (true, 0) => "publicly".to_string(),
         (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }), // i18n: not shown
@@ -1319,14 +1364,14 @@ fn give_picture(api: &Api, token: &str, entry: &Entry, item: &mut Item, steps: &
 /// at a time ([`Changing`]); its item at the new revision and the splat edits they were made with. How long each step
 /// took goes to shares.log. A failure says that the version shared before stays: Orbiters switches to new files whole or
 /// not at all (contracts Docs/capture-sharing.md, Updating a capture).
-pub fn update(server: Server, entry: Entry, report: Report) -> anyhow::Result<(Item, String)> {
+fn update(whose: &Whose, entry: Entry, report: Report) -> anyhow::Result<(Item, String)> {
     let started = Instant::now();
     let mut steps = Vec::new();
-    let result = api(server).and_then(|(api, token)| {
+    let result = {
         let _one = Changing::of(&entry, report);
-        let records = records_path(server);
-        update_with(&api, &token, records.as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, report, &mut steps, &super::maps::web_preview)
-    });
+        let records = whose.records();
+        update_with(&whose.api, &whose.token, records.as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, report, &mut steps, &super::maps::web_preview)
+    };
     let end = match &result {
         Ok((item, _)) => format!(", revision {}", item.capture.as_ref().map_or(1, shares::Capture::revision)), // i18n: not shown
         Err(e) => format!(", failed: {e}"), // i18n: not shown
@@ -1492,22 +1537,20 @@ fn share_log(line: &str) {
     #[cfg(test)]
     let _ = line;
 }
-pub fn unshare(server: Server, entry: Entry, request: shares::Unshare) -> anyhow::Result<Item> {
+fn unshare(whose: &Whose, entry: Entry, request: shares::Unshare) -> anyhow::Result<Item> {
     let _one = Changing::of(&entry, &|_| {});
-    let (api, token) = api(server)?;
     let item = entry.remote.as_ref().ok_or_else(|| anyhow::anyhow!("{}", tr("This item has not been uploaded")))?;
-    let item = api.unshare_capture(&token, item.kind, item.id, &request)?;
-    save_record(records_path(server).as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, &item)?;
+    let item = whose.api.unshare_capture(&whose.token, item.kind, item.id, &request)?;
+    save_record(whose.records().as_deref().map_err(|e| anyhow::anyhow!("{e}")), &entry, &item)?;
     Ok(item)
 }
-pub fn download(server: Server, item: Item) -> anyhow::Result<PathBuf> {
-    let (api, token) = api(server)?;
+fn download(whose: &Whose, item: Item) -> anyhow::Result<PathBuf> {
     let dir = orbiters_core::paths::documents_root().join("Shared captures");
     std::fs::create_dir_all(&dir)?;
     let out =
         dir.join(format!("{}-{}-{}.{}", item.kind.path(), item.id, uuid::Uuid::new_v4().simple(), if item.kind == Kind::Picture { "webp" } else { "splat" }));
     let temp = out.with_extension("download");
-    let result = api.capture_file(&token, item.kind, item.id, &temp);
+    let result = whose.api.capture_file(&whose.token, item.kind, item.id, &temp);
     if let Err(e) = result {
         let _ = std::fs::remove_file(&temp);
         return Err(e);
@@ -1539,7 +1582,7 @@ pub(crate) mod tests {
             extra: Vec::new(),
             operation: Operation::Share(shares::Share { public: true, ..Default::default() }),
         };
-        let message = crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()) };
+        let message = crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()), epoch: 1 };
         let json = serde_json::to_string(&message).unwrap();
         let parsed: crate::ipc::ToService = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, crate::ipc::ToService::CaptureShare { .. }));
@@ -2055,7 +2098,7 @@ pub(crate) mod tests {
     fn an_update_job_is_marked_and_answers_its_item_and_edits() {
         let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
         let request = Request { id: "update-job".into(), server: Server::Development, entry: remote_entry(Item::default()), extra: Vec::new(), operation: Operation::Update };
-        let json = serde_json::to_string(&crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()) }).unwrap();
+        let json = serde_json::to_string(&crate::ipc::ToService::CaptureShare { request: Box::new(request.clone()), epoch: 1 }).unwrap();
         assert!(matches!(serde_json::from_str::<crate::ipc::ToService>(&json).unwrap(), crate::ipc::ToService::CaptureShare { .. }));
         ctl.capture_share_with(request, |_, report| {
             report(Stage::Replacing);

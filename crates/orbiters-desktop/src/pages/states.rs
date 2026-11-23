@@ -481,7 +481,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, sta
     let delete = Button::new(if confirming { tr("Delete it?") } else { tr("Delete") }).icon(icons::TRASH).variant(Variant::Danger).enabled(!saving);
     let delete = delete.id_salt(("orbiters-state-delete", &id));
     let dw = delete.desired_width(ui);
-    if delete.show_at(ui, Rect::from_min_size(pos2(row.right() - dw, row.top()), vec2(dw, 40.0))).clicked() {
+    if delete.confirm_at(ui, Rect::from_min_size(pos2(row.right() - dw, row.top()), vec2(dw, 40.0))) {
         if confirming {
             page.confirm = None;
             page.ask(whose, StateAction::Delete { id: id.clone() }, now, out);
@@ -533,6 +533,40 @@ mod tests {
 
     fn states(states: &[(&str, &str, bool)]) -> Vec<StateView> {
         states.iter().map(|(id, name, default)| StateView { id: id.to_string(), name: name.to_string(), default: *default, ..Default::default() }).collect()
+    }
+
+    /// Verify3-r21 B7: Enter held on a state's Delete opens "Delete it?" and no more; let go and pressed again, it deletes.
+    #[test]
+    fn a_held_enter_on_delete_never_confirms_it() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut page = StatesPage::default();
+        let whose = Whose { id: "avtr_a".into(), worn: true };
+        let state = states(&[("s1", "Hoodie on", false)]).remove(0);
+        let mut said = Vec::new();
+        let mut frame = |page: &mut StatesPage, said: &mut Vec<Out>, events: Vec<egui::Event>, focus: bool| {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 200.0))), events, ..Default::default() }, |ui| {
+                buttons_row(ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 40.0)), page, &whose, &state, false, 0.0, said);
+                if focus {
+                    let id = ui.scope_id().with("button").with_salt(egui::IdSalt::new(("orbiters-state-delete", "s1".to_string())));
+                    ui.memory_mut(|m| m.request_focus(id));
+                }
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut page, &mut said, Vec::new(), true);
+        frame(&mut page, &mut said, Vec::new(), true);
+        let enter = |pressed| egui::Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        for _ in 0..10 {
+            frame(&mut page, &mut said, vec![enter(true)], false);
+        }
+        assert!(page.confirm.is_some(), "Delete asks");
+        assert!(said.is_empty(), "one held Enter deleted the state");
+        frame(&mut page, &mut said, vec![enter(false)], false);
+        frame(&mut page, &mut said, Vec::new(), false);
+        frame(&mut page, &mut said, vec![enter(true)], false);
+        assert_eq!(said.len(), 1, "a press of its own does");
+        assert!(page.confirm.is_none());
     }
 
     /// Night PAGES-UI-9: Escape while renaming cancels the rename and is taken: Home's page, which asks after it, does
@@ -613,5 +647,57 @@ mod tests {
         in_language(Language::Ja, || assert_eq!(count(2), "保存済みの状態 2件"));
         // A name the person chose is theirs, in any language.
         in_language(Language::Es, || assert_eq!(avatar_name(&AvatarView { name: Some("Ultirex ✨".into()), ..unnamed }), "Ultirex ✨"));
+    }
+}
+
+#[cfg(test)]
+mod destructive_tests {
+    /// Verify3-r21 F: every destructive button of the window (red, or a bin's) is pressed through the shared fresh press, which
+    /// no held key and no press of another control reaches. Those listed here only open a menu or a question, or take back a
+    /// step the editor can undo.
+    #[test]
+    fn every_destructive_button_takes_a_press_of_its_own() {
+        const NOT: [(&str, &str); 3] = [
+            ("pages/editor/controls.rs", "b = b.danger();"),
+            ("pages/editor/looks.rs", "Item::new(r).icon(orbiters_ui::icons::TRASH).danger()"),
+            ("pages/projects/menus.rs", "Item::new("),
+        ];
+        fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    files(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut all = Vec::new();
+        files(&src.join("pages"), &mut all);
+        files(&src.join("chat_bar"), &mut all);
+        all.push(src.join("app.rs"));
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for path in all {
+            let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            let source = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+            let lines: Vec<&str> = source.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") || !(line.contains("Variant::Danger") || line.contains(".danger()")) {
+                    continue;
+                }
+                if NOT.iter().any(|(file, what)| name == *file && line.contains(what)) || name == "pages/states.rs" && line.contains("line.contains") {
+                    continue;
+                }
+                checked += 1;
+                let around = lines[n.saturating_sub(4)..(n + 12).min(lines.len())].join("\n");
+                let fresh = [".confirm(", ".confirm_at(", "activated_fresh(", "pressed_fresh(", "sharing::pressed(", "settings::pressed(", "kill_confirm = Some"];
+                if !fresh.iter().any(|f| around.contains(f)) {
+                    wrong.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        assert!(checked >= 15, "the sweep reads the sources ({checked})");
     }
 }

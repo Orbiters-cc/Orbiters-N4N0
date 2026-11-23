@@ -11,6 +11,7 @@
 
 mod assistant;
 mod captures;
+mod conversation;
 mod command;
 mod feedback;
 pub mod input;
@@ -32,7 +33,7 @@ mod tests;
 
 pub use assistant::{AssistantView, OpenAsk, TurnFailure};
 pub use command::{Command, MenuHolder, Stamp, Surface, FIRST_EPOCH};
-pub use fence::{next_input, Paused};
+pub use fence::{next_input, Acting, Paused};
 pub use platform::{
     language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen, QrSide,
     Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,

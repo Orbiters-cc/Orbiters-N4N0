@@ -148,7 +148,11 @@ impl N4n0 {
     pub(crate) fn voice_readiness(&self) -> crate::status::VoiceReadiness {
         use crate::status::VoiceReadiness::*;
         if !self.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) { return AssistantOff; }
-        if self.host.account().is_none() { return SignIn; }
+        match self.host.signed_as() {
+            crate::status::SignedAs::Nobody => return SignIn,
+            crate::status::SignedAs::Unknown => return SigningIn,
+            crate::status::SignedAs::Member => {}
+        }
         let rt = self.n4n0.lock().unwrap();
         if rt.voice.downloading.is_some() { ModelsDownloading }
         else if !rt.voice.installed { ModelsMissing }
@@ -212,6 +216,13 @@ impl N4n0 {
 
     pub(crate) fn ask_talk(self: &Shared, down: bool, stamp: Option<Stamp>) {
         let _lifecycle = self.voice_lifecycle.lock();
+        // A press that is not let in changes nothing of what the page listens to (verify3-r21 M6).
+        if !self.n4n0.lock().unwrap().voice.ask_open { return; }
+        let mut admitted = None;
+        if down {
+            admitted = self.let_in(stamp);
+            if admitted.is_none() { return; }
+        }
         let takeover = {
             let mut rt = self.n4n0.lock().unwrap();
             if !rt.voice.ask_open { return; }
@@ -221,7 +232,7 @@ impl N4n0 {
             takeover
         };
         if takeover { self.voice_cancel(); }
-        self.talk(down, Source::Overlay, stamp);
+        self.talk_admitted(down, Source::Overlay, admitted);
     }
 
     /// Called by the runtime watcher, independently of page paint and audio callbacks.
@@ -365,7 +376,11 @@ impl N4n0 {
             if n.busy_for(source) || (source == Source::AskAuto && (!n.voice.ask_open || !n.voice.automatic)) { return; }
             n.voice.ask_open
         };
-        let stamp = stamp.unwrap_or_else(|| self.own_stamp(Surface::Avatar));
+        // Installed with the identity held: a handover comes before it (and nothing is listened to) or clears it.
+        let later = self.later();
+        let Some(_held) = later.fence() else { return };
+        let here = if source == Source::AskAuto { Surface::Overlay } else { Surface::Avatar };
+        let stamp = stamp.unwrap_or_else(|| self.own_stamp(here));
         let mut rt = self.voice.lock().unwrap();
         if !ask { rt.ask_owned = false; }
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
@@ -478,6 +493,8 @@ impl N4n0 {
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
                 let rt = self.voice.lock().unwrap();
                 if rt.current_id() != Some(listen) || self.n4n0.lock().unwrap().voice.finalizing { return; }
+                // Never another member's words, even for a moment.
+                if rt.current.is_none_or(|(_, stamp)| stamp.epoch != self.host.identity_epoch()) { return; }
                 self.voice_status(|v| v.provisional = (!text.is_empty()).then_some(crate::status::ProvisionalSpeech { listen, text }));
             }
             VoiceEvent::Ready { engine, load_ms } => {

@@ -149,9 +149,12 @@ pub fn parameters(name: &str) -> &'static [&'static str] {
     }
 }
 
-/// The client tool of `group`.
-pub fn tool(group: Group) -> Value {
-    let intents: Vec<&str> = CATALOGUE.iter().filter(|s| s.group == group).map(|s| s.name).collect();
+/// The client tool of `group`, with what `actions` lets it offer ([`super::offered`]); `None` when that is nothing.
+pub fn tool(group: Group, actions: bool) -> Option<Value> {
+    let intents: Vec<&str> = CATALOGUE.iter().filter(|s| s.group == group && super::offered(s, actions)).map(|s| s.name).collect();
+    if intents.is_empty() {
+        return None;
+    }
     let mut properties = Map::new();
     properties.insert("intent".into(), json!({ "enum": intents }));
     for name in &intents {
@@ -160,13 +163,13 @@ pub fn tool(group: Group) -> Value {
         }
     }
     let lines: Vec<&str> = intents.iter().map(|n| about(n)).collect();
-    json!({
+    Some(json!({
         "name": group.tool(),
         // The rules once, on the tool of questions; the others point there.
         // The rules ride once, on orbiters_more, which every request carries (tools::more_spec).
         "description": format!("{} Intents: {}", summary(group), lines.join(" ")), // i18n: not shown
         "input_schema": { "type": "object", "properties": properties, "required": ["intent"] }
-    })
+    }))
 }
 
 /// Each intent's line (tests check every one has one).

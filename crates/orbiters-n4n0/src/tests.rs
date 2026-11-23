@@ -84,6 +84,12 @@ pub(crate) struct TestHost {
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
     invited_self: Mutex<Vec<String>>,
+    /// The VRChat account connected, when one is.
+    vrchat_account: Mutex<String>,
+    /// World feedback the menus asked.
+    feedback: Mutex<Vec<String>>,
+    /// Who is signed in is not known yet.
+    unknown: std::sync::atomic::AtomicBool,
     /// How often another member was signed in.
     epoch: std::sync::atomic::AtomicU64,
     /// N4N0's files, gone with the test.
@@ -101,12 +107,24 @@ pub(crate) trait Captured {
     fn acts(&self) -> crate::fence::Fence<'_>;
 }
 
+/// `surface` shows question `question` (as it says once its card is in view).
+pub(crate) fn present(n: &Shared, question: u64, surface: Surface) {
+    let epoch = n.n4n0.lock().unwrap().account_epoch;
+    n.command(Command::Presented { stamp: Some(Stamp { epoch, question: Some(question), surface, seq: crate::next_input() }) });
+}
+
 impl Captured for Shared {
     fn stamped(&self) -> Option<Stamp> {
+        // As a surface does: what it shows was presented on it before anything is answered there.
+        let question = self.n4n0.lock().unwrap().question();
+        if let Some(question) = question {
+            present(self, question, Surface::Window);
+        }
         Some(self.own_stamp(Surface::Window))
     }
 
     fn stamp_for(&self, question: u64) -> Option<Stamp> {
+        present(self, question, Surface::Window);
         Some(Stamp { question: Some(question), ..self.own_stamp(Surface::Window) })
     }
 
@@ -278,7 +296,23 @@ impl Host for TestHost {
         (epoch == self.identity_epoch()).then(|| server.clone()).flatten().map(|(base, token)| (Api::at(&base), token))
     }
 
-    fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+    fn signed_as(&self) -> SignedAs {
+        let unknown = self.unknown.load(Ordering::SeqCst);
+        if unknown { SignedAs::Unknown } else if self.server.lock().unwrap().is_some() { SignedAs::Member } else { SignedAs::Nobody }
+    }
+
+    fn invite_account(&self) -> Option<String> {
+        self.vrchat_invite.lock().unwrap().is_some().then(|| self.vrchat_account.lock().unwrap().clone())
+    }
+
+    fn world_feedback(&self, ask: orbiters_n4n0_core::feedback::FeedbackAsk) {
+        self.feedback.lock().unwrap().push(format!("{ask:?}"));
+    }
+
+    fn invite_self(&self, location: &str, account: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
+        if account != *self.vrchat_account.lock().unwrap() {
+            return None;
+        }
         let answer = self.vrchat_invite.lock().unwrap().clone()?;
         self.invited_self.lock().unwrap().push(location.to_string());
         Some(answer)
@@ -941,7 +975,7 @@ fn a_new_conversation_stops_what_is_arriving() {
     t.sign_in(base, "orbit-test");
     n.asked("Count".into(), "typed");
     status_when(&t, |s| !the_answers(s).is_empty());
-    n.command(Command::NewConversation);
+    n.command(Command::NewConversation { conversation: Some(t.view().conversation), stamp: n.stamped() });
     let cleared = status_when(&t, |s| s.lines.is_empty() && !s.thinking);
     assert!(cleared.lines.is_empty());
     std::thread::sleep(Duration::from_millis(500));
@@ -1486,7 +1520,7 @@ fn a_late_click_on_an_older_question_leaves_the_newer_one_up() {
     assert_eq!(local_ask(&t).as_deref(), Some(b.as_str()), "B still up");
     assert!(t.settings().n4n0.pins.is_empty(), "nothing done by a stale click");
     // A link names a question but not whom it was shown to: it answers nothing.
-    n.command(Command::OpenLink { url: b.clone() });
+    n.command(Command::OpenLink { url: b.clone(), stamp: n.stamped() });
     assert_eq!(local_ask(&t).as_deref(), Some(b.as_str()), "still up");
     n.command(Command::AskAnswer { yes: true, stamp: n.stamp_for(number(&b)) });
     assert_eq!(t.settings().n4n0.pins.iter().map(|p| p.parameter.as_str()).collect::<Vec<_>>(), vec!["Hoodie"]);
@@ -1528,7 +1562,7 @@ fn a_website_approval_opened_in_the_browser_no_longer_keeps_n4n0_from_listening(
     n.asked("plan a movie night".into(), "typed");
     turn_ended(&n, &bodies, 1);
     assert!(n.n4n0.lock().unwrap().ask_busy(), "waiting for the website");
-    n.command(Command::OpenLink { url: url.clone() });
+    n.command(Command::OpenLink { url: url.clone(), stamp: n.stamped() });
     assert!(!n.n4n0.lock().unwrap().ask_busy(), "handed to the website: N4N0 listens again");
     assert!(t.view().confirmations.iter().any(|c| c.approve_url == url), "still listed with its link");
     assert!(n.n4n0.lock().unwrap().conversation.len() == 1, "the conversation stays");
@@ -2627,7 +2661,7 @@ fn a_card_is_taken_back_from_n4n0_s_menu_the_overlay_or_the_window() {
     put_node(&mut tree, &parameter(params::SCREEN_VERSION), "i", json!(contract::SCREEN_TIMELINE), 3);
     let (t, n, vrchat) = n4n0_on_avatar(tree);
     assert!(until(|| t.view().can_drop));
-    let drop = || Command::Drop { link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), video: None };
+    let drop = || Command::Drop { link: "https://www.youtube.com/watch?v=dQw4w9WgXcQ".into(), title: "Never Gonna Give You Up".into(), video: None, stamp: n.stamped() };
     n.command(drop());
     assert!(until(|| t.view().card.is_some()));
     received(&vrchat, Duration::from_millis(600));
@@ -2713,7 +2747,7 @@ fn a_dropped_card_is_out_for_everyone_beside_the_menu_until_its_time_is_up() {
     let (t, n, vrchat) = n4n0_on_avatar(card_tree("avtr_card"));
     assert!(until(|| t.view().can_drop), "a screen of version 7 drops cards");
     let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    n.command(Command::Drop { link: link.into(), title: "Never Gonna Give You Up".into(), video: None });
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna Give You Up".into(), video: None, stamp: n.stamped() });
     let sent = received(&vrchat, Duration::from_millis(2500));
     assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(true))), "the card is out: {sent:?}");
     assert_ne!(n.n4n0.lock().unwrap().screen.menu.page, orbiters_n4n0_core::menu::Page::Card, "the menu is not the card");
@@ -2764,7 +2798,7 @@ fn a_screen_of_version_8_sends_the_card_s_full_picture_to_its_owner_then_to_ever
     let picture = orbiters_n4n0_core::menu::screen::picture_from_rgb(&rgb);
     let stream = picture.full_stream(SLOT_CARD, 72).expect("a full picture");
     n.n4n0.lock().unwrap().screen.put_picture(id, picture);
-    n.command(Command::Drop { link: format!("https://www.youtube.com/watch?v={id}"), title: "Never Gonna Give You Up".into(), video: Some(id.into()) });
+    n.command(Command::Drop { link: format!("https://www.youtube.com/watch?v={id}"), title: "Never Gonna Give You Up".into(), video: Some(id.into()), stamp: n.stamped() });
     // The owner: the bridge on, then the stream's chunks through the local values (each one checked, rebuilding it).
     let sent = received(&vrchat, Duration::from_millis(1500));
     assert!(sent.contains(&(parameter(params::PICTURE_SEND), OscType::Bool(true))), "the bridge on");
@@ -2798,7 +2832,7 @@ fn a_card_is_told_to_orbiters_and_someone_else_s_is_fetched_when_grabbed() {
     let hash = t.world.lock().unwrap().instance_hash().unwrap();
     assert!(until(|| t.view().can_drop));
     let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None });
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None, stamp: n.stamped() });
     assert!(until(|| !seen.lock().unwrap().is_empty()));
     {
         let seen = seen.lock().unwrap();
@@ -2832,7 +2866,7 @@ fn in_vr_without_replace_a_card_drops_while_the_menu_is_the_overlay_s() {
     assert!(!writes_the_screen(&startup), "{startup:?}");
     // Dropped from the overlay's menu: the card is out and its blocks go; the screen stays closed.
     let link = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None });
+    n.command(Command::Drop { link: link.into(), title: "Never Gonna".into(), video: None, stamp: n.stamped() });
     let sent = received(&vrchat, Duration::from_millis(1500));
     assert!(sent.contains(&(parameter(card::OUT), OscType::Bool(true))), "{sent:?}");
     assert!(!sent.contains(&(parameter(params::SCREEN_OPEN), OscType::Bool(true))), "the screen stays closed");
@@ -2914,7 +2948,7 @@ fn copying_goes_to_the_device_s_clipboard_with_its_press_sound() {
         rt.screen.menu.pages = orbiters_n4n0_core::menu::Pages::Ten;
         rt.screen.set_card_capable(true);
     }
-    n.command(Command::Drop { link: "https://example.com/card".into(), title: "A card".into(), video: None });
+    n.command(Command::Drop { link: "https://example.com/card".into(), title: "A card".into(), video: None, stamp: n.stamped() });
     n.card_grab();
     assert!(copied("https://example.com/card"));
     assert_eq!(device.sounds.0.load(Ordering::Relaxed), 1);
@@ -2926,9 +2960,9 @@ fn copying_goes_to_the_device_s_clipboard_with_its_press_sound() {
 fn only_orbiters_pages_reach_the_device_s_browser() {
     let media = Arc::new(Watcher::new(|| Box::new(NoMedia)));
     let (_t, n, device) = n4n0_on(Settings::default(), media);
-    n.command(Command::OpenLink { url: "https://evil.example/phish".into() });
+    n.command(Command::OpenLink { url: "https://evil.example/phish".into(), stamp: n.stamped() });
     let approve = format!("{}approve/42", orbiters_core::account::Server::current().website());
-    n.command(Command::OpenLink { url: approve.clone() });
+    n.command(Command::OpenLink { url: approve.clone(), stamp: n.stamped() });
     assert_eq!(device.browser.0.lock().unwrap().as_slice(), &[approve]);
     n.shutdown();
 }
@@ -2959,7 +2993,7 @@ fn the_avatar_s_triggers_go_to_the_app_s_own_features_in_order() {
     n.on_avatar("avtr_other".into());
     assert_eq!(t.motion.lock().unwrap().last(), Some(&None));
     // The interfaces' call buttons, and a touch while a call rings: answered.
-    n.command(Command::Call { contact: "c1".into() });
+    n.command(Command::Call { contact: "c1".into(), stamp: n.stamped() });
     n.command(Command::MuteCall { on: true });
     *t.ringing.lock().unwrap() = true;
     n.n4n0.lock().unwrap().params.insert(params::TOUCH.to_string());
@@ -3032,7 +3066,7 @@ fn n4n0_hands_its_menus_the_3d_captures_shares_them_and_reads_friends_while_shar
     n.command(Command::Captures);
     assert!(until(|| host.listed.load(Ordering::Relaxed) == 1));
     let ask = ShareAsk { key: "C:/s/a".into(), public: true, recipients: Vec::new(), acknowledge_explicit: true };
-    n.command(Command::ShareCapture { share: ask.clone() });
+    n.command(Command::ShareCapture { share: ask.clone(), stamp: n.stamped() });
     assert!(until(|| host.shares.lock().unwrap().as_slice() == std::slice::from_ref(&ask)));
     // Friends: read while Share to … shows (by name), forgotten when it closes; why they could not be read.
     let f = |id: &str, name: &str| Friend { id: id.into(), name: name.into() };
@@ -3795,24 +3829,24 @@ fn invite_me_takes_the_connected_vrchat_account_else_orbiters_and_then_says_to_c
         let host = TestHost::default();
         *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
         *host.vrchat_invite.lock().unwrap() = Some(answer.clone());
-        assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), answer);
+        assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), answer);
         assert_eq!(*host.invited_self.lock().unwrap(), [location]);
     }
     assert_eq!(asked.load(Ordering::SeqCst), 0, "Orbiters' account is not asked when the person's own is connected");
     // Not connected: Orbiters' account, as before.
     let host = TestHost::default();
     *host.server.lock().unwrap() = Some((base.clone(), "orbit-test".into()));
-    assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::Sent);
+    assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), InviteAnswer::Sent);
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     let (befriend, _) = orbiters_invites(409, r#"{"code":"not_friends","message":"Add it first.","account":{"name":"Orbiters","link":"https://vrchat.com/home/user/usr_1"}}"#);
     *host.server.lock().unwrap() = Some((befriend, "orbit-test".into()));
-    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::NeedsFriend { .. }), "adding Orbiters as a friend can work: offered");
+    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), InviteAnswer::NeedsFriend { .. }), "adding Orbiters as a friend can work: offered");
     // What Orbiters' account could not do: connect your own.
     let (refused, _) = orbiters_invites(409, r#"{"code":"refused","message":"VRChat refused this invite. The instance may have closed."}"#);
     *host.server.lock().unwrap() = Some((refused, "orbit-test".into()));
-    let InviteAnswer::NeedsVrchat { message } = crate::screen::invite_route(&host, crate::FIRST_EPOCH, location) else { panic!("connect VRChat") };
+    let InviteAnswer::NeedsVrchat { message } = crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location) else { panic!("connect VRChat") };
     assert!(message.contains("VRChat refused this invite") && message.contains("Connect your VRChat account"), "{message}");
     *host.server.lock().unwrap() = None;
-    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
+    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
     assert!(host.invited_self.lock().unwrap().is_empty());
 }

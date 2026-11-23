@@ -181,6 +181,13 @@ pub(super) struct Runtime {
     pub(super) signed_bell: Arc<Bell>,
     /// The Orbiters account's state and environment the last publish saw, to ring `bell` when it changes.
     seen_account: Option<(std::mem::Discriminant<AccountState>, bool)>,
+    /// The Orbiters account and environment ([`owner_key`]) the VRChat name and picture on show belong to: shown to that
+    /// one only; any other sees a plain "Connecting" (verify-r21 Major 2).
+    shown_for: Option<String>,
+    /// Where the last account's name and picture are kept (tests: a file of their own; the app: its cache folder).
+    pub(super) cache_path: Option<std::path::PathBuf>,
+    /// Bumped at every sign-out and change of the Orbiters identity: a cache write begun before is not made (Major 3).
+    cache_generation: u64,
     /// What every publish said of the sign-in (tests: no state any window could see is missed).
     #[cfg(test)]
     pub(super) presences: Vec<Presence>,
@@ -221,7 +228,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, #[cfg(test)] presences: Vec::new() }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, shown_for: None, cache_path: account_cache_path(), cache_generation: 0, #[cfg(test)] presences: Vec::new() }
     }
 }
 impl Runtime {
@@ -283,7 +290,8 @@ impl Controller {
         self.vrchat_identity().is_some_and(|(api, token)| api.url("") == identity.0 && token == identity.1)
     }
     pub(super) fn start_vrchat_login(self: &Shared) {
-        self.vrchat_at_launch(read_account_cache());
+        let cached = { let rt = self.vrchat_login.lock().unwrap(); rt.cache_path.clone() }.and_then(|p| read_account_cache(&p));
+        self.vrchat_at_launch(cached);
         let weak = Arc::downgrade(self);
         let bell = self.vrchat_login.lock().unwrap().bell.clone();
         let _ = std::thread::Builder::new().name("vrchat-feature".into()).spawn(move || {
@@ -299,16 +307,24 @@ impl Controller {
     }
     /// Before the first look and before any window asks (r21): a session saved here is "connecting", with the last
     /// account's name and picture kept on this computer, never "signed out" while nothing has been asked yet.
-    pub(super) fn vrchat_at_launch(&self, cached: Option<(User, Option<Picture>)>) {
+    /// The name and picture are shown only to the Orbiters account and environment they were kept for (verify-r21
+    /// Major 2): another member, or another environment, sees a plain "Connecting to VRChat…".
+    pub(super) fn vrchat_at_launch(&self, cached: Option<(User, Option<Picture>, Option<String>)>) {
         let saved = self.vrchat_login.lock().unwrap().saved();
         if !saved {
             return;
+        }
+        let owner = owner_key(&self.view());
+        let own = cached.filter(|(_, _, kept_for)| kept_for.is_some() && *kept_for == owner).map(|(user, picture, _)| (user, picture));
+        if own.is_some() {
+            // The publish's rule then shows it, for as long as this stays the account on show.
+            self.vrchat_login.lock().unwrap().shown_for = owner;
         }
         self.update(|s| {
             let st = &mut s.vrchat_login;
             if st.user.is_none() {
                 st.restoring = true;
-                if let Some((user, picture)) = cached {
+                if let Some((user, picture)) = own {
                     st.known = Some(user);
                     st.picture = picture;
                 }
@@ -330,6 +346,7 @@ impl Controller {
                 rt.gate.revoke();
                 rt.identity = identity.clone();
                 rt.generation += 1;
+                rt.cache_generation += 1;
                 rt.busy = false;
             }
             match &identity {
@@ -386,9 +403,9 @@ impl Controller {
             rt.busy = true;
             rt.restoring_now = saved;
             rt.generation += 1;
-            Some((rt.client.clone(), rt.generation, saved))
+            Some((rt.client.clone(), rt.generation, saved, rt.cache_generation))
         });
-        if let (Some((client, generation, saved)), Some(id)) = (restore, identity.as_ref()) {
+        if let (Some((client, generation, saved, cache_generation)), Some(id)) = (restore, identity.as_ref()) {
             self.update(|s| {
                 s.vrchat_login.busy = true;
                 s.vrchat_login.restoring = saved;
@@ -430,15 +447,25 @@ impl Controller {
             if let Some(user) = signed_in {
                 self.vrchat_login.lock().unwrap().signed_bell.ring();
                 let portrait = if user.picture().is_empty() { None } else { client.lock().unwrap().image(user.picture()).ok().and_then(picture) };
-                let shown = self.update_if(|s| {
+                let mut displayed = false;
+                self.update_if(|s| {
                     let st = &mut s.vrchat_login;
-                    let same = st.user.as_ref().is_some_and(|u| u.id == user.id);
-                    if same && portrait.is_some() {
+                    displayed = st.user.as_ref().is_some_and(|u| u.id == user.id);
+                    if displayed && portrait.is_some() {
                         st.picture = portrait.clone();
                     }
-                    same && portrait.is_some()
+                    displayed && portrait.is_some()
                 });
-                write_account_cache(&user, if shown { portrait.as_ref() } else { None });
+                // Kept only while that account is still the one shown, for the Orbiters account it is shown to, and no
+                // sign-out or change of identity came while the picture was read (verify-r21 Major 3).
+                let owner = owner_key(&self.view());
+                let rt = self.vrchat_login.lock().unwrap();
+                if displayed && rt.cache_generation == cache_generation {
+                    if let (Some(path), Some(owner)) = (rt.cache_path.as_deref(), owner) {
+                        write_account_cache(path, &user, portrait.as_ref(), &owner);
+                    }
+                }
+                drop(rt);
             }
         }
         self.settle_vrchat_status(matches!(orbiters, Orbiters::Gone));
@@ -535,8 +562,14 @@ impl Controller {
             rt.busy = true;
             // The person's own sign-in or "Try again": the saved session is theirs to read now.
             rt.restored = true;
+            // A sign-out (or another sign-in) makes any cache write begun before it moot.
+            if matches!(command, Command::SignOut | Command::SignIn { .. } | Command::Cancel) {
+                rt.cache_generation += 1;
+            }
             (rt.client.clone(), rt.generation)
         };
+        let cache_generation = self.vrchat_login.lock().unwrap().cache_generation;
+        let owner = owner_key(&self.view());
         let replacing_session = matches!(&command, Command::SignOut | Command::SignIn { .. } | Command::Cancel);
         self.update(|s| {
             if replacing_session { s.vrchat_login.user = None; s.vrchat_login.picture = None; s.vrchat_login.methods.clear(); }
@@ -568,29 +601,42 @@ impl Controller {
             if matches!(result, Ok(Some(Login::SignedIn(_)))) && !c.signed_in() {
                 result = Err(Error::Unauthorized);
             }
+            // Signed out here when the session is gone from memory and from disk, whatever VRChat answered about its own
+            // side (verify-r21 Major 3: an offline sign-out left the cached name and picture behind).
+            let forgotten = signing_out && !c.holds_session() && !c.session_saved();
             let ended = c.ended_user().cloned();
             drop(c);
             {
                 let mut rt = ctl.vrchat_login.lock().unwrap();
-                if signing_out && result.is_ok() {
+                if forgotten {
                     rt.saved = Some(false);
-                    remove_account_cache();
+                    rt.cache_generation += 1;
+                    rt.shown_for = None;
+                    if let Some(path) = rt.cache_path.clone() {
+                        remove_account_cache(&path);
+                    }
                 } else if let Ok(Some(Login::SignedIn(u))) = &result {
                     rt.saved = Some(true);
                     rt.signed_bell.ring();
-                    write_account_cache(u, picture.as_ref());
+                    if rt.cache_generation == cache_generation {
+                        if let (Some(path), Some(owner)) = (rt.cache_path.clone(), owner.as_deref()) {
+                            write_account_cache(&path, u, picture.as_ref(), owner);
+                        }
+                    }
                 }
             }
             let recovery = match &result {
-                Err(Error::Storage) if signing_out => Recovery::RemoveSavedSession,
+                Err(_) if signing_out && !forgotten => Recovery::RemoveSavedSession,
                 Err(Error::Unavailable | Error::RateLimited(_) | Error::Storage) if !signing_out => Recovery::Resume,
                 _ => Recovery::None,
             };
-            let clear_session = signing_out || matches!(result, Err(Error::Unauthorized));
+            let clear_session = forgotten || matches!(result, Err(Error::Unauthorized));
             let result = match result {
                 Err(Error::Unauthorized) if signing_in => Err(tr("The username or password was not accepted by VRChat.").to_string()),
                 Err(Error::Unauthorized) => Err(ended_text(ended.as_ref())),
-                Err(Error::Storage) if signing_out => Err(tr("The saved VRChat session could not be removed. Try signing out again.").into()),
+                // Forgetting here failed: still signed in here, said so (not "signed out").
+                Err(_) if signing_out && !forgotten => Err(tr("The saved VRChat session could not be removed. Try signing out again.").into()),
+                // Forgotten here; only telling VRChat failed.
                 Err(e) if signing_out => Err(tr!("Signed out on this computer. VRChat could not confirm remote sign-out: {error}", error = e)),
                 r => r.map_err(|e| e.to_string()),
             };
@@ -687,6 +733,34 @@ impl Controller {
 /// grant too, but the session shows as kept and waiting, not signed out (r20). The session itself is never dropped
 /// here: it stays in memory and on disk for the next grant.
 pub(super) fn follow_orbiters(s: &mut crate::state::Snapshot, rt: &mut Runtime) {
+    follow_orbiters_session(s, rt);
+    // The VRChat name and picture are the Orbiters account's they were verified (or kept) for: any other account or
+    // environment, or none, sees a plain "Connecting" (verify-r21 Major 2), at every publish whatever path got here.
+    let owner = owner_key(s);
+    let st = &mut s.vrchat_login;
+    if st.user.is_some() {
+        rt.shown_for = owner;
+    } else if (st.known.is_some() || st.picture.is_some()) && (owner.is_none() || rt.shown_for != owner) {
+        st.known = None;
+        st.picture = None;
+    }
+}
+
+/// The Orbiters account and environment a VRChat name and picture may be shown to: a digest of the environment and the
+/// account's name (no credential), `None` while no account is known (being read, signed out, refused).
+pub(super) fn owner_key(s: &crate::state::Snapshot) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let name = match &s.account.state {
+        AccountState::SignedIn { username } => Some(username.as_str()),
+        AccountState::Checking { username } | AccountState::Offline { username } => username.as_deref(),
+        _ => None,
+    }?;
+    let env = if s.account.development { "development" } else { "production" };
+    let digest = Sha256::digest(format!("{env}\n{name}").as_bytes());
+    Some(digest.iter().take(16).map(|b| format!("{b:02x}")).collect())
+}
+
+fn follow_orbiters_session(s: &mut crate::state::Snapshot, rt: &mut Runtime) {
     // The Orbiters account changed (read, checked, signed in or out, the environment): VRChat's next look comes at once.
     let seen = (std::mem::discriminant(&s.account.state), s.account.development);
     if rt.seen_account != Some(seen) {
@@ -733,30 +807,31 @@ struct CachedAccount {
     name: String,
     #[serde(default)]
     picture: Option<Picture>,
+    /// The Orbiters account and environment it may be shown to ([`owner_key`]); none in a file of r21 (never shown).
+    #[serde(default)]
+    owner: Option<String>,
 }
 
-fn read_account_cache() -> Option<(User, Option<Picture>)> {
-    let text = std::fs::read_to_string(account_cache_path()?).ok()?;
+fn read_account_cache(path: &std::path::Path) -> Option<(User, Option<Picture>, Option<String>)> {
+    let text = std::fs::read_to_string(path).ok()?;
     let cached: CachedAccount = serde_json::from_str(&text).ok()?;
     let user: User = serde_json::from_value(serde_json::json!({"id": cached.id, "displayName": cached.name})).ok()?;
-    Some((user, cached.picture))
+    Some((user, cached.picture, cached.owner))
 }
 
-fn write_account_cache(user: &User, picture: Option<&Picture>) {
-    let Some(path) = account_cache_path() else { return };
-    // A picture fetched before stays when this time none came.
-    let picture = picture.cloned().or_else(|| read_account_cache().filter(|(u, _)| u.id == user.id).and_then(|(_, p)| p));
-    let cached = CachedAccount { id: user.id.clone(), name: user.display_name.clone(), picture };
+/// Written with the runtime's lock held (the callers'), so no write crosses a sign-out.
+fn write_account_cache(path: &std::path::Path, user: &User, picture: Option<&Picture>, owner: &str) {
+    // A picture fetched before stays when this time none came (for the same account and owner).
+    let picture = picture.cloned().or_else(|| read_account_cache(path).filter(|(u, _, o)| u.id == user.id && o.as_deref() == Some(owner)).and_then(|(_, p, _)| p));
+    let cached = CachedAccount { id: user.id.clone(), name: user.display_name.clone(), picture, owner: Some(owner.to_string()) };
     if let (Some(dir), Ok(text)) = (path.parent(), serde_json::to_vec(&cached)) {
         let _ = std::fs::create_dir_all(dir);
-        let _ = orbiters_core::write_atomic(&path, &text);
+        let _ = orbiters_core::write_atomic(path, &text);
     }
 }
 
-fn remove_account_cache() {
-    if let Some(path) = account_cache_path() {
-        let _ = std::fs::remove_file(path);
-    }
+fn remove_account_cache(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// What a session VRChat ended says: whose it was, when known, and that signing in again brings it back.
@@ -893,7 +968,8 @@ mod tests {
         // The switch: the other environment's account is not read yet.
         switching(&c);
         let status = c.view().vrchat_login.clone();
-        assert!(status.waiting && status.user.is_none() && status.known.as_ref().map(|u| u.id.as_str()) == Some("usr_test"), "{status:?}");
+        // verify-r21 Major 2: waiting, and no name: the other environment's account is not known to be this one.
+        assert!(status.waiting && status.user.is_none() && status.known.is_none() && status.picture.is_none(), "{status:?}");
         c.vrchat_feature_tick();
         assert!(c.view().vrchat_login.waiting);
         // Its account read and being checked; its server says yes: the same session goes on.
@@ -1069,6 +1145,127 @@ mod tests {
         assert!(seen.len() > 8);
     }
 
+    /// A cache file of this test's own (tests never touch the app's cache folder).
+    fn test_cache(name: &str) -> std::path::PathBuf {
+        let path = crate::pages::test_root().join(format!("vrchat-account-{name}.json"));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// verify-r21 Major 2: the cached VRChat name and picture show only to the Orbiters account and environment they
+    /// were kept for: another member, or a file kept before r21's fix (no owner), sees a plain "Connecting".
+    #[test]
+    fn a_cached_vrchat_name_shows_only_to_the_orbiters_account_it_was_kept_for() {
+        let user: User = serde_json::from_value(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
+        let path = test_cache("owner");
+        let as_member = |name: &str| {
+            let c = launch(me, Some(true), true);
+            c.update(|s| {
+                s.vrchat_login = Default::default();
+                s.account.state = AccountState::Checking { username: Some(name.into()) };
+            });
+            c
+        };
+        let tester = as_member("tester");
+        write_account_cache(&path, &user, None, &owner_key(&tester.view()).unwrap());
+        tester.vrchat_at_launch(read_account_cache(&path));
+        assert_eq!(tester.view().vrchat_login.shown_user().map(|u| u.display_name.clone()).as_deref(), Some("Tester"), "its own member");
+        let other = as_member("someone-else");
+        other.vrchat_at_launch(read_account_cache(&path));
+        let status = other.view().vrchat_login.clone();
+        assert_eq!(status.presence(), Presence::Connecting, "{status:?}");
+        assert!(status.known.is_none() && status.picture.is_none() && status.shown_user().is_none(), "another member sees no name: {status:?}");
+        // The other environment, same name: not the same account.
+        let there = as_member("tester");
+        there.update(|s| s.account.development = !s.account.development);
+        there.vrchat_at_launch(read_account_cache(&path));
+        assert!(there.view().vrchat_login.known.is_none(), "another environment sees no name");
+        // A file kept before (no owner): never shown.
+        std::fs::write(&path, br#"{"id":"usr_test","name":"Tester"}"#).unwrap();
+        let old = as_member("tester");
+        old.vrchat_at_launch(read_account_cache(&path));
+        assert!(old.view().vrchat_login.known.is_none());
+    }
+
+    /// verify-r21 Major 2: switching the Orbiters account (or its environment) in memory hides the last VRChat name and
+    /// picture until VRChat verifies the session for the new one.
+    #[test]
+    fn switching_the_orbiters_account_hides_the_last_vrchat_identity() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        c.test_vrchat(vec![]);
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        c.update(|s| s.vrchat_login.picture = Some(Picture { width: 1, height: 1, rgba: vec![1, 2, 3, 255] }));
+        orbiters_account(&c, Server::current(), "another-token", AccountState::Checking { username: Some("someone-else".into()) });
+        c.vrchat_feature_tick();
+        let status = c.view().vrchat_login.clone();
+        assert!(status.user.is_none() && status.known.is_none() && status.picture.is_none(), "{status:?}");
+        assert!(status.shown_user().is_none());
+    }
+
+    /// verify-r21 Major 3: a sign-out with VRChat out of reach forgets the session here and its cached name and picture
+    /// with it; only telling VRChat failed, and that is what it says.
+    #[test]
+    fn an_offline_sign_out_forgets_the_cached_identity() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = c.test_vrchat(vec![(503, serde_json::json!({}))]);
+        c.vrchat_feature_tick();
+        assert_eq!(signed_in_as(&c), tester());
+        let path = test_cache("offline-sign-out");
+        let user = c.view().vrchat_login.user.clone().unwrap();
+        write_account_cache(&path, &user, None, &owner_key(&c.view()).unwrap());
+        c.vrchat_login.lock().unwrap().cache_path = Some(path.clone());
+        c.vrchat_command(Command::SignOut);
+        for _ in 0..400 {
+            if !c.view().vrchat_login.busy {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(calls.lock().unwrap().iter().any(|(_, url)| url.ends_with("/logout")), "VRChat was asked");
+        let status = c.view().vrchat_login.clone();
+        assert!(!path.exists(), "the cached identity is gone with the session");
+        assert_eq!(status.presence(), Presence::SignedOut, "{status:?}");
+        assert!(status.error.as_deref().is_some_and(|e| e.contains("Signed out on this computer")), "{status:?}");
+        assert!(status.known.is_none() && status.picture.is_none());
+    }
+
+    /// verify-r21 Major 3: the account's picture read after "signed in" is shown: if that account is no longer the one
+    /// on show when the picture comes (the Orbiters account changed meanwhile), nothing is written to the cache.
+    #[test]
+    fn a_late_portrait_writes_nothing_for_an_account_no_longer_shown() {
+        let me_with_picture = |_: &str, url: &str| {
+            if url.ends_with("/auth/user") {
+                (200, serde_json::json!({"id": "usr_test", "displayName": "Tester", "currentAvatarThumbnailImageUrl": "https://api.vrchat.cloud/api/1/file/file_00000000-0000-4000-8000-000000000001/1/file"}))
+            } else if url.contains("/file/") {
+                std::thread::sleep(Duration::from_millis(400));
+                (404, serde_json::json!({}))
+            } else {
+                (404, serde_json::json!({}))
+            }
+        };
+        let c = launch(me_with_picture, Some(true), true);
+        let path = test_cache("late-portrait");
+        c.vrchat_login.lock().unwrap().cache_path = Some(path.clone());
+        c.vrchat_feature_tick();
+        account_read(&c);
+        let ticking = {
+            let c = c.clone();
+            std::thread::spawn(move || c.vrchat_feature_tick())
+        };
+        // Signed in shown, its picture still being read: the Orbiters account changes.
+        for _ in 0..400 {
+            if c.view().vrchat_login.user.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(c.view().vrchat_login.user.is_some(), "signed in before the picture");
+        orbiters_account(&c, Server::current(), "another-token", AccountState::SignedOut);
+        ticking.join().unwrap();
+        assert!(!path.exists(), "no cache written for an account no longer shown");
+    }
+
     /// r21: a launch with a session saved here, as the service's `start()` makes it: the account file read (Checking),
     /// the sign-in's first state, then the looks. `vrchat` answers VRChat's requests; Orbiters says `orbiters`.
     fn launch(vrchat: impl Fn(&str, &str) -> (u16, serde_json::Value) + Send + Sync + 'static, orbiters: Option<bool>, saved: bool) -> Shared {
@@ -1080,7 +1277,8 @@ mod tests {
         c.vrchat_login.lock().unwrap().saved = Some(saved);
         c.account_at_launch(Server::current(), Some(Some("tester".into())));
         let cached = serde_json::from_value(serde_json::json!({"id": "usr_test", "displayName": "Tester"})).unwrap();
-        c.vrchat_at_launch(Some((cached, None)));
+        let owner = owner_key(&c.view());
+        c.vrchat_at_launch(Some((cached, None, owner)));
         // From here a window can be connected (the service listens once `start()` returned).
         c.vrchat_login.lock().unwrap().presences.clear();
         c.update(|_| {});

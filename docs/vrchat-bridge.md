@@ -334,8 +334,19 @@ How it is one verified game (`controller/bridge_mac.rs`):
   after it, closed, cut short or percent-encoded, singly or doubly), any `vrchat:` link in any case or encoded, an instance part on
   its own, a nonce given as a value, `usr_` and `grp_` ids (tested with each form). **No raw sample is ever on disk**: `sample`
   writes to its standard output (`-file /dev/stdout`), which is redacted in memory and only then written. The engine's
-  recent-event ring (`wine-438100.lkd-events`, voile-lkd's last 8192 ptrace and signal events) is copied sorted and redacted
-  (`lkd-events.txt`).
+  recent-event ring (`wine-438100.lkd-events`, voile-lkd's last 8192 ptrace and signal events, from an engine with voile-lkd
+  `bf0af9b`, which obelisk-cli 0.1.8 holds back) is copied sorted and redacted (`lkd-events.txt`) when it is there.
+- **2026-11-23 08:01 to 08:26, the soak of a 0.1.8 candidate with voile-lkd `bf0af9b`** (five starts, private instances of the
+  owner's home world, the screen locked, each quit by session): four arrived (42 to 46 s) and quit cleanly, no group stop; in one
+  (08:06), Easy Anti-Cheat logged `Client Violation with Type: 15 Message: Forbidden system configuration (Debugger detected.)` at
+  08:07:03, 26 s in, VRChat then failed to create its instance and was told the anti-cheat could not verify the installation; the
+  session ran on until quit by session at 604 s. That line is in none of the 26 earlier VRChat logs here. The new ptrace code's
+  attach windows measured as short as the old (p99 1 ms), its engine log shows no failed attach and no group stop, and the
+  event ring had wrapped (8192 lines hold about three minutes of Wine's attaches) before it could show the start-up; the cause
+  is unknown. obelisk-cli 0.1.8 therefore ships `fexdarwin-run` from 0.1.7's sources, and `bf0af9b` waits for an explanation
+  (what Easy Anti-Cheat's Linux client checks to call a debugger: `TracerPid`, an attach of its own refused): do not ship it
+  before. The first start of that candidate also showed the bounded log writer printing to the launcher's discarded standard
+  output (no guest line in the log): fixed in 0.1.8 before release.
 - **A lost picture** (requirement R1; `controller/picture.rs`): three states. *Presenting*: the guest's presents or the shown
   frames grew within 15 s. *Unobservable*: nothing seen lately: a covered window, another Space, the lock screen, a stall, loading;
   nothing is said or offered. *Lost*: the engine's log said the graphics server dropped this session's game (`destroying Neptune
@@ -346,7 +357,7 @@ How it is one verified game (`controller/bridge_mac.rs`):
   starts VRChat as Home started it through the one start (its 80 s after an early end and one start at a time hold; a wait up to
   100 s is waited once). The bridge's `renderer_lost` is the same confirmed loss (it used to be the log's marker alone), and its
   presents count per swapchain generation (the largest count seen used to hide a new swapchain's growth). The flood after a loss
-  (420 MB in five minutes from the guest driver's retries) is bounded by obelisk-cli 0.1.8's launch script (a line repeated
+  (420 MB in five minutes from the guest driver's retries) is bounded by obelisk-cli 0.1.8's launch script (its standard error) (a line repeated
   without end is kept 200 times, then counted; the frame counters' lines always pass): the guest driver inside the game's
   process is left unchanged (it loads in the game's process; Easy Anti-Cheat; a change there needs its own soak).
 

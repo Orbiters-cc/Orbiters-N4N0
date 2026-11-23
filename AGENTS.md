@@ -30,8 +30,9 @@
 - **The engine files change only as a recorded transaction, never under a running game** (obelisk-cli 0.1.8, its
   `docs/CLI.md`, Keyboard layout): `linux/.obelisk-engine-patch.txn.json` says what a crash left, `.obelisk-engine-sessions.lock`
   is held shared from a launch's preparation to its game's exit; a launch that finds them in a state it cannot repair is refused
-  with `engine patch: not started: …` on standard error naming the paths. voile-lkd's recent ptrace and signal events are in
-  `~/Library/Logs/Obelisk/Steam/wine-438100.lkd-events` (sort the lines after the first), copied into each incident. Home offers
+  with `engine patch: not started: …` on standard error naming the paths. voile-lkd `bf0af9b` (the attach stop as link state, the
+  event ring) is **held back**: one start of five on it got Easy Anti-Cheat's "Debugger detected" (`docs/vrchat-bridge.md`,
+  2026-11-23 08:06); never ship it before that is explained. Home offers
   **Restart VRChat** only for a confirmed lost picture of its own running session (`controller/picture.rs`, R1): never make a
   covered, locked or slow game look lost. Benchmarks: `tools/mac-bench/session.sh` (the screen must be unlocked; only valid
   windows are scored).

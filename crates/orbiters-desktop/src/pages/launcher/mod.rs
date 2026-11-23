@@ -352,6 +352,18 @@ impl State {
     }
 
     /// Opens a person's profile as if their row was pressed at `from`.
+    /// The list's data (tests).
+    #[cfg(test)]
+    pub fn data_for_tests(&self) -> Arc<LauncherState> {
+        self.data.clone()
+    }
+
+    /// The profile window open, whose (tests).
+    #[cfg(test)]
+    pub fn modal_open(&self) -> Option<&str> {
+        self.modal.as_ref().filter(|m| m.closing.is_none()).map(|m| m.id.as_str())
+    }
+
     pub fn open_profile(&mut self, ctx: &egui::Context, id: &str, from: Rect) {
         self.modal = Some(Modal { id: id.to_string(), from, opened: anim::time(ctx), closing: None });
     }

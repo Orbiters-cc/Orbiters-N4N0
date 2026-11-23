@@ -44,5 +44,9 @@
   "Smoothing back to the values measured to match VRChat": "Suavização de volta aos valores medidos para acompanhar o VRChat",
   "default measured smoothing back": "padrão medido suavização voltar",
   "World ID": "ID do mundo",
-  "{name} has closed since you chose it: choose a new instance of its world, or another place.": "{name} fechou depois que você a escolheu: escolha uma nova instância do mundo dela ou outro lugar."
+  "{name} has closed since you chose it: choose a new instance of its world, or another place.": "{name} fechou depois que você a escolheu: escolha uma nova instância do mundo dela ou outro lugar.",
+  "choose an instance\u0004Select": "Escolher",
+  "Choose {name}'s instance in Where: Play starts VRChat there": "Escolha a instância de {name} em Onde: Jogar inicia o VRChat lá",
+  "With {name}": "Com {name}",
+  "{name} has left that instance: Play starts VRChat at home.": "{name} saiu dessa instância: Jogar inicia o VRChat no seu mundo inicial."
 }

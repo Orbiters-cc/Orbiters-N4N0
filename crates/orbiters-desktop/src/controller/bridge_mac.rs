@@ -63,6 +63,15 @@ pub(super) fn born(pid: u32) -> Option<(u64, u32)> {
     process(pid).map(|p| p.birth)
 }
 
+/// The executable of process `pid` while it runs.
+pub(super) fn executable(pid: u32) -> Option<String> {
+    process(pid)?;
+    let mut buf = vec![0u8; 4 * libc::PATH_MAX as usize];
+    // SAFETY: the buffer and its length are ours.
+    let n = unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
 /// When process `pid` started (Unix seconds), while it runs.
 fn birth(pid: u32) -> Option<u64> {
     process(pid).map(|p| p.birth.0)
@@ -145,6 +154,8 @@ struct EngineLog {
     tail: Vec<u8>,
     /// The most presents its window server said so far (`neptune unixlib wsi (wsd): <n> presents`).
     presents: Option<u64>,
+    /// The size of the guest's last swapchain: what the game renders now (finding 10).
+    swapchain: Option<(u32, u32)>,
 }
 
 /// Whether the game draws: the frames its Game session's record says it has shown, as they grow.
@@ -182,7 +193,9 @@ struct Mine {
     /// The engine's log file at the launch (the previous start's): the one found after it is this start's.
     engine_before: Option<(u64, u64)>,
     engine: Option<EngineLog>,
-    renderer_lost: bool,
+    /// When the engine's log said the graphics server dropped this start's game: a loss once no frame came for
+    /// [`super::picture::CONFIRM_AFTER`] since (R1: a context dropped and made again, a stall, a covered window are none).
+    dropped_at: Option<Instant>,
     /// The verified game.
     ident: Option<Ident>,
     /// This start's own VRChat log (its arguments name the launch link), which file it is and how long it was at the last
@@ -229,6 +242,7 @@ impl Mine {
         self.continuous = None;
         self.presents = None;
         self.presents_grew = None;
+        self.dropped_at = None;
         self.looked = None;
     }
 }
@@ -375,19 +389,26 @@ impl MacGame {
             if let Ok(file) = std::fs::File::open(obelisk::engine_log(&obelisk::home())) {
                 let key = file.metadata().ok().map(|m| file_key(&m));
                 if key.is_some() && key != mine.engine_before {
-                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new(), presents: None });
+                    mine.engine = Some(EngineLog { file, read: 0, tail: Vec::new(), presents: None, swapchain: None });
                 }
             }
         }
         let read = mine.engine.as_mut().map(|engine| (read_engine_log(engine), engine.presents));
         if let Some((lost, presents)) = read {
-            mine.renderer_lost |= lost;
             if let Some(presents) = presents {
-                // The first count read (a backlog, or the first line) is where it stands, not a growth.
+                // The first count read (a backlog, or the first line) is where it stands, not a growth; a smaller count is
+                // a new swapchain counting from its own 0: its new base, not a growth.
                 if grown(mine.presents, presents) {
                     mine.presents_grew = Some(Instant::now());
                 }
-                mine.presents = Some(mine.presents.map_or(presents, |before| before.max(presents)));
+                mine.presents = Some(presents);
+            }
+            if lost && mine.dropped_at.is_none() {
+                mine.dropped_at = Some(Instant::now());
+            }
+            // a frame after the drop: the graphics came back
+            if mine.dropped_at.is_some_and(|at| mine.presents_grew.is_some_and(|grew| grew > at) || mine.grew.is_some_and(|grew| grew > at)) {
+                mine.dropped_at = None;
             }
         }
     }
@@ -410,6 +431,14 @@ impl MacGame {
         let Some((wsd, born)) = self.mine.lock().unwrap().ident.as_ref().and_then(|i| i.wsd) else { return false };
         // The very window chosen as the game's (not any window of the window server: its splash, a crash box).
         process(wsd).is_some_and(|p| p.parent == pid && p.birth == born) && native::game_window(&native::windows(), wsd).is_some_and(|w| w.id == id)
+    }
+
+    /// The title bar of the game's window `window`, in points: from the size the game renders (`swapchain`) and the frame
+    /// when they say it, else none for a window covering its display and the engine's 32 otherwise.
+    fn title_of(&self, window: &MacWindow, swapchain: Option<(u32, u32)>) -> f64 {
+        swapchain
+            .and_then(|(_, h)| native::title_from_guest(window.height, native::scale_of(window), h))
+            .unwrap_or_else(|| native::title_points(window, native::display_frame(window)))
     }
 
     /// Asks the program to quit the bridge's own game session, as the game's own Quit does: never forced.
@@ -444,15 +473,6 @@ pub(crate) fn grown(before: Option<u64>, now: u64) -> bool {
     before.is_some_and(|before| now > before)
 }
 
-/// The most presents the window server's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
-/// `… alive: 6452 presents, …`).
-fn presents_said(text: &str) -> Option<u64> {
-    text.lines()
-        .filter_map(|line| line.split_once("neptune unixlib wsi (wsd): ")) // i18n: not shown (the engine's log lines)
-        .filter_map(|(_, rest)| rest.trim_start_matches("alive: ").split_once(" presents").and_then(|(n, _)| n.trim().parse().ok()))
-        .max()
-}
-
 /// Reads what the held engine log gained since the last read, up to [`ENGINE_LOG_LOOK`] at a time (the rest next time):
 /// whether it says the game's graphics went.
 fn read_engine_log(engine: &mut EngineLog) -> bool {
@@ -466,7 +486,9 @@ fn read_engine_log(engine: &mut EngineLog) -> bool {
     engine.read += (bytes.len() - before) as u64;
     let text = String::from_utf8_lossy(&bytes);
     let lost = obelisk::renderer_lost(&text);
-    engine.presents = engine.presents.max(presents_said(&text));
+    // the last count said (each swapchain counts from its own 0: the largest would hide a new one's growth)
+    engine.presents = obelisk::presents_last(&text).or(engine.presents);
+    engine.swapchain = obelisk::swapchain_last(&text).or(engine.swapchain);
     // A line cut at the end is read again with what follows.
     engine.tail = bytes[bytes.len().saturating_sub(256)..].to_vec();
     lost
@@ -527,7 +549,7 @@ impl Game for MacGame {
                 let drawn = drawing(mine.continuous, mine.grew, mine.presents_grew, Instant::now());
                 // Lost only when the engine says so (or the game ends): frames that stop for a while (a long load, a
                 // suspended compositor) are no proof of drawing, which keeps the arrival from being given, and no loss.
-                seen.renderer_lost = mine.renderer_lost;
+                seen.renderer_lost = mine.dropped_at.is_some_and(|at| at.elapsed().as_secs_f64() >= super::picture::CONFIRM_AFTER);
                 seen.desktop_mode = mine.args.as_ref().map(|a| a.iter().any(|x| x == "--no-vr"));
                 let mut mine = mine;
                 let link = mine.link.clone();
@@ -668,8 +690,13 @@ impl Game for MacGame {
 
     fn window(&self, pid: u32) -> Option<GameWindow> {
         let window = self.own_window(pid)?;
-        // The bridge's own starts take no render percent: the game's pixels are the content's (R2).
-        let (width, height) = native::guest_pixels(&window, native::scale_of(&window), native::title_points(&window, native::display_frame(&window)), 100);
+        // The bridge's own starts are at 100 % (said to the engine explicitly): the game's pixels are the content's (R2).
+        // What the game renders is read from this start's own log (its last swapchain) when it is there; the window's
+        // title bar from that size and the frame, else from whether the frame covers its display.
+        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let scale = native::scale_of(&window);
+        let title = self.title_of(&window, swapchain);
+        let (width, height) = swapchain.unwrap_or_else(|| native::guest_pixels(&window, scale, title, 100));
         Some(GameWindow { handle: window.id as isize, width, height })
     }
 
@@ -717,7 +744,8 @@ impl Game for MacGame {
         }
         let image = image::load_from_memory(&png).map_err(|e| Failure::new("screenshot_failed", e.to_string(), "Try again in a moment."))?.to_rgba8(); // i18n: not shown
         // The title bar is the system's, not the game's: the picture is the content, as clicks and VRChat count it.
-        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, native::title_points(&f, native::display_frame(&f)))).min(image.height().saturating_sub(1));
+        let swapchain = self.mine.lock().unwrap().engine.as_ref().and_then(|e| e.swapchain);
+        let top = frame.map_or(0, |f| native::title_rows(image.height(), f.height, self.title_of(&f, swapchain))).min(image.height().saturating_sub(1));
         let (width, height) = (image.width(), image.height() - top);
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for row in top..image.height() {
@@ -926,7 +954,7 @@ mod tests {
     /// and a log replaced or cut ends what its follower said.
     #[test]
     fn only_the_recorded_launcher_and_its_own_whole_log_are_the_bridge_s() {
-        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None };
+        let record = |phase: &str| obelisk::SessionRecord { id: "s".into(), phase: phase.into(), game: Some(33466), seconds: None, frames: None, game_birth: Some((1795387812, 431)), shown: None, quit_accepted: None };
         assert!(record_names(&record("Running"), 33466, (1795387812, 431)));
         assert!(!record_names(&record("Running"), 33466, (1795387812, 432)), "the same number, another process");
         assert!(!record_names(&record("Running"), 33467, (1795387812, 431)));
@@ -975,7 +1003,10 @@ mod tests {
         assert!(!grown(Some(10), 10) && grown(Some(10), 11));
         // As this Mac's engine wrote them on 2026-11-22 23:56.
         let log = "neptune unixlib wsi (wsd): 6420 presents (4599 shown events), last 60: interval avg 55.840 ms\nneptune unixlib wsi (wsd): alive: 6452 presents, 4599 shown events, 7286 drains\nwsd: window 1 overlay: frame held 183.3 ms\n";
-        assert_eq!(presents_said(log), Some(6452));
-        assert_eq!(presents_said("nothing"), None);
+        assert_eq!(obelisk::presents_said(log), Some(6452));
+        assert_eq!(obelisk::presents_said("nothing"), None);
+        // Finding: each swapchain counts its own presents; the last count is where the current one stands.
+        assert_eq!(obelisk::presents_last(log), Some(6452));
+        assert_eq!(obelisk::presents_last("neptune unixlib wsi (wsd): 9000 presents (0 shown events)\nguest swapchain: created\nneptune unixlib wsi (wsd): 60 presents (0 shown events)\n"), Some(60));
     }
 }

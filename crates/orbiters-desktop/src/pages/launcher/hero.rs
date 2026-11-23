@@ -46,6 +46,11 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         hero_play(ui, cx, state, index, play);
         return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| start_trouble(ui, cx, state, rect, &trouble));
     }
+    // A Mac whose VRChat (Home's own) lost its graphics for good: said under the line that it runs, with a restart.
+    if state.data.picture_lost && matches!(play, PlayState::Running(_)) {
+        hero_play(ui, cx, state, index, play);
+        return super::super::block(ui, cx, index + 1, LINE_H, |ui, rect| picture_lost(ui, cx, state, rect));
+    }
     // A Mac about to start VRChat in Low Power Mode while on power: said, with where to change it (never changed here).
     #[cfg(target_os = "macos")]
     if matches!(play, PlayState::Ready | PlayState::Starting(_)) && crate::mac_display::low_power_on_power() {
@@ -53,6 +58,23 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         return super::super::block(ui, cx, index + 1, LINE_H, low_power);
     }
     hero_play(ui, cx, state, index, play)
+}
+
+/// Home's VRChat runs and its graphics went for good (confirmed: R1 of the performance review): a line and a restart,
+/// which quits that very session and starts it again through the one start (checked again on the click).
+fn picture_lost(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
+    let button = widgets::Button::new(tr("Restart VRChat")).variant(widgets::Variant::Primary).id_salt("launcher-restart-lost");
+    let bw = button.desired_width(ui);
+    let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+    let line = tr("VRChat's picture stopped on this Mac and will not come back: restart it.");
+    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+    let clicked = button.show_at(ui, at).on_hover_text(tr("Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.")).clicked();
+    if clicked {
+        state.act(cx, anim::time(ui.ctx()), Action::RestartLostGame);
+    }
 }
 
 /// Low Power Mode is on while the Mac is on power: a neutral line and a button to Battery settings.

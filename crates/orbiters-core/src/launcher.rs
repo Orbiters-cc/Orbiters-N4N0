@@ -445,6 +445,9 @@ pub enum Action {
     InstallEngine,
     /// On a Mac: move the engine's damaged start record `file` ([`StartTrouble`]) out of its records, kept aside.
     SetAsideRecord { file: String },
+    /// On a Mac: Home's own VRChat lost its picture for good ([`LauncherState::picture_lost`]): quit that very session
+    /// and start VRChat again through the one start (checked again first; nothing for a healthy game).
+    RestartLostGame,
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,
@@ -505,6 +508,11 @@ pub struct LauncherState {
     /// On a Mac: how getting Obelisk goes, from the press of its button until VRChat is in it.
     #[serde(default)]
     pub engine_setup: Option<EngineSetup>,
+    /// On a Mac: the VRChat Home started still runs and its graphics went for good (the engine's graphics server
+    /// dropped that very session, and no frame came since): Home offers to start it again. Never for a game that is only
+    /// covered, behind the lock screen or slow.
+    #[serde(default)]
+    pub picture_lost: bool,
     /// On a Mac: a record of the engine's that cannot be read, which Home names (and, once it is known to be history,
     /// offers to set aside).
     #[serde(default)]
@@ -657,6 +665,7 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
         engine_setup: None,
+        picture_lost: false,
         start_trouble: None,
         mine: Some(MyProfile {
             loaded: true,

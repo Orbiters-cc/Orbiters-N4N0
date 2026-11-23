@@ -74,5 +74,13 @@
   "What runs VRChat on this Mac stopped without saying why ({status}).": "この Mac で VRChat を動かすものが理由を示さずに止まりました（{status}）。",
   "VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}": "この Mac の VRChat が応答しなくなりました（{kind}）。そのときの状況は {path} に保存されています",
   "Picture detail": "画質",
-  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "このMacでVRChatが描画するピクセル数（一辺あたり）。macOSが画像を画面に合わせて拡大縮小します。少ないほど速く、柔らかい画質になります。100 %は画面本来のピクセルです。次回の起動から反映されます。"
+  "How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.": "このMacでVRChatが描画するピクセル数（一辺あたり）。macOSが画像を画面に合わせて拡大縮小します。少ないほど速く、柔らかい画質になります。100 %は画面本来のピクセルです。次回の起動から反映されます。",
+  "Home does not know how VRChat was started: start it again with Play.": "VRChat がどのように起動されたかをホームは知りません。プレイで起動し直してください。",
+  "There is nothing to start again.": "再起動するものはありません。",
+  "VRChat could not be asked to quit ({code}): quit it yourself, then press Play.": "VRChat に終了を求められませんでした ({code})。ご自身で終了してから、プレイを押してください。",
+  "VRChat could not be asked to quit: {reason}": "VRChat に終了を求められませんでした: {reason}",
+  "VRChat could not be started again yet: press Play in a moment.": "VRChat はまだ再起動できません。少し待ってからプレイを押してください。",
+  "VRChat did not quit in time: quit it yourself, then press Play.": "VRChat は時間内に終了しませんでした。ご自身で終了してから、プレイを押してください。",
+  "VRChat draws again, or is no longer the one Home started: nothing was done.": "VRChat が再び描画しているか、ホームが起動したものではなくなりました。何もしていません。",
+  "VRChat is starting again.": "VRChat を再び起動しています。"
 }

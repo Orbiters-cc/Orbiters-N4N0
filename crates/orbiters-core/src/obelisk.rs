@@ -211,6 +211,9 @@ pub struct SessionRecord {
     pub game_birth: Option<(u64, u32)>,
     /// While it runs, the frames shown so far (obelisk-cli 0.1.5 and later).
     pub shown: Option<Shown>,
+    /// When the session's supervisor accepted a Quit of its game, on the boot clock (obelisk-cli 0.1.8): the boot's
+    /// session UUID and the milliseconds since it.
+    pub quit_accepted: Option<(String, u64)>,
 }
 
 /// The frames a running game has shown so far, as its record says them (`shown`, obelisk-cli 0.1.5).
@@ -274,6 +277,7 @@ pub fn session_record(text: &str) -> Option<SessionRecord> {
         shown: shown.and_then(|s| {
             Some(Shown { frames: s.get("frames")?.as_u64()?, at: s.get("at")?.as_u64()?, continuous: s.get("continuous")?.as_bool()? })
         }),
+        quit_accepted: record.get("quit_accepted").and_then(boot_instant).map(|at| (at.boot, (at.seconds * 1000.0) as u64)),
     })
 }
 
@@ -462,7 +466,11 @@ pub fn scan_records(library: &Path) -> Result<RecordScan, Unlistable> {
 
 /// When a record says its game ended on the boot clock (`played.ended`, obelisk-cli 0.1.6).
 fn ended_at(record: &serde_json::Value) -> Option<BootInstant> {
-    let ended = record.get("played")?.get("ended")?;
+    boot_instant(record.get("played")?.get("ended")?)
+}
+
+/// A moment on the boot clock as the engine writes it (`{"boot": <UUID>, "seconds": <since boot>}`).
+fn boot_instant(ended: &serde_json::Value) -> Option<BootInstant> {
     let boot = ended.get("boot")?.as_str().filter(|b| is_uuid(b))?;
     let seconds = ended.get("seconds")?.as_f64().filter(|s| s.is_finite() && *s >= 0.0)?;
     Some(BootInstant { boot: boot.to_ascii_uppercase(), seconds })
@@ -490,6 +498,37 @@ pub fn engine_log(home: &Path) -> PathBuf {
 /// (measured 2026-11-22, three starts: 5 to 46 s after the world loaded, the game ran on without a frame).
 pub fn renderer_lost(engine_log: &str) -> bool {
     engine_log.contains("VTEST_CLIENT_ERROR_CONTEXT_LOST") || engine_log.contains("npt: destroying Neptune context") // i18n: not shown (the engine's log lines)
+}
+
+/// The most presents the guest driver's lines in `text` say (`neptune unixlib wsi (wsd): 6480 presents (4599 shown events)`,
+/// `… alive: 6452 presents, …`): frames the game submitted, which grow behind a lock screen or a covered window too. Each
+/// swapchain counts from its own 0.
+pub fn presents_said(text: &str) -> Option<u64> {
+    text.lines()
+        .filter_map(|line| line.split_once("neptune unixlib wsi (wsd): ")) // i18n: not shown (the engine's log lines)
+        .filter_map(|(_, rest)| rest.trim_start_matches("alive: ").split_once(" presents").and_then(|(n, _)| n.trim().parse().ok()))
+        .max()
+}
+
+/// The size of the last swapchain the guest made in `text` (`guest swapchain: created 1705x1109 fmt=29 buffers=1`): the
+/// pixels the game renders now, whatever percent the window server applied.
+pub fn swapchain_last(text: &str) -> Option<(u32, u32)> {
+    text.lines()
+        .filter_map(|line| line.split_once("guest swapchain: created ")) // i18n: not shown (the engine's log lines)
+        .filter_map(|(_, rest)| {
+            let size = rest.split_whitespace().next()?;
+            let (w, h) = size.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .rfind(|(w, h)| *w > 0 && *h > 0)
+}
+
+/// The last presents count the guest driver's lines in `text` say: where the current swapchain stands.
+pub fn presents_last(text: &str) -> Option<u64> {
+    text.lines()
+        .filter_map(|line| line.split_once("neptune unixlib wsi (wsd): ")) // i18n: not shown (the engine's log lines)
+        .filter_map(|(_, rest)| rest.trim_start_matches("alive: ").split_once(" presents").and_then(|(n, _)| n.trim().parse().ok()))
+        .next_back()
 }
 
 /// The engine's socket of the window server of the game whose launcher is `launcher`, under the temporary folder `tmp`.
@@ -609,10 +648,20 @@ pub fn render_percent(chosen: u32, backing: u32, panel: u32) -> u32 {
 }
 
 /// The size the game draws at for `chosen` % on a display drawing `backing` pixels (width, height) on a panel of
-/// `panel` pixels: as the engine rounds it (points times its scale), within a pixel.
+/// `panel` pixels, by the engine's own rules (voile-lkd `wsd.m`, `scale_at`): its percent of the drawing scale, never
+/// below what keeps the desktop at 640 x 480 pixels and never above the display's scale; within a pixel.
 pub fn render_size(chosen: u32, backing: (u32, u32), panel: (u32, u32)) -> (u32, u32) {
     let percent = render_percent(chosen, backing.0, panel.0) as f64 / 100.0;
-    ((backing.0 as f64 * percent).round() as u32, (backing.1 as f64 * percent).round() as u32)
+    let least = if backing.0 > 0 && backing.1 > 0 { (640.0 / backing.0 as f64).max(480.0 / backing.1 as f64) } else { 0.0 };
+    let share = percent.max(least).min(1.0);
+    ((backing.0 as f64 * share).round() as u32, (backing.1 as f64 * share).round() as u32)
+}
+
+/// The percent the engine applies for `chosen` (what Settings shows beside the size): the panel's cap, then the 640 x 480
+/// floor, as [`render_size`].
+pub fn effective_percent(chosen: u32, backing: (u32, u32), panel: (u32, u32)) -> u32 {
+    let (w, _) = render_size(chosen, backing, panel);
+    if backing.0 == 0 { render_percent(chosen, backing.0, panel.0) } else { ((w as f64 * 100.0 / backing.0 as f64).round() as u32).clamp(1, 100) }
 }
 
 /// Whether the obelisk-cli at `program` takes `steam play --render-percent` (0.1.7 and later): an older one refuses
@@ -642,6 +691,16 @@ mod tests {
         assert_eq!(render_percent(10, backing.0, panel.0), 25, "the lowest offered");
         assert_eq!(render_percent(100, 1920, 1920), 100, "a display drawn at its own pixels");
         assert_eq!(render_percent(100, 1920, 0), 100, "a panel that says nothing");
+        // Fourth verification, finding 12: the label shows what the engine makes. 87 to 100 are one size on this panel
+        // (and say 87 %); the engine keeps the desktop at 640 x 480 at least: 25 % of 1920 x 1080 is 853 x 480.
+        for chosen in 87..=100 {
+            assert_eq!(render_size(chosen, backing, panel), (2558, 1663), "{chosen}");
+            assert_eq!(effective_percent(chosen, backing, panel), 87, "{chosen}");
+        }
+        assert_eq!(render_size(25, (1920, 1080), (1920, 1080)), (853, 480));
+        assert_eq!(effective_percent(25, (1920, 1080), (1920, 1080)), 44);
+        assert_eq!(render_size(25, backing, panel), (738, 480));
+        assert_eq!(render_size(58, (1920, 1080), (1920, 1080)), (1114, 626), "above the floor: as asked");
     }
 
     #[test]
@@ -964,4 +1023,16 @@ mod tests {
         assert_eq!(game_arguments(args(&["--no-vr", "--process-priority=1", "--fps=90", "vrchat://launch?ref=vrchat.com&id=wrld_1:2"])), args(&[whole.as_slice(), &["vrchat://launch?ref=vrchat.com&id=wrld_1:2"]].concat()));
         assert_eq!(game_arguments(args(&["--no-vr"])), args(&whole));
     }
+
+    /// Finding 10 and R1: the size the game renders now is its last swapchain's; presents restart with each swapchain.
+    #[test]
+    fn the_last_swapchain_and_presents_are_read_from_the_engine_s_log() {
+        let log = "guest swapchain: created 2940x1912 fmt=29 buffers=2\nneptune unixlib wsi (wsd): 9000 presents (0 shown events)\nguest swapchain: created 1705x1109 fmt=29 buffers=1\nneptune unixlib wsi (wsd): 60 presents (0 shown events)\n";
+        assert_eq!(swapchain_last(log), Some((1705, 1109)));
+        assert_eq!(swapchain_last("guest swapchain: created 0x0 fmt=1"), None);
+        assert_eq!(swapchain_last("nothing"), None);
+        assert_eq!(presents_last(log), Some(60));
+        assert_eq!(presents_said(log), Some(9000));
+    }
+
 }

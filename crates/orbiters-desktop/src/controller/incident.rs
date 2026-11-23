@@ -60,21 +60,31 @@ pub(crate) struct Look {
     pub at: f64,
     /// The session runs (its record says so and its game's process lives).
     pub running: bool,
-    /// The frames its record says it has shown, and the lengths of the engine's and VRChat's logs.
+    /// The game's own counters as read at this look, `None` when one could not be read this time: the frames its
+    /// record says it has shown, the presents its guest driver says (`neptune unixlib wsi (wsd): <n> presents`, which
+    /// grow behind a locked screen or a covered window too), and the length of VRChat's own log.
     pub shown: Option<u64>,
-    pub engine_len: Option<u64>,
+    pub presents: Option<u64>,
     pub vrchat_len: Option<u64>,
-    /// VRChat's log said it quits (`HandleApplicationQuit`), or the engine accepted a quit (its window server's `quit
-    /// requested`, which a parked game cannot log itself).
+    /// The engine's log's length: kept in the capture, never taken for the game's progress (processes around a parked
+    /// game write into it too).
+    pub engine_len: Option<u64>,
+    /// VRChat's log said it quits (`HandleApplicationQuit`), or the engine's window server logged a quit asked of it.
     pub quitting: bool,
+    /// Seconds since the session's supervisor accepted a Quit (its record's `quit_accepted`, obelisk-cli 0.1.8): what
+    /// arms the stuck-quit detection whatever the game or its window server can still log.
+    pub quit_since: Option<f64>,
     /// The engine's log said the graphics went.
     pub renderer_lost: bool,
 }
 
-/// Tells incidents from the looks at one session, each once.
+/// Tells incidents from the looks at one session (one Game session UUID: a new session gets a new detector), each once.
 #[derive(Debug, Default)]
 pub(crate) struct Detector {
-    last: Option<(Option<u64>, Option<u64>, Option<u64>)>,
+    /// The last valid reading of each of the game's counters: a reading that failed leaves it as it was.
+    frames: Option<u64>,
+    presents: Option<u64>,
+    vrchat: Option<u64>,
     progress_at: Option<f64>,
     stall_told: bool,
     pub(crate) quit_at: Option<f64>,
@@ -83,23 +93,24 @@ pub(crate) struct Detector {
     stalls: u32,
 }
 
+/// Whether a counter grew from its last valid reading, and that reading kept: a missing reading changes nothing; a
+/// smaller one is a counter that started again (a new swapchain, a log replaced): its new base, never progress.
+fn advanced(last: &mut Option<u64>, now: Option<u64>) -> bool {
+    let Some(now) = now else { return false };
+    let grew = last.is_some_and(|before| now > before);
+    *last = Some(now);
+    grew
+}
+
 impl Detector {
     /// What this look shows that was not told yet.
     pub(crate) fn look(&mut self, look: &Look) -> Option<Kind> {
-        let now = (look.shown, look.engine_len, look.vrchat_len);
-        let grew = |before: Option<u64>, after: Option<u64>| matches!((before, after), (Some(b), Some(a)) if a != b) || (before.is_none() && after.is_some());
-        // Progress: any of them grew, or a log was replaced (shorter): the game still did something. The game's own
-        // progress (a frame, a line of VRChat's) is what ends a stall told: the engine's log also grows from processes
-        // around a parked game (a quit asked of its window server, a client of it connecting).
-        let (moved, recovered) = match self.last {
-            None => (false, false),
-            Some((shown, engine, vrchat)) => {
-                let own = grew(shown, now.0) || grew(vrchat, now.2);
-                (own || grew(engine, now.1), own)
-            }
-        };
-        self.last = Some(now);
-        if moved && (!self.stall_told || recovered) {
+        // Progress is the game's own only: a frame shown, a frame presented, a line of VRChat's. The engine's log grows
+        // from processes around a parked game too (a quit asked of its window server, a client of it connecting).
+        let a = advanced(&mut self.frames, look.shown);
+        let b = advanced(&mut self.presents, look.presents);
+        let c = advanced(&mut self.vrchat, look.vrchat_len);
+        if a || b || c {
             self.progress_at = Some(look.at);
             self.stall_told = false;
         }
@@ -108,13 +119,16 @@ impl Detector {
         }
         // A game that quits closes its renderer too (`destroying Neptune context` follows the engine's `quit requested`): no
         // loss. A quit that then does not finish is told as such.
-        if look.renderer_lost && !self.lost_told && !look.quitting && self.quit_at.is_none() {
+        let quitting = look.quitting || look.quit_since.is_some();
+        if look.renderer_lost && !self.lost_told && !quitting && self.quit_at.is_none() {
             self.lost_told = true;
             return Some(Kind::RendererLost);
         }
-        if look.quitting {
-            let since = *self.quit_at.get_or_insert(look.at);
-            if look.at - since >= QUIT_AFTER && !self.quit_told {
+        if quitting {
+            let first = *self.quit_at.get_or_insert(look.at);
+            // from the supervisor's acceptance when the record says it, else from the first sign seen
+            let waited = look.quit_since.unwrap_or(0.0).max(look.at - first);
+            if waited >= QUIT_AFTER && !self.quit_told {
                 self.quit_told = true;
                 return Some(Kind::StuckQuit);
             }
@@ -133,42 +147,92 @@ impl Detector {
 }
 
 /// A line with what could be a credential taken out (whatever follows a word that names one), and what says where the
-/// person was or who they are: a VRChat link's destination, an instance's private parts (`~private(...)`, `~nonce(...)`
-/// and the like) and account ids (`usr_...`).
+/// person was or who they are: VRChat links (any case, percent-encoded too), a location's whole world, instance and
+/// access parts (`wrld_…:…~private(…)~nonce(…)`, whether its parts are closed, cut short or encoded), account and group
+/// ids (`usr_…`, `grp_…`) and a nonce given as a value.
 pub(crate) fn redact(line: &str) -> String {
     private(&credentials(line))
 }
 
-/// An instance's access and owner parts, launch links and account ids, taken out.
+/// Characters a location or a link is made of (encoded ones included): what follows its start up to the first other.
+fn location_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_-:~().%+=&?/#!$*@".contains(c)
+}
+
+/// The length of the run of location characters at the start of `s`.
+fn location_run(s: &str) -> usize {
+    s.find(|c: char| !location_char(c)).unwrap_or(s.len())
+}
+
+/// `s` starts with `prefix`, ASCII case ignored: the length matched.
+fn starts_ci(s: &str, prefix: &str) -> Option<usize> {
+    (s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())).then_some(prefix.len())
+}
+
+/// An instance part at the start of `s` (`~name(`, `%7Ename%28`, doubly encoded too): the name and the length up to the
+/// value.
+fn instance_part(s: &str) -> Option<(String, usize)> {
+    let tilde = ["~", "%7e", "%257e"].iter().find_map(|t| starts_ci(s, t))?;
+    let after = &s[tilde..];
+    let name_len = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len());
+    if name_len == 0 {
+        return None;
+    }
+    let open = ["(", "%28", "%2528"].iter().find_map(|o| starts_ci(&after[name_len..], o))?;
+    Some((after[..name_len].to_ascii_lowercase(), tilde + name_len + open))
+}
+
+/// Whatever says where or who, taken out.
 fn private(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("vrchat://") {
-            // a launch link: its scheme only
+        // a VRChat link, as it is or encoded: its scheme only
+        if let Some(n) = ["vrchat://", "vrchat:%2f%2f", "vrchat%3a%2f%2f", "vrchat%253a"].iter().find_map(|p| starts_ci(rest, p)) {
             out.push_str("vrchat://[removed]");
-            rest = after.find(|c: char| c.is_whitespace() || c == '\'' || c == '"').map_or("", |i| &after[i..]);
+            rest = &rest[n..];
+            rest = &rest[location_run(rest)..];
             continue;
         }
-        if let Some(after) = rest.strip_prefix('~') {
-            // ~private(usr_...), ~nonce(...), ~hidden(...), ~friends(...), ~group(...), ~region(eu) kept
-            let name_end = after.find('(').unwrap_or(0);
-            let name = &after[..name_end];
-            if name_end > 0 && name.bytes().all(|b| b.is_ascii_alphabetic()) && name != "region" {
-                if let Some(close) = after[name_end..].find(')') {
-                    out.push('~');
-                    out.push_str(name);
-                    out.push_str("([removed])");
-                    rest = &after[name_end + close + 1..];
-                    continue;
-                }
+        // a location: the world, its instance and every part after them
+        if starts_ci(rest, "wrld_").is_some() {
+            out.push_str("[location removed]");
+            rest = &rest[location_run(rest)..];
+            continue;
+        }
+        // an instance part on its own (~region(eu) is kept: a region says nothing of the person)
+        if let Some((name, n)) = instance_part(rest) {
+            if name != "region" {
+                out.push('~');
+                out.push_str(&name);
+                out.push_str("([removed])");
+                let value = &rest[n..];
+                // up to its close, or to the end of the run when it is cut short
+                let run = location_run(value);
+                let close = ["%2529", "%29", ")"].iter().filter_map(|c| value[..run].to_ascii_lowercase().find(c).map(|i| i + c.len())).min();
+                rest = &value[close.unwrap_or(run)..];
+                continue;
             }
         }
-        if let Some(after) = rest.strip_prefix("usr_") {
+        // account and group ids
+        if let Some(n) = ["usr_", "grp_"].iter().find_map(|p| starts_ci(rest, p)) {
+            let after = &rest[n..];
             let end = after.find(|c: char| !(c.is_ascii_hexdigit() || c == '-')).unwrap_or(after.len());
             if end >= 8 {
-                out.push_str("usr_[removed]");
+                out.push_str(&rest[..n].to_ascii_lowercase());
+                out.push_str("[removed]");
                 rest = &after[end..];
+                continue;
+            }
+        }
+        // a nonce given as a value (nonce=…, "nonce":"…", nonce%3D…)
+        if let Some(n) = starts_ci(rest, "nonce") {
+            let after = &rest[n..];
+            let sep = ["=", "%3d", "\":\"", "\": \"", ":"].iter().find_map(|s| starts_ci(after, s));
+            if let Some(sep) = sep {
+                out.push_str("nonce=[removed]");
+                let value = &after[sep..];
+                rest = &value[location_run(value)..];
                 continue;
             }
         }
@@ -248,12 +312,30 @@ pub(crate) fn parse_ps(text: &str) -> Vec<Proc> {
         .collect()
 }
 
-/// The processes of the engine's game launched as `launcher`: the launcher and every process under it, and any other
-/// process whose executable is the engine's own (inside `library`, or the engine's generated game bundle): a helper
-/// re-parented after its parent went. A process that only names the library in its arguments (an editor with a file of
-/// it open) is not one.
-pub(crate) fn tree(all: &[Proc], launcher: u32, library: &str) -> Vec<Proc> {
-    let mut kept: Vec<u32> = vec![launcher];
+/// The processes whose own arguments or environment name the launch whose launcher is `launcher`, from
+/// `ps -axwwE -o pid=,command=`: its window server and graphics server (`--dir obelisk-engine-<launcher>`, a socket in that
+/// folder) and every engine process (`FEXDARWIN_SUPERVISOR_PID=<launcher>`), still attributed to the session after their
+/// parent went. Read to decide only: an argument list or an environment is never kept.
+pub(crate) fn attributed(text: &str, launcher: u32) -> Vec<u32> {
+    let folder = format!("obelisk-engine-{launcher}");
+    let supervisor = format!("FEXDARWIN_SUPERVISOR_PID={launcher}");
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (pid, rest) = line.split_once(char::is_whitespace)?;
+            let names_folder = rest.match_indices(&folder).any(|(i, m)| !rest[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()));
+            let names_supervisor = rest.match_indices(&supervisor).any(|(i, m)| !rest[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()));
+            (names_folder || names_supervisor).then(|| pid.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// The processes of the engine's game launched as `launcher`: the launcher and every process under it, and the processes
+/// [`attributed`] to this launch (`also`) with every process under them: a helper re-parented after its parent went is
+/// still the session's. A process of another session, or of nobody's, is never one, whatever its executable (another
+/// game's engine in the same library, an editor with the library open).
+pub(crate) fn tree(all: &[Proc], launcher: u32, also: &[u32]) -> Vec<Proc> {
+    let mut kept: Vec<u32> = std::iter::once(launcher).chain(also.iter().copied().filter(|p| *p > 1)).collect();
     loop {
         let more: Vec<u32> = all.iter().filter(|p| kept.contains(&p.ppid) && !kept.contains(&p.pid)).map(|p| p.pid).collect();
         if more.is_empty() {
@@ -261,8 +343,7 @@ pub(crate) fn tree(all: &[Proc], launcher: u32, library: &str) -> Vec<Proc> {
         }
         kept.extend(more);
     }
-    let engine_exe = |exe: &str| (!library.is_empty() && exe.starts_with(&format!("{}/", library.trim_end_matches('/')))) || exe.contains("/obelisk-apps/");
-    all.iter().filter(|p| kept.contains(&p.pid) || engine_exe(&p.exe)).cloned().collect()
+    all.iter().filter(|p| kept.contains(&p.pid)).cloned().collect()
 }
 
 /// The processes to sample in `tree`: the game's own (the largest in memory among the engine's Wine processes, VRChat
@@ -271,7 +352,7 @@ pub(crate) fn tree(all: &[Proc], launcher: u32, library: &str) -> Vec<Proc> {
 pub(crate) fn sample_targets(tree: &[Proc]) -> Vec<(&'static str, u32)> {
     let busiest = |f: &dyn Fn(&Proc) -> bool| tree.iter().filter(|p| f(p)).max_by(|a, b| a.cpu.total_cmp(&b.cpu)).map(|p| p.pid);
     let program = |p: &Proc| p.exe.rsplit('/').next().unwrap_or_default().to_string();
-    let game = tree.iter().filter(|p| !matches!(program(p).as_str(), "wsd" | "virgl_render_server" | "virgl_test_server" | "obelisk-input" | "sh" | "bash")).max_by_key(|p| p.rss_kb).map(|p| p.pid);
+    let game = tree.iter().filter(|p| !matches!(program(p).as_str(), "wsd" | "virgl_render_server" | "virgl_test_server" | "obelisk-input" | "sh" | "bash" | "awk")).max_by_key(|p| p.rss_kb).map(|p| p.pid);
     let mut targets: Vec<(&'static str, u32)> = Vec::new();
     let mut add = |name: &'static str, pid: Option<u32>| {
         if let Some(pid) = pid.filter(|pid| !targets.iter().any(|(_, p)| p == pid)) {
@@ -283,6 +364,46 @@ pub(crate) fn sample_targets(tree: &[Proc]) -> Vec<(&'static str, u32)> {
     add("wsd", busiest(&|p| program(p) == "wsd"));
     add("busiest", busiest(&|_| true));
     targets
+}
+
+/// A process chosen for sampling: its pid, birth and executable taken together at the moment it was chosen, and checked
+/// again before each sample (a pid used again is another birth, or another program).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Target {
+    pub name: &'static str,
+    pub pid: u32,
+    pub birth: (u64, u32),
+    pub exe: String,
+}
+
+impl Target {
+    /// Whether the process is still the one chosen.
+    pub(crate) fn same(&self, birth: Option<(u64, u32)>, exe: Option<&str>) -> bool {
+        birth == Some(self.birth) && exe == Some(self.exe.as_str())
+    }
+}
+
+/// The lines of voile-lkd's recent-event ring (`LKD_EVENT_RING`, a header line then fixed 128-byte lines, the newest
+/// overwriting the oldest), in the order they happened, unwritten ones left out, each [`redact`]ed.
+pub(crate) fn ring_lines(bytes: &[u8]) -> Vec<String> {
+    const LINE: usize = 128;
+    let mut lines: Vec<(u64, String)> = bytes
+        .chunks(LINE)
+        .skip(1)
+        .filter(|chunk| chunk.len() == LINE && chunk[0].is_ascii_digit())
+        .filter_map(|chunk| {
+            let text = String::from_utf8_lossy(chunk).trim_end().to_string();
+            let seq = text.get(..12)?.parse().ok()?;
+            Some((seq, redact(&text)))
+        })
+        .collect();
+    lines.sort_by_key(|(seq, _)| *seq);
+    lines.into_iter().map(|(_, text)| text).collect()
+}
+
+/// The ring voile-lkd keeps beside the engine's log `engine_log` (obelisk-cli 0.1.8 names it so).
+pub(crate) fn ring_of(engine_log: &Path) -> PathBuf {
+    engine_log.with_extension("lkd-events")
 }
 
 /// The times the engine's launch script says its waits returned (`obelisk-wait: …` lines, obelisk-cli 0.1.6), from a log.
@@ -338,7 +459,6 @@ pub(crate) fn prune(logs: &Path) {
 pub(crate) struct Followed {
     pub session: String,
     pub launcher: u32,
-    pub library: PathBuf,
     pub engine_log: PathBuf,
     pub vrchat_log: Option<PathBuf>,
 }
@@ -351,11 +471,19 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
     let run = |program: &str, args: &[&str]| -> String {
         run_bounded(program, args, std::time::Duration::from_secs(15)).map(|t| t.lines().map(redact).collect::<Vec<_>>().join("\n")).unwrap_or_else(|e| format!("{program}: {e}"))
     };
-    // The processes first: the moment the incident was seen.
+    // The processes first: the moment the incident was seen. Which are this session's is decided from their parents and
+    // from what their own arguments and environment name (read, never kept); the ones to sample are chosen at once, each
+    // with its birth and executable read right then, before anything else is collected.
     let ps = run("/bin/ps", &["-axww", "-o", "pid=,ppid=,pcpu=,rss=,state=,comm="]);
     let all = parse_ps(&ps);
-    let library = followed.library.to_string_lossy().into_owned();
-    let tree = tree(&all, followed.launcher, &library);
+    let named = run_bounded("/bin/ps", &["-axwwE", "-o", "pid=,command="], std::time::Duration::from_secs(15)).unwrap_or_default();
+    let also = attributed(&named, followed.launcher);
+    drop(named);
+    let tree = tree(&all, followed.launcher, &also);
+    let targets: Vec<Target> = sample_targets(&tree)
+        .into_iter()
+        .filter_map(|(name, pid)| Some(Target { name, pid, birth: birth_of(pid)?, exe: exe_of(pid)? }))
+        .collect();
     let hot = tree.iter().max_by(|a, b| a.cpu.total_cmp(&b.cpu)).cloned();
     let mut listed = String::from("pid ppid %cpu rss_kb state executable\n"); // i18n: not shown (a file for whoever looks into it)
     for p in &tree {
@@ -369,27 +497,29 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
         run("/usr/bin/vm_stat", &[])
     );
     std::fs::write(dir.join("memory.txt"), memory)?;
-    // The logs, before the next start replaces them.
+    // The logs, before the next start replaces them; and the engine's recent events (attaches, ptrace and group stops).
     let engine_len = copy_tail(&followed.engine_log, &dir.join("engine.log"), LOG_COPY).ok();
     let vrchat_len = followed.vrchat_log.as_ref().and_then(|log| copy_tail(log, &dir.join("vrchat.log"), LOG_COPY).ok());
+    let ring = std::fs::read(ring_of(&followed.engine_log)).ok().map(|bytes| ring_lines(&bytes));
+    if let Some(lines) = &ring {
+        std::fs::write(dir.join("lkd-events.txt"), lines.join("\n") + "\n")?;
+    }
     // Two short samples of each, a few seconds apart; each one at most 2 s of the process's time, never stopping it. Each
-    // process is the one first seen (its birth checked before each round: a pid used again is not sampled), and each
-    // sample is redacted once written.
-    type Target = (&'static str, u32, Option<(u64, u32)>);
-    let targets: Vec<Target> = sample_targets(&tree).into_iter().map(|(n, p)| (n, p, birth_of(p))).collect();
+    // is of the very process chosen (birth and executable checked before each round), read from `sample`'s output, never
+    // from a file of its own, and written only once redacted: no raw sample is ever on disk.
     for round in 1..=2 {
         let handles: Vec<_> = targets
             .iter()
-            .filter(|(_, pid, birth)| birth.is_some() && birth_of(*pid) == *birth)
-            .map(|(name, pid, _)| {
-                let file = dir.join(format!("sample-{round}-{name}-{pid}.txt"));
-                let pid = pid.to_string();
-                std::thread::spawn(move || {
-                    let failed = run_bounded("/usr/bin/sample", &[&pid, "2", "-mayDie", "-file", &file.to_string_lossy()], std::time::Duration::from_secs(20)).err();
-                    if let Ok(text) = std::fs::read_to_string(&file) {
-                        let _ = std::fs::write(&file, text.lines().map(redact).collect::<Vec<_>>().join("\n"));
+            .filter(|t| t.same(birth_of(t.pid), exe_of(t.pid).as_deref()))
+            .map(|t| {
+                let file = dir.join(format!("sample-{round}-{}-{}.txt", t.name, t.pid));
+                let pid = t.pid.to_string();
+                std::thread::spawn(move || match run_bounded("/usr/bin/sample", &[&pid, "2", "-mayDie", "-file", "/dev/stdout"], std::time::Duration::from_secs(20)) {
+                    Ok(text) => {
+                        let clean = text.lines().map(redact).collect::<Vec<_>>().join("\n");
+                        std::fs::write(&file, clean).err().map(|e| format!("{}: {e}", file.display()))
                     }
-                    failed
+                    Err(e) => Some(format!("sample of {pid}: {e}")), // i18n: not shown (a file for whoever looks into it)
                 })
             })
             .collect();
@@ -410,10 +540,11 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
         "seen_at": at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
         "boot": { "session": boot.boot, "seconds": boot.seconds },
         "detail": detail,
-        "look": { "shown_frames": look.shown, "engine_log_bytes": look.engine_len, "vrchat_log_bytes": look.vrchat_len, "quitting": look.quitting, "renderer_lost": look.renderer_lost },
+        "look": { "shown_frames": look.shown, "presents": look.presents, "engine_log_bytes": look.engine_len, "vrchat_log_bytes": look.vrchat_len, "quitting": look.quitting, "quit_accepted_seconds_ago": look.quit_since, "renderer_lost": look.renderer_lost },
         "hot": hot.as_ref().map(|p| serde_json::json!({ "pid": p.pid, "cpu": p.cpu, "executable": redact(&p.exe) })),
-        "sampled": targets.iter().map(|(n, p, _)| serde_json::json!({ "name": n, "pid": p })).collect::<Vec<_>>(),
-        "logs": { "engine_bytes": engine_len, "vrchat_bytes": vrchat_len },
+        "sampled": targets.iter().map(|t| serde_json::json!({ "name": t.name, "pid": t.pid, "birth": [t.birth.0, t.birth.1], "executable": redact(&t.exe) })).collect::<Vec<_>>(),
+        "attributed_by_name": also,
+        "logs": { "engine_bytes": engine_len, "vrchat_bytes": vrchat_len, "lkd_events": ring.as_ref().map(Vec::len) },
         "wrapper_waits": marks,
     });
     std::fs::write(dir.join("incident.json"), serde_json::to_string_pretty(&summary).unwrap_or_default())?;
@@ -425,6 +556,17 @@ pub(crate) fn capture(logs: &Path, kind: Kind, followed: &Followed, look: &Look,
 fn birth_of(pid: u32) -> Option<(u64, u32)> {
     #[cfg(target_os = "macos")]
     return super::bridge_mac::born(pid);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// The executable of process `pid` now; `None` when it is gone.
+fn exe_of(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return super::bridge_mac::executable(pid);
     #[cfg(not(target_os = "macos"))]
     {
         let _ = pid;
@@ -492,7 +634,7 @@ fn vrchat_log(dir: &Path, since: u64) -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
     let clock = std::time::Instant::now();
-    let mut current: Option<(Followed, Detector, u64, u64)> = None;
+    let mut current: Option<(Followed, Detector, u64, u64, super::picture::Tracker)> = None;
     loop {
         std::thread::sleep(EVERY);
         // A pointer or record that cannot be read for a moment (being rewritten) keeps what is followed: only a record that
@@ -505,6 +647,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let Ok(record) = orbiters_core::obelisk::session_record_of(&library, &id) else { continue };
         let Some(record) = record.filter(|r| !r.over()) else {
             current = None;
+            super::picture::publish(None);
             continue;
         };
         let Some(launcher) = record.game else { continue };
@@ -512,19 +655,25 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         if current.as_ref().is_none_or(|(f, ..)| f.session != record.id || f.launcher != launcher) {
             // The engine's log is this start's from its beginning (a new one each start); VRChat's is found once it begins.
             let engine_log = orbiters_core::obelisk::engine_log(&home);
-            let followed = Followed { session: record.id.clone(), launcher, library: library.clone(), engine_log, vrchat_log: None };
-            current = Some((followed, Detector::default(), 0, 0));
+            let followed = Followed { session: record.id.clone(), launcher, engine_log, vrchat_log: None };
+            current = Some((followed, Detector::default(), 0, 0, super::picture::Tracker::default()));
         }
-        let Some((followed, detector, engine_read, vrchat_read)) = current.as_mut() else { continue };
+        let Some((followed, detector, engine_read, vrchat_read, picture)) = current.as_mut() else { continue };
         if followed.vrchat_log.is_none() || followed.vrchat_log.as_ref().is_some_and(|l| !l.exists()) {
             let since = record.game_birth.map_or(0, |b| b.0);
             followed.vrchat_log = vrchat_log(&orbiters_core::obelisk::vrchat_log_dir(&library), since);
             *vrchat_read = 0;
         }
-        let mut look = Look { at: clock.elapsed().as_secs_f64(), running: alive, shown: record.shown.map(|s| s.frames), ..Default::default() };
+        // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
+        let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
+            let now = super::obelisk_cli::boot_clock();
+            (now.boot == *boot).then(|| (now.seconds - *millis as f64 / 1000.0).max(0.0))
+        });
+        let mut look = Look { at: clock.elapsed().as_secs_f64(), running: alive, shown: record.shown.map(|s| s.frames), quit_since, ..Default::default() };
         if let Some((len, text)) = gained(&followed.engine_log, *engine_read) {
             look.engine_len = Some(len);
             look.renderer_lost = orbiters_core::obelisk::renderer_lost(&text);
+            look.presents = orbiters_core::obelisk::presents_last(&text);
             // The engine accepted a quit (`steam quit` asks the window server to close the game's windows): a parked game
             // cannot log its own.
             look.quitting = text.contains("wsd: quit requested"); // i18n: not shown (the engine's log line)
@@ -537,6 +686,9 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         }
         // Once VRChat said it quits, it stays quitting.
         look.quitting |= detector.quit_at.is_some();
+        // Its picture, for Home (R1: only a confirmed loss of this very session is ever acted on).
+        let seen = picture.look(look.at, look.running, look.presents, look.shown, look.renderer_lost, look.quitting || look.quit_since.is_some());
+        super::picture::publish(Some((record.id.clone(), seen)));
         // Once the graphics went, that is said once.
         let Some(kind) = detector.look(&look) else { continue };
         let detail = match kind {
@@ -559,12 +711,13 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
 mod tests {
     use super::*;
 
-    fn look(at: f64, shown: u64, engine: u64, vrchat: u64) -> Look {
-        Look { at, running: true, shown: Some(shown), engine_len: Some(engine), vrchat_len: Some(vrchat), ..Default::default() }
+    /// A look with the game's three counters: shown frames, the guest's presents, VRChat's log length.
+    fn look(at: f64, shown: u64, presents: u64, vrchat: u64) -> Look {
+        Look { at, running: true, shown: Some(shown), presents: Some(presents), vrchat_len: Some(vrchat), ..Default::default() }
     }
 
-    /// M15: frames and both logs stopped together while the session lives is a stall, told once; any of them moving is no
-    /// stall (a covered window or a locked screen still presents, so the engine's log grows); a game that stopped is none.
+    /// M15: the game's counters all stopped while the session lives is a stall, told once; any of them moving is no stall
+    /// (a covered window or a locked screen still presents: the guest's presents grow); a game that stopped is none.
     #[test]
     fn a_stall_is_all_three_stopped_while_the_session_lives_told_once() {
         let mut d = Detector::default();
@@ -576,7 +729,7 @@ mod tests {
         // It comes back, then stops again: another incident.
         assert_eq!(d.look(&look(65.0, 30, 110, 105)), None);
         assert_eq!(d.look(&look(96.0, 30, 110, 105)), Some(Kind::Stall));
-        // Only the engine's log grows (a covered window): no stall.
+        // Only the presents grow (a covered window, the lock screen): no stall.
         let mut d = Detector::default();
         for i in 0..20 {
             assert_eq!(d.look(&look(i as f64 * 5.0, 10, 100 + i, 50)), None);
@@ -636,11 +789,11 @@ mod tests {
         d.look(&look(5.0, 652, 56159, 131714));
         assert_eq!(d.look(&look(40.0, 652, 56159, 131714)), Some(Kind::Stall));
         // The engine's log grows (a client of the window server, a quit asked): no recovery.
-        assert_eq!(d.look(&look(300.0, 652, 56300, 131714)), None);
-        let quit = |at: f64| Look { quitting: true, ..look(at, 652, 56352, 131714) };
+        assert_eq!(d.look(&Look { engine_len: Some(56300), ..look(300.0, 652, 56159, 131714) }), None);
+        let quit = |at: f64| Look { quitting: true, engine_len: Some(56352), ..look(at, 652, 56159, 131714) };
         assert_eq!(d.look(&quit(380.0)), None);
         assert_eq!(d.look(&quit(430.0)), Some(Kind::StuckQuit), "45 s after the engine accepted the quit");
-        assert_eq!(d.look(&look(500.0, 652, 56400, 131714)), None, "never a second stall without a frame or a VRChat line");
+        assert_eq!(d.look(&Look { engine_len: Some(56400), ..look(500.0, 652, 56159, 131714) }), None, "never a second stall without the game's own progress");
         // A game that draws again is a new incident when it stops again.
         let mut d = Detector::default();
         d.look(&look(0.0, 1, 1, 1));
@@ -671,7 +824,7 @@ mod tests {
         assert!(out.contains("vrchat://[removed]"), "{out}");
         let line = "[Behaviour] Joining wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:63402~private(usr_1339e525-d75d-4832-9104-98dd89287681)~nonce(4c1f0e7a-2d3e-4b0a-9f01-7a2b3c4d5e6f)~region(eu)";
         let out = redact(line);
-        assert_eq!(out, "[Behaviour] Joining wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:63402~private([removed])~nonce([removed])~region(eu)");
+        assert_eq!(out, "[Behaviour] Joining [location removed]", "the whole location: world, instance and every part");
         assert_eq!(redact("OnPlayerJoined blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)"), "OnPlayerJoined blackorbit (usr_[removed])");
         assert_eq!(redact("wsd: window 1 overlay: frame held 100.0 ms"), "wsd: window 1 overlay: frame held 100.0 ms");
     }
@@ -706,8 +859,9 @@ mod tests {
         let all = parse_ps(ps);
         assert_eq!(all.len(), 10);
         assert_eq!(all[3].exe, "/L L/Voile/v/linux/graphics/libexec/virgl_render_server", "a path with a space is whole");
-        // The editor has the library open (its arguments would name it) but is no process of the engine's.
-        let t = tree(&all, 92600, "/L L");
+        // The editor has the library open (its arguments would name it) but is no process of the engine's; the input helper
+        // left alone is this session's because its arguments name the launch's folder.
+        let t = tree(&all, 92600, &attributed("99999 /L L/Voile/v/linux/engine/obelisk-input --dir obelisk-engine-92600\n", 92600));
         let pids: Vec<u32> = t.iter().map(|p| p.pid).collect();
         assert_eq!(pids, [92600, 92621, 92705, 92706, 92640, 92685, 99999], "the launcher's, and the engine's helper left alone");
         assert_eq!(sample_targets(&t), [("game", 92685), ("render-server", 92706), ("wsd", 92621)], "the busiest is the game already");
@@ -729,7 +883,7 @@ mod tests {
         let mut launcher = std::process::Command::new("/bin/sh").arg("-c").arg(format!("{} & {} & wait", dir.join("wsd").display(), dir.join("wsd").display())).spawn().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(1));
         std::fs::write(dir.join("engine.log"), "neptune unixlib wsi (wsd): 5 presents\nobelisk-wait: wine returned 0 at 1.0\n").unwrap();
-        let followed = Followed { session: "f16d947e-7d8f-4331-8731-bede005d29fe".into(), launcher: launcher.id(), library: dir.join("no-library"), engine_log: dir.join("engine.log"), vrchat_log: None };
+        let followed = Followed { session: "f16d947e-7d8f-4331-8731-bede005d29fe".into(), launcher: launcher.id(), engine_log: dir.join("engine.log"), vrchat_log: None };
         let logs = dir.join("logs");
         let out = capture(&logs, Kind::StuckQuit, &followed, &Look::default(), "test").unwrap();
         let _ = launcher.kill();
@@ -759,4 +913,124 @@ mod tests {
         assert!(end.ends_with("third\n") && !end.contains("first line") && end.starts_with("[the first"), "{end}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// Fourth verification, finding 8: the forms that survived before (a percent-encoded nonce, an unterminated
+    /// `~nonce(`, an upper-case link) and their neighbours (doubly encoded, a nonce as a value, a group id, an instance
+    /// part alone) are all taken out; text around them stays.
+    #[test]
+    fn encoded_truncated_and_upper_case_private_values_are_taken_out() {
+        let secrets = ["4c1f0e7a", "1339e525", "4432ea9b", "63402", "0b9a"];
+        let cases = [
+            "join wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd%3A63402%7Eprivate%28usr_1339e525-d75d-4832-9104-98dd89287681%29%7Enonce%284c1f0e7a-2d3e-4b0a-9f01-7a2b3c4d5e6f%29 end",
+            "id=wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd%253A63402%257Enonce%25284c1f0e7a-2d3e end",
+            "cut ~nonce(4c1f0e7a-2d3e-4b0a-9f01",
+            "cut %7Enonce%284c1f0e7a-2d3e",
+            "OPEN VRCHAT://LAUNCH?ID=WRLD_4432EA9B:63402~NONCE(4c1f0e7a) end",
+            "open Vrchat%3A%2F%2Flaunch%3Fid%3Dwrld_4432ea9b%3A63402 end",
+            r#"{"nonce":"4c1f0e7a-2d3e","x":1}"#,
+            "token nonce=4c1f0e7a-2d3e end",
+            "owner ~group(grp_0b9a1234-5678-4abc-9def-0123456789ab)~groupAccessType(members) end",
+            "member grp_0b9a1234-5678-4abc-9def-0123456789ab end",
+            "[Behaviour] Joining or Creating Room: wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:63402~private(usr_1339e525-d75d-4832-9104-98dd89287681",
+        ];
+        for line in cases {
+            let out = redact(line);
+            for secret in secrets {
+                assert!(!out.to_ascii_lowercase().contains(secret), "{secret} survived in {out:?} (from {line:?})");
+            }
+        }
+        assert_eq!(redact("cut ~nonce(4c1f0e7a-2d3e-4b0a-9f01"), "cut ~nonce([removed])");
+        assert_eq!(redact("OPEN VRCHAT://LAUNCH?ID=WRLD_4432EA9B end"), "OPEN vrchat://[removed] end");
+        assert_eq!(redact("member grp_0b9a1234-5678-4abc-9def-0123456789ab end"), "member grp_[removed] end");
+        assert_eq!(redact("in ~region(eu) still"), "in ~region(eu) still", "a region says nothing of the person");
+        assert_eq!(redact("neptune unixlib wsi (wsd): 6480 presents"), "neptune unixlib wsi (wsd): 6480 presents");
+    }
+
+    /// Finding 9: a reading missing between two equal frame counts (651) is no progress; a shorter (replaced) log is
+    /// none; the engine's log growing alone never postpones the first stall; the supervisor's acceptance of a Quit arms the
+    /// stuck-quit detection when nothing logs it (a parked game, a window server that died).
+    #[test]
+    fn only_the_game_s_own_progress_counts_and_an_accepted_quit_arms_the_stuck_quit() {
+        let mut d = Detector::default();
+        d.look(&look(0.0, 650, 100, 1000));
+        d.look(&look(5.0, 651, 100, 1000));
+        assert_eq!(d.look(&look(40.0, 651, 100, 1000)), Some(Kind::Stall));
+        assert_eq!(d.look(&Look { shown: None, presents: None, vrchat_len: None, ..look(45.0, 0, 0, 0) }), None, "nothing read");
+        assert_eq!(d.look(&look(50.0, 651, 100, 1000)), None, "651 again after a failed read: no progress");
+        assert_eq!(d.look(&look(100.0, 651, 100, 1000)), None, "so no second stall either");
+        assert_eq!(d.look(&look(105.0, 651, 100, 200)), None, "a shorter log: replaced, not progress");
+        assert_eq!(d.look(&look(150.0, 651, 100, 200)), None, "still the same incident");
+        // the engine's log alone (other clients of the window server) never moves the first stall
+        let mut d = Detector::default();
+        d.look(&look(0.0, 1, 1, 1));
+        d.look(&look(5.0, 2, 2, 2));
+        for (k, at) in [10.0, 20.0, 30.0].iter().enumerate() {
+            assert_eq!(d.look(&Look { engine_len: Some(1000 + k as u64 * 100), ..look(*at, 2, 2, 2) }), None);
+        }
+        assert_eq!(d.look(&Look { engine_len: Some(5000), ..look(36.0, 2, 2, 2) }), Some(Kind::Stall));
+        // a Quit the supervisor accepted 46 s ago, with no line of anyone's: a stuck quit
+        let mut d = Detector::default();
+        d.look(&look(0.0, 1, 1, 1));
+        assert_eq!(d.look(&Look { quit_since: Some(10.0), ..look(5.0, 1, 1, 1) }), None);
+        assert_eq!(d.look(&Look { quit_since: Some(46.0), ..look(41.0, 1, 1, 1) }), Some(Kind::StuckQuit));
+        assert_eq!(d.look(&Look { quit_since: Some(80.0), ..look(75.0, 1, 1, 1) }), None, "once");
+        // a quit accepted that finishes is none; a renderer closing during it is no loss
+        let mut d = Detector::default();
+        d.look(&look(0.0, 1, 1, 1));
+        assert_eq!(d.look(&Look { quit_since: Some(1.0), renderer_lost: true, ..look(5.0, 1, 1, 1) }), None);
+        assert_eq!(d.look(&Look { running: false, quit_since: Some(60.0), ..look(60.0, 1, 1, 1) }), None);
+    }
+
+    /// Finding 7: the session's processes are the launcher's tree and the ones whose own arguments or environment name
+    /// this launch (a helper re-parented); another session's engine processes, or an editor, are never chosen, whatever
+    /// their memory. The executable and birth chosen are the ones checked before each sample.
+    #[test]
+    fn processes_are_the_session_s_by_ancestry_or_by_name_only() {
+        let ps = "  1     0  0.0  1000 Ss /sbin/launchd\n\
+                  92600 1  0.0  4000 S  /bin/bash\n\
+                  92640 92600 1.0 20000 S /L L/Voile/v/linux/engine/fexdarwin-run\n\
+                  92685 92640 99.0 6000000 R /L L/Voile/v/linux/engine/fexdarwin-run\n\
+                  92621 1 3.1 90000 S /x/T/obelisk-apps/VRChat/VRChat.app/Contents/MacOS/wsd\n\
+                  92700 92621 0.0 100 S /x/T/child-of-a-reparented\n\
+                  93000 1 1.0 9000000 R /L L/Voile/v/linux/engine/fexdarwin-run\n\
+                  93001 1 1.0 9500000 R /x/T/obelisk-apps/Other/Other.app/Contents/MacOS/wsd\n\
+                  55555 1 1.0 9900000 S /Applications/Editor.app/Contents/MacOS/Editor\n";
+        let all = parse_ps(ps);
+        let named = "92621 /x/T/obelisk-apps/VRChat/VRChat.app/Contents/MacOS/wsd --dir obelisk-engine-92600\n\
+                     93000 /L L/Voile/v/linux/engine/fexdarwin-run --cwd /opt/game FEXDARWIN_SUPERVISOR_PID=926001 HOME=/x\n\
+                     93001 /x/T/obelisk-apps/Other/Other.app/Contents/MacOS/wsd --dir obelisk-engine-926001\n\
+                     55555 /Applications/Editor.app/Contents/MacOS/Editor /L L/Voile/v/linux/engine/fexdarwin-run\n\
+                     92685 /L L/Voile/v/linux/engine/fexdarwin-run --cwd /opt/game FEXDARWIN_SUPERVISOR_PID=92600\n";
+        let also = attributed(named, 92600);
+        assert_eq!(also, [92621, 92685], "by name: this launch's only (926001 is another)");
+        let t = tree(&all, 92600, &also);
+        let pids: Vec<u32> = t.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [92600, 92640, 92685, 92621, 92700]);
+        assert_eq!(sample_targets(&t)[0], ("game", 92685), "the largest of this session, not another session's 9 GB");
+        let target = Target { name: "game", pid: 92685, birth: (10, 5), exe: "/L L/Voile/v/linux/engine/fexdarwin-run".into() };
+        assert!(target.same(Some((10, 5)), Some("/L L/Voile/v/linux/engine/fexdarwin-run")));
+        assert!(!target.same(Some((11, 0)), Some("/L L/Voile/v/linux/engine/fexdarwin-run")), "a pid used again");
+        assert!(!target.same(Some((10, 5)), Some("/usr/bin/other")), "another program");
+        assert!(!target.same(None, None), "gone");
+    }
+
+    /// The engine's recent-event ring is copied in the order things happened, unwritten lines left out, redacted.
+    #[test]
+    fn the_event_ring_is_copied_in_order_and_redacted() {
+        let line = |seq: u64, text: &str| {
+            let mut l = format!("{seq:012} {:012} {:6} {text}", seq * 10, 42).into_bytes();
+            l.resize(127, b' ');
+            l.push(b'\n');
+            l
+        };
+        let mut bytes = vec![0u8; 128];
+        bytes.extend(line(7, "ptrace: attach 7: tracer 5 -> pid 3 tid 3, link 0 gen 9, wake 0"));
+        bytes.extend(vec![0u8; 128]);
+        bytes.extend(line(5, "sig: SIGCONT resumes process 3 wrld_4432ea9b:1~nonce(x)"));
+        let lines = ring_lines(&bytes);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("000000000005") && lines[0].contains("[location removed]") && !lines[0].contains("4432"), "{lines:?}");
+        assert!(lines[1].contains("ptrace: attach 7"));
+        assert_eq!(ring_of(Path::new("/L/wine-438100.log")), Path::new("/L/wine-438100.lkd-events"));
+    }
+
 }

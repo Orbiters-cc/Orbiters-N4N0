@@ -513,6 +513,7 @@ mod lan;
 pub mod launcher;
 mod obelisk_cli;
 mod incident;
+mod picture;
 mod language;
 mod maps;
 pub(crate) mod menu_shares;

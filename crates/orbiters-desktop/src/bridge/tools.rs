@@ -170,7 +170,7 @@ fn number(args: &Value, key: &str, default: f64) -> f64 {
 
 /// The schema keywords [`schema_refusal`] holds arguments to; a schema using any other is a test failure
 /// (`every_schema_uses_only_what_is_checked`), never an argument let through unchecked.
-pub const CHECKED_KEYWORDS: [&str; 19] = ["type", "enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "items", "minItems", "maxItems", "uniqueItems", "properties", "required", "additionalProperties", "description", "default"];
+pub const CHECKED_KEYWORDS: [&str; 21] = ["type", "enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "items", "minItems", "maxItems", "uniqueItems", "properties", "required", "additionalProperties", "anyOf", "oneOf", "description", "default"];
 
 /// Why `value` does not fit `spec` (one JSON Schema of the subset in [`CHECKED_KEYWORDS`]), `at` naming where it is.
 fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
@@ -189,6 +189,15 @@ fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
         "null" => value.is_null(),
         _ => false,
     };
+    // anyOf / oneOf: the value fits one of the forms (oneOf: exactly one), each checked whole.
+    if let Some(forms) = spec["anyOf"].as_array().or(spec["oneOf"].as_array()) {
+        let fits = forms.iter().filter(|form| misfit(form, value, at).is_none()).count();
+        let exactly_one = spec.get("oneOf").is_some();
+        if fits == 0 || (exactly_one && fits > 1) {
+            let first = forms.iter().find_map(|form| misfit(form, value, at));
+            return Some(first.unwrap_or_else(|| format!("{at} fits more than one of its forms")));
+        }
+    }
     // A null is an argument of its own: only where the schema says null (else leave the argument out).
     if value.is_null() && !types.contains(&"null") {
         return Some(format!("{at} must not be null (leave it out instead)"));
@@ -249,12 +258,19 @@ fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
                 return Some(format!("{at}.{required} is required"));
             }
         }
-        // An object of the schema's takes only what it names, unless it says otherwise.
+        // An object of the schema's takes only what it names, unless it says otherwise: `true` takes anything more, a
+        // schema takes more that fits it (a map of headers: every value a string), recursively.
+        let extra = spec.get("additionalProperties").filter(|e| e.is_object());
         let open = spec["additionalProperties"] == json!(true) || (properties.is_none() && spec.get("additionalProperties").is_none());
         for (key, item) in given {
             match properties.and_then(|p| p.get(key)) {
                 Some(each) => {
                     if let Some(why) = misfit(each, item, &format!("{at}.{key}")) {
+                        return Some(why);
+                    }
+                }
+                None if extra.is_some() => {
+                    if let Some(why) = misfit(extra.expect("checked"), item, &format!("{at}.{key}")) {
                         return Some(why);
                     }
                 }
@@ -372,7 +388,7 @@ pub fn list() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "world_id": { "type": "string", "description": "wrld_… from find_worlds." },
                 "region": { "type": "string", "enum": ["eu", "us", "use", "jp"], "description": "Where the instance runs. Default eu." },
-                "profile": { "type": "integer", "minimum": 0, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
+                "profile": { "type": "integer", "minimum": 0, "maximum": orbiters_core::vrchat_launch::PROFILE_MAX, "description": "VRChat's --profile for the main session, when the signed-in account is on another profile than the default; never a side session's profile (open_session is the way to use another profile beside it)." },
                 "relaunch": { "type": "boolean", "description": "Side session: start its VRChat again in the instance instead of travelling in the running game. Only when travelling did not work: every start of VRChat starts Easy Anti-Cheat again, and long runs of starts have left its driver stuck until Windows restarted." },
             }, "required": ["world_id"], "additionalProperties": false },
             "annotations": acts,
@@ -1605,7 +1621,7 @@ impl Bridge {
                 let plan = LaunchPlan { world_id: world_id.to_string(), instance: instance.clone(), width: WINDOW_WIDTH, height: WINDOW_HEIGHT, profile: s.profile, osc: s.osc, vr: s.vr().is_some() };
                 return self.launch_side(s, plan, call);
             }
-            let profile = args["profile"].as_u64().map(|p| p as u32);
+            let profile = args["profile"].as_u64().and_then(|p| u32::try_from(p).ok());
             // Another profile for the main session must not be a side session's (two VRChats of one account) (BRIDGE-17 g).
             if let Some(p) = profile.filter(|p| *p > 0 && self.sides.lock().unwrap().iter().any(|x| x.profile == Some(*p))) {
                 return Err(Failure::new("profile_in_use", format!("Profile {p} is a side session's."), "Use that session (pass its id), or another profile."));
@@ -3181,6 +3197,21 @@ mod tests {
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{}] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a", "other": 1 }] })).is_some());
         assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }] })).is_none());
+        // Bridge verification 3, finding 4: go_to_world's profile is bounded as the launch takes it (u32, then
+        // PROFILE_MAX); orbiters_environment's omitted action reaches its default (read), as before the validator.
+        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": 4294967297u64 })), Some("bad_arguments"));
+        assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": orbiters_core::vrchat_launch::PROFILE_MAX + 1 })), Some("bad_arguments"));
+        assert_eq!(check("orbiters_environment", json!({})), None);
+        assert_eq!(check("orbiters_environment", json!({ "action": "erase" })), Some("bad_arguments"));
+        // A schema-valued additionalProperties checks every further key, recursively; anyOf takes either form.
+        let map = json!({ "type": "object", "properties": { "m": { "type": "object", "additionalProperties": { "type": "object", "additionalProperties": { "type": "string" } } } } });
+        assert!(schema_refusal("t", &map, &json!({ "m": { "a": { "x": "1" }, "b": {} } })).is_none());
+        assert!(schema_refusal("t", &map, &json!({ "m": { "a": { "x": 1 } } })).is_some());
+        let either = json!({ "type": "object", "properties": { "v": { "anyOf": [{ "type": "string" }, { "type": "integer", "minimum": 0 }] } } });
+        assert!(schema_refusal("t", &either, &json!({ "v": "s" })).is_none());
+        assert!(schema_refusal("t", &either, &json!({ "v": 3 })).is_none());
+        assert!(schema_refusal("t", &either, &json!({ "v": -3 })).is_some());
+        assert!(schema_refusal("t", &either, &json!({ "v": true })).is_some());
     }
 
     /// Writes Windows' tool list to `$ORBITERS_TOOLS_OUT` (to check other computers' test calls against it).
@@ -3204,6 +3235,8 @@ mod tests {
                 match key.as_str() {
                     "properties" => value.as_object().into_iter().flatten().for_each(|(k, v)| walk(v, &format!("{at}.{k}"), found)),
                     "items" => walk(value, &format!("{at}[]"), found),
+                    "additionalProperties" => walk(value, &format!("{at}{{*}}"), found),
+                    "anyOf" | "oneOf" => value.as_array().into_iter().flatten().enumerate().for_each(|(n, v)| walk(v, &format!("{at}|{n}"), found)),
                     _ => {}
                 }
             }

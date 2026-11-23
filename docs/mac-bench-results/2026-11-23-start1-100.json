@@ -1,0 +1,255 @@
+{
+ "label": "start1 render 100",
+ "when": "2026-11-23T05:17:10",
+ "command": [
+  "steam",
+  "play",
+  "438100",
+  "--",
+  "-screen-fullscreen",
+  "1",
+  "-window-mode",
+  "borderless",
+  "<link>"
+ ],
+ "render": [
+  [
+   "none",
+   "100",
+   "2940",
+   "1912"
+  ]
+ ],
+ "power": {
+  "pmset_custom": "Battery Power:\n Sleep On Power Button 1\n lowpowermode         0\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         180\n womp                 0\n networkoversleep     0\n sleep                1\n lessbright           1\n tcpkeepalive         1\n disksleep            10\nAC Power:\n Sleep On Power Button 1\n lowpowermode         1\n standby              1\n ttyskeepawake        1\n hibernatemode        3\n powernap             1\n hibernatefile        /var/vm/sleepimage\n displaysleep         0\n womp                 1\n networkoversleep     0\n sleep                1\n tcpkeepalive         1\n disksleep            10\n",
+  "batt": [
+   "Now drawing from 'AC Power'"
+  ],
+  "thermal_start": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n",
+  "thermal_end": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded\n"
+ },
+ "arrived_after_s": 51.9,
+ "swapchains": [
+  {
+   "at_s": 15.8,
+   "size": "2940x1912",
+   "fmt": "28",
+   "buffers": "2"
+  }
+ ],
+ "windows": [
+  {
+   "seconds": 60.0,
+   "guest_present": {
+    "batches_of_60": 8,
+    "interval_ms_per_batch": [
+     121.736,
+     116.777,
+     118.792,
+     119.495,
+     120.651,
+     121.078,
+     121.907,
+     123.053
+    ],
+    "interval_ms_median": 120.864,
+    "interval_ms_p10_p90": [
+     118.188,
+     122.251
+    ],
+    "fence_wait_ms_per_batch": [
+     68.287,
+     73.3,
+     67.489,
+     72.053,
+     67.248,
+     75.156,
+     72.718,
+     67.662
+    ],
+    "fence_wait_ms_median": 70.17,
+    "submitted_per_second": 7.0
+   },
+   "worker_shown_events_per_second": null,
+   "wsd_shown": {
+    "hud_intervals_ms": [],
+    "frames": 0,
+    "per_second": null,
+    "interval_ms_p50_p90_p99": [
+     null,
+     null,
+     null
+    ],
+    "share_at_16_7": null,
+    "share_at_33_3": null,
+    "batches": [],
+    "held_over_50ms": 0,
+    "held_over_100ms": 0
+   },
+   "gpu_device_utilization_pct": {
+    "median": 85.0,
+    "p10_p90": [
+     84.0,
+     87.4
+    ]
+   },
+   "process_cpu_pct_median": {},
+   "from_s": 142.2
+  },
+  {
+   "seconds": 60.0,
+   "guest_present": {
+    "batches_of_60": 9,
+    "interval_ms_per_batch": [
+     120.521,
+     120.264,
+     116.733,
+     120.758,
+     114.807,
+     113.151,
+     115.595,
+     115.159,
+     117.641
+    ],
+    "interval_ms_median": 116.733,
+    "interval_ms_p10_p90": [
+     114.476,
+     120.568
+    ],
+    "fence_wait_ms_per_batch": [
+     66.239,
+     68.594,
+     67.582,
+     73.628,
+     73.975,
+     75.553,
+     73.018,
+     72.147,
+     70.928
+    ],
+    "fence_wait_ms_median": 72.147,
+    "submitted_per_second": 8.0
+   },
+   "worker_shown_events_per_second": null,
+   "wsd_shown": {
+    "hud_intervals_ms": [],
+    "frames": 0,
+    "per_second": null,
+    "interval_ms_p50_p90_p99": [
+     null,
+     null,
+     null
+    ],
+    "share_at_16_7": null,
+    "share_at_33_3": null,
+    "batches": [],
+    "held_over_50ms": 0,
+    "held_over_100ms": 0
+   },
+   "gpu_device_utilization_pct": {
+    "median": 85.0,
+    "p10_p90": [
+     83.6,
+     87.4
+    ]
+   },
+   "process_cpu_pct_median": {},
+   "from_s": 202.2
+  },
+  {
+   "seconds": 60.0,
+   "guest_present": {
+    "batches_of_60": 9,
+    "interval_ms_per_batch": [
+     115.699,
+     118.262,
+     114.014,
+     118.833,
+     114.113,
+     113.826,
+     115.457,
+     118.45,
+     113.344
+    ],
+    "interval_ms_median": 115.457,
+    "interval_ms_p10_p90": [
+     113.73,
+     118.527
+    ],
+    "fence_wait_ms_per_batch": [
+     65.915,
+     71.916,
+     70.772,
+     76.07,
+     73.441,
+     74.712,
+     73.072,
+     70.869,
+     79.47
+    ],
+    "fence_wait_ms_median": 73.072,
+    "submitted_per_second": 8.0
+   },
+   "worker_shown_events_per_second": null,
+   "wsd_shown": {
+    "hud_intervals_ms": [],
+    "frames": 0,
+    "per_second": null,
+    "interval_ms_p50_p90_p99": [
+     null,
+     null,
+     null
+    ],
+    "share_at_16_7": null,
+    "share_at_33_3": null,
+    "batches": [],
+    "held_over_50ms": 0,
+    "held_over_100ms": 0
+   },
+   "gpu_device_utilization_pct": {
+    "median": 86.0,
+    "p10_p90": [
+     84.6,
+     88.0
+    ]
+   },
+   "process_cpu_pct_median": {},
+   "from_s": 262.2
+  }
+ ],
+ "engine_trace": [
+  "lkd: ptrace: attach 1: tracer tid 4 -> pid 77 tid 96, link 0 gen 2, wake 0, SIGSTOP 0",
+  "lkd: ptrace: POKEUSER DR7 enabling a hardware breakpoint: unsupported by the engine (EIO)",
+  "lkd: ptrace: attach 2: tracer tid 4 -> pid 77 tid 96, link 0 gen 3, wake 0, SIGSTOP 0",
+  "lkd: ptrace: attach 3: tracer tid 4 -> pid 77 tid 96, link 0 gen 4, wake 0, SIGSTOP 0",
+  "lkd: ptrace: attach 4: tracer tid 4 -> pid 77 tid 96, link 0 gen 5, wake 0, SIGSTOP 0",
+  "lkd: ptrace: attach 4096: tracer tid 4 -> pid 77 tid 153, link 0 gen 4019, wake 0, SIGSTOP 0"
+ ],
+ "events": [
+  {
+   "event": "preparing",
+   "app_id": 438100
+  },
+  {
+   "event": "starting",
+   "app_id": 438100
+  },
+  {
+   "event": "running",
+   "app_id": 438100,
+   "pid": 90776,
+   "session_id": "2a64cda1-c2b4-4846-b911-c2c9a386578b"
+  },
+  {
+   "event": "exited",
+   "app_id": 438100,
+   "session_id": "2a64cda1-c2b4-4846-b911-c2c9a386578b",
+   "frames": 0,
+   "exit_code": 0,
+   "exit_signal": null,
+   "seconds": 321,
+   "ended_by_request": true
+  }
+ ],
+ "quit": "{\"event\":\"quit_requested\",\"app_id\":438100,\"forced\":false}\n{\"event\":\"exited\",\"app_id\":438100,\"session_id\":\"2a64cda1-c2b4-4846-b911-c2c9a386578b\",\"frames\":0,\"exit_code\":0,\"exit_signal\":null,\"seconds\":321,\"ended_by_request\":true}\n"
+}

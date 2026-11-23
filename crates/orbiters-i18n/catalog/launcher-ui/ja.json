@@ -109,5 +109,7 @@
   "VRChat's engine stops at a damaged record ({file}): set it aside to play.": "VRChat のエンジンが壊れた記録（{file}）で止まります。プレイするには退避してください。",
   "A record of an earlier VRChat start cannot be read ({file}): it no longer holds Play.": "以前の VRChat 起動の記録を読めません（{file}）。プレイはもう妨げられません。",
   "Set aside": "退避",
-  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "VRChat のエンジンの記録の隣にある Set aside フォルダーへ移動します。何も削除されません。"
+  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "VRChat のエンジンの記録の隣にある Set aside フォルダーへ移動します。何も削除されません。",
+  "Battery settings": "バッテリー設定",
+  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "このMacは電源に接続されていますが、低電力モードがオンです。VRChatの動作が遅くなる場合があります。"
 }

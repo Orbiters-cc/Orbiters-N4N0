@@ -94,6 +94,8 @@ pub enum Reason {
     Frequent { visits: u32 },
     /// Chosen among the previous instances (REQUEST21 7), joined last at `at` (Unix seconds).
     Previous { at: u64 },
+    /// A friend's instance chosen with Select (REQUEST23): who is there.
+    Friend { name: String },
 }
 
 /// Where Play goes with a card.
@@ -131,7 +133,7 @@ impl Suggestion {
     /// Whether its place comes from this computer alone (Home, the history), not from an account's list: such a card is
     /// started whatever account is on show.
     pub fn local(&self) -> bool {
-        matches!(self.reason, Reason::Home | Reason::Frequent { .. } | Reason::Recent { rejoin: false }) || matches!(self.reason, Reason::Previous { .. }) && self.go == Go::New
+        matches!(self.reason, Reason::Home | Reason::Frequent { .. } | Reason::Recent { rejoin: false }) || matches!(self.reason, Reason::Previous { .. } | Reason::Friend { .. }) && self.go == Go::New
     }
 
     /// Whether Play makes a new instance for it.
@@ -238,10 +240,22 @@ pub fn frequent(history: &orbiters_core::visited::History, now: u64) -> Vec<Freq
 /// Whether the account `me` can join `instance` again by its link alone: a public one (its group's too), a friends one,
 /// or one of its own. An invite instance of someone else, or a group's members-only one, needs an invite.
 pub fn rejoinable(instance: &str, me: &str) -> bool {
+    // An instance of the history was joined: its friends-only owner was this account or a friend then.
+    joinable_without_asking(instance, me, &|_| true)
+}
+
+/// Whether the account `me` can go into `instance` by its link alone, without asking anyone (REQUEST23: Select instead
+/// of Request; Where's rejoin; a friend's profile's Join): public and a group's public ones; friends+ (anyone's friend
+/// in it, so the friend there); friends-only when its owner is `me` or one of `friend_of`; an invite instance only when
+/// `me` made it. A group's members-only or plus instance (membership is not known here), an unknown kind, never. Whether
+/// it is full, age-gated or closed is not known from a location: VRChat is asked whether it is open before Play.
+pub fn joinable_without_asking(instance: &str, me: &str, friend_of: &dyn Fn(&str) -> bool) -> bool {
     let (access, _) = orbiters_core::launcher_feed::access(instance);
+    let tag = |name: &str| instance.split('~').find_map(|t| t.strip_prefix(name).and_then(|t| t.strip_prefix('(')).and_then(|t| t.strip_suffix(')')));
     match access {
-        InstanceAccess::Public | InstanceAccess::GroupPublic | InstanceAccess::FriendsPlus | InstanceAccess::Friends => true,
-        InstanceAccess::Invite | InstanceAccess::InvitePlus => !me.is_empty() && instance.contains(&format!("~private({me})")),
+        InstanceAccess::Public | InstanceAccess::GroupPublic | InstanceAccess::FriendsPlus => true,
+        InstanceAccess::Friends => tag("friends").is_some_and(|owner| (!me.is_empty() && owner == me) || friend_of(owner)),
+        InstanceAccess::Invite | InstanceAccess::InvitePlus => !me.is_empty() && tag("private") == Some(me),
         InstanceAccess::GroupPlus | InstanceAccess::Group | InstanceAccess::Unknown => false,
     }
 }
@@ -282,7 +296,11 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
             }
             None => (Go::New, if own.is_empty() { region.clone() } else { own }),
         };
-        out.push(Suggestion { key: v.key(), world_id: v.world_id.clone(), name: world_name(&v.name), picture: None, reason: Reason::Previous { at: v.at }, go, region });
+        let reason = match &p.with {
+            Some((_, name)) => Reason::Friend { name: name.clone() },
+            None => Reason::Previous { at: v.at },
+        };
+        out.push(Suggestion { key: v.key(), world_id: v.world_id.clone(), name: world_name(&v.name), picture: p.picture.clone(), reason, go, region });
     }
     if i.me.is_some() {
         let fresh = i.invites.iter().filter(|v| v.kind == InviteKind::Invite && !(i.dismissed)(&v.id) && (v.received_at <= 0 || i.now - v.received_at <= INVITE_FOR));
@@ -574,6 +592,8 @@ pub struct Places {
     cards: Vec<Suggestion>,
     /// Whether the row showed in the last frame (the invite card under Play then stands aside).
     pub(super) showing: bool,
+    /// A place was just chosen from outside the row (a friend's Select, REQUEST23): Home shows the row (its top).
+    pub(super) reveal: bool,
     /// What the Map explorer says of the worlds (their pictures), once asked.
     infos: Option<crate::worlds::Infos>,
     /// Pictures of the page: what is handed in instead of being read.
@@ -636,9 +656,20 @@ impl Places {
         self.chosen.as_ref().map(|c| c.key.as_str())
     }
 
+    /// The line while a friend's chosen instance is being checked (tests).
+    #[cfg(test)]
+    pub fn checking_line(&self) -> Option<String> {
+        super::previous::checking(&self.previous)
+    }
+
     #[cfg(test)]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|n| n.0.as_str())
+    }
+
+    /// Whether Home should bring Where into view (a place was just chosen from the friends list): once.
+    pub fn take_reveal(&mut self) -> bool {
+        std::mem::take(&mut self.reveal)
     }
 
     /// A new instance is being made for Play: the Play button of `mode` turns.
@@ -931,6 +962,10 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
         let kind = state.places.chosen.as_ref().and_then(|c| cards.iter().find(|s| s.key == c.key)).map(|s| kind_of(state, s, can_create)).unwrap_or(CreateAccess::FriendsPlus);
         return Some((orbiters_i18n::tr!("Opening a new {kind} instance…", kind = access_name(kind_access(kind))), Tone::Busy));
     }
+    // A friend's instance chosen with Select, being checked (REQUEST23).
+    if let Some(text) = super::previous::checking(&state.places.previous) {
+        return Some((text, Tone::Busy));
+    }
     if let Some((text, at)) = &state.places.notice {
         if clock - at < NOTICE_FOR {
             return Some((text.clone(), Tone::Warn));
@@ -981,6 +1016,7 @@ fn reason_line(card: &Suggestion, now: i64) -> (String, &'static str, Color32) {
         }
         Reason::Recent { .. } => (tr("Last visited").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
         Reason::Frequent { .. } => (tr("Often visited").into(), icons::STAR, theme::FG_3),
+        Reason::Friend { name } => (orbiters_i18n::tr!("With {name}", name = name), icons::USERS, theme::ACCENT),
         Reason::Previous { at } => (
             orbiters_i18n::tr!("Previous instance · {when}", when = orbiters_ui::format::relative_time(*at, now.max(0) as u64)),
             icons::CLOCK_COUNTER_CLOCKWISE,
@@ -1138,6 +1174,10 @@ fn picture(state: &mut State, card: &Suggestion) -> Option<egui::TextureHandle> 
         if url.starts_with("https://") && matches!(card.reason, Reason::Invite { .. }) {
             return state.picture(url);
         }
+    }
+    // A friend's instance (REQUEST23): the picture its row already shows, or one kept on this computer; never fetched.
+    if matches!(card.reason, Reason::Friend { .. }) {
+        return super::previous::kept_world_picture(state, &card.world_id);
     }
     match &card.picture {
         Some(url) if url.starts_with("https://") => remote_picture(state, &card.world_id, url.clone()),
@@ -1555,6 +1595,34 @@ mod tests {
         let Launch::At(place) = launch(&cards[1], CreateAccess::FriendsPlus, false, 42) else { panic!() };
         assert!(crate::controller::vrchat_data::public_instance(&place.instance_id) && place.instance_id.ends_with("~region(eu)"), "{}", place.instance_id);
         assert_eq!(action(&Launch::At(place.clone()), mode, Some(0)), Some(Action::PlayAt { mode, profile: 0, destination: place }));
+    }
+
+    /// REQUEST23: which instances take the account without asking (Select) and which need an invite (Request), and that
+    /// Where's rejoin of its own history and the friends' Select are one rule.
+    #[test]
+    fn joinable_without_asking_decides_select_or_request() {
+        let friend = "usr_00000000-0000-4000-8000-0000000000f1";
+        let stranger = "usr_00000000-0000-4000-8000-0000000000f2";
+        let is_friend = |id: &str| id == friend;
+        for (instance, joinable) in [
+            ("1~region(eu)".to_string(), true),
+            (format!("2~hidden({stranger})~region(eu)"), true),
+            (format!("3~friends({friend})~region(eu)"), true),
+            (format!("4~friends({ME})~region(eu)"), true),
+            (format!("5~friends({stranger})~region(eu)"), false),
+            (format!("6~private({stranger})~region(eu)"), false),
+            (format!("7~private({stranger})~canRequestInvite~region(eu)"), false),
+            (format!("8~private({ME})~region(eu)"), true),
+            ("9~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(public)~region(eu)".to_string(), true),
+            ("10~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(plus)~region(eu)".to_string(), false),
+            ("11~group(grp_00000000-0000-4000-8000-000000000001)~groupAccessType(members)~region(eu)".to_string(), false),
+        ] {
+            assert_eq!(joinable_without_asking(&instance, ME, &is_friend), joinable, "{instance}");
+        }
+        // Signed out (no account): nothing of its own; the rest as above.
+        assert!(!joinable_without_asking(&format!("8~private({ME})"), "", &is_friend));
+        // The history: a friends-only instance joined then is taken as its owner's friend's.
+        assert!(rejoinable(&format!("5~friends({stranger})~region(eu)"), ME));
     }
 
     #[test]

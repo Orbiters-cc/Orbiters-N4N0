@@ -109,5 +109,7 @@
   "VRChat's engine stops at a damaged record ({file}): set it aside to play.": "El motor de VRChat se detiene ante un registro dañado ({file}): apártalo para jugar.",
   "A record of an earlier VRChat start cannot be read ({file}): it no longer holds Play.": "No se puede leer un registro de un inicio anterior de VRChat ({file}): ya no bloquea Jugar.",
   "Set aside": "Apartar",
-  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "Lo mueve a la carpeta Set aside, junto a los registros del motor de VRChat: no se borra nada."
+  "Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.": "Lo mueve a la carpeta Set aside, junto a los registros del motor de VRChat: no se borra nada.",
+  "Battery settings": "Ajustes de batería",
+  "Low Power Mode is on while this Mac is plugged in: VRChat may run slower.": "El modo de bajo consumo está activado mientras este Mac está enchufado: VRChat puede ir más lento."
 }

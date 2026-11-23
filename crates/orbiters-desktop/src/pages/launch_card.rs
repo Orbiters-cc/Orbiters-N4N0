@@ -22,6 +22,33 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
     let mut apply = false;
     section(ui, cx, index, icons::PLAY, tr("Play VRChat"), Some(tr("How Home's Play buttons start VRChat")), |ui| {
         let launch = &mut draft.launch;
+        #[cfg(target_os = "macos")]
+        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+            // A Mac: how many pixels VRChat draws, per side, of what the display draws; macOS scales the picture to the
+            // screen. 100 % is the panel's own pixels, never more.
+            let sizes = crate::mac_display::sizes();
+            let mut level = launch.mac_render_percent.clamp(25, 100) as f32;
+            let size = move |v: f32| match sizes {
+                Some((backing, panel)) => {
+                    let (w, h) = orbiters_core::obelisk::render_size(v.round() as u32, backing, panel);
+                    format!("{v:.0} % · {w} × {h}") // i18n: not shown (a number and a size)
+                }
+                None => format!("{v:.0} %"), // i18n: not shown (a number)
+            };
+            widgets::field(
+                ui,
+                tr("Picture detail"),
+                Some(tr("How many pixels VRChat draws on this Mac, per side; macOS scales the picture to the screen. Less is faster and softer. 100 % is the screen's own pixels. Applies at the next start.")),
+                284.0,
+                |ui| {
+                    if widgets::slider(ui, "launch-mac-render", &mut level, 25.0..=100.0, 1.0, size) {
+                        launch.mac_render_percent = level.round() as u32;
+                        apply = true;
+                    }
+                },
+            );
+            return;
+        }
         widgets::field(
             ui,
             tr("Performance launch options"),

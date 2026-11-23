@@ -92,3 +92,6 @@ crates/orbiters-desktop/src/pages/settings_tests.rs
 crates/orbiters-core/src/launcher_live.rs
 # The shared 3D view's protocol (its words are the contract's, never shown).
 crates/orbiters-core/src/shared_view.rs
+# The Unity 6 trial's tests: the generated matrix and the fixtures (r22).
+crates/orbiters-projects/src/unity6/hostile/tests.rs
+crates/orbiters-projects/src/unity6/trial/tests.rs

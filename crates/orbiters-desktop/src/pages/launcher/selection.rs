@@ -658,7 +658,7 @@ mod tests {
     fn whatever_the_order_play_starts_only_what_is_chosen_and_proven_and_busy_ends() {
         let t0 = Instant::now();
         let (mut launched, mut entered_by_answer, mut busy_seen) = (0u32, 0u32, 0u32);
-        for seed in 1..=400u64 {
+        for seed in 1..=1500u64 {
             let mut dice = Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let mut d = desk();
             let mut now = t0;

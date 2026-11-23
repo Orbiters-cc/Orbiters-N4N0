@@ -250,7 +250,7 @@ fn friend_left(state: &mut State, clock: f64) {
 }
 
 /// What the line under Where says of a previous instance or a friend's that is chosen and not said open: being asked
-/// about, closed, not known, nobody to ask for.
+/// about, closed, not known, nobody to ask for. (What can be had instead is the button at its end, [`alternatives`].)
 pub(super) fn line(places: &Places) -> Option<(String, Tone)> {
     let selection = places.desk.selection();
     let visit = selection.instance()?;
@@ -262,13 +262,13 @@ pub(super) fn line(places: &Places) -> Option<(String, Tone)> {
     let world = world_name(visit);
     Some(match (selection.verified(), friend) {
         (Verified::Open { .. }, _) => return None,
-        (Verified::Closed, Some(name)) => (orbiters_i18n::tr!("{name}'s instance is closed now: choose a new instance of its world, or another place.", name = name), Tone::Warn),
-        (Verified::Closed, None) => (orbiters_i18n::tr!("{name} is closed now: choose a new instance of its world, or another place.", name = world), Tone::Warn),
+        (Verified::Closed, Some(name)) => (orbiters_i18n::tr!("{name}'s instance is closed now: choose another place.", name = name), Tone::Warn),
+        (Verified::Closed, None) => (orbiters_i18n::tr!("{name} is closed now: choose another place.", name = world), Tone::Warn),
         (Verified::Unverified, Some(name)) if nobody && places.previous.connecting => (orbiters_i18n::tr!("Connecting to VRChat: {name}'s instance is checked next…", name = name), Tone::Busy),
         (Verified::Unverified, None) if nobody && places.previous.connecting => (tr("Connecting to VRChat…").into(), Tone::Busy),
-        (Verified::Unverified | Verified::Unknown, _) if nobody => (orbiters_i18n::tr!("VRChat is not signed in for this profile: choose a new instance of {name}, or another place.", name = world), Tone::Warn),
-        (Verified::Unknown, Some(name)) => (orbiters_i18n::tr!("VRChat did not say whether {name}'s instance is open: Play asks again, or choose a new instance of its world.", name = name), Tone::Warn),
-        (Verified::Unknown, None) => (orbiters_i18n::tr!("VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.", name = world), Tone::Warn),
+        (Verified::Unverified | Verified::Unknown, _) if nobody => (tr("VRChat is not signed in for this profile: choose another place.").into(), Tone::Warn),
+        (Verified::Unknown, Some(name)) => (orbiters_i18n::tr!("VRChat did not say whether {name}'s instance is open: Play asks again.", name = name), Tone::Warn),
+        (Verified::Unknown, None) => (orbiters_i18n::tr!("VRChat did not say whether {name} is open: Play asks again.", name = world), Tone::Warn),
         (Verified::Unverified | Verified::Checking { .. }, Some(name)) => (orbiters_i18n::tr!("Asking VRChat whether {name}'s instance is open…", name = name), Tone::Busy),
         (Verified::Unverified | Verified::Checking { .. }, None) => (tr("Asking VRChat…").into(), Tone::Busy),
     })

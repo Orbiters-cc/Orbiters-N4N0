@@ -50,12 +50,12 @@
   "{name} has left that instance: Play starts VRChat at home.": "{name} a quitté cette instance : Jouer lance VRChat dans ton monde d’accueil.",
   "Connecting to VRChat: {name}'s instance is checked next…": "Connexion à VRChat : l’instance de {name} est vérifiée ensuite…",
   "Asking VRChat whether {name}'s instance is open…": "Demande à VRChat si l’instance de {name} est ouverte…",
-  "{name}'s instance is closed now: choose a new instance of its world, or another place.": "L’instance de {name} est fermée : choisis une nouvelle instance de son monde, ou un autre endroit.",
-  "{name} is closed now: choose a new instance of its world, or another place.": "{name} est fermé : choisis une nouvelle instance de son monde, ou un autre endroit.",
-  "VRChat is not signed in for this profile: choose a new instance of {name}, or another place.": "VRChat n’est pas connecté sur ce profil : choisis une nouvelle instance de {name}, ou un autre endroit.",
-  "VRChat did not say whether {name}'s instance is open: Play asks again, or choose a new instance of its world.": "VRChat n’a pas dit si l’instance de {name} est ouverte : Jouer redemande, ou choisis une nouvelle instance de son monde.",
-  "VRChat did not say whether {name} is open: Play asks again, or choose a new instance of its world.": "VRChat n’a pas dit si {name} est ouvert : Jouer redemande, ou choisis une nouvelle instance de son monde.",
   "Signed out on this computer, but VRChat could not be told ({error}): the session may stay valid on VRChat's side until it expires.": "Déconnecté sur cet ordinateur, mais VRChat n’a pas pu être prévenu ({error}) : la session peut rester valable du côté de VRChat jusqu’à son expiration.",
   "VRChat could not be told either ({error}): the session may stay valid on VRChat's side until it expires.": "VRChat n’a pas pu être prévenu non plus ({error}) : la session peut rester valable du côté de VRChat jusqu’à son expiration.",
-  "Signed out, but the saved VRChat session could not be fully removed from this computer. It is not used any more; removing it is tried again at the next start.": "Déconnecté, mais la session VRChat enregistrée n’a pas pu être entièrement supprimée de cet ordinateur. Elle n’est plus utilisée ; sa suppression sera retentée au prochain démarrage."
+  "Signed out, but the saved VRChat session could not be fully removed from this computer. It is not used any more; removing it is tried again at the next start.": "Déconnecté, mais la session VRChat enregistrée n’a pas pu être entièrement supprimée de cet ordinateur. Elle n’est plus utilisée ; sa suppression sera retentée au prochain démarrage.",
+  "{name}'s instance is closed now: choose another place.": "L’instance de {name} est fermée : choisis un autre endroit.",
+  "{name} is closed now: choose another place.": "{name} est fermé : choisis un autre endroit.",
+  "VRChat did not say whether {name}'s instance is open: Play asks again.": "VRChat n’a pas dit si l’instance de {name} est ouverte : Jouer redemande.",
+  "VRChat did not say whether {name} is open: Play asks again.": "VRChat n’a pas dit si {name} est ouvert : Jouer redemande.",
+  "VRChat is not signed in for this profile: choose another place.": "VRChat n’est pas connecté sur ce profil : choisis un autre endroit."
 }

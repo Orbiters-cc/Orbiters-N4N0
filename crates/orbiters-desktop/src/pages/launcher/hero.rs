@@ -350,13 +350,17 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));
     let mut p = ui.painter().clone();
+    // Held by the place chosen, it says why: readable, in grey.
+    let held = held.filter(|_| play == PlayState::Ready);
     if !enabled && !starting && !running {
-        p.multiply_opacity(0.4);
+        p.multiply_opacity(if held.is_some() { 0.75 } else { 0.4 });
     }
     // The one button of a Mac is the green one.
     let primary = mode == LaunchMode::Vr || !VR_HERE;
     let (fill, fg, fg2) = if running {
         (theme::alpha(theme::ACCENT, 0.14), theme::FG, theme::FG_2)
+    } else if held.is_some() {
+        (theme::control(), theme::FG_2, theme::FG_2)
     } else if primary {
         (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
     } else {
@@ -395,7 +399,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             false => (label, sub),
         };
         let sub: &str = match (whose, starting, running) {
-            (_, false, false) if play == PlayState::Ready && held.is_some() => held.unwrap_or_default(),
+            (_, false, false) if held.is_some() => held.unwrap_or_default(),
             (Some(w), false, false) if play != PlayState::OtherStarting => w,
             _ => sub,
         };

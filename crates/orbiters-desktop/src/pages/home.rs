@@ -2863,6 +2863,38 @@ mod tests {
         assert!(h.state.launcher_mut().modal_open().is_none(), "the row's profile did not open");
     }
 
+    /// REQUEST23: VRChat saying the friend's instance is closed, or not answering, chooses nothing and the line under
+    /// Where says which (no sheet's row does); on another account's profile, Request stays.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn select_on_a_closed_instance_chooses_nothing_and_says_so() {
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        for (open, said) in [(Some(false), "closed"), (None, "did not say")] {
+            let (mut h, place, _) = friends_in_instances(false);
+            // The answer held back a moment: until it comes the line says it is being asked.
+            h.recorder.alive_by.lock().unwrap().insert(place.instance_id.clone(), (open, Duration::from_millis(1000)));
+            open_profile_of(&mut h, "Nova Sample");
+            click(&mut h, "Select");
+            assert!(h.state.launcher_mut().places.checking_line().is_some_and(|l| l.contains("Nova Sample")), "being asked: said");
+            frames_until(&mut h, "answered", |h| h.state.launcher_mut().places.notice().is_some());
+            let line = h.state.launcher_mut().places.notice().unwrap().to_string();
+            assert!(line.contains("Nova Sample") && line.contains(said), "{line}");
+            assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
+            assert!(h.state.launcher_mut().places.checking_line().is_none());
+            assert!(h.recorder.launcher.lock().unwrap().iter().all(|a| !matches!(a, Action::PlayAt { .. })));
+        }
+        // Another account's profile chosen under Play: this account cannot start VRChat there, Request as before.
+        let (mut h, _, _) = friends_in_instances(false);
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), running: None, starting: None, assistant: false }];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        open_profile_of(&mut h, "Nova Sample");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Select").is_none(), "no Select on another account's profile");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Request invite").is_some());
+    }
+
     /// REQUEST23: while VRChat's session is restored, Select holds the friend's instance (nothing chosen, nothing asked)
     /// until VRChat says who is signed in; with VRChat running on the profile chosen (Where hidden), the profile keeps
     /// Request invite as before.
@@ -2877,6 +2909,7 @@ mod tests {
         {
             click(&mut h, "Select");
             assert_eq!(h.state.launcher_mut().places.chosen_key(), None, "held while connecting");
+            assert!(h.state.launcher_mut().places.checking_line().is_some_and(|l| l.contains("Nova Sample")), "said under Where");
             assert!(h.recorder.asked.lock().unwrap().is_empty());
             *h.recorder.alive.lock().unwrap() = Some(true);
             let name = h.snap.vrchat_login.known.clone().unwrap().display_name;

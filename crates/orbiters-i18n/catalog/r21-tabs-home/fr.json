@@ -48,5 +48,9 @@
   "choose an instance\u0004Select": "Choisir",
   "Choose {name}'s instance in Where: Play starts VRChat there": "Choisir l’instance de {name} dans Où : Jouer y lance VRChat",
   "With {name}": "Avec {name}",
-  "{name} has left that instance: Play starts VRChat at home.": "{name} a quitté cette instance : Jouer lance VRChat dans ton monde d’accueil."
+  "{name} has left that instance: Play starts VRChat at home.": "{name} a quitté cette instance : Jouer lance VRChat dans ton monde d’accueil.",
+  "{name}'s instance is closed now: Play starts VRChat at home.": "L’instance de {name} est fermée : Jouer lance VRChat dans ton monde d’accueil.",
+  "VRChat did not say whether {name}'s instance is open: Play starts VRChat at home.": "VRChat n’a pas dit si l’instance de {name} est ouverte : Jouer lance VRChat dans ton monde d’accueil.",
+  "Connecting to VRChat: {name}'s instance is checked next…": "Connexion à VRChat : l’instance de {name} est vérifiée ensuite…",
+  "Asking VRChat whether {name}'s instance is open…": "Demande à VRChat si l’instance de {name} est ouverte…"
 }

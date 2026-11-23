@@ -237,8 +237,10 @@ pub(super) const PREVIOUS: [&str; 10] = [
 ];
 
 /// REQUEST23: Select in Request's place on a friend whose instance takes the account without asking: their row under
-/// the pointer, beside one that keeps Request; their profile, and one that keeps Request invite; Home once chosen.
-pub(super) const SELECT: [&str; 5] = ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-home"];
+/// the pointer, beside one that keeps Request; their profile, and one that keeps Request invite; Home while VRChat is
+/// asked whether it is open, and once chosen.
+pub(super) const SELECT: [&str; 6] =
+    ["launcher-select-row", "launcher-request-row", "launcher-select-modal", "launcher-request-modal", "launcher-select-asking", "launcher-select-home"];
 
 /// Made-up instances of the history, newest first: world names of the sample, every kind, several regions.
 fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
@@ -796,7 +798,8 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
         "launcher-select-modal" if f == 30 => state.open_profile(ctx, nova, Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         "launcher-request-modal" if f == 30 => state.open_profile(ctx, "usr_00000000-0000-4000-8000-000000000002", Rect::from_min_size(pos2(954.0, 348.0), vec2(306.0, 54.0))),
         // Home once Select was pressed on them, VRChat having said it is open.
-        "launcher-select-home" if f == 1 => {
+        "launcher-select-home" | "launcher-select-asking" if f == 1 => {
+            let asking = name == "launcher-select-asking";
             use crate::pages::launcher::previous::{Check, Visit};
             let friend = data(name).friend(nova).cloned();
             if let Some((friend, Whereabouts::World(place))) = friend.map(|f| (f.name.clone(), f.whereabouts)) {
@@ -804,12 +807,14 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
                 let key = visit.key();
                 let title = visit.name.clone();
                 state.places.previous.stand_in(Vec::new(), "");
-                state.places.previous.stand_in_pick(visit, Check::Open, false);
+                state.places.previous.stand_in_pick(visit, if asking { Check::Asking } else { Check::Open }, false);
                 state.places.previous.stand_in_close();
                 if let Some(p) = state.places.previous.picked.as_mut() {
                     (p.with, p.picture) = (Some((nova.into(), friend)), (!place.world_picture.is_empty()).then_some(place.world_picture));
                 }
-                state.places.stand_in_choose(&key, &title, true);
+                if !asking {
+                    state.places.stand_in_choose(&key, &title, true);
+                }
             }
         }
         "launcher-hover" => {

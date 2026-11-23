@@ -656,6 +656,12 @@ impl Places {
         self.chosen.as_ref().map(|c| c.key.as_str())
     }
 
+    /// The line while a friend's chosen instance is being checked (tests).
+    #[cfg(test)]
+    pub fn checking_line(&self) -> Option<String> {
+        super::previous::checking(&self.previous)
+    }
+
     #[cfg(test)]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_ref().map(|n| n.0.as_str())
@@ -955,6 +961,10 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
         let _ = mode;
         let kind = state.places.chosen.as_ref().and_then(|c| cards.iter().find(|s| s.key == c.key)).map(|s| kind_of(state, s, can_create)).unwrap_or(CreateAccess::FriendsPlus);
         return Some((orbiters_i18n::tr!("Opening a new {kind} instance…", kind = access_name(kind_access(kind))), Tone::Busy));
+    }
+    // A friend's instance chosen with Select, being checked (REQUEST23).
+    if let Some(text) = super::previous::checking(&state.places.previous) {
+        return Some((text, Tone::Busy));
     }
     if let Some((text, at)) = &state.places.notice {
         if clock - at < NOTICE_FOR {

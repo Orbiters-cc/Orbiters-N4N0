@@ -313,7 +313,14 @@ pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
         if me.is_some() && joinable {
             ask(state, cx, &p.visit, false);
         } else if !connecting {
-            state.places.previous.picked = Some(carried(state, &p.visit, Check::NotAsked, false));
+            match &p.with {
+                // A friend's instance is never taken as a new one of its world, and no sheet's row shows it: it goes, with a word.
+                Some((_, name)) => {
+                    state.places.previous.picked = None;
+                    state.places.notice = Some((not_said(name), clock));
+                }
+                None => state.places.previous.picked = Some(carried(state, &p.visit, Check::NotAsked, false)),
+            }
         }
     }
     // A friend's instance (REQUEST23): it goes when the friend left it or went offline; the choice goes back to Home
@@ -350,7 +357,7 @@ pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
     };
     p.checked = (p.check == Check::Open).then(|| (answer.at, me.clone().unwrap_or_default()));
     let rejoins = p.rejoins(me.as_deref());
-    let (key, name) = (p.visit.key(), world_name(&p.visit));
+    let (key, name, with, check) = (p.visit.key(), world_name(&p.visit), p.with.clone(), p.check);
     let play_after = state.places.previous.play_after.take();
     if rejoins {
         state.places.chosen = Some(Chosen { key, name, instance: true });
@@ -363,13 +370,43 @@ pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
             super::destinations::play(state, cx, clock, mode, profile);
         }
     } else {
+        // A friend's instance (REQUEST23) has no row in a sheet to say it: the line under Where does, and it goes.
+        if play_after.is_none() {
+            if let Some((_, friend)) = &with {
+                let line = match check {
+                    Check::Closed => orbiters_i18n::tr!("{name}'s instance is closed now: Play starts VRChat at home.", name = friend),
+                    _ => not_said(friend),
+                };
+                state.places.previous.picked = None;
+                state.places.notice = Some((line, clock));
+            }
+        }
         if play_after.is_some() {
             state.places.making = None;
             if state.places.chosen.as_ref().is_some_and(|c| c.key == key) {
                 state.places.chosen = None;
             }
+            if with.is_some() {
+                state.places.previous.picked = None;
+            }
             state.places.notice = Some((orbiters_i18n::tr!("{name} has closed since you chose it: choose a new instance of its world, or another place.", name = name), clock));
         }
+    }
+}
+
+/// VRChat could not say whether a friend's instance is open.
+fn not_said(friend: &str) -> String {
+    orbiters_i18n::tr!("VRChat did not say whether {name}'s instance is open: Play starts VRChat at home.", name = friend)
+}
+
+/// What the line under Where says while a friend's instance, chosen with Select, is being checked (REQUEST23).
+pub(super) fn checking(previous: &Previous) -> Option<String> {
+    let p = previous.picked.as_ref()?;
+    let (_, name) = p.with.as_ref()?;
+    match p.check {
+        Check::Waiting => Some(orbiters_i18n::tr!("Connecting to VRChat: {name}'s instance is checked next…", name = name)),
+        Check::Asking => Some(orbiters_i18n::tr!("Asking VRChat whether {name}'s instance is open…", name = name)),
+        _ => None,
     }
 }
 
@@ -409,7 +446,8 @@ fn ask(state: &mut State, cx: &Cx, visit: &Visit, again: bool) {
         return;
     }
     let Some(scope) = state.scope.clone() else {
-        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Unknown, false));
+        // Not asked: said as an answer that knows nothing (`follow` takes it on the next frame).
+        unanswered(state, visit, generation);
         return;
     };
     let (ctl, answer, current, ctx) = (cx.ctl.clone(), state.places.previous.answer.clone(), state.places.previous.generation.clone(), state.ctx.clone());
@@ -429,7 +467,15 @@ fn ask(state: &mut State, cx: &Cx, visit: &Visit, again: bool) {
         }
     });
     if started.is_err() {
-        state.places.previous.picked = Some(Picked::new(visit.clone(), Check::Unknown, false));
+        unanswered(state, visit, generation);
+    }
+}
+
+/// An answer for `visit` that does not know whether it is open (it could not be asked).
+fn unanswered(state: &mut State, visit: &Visit, generation: u64) {
+    *state.places.previous.answer.lock().unwrap_or_else(|e| e.into_inner()) = Some(Answer { generation, location: visit.location(), open: None, at: Instant::now() });
+    if let Some(ctx) = &state.ctx {
+        ctx.request_repaint();
     }
 }
 
@@ -476,7 +522,12 @@ pub(super) fn friend_selectable(state: &State, friend: &orbiters_core::launcher:
     if !orbiters_core::vrchat_launch::is_destination(&place.world_id, &place.instance_id) {
         return None;
     }
-    let me = state.places.previous.me.clone().unwrap_or_default();
+    // Signed out, or a profile of another account: nothing can be asked of VRChat for it; Request as before.
+    let me = match &state.places.previous.me {
+        Some(me) => me.clone(),
+        None if state.places.previous.connecting => String::new(),
+        None => return None,
+    };
     let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
     super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)).then(|| place.clone())
 }
@@ -490,11 +541,6 @@ pub(super) fn select_friend(state: &mut State, cx: &Cx, friend_id: &str, friend_
         return;
     }
     let visit = Visit { world_id: place.world_id.clone(), instance: place.instance_id.clone(), name: place.world_name.clone(), at: state.now().max(0) as u64 };
-    state.places.previous.generation.fetch_add(1, Ordering::SeqCst);
-    state.places.previous.play_after = None;
-    if state.places.chosen.as_ref().is_some_and(|c| c.key.starts_with("previous:")) {
-        state.places.chosen = None;
-    }
     let with = Some((friend_id.to_string(), friend_name.to_string()));
     let picture = (!place.world_picture.is_empty()).then(|| place.world_picture.clone());
     let me = state.places.previous.me.clone();
@@ -504,10 +550,14 @@ pub(super) fn select_friend(state: &mut State, cx: &Cx, friend_id: &str, friend_
     } else if me.as_deref().is_some_and(|me| super::destinations::joinable_without_asking(&visit.instance, me, &|id| friends.contains(id))) {
         Check::Asking
     } else {
-        // Not to be checked (no VRChat account for this profile): offered as a new instance of its world, never taken
-        // as one by itself.
-        Check::NotAsked
+        // Not joinable any more (the list changed under the press): nothing is chosen.
+        return;
     };
+    state.places.previous.generation.fetch_add(1, Ordering::SeqCst);
+    state.places.previous.play_after = None;
+    if state.places.chosen.as_ref().is_some_and(|c| c.key.starts_with("previous:")) {
+        state.places.chosen = None;
+    }
     state.places.previous.picked = Some(Picked { with, picture, ..Picked::new(visit.clone(), check, false) });
     if check == Check::Asking {
         ask(state, cx, &visit, false);

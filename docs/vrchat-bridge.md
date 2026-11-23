@@ -310,7 +310,7 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `~nonce(...)` and the like, and `usr_` ids taken out), and two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
   (the largest in memory), the render server, `wsd` and the busiest, each process's birth checked before each round (a pid used
   again is not sampled) and each sample redacted the same way once written. Into `<logs>/incidents/<date>_<time>-<kind>-<session>/`,
-  six kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`). Since 0.3.9-dev.29 (the third
+  six kept and 200 MiB in all, the oldest going first; Settings' Log says where (a `warning`). Since 0.3.9-dev.30 (the third
   verification's findings 5 and 6): a stall told is told again only after the game itself moved (a frame, a line of VRChat's: the
   engine's log also grows around a parked game, from a client of its window server or a quit asked of it), two stalls per session
   at most, and a quit and a lost renderer are told whatever stalls came first; the engine accepting a quit (`wsd: quit requested` in
@@ -349,7 +349,7 @@ re-read the table until it agrees, keeps ordinary stops as they are, and logs at
 and SIGCONTs. obelisk-cli 0.1.7 ships it as `engine/fexdarwin-run`. Measured on its first start: wineserver attached the game's
 threads more than 4,096 times in 5 minutes (`lkd: ptrace: attach 4096:`), one every 70 ms or so: the race had many chances.
 
-### Render scale and Low Power Mode (0.3.9-dev.29)
+### Render scale and Low Power Mode (0.3.9-dev.30)
 
 Home's Play on a Mac starts VRChat at Settings' **Picture detail** (VRChat, Play VRChat), 25 to 100 % per side of the display's
 drawing resolution, 58 by default (ruling 1: a third of the pixels), "100 %" being the panel's own pixels (this Mac: 2558 x 1663,

@@ -39,6 +39,11 @@ pub enum Command {
     Assistant { on: bool },
     /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
     AskRetry,
+    /// Sends N4N0's last failed message again (its turn's number: [`crate::TurnFailure::id`]): one send per press, nothing
+    /// for a message that is not waiting any more or before its moment.
+    RetryTurn {
+        id: u64,
+    },
     /// A surface's Yes or No (the Ask page's, the window chat's card) to what N4N0 asked to do, for the question it showed
     /// (`question`: the number in its `N4n0Confirmation::approve_url`). An answer for a question that is no longer the one
     /// waiting answers nothing (verify-r21 1): a late Yes never runs the next question, a late No never drops it. Without

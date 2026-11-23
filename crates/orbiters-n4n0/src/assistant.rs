@@ -44,6 +44,61 @@ pub struct AssistantView {
     pub doing: Option<String>,
     #[serde(default)]
     pub open: Option<OpenAsk>,
+    /// The last turn when it failed (r23): its Retry button, under its line.
+    #[serde(default)]
+    pub failure: Option<TurnFailure>,
+}
+
+/// A turn that failed, as the chat and the Ask page show it: the line it goes under, and its Retry button.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnFailure {
+    /// The failed turn's number: what Retry names ([`crate::Command::RetryTurn`]), a later one is refused.
+    pub id: u64,
+    /// The error line it goes with ([`crate::N4n0Line::at_ms`]).
+    pub at_ms: u64,
+    /// The message can be sent again (a busy or unreachable service; not a refusal of the request itself).
+    pub retry: bool,
+    /// Unix time in milliseconds before which it is too early to try again (the service said so); 0: now.
+    pub retry_at_ms: u64,
+    /// N4N0 sends it once by itself at that moment, unless something else is asked before.
+    pub automatic: bool,
+    /// What an administrator of Orbiters reads (the provider's failure), small; nobody else.
+    #[serde(default)]
+    pub admin_detail: Option<String>,
+}
+
+impl TurnFailure {
+    /// Seconds until it may be sent again (0: now), at `now_ms` (Unix milliseconds).
+    pub fn waits(&self, now_ms: u64) -> u64 {
+        self.retry_at_ms.saturating_sub(now_ms).div_ceil(1000)
+    }
+
+    /// The Retry button's words at `now_ms`: the wait while it has one ("Retry in 25 s"), and that N4N0 sends it itself
+    /// when it does.
+    pub fn label(&self, now_ms: u64) -> String {
+        let wait = match self.waits(now_ms) {
+            0 => return tr("Retry").to_string(),
+            s if s < 60 => tr!("{n} s", n = s),
+            s if s < 3600 => tr!("{n} min", n = s.div_ceil(60)),
+            s => tr!("{n} h", n = s.div_ceil(3600)),
+        };
+        if self.automatic {
+            tr!("Trying again in {wait}", wait = wait)
+        } else {
+            tr!("Retry in {wait}", wait = wait)
+        }
+    }
+}
+
+/// A message whose turn failed, kept to be sent again ([`N4n0::retry_turn`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Retrying {
+    pub(crate) id: u64,
+    pub(crate) text: String,
+    pub(crate) via: &'static str,
+    pub(crate) not_before: Instant,
+    /// This message has had its one automatic retry.
+    pub(crate) auto_used: bool,
 }
 
 /// What undoes an action.
@@ -72,10 +127,20 @@ pub(crate) struct AssistantRuntime {
     /// The last list of each kind a tool answered with, its items as given (`ref` names what an index acts on).
     lists: HashMap<&'static str, Vec<Value>>,
     youtube: Vec<orbiters_n4n0_core::youtube::Video>,
+    /// The groups of the app's tools the last turn carried: the next one carries them too (r23).
+    pub(crate) last_groups: std::collections::BTreeSet<orbiters_n4n0_core::intents::route::ToolGroup>,
     share_next: Option<ShareNext>,
+    /// The last failed message, which Retry sends again once.
+    pub(crate) retry: Option<Retrying>,
 }
 
 impl AssistantRuntime {
+    /// Nothing is left to retry (something else was asked, or the conversation was started over).
+    pub(crate) fn clear_failure(&mut self) {
+        self.retry = None;
+        self.view.failure = None;
+    }
+
     /// Forgets everything of the Orbiters account before (verify-r21 3): the log, what is being done, the page asked for,
     /// undo steps, the lists "the second one" points into, a share waiting for the next capture. The rate limits stay.
     /// The last page request's number stays (each interface opens a numbered request once: a new one must count on),
@@ -708,6 +773,7 @@ impl crate::N4n0 {
         self.add_line(N4n0Who::You, text.to_string());
         let facts = self.assistant_facts();
         let (mut said, mut said_en, mut refused, mut panel) = (Vec::new(), Vec::new(), Vec::new(), Vec::<String>::new());
+        let (mut asked, mut asked_en) = (Vec::new(), Vec::new());
         for action in actions {
             match action {
                 Action::App(intent) => match intents::gate(&intent, &facts, false) {
@@ -723,8 +789,13 @@ impl crate::N4n0 {
                         self.intent_log(&intent, Outcome::Refused, Some(why.clone()), Via::Quick);
                         refused.push(format!("{} ({why})", intent.says()));
                     }
-                    // Never on this path (it only knows class a), but never run either.
-                    Gate::Confirm | Gate::Offer(_) => refused.push(intent.says()),
+                    // The status and what else is the account's: asked about first, as the model's call would be (r23).
+                    Gate::Confirm => {
+                        self.intent_log(&intent, Outcome::Asked, None, Via::Quick);
+                        asked_en.push(intent.what());
+                        asked.push(Action::App(intent));
+                    }
+                    Gate::Offer(_) => refused.push(intent.says()),
                 },
                 other => {
                     let words = crate::runtime::action_says(&other);
@@ -760,8 +831,15 @@ impl crate::N4n0 {
             }
         }
         let quoted = context::quoted(text, 200);
-        rt.notes.push(format!("The owner said {quoted} and Orbiters - N4N0 did it by itself, without you: {}.", if said_en.is_empty() { "nothing".to_string() } else { said_en.join(", ") })); // i18n: not shown
+        let mut note = format!("The owner said {quoted} and Orbiters - N4N0 did it by itself, without you: {}.", if said_en.is_empty() { "nothing".to_string() } else { said_en.join(", ") }); // i18n: not shown
+        if !asked_en.is_empty() {
+            note.push_str(&format!(" It asked the owner first about: {}.", asked_en.join(", "))); // i18n: not shown
+        }
+        rt.notes.push(note);
         drop(rt);
+        if !asked.is_empty() {
+            self.ask_owner(asked);
+        }
         self.publish();
     }
 }

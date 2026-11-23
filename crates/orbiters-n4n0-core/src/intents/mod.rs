@@ -20,6 +20,7 @@
 
 pub mod model;
 pub mod quick;
+pub mod route;
 mod phrases;
 #[cfg(test)]
 mod tests;

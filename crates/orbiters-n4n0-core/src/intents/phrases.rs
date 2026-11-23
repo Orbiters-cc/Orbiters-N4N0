@@ -269,3 +269,23 @@ pub(super) const AND: &[&str] = &["and", "then", "et", "puis", "y", "luego", "e"
 
 /// Japanese endings that only make a request polite.
 pub(super) const JA_POLITE: &[&str] = &["ください", "下さい", "お願いします", "おねがいします", "お願い", "ちょうだい"];
+
+/// Setting the VRChat status (`{c}` its colour or its name), per language (r23: "put me in orange" is Ask me).
+pub(super) const STATUS: [&[&str]; 5] = [
+    &["put me in {c}", "set me to {c}", "set my status to {c}", "change my status to {c}", "make me {c}", "status {c}", "{c} status", "set status {c}", "put my status on {c}", "put my status to {c}"],
+    &["mets moi en {c}", "passe moi en {c}", "mets mon statut en {c}", "mets mon statut sur {c}", "mets mon statut a {c}", "change mon statut en {c}", "statut {c}", "passe en {c}"],
+    &["ponme en {c}", "pon mi estado en {c}", "cambia mi estado a {c}", "estado {c}", "ponme {c}", "pasame a {c}"],
+    &["me coloca em {c}", "me poe em {c}", "coloca meu status em {c}", "muda meu status para {c}", "status {c}", "me deixa {c}", "coloca meu status como {c}"],
+    &["ステータスを{c}にして", "ステータス{c}", "ステータスを{c}に"],
+];
+
+/// Each status's colours and names (VRChat's: Join Me blue, Online green, Ask Me orange, Busy red), all languages together.
+pub(super) fn status_names(status: super::StatusKind) -> &'static [&'static str] {
+    use super::StatusKind as S;
+    match status {
+        S::JoinMe => &["blue", "join me", "bleu", "azul", "青", "ジョインミー"],
+        S::Online => &["green", "online", "active", "vert", "en ligne", "verde", "en linea", "conectado", "緑", "オンライン"],
+        S::AskMe => &["orange", "ask me", "demande moi", "naranja", "preguntame", "laranja", "オレンジ"],
+        S::Busy => &["red", "busy", "do not disturb", "rouge", "occupe", "ne pas deranger", "rojo", "ocupado", "no molestar", "vermelho", "nao perturbe", "赤", "取り込み中"],
+    }
+}

@@ -672,7 +672,8 @@ mod tests {
             };
             for _ in 0..120 {
                 clock += 0.05 + dice.roll(10) as f64 * 0.1;
-                now += Duration::from_millis(dice.roll(6000));
+                // Now and then the person is away: an "open" grows old with nothing else changing.
+                now += Duration::from_millis(if dice.roll(6) == 0 { 50_000 + dice.roll(40_000) } else { dice.roll(6000) });
                 match dice.roll(16) {
                     0 => d.go_home(),
                     1 => d.choose(Destination::Card { key: "often:w".into(), name: "W".into(), instance: false }, Origin::Card),

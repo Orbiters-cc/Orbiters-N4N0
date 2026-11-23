@@ -441,8 +441,8 @@ pub enum Action {
     Boop { to: String, emoji: Option<String> },
     /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
-    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play.
-    InstallEngine,
+    /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play it on `profile`.
+    InstallEngine { profile: u32 },
     /// On a Mac: move the engine's damaged start record `file` ([`StartTrouble`]) out of its records, kept aside.
     SetAsideRecord { file: String },
     /// On a Mac: the VRChat of Game session `session`, which Home showed as having lost its picture for good

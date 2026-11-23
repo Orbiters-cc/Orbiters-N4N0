@@ -2,6 +2,7 @@
 //! this page itself just sent, and the clock. Pure, so the states are tested without drawing.
 
 use orbiters_core::launcher::{Friend, Game, GameProfile, LaunchMode, LauncherState, Notice, Presence, SentKind, Source, Whereabouts};
+use orbiters_core::vrchat_launch::SEVERAL_HERE;
 
 /// How long "Sent" shows after a press before the cool-down (or the plain button) is back.
 pub const SENT_FOR: f64 = 2.5;
@@ -93,6 +94,8 @@ pub enum PlayState {
     Unavailable,
     /// Another profile's VRChat is starting: one start at a time.
     OtherStarting,
+    /// Where one VRChat runs at a time (a Mac): it runs on another profile.
+    OtherRunning,
 }
 
 pub fn play(state: &LauncherState) -> PlayState {
@@ -164,6 +167,40 @@ pub fn play_on(state: &LauncherState, offered: &[GameProfile], profile: u32) -> 
         }
     }
     PlayState::Ready
+}
+
+/// [`next_profile`], where one VRChat runs at a time (a Mac): the one the person chose, else the one VRChat runs or starts
+/// on (no other can be started beside it), else the first.
+pub fn next_profile_of_one(offered: &[GameProfile], chosen: Option<u32>) -> u32 {
+    if let Some(c) = chosen.filter(|c| offered.iter().any(|p| p.profile == *c)) {
+        return c;
+    }
+    offered.iter().find(|p| p.running.is_some() || p.starting.is_some()).or(offered.first()).map_or(0, |p| p.profile)
+}
+
+/// [`play_on`], where one VRChat runs at a time: while it runs or starts, only its own profile says so, and no other one
+/// starts (nor, while its profile is not known, any).
+pub fn play_on_one(state: &LauncherState, offered: &[GameProfile], profile: u32) -> PlayState {
+    let this = offered.iter().find(|p| p.profile == profile);
+    match play(state) {
+        PlayState::Running(_) => this.and_then(|p| p.running).map_or(PlayState::OtherRunning, PlayState::Running),
+        PlayState::Starting(mode) => match this.and_then(|p| p.starting) {
+            Some(mode) => PlayState::Starting(mode),
+            None if offered.iter().all(|p| p.starting.is_none()) && profile == 0 => PlayState::Starting(mode),
+            None => PlayState::OtherStarting,
+        },
+        other => other,
+    }
+}
+
+/// [`next_profile`] on this computer.
+pub fn next_here(offered: &[GameProfile], chosen: Option<u32>) -> u32 {
+    if SEVERAL_HERE { next_profile(offered, chosen) } else { next_profile_of_one(offered, chosen) }
+}
+
+/// [`play_on`] on this computer.
+pub fn play_here(state: &LauncherState, offered: &[GameProfile], profile: u32) -> PlayState {
+    if SEVERAL_HERE { play_on(state, offered, profile) } else { play_on_one(state, offered, profile) }
 }
 
 /// Whether the list shows what is live or a copy, for the one line that says what needs the sign-in.
@@ -263,6 +300,43 @@ mod tests {
         assert_eq!(play_on(&s, &starting, 1), PlayState::Starting(LaunchMode::Desktop));
         assert_eq!(play_on(&s, &starting, 2), PlayState::OtherStarting);
         assert_eq!(next_profile(&starting, None), 2);
+    }
+
+    /// A Mac: one VRChat at a time, whatever profile it is on; no other one is startable while it runs or starts.
+    #[test]
+    fn where_one_vrchat_runs_at_a_time_no_other_profile_starts_beside_it() {
+        const DESK: LaunchMode = LaunchMode::Desktop;
+        let mut s = sample();
+        let free = [on(0, None, None), on(1, None, None), on(2, None, None)];
+        s.profiles = free.to_vec();
+        assert_eq!(next_profile_of_one(&free, None), 0, "the default, as always");
+        assert_eq!(next_profile_of_one(&free, Some(2)), 2);
+        assert_eq!(next_profile_of_one(&free, Some(9)), 0, "a choice no longer offered is not kept");
+        assert!((0..3).all(|n| play_on_one(&s, &free, n) == PlayState::Ready));
+        // It runs on 1: that one says so, and is the one shown to someone who chose none.
+        s.game = Game::Running(DESK);
+        let runs = [on(0, None, None), on(1, Some(DESK), None), on(2, None, None)];
+        assert_eq!(next_profile_of_one(&runs, None), 1);
+        assert_eq!(next_profile_of_one(&runs, Some(2)), 2, "the person's choice, for once it was quit");
+        assert_eq!(play_on_one(&s, &runs, 1), PlayState::Running(DESK));
+        assert_eq!((play_on_one(&s, &runs, 0), play_on_one(&s, &runs, 2)), (PlayState::OtherRunning, PlayState::OtherRunning));
+        // It runs and its profile is not known (yet): none says it is its own, none starts.
+        assert!((0..3).all(|n| play_on_one(&s, &free, n) == PlayState::OtherRunning));
+        // It starts on 2.
+        s.game = Game::Starting(DESK);
+        let starts = [on(0, None, None), on(1, None, None), on(2, None, Some(DESK))];
+        assert_eq!(next_profile_of_one(&starts, None), 2);
+        assert_eq!(play_on_one(&s, &starts, 2), PlayState::Starting(DESK));
+        assert_eq!((play_on_one(&s, &starts, 0), play_on_one(&s, &starts, 1)), (PlayState::OtherStarting, PlayState::OtherStarting));
+        assert_eq!((play_on_one(&s, &free, 0), play_on_one(&s, &free, 1)), (PlayState::Starting(DESK), PlayState::OtherStarting));
+        // The profile list never makes a computer ready that is not.
+        for (game, state) in [(Game::NotInstalled, PlayState::NotInstalled), (Game::NoEngine, PlayState::NoEngine)] {
+            s.game = game;
+            assert!((0..3).all(|n| play_on_one(&s, &free, n) == state));
+        }
+        s.game = Game::NotRunning;
+        s.possible.play = false;
+        assert_eq!(play_on_one(&s, &free, 1), PlayState::Unavailable);
     }
 
     #[test]

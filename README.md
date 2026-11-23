@@ -226,9 +226,9 @@ There are development builds for Macs with Apple silicon (a `.dmg` on some `-dev
 version, so what reads VRChat on the same computer has nothing to read there (the camera over Spout, 3D pictures and
 recordings, the log, SteamVR features). The rest works: Unity projects, Photos & captures and their reconstruction, the
 3D view and editors, Events, N4N0 and its menu, and OSC with VRChat on another device of the network (a Quest, a Pico,
-a phone or a PC on the same Wi-Fi). Play can also start VRChat on the Mac through `obelisk-cli`, a separate GPL-3.0
-program from the [Orbiters-cc/Obelisk](https://github.com/Orbiters-cc/Obelisk) fork, downloaded from that fork's
-releases; none of its code is in N4N0.
+a phone or a PC on the same Wi-Fi). Play can also start VRChat on the Mac, one at a time, on the VRChat profile you pick,
+through `obelisk-cli`, a separate GPL-3.0 program from the [Orbiters-cc/Obelisk](https://github.com/Orbiters-cc/Obelisk)
+fork, downloaded from that fork's releases; none of its code is in N4N0.
 
 ## How it works with VRChat, and what it does not do
 

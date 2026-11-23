@@ -418,6 +418,8 @@ const SLOT_WAIT: Duration = Duration::from_millis(300);
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Launch {
     pub id: u64,
+    /// The VRChat profile it was made on (0: the default, no `--profile`).
+    pub profile: u32,
     /// The engine's launcher of the game, and its Game session (from 0.1.3 the program says it; before, the engine's
     /// records are read for it).
     pub launcher: Option<u32>,
@@ -1076,7 +1078,7 @@ impl Play {
         now.attached = true;
         now.running = None;
         now.program = Some(child.id());
-        now.launches.push(Launch { id, ..Default::default() });
+        now.launches.push(Launch { id, profile: orbiters_core::vrchat_launch::profile_of(args), ..Default::default() });
         let drop_old = now.launches.len().saturating_sub(LAUNCHES_KEPT);
         now.launches.drain(..drop_old);
         drop(now);
@@ -1493,6 +1495,11 @@ impl Play {
                 Err(failure)
             }
         }
+    }
+
+    /// The newest launch made, whoever made it and whatever became of it.
+    pub fn newest(&self) -> Option<Launch> {
+        self.now.lock().unwrap().launches.last().cloned()
     }
 
     /// What became of launch `id`, as often as asked.

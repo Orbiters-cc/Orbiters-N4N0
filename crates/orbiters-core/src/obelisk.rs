@@ -708,13 +708,13 @@ pub fn event(line: &str) -> Option<Event> {
 }
 
 /// VRChat's arguments for a start on a Mac, from those of a desktop start on a PC: the whole screen (Unity's own
-/// options: without them the game opens in a small window, as it does at its first start anywhere), then the
-/// destination's link. `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way
+/// options: without them the game opens in a small window, as it does at its first start anywhere), then the profile
+/// (`--profile=N`, none for the default one) and the destination's link, in that order. `--no-vr` is left out (a Mac has no SteamVR to keep out of, and people who run VRChat this way
 /// report starts that hang with it), and so are the PC's performance options (process priorities, video decoding by
 /// the graphics card: tuned for Windows, never tried under the engine, and not offered in a Mac's settings).
 pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     let whole_screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"].map(String::from);
-    whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://"))).collect()
+    whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://") || crate::vrchat_launch::is_profile_arg(a))).collect()
 }
 
 /// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
@@ -1135,6 +1135,26 @@ mod tests {
         let whole = ["-screen-fullscreen", "1", "-window-mode", "borderless"];
         assert_eq!(game_arguments(args(&["--no-vr", "--process-priority=1", "--fps=90", "vrchat://launch?ref=vrchat.com&id=wrld_1:2"])), args(&[whole.as_slice(), &["vrchat://launch?ref=vrchat.com&id=wrld_1:2"]].concat()));
         assert_eq!(game_arguments(args(&["--no-vr"])), args(&whole));
+    }
+
+    /// One profile at a time on a Mac: VRChat gets exactly `--profile=N` for one that is not the default, nothing for the
+    /// default, before the link; none of the PC's options with it.
+    #[test]
+    fn a_mac_s_arguments_are_the_whole_screen_the_profile_and_the_link() {
+        use crate::vrchat_launch::{arguments_on, LaunchMode, LaunchSettings, PROFILE_MAX};
+        let (world, instance) = ("wrld_00000000-0000-4000-8000-0000000000aa", "7~friends(usr_x)");
+        let screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"].map(String::from).to_vec();
+        for profile in 0..=PROFILE_MAX {
+            let own: Vec<String> = (profile != 0).then(|| format!("--profile={profile}")).into_iter().collect();
+            let plain = game_arguments(arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), Vec::new(), profile, None));
+            assert_eq!(plain, [screen.clone(), own.clone()].concat());
+            let window = vec!["-screen-width".to_string(), "1280".into()];
+            let there = game_arguments(arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), window, profile, Some((world, instance))));
+            assert_eq!(there, [screen.clone(), own, vec![crate::vrchat_launch::link(world, instance)]].concat());
+        }
+        // Whatever else is handed in is not passed on, however much it looks like a profile.
+        let odd = ["--no-vr", "--profile=0", "--profile=16", "--profile=1 --osc=1:2:3", "--profile", "--fps=90"].map(String::from).to_vec();
+        assert_eq!(game_arguments(odd), screen);
     }
 
     /// Finding 10 and R1: the size the game renders now is its last swapchain's; presents restart with each swapchain.

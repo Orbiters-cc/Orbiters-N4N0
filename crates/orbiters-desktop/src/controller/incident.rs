@@ -884,6 +884,58 @@ fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime, argum
     (own.len() == 1).then(|| own.remove(0))
 }
 
+/// The VRChat the engine runs, as its own launcher's command line and its own log say it: what Home says of its profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Player {
+    pub launcher: u32,
+    pub birth: (u64, u32),
+    /// The VRChat profile its launcher starts it on, once its command line could be read.
+    pub profile: Option<u32>,
+    /// The account its own log says is signed in (its display name), once it said; `None` is "not known", never "nobody".
+    pub account: Option<String>,
+}
+
+static PLAYER: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
+
+/// The VRChat that runs now as the follower last saw it, while its launcher is that very process: the caller checks.
+pub(crate) fn player() -> Option<Player> {
+    PLAYER.lock().unwrap().clone()
+}
+
+/// Who VRChat's log says is signed in, read from its start to its end as it grows: whole lines only.
+#[derive(Debug, Default)]
+pub(crate) struct SignedIn {
+    read: u64,
+    name: Option<String>,
+}
+
+impl SignedIn {
+    /// Reads what the held `file` gained, up to [`SCAN_AT_MOST`] a look, the rest at the next ones. A file cut shorter is
+    /// read anew, and what it said before is forgotten.
+    pub(crate) fn read(&mut self, file: &std::fs::File) {
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return };
+        if len < self.read {
+            *self = SignedIn::default();
+        }
+        let Ok(bytes) = read_at(file, self.read, SCAN_AT_MOST) else { return };
+        match bytes.iter().rposition(|b| *b == b'\n') {
+            Some(end) => {
+                self.read += end as u64 + 1;
+                if let Some((_, name)) = crate::bridge::sessions::signed_in(&String::from_utf8_lossy(&bytes[..=end])) {
+                    self.name = Some(name);
+                }
+            }
+            // One line longer than a look: no line looked for.
+            None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
+            None => {}
+        }
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 /// How far into VRChat's log its command line is looked for (it is within its first lines).
 const COMMAND_LINE_WITHIN: u64 = 64 << 10;
 
@@ -901,7 +953,7 @@ fn begins_with(file: &std::fs::File, arguments: &[String]) -> bool {
 
 /// What the engine's launcher, started with `command`, starts the game with: what follows the game's program in the guest's
 /// command line (after `--`: the storefront's helper, the program, its arguments).
-fn game_arguments(command: &[String]) -> Option<Vec<String>> {
+pub(crate) fn game_arguments(command: &[String]) -> Option<Vec<String>> {
     if !command.iter().any(|word| word == "obelisk-linux-engine") {
         return None;
     }
@@ -941,6 +993,7 @@ fn pointer(library: &Path) -> Option<String> {
 pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
     let clock = std::time::Instant::now();
     let mut current: Option<(Followed, Detector, Lines, Lines, super::picture::Tracker)> = None;
+    let mut signed_in = SignedIn::default();
     loop {
         std::thread::sleep(EVERY);
         // A pointer or record that cannot be read for a moment (being rewritten) keeps what is followed: only a record that
@@ -950,6 +1003,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let Some(record) = record.filter(|r| !r.over()) else {
             current = None;
             super::picture::publish(None);
+            *PLAYER.lock().unwrap() = None;
             continue;
         };
         // Which process it is, is its number and its birth together: a record that does not say both names none.
@@ -959,6 +1013,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
             let engine_log = orbiters_core::obelisk::engine_log(&home);
             let followed = Followed { session: record.id.clone(), launcher, birth, engine_log, arguments: None, engine: None, vrchat: None, ring: None };
             current = Some((followed, Detector::default(), Lines::default(), Lines::default(), super::picture::Tracker::default()));
+            signed_in = SignedIn::default();
         }
         let Some((followed, detector, engine_lines, vrchat_lines, picture)) = current.as_mut() else { continue };
         // What it starts the game with, once the helper has become the launcher.
@@ -967,6 +1022,12 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         }
         // Held once found to be this launch's (the engine's log is a new file each start; VRChat's begins a while after).
         followed.associate(&orbiters_core::obelisk::vrchat_log_dir(&library), &|| super::bridge_mac::born(launcher) == Some(birth) && pointer(&library).as_deref() == Some(&*id));
+        // Who plays, from this launch's own log only: an account is never read from a log that is not proven to be its own.
+        if let Some(log) = &followed.vrchat {
+            signed_in.read(log);
+        }
+        let profile = followed.arguments.as_deref().map(orbiters_core::vrchat_launch::profile_of);
+        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, account: signed_in.name().map(str::to_owned) });
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();
@@ -1769,6 +1830,83 @@ mod tests {
         assert_eq!(game_arguments(&launcher).unwrap(), ["--no-vr", "--", "x"]);
         assert_eq!(game_arguments(&words("/x/obelisk-steam-host game-exec")), None, "not the launcher yet");
         assert_eq!(game_arguments(&words("/bin/bash -c script obelisk-linux-engine /r")), None);
+    }
+
+    /// Who plays on a Mac, read from the launch's own log only, in VRChat's own words (made-up accounts): of two logs the one
+    /// that repeats this launch's command line, its profile among it; the last account it says is signed in; none before it
+    /// says one, and none from a log that is another launch's or that cannot be told to be this one's.
+    #[test]
+    fn who_is_signed_in_comes_only_from_the_launch_s_own_log() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("orbiters-incident-signed-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let birth = (since.as_secs(), since.subsec_micros());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let begun = |args: &[&str]| {
+            let mut text = format!("2026.11.23 18:29:14 Debug      -  Launching with args: {}\r\n", args.len() + 1);
+            for arg in ["Z:\\opt\\game\\VRChat.exe"].iter().chain(args) {
+                text.push_str(&format!("2026.11.23 18:29:14 Debug      -  Arg: {arg}\r\n"));
+            }
+            text
+        };
+        let login = |name: &str, n: u32| format!("2026.11.23 18:29:31 Debug      -  [Authentication - x] Preforming post login checks for {name} (usr_00000000-0000-4000-8000-{n:012})\r\n");
+        let screen = ["-screen-fullscreen", "1", "-window-mode", "borderless"];
+        let on = |profile: u32| screen.iter().map(|a| a.to_string()).chain(orbiters_core::vrchat_launch::profile_arg(profile)).collect::<Vec<String>>();
+        let path = |name: &str| dir.join(format!("output_log_2026-11-23_18-29-{name}.txt"));
+        let write = |name: &str, profile: u32, tail: &str| std::fs::write(path(name), begun(&on(profile).iter().map(String::as_str).collect::<Vec<_>>()) + tail).unwrap();
+        // The log held for a launch on `profile`, and who it says is signed in.
+        let held = |profile: u32| {
+            let mut followed = Followed { session: "s".into(), launcher: 1, birth, engine_log: dir.join("none"), arguments: Some(on(profile)), engine: None, vrchat: None, ring: None };
+            followed.associate(&dir, &|| true);
+            followed.vrchat
+        };
+        let who = |profile: u32| {
+            let mut signed_in = SignedIn::default();
+            signed_in.read(&held(profile)?);
+            signed_in.name().map(str::to_owned)
+        };
+        // The start's command line and its log agree on the profile.
+        assert_eq!((orbiters_core::vrchat_launch::profile_of(&on(0)), orbiters_core::vrchat_launch::profile_of(&on(2))), (0, 2));
+        write("14", 0, &login("Sample Me", 1));
+        assert_eq!(held(2).is_some(), false, "another profile's log is not this launch's");
+        assert_eq!((who(0).as_deref(), who(2)), (Some("Sample Me"), None));
+        // Its own, at the sign-in page: not known, never the other one's.
+        write("15", 2, "2026.11.23 18:29:20 Debug      -  [Authentication - x] No cached credentials found\r\n");
+        assert!(held(2).is_some());
+        assert_eq!(who(2), None);
+        // Signed in, read on as it grows; a line still being written says nothing yet; another account later is the one.
+        let file = held(2).unwrap();
+        let mut signed_in = SignedIn::default();
+        let mut log = std::fs::OpenOptions::new().append(true).open(path("15")).unwrap();
+        signed_in.read(&file);
+        let line = login("Sample Alt (two)", 2);
+        log.write_all(line[..line.len() - 9].as_bytes()).unwrap();
+        signed_in.read(&file);
+        assert_eq!(signed_in.name(), None, "not said yet");
+        log.write_all(line[line.len() - 9..].as_bytes()).unwrap();
+        signed_in.read(&file);
+        assert_eq!(signed_in.name(), Some("Sample Alt (two)"));
+        log.write_all(b"2026.11.23 18:30:02 Debug      -  [Behaviour] Entering Room: Lantern Garden\r\n").unwrap();
+        signed_in.read(&file);
+        assert_eq!(signed_in.name(), Some("Sample Alt (two)"), "kept");
+        log.write_all(login("Sample Third", 3).as_bytes()).unwrap();
+        signed_in.read(&file);
+        assert_eq!(signed_in.name(), Some("Sample Third"));
+        assert_eq!((who(2).as_deref(), who(0).as_deref()), (Some("Sample Third"), Some("Sample Me")), "read from its start, whole");
+        // Words that only look like it, of another line, name nobody.
+        write("14", 0, "2026.11.23 18:31:00 Debug      -  post login checks for Sample Fake (not an id)\r\n");
+        assert_eq!(who(0), None);
+        // Two logs that begin alike: which is this launch's cannot be told, so neither names anyone.
+        write("16", 2, &login("Sample Other", 4));
+        assert_eq!(who(2), None);
+        // A log cut shorter is read anew; what it said before is forgotten.
+        drop(log);
+        std::fs::write(path("15"), "").unwrap();
+        signed_in.read(&file);
+        assert_eq!(signed_in.name(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Sixth verification: a sample whose process cannot be told to be the one chosen, after it was taken, is nobody's.

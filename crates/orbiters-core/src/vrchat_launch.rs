@@ -15,6 +15,10 @@ pub use crate::launcher::LaunchMode;
 /// the desktop game, and the Play buttons are one.
 pub const VR_HERE: bool = !cfg!(target_os = "macos");
 
+/// Whether VRChats run side by side on this computer, each on its own profile. On a Mac the engine runs one game at a
+/// time: the profile is chosen for that one, and the others wait until it was quit.
+pub const SEVERAL_HERE: bool = !cfg!(target_os = "macos");
+
 /// Steam's id of VRChat.
 pub const STEAM_APP: &str = "438100";
 
@@ -223,6 +227,11 @@ pub fn profile_arg(profile: u32) -> Option<String> {
     (profile != 0).then(|| format!("--profile={}", profile.min(PROFILE_MAX)))
 }
 
+/// Whether `arg` is one [`profile_arg`] makes, of a profile other than the default: `--profile=1` to `--profile=15`.
+pub fn is_profile_arg(arg: &str) -> bool {
+    (1..=PROFILE_MAX).any(|profile| profile_arg(profile).as_deref() == Some(arg))
+}
+
 /// VRChat's `--profile` in a command line (0 without one).
 pub fn profile_of(args: &[String]) -> u32 {
     args.iter().find_map(|a| a.strip_prefix("--profile=").and_then(|p| p.trim().parse().ok())).unwrap_or(0)
@@ -427,6 +436,10 @@ mod tests {
         assert_eq!(profile_arg(0), None);
         assert_eq!(profile_arg(2).as_deref(), Some("--profile=2"));
         assert_eq!(profile_arg(99).as_deref(), Some("--profile=15"), "never past what Home offers");
+        assert!((1..=15).all(|profile| is_profile_arg(&profile_arg(profile).unwrap())));
+        for not in ["--profile=0", "--profile=16", "--profile=02", "--profile=", "--profile=1 ", "--profile=1 --x", "--profile", "profile=1", "-profile=1"] {
+            assert!(!is_profile_arg(not), "{not:?}");
+        }
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(profile_of(&args(&["VRChat.exe", "--no-vr", "--profile=3"])), 3);
         assert_eq!(profile_of(&args(&["VRChat.exe", "--profile=x"])), 0);

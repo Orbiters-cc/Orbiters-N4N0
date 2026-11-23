@@ -2612,6 +2612,59 @@ mod tests {
         }
     }
 
+    /// A Mac: the profile choice of Windows' Home under its one Play button, for one VRChat at a time. Play starts the profile
+    /// chosen; while one runs or starts, no other does, and nothing is sent.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_s_play_starts_the_profile_chosen_and_none_beside_a_running_one() {
+        use orbiters_core::launcher::{Action, Game, GameProfile, LaunchMode, Source};
+        orbiters_ui::widgets::watch_controls();
+        let mut h = where_signed_in(Vec::new());
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
+        data.invites.clear();
+        data.game = Game::NotRunning;
+        let stage = |h: &mut Harness, data: &mut orbiters_core::launcher::LauncherState, game: Game, on: Option<u32>| {
+            let mode = |p: u32, up: bool| (up && on == Some(p)).then_some(LaunchMode::Desktop);
+            let (running, starting) = (matches!(game, Game::Running(_)), matches!(game, Game::Starting(_)));
+            let profile = |p: u32, account: &str| GameProfile { profile: p, account: Some(account.into()), running: mode(p, running), starting: mode(p, starting), assistant: false };
+            data.profiles = vec![profile(0, &name), profile(1, "Sample Alt")];
+            data.game = game;
+            h.state.launcher_mut().set_data(Arc::new(data.clone()));
+            h.settle();
+        };
+        stage(&mut h, &mut data, Game::NotRunning, None);
+        let sent = |h: &Harness| h.recorder.launcher.lock().unwrap().iter().filter(|a| matches!(a, Action::As { action, .. } if matches!(**action, Action::PlayOn { .. }))).cloned().collect::<Vec<_>>();
+        let on = |profile| Action::As { account: me.clone(), action: Box::new(Action::PlayOn { mode: LaunchMode::Desktop, profile }) };
+        let own = format!("0 · {name}");
+        click(&mut h, "Play VRChat");
+        assert_eq!(sent(&h), [on(0)], "the default profile");
+        click(&mut h, "1 · Sample Alt");
+        click(&mut h, "Play VRChat");
+        assert_eq!(sent(&h), [on(0), on(1)]);
+        click(&mut h, "Another profile");
+        click(&mut h, "Play VRChat");
+        assert_eq!(sent(&h), [on(0), on(1), on(2)]);
+        let played = |h: &Harness| orbiters_ui::widgets::control(&h.ctx, "Play VRChat").expect("the button stays").1;
+        for game in [Game::Running(LaunchMode::Desktop), Game::Starting(LaunchMode::Desktop)] {
+            stage(&mut h, &mut data, game, Some(1));
+            for chip in ["Profile 2", own.as_str(), "1 · Sample Alt"] {
+                click(&mut h, chip);
+                assert!(!played(&h), "{chip}: Play starts nothing");
+                let (r, _) = orbiters_ui::widgets::control(&h.ctx, "Play VRChat").unwrap();
+                h.press(r.center());
+                h.release(r.center());
+            }
+            assert_eq!(sent(&h).len(), 3);
+        }
+        // Quit: the one chosen starts.
+        stage(&mut h, &mut data, Game::NotRunning, None);
+        click(&mut h, &own);
+        click(&mut h, "Play VRChat");
+        assert_eq!(sent(&h).last(), Some(&on(0)));
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Play in VR").is_none() && orbiters_ui::widgets::control(&h.ctx, "Play in Desktop").is_none());
+    }
+
     fn frames_until(h: &mut Harness, what: &str, done: impl Fn(&mut Harness) -> bool) {
         for _ in 0..400 {
             if done(h) {

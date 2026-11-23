@@ -841,7 +841,7 @@ impl Controller {
         }
         {
             let rt = self.account_runtime.lock().unwrap();
-            if rt.unknown {
+            if rt.unknown && rt.read.is_none() {
                 return None;
             }
             if let Some((server, _)) = rt.read {

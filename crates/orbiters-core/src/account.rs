@@ -557,7 +557,7 @@ impl Api {
         if account.token.trim().is_empty() {
             account.token = token.to_string();
         }
-        crate::origin::issued(&account.token, &self.base);
+        crate::origin::answered(&account.token, &self.base);
         Ok(Check::Valid(account))
     }
 
@@ -597,7 +597,7 @@ impl Api {
         let status = response.status().as_u16();
         match Self::json::<Account>(response) {
             Ok(account) if !account.token.trim().is_empty() => {
-                crate::origin::issued(&account.token, &self.base);
+                crate::origin::answered(&account.token, &self.base);
                 Exchange::Done(account)
             }
             Ok(_) => Exchange::Ended(tr("Orbiters did not return a credential. Sign in again.").into()),

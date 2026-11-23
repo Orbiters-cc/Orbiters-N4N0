@@ -45,9 +45,10 @@ pub struct AccountRuntime {
     pub(super) account: Option<Account>,
     /// The server and the account file's change time last read, to notice another tool signing in or out.
     pub(super) read: Option<(Server, Option<SystemTime>)>,
-    /// The saved account could not be read (tried last at, and the file's change time then), or the environment is being
-    /// switched and the next one's is not read yet: nobody is installed, and who it is is unknown (controller/identity.rs).
+    /// The saved account could not be read, or the environment is being switched and the next one's is not read yet: who it
+    /// is is unknown (controller/identity.rs).
     pub(super) unknown: bool,
+    /// The file that could not be read, its change time then, and when that was.
     unreadable: Option<(Server, Option<SystemTime>, Instant)>,
     /// The service just started: the account's file is not read yet.
     pub(super) starting: bool,
@@ -190,7 +191,7 @@ impl Controller {
             // One that could not be read: again now and then, or as soon as it changes.
             let waits = rt.unreadable.is_some_and(|(s, m, at)| (s, m) == (server, modified) && at.elapsed() < REREAD);
             (
-                rt.read != Some((server, modified)) && !waits,
+                (rt.read != Some((server, modified)) || rt.unknown) && !waits,
                 rt.offline_since.is_some_and(|t| t.elapsed() > RECHECK_OFFLINE),
                 rt.refused.is_some_and(|(t, n)| t.elapsed() > refused_recheck(n)),
             )
@@ -286,21 +287,30 @@ impl Controller {
         let before = self.account_runtime.lock().unwrap().generation;
         let saved = match read() {
             Ok(saved) => saved,
-            // Could not be read: whose it is is not known, so nobody is signed in (on this environment or any), and it is
-            // tried again soon.
+            // Could not be read (another tool may be writing it): whose it is is not known, and it is tried again soon. On the
+            // environment it was last read for, the account installed stays with its own server (a call goes on), but is
+            // nobody's for N4N0 until it is read; on any other (the environment was switched), nobody is signed in.
             Err(e) => {
                 eprintln!("account file: {e:#}");
-                if self.account_runtime.lock().unwrap().generation == before {
+                let stays = {
+                    let rt = self.account_runtime.lock().unwrap();
+                    rt.generation == before && rt.account.is_some() && rt.read.is_some_and(|(s, _)| s == server)
+                };
+                if !stays && self.account_runtime.lock().unwrap().generation == before {
                     self.leave_unless_same(None);
                 }
                 let generation = self.install_account(|rt| {
                     (rt.generation == before).then(|| {
-                        rt.unsettled();
+                        if stays {
+                            rt.unknown = true;
+                        } else {
+                            rt.unsettled();
+                        }
                         rt.unreadable = Some((server, modified, Instant::now()));
                         rt.generation
                     })
                 });
-                if let Some(generation) = generation {
+                if let Some(generation) = generation.filter(|_| !stays) {
                     self.update_if(|s| {
                         if self.account_generation.load(Ordering::SeqCst) != generation || s.account.state == AccountState::SigningIn {
                             return false;
@@ -827,9 +837,13 @@ mod tests {
         assert_eq!((c.identity_epoch(), c.signed_as()), (epoch + 1, SignedAs::Member));
         assert!(c.account_api_of(epoch + 1).is_some_and(|(api, token)| token == "fake-d" && api.url("") == Api::new(Server::Development).url("")));
         assert!(c.view().account.error.is_none());
-        // Without a switch too: what cannot be read is nobody's.
+        // Without a switch: it is nobody's for N4N0 until it is read, what is installed staying with its own server (a call).
+        say(&c);
+        let epoch = c.identity_epoch();
         c.read_account_with(Server::Development, None, false, || Err(anyhow::anyhow!("fixture")), |_| unreachable!());
-        assert!(c.account_api().is_none() && c.signed_as() == SignedAs::Unknown);
+        assert_eq!((c.signed_as(), c.identity_epoch(), lines(&c)), (SignedAs::Unknown, epoch + 1, 0));
+        assert!(c.account_api_of(epoch).is_none() && c.account_api_of(epoch + 1).is_none());
+        assert!(c.account_api().is_some_and(|(api, token)| token == "fake-d" && api.url("") == Api::new(Server::Development).url("")));
         // And readable with nobody in it: signed out, the note gone.
         reread(&c, Server::Development, None, None);
         assert_eq!((c.signed_as(), c.view().account.error.clone()), (SignedAs::Nobody, None));

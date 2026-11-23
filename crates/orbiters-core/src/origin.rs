@@ -40,13 +40,26 @@ pub fn issued(token: &str, base: &str) {
     ISSUED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().entry(digest(token)).or_default().insert(origin);
 }
 
+/// The server at `base` gave or confirmed `token`: it is that environment's. (A stand-in's made-up ones belong to no
+/// environment, and reach none.)
+pub fn answered(token: &str, base: &str) {
+    if of(base).is_some_and(|origin| is_environment(&origin)) {
+        issued(token, base);
+    }
+}
+
+/// Whether `origin` is one of Orbiters' environments.
+fn is_environment(origin: &str) -> bool {
+    [Server::Production, Server::Development].iter().any(|s| of(s.api()).as_deref() == Some(origin))
+}
+
 /// Whether a request to `url` may carry `token`.
 pub fn allowed(token: &str, url: &str) -> bool {
     let Some(origin) = of(url) else { return false };
     match ISSUED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|all| all.get(&digest(token))) {
         Some(origins) => origins.contains(&origin),
         // Of unknown origin: never to an environment of Orbiters (a stand-in's own address takes its made-up ones).
-        None => ![Server::Production, Server::Development].iter().any(|s| of(s.api()) == Some(origin.clone())),
+        None => !is_environment(&origin),
     }
 }
 

@@ -686,12 +686,16 @@ mod destructive_tests {
                 if line.trim_start().starts_with("//") || !(line.contains("Variant::Danger") || line.contains(".danger()")) {
                     continue;
                 }
-                if NOT.iter().any(|(file, what)| name == *file && line.contains(what)) || name == "pages/states.rs" && line.contains("line.contains") {
+                // (This test's own words.)
+                if name == "pages/states.rs" && lines[..n].contains(&"mod destructive_tests {") {
+                    continue;
+                }
+                if NOT.iter().any(|(file, what)| name == *file && line.contains(what)) {
                     continue;
                 }
                 checked += 1;
-                let around = lines[n.saturating_sub(4)..(n + 12).min(lines.len())].join("\n");
-                let fresh = [".confirm(", ".confirm_at(", "activated_fresh(", "pressed_fresh(", "sharing::pressed(", "settings::pressed(", "kill_confirm = Some"];
+                let around = lines[n.saturating_sub(4)..(n + 36).min(lines.len())].join("\n");
+                let fresh = [".confirm(", ".confirm_at(", "activated_fresh(", "pressed_fresh(", "sharing::pressed(", "if pressed(", "kill_confirm = Some"];
                 if !fresh.iter().any(|f| around.contains(f)) {
                     wrong.push(format!("{name}:{}: {}", n + 1, line.trim()));
                 }

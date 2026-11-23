@@ -3270,7 +3270,7 @@ mod tests {
         }
         assert_eq!(check("go_to_world", json!({ "world_id": "wrld_x", "profile": -1 })), Some("bad_arguments"));
         assert_eq!(check("open_session", json!({ "profile": 99 })), None);
-        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_arguments"));
+        assert_eq!(check("open_session", json!({ "profile": 100 })), Some("bad_profile"));
         // What a handler has a default for is not required (unity_repositories lists, unity_editor says its status).
         assert_eq!(check("unity_repositories", json!({})), None);
         assert_eq!(check("unity_repositories", json!({ "action": "erase" })), Some("bad_arguments"));

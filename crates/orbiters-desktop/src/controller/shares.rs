@@ -253,7 +253,7 @@ impl Whose {
     }
 }
 
-fn signed_out() -> anyhow::Error {
+pub(super) fn signed_out() -> anyhow::Error {
     anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first."))
 }
 
@@ -1100,11 +1100,7 @@ impl Drop for Changing {
 /// uploaded (as the gallery or its record says) is shared with one request, never sent or fetched again, unless it is a
 /// capture whose splats were edited since: its files on Orbiters are replaced first ([`update_with`]), so what is shared
 /// is what its 3D view shows. How long each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
-pub fn share(server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
-    share_as(&Whose::saved(server)?, entry, request, report)
-}
-/// [`share`] as `whose`.
-fn share_as(whose: &Whose, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
+pub(super) fn share_as(whose: &Whose, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
     let started = Instant::now();
     let mut steps = Vec::new();
     let result = share_with(&whose.api, &whose.token, whose.records(), &entry, &request, report, &mut steps, &super::maps::web_preview);
@@ -1134,7 +1130,7 @@ fn removed_on_orbiters(e: &anyhow::Error) -> bool {
     e.downcast_ref::<orbiters_core::account::ApiError>().is_some_and(|a| a.status == 404 && !a.message.is_empty() && a.message != general)
 }
 
-/// [`share`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;
+/// [`share_as`] through `api` as `token`, this account's upload records in `records`, a capture's files made by `prepare`;
 /// what took how long in `steps`. One try ([`share_with_once`]); an item this computer's record says it uploaded, and that Orbiters answers it no longer has
 /// (removed on the website, another computer, moderation), loses that record and is uploaded again, once, as the person
 /// asked to share it. It stayed unshareable for good before: every share asked the dead id again (CTL2-4).

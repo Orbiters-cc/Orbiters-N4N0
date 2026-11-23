@@ -286,7 +286,7 @@ pub(crate) struct N4n0Runtime {
     generation: u64,
     /// The conversation, the saved videos' list and the processes' footprint as the apps show them: slices, so that making
     /// the state to publish ([`N4n0Runtime::status`]) copies none of them.
-    lines: Slice<Vec<N4n0Line>>,
+    pub(crate) lines: Slice<Vec<N4n0Line>>,
     pub(crate) confirmations: Vec<N4n0Confirmation>,
     /// The website approvals the owner opened in the browser: dealt with there (the app hears nothing back), they stay
     /// listed with their link but no longer keep N4N0 from listening.
@@ -2917,8 +2917,8 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
         }
     }
     drop(rt);
-    fence.keep_conversation();
     fence.publish();
+    fence.keep_conversation();
     if let Some(at) = automatic_at {
         let later = fence.later();
         let started = fence.spawn("n4n0-retry", move || {

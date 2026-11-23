@@ -861,8 +861,8 @@ impl Fence<'_> {
         if !asked.is_empty() {
             self.ask_owner(asked);
         }
-        self.keep_conversation();
         self.publish();
+        self.keep_conversation();
     }
 }
 

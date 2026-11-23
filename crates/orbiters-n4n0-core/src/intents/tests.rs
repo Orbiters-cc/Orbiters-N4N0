@@ -618,15 +618,19 @@ fn without_the_switch_nothing_is_done_from_an_account() {
             "set_bio", "set_status", "set_status_text", "share_capture", "suggest", "world_comment", "world_label", "world_like", "youtube_drop"
         ]
     );
-    let json = |actions| serde_json::Value::Array(tools::specs_for(true, &route::ToolGroup::ALL.into_iter().collect(), actions)).to_string();
-    let (with, without) = (json(true), json(false));
-    for name in &behind {
-        let named = format!("\"{name}\"");
-        assert!(with.contains(&named) && !without.contains(&named), "{name}");
-    }
-    for spec in CATALOGUE.iter().filter(|s| s.risk != Risk::Confirm) {
-        assert!(without.contains(&format!("\"{}\"", spec.name)), "{} stays", spec.name);
-    }
+    // The intents offered: each group's tool lists its own.
+    let named = |actions| -> std::collections::BTreeSet<String> {
+        tools::specs_for(true, &route::ToolGroup::ALL.into_iter().collect(), actions)
+            .iter()
+            .filter(|t| Group::of_tool(t["name"].as_str().unwrap()).is_some())
+            .flat_map(|t| t["input_schema"]["properties"]["intent"]["enum"].as_array().cloned().unwrap_or_default())
+            .map(|i| i.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (with, without) = (named(true), named(false));
+    let all: std::collections::BTreeSet<String> = CATALOGUE.iter().map(|s| s.name.to_string()).collect();
+    assert_eq!(with, all);
+    assert_eq!(all.difference(&without).map(String::as_str).collect::<Vec<_>>(), behind);
 }
 
 /// What waits for a yes after other people's text was read asks in words of its own, in the five languages.

@@ -726,12 +726,17 @@ fn a_question_is_said_to_be_presented_when_its_card_is_in_view() {
     w.settle();
     assert_eq!(w.backend.presented(), [(5, 7), (5, 8)]);
     // Another member's window starts again, closed.
-    w.backend.set(|s| s.n4n0.account_epoch = 6);
+    w.backend.set(|s| {
+        s.n4n0.account_epoch = 6;
+        s.n4n0.confirmations.clear();
+    });
     w.settle();
-    assert_eq!(w.backend.presented().len(), 2);
+    w.backend.set(|s| s.n4n0.confirmations = vec![local_question(9, "N4N0 will do this if you say yes: Boop \"Kira\".")]);
+    w.settle();
+    assert_eq!(w.backend.presented().len(), 2, "closed");
     w.key(Key::J, Modifiers::COMMAND);
     w.settle();
-    assert_eq!(w.backend.presented().last(), Some(&(6, 8)));
+    assert_eq!(w.backend.presented().last(), Some(&(6, 9)));
 }
 
 /// M8: New conversation in the window names the conversation the last frame showed, and whose.
@@ -756,14 +761,15 @@ fn the_windows_new_conversation_names_the_one_it_shows() {
 /// While who is signed in is not known the chat says so and offers nothing; what is typed stays.
 #[test]
 fn signing_in_says_so_and_keeps_what_is_typed() {
-    let mut snap = ready();
-    snap.n4n0.signed_as = SignedAs::Unknown;
-    assert_eq!(gate(&snap), Gate::SigningIn);
-    assert_eq!(panel::status_line(&snap), orbiters_i18n::tr("Signing in…"));
-    let mut w = Window::new(snap, 1280.0);
+    let mut w = Window::new(ready(), 1280.0);
     w.key(Key::J, Modifiers::COMMAND);
     w.settle();
     w.type_text("hello");
+    w.backend.set(|s| s.n4n0.signed_as = SignedAs::Unknown);
+    w.settle();
+    let snap = w.backend.view();
+    assert_eq!(gate(&snap), Gate::SigningIn);
+    assert_eq!(panel::status_line(&snap), orbiters_i18n::tr("Signing in…"));
     w.key(Key::Enter, Modifiers::NONE);
     assert!(w.backend.sent().is_empty(), "{:?}", w.backend.sent());
     assert_eq!(w.chat().draft(), "hello");

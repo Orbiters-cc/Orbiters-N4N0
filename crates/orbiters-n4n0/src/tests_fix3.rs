@@ -464,6 +464,7 @@ fn a_conversation_outlives_a_restart_for_its_member_only() {
     turn_ended(&n, &bodies, 2);
     let (conversation, epoch) = (n.n4n0.lock().unwrap().conversation.clone(), shown_epoch(&t));
     assert!(!conversation.is_empty() && question_shown(&t).is_some());
+    until("the conversation is kept", || n.files.conversation.exists());
     let kept = std::fs::read(&n.files.conversation).unwrap();
     assert!(!cfg!(windows) || !String::from_utf8_lossy(&kept).contains("Hello there"), "sealed");
     let restart = || {
@@ -531,7 +532,7 @@ fn a_talk_let_in_is_installed_before_a_handover() {
     let switching = std::thread::spawn(move || t2.switch_member(&n2, None));
     std::thread::sleep(Duration::from_millis(100));
     assert!(!switching.is_finished());
-    n.talk_admitted(true, crate::runtime::Source::App, admitted);
+    n.talk_admitted(true, crate::runtime::Source::Window, admitted);
     switching.join().unwrap();
     assert!(n.n4n0.lock().unwrap().listening.is_none(), "it went with its member");
     t.shutdown(&n);
@@ -542,7 +543,7 @@ fn a_talk_let_in_is_installed_before_a_handover() {
 #[test]
 fn a_turn_that_could_not_start_ends_and_can_be_retried() {
     let (t, n, _device) = ready();
-    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }, { "role": "assistant", "content": "The sea." }]), json!([]))]);
+    let (base, bodies) = orbiters(vec![format!("{}{}", delta("The sea."), done(json!([{ "role": "user", "content": "x" }, { "role": "assistant", "content": "The sea." }]), json!([])))]);
     t.sign_in(base, "orbit-a");
     n.no_threads.store(true, Ordering::SeqCst);
     n.asked("say something about the sea".into(), "typed");
@@ -591,14 +592,18 @@ fn a_new_conversation_clears_only_the_one_shown() {
 fn every_acting_command_passes_the_gate_and_nothing_resolves_whoever_is_signed_in() {
     let read = |name: &str| std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(name)).unwrap().replace("\r\n", "\n");
     let runtime = read("runtime.rs");
-    let handler = body(&runtime, "    pub fn command(");
+    let handler = body(&runtime, "pub fn command(self");
     let arms: Vec<&str> = handler.split("\n            Command::").skip(1).collect();
     for mut command in acting(None) {
         let name = format!("{command:?}").split([' ', '{']).next().unwrap().to_string();
         assert!(command.stamp_mut().is_some(), "{name}");
-        let arm = arms.iter().find(|a| a.starts_with(&name) && !a.starts_with(&format!("{name}_"))).unwrap_or_else(|| panic!("{name} has no arm"));
-        let passes = ["let_in(", "fence(&crate::fence::Ticket::input(epoch))", "app_talk(", "ask_talk(", "retry_turn(", ".ask(", "answer(", "ask_answer("].iter().any(|g| arm.contains(g));
+        let arm = arms.iter().find(|a| a.starts_with(&format!("{name} "))).unwrap_or_else(|| panic!("{name} has no arm"));
+        let passes = ["let_in(", "self.talk(", "fence(&crate::fence::Ticket::input(epoch))", "app_talk(", "ask_talk(", "retry_turn(", ".ask(", "answer(", "ask_answer("].iter().any(|g| arm.contains(g));
         assert!(passes, "{name} is handled without the gate: {arm}");
+    }
+    // (Talk and Ask pass it where they begin.)
+    for begins in ["pub(crate) fn talk(self", "pub(crate) fn ask(self"] {
+        assert!(runtime.contains(begins) && (body(&runtime, begins).contains("let_in(") || body(&runtime, begins).contains("still(")), "{begins}");
     }
     // Those that act from an account exist on the fence only.
     let all: Vec<(&str, String)> = ["runtime.rs", "assistant.rs", "screen.rs", "captures.rs", "feedback.rs", "voice.rs", "conversation.rs"].into_iter().map(|f| (f, read(f))).collect();

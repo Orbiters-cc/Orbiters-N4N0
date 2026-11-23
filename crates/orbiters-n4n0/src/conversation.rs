@@ -4,7 +4,7 @@
 
 use crate::fence::Fence;
 use crate::runtime::N4n0;
-use crate::status::{N4n0Line, N4n0Who};
+use crate::status::{N4n0Line, N4n0Who, SignedAs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,6 +20,10 @@ struct Kept {
 impl Fence<'_> {
     /// The conversation as it stands, kept for the next start.
     pub(crate) fn keep_conversation(&self) {
+        // A member's only.
+        if self.host.signed_as() != SignedAs::Member {
+            return;
+        }
         let kept = {
             let rt = self.n4n0.lock().unwrap();
             // Not an error's line nor a note's: what was said.
@@ -31,7 +35,7 @@ impl Fence<'_> {
             if let Some(dir) = self.files.conversation.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            orbiters_core::write_atomic_private(&self.files.conversation, &sealed)
+            Ok(orbiters_core::write_atomic_private(&self.files.conversation, &sealed)?)
         });
         if let Err(e) = written {
             eprintln!("N4N0's conversation could not be kept: {e:#}"); // i18n: not shown

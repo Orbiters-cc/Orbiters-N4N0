@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 mod groups;
 mod social;
-pub use groups::{art_body, file_md5 as group_file_md5, post_create_body, post_edit_body, role_create_body, role_update_body, Failure as GroupFailure, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
+pub use groups::{art_body, file_md5 as group_file_md5, post_create_body, role_create_body, role_update_body, Failure as GroupFailure, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
 pub use social::{boop_body, own_profile_body, own_status_body};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";

@@ -15,16 +15,21 @@
 //! - At the commit, under the client's lock: what decides it is read, the ledger is marked `Dispatched` on the disk, the
 //!   write's pacing is waited for, and then, as one step with nothing else in it, the last read is made, compared in
 //!   memory with what was sealed, and the request sent with the [`Permit`] the rules gave on that read ([`Controller::groups_step`]).
-//! - Its outcome is done, refused or UNKNOWN, kept by the ledger. An unknown one ends by a read that identifies the very
-//!   object, or by the person ([`Request::Said`]); never by default (verify2 B-A, B-B).
+//! - Its outcome is done, refused or UNKNOWN, kept by the ledger, by VRChat's own answer to the write alone. A check of an
+//!   unknown one says what VRChat shows NOW (it is there, it is not, cannot tell), never what happened or who did it; it is
+//!   closed when VRChat shows what was asked for, or by the person ([`Request::Decide`]), never by default (verify3
+//!   Blocker 2).
+//! - Posts are created and deleted here, never edited: VRChat's edit carries the audience whole and takes no condition
+//!   (verify3 Blocker 4). A member's role change is bound to their membership (verify3 Blocker 1).
 //! - One write at a time per target, a few requests at a time in all; the client's lock is let go between calls (M9,
 //!   M11). No bulk, no background sweeps.
 use super::vrchat_data::Scope;
 use super::vrchat_login::Presence;
 use super::Controller;
-pub use super::groups_ledger::{Before, By, Entry, Evidence, Key, Kind, Ledger, Said, State, Stop, Target, Warning};
-use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Missing, PermissionInfo, Permit, Post, PostDraft, PostField, Role, RoleChange, RoleDraft, RoleField, Why};
-use orbiters_core::vrchat_api::{Client, GroupFailure, GroupInventory, Members, Posts};
+pub use super::groups_ledger::{Answer, By, Closing, Entry, Evidence, Key, Kind, Ledger, Not, State, Stop, Target, Warning};
+use super::groups_ledger::{known_id, FORMAT, SETTLES_AFTER_MS};
+use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Missing, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Why};
+use orbiters_core::vrchat_api::{Client, GroupFailure, GroupFile, GroupInventory, Members, Posts};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,7 +59,9 @@ const GROUPS_MAX: usize = 1000;
 const HYDRATE_MAX: usize = 12;
 /// Groups a [`Request::Hydrate`] reads at most.
 pub const HYDRATE_BATCH: usize = 8;
-/// Pages of posts read to find one post (an edit's or a deletion's target, a check), and of inventory to find a file.
+/// What a check offers the person at most.
+const CANDIDATES_MAX: usize = 20;
+/// Pages of posts read to find one post (a deletion's target, a check's candidates), and of inventory to find a file.
 const POST_PAGES: usize = 4;
 const INVENTORY_PAGES: usize = 4;
 /// A picture of the page at most (memory only).
@@ -83,12 +90,27 @@ pub enum Request {
     /// Send the sealed write `op`, shown to the person as `digest` says.
     Commit { op: String, digest: String },
     Cancel { op: String },
-    /// The account's entries of the ledger: those not ended, and the newest others.
-    Ledger,
-    /// What became of the write `op`: the ledger's word, or a fresh read of exactly what it touched.
+    /// The account's entries of the ledger: those open, those of `also`, and the newest others.
+    Ledger { also: Vec<String> },
+    /// What VRChat shows now of the write `op`: a fresh read of exactly what it touched.
     Check { op: String },
-    /// The person, after a check that could not settle it, says what they saw (`made`: which of the candidates it is).
-    Said { op: String, said: Said, made: Option<String> },
+    /// The person decides, after a check was asked for.
+    Decide { op: String, choice: Choice },
+    /// The person looked on vrchat.com and goes on: records that cannot be read are kept aside.
+    SetAside,
+}
+
+/// What the person decides of a write no one can tell the end of.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Choice {
+    /// They looked: it is there (`made`: which of those shown, when it is one of them). Closed.
+    Shows { made: Option<String> },
+    /// They looked: it is not there. It stays open, to be sent again or dropped.
+    ShowsNot,
+    /// Again, as a new operation: closed, and the same may be sealed again, with a warning.
+    Again,
+    /// Left: closed, with the same warning for the same again.
+    Drop,
 }
 
 /// A PNG the window put in the staging folder for an upload: only its name, size and SHA-256 cross the link (Major 1).
@@ -137,8 +159,8 @@ pub enum Write {
     CreateRole { group: String, draft: RoleDraft },
     EditRole { group: String, baseline: Role, edit: RoleDraft },
     DeleteRole { group: String, role: String },
-    CreatePost { group: String, draft: PostDraft },
-    EditPost { group: String, baseline: Post, edit: PostDraft },
+    /// `of`: the new post being written it comes from (an id of the window's), cleared when this very one is done.
+    CreatePost { group: String, draft: PostDraft, of: String },
     /// `post` is the post as the person saw it: a different one now is not deleted (Blocker 7).
     DeletePost { group: String, post: Post },
     /// A PNG into the account's own gallery or icons, for `group`: a step of its own (M6).
@@ -159,7 +181,7 @@ impl Write {
         match self {
             Write::MemberRole { group, user, .. } => format!("member:{group}:{user}"),
             Write::CreateRole { group, .. } | Write::EditRole { group, .. } | Write::DeleteRole { group, .. } => format!("roles:{group}"),
-            Write::CreatePost { group, .. } | Write::EditPost { group, .. } | Write::DeletePost { group, .. } => format!("posts:{group}"),
+            Write::CreatePost { group, .. } | Write::DeletePost { group, .. } => format!("posts:{group}"),
             Write::ApplyArt { group, .. } => format!("art:{group}"),
             Write::Upload { tag, .. } => format!("upload:{}", tag.wire()),
         }
@@ -172,7 +194,6 @@ impl Write {
             Write::EditRole { .. } => Kind::EditRole,
             Write::DeleteRole { .. } => Kind::DeleteRole,
             Write::CreatePost { .. } => Kind::CreatePost,
-            Write::EditPost { .. } => Kind::EditPost,
             Write::DeletePost { .. } => Kind::DeletePost,
             Write::ApplyArt { slot: ArtSlot::Banner, .. } => Kind::ApplyBanner,
             Write::ApplyArt { slot: ArtSlot::Icon, .. } => Kind::ApplyIcon,
@@ -187,7 +208,6 @@ impl Write {
             Write::MemberRole { user, role, .. } => (t.user, t.role) = (Some(user.clone()), Some(role.clone())),
             Write::EditRole { baseline, .. } => t.role = Some(baseline.id.clone()),
             Write::DeleteRole { role, .. } => t.role = Some(role.clone()),
-            Write::EditPost { baseline, .. } => t.post = Some(baseline.id.clone()),
             Write::DeletePost { post, .. } => t.post = Some(post.id.clone()),
             Write::ApplyArt { file, .. } => t.file = Some(file.clone()),
             Write::CreateRole { .. } | Write::CreatePost { .. } | Write::Upload { .. } => {}
@@ -202,13 +222,26 @@ impl Write {
             Write::CreateRole { group, draft } => ("POST", format!("{group}/roles"), api::role_create_body(draft)), // i18n: not shown
             Write::EditRole { group, baseline, edit } => ("PUT", format!("{group}/roles/{}", baseline.id), api::role_update_body(&RoleChange::between(baseline, edit))), // i18n: not shown
             Write::DeleteRole { group, role } => ("DELETE", format!("{group}/roles/{role}"), String::new()), // i18n: not shown
-            Write::CreatePost { group, draft } => ("POST", format!("{group}/posts"), api::post_create_body(draft)), // i18n: not shown
-            Write::EditPost { group, baseline, edit } => ("PUT", format!("{group}/posts/{}", baseline.id), api::post_edit_body(edit, baseline, &baseline.changed_by(edit))), // i18n: not shown
+            Write::CreatePost { group, draft, .. } => ("POST", format!("{group}/posts"), api::post_create_body(draft)), // i18n: not shown
             Write::DeletePost { group, post } => ("DELETE", format!("{group}/posts/{}", post.id), String::new()), // i18n: not shown
             Write::ApplyArt { group, slot, file } => ("PUT", group.clone(), api::art_body(*slot, file)), // i18n: not shown
             Write::Upload { tag, staged, .. } => ("POST", format!("file/image/{}", tag.wire()), staged.sha256.clone()), // i18n: not shown
         };
         g::digest(&[method, &path, &body])
+    }
+    /// What makes it the same again, hashed: the same people, roles, rights, words, audience and pictures, whatever their
+    /// spaces, Unicode form and order (its group and kind are the entry's own).
+    fn same(&self) -> String {
+        match self {
+            Write::MemberRole { user, role, add, .. } => g::digest(&["member-role", user, role, if *add { "add" } else { "remove" }]),
+            Write::CreateRole { draft, .. } => g::digest(&["create-role", &draft.canonical()]),
+            Write::EditRole { baseline, edit, .. } => g::digest(&["edit-role", &baseline.id, &RoleChange::between(baseline, edit).canonical()]),
+            Write::DeleteRole { role, .. } => g::digest(&["delete-role", role]),
+            Write::CreatePost { draft, .. } => g::digest(&["create-post", &draft.canonical()]),
+            Write::DeletePost { post, .. } => g::digest(&["delete-post", &post.id]),
+            Write::ApplyArt { slot, file, .. } => g::digest(&["apply", &format!("{slot:?}"), file]),
+            Write::Upload { tag, staged, .. } => g::digest(&["upload", tag.wire(), &staged.sha256]),
+        }
     }
     pub fn group(&self) -> &str {
         match self {
@@ -217,7 +250,6 @@ impl Write {
             | Write::EditRole { group, .. }
             | Write::DeleteRole { group, .. }
             | Write::CreatePost { group, .. }
-            | Write::EditPost { group, .. }
             | Write::DeletePost { group, .. }
             | Write::Upload { group, .. }
             | Write::ApplyArt { group, .. } => group,
@@ -231,6 +263,8 @@ pub struct SealedArt {
     pub file: Option<String>,
     pub sha256: String,
     pub size: u64,
+    /// The file's version it is (an apply's): another one by the send, and it does not go.
+    pub version: Option<u64>,
 }
 
 /// A write prepared and sealed (verify2 B-E, B-F): everything that will be sent, and everything its confirmation shows,
@@ -247,9 +281,10 @@ pub struct Sealed {
     pub confirm: bool,
     /// The role concerned, as read just now (a member's role change, a role's change or deletion).
     pub role: Option<Role>,
-    /// The post concerned, as read just now (an edit, a deletion).
+    /// The post concerned, as read just now (a deletion).
     pub post: Option<Post>,
-    /// The member concerned, as read just now (ids that tell namesakes apart).
+    /// The member concerned, as read just now, with the very membership (its id and when it began): ids that tell
+    /// namesakes apart, and one who left and came back from who they were.
     pub member: Option<Member>,
     pub art: Option<SealedArt>,
     /// Names to show for the roles and rights it names (id or key, label).
@@ -300,43 +335,51 @@ pub enum Outcome {
     Unknown,
 }
 
-/// Something a check found that the write may have made: its id, its words (shown, never kept), when, and whether it is
-/// exactly what was asked.
+/// Something VRChat shows that the write may have made: its id, its words or address (shown, never kept), when, and whether
+/// it is exactly what was asked. It says nothing of who made it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
     pub label: String,
+    /// A picture's address.
+    pub url: String,
     pub at: Option<String>,
     pub same: bool,
 }
 
-/// Why a check could not settle it.
+/// Why a check cannot tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Unclear {
     /// It went out moments ago: VRChat may still be at it.
     TooSoon,
     /// What VRChat answered is not of this very object, or not whole.
     NotRead,
-    /// The object is neither as it was nor as asked: someone else changed it.
-    Otherwise,
-    /// Not seen, which proves nothing here.
+    /// Not seen, which says nothing here.
     NotSeen,
+    /// The person left the group and joined again: what VRChat shows is of another membership.
+    Rejoined,
+    /// There is no record of it here, or none that can be read.
+    NoRecord,
+    /// VRChat could not be asked.
+    Failed(Failure),
 }
 
-/// What a check found.
+/// What a check found: what VRChat shows now, not what happened.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Observation {
-    /// The ledger knows: done (by VRChat's own answer, a read, or the person), or never sent or refused.
-    Recorded { done: bool },
+    /// VRChat answered the write itself (done, or its "no"), or it stopped before it went: no check is needed.
+    Answered { done: bool },
     /// It is being sent now.
     Running,
-    /// A fresh read of the very object shows it done.
-    Done,
-    /// A fresh read of the very object shows it not done.
-    NotDone,
-    /// What it may have made, for the person to say.
+    /// VRChat now shows what was asked for, whoever did it. Closed.
+    Shows,
+    /// VRChat does not show it now: it may never have applied, or was changed since.
+    ShowsNot,
+    /// What is there that it may have made, for the person: it cannot tell.
     Candidates(Vec<Candidate>),
-    Inconclusive(Unclear),
+    CannotTell(Unclear),
+    /// The person closed it before.
+    Closed,
 }
 
 /// Why a request gave nothing: local codes, worded by the window. No server text, no member, role or post text.
@@ -359,12 +402,20 @@ pub enum Failure {
     Duplicate,
     /// What it was made against changed since (the member's roles, the picture, what is there).
     Changed,
+    /// The person left the group and joined again since it was looked at: another membership, not the one decided for.
+    Rejoined,
     /// Someone changed the post since the person saw it, and these parts: nothing was sent.
     PostChanged(g::PostParts),
     /// Someone changed the role since the person saw it, and these parts: nothing was sent.
     RoleChanged(g::RoleParts),
     /// This very write may already have been sent: check first.
     MaySent,
+    /// Another like it went out since this one was shown: it is to be looked at again.
+    Since,
+    /// A record of an earlier write cannot be read: it may be of this.
+    RecordUnreadable,
+    /// Another Orbiters on this computer keeps the record: it is done there.
+    OtherOwner,
     /// The record of the write could not be kept on this computer: nothing was sent.
     NotKept,
     /// Only the window asks this.
@@ -403,10 +454,11 @@ pub enum Reply {
     Outcome { op: String, outcome: Outcome },
     /// This very write may already have been sent: that one.
     MaySent { op: String },
-    Ledger(Vec<Entry>),
+    /// The account's entries, and how many records cannot be read that may be its own.
+    Ledger { entries: Vec<Entry>, unreadable: usize },
     Checked { op: String, observation: Observation },
-    /// What the person said is kept.
-    Said { op: String },
+    /// What the person decided is kept.
+    Decided { op: String },
     Cancelled,
     Failed(Failure),
 }
@@ -419,7 +471,21 @@ struct Intent {
     picture: Option<Vec<u8>>,
     /// Where the post was found in the list.
     offset: usize,
+    /// The file applied, as read, and where (an apply's).
+    file: Option<Filed>,
+    /// What was in the slot (an apply's).
+    previous: Option<String>,
+    /// The entries of the ledger its person was warned of.
+    told: Vec<String>,
     at: Instant,
+}
+
+/// A file of the account's as read: by its id, or on a page of the list of its kind (what VRChat gives by its id, it may
+/// not give to everyone).
+#[derive(Clone)]
+struct Filed {
+    detail: GroupFile,
+    page: Option<usize>,
 }
 
 /// The service's side of groups: the sealed writes waiting, the ledger, targets being written.
@@ -561,20 +627,28 @@ impl Controller {
         {
             self.groups.lock().unwrap().entered += 1;
         }
+        // A staged picture goes with the request it came with, whatever refuses that (J3).
+        let refused = |f: Failure| {
+            if let Request::Prepare { write } = &request {
+                drop_staged(write);
+            }
+            Reply::Failed(f)
+        };
         if scope != Scope::of(&self.view()) {
-            return Reply::Failed(Failure::AccountChanged);
+            return refused(Failure::AccountChanged);
         }
         if self.view().vrchat_login.presence() != Presence::SignedIn {
-            return Reply::Failed(Failure::SignedOut);
+            return refused(Failure::SignedOut);
         }
         {
             let mut rt = self.groups.lock().unwrap();
             // What is sealed under another scope, or too old, ends unsent (B3).
             rt.end_unsent(|i| i.scope != scope || i.at.elapsed() >= INTENT_FOR);
             // Committing, cancelling, the ledger, checking and saying never wait behind reads.
-            let control = matches!(request, Request::Cancel { .. } | Request::Commit { .. } | Request::Ledger | Request::Check { .. } | Request::Said { .. });
+            let control = matches!(request, Request::Cancel { .. } | Request::Commit { .. } | Request::Ledger { .. } | Request::Check { .. } | Request::Decide { .. } | Request::SetAside);
             if rt.running >= RUNNING_MAX && !control {
-                return Reply::Failed(Failure::Busy);
+                drop(rt);
+                return refused(Failure::Busy);
             }
             rt.running += 1;
         }
@@ -583,9 +657,10 @@ impl Controller {
             Request::Discover => self.groups_discover(&scope).map(Reply::Discovered),
             Request::Hydrate { ids } => self.groups_hydrate(&scope, ids).map(Reply::Hydrated),
             Request::Open { group } => self.groups_open(&scope, &group).map(|p| Reply::Opened(Box::new(p))),
-            Request::Ledger => self.groups_ledger(&scope).map(Reply::Ledger),
+            Request::Ledger { also } => self.groups_ledger(&scope, &also),
             Request::Check { op } => self.groups_check(link, &scope, &op).map(|observation| Reply::Checked { op, observation }),
-            Request::Said { op, said, made } => self.groups_said(&scope, &op, said, made).map(|_| Reply::Said { op }),
+            Request::Decide { op, choice } => self.groups_decide(&scope, &op, choice).map(|_| Reply::Decided { op }),
+            Request::SetAside => Key::of(&scope).ok_or(Failure::SignedOut).and_then(|key| self.groups_book().set_aside(&key).map_err(not)).map(|_| Reply::Cancelled),
             Request::SealedArt { op } => self.groups_sealed_art(link, &scope, &op).map(Reply::Picture),
             Request::Members { group, query, offset } => {
                 let query = query.trim().to_string();
@@ -624,21 +699,28 @@ impl Controller {
         self.groups.lock().unwrap().ledger.clone()
     }
 
-    /// What the window shows of the ledger: ids and states, no text.
-    fn groups_ledger(&self, scope: &Scope) -> Result<Vec<Entry>, Failure> {
+    /// What the window shows of the ledger: ids and states, no text. (Asked at each page: what an ended program left staged
+    /// goes here too.)
+    fn groups_ledger(&self, scope: &Scope, also: &[String]) -> Result<Reply, Failure> {
         let key = Key::of(scope).ok_or(Failure::SignedOut)?;
+        self.groups_sweep_staged();
+        let book = self.groups_book();
+        if !book.owned() {
+            return Err(Failure::OtherOwner);
+        }
+        let unreadable = book.unreadable(&key);
         let mut left = SHOWN_MAX;
-        Ok(self
-            .groups_book()
+        let entries = book
             .of(&key)
             .into_iter()
             .filter(|e| {
-                e.open() || {
+                e.open() || also.contains(&e.op) || {
                     left = left.saturating_sub(1);
                     left > 0
                 }
             })
-            .collect())
+            .collect();
+        Ok(Reply::Ledger { entries, unreadable })
     }
 
     /// A read of the signed-in account, the scope checked under the client's lock before and after.
@@ -735,8 +817,8 @@ impl Controller {
         Ok(None)
     }
 
-    /// The account's own pictures of `tag`, with what tells them apart, and whether every one was seen.
-    fn groups_inventory(&self, scope: &Scope, tag: FileTag) -> Result<(Vec<orbiters_core::vrchat_api::GroupFile>, bool), Failure> {
+    /// The account's own newest pictures of `tag`, with what tells them apart.
+    fn groups_inventory(&self, scope: &Scope, tag: FileTag) -> Result<Vec<GroupFile>, Failure> {
         let mut out = Vec::new();
         let mut offset = 0;
         for _ in 0..INVENTORY_PAGES {
@@ -745,10 +827,32 @@ impl Controller {
             let last = page.raw < orbiters_core::vrchat_api::GROUP_PAGE;
             out.extend(page.details);
             if last {
-                return Ok((out, true));
+                break;
             }
         }
-        Ok((out, false))
+        Ok(out)
+    }
+
+    /// The file `id`: by its id, or, when VRChat does not give it so, on the first pages of the account's pictures of its
+    /// kind. One not found on a longer list is "not read", not "not yours" (N2).
+    fn groups_file(&self, scope: &Scope, tag: FileTag, id: &str) -> Result<Filed, Failure> {
+        match self.groups_read(scope, |c| c.picture_file(id)) {
+            Ok(detail) => return Ok(Filed { detail, page: None }),
+            Err(Failure::Api(GroupFailure::NotFound | GroupFailure::Forbidden)) => {}
+            Err(f) => return Err(f),
+        }
+        let mut offset = 0;
+        for _ in 0..INVENTORY_PAGES {
+            let page = self.groups_read(scope, |c| c.inventory(tag, offset))?;
+            if let Some(detail) = page.details.into_iter().find(|d| d.file.id == id) {
+                return Ok(Filed { detail, page: Some(offset) });
+            }
+            if page.raw < orbiters_core::vrchat_api::GROUP_PAGE {
+                return Err(Failure::Withheld(Why::NotYourPicture));
+            }
+            offset += page.raw;
+        }
+        Err(Failure::NotRead(Missing::Picture))
     }
 
     /// Fresh reads and the rules, sealed, written in the ledger as prepared, kept here under a one-use id.
@@ -766,30 +870,37 @@ impl Controller {
         let book = self.groups_book();
         let op = uuid::Uuid::new_v4().to_string();
         let mut entry = Entry {
+            v: FORMAT,
             op: op.clone(),
             key,
             group: ready.write.group().into(),
             kind: ready.write.kind(),
             target: ready.write.ids(),
             payload: ready.write.payload(),
+            same: ready.write.same(),
             evidence: ready.evidence,
             state: State::Prepared,
             by: None,
-            said: None,
             made: None,
             checked: false,
+            answer: None,
+            looked: false,
+            closed: None,
             prepared_at: book.now(),
             dispatched_at: None,
             ended_at: None,
         };
-        if let Write::Upload { art, .. } = &ready.write {
-            entry.evidence.art = *art;
+        match &ready.write {
+            Write::Upload { art, .. } => entry.evidence.art = *art,
+            Write::CreatePost { of, .. } => entry.evidence.draft = Some(of.clone()),
+            Write::MemberRole { .. } => entry.target.membership = ready.member.as_ref().and_then(Member::membership).map(|m| m.digest()),
+            _ => {}
         }
         if let Some(gone) = book.may_have_gone(&entry) {
             drop_staged(&ready.write);
             return Ok(Reply::MaySent { op: gone });
         }
-        let warning = book.warning(&entry);
+        let (warning, told) = book.conflicts(&entry);
         let sealed = Sealed {
             op: op.clone(),
             group: entry.group.clone(),
@@ -805,13 +916,13 @@ impl Controller {
             digest: String::new(),
         }
         .seal();
-        book.prepare(entry).map_err(|_| Failure::NotKept)?;
+        book.prepare(entry).map_err(not)?;
         let mut rt = self.groups.lock().unwrap();
         if rt.intents.len() >= INTENTS_MAX {
             let oldest = rt.intents.iter().min_by_key(|i| i.at).map(|i| i.sealed.op.clone()).unwrap_or_default();
             rt.end_unsent(|i| i.sealed.op == oldest);
         }
-        rt.intents.push(Intent { scope: scope.clone(), link, sealed: sealed.clone(), picture: ready.picture, offset: ready.offset, at: Instant::now() });
+        rt.intents.push(Intent { scope: scope.clone(), link, sealed: sealed.clone(), picture: ready.picture, offset: ready.offset, file: ready.file, previous: ready.previous, told, at: Instant::now() });
         Ok(Reply::Prepared(Box::new(sealed)))
     }
 
@@ -870,19 +981,19 @@ impl Controller {
                 let page = self.groups_open(scope, &group)?;
                 let permit = authority(&Action::AssignRole { role: &role, user: &user, add }, &page.group, me, None)?;
                 let found = role_of(&page.group, &role).ok_or(Failure::NotRead(Missing::RoleDefinition))?;
-                // The member as VRChat has them now, whole: their id, this group, and their role arrays (Blocker 4). A
-                // lookup of oneself gives no name: the account's own membership counts (whole: the permit says so).
-                let (held, member) = if user == me {
-                    let own = self.view().vrchat_login.user.as_ref().map(|u| u.display_name.clone()).filter(|n| !n.is_empty());
-                    let shown = Member { user_id: user.clone(), display_name: own.map(|n| g::label(&n, 32)), ..Default::default() };
-                    (page.group.my_member.as_ref().map(|m| m.role_ids.clone()).unwrap_or_default(), Some(shown))
+                // The member as VRChat has them now, whole: their id, this group, this membership and their role arrays
+                // (Blocker 4, verify3 Blocker 1). A lookup of oneself gives no name: the account's own membership counts.
+                let member = if user == me {
+                    let mine = own_record(&page.group).ok_or(Failure::NotRead(Missing::Member))?;
+                    let name = self.view().vrchat_login.user.as_ref().map(|u| g::label(&u.display_name, 32)).filter(|n| !n.is_empty());
+                    Member { display_name: name, ..mine }
                 } else {
-                    let m = self.groups_read(scope, |c| c.group_member(&group, &user))?.ok_or(Failure::Api(GroupFailure::NotFound))?;
-                    if !m.is_of(&group, &user) {
-                        return Err(Failure::NotRead(Missing::Member));
-                    }
-                    (m.role_ids.clone(), Some(m))
+                    self.groups_read(scope, |c| c.group_member(&group, &user))?.ok_or(Failure::Api(GroupFailure::NotFound))?
                 };
+                if !member.is_of(&group, &user) {
+                    return Err(Failure::NotRead(Missing::Member));
+                }
+                let (held, member) = (member.role_ids.clone(), Some(member));
                 if held.contains(&role) == add {
                     return Err(Failure::Changed);
                 }
@@ -890,13 +1001,13 @@ impl Controller {
                 Ok(Ready { role: Some(found), member, labels, ..Ready::new(Write::MemberRole { group, user, role, add }, permit, &page.group) })
             }
             Write::CreateRole { group, draft } => {
-                let draft = RoleDraft { name: g::label(&draft.name, g::ROLE_NAME_MAX), description: g::text(&draft.description, g::ROLE_DESCRIPTION_MAX), ..draft };
+                let draft = RoleDraft { name: g::label(&draft.name, g::ROLE_NAME_MAX), description: g::text(&draft.description, g::ROLE_DESCRIPTION_MAX), permissions: g::in_order(&draft.permissions), ..draft };
                 if draft.name.is_empty() {
                     return Err(Failure::Api(GroupFailure::Invalid));
                 }
                 let page = self.groups_open(scope, &group)?;
                 let permit = authority(&Action::CreateRole { draft: &draft }, &page.group, me, page.catalogue.as_deref())?;
-                let before = page.group.roles.as_ref().map(|r| r.iter().map(|r| r.id.clone()).collect());
+                let before = page.group.roles.as_ref().map(|r| r.iter().map(|r| known_id(&r.id)).collect());
                 let evidence = Evidence { content: Some(draft.as_role().digest_of(&RoleField::ALL)), before, ..Default::default() };
                 let labels = names(&page.group, page.catalogue.as_deref(), &[], &draft.permissions);
                 Ok(Ready { evidence, labels, ..Ready::new(Write::CreateRole { group, draft }, permit, &page.group) })
@@ -916,7 +1027,7 @@ impl Controller {
                 }
                 let permit = authority(&Action::EditRole { role: &now.id, change: &change }, &page.group, me, page.catalogue.as_deref())?;
                 let fields = change.fields();
-                let evidence = Evidence { wanted: Some(now.with(&change).digest_of(&fields)), was: Some(now.digest_of(&RoleField::ALL)), role_fields: fields, ..Default::default() };
+                let evidence = Evidence { wanted: Some(now.with(&change).digest_of(&fields)), role_fields: fields, ..Default::default() };
                 let rights: Vec<String> = now.permissions.iter().chain(&edit.permissions).cloned().collect();
                 let labels = names(&page.group, page.catalogue.as_deref(), &[], &rights);
                 Ok(Ready { role: Some(now.clone()), evidence, labels, ..Ready::new(Write::EditRole { group, baseline: now, edit }, permit, &page.group) })
@@ -928,37 +1039,17 @@ impl Controller {
                 let labels = names(&page.group, page.catalogue.as_deref(), &[], &found.permissions);
                 Ok(Ready { role: Some(found), labels, ..Ready::new(Write::DeleteRole { group, role }, permit, &page.group) })
             }
-            Write::CreatePost { group, draft } => {
+            Write::CreatePost { group, draft, of } => {
                 let draft = clean_post(draft)?;
+                if of.len() > 64 {
+                    return Err(Failure::Api(GroupFailure::Invalid));
+                }
                 let found = self.groups_read(scope, |c| c.group(&group))?;
                 let permit = authority(&Action::Post, &found, me, None)?;
                 let posts = self.groups_read(scope, |c| c.group_posts(&group, 0))?;
-                let evidence = Evidence { content: Some(draft.content()), before: Some(posts.items.iter().map(|p| p.id.clone()).collect()), ..Default::default() };
+                let evidence = Evidence { content: Some(draft.content()), before: Some(posts.items.iter().map(|p| known_id(&p.id)).collect()), ..Default::default() };
                 let labels = names(&found, None, &draft.role_ids, &[]);
-                Ok(Ready { evidence, labels, ..Ready::new(Write::CreatePost { group, draft }, permit, &found) })
-            }
-            Write::EditPost { group, baseline, edit } => {
-                let edit = PostDraft { send_notification: false, ..clean_post(edit)? };
-                if !g::is_post_id(&baseline.id) || !baseline.complete {
-                    return Err(Failure::NotRead(Missing::Post));
-                }
-                let found = self.groups_read(scope, |c| c.group(&group))?;
-                let permit = authority(&Action::Post, &found, me, None)?;
-                // The post as VRChat has it now must be the one the edit was made on: its audience, picture and words
-                // (another moderator may have changed them, Blocker 3).
-                let (now, offset) = self.groups_find_post(scope, &group, &baseline.id)?.ok_or(Failure::NotRead(Missing::Post))?;
-                if !now.complete {
-                    return Err(Failure::NotRead(Missing::Post));
-                }
-                same_post(&baseline, &now)?;
-                let fields = now.changed_by(&edit);
-                if fields.is_empty() {
-                    return Err(Failure::Api(GroupFailure::Invalid));
-                }
-                let evidence = Evidence { wanted: Some(now.with(&edit).digest_of(&fields)), was: Some(now.digest_of(&PostField::ALL)), post_fields: fields, ..Default::default() };
-                let roles: Vec<String> = now.role_ids.iter().chain(&edit.role_ids).cloned().collect();
-                let labels = names(&found, None, &roles, &[]);
-                Ok(Ready { post: Some(now.clone()), evidence, labels, offset, ..Ready::new(Write::EditPost { group, baseline: now, edit }, permit, &found) })
+                Ok(Ready { evidence, labels, ..Ready::new(Write::CreatePost { group, draft, of }, permit, &found) })
             }
             Write::DeletePost { group, post } => {
                 if !g::is_post_id(&post.id) {
@@ -985,15 +1076,15 @@ impl Controller {
                 let value = self.groups_read(scope, |c| c.current_user_value().map_err(|_| GroupFailure::Unavailable))?;
                 let permit = permit(g::can_upload(me, &group, own_tags(&value, me).as_deref()))?;
                 let found = self.groups_read(scope, |c| c.group(&group))?;
-                let (files, _) = self.groups_inventory(scope, tag)?;
+                let files = self.groups_inventory(scope, tag)?;
                 let evidence = Evidence {
                     content: Some(staged.sha256.clone()),
-                    before: Some(files.iter().map(|f| f.file.id.clone()).collect()),
+                    before: Some(files.iter().map(|f| known_id(&f.file.id)).collect()),
                     md5: Some(orbiters_core::vrchat_api::group_file_md5(&bytes)),
                     size: Some(bytes.len() as u64),
                     ..Default::default()
                 };
-                let sealed = SealedArt { file: None, sha256: staged.sha256.clone(), size: staged.size };
+                let sealed = SealedArt { file: None, sha256: staged.sha256.clone(), size: staged.size, version: None };
                 Ok(Ready { evidence, art: Some(sealed), ..Ready::new(Write::Upload { tag, group, staged, art }, permit, &found) })
             }
             Write::ApplyArt { group, slot, file } => {
@@ -1004,21 +1095,19 @@ impl Controller {
                 let permit = authority(&Action::ApplyArt, &found, me, None)?;
                 // What the group has now must be known: what a check, and the last read, compare with.
                 let previous = found.art(slot).ok_or(Failure::NotRead(Missing::Picture))?.map(str::to_string);
-                // Only a picture of the account's own inventory of that kind (Major 4); not seen among the first pages of
-                // a longer list is not "not yours" (N2).
-                let (files, all) = self.groups_inventory(scope, slot.tag())?;
-                let Some(own) = files.iter().find(|f| f.file.id == file) else {
-                    return Err(if all { Failure::Withheld(Why::NotYourPicture) } else { Failure::NotRead(Missing::Picture) });
-                };
+                // One of the account's own, of the kind the slot takes, said by VRChat of that very file; the version it is
+                // now (verify3 Major 4).
+                let filed = self.groups_file(scope, slot.tag(), &file)?;
+                own_picture(&filed.detail, slot.tag(), me)?;
+                let version = filed.detail.version.ok_or(Failure::NotRead(Missing::Picture))?;
                 // The picture that file is, as VRChat serves it: its bytes are what the confirmation shows (B-E).
-                let url = own.file.url.clone();
+                let url = filed.detail.file.url.clone();
                 let bytes = self.groups_read(scope, |c| c.image(&url).map_err(|_| GroupFailure::Unavailable))?;
                 if bytes.is_empty() || bytes.len() > PICTURE_MAX {
                     return Err(Failure::NotRead(Missing::Picture));
                 }
-                let sealed = SealedArt { file: Some(file.clone()), sha256: sha256(&bytes), size: bytes.len() as u64 };
-                let evidence = Evidence { previous: Some(Before { file: previous }), ..Default::default() };
-                Ok(Ready { evidence, art: Some(sealed), picture: Some(bytes), ..Ready::new(Write::ApplyArt { group, slot, file }, permit, &found) })
+                let sealed = SealedArt { file: Some(file.clone()), sha256: sha256(&bytes), size: bytes.len() as u64, version: Some(version) };
+                Ok(Ready { art: Some(sealed), picture: Some(bytes), file: Some(filed), previous, ..Ready::new(Write::ApplyArt { group, slot, file }, permit, &found) })
             }
         }
     }
@@ -1086,6 +1175,7 @@ impl Controller {
         let Ok(user) = scope_user(scope) else { return Gone::Stopped(Failure::SignedOut) };
         let source = self.vrchat_source();
         let deadline = Instant::now() + Duration::from_secs(60);
+        // The scope is looked at inside, before the request and not after: what was sent is never called "not sent".
         let sent = source.personal_until(&user, || true, deadline, |c| {
             if *scope != Scope::of(&self.view()) || self.view().vrchat_login.presence() != Presence::SignedIn {
                 return Ok(Gone::Stopped(Failure::AccountChanged));
@@ -1122,7 +1212,7 @@ impl Controller {
         match write {
             Write::CreateRole { group, draft } if !draft.permissions.is_empty() => catalogue = stop!(read(c.group_permission_catalogue(group))),
             Write::EditRole { group, baseline, edit } if RoleChange::between(baseline, edit).permissions.is_some() => catalogue = stop!(read(c.group_permission_catalogue(group))),
-            Write::EditPost { group, .. } | Write::DeletePost { group, .. } => {
+            Write::DeletePost { group, .. } => {
                 let found = stop!(read(c.group(group)));
                 permit = Some(stop!(authority(&Action::Post, &found, me, None)));
             }
@@ -1138,29 +1228,33 @@ impl Controller {
         if *scope != Scope::of(&self.view()) {
             return Gone::Stopped(Failure::AccountChanged);
         }
-        match self.groups_book().dispatch(&sealed.op, sealed.warning == Some(Warning::AnotherMayHaveGone)) {
+        match self.groups_book().dispatch(&sealed.op, &intent.told) {
             Ok(()) => {}
-            Err(Stop::NotKept) => return Gone::Stopped(Failure::NotKept),
+            Err(Stop::Not(n)) => return Gone::Stopped(not(n)),
             Err(Stop::MaySent) => return Gone::Stopped(Failure::MaySent),
+            Err(Stop::Since) => return Gone::Stopped(Failure::Since),
             Err(Stop::NotPrepared) => return Gone::Stopped(Failure::Expired),
         }
         stop!(read(c.ready_to_write()));
         // The last read, compared, and the request.
-        let mut post: Option<Post> = None;
         match write {
             Write::MemberRole { group, user, role, add } => {
-                let held = if user == me {
+                let now = if user == me {
                     let found = stop!(read(c.group(group)));
                     permit = Some(stop!(authority(&Action::AssignRole { role, user, add: *add }, &found, me, None)));
                     stop!(self.groups_same_role(&found, role, sealed));
-                    found.my_member.map(|m| m.role_ids).unwrap_or_default()
+                    stop!(own_record(&found).ok_or(Failure::NotRead(Missing::Member)))
                 } else {
-                    let m = stop!(stop!(read(c.group_member(group, user))).ok_or(Failure::Api(GroupFailure::NotFound)));
-                    if !m.is_of(group, user) {
-                        return Gone::Stopped(Failure::NotRead(Missing::Member));
-                    }
-                    m.role_ids
+                    stop!(stop!(read(c.group_member(group, user))).ok_or(Failure::Api(GroupFailure::NotFound)))
                 };
+                if !now.is_of(group, user) {
+                    return Gone::Stopped(Failure::NotRead(Missing::Member));
+                }
+                // The very membership it was decided for: one who left and came back is looked at again (verify3 Blocker 1).
+                if now.membership() != sealed.member.as_ref().and_then(Member::membership) {
+                    return Gone::Stopped(Failure::Rejoined);
+                }
+                let held = now.role_ids;
                 if held.contains(role) == *add {
                     return Gone::Stopped(Failure::Changed);
                 }
@@ -1184,7 +1278,7 @@ impl Controller {
                 let found = stop!(read(c.group(group)));
                 permit = Some(stop!(authority(&Action::Post, &found, me, None)));
             }
-            Write::EditPost { group, baseline, .. } | Write::DeletePost { group, post: baseline } => {
+            Write::DeletePost { group, post: baseline } => {
                 let page = stop!(read(c.group_posts(group, intent.offset)));
                 // Not where it was, not whole, or not as the person saw it (its audience above all): nothing is sent.
                 let now = stop!(page.items.into_iter().find(|p| p.id == baseline.id).ok_or(Failure::Changed));
@@ -1192,14 +1286,23 @@ impl Controller {
                     return Gone::Stopped(Failure::NotRead(Missing::Post));
                 }
                 stop!(same_post(baseline, &now));
-                post = Some(now);
             }
-            Write::ApplyArt { group, slot, .. } => {
+            Write::ApplyArt { group, slot, file } => {
+                // The very version that was shown (verify3 Major 4); what VRChat takes is the file, so the instant between
+                // is said in the confirmation.
+                let filed = stop!(intent.file.as_ref().ok_or(Failure::Expired));
+                let now = match filed.page {
+                    None => stop!(read(c.picture_file(file))),
+                    Some(offset) => stop!(stop!(read(c.inventory(slot.tag(), offset))).details.into_iter().find(|d| d.file.id == *file).ok_or(Failure::Changed)),
+                };
+                stop!(own_picture(&now, slot.tag(), me));
+                if now != filed.detail {
+                    return Gone::Stopped(Failure::Changed);
+                }
                 let found = stop!(read(c.group(group)));
                 permit = Some(stop!(authority(&Action::ApplyArt, &found, me, None)));
                 let now = stop!(found.art(*slot).ok_or(Failure::NotRead(Missing::Picture)));
-                let then = self.groups_book().get(&stop!(Key::of(scope).ok_or(Failure::SignedOut)), &sealed.op).and_then(|e| e.evidence.previous).and_then(|p| p.file);
-                if now != then.as_deref() {
+                if now != intent.previous.as_deref() {
                     return Gone::Stopped(Failure::Changed);
                 }
             }
@@ -1209,7 +1312,11 @@ impl Controller {
             }
         }
         let Some(permit) = permit else { return Gone::Stopped(Failure::NotRead(Missing::Membership)) };
-        self.groups_send(c, me, &permit, sealed, post.as_ref(), png)
+        // Another sign-in, account or environment while it was read: nothing goes as this one (verify3, "Scope").
+        if *scope != Scope::of(&self.view()) {
+            return Gone::Stopped(Failure::AccountChanged);
+        }
+        self.groups_send(c, me, &permit, sealed, png)
     }
 
     /// The role as sealed is the role as read now.
@@ -1220,7 +1327,7 @@ impl Controller {
 
     /// The request itself. It takes the proof the rules gave on the last read, for exactly this; there is no other way to
     /// VRChat's group writes in this program.
-    fn groups_send(&self, c: &mut Client, me: &str, permit: &Permit, sealed: &Sealed, post: Option<&Post>, png: Option<Vec<u8>>) -> Gone {
+    fn groups_send(&self, c: &mut Client, me: &str, permit: &Permit, sealed: &Sealed, png: Option<Vec<u8>>) -> Gone {
         let write = &sealed.write;
         let change = match write {
             Write::EditRole { baseline, edit, .. } => RoleChange::between(baseline, edit),
@@ -1231,7 +1338,7 @@ impl Controller {
             Write::CreateRole { draft, .. } => Action::CreateRole { draft }.subject(),
             Write::EditRole { baseline, .. } => Action::EditRole { role: &baseline.id, change: &change }.subject(),
             Write::DeleteRole { role, .. } => Action::DeleteRole { role }.subject(),
-            Write::CreatePost { .. } | Write::EditPost { .. } | Write::DeletePost { .. } => Action::Post.subject(),
+            Write::CreatePost { .. } | Write::DeletePost { .. } => Action::Post.subject(),
             Write::ApplyArt { .. } => Action::ApplyArt.subject(),
             Write::Upload { .. } => g::UPLOAD.into(),
         };
@@ -1247,11 +1354,7 @@ impl Controller {
             Write::CreateRole { group, draft } => c.create_role(group, draft).map(Done::Role),
             Write::EditRole { group, baseline, .. } => c.update_role(group, &baseline.id, &change).map(Done::Roles),
             Write::DeleteRole { group, role } => c.delete_role(group, role).map(Done::Roles),
-            Write::CreatePost { group, draft } => c.create_post(group, draft).map(Done::Post),
-            Write::EditPost { group, edit, .. } => match post {
-                Some(now) => c.edit_post(group, now, edit, &now.changed_by(edit)).map(Done::Post),
-                None => return Gone::Stopped(Failure::NotRead(Missing::Post)),
-            },
+            Write::CreatePost { group, draft, .. } => c.create_post(group, draft).map(Done::Post),
             Write::DeletePost { group, post } => c.delete_post(group, &post.id).map(|_| Done::PostDeleted { post: post.id.clone() }),
             Write::ApplyArt { group, slot, file } => c.set_group_art(group, *slot, file).map(|g| Done::Group(Box::new(g))),
             Write::Upload { tag, .. } => match png {
@@ -1261,167 +1364,182 @@ impl Controller {
         })
     }
 
-    /// What became of `op` (B-A, B-B): the ledger's word, or a read of the very object.
+    /// What VRChat shows now of `op`: never what happened, or who did it (verify3 Blocker 2).
     fn groups_check(&self, link: u64, scope: &Scope, op: &str) -> Result<Observation, Failure> {
         let key = Key::of(scope).ok_or(Failure::SignedOut)?;
         let book = self.groups_book();
+        if !book.owned() {
+            return Err(Failure::OtherOwner);
+        }
         // Sealed and never committed: it ends here, unsent.
         self.groups.lock().unwrap().end_unsent(|i| i.sealed.op == op && i.link == link && i.scope == *scope);
-        // The ledger is written before anything is sent: what it does not know was not sent.
-        let Some(entry) = book.get(&key, op) else { return Ok(Observation::Recorded { done: false }) };
+        // Not there, or not readable: that says nothing of what was sent (verify3 Major 1).
+        let Some(entry) = book.get(&key, op) else { return Ok(Observation::CannotTell(Unclear::NoRecord)) };
         match entry.state {
-            State::Done => return Ok(Observation::Recorded { done: true }),
-            State::Refused => return Ok(Observation::Recorded { done: false }),
+            State::Done => return Ok(Observation::Answered { done: true }),
+            State::Refused => return Ok(Observation::Answered { done: false }),
             State::Prepared => return Ok(Observation::Running),
             _ if book.active(op) => return Ok(Observation::Running),
+            _ if entry.closed == Some(Closing::Shows) => return Ok(Observation::Shows),
+            _ if entry.closed.is_some() => return Ok(Observation::Closed),
             State::Dispatched | State::Unknown => {}
         }
-        let seen = self.groups_reconcile(scope, &entry)?;
+        book.looking(op);
+        let seen = match self.groups_reconcile(scope, &entry) {
+            Ok(seen) => seen,
+            Err(f @ (Failure::AccountChanged | Failure::SignedOut)) => return Err(f),
+            // What cannot be read is no dead end: the person may still decide (verify3 Major 3).
+            Err(f) => Seen::CannotTell(Unclear::Failed(f)),
+        };
+        self.groups.lock().unwrap().candidates.remove(op);
         Ok(match seen {
-            Seen::Done(made) => {
-                book.end(op, State::Done, Some(By::Read), made);
-                Observation::Done
+            Seen::Shows => {
+                if !book.close(op, Closing::Shows, false, None) {
+                    return Err(Failure::NotKept);
+                }
+                Observation::Shows
             }
             // Read too soon after the send, its absence says nothing.
-            Seen::NotDone if book.now() - entry.dispatched_at.unwrap_or(0) < super::groups_ledger::SETTLES_AFTER_MS => Observation::Inconclusive(Unclear::TooSoon),
-            Seen::NotDone => {
-                book.end(op, State::Refused, Some(By::Read), None);
-                Observation::NotDone
+            Seen::ShowsNot if book.now() - entry.dispatched_at.unwrap_or(0) < SETTLES_AFTER_MS => {
+                book.answer(op, Answer::CannotTell, false);
+                Observation::CannotTell(Unclear::TooSoon)
+            }
+            Seen::ShowsNot => {
+                book.answer(op, Answer::ShowsNot, false);
+                Observation::ShowsNot
             }
             Seen::Candidates(list) => {
-                book.checked(op);
+                book.answer(op, Answer::CannotTell, false);
                 self.groups.lock().unwrap().candidates.insert(op.to_string(), list.iter().map(|c| c.id.clone()).collect());
                 Observation::Candidates(list)
             }
-            Seen::Unclear(why) => {
-                book.checked(op);
-                Observation::Inconclusive(why)
+            Seen::CannotTell(why) => {
+                book.answer(op, Answer::CannotTell, false);
+                Observation::CannotTell(why)
             }
         })
     }
 
-    /// What the person saw of a write nothing could settle: kept as theirs. One that made something is done only as one of
-    /// the candidates they were shown.
-    fn groups_said(&self, scope: &Scope, op: &str, said: Said, made: Option<String>) -> Result<(), Failure> {
+    /// What the person decides of a write no one can tell the end of, kept as theirs. One of those shown is only what they
+    /// were shown.
+    fn groups_decide(&self, scope: &Scope, op: &str, choice: Choice) -> Result<(), Failure> {
         let key = Key::of(scope).ok_or(Failure::SignedOut)?;
         let book = self.groups_book();
-        let entry = book.get(&key, op).ok_or(Failure::Expired)?;
-        if said == Said::Done && entry.kind.makes() {
-            let offered = self.groups.lock().unwrap().candidates.get(op).cloned().unwrap_or_default();
-            if !made.as_ref().is_some_and(|m| offered.contains(m)) {
-                return Err(Failure::Api(GroupFailure::Invalid));
+        book.get(&key, op).ok_or(if book.owned() { Failure::Expired } else { Failure::OtherOwner })?;
+        let kept = match choice {
+            Choice::Shows { made } => {
+                let offered = self.groups.lock().unwrap().candidates.get(op).cloned().unwrap_or_default();
+                if made.as_ref().is_some_and(|m| !offered.contains(m)) {
+                    return Err(Failure::Api(GroupFailure::Invalid));
+                }
+                book.close(op, Closing::Shows, true, made)
             }
+            Choice::ShowsNot => book.answer(op, Answer::ShowsNot, true),
+            Choice::Again => book.close(op, Closing::Again, true, None),
+            Choice::Drop => book.close(op, Closing::Dropped, true, None),
+        };
+        if kept && book.get(&key, op).is_some_and(|e| !e.open()) {
+            self.groups.lock().unwrap().candidates.remove(op);
         }
-        if book.said(op, said, made) { Ok(()) } else { Err(Failure::NotKept) }
+        if kept { Ok(()) } else { Err(Failure::NotKept) }
     }
 
-    /// A fresh read of the very object a write touched, per kind. Done or not done only from what identifies it; anything
-    /// missing, of another object, or changed by someone else settles nothing (B-B).
+    /// A fresh read of the very object a write touched, per kind: whether VRChat shows now what was asked. Anything
+    /// missing, or of another object or membership, tells nothing. What has no id until VRChat answers is for the person.
     fn groups_reconcile(&self, scope: &Scope, e: &Entry) -> Result<Seen, Failure> {
         let me = scope_user(scope)?;
         let group = e.group.as_str();
+        let there_before = |id: &str| e.evidence.before.as_ref().is_some_and(|b| b.contains(&known_id(id)));
+        let shows = |yes: bool| if yes { Seen::Shows } else { Seen::ShowsNot };
         Ok(match e.kind {
             Kind::AssignRole | Kind::UnassignRole => {
-                let (Some(user), Some(role)) = (&e.target.user, &e.target.role) else { return Ok(Seen::Unclear(Unclear::NotRead)) };
-                let held = if *user == me {
-                    let found = self.groups_read(scope, |c| c.group(group))?;
-                    Actor::of(&found, &me).ok().map(|a| a.role_ids.to_vec())
+                let (Some(user), Some(role)) = (&e.target.user, &e.target.role) else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
+                let now = if *user == me {
+                    own_record(&self.groups_read(scope, |c| c.group(group))?)
                 } else {
-                    self.groups_read(scope, |c| c.group_member(group, user))?.filter(|m| m.is_of(group, user)).map(|m| m.role_ids)
+                    self.groups_read(scope, |c| c.group_member(group, user))?
                 };
-                match held {
-                    Some(r) if r.contains(role) == (e.kind == Kind::AssignRole) => Seen::Done(None),
-                    Some(_) => Seen::NotDone,
-                    None => Seen::Unclear(Unclear::NotRead),
+                match now {
+                    None => Seen::CannotTell(Unclear::NotSeen),
+                    Some(m) if !m.is_of(group, user) => Seen::CannotTell(Unclear::NotRead),
+                    // Another membership of the same person: what it holds says nothing of the one it was for.
+                    Some(m) if m.membership().map(|m| m.digest()) != e.target.membership => Seen::CannotTell(Unclear::Rejoined),
+                    Some(m) => shows(m.role_ids.contains(role) == (e.kind == Kind::AssignRole)),
                 }
             }
             Kind::CreateRole => {
-                let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::Unclear(Unclear::NotRead)) };
-                let new: Vec<(Candidate, bool)> = roles
-                    .iter()
-                    .filter(|r| !e.evidence.before.as_ref().is_some_and(|b| b.contains(&r.id)))
-                    .map(|r| {
-                        let same = r.whole && Some(r.digest_of(&RoleField::ALL)) == e.evidence.content;
-                        (Candidate { id: r.id.clone(), label: g::label(&r.name, g::ROLE_NAME_MAX), at: r.created_at.clone(), same }, same && e.evidence.before.is_some() && after(&r.created_at, e.dispatched_at))
-                    })
-                    .collect();
-                made_one(new)
+                let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
+                let same = |r: &Role| r.whole && Some(r.digest_of(&RoleField::ALL)) == e.evidence.content;
+                Seen::Candidates(roles.iter().filter(|r| !there_before(&r.id)).map(|r| Candidate { id: r.id.clone(), label: g::label(&r.name, g::ROLE_NAME_MAX), url: String::new(), at: r.created_at.clone(), same: same(r) }).take(CANDIDATES_MAX).collect())
             }
             Kind::EditRole => {
-                let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::Unclear(Unclear::NotRead)) };
+                let Some(roles) = self.groups_read(scope, |c| c.group(group))?.roles else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
                 match roles.iter().find(|r| Some(&r.id) == e.target.role.as_ref()) {
-                    Some(r) if !r.whole => Seen::Unclear(Unclear::NotRead),
-                    Some(r) if Some(r.digest_of(&e.evidence.role_fields)) == e.evidence.wanted => Seen::Done(None),
-                    Some(r) if Some(r.digest_of(&RoleField::ALL)) == e.evidence.was => Seen::NotDone,
-                    Some(_) => Seen::Unclear(Unclear::Otherwise),
-                    None => Seen::Unclear(Unclear::NotSeen),
+                    Some(r) if !r.whole => Seen::CannotTell(Unclear::NotRead),
+                    Some(r) => shows(Some(r.digest_of(&e.evidence.role_fields)) == e.evidence.wanted),
+                    None => Seen::CannotTell(Unclear::NotSeen),
                 }
             }
             Kind::DeleteRole => match self.groups_read(scope, |c| c.group(group))?.roles {
-                // The list is whole or it is none: an id it does not hold is gone.
-                Some(roles) if roles.is_empty() => Seen::Unclear(Unclear::NotRead),
-                Some(roles) if roles.iter().any(|r| Some(&r.id) == e.target.role.as_ref()) => Seen::NotDone,
-                Some(_) => Seen::Done(None),
-                None => Seen::Unclear(Unclear::NotRead),
+                // The list is whole or it is none; one without the roles no group is without is not the group's.
+                Some(roles) if roles.iter().any(|r| r.default_role || r.is_owner_role()) => shows(!roles.iter().any(|r| Some(&r.id) == e.target.role.as_ref())),
+                _ => Seen::CannotTell(Unclear::NotRead),
             },
             Kind::CreatePost => {
-                let page = self.groups_read(scope, |c| c.group_posts(group, 0))?;
                 let early = e.prepared_at - CLOCKS_DIFFER_MS;
-                let new: Vec<(Candidate, bool)> = page
-                    .items
-                    .iter()
-                    .filter(|p| p.author_id == me && !e.evidence.before.as_ref().is_some_and(|b| b.contains(&p.id)))
-                    .filter(|p| p.created_at.as_deref().and_then(millis).is_none_or(|at| at >= early))
-                    .map(|p| {
-                        let same = p.complete && Some(p.digest_of(&PostField::ALL)) == e.evidence.content;
-                        (Candidate { id: p.id.clone(), label: g::label(&p.title, g::POST_TITLE_MAX), at: p.created_at.clone(), same }, same && e.evidence.before.is_some() && after(&p.created_at, e.dispatched_at))
-                    })
-                    .collect();
-                made_one(new)
-            }
-            Kind::EditPost => {
-                let Some(id) = &e.target.post else { return Ok(Seen::Unclear(Unclear::NotRead)) };
-                match self.groups_find_post(scope, group, id)? {
-                    Some((p, _)) if !p.complete => Seen::Unclear(Unclear::NotRead),
-                    Some((p, _)) if Some(p.digest_of(&e.evidence.post_fields)) == e.evidence.wanted => Seen::Done(None),
-                    Some((p, _)) if Some(p.digest_of(&PostField::ALL)) == e.evidence.was => Seen::NotDone,
-                    Some(_) => Seen::Unclear(Unclear::Otherwise),
-                    None => Seen::Unclear(Unclear::NotSeen),
+                let made_by_then = |p: &Post| p.created_at.as_deref().and_then(millis).is_none_or(|at| at >= early);
+                let mut found = Vec::new();
+                let mut offset = 0;
+                for _ in 0..POST_PAGES {
+                    let page = self.groups_read(scope, |c| c.group_posts(group, offset))?;
+                    offset += page.raw;
+                    let older = page.items.iter().any(|p| !made_by_then(p));
+                    found.extend(page.items);
+                    if older || page.raw < orbiters_core::vrchat_api::GROUP_PAGE {
+                        break;
+                    }
                 }
+                let same = |p: &Post| p.complete && Some(p.content()) == e.evidence.content;
+                Seen::Candidates(
+                    found
+                        .iter()
+                        .filter(|p| p.author_id == me && made_by_then(p) && !there_before(&p.id))
+                        .map(|p| Candidate { id: p.id.clone(), label: g::label(&p.title, g::POST_TITLE_MAX), url: String::new(), at: p.created_at.clone(), same: same(p) })
+                        .take(CANDIDATES_MAX)
+                        .collect(),
+                )
             }
             Kind::DeletePost => {
-                let Some(id) = &e.target.post else { return Ok(Seen::Unclear(Unclear::NotRead)) };
+                let Some(id) = &e.target.post else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
                 match self.groups_find_post(scope, group, id)? {
-                    Some(_) => Seen::NotDone,
+                    Some(_) => Seen::ShowsNot,
                     // VRChat has no call for one post by its id, and its list is filtered by who may see it: a post not
                     // in it is deleted, or hidden, or out of reach. The person looks.
-                    None => Seen::Unclear(Unclear::NotSeen),
+                    None => Seen::CannotTell(Unclear::NotSeen),
                 }
             }
             Kind::ApplyBanner | Kind::ApplyIcon => {
                 let found = self.groups_read(scope, |c| c.group(group))?;
-                let Some(now) = e.kind.slot().and_then(|s| found.art(s)) else { return Ok(Seen::Unclear(Unclear::NotRead)) };
-                if now.is_some() && now == e.target.file.as_deref() {
-                    Seen::Done(None)
-                } else if e.evidence.previous.as_ref().is_some_and(|p| p.file.as_deref() == now) {
-                    Seen::NotDone
-                } else {
-                    Seen::Unclear(Unclear::Otherwise)
+                match e.kind.slot().and_then(|s| found.art(s)) {
+                    Some(now) => shows(now.is_some() && now == e.target.file.as_deref()),
+                    None => Seen::CannotTell(Unclear::NotRead),
                 }
             }
             Kind::UploadGallery | Kind::UploadIcon => {
-                let Some(tag) = e.kind.tag() else { return Ok(Seen::Unclear(Unclear::NotRead)) };
-                let (files, _) = self.groups_inventory(scope, tag)?;
-                let new: Vec<(Candidate, bool)> = files
-                    .iter()
-                    .filter(|f| !e.evidence.before.as_ref().is_some_and(|b| b.contains(&f.file.id)))
-                    .map(|f| {
-                        // The very bytes sent, by VRChat's own hash and size of them, among what was not there before.
-                        let same = f.md5.is_some() && f.md5 == e.evidence.md5 && f.size.is_some() && f.size == e.evidence.size && f.owner == me;
-                        (Candidate { id: f.file.id.clone(), label: String::new(), at: f.created_at.clone(), same }, same && e.evidence.before.is_some())
-                    })
-                    .collect();
-                made_one(new)
+                let Some(tag) = e.kind.tag() else { return Ok(Seen::CannotTell(Unclear::NotRead)) };
+                // The very bytes sent, by VRChat's own hash and size of them, in the account's own pictures of that kind.
+                let same = |f: &GroupFile| f.md5.is_some() && f.md5 == e.evidence.md5 && f.size.is_some() && f.size == e.evidence.size;
+                let early = e.prepared_at - CLOCKS_DIFFER_MS;
+                let made_by_then = |f: &GroupFile| f.created_at.as_deref().and_then(millis).is_none_or(|at| at >= early);
+                let files = self.groups_inventory(scope, tag)?;
+                Seen::Candidates(
+                    files
+                        .iter()
+                        .filter(|f| f.owner == me && made_by_then(f) && !there_before(&f.file.id))
+                        .map(|f| Candidate { id: f.file.id.clone(), label: String::new(), url: f.file.url.clone(), at: f.created_at.clone(), same: same(f) })
+                        .take(CANDIDATES_MAX)
+                        .collect(),
+                )
             }
         })
     }
@@ -1434,33 +1552,18 @@ enum Gone {
     Sent(Result<Done, GroupFailure>),
 }
 
-/// What a read of the very object says.
+/// What VRChat shows now of the very object.
 enum Seen {
-    Done(Option<String>),
-    NotDone,
+    Shows,
+    ShowsNot,
     Candidates(Vec<Candidate>),
-    Unclear(Unclear),
-}
-
-/// Something made, found again: settled by itself only when exactly one new thing is exactly what was asked, made after
-/// the send; anything else is for the person. Nothing found proves nothing.
-fn made_one(new: Vec<(Candidate, bool)>) -> Seen {
-    let sure: Vec<&Candidate> = new.iter().filter(|(_, sure)| *sure).map(|(c, _)| c).collect();
-    match sure.as_slice() {
-        [one] => Seen::Done(Some(one.id.clone())),
-        _ => Seen::Candidates(new.into_iter().map(|(c, _)| c).take(20).collect()),
-    }
+    CannotTell(Unclear),
 }
 
 /// Milliseconds since 1970 of a time VRChat gave.
 fn millis(at: &str) -> Option<i64> {
     let t = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()?;
     Some((t.unix_timestamp_nanos() / 1_000_000) as i64)
-}
-
-/// Made after the send, by the times each gave.
-fn after(at: &Option<String>, sent: Option<i64>) -> bool {
-    at.as_deref().and_then(millis).zip(sent).is_some_and(|(at, sent)| at > sent)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -1491,13 +1594,15 @@ struct Ready {
     art: Option<SealedArt>,
     picture: Option<Vec<u8>>,
     offset: usize,
+    file: Option<Filed>,
+    previous: Option<String>,
     labels: Vec<(String, String)>,
     evidence: Evidence,
 }
 
 impl Ready {
     fn new(write: Write, permit: Permit, group: &Group) -> Self {
-        Self { write, permit, group_name: g::label(&group.name, 64), role: None, post: None, member: None, art: None, picture: None, offset: 0, labels: Vec::new(), evidence: Evidence::default() }
+        Self { write, permit, group_name: g::label(&group.name, 64), role: None, post: None, member: None, art: None, picture: None, offset: 0, file: None, previous: None, labels: Vec::new(), evidence: Evidence::default() }
     }
 }
 
@@ -1521,6 +1626,30 @@ fn fill_card(card: &mut GroupCard, group: &Group, me: &str) {
     card.named = true;
 }
 
+/// Why the record did not take it.
+fn not(n: Not) -> Failure {
+    match n {
+        Not::Kept => Failure::NotKept,
+        Not::Owner => Failure::OtherOwner,
+        Not::Read => Failure::RecordUnreadable,
+    }
+}
+
+/// The account's own membership as a member's record: only with both its role arrays whole, of this group.
+fn own_record(group: &Group) -> Option<Member> {
+    let me = group.my_member.as_ref().filter(|me| me.roles_known && me.managed_known && me.group_id.as_deref().is_none_or(|g| g == group.id))?;
+    Some(Member { user_id: me.user_id.clone(), membership_id: me.membership_id.clone(), joined_at: me.joined_at.clone(), role_ids: me.role_ids.clone(), roles_known: true, group_id: Some(group.id.clone()), ..Default::default() })
+}
+
+/// The file is the account's own and of the kind asked, by what VRChat says of it: not said is not known (verify3 Major 4).
+fn own_picture(file: &GroupFile, tag: FileTag, me: &str) -> Result<(), Failure> {
+    let tags = file.tags.as_ref().filter(|_| !file.owner.is_empty()).ok_or(Failure::NotRead(Missing::Picture))?;
+    if file.owner != me || !tags.iter().any(|t| t == tag.wire()) {
+        return Err(Failure::Withheld(Why::NotYourPicture));
+    }
+    Ok(())
+}
+
 fn scope_user(scope: &Scope) -> Result<String, Failure> {
     scope.vrchat_user().map(str::to_string).ok_or(Failure::SignedOut)
 }
@@ -1533,7 +1662,7 @@ fn clean_post(draft: PostDraft) -> Result<PostDraft, Failure> {
     if title.is_empty() || text.is_empty() || title.chars().count() > g::POST_TITLE_MAX || text.chars().count() > g::POST_TEXT_MAX {
         return Err(Failure::Api(GroupFailure::Invalid));
     }
-    if draft.role_ids.len() > 32 || draft.role_ids.iter().any(|r| !g::is_role_id(r)) || draft.image_id.as_deref().is_some_and(|i| !g::is_file_id(i)) {
+    if draft.role_ids.len() > 32 || draft.role_ids.iter().any(|r| !g::is_role_id(r)) {
         return Err(Failure::Api(GroupFailure::Invalid));
     }
     // Public on purpose: the restriction chosen before goes with the switch (N3); the confirmation shows none.

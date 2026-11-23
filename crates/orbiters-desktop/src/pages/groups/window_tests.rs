@@ -313,7 +313,7 @@ fn whatever_the_window_becomes_the_wire_is_the_sealed_payload() {
         ("another group's page", |w| w.state.open = Some(page::Open::new(GroupCard { id: "grp_other".into(), name: "Other".into(), ..Default::default() }, &w.state.drafts))),
         ("the composer rewritten", |w| {
             let mut o = page::Open::new(card(), &w.state.drafts);
-            o.composer = Some(page::Composer::new(None, PostDraft { title: "Changed".into(), text: "after the seal".into(), visibility: Visibility::Public, ..Default::default() }));
+            o.composer = Some(page::Composer::new(PostDraft { title: "Changed".into(), text: "after the seal".into(), visibility: Visibility::Public, ..Default::default() }));
             w.state.open = Some(o);
         }),
         ("the ledger forgotten", |w| w.state.ledger.clear()),
@@ -372,34 +372,44 @@ fn verify2_pending_send_survives_window_drop() {
     assert_eq!(r.w.state.open_writes(G).len(), 1);
     // And on the disk, whatever becomes of the service.
     let book = r.service.ctl.groups_book_for_tests();
-    let after = crate::controller::groups::Ledger::at(book.dir());
+    // (Its lock ends with it: its copy is what the next program finds.)
+    let after = crate::controller::groups::Ledger::at(copied(&book.dir()));
     let key = crate::controller::groups::Key::of(&Scope::of(&r.w.snap)).unwrap();
     assert_eq!(after.get(&key, &op).unwrap().state, Stands::Unknown, "a program that ended here comes back to 'unknown'");
     hold.let_go();
 }
 
-/// verify2 B-C, the second verification's own assertion in the new shapes, and the scan of every file: editing someone
+/// The folder of a record as it is now, for another program to find.
+fn copied(from: &std::path::Path) -> std::path::PathBuf {
+    let to = from.with_extension("after");
+    std::fs::create_dir_all(&to).unwrap();
+    for f in std::fs::read_dir(from).unwrap().flatten().filter(|f| f.path().extension().is_some_and(|x| x == "json")) {
+        std::fs::copy(f.path(), to.join(f.file_name())).unwrap();
+    }
+    to
+}
+
+/// verify2 B-C, the second verification's own assertion in the new shapes, and the scan of every file: deleting someone
 /// else's post, and everything else the feature does, writes nothing of theirs to the disk.
 #[test]
 fn verify2_editing_someone_elses_post_writes_no_private_baseline() {
     let mut r = rig();
-    let Write::EditPost { baseline, edit, .. } = r.write(Wrote::EditPost) else { panic!() };
-    assert!(baseline.text.contains(OTHERS_WORDS) && baseline.author_id == OTHERS_ID, "the fixture is someone else's");
+    let Reply::Posts(page) = r.w.ask()(Request::Posts { group: G.into(), offset: 0 }) else { panic!() };
+    let theirs = page.items.iter().find(|p| p.text.contains(OTHERS_WORDS) && p.author_id == OTHERS_ID).expect("the fixture is someone else's").clone();
     let mut o = page::Open::new(card(), &r.w.state.drafts);
-    o.composer = Some(page::Composer::new(Some(baseline), PostDraft { text: "my replacement".into(), ..edit }));
+    o.posts.items = page.items;
     r.w.state.open = Some(o);
     for _ in 0..3 {
         r.w.frame();
     }
-    // The edit is sent and its answer lost; checked; a new post is written and kept; the page is closed.
-    let write = r.write(Wrote::EditPost);
-    let op = r.w.confirm(write).op;
+    // Its deletion is sent and its answer lost; checked; a new post is written and kept; the page is closed.
+    let op = r.w.confirm(Write::DeletePost { group: G.into(), post: theirs }).op;
     r.world.lock().unwrap().fault = Some(Fault::Drop { done: true });
     r.w.send();
     r.w.settle();
     r.later();
     r.w.check(&op);
-    r.w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(None, PostDraft { title: "My own".into(), text: "my own words".into(), ..Default::default() }));
+    r.w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(PostDraft { title: "My own".into(), text: "my own words".into(), ..Default::default() }));
     r.w.frame();
     r.w.state.close();
     let mut mine = false;
@@ -430,41 +440,63 @@ fn files() -> Vec<std::path::PathBuf> {
     out
 }
 
-/// Major 8, J9: the new post being written is the account's own, per group: closed and opened again, and from another
-/// window, it is back, and another group's is not lost to it; another environment's or account's is not it. One that could
-/// not be kept says so. One the ledger says is out is not offered again.
+/// Major 8, J9, verify3 Major 6: the new post being written is the account's own: closed and opened again, and from another
+/// window, it is back; two windows writing in one group keep both; another account's is not it. The very one the ledger
+/// says is out is not offered again; a later one with the same words is.
 #[test]
 fn new_posts_being_written_come_back() {
     let mut r = rig();
     let scope = Scope::of(&r.w.snap);
     let write = |w: &mut Window, group: &str, title: &str| {
-        let mut o = page::Open::new(GroupCard { id: group.into(), ..card() }, &w.state.drafts);
-        o.composer = Some(page::Composer::new(None, PostDraft { title: title.into(), text: "written".into(), send_notification: true, ..Default::default() }));
+        let mut o = page::Open::new(GroupCard { id: group.into(), ..card() }, &Drafts::default());
+        o.composer = Some(page::Composer::new(PostDraft { title: title.into(), text: "written".into(), send_notification: true, ..Default::default() }));
         w.state.open = Some(o);
         w.frame();
         w.state.close();
     };
     let mut other = r.another();
     write(&mut r.w, G, "Half");
-    write(&mut other, "grp_00000000-0000-4000-8000-0000000000fe", "Other half");
-    let back = Drafts::load(&scope);
-    assert_eq!(back.composer(G).map(|d| (d.title.as_str(), d.send_notification)), Some(("Half", true)));
-    assert_eq!(back.composer("grp_00000000-0000-4000-8000-0000000000fe").map(|d| d.title.as_str()), Some("Other half"), "two windows keep each their own");
-    let open = page::Open::new(card(), &back);
-    assert!(open.composer.as_ref().is_some_and(|c| c.restored && c.draft.title == "Half"));
+    write(&mut other, "grp_00000000-0000-4000-8000-0000000000fe", "Elsewhere");
+    let newest = |group: &str| Drafts::load(&scope).newest(group).map(|k| (k.draft.title.clone(), k.draft.send_notification));
+    assert_eq!(newest(G), Some(("Half".into(), true)));
+    assert_eq!(newest("grp_00000000-0000-4000-8000-0000000000fe").map(|d| d.0).as_deref(), Some("Elsewhere"));
+    std::thread::sleep(Duration::from_millis(5));
+    write(&mut other, G, "Other half");
+    assert_eq!(newest(G).map(|d| d.0).as_deref(), Some("Other half"), "the newest is offered");
+    // It is cancelled: the other one is still there.
+    let mut o = page::Open::new(card(), &Drafts::load(&scope));
+    o.end_composer();
+    other.state.drafts = Drafts::load(&scope);
+    other.state.open = Some(o);
+    other.frame();
+    other.state.close();
+    assert_eq!(newest(G).map(|d| d.0).as_deref(), Some("Half"), "two windows keep each their own");
+    let open = page::Open::new(card(), &Drafts::load(&scope));
+    let c = open.composer.as_ref().unwrap();
+    assert!(c.restored && c.draft.title == "Half");
     // Sent from there; the window ends before its answer; the next one finds the post out, and does not offer it again.
-    let op = r.w.confirm(Write::CreatePost { group: G.into(), draft: back.composer(G).unwrap().clone() }).op;
+    let op = r.w.confirm(Write::CreatePost { group: G.into(), draft: c.draft.clone(), of: c.id.clone() }).op;
     r.w.send();
     assert!(r.w.until(|s| s.flow.is_none()));
     let mut next = r.another();
     next.settle();
     assert_eq!(next.stands(&op), Some(Stands::Done));
-    next.state.open = Some(page::Open::new(card(), &Drafts::load(&scope)));
-    next.state.ledger_due = true;
-    next.settle();
-    assert!(next.state.open.as_ref().unwrap().composer.is_none(), "it is on VRChat");
-    let dir = art::drafts_dir(&scope).unwrap();
-    let _ = std::fs::remove_dir_all(dir);
+    let offered = |next: &mut Window, change: &dyn Fn(&mut page::Composer)| {
+        let mut o = page::Open::new(card(), &Drafts::default());
+        let mut c = page::Composer { id: c.id.clone(), draft: c.draft.clone(), restored: true };
+        change(&mut c);
+        o.composer = Some(c);
+        next.state.open = Some(o);
+        next.state.ledger_due = true;
+        next.settle();
+        next.state.open.as_ref().unwrap().composer.is_some()
+    };
+    assert!(offered(&mut next, &|c| c.id = uuid::Uuid::new_v4().to_string()), "a later announcement with the same words is another");
+    assert!(offered(&mut next, &|c| c.draft.text = "written, and more".into()), "what was written since stays");
+    assert!(!offered(&mut next, &|_| {}), "it is on VRChat");
+    let left = newest(G);
+    assert!(left.as_ref().is_none_or(|d| d.0 != "Half"), "and off the disk: {left:?}");
+    let _ = std::fs::remove_dir_all(art::drafts_dir(&scope).unwrap());
 }
 
 /// Major 1: an upload of the largest size accepted crosses the real link as a small message (its PNG is staged on
@@ -580,7 +612,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     w.state.studio = None;
     w.state.open = Some(page::Open::new(card(), &w.state.drafts));
     assert!(!w.state.holds(), "a page to read");
-    w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(None, PostDraft::default()));
+    w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(PostDraft::default()));
     assert!(w.state.holds(), "the composer");
     w.state.open = None;
     stage::confirming(&mut w.state, Sealed::made_up(Write::DeleteRole { group: G.into(), role: "grol_a".into() }, true), Rect::NOTHING, None);
@@ -600,7 +632,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     w.state.scope = Some(Scope::of(&w.snap));
     w.state.open = Some(page::Open::new(card(), &w.state.drafts));
     assert!(!front(&mut w), "a page to read holds nothing");
-    w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(None, PostDraft::default()));
+    w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(PostDraft::default()));
     assert!(front(&mut w), "the composer");
     w.state.open.as_mut().unwrap().composer = None;
     assert!(!front(&mut w), "closed");
@@ -615,37 +647,315 @@ fn groups_own_the_keyboard_while_they_are_up() {
     assert!(orbiters_ui::front::missing(&w.ctx).is_empty(), "no layer here that did not say so");
 }
 
-/// The panel: what may have been done, what the check saw, and the person's word, from the real service; nothing offered
-/// to say before a check.
+/// verify3 Major 7: a confirmation that comes under a key already held down is not confirmed by it, through the page's own
+/// flow: Enter saves a role, is held while its confirmation comes and takes the focus, repeats: nothing goes. Let go and
+/// pressed again, it goes.
 #[test]
-fn the_panel_offers_the_persons_word_only_after_a_check() {
+fn a_key_held_from_the_opener_confirms_nothing() {
+    let key = |k, pressed: bool, repeat: bool| egui::Event::Key { key: k, physical_key: None, pressed, repeat, modifiers: egui::Modifiers::NONE };
+    for k in [egui::Key::Enter, egui::Key::Space] {
+        let mut r = rig();
+        let Write::EditRole { baseline, edit, .. } = r.write(Wrote::EditRole) else { panic!() };
+        let Reply::Opened(page) = r.w.ask()(Request::Open { group: G.into() }) else { panic!() };
+        let mut o = page::Open::new(card(), &Drafts::default());
+        o.answer(Kind::Open(G.into()), Reply::Opened(page));
+        o.tab = page::Tab::Roles;
+        o.role_editor = Some(page::RoleEditor::new(Some(baseline), edit));
+        r.w.state.open = Some(o);
+        orbiters_ui::widgets::watch_controls();
+        r.w.drawn(6, vec![], show_page);
+        let focus = |w: &mut Window, label: &str| {
+            for _ in 0..60 {
+                let at = orbiters_ui::widgets::control(&w.ctx, label).map(|(r, _)| r);
+                if at.is_some() && w.ctx.memory(|m| m.focused()).and_then(|id| w.ctx.read_response(id)).map(|r| r.rect) == at {
+                    return true;
+                }
+                w.drawn(1, vec![key(egui::Key::Tab, true, false), key(egui::Key::Tab, false, false)], show_page);
+            }
+            false
+        };
+        assert!(focus(&mut r.w, "Save"), "{k:?}: Save takes the focus");
+        // Down, and held from here on.
+        r.w.drawn(1, vec![key(k, true, false)], show_page);
+        let mut confirming = false;
+        for _ in 0..400 {
+            r.w.drawn(1, vec![key(k, true, true)], show_page);
+            confirming = matches!(r.w.state.flow, Some(Flow::Confirming { .. }));
+            if confirming {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(confirming, "{k:?}: the press opened its confirmation");
+        assert!(focus(&mut r.w, "Save the role"), "{k:?}: its Send takes the focus");
+        // Repeats, and what some keyboards and tools send for them: presses not marked as repeats.
+        for events in [vec![key(k, true, true)], vec![key(k, true, false)], vec![key(k, true, true), key(k, true, true)], vec![key(k, true, false), key(k, true, false)]] {
+            for _ in 0..40 {
+                r.w.drawn(1, events.clone(), show_page);
+                assert!(matches!(r.w.state.flow, Some(Flow::Confirming { .. })), "{k:?}: {events:?}");
+            }
+        }
+        assert_eq!(r.sent_writes(), 0);
+        r.w.drawn(1, vec![key(k, false, false)], show_page);
+        r.w.drawn(2, vec![], show_page);
+        assert!(matches!(r.w.state.flow, Some(Flow::Confirming { .. })), "{k:?}: its release sends nothing");
+        r.w.drawn(1, vec![key(k, true, false)], show_page);
+        assert!(!matches!(r.w.state.flow, Some(Flow::Confirming { .. })), "{k:?}: a press of its own sends");
+        r.w.settle();
+        assert_eq!(r.sent_writes(), 1, "{k:?}");
+    }
+}
+
+/// The local guard by itself: armed only after the key was seen up, once per press, whatever the pointer does.
+#[test]
+fn a_press_is_one_controls_own() {
+    let key = |pressed: bool| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+    let ctx = egui::Context::default();
+    let mut t = 0.0;
+    let mut frame = |shown: &[&str], focus: &str, events: Vec<egui::Event>| {
+        t += 0.05;
+        let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))), time: Some(t), ..Default::default() };
+        input.events = events;
+        let mut hit = Vec::new();
+        let mut out = ctx.run_ui(input, |ui| {
+            for (i, name) in shown.iter().enumerate() {
+                let r = Rect::from_min_size(egui::pos2(10.0, 10.0 + 50.0 * i as f32), egui::vec2(100.0, 40.0));
+                let resp = ui.interact(r, Id::unique(("control", *name)), Sense::click());
+                if *name == focus {
+                    resp.request_focus();
+                }
+                if deliberate(&resp) {
+                    hit.push(name.to_string());
+                }
+            }
+        });
+        out.textures_delta.clear();
+        hit
+    };
+    for _ in 0..3 {
+        assert!(frame(&["a"], "a", vec![]).is_empty());
+    }
+    assert_eq!(frame(&["a"], "a", vec![key(true)]), ["a"]);
+    // "b" comes while the key is down, and takes the focus.
+    for _ in 0..3 {
+        assert!(frame(&["a", "b"], "b", vec![key(true)]).is_empty(), "never armed under a key already down");
+    }
+    assert!(frame(&["a", "b"], "b", vec![key(false)]).is_empty());
+    assert!(frame(&["a", "b"], "b", vec![]).is_empty());
+    assert_eq!(frame(&["a", "b"], "b", vec![key(true)]), ["b"], "its own press");
+    assert!(frame(&["a", "b"], "b", vec![key(false)]).is_empty());
+    // Gone and back while the key is down: to be armed anew.
+    assert!(frame(&["a"], "a", vec![]).is_empty());
+    assert_eq!(frame(&["a"], "a", vec![key(true)]), ["a"]);
+    assert!(frame(&["a", "b"], "b", vec![key(true)]).is_empty());
+}
+
+/// The panel: which write it is, what the check saw now, and the person's way out, from the real service; nothing offered
+/// to decide before a check, and something always after (verify3 Major 3).
+#[test]
+fn the_panel_says_which_it_is_and_always_has_a_way_out() {
+    let ctl_of = |r: &Rig| r.w.ctl.clone();
+    let text_of = |r: &mut Rig| {
+        let ctl = ctl_of(r);
+        words(&r.w.drawn(2, vec![], |ui, _, s| {
+            let ctx = ui.ctx().clone();
+            uncertain_panel(ui, &ctx, &ctl, s, G);
+        }))
+    };
+    let lose = |r: &mut Rig, kind: Wrote, done: bool| {
+        let write = r.write(kind);
+        let op = r.w.confirm(write).op;
+        r.world.lock().unwrap().fault = Some(Fault::Drop { done });
+        r.w.send();
+        r.w.settle();
+        r.later();
+        op
+    };
+    let decide = |r: &mut Rig, op: &str, choice: Choice| {
+        let (ctx, ctl) = (r.w.ctx.clone(), r.w.ctl.clone());
+        r.w.state.decide(&ctx, &ctl, op, choice);
+        r.w.settle();
+    };
+    let decisions = [tr("None of these"), tr("This is it"), tr("Drop it"), tr("Do it again…"), tr("I looked: it is there"), tr("I looked: it is not there")];
+    // A post: there, opened to everyone by someone else since: shown, for the person.
+    let mut r = rig();
+    let op = lose(&mut r, Wrote::CreatePost, true);
+    let text = text_of(&mut r);
+    assert!(text.contains(tr("Check VRChat")) && text.contains("may or may not have been published"), "{text}");
+    assert!(decisions.iter().all(|d| !text.contains(d)), "nothing to decide before a check: {text}");
+    r.world.lock().unwrap().posts[0]["roleIds"] = json!([]);
+    r.w.check(&op);
+    let text = text_of(&mut r);
+    for want in [tr("This is it"), tr("None of these"), tr("Drop it"), tr("not exactly what was sent"), "Saturday", "…s_new1"] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    let made = match &r.w.state.observed[&op] {
+        Observation::Candidates(l) => l[0].id.clone(),
+        other => panic!("{other:?}"),
+    };
+    decide(&mut r, &op, Choice::Shows { made: Some(made) });
+    assert!(r.entry(&op).closed.is_some() && r.w.state.open_writes(G).is_empty());
+    // Two deletions lost: told apart by the post, its id, when and as whom.
+    let mut r = rig();
+    let Reply::Posts(page) = r.w.ask()(Request::Posts { group: G.into(), offset: 0 }) else { panic!() };
+    for post in &page.items {
+        r.w.confirm(Write::DeletePost { group: G.into(), post: post.clone() });
+        r.world.lock().unwrap().fault = Some(Fault::Drop { done: true });
+        r.w.send();
+        r.w.settle();
+    }
+    let mut o = page::Open::new(card(), &Drafts::default());
+    o.posts.items = page.items.clone();
+    r.w.state.open = Some(o);
+    let text = text_of(&mut r);
+    for p in &page.items {
+        assert!(text.contains(&p.title) && text.contains(&tail(&p.id)), "{}: {text}", p.id);
+    }
+    assert!(text.contains(&orbiters_i18n::tr!("as {name}", name = r.w.state.me_name)), "{text}");
+    r.w.state.open = None;
+    let text = text_of(&mut r);
+    assert!(page.items.iter().all(|p| text.contains(&tail(&p.id))), "from its id alone, with no page: {text}");
+    // A picture: by its file's id.
+    let mut r = rig();
+    let op = lose(&mut r, Wrote::UploadGallery, true);
+    r.w.check(&op);
+    let text = text_of(&mut r);
+    assert!(text.contains(tr("A picture")) && text.contains("…le_up1") && text.contains(tr("exactly what was sent")), "{text}");
+    // VRChat refuses the reads, or there is no answer at all: the person still has a way out, for every kind.
+    for kind in Wrote::ALL {
+        let mut r = rig();
+        let op = lose(&mut r, kind, false);
+        r.world.lock().unwrap().refuses = true;
+        r.w.check(&op);
+        let text = text_of(&mut r);
+        for want in [tr("I looked: it is there"), tr("I looked: it is not there"), tr("Drop it")] {
+            assert!(text.contains(want), "{kind:?}: {text}");
+        }
+        decide(&mut r, &op, Choice::ShowsNot);
+        let text = text_of(&mut r);
+        assert!(text.contains(tr("Do it again…")) && text.contains(tr("Drop it")), "{kind:?}: {text}");
+        decide(&mut r, &op, Choice::Drop);
+        assert!(r.w.state.open_writes(G).is_empty() && !text_of(&mut r).contains(tr("Check VRChat")), "{kind:?}");
+        assert_eq!(r.entry(&op).state, Stands::Unknown, "{kind:?}: no one said it was or was not done");
+        assert_eq!(r.sent_writes(), 1);
+    }
+}
+
+/// verify3 Major 1: an answer lost, and a record that is not there, or cannot be read, is never "it was not done": it stays
+/// said, with a way out. Records that cannot be read are said, and stop what they may be of until set aside.
+#[test]
+fn a_missing_record_is_no_leave_to_send_again() {
     let mut r = rig();
     let write = r.write(Wrote::CreatePost);
-    let op = r.w.confirm(write).op;
-    r.world.lock().unwrap().fault = Some(Fault::Drop { done: true });
+    let op = r.w.confirm(write.clone()).op;
+    r.between.lose(r#"{"type":"groups""#);
     r.w.send();
+    let start = Instant::now();
+    while r.between.lost() == 0 && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The service ends; what it wrote of it is cut short; another comes up.
+    let book = r.service.ctl.groups_book_for_tests();
+    while book.active(&op) && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    r.between.hang_up();
+    assert!(r.w.until(|s| s.flow.is_none()));
+    book.let_go();
+    let path = book.dir().join(format!("{op}.json"));
+    let whole = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &whole[..60]).unwrap();
+    let after = service();
+    after.ctl.groups_keep_book_for_tests(book.dir());
+    let sent = after.ctl.test_vrchat_routed(route(r.world.clone()));
+    let (client, between) = linked_through(&after, Role::Window);
+    r.w.ctl = Arc::new(Remote(client));
+    let before = r.sent_writes();
+    let world = r.world.clone();
+    let w = std::mem::replace(&mut r.w, Window::new(Arc::new(crate::backend::Local::new(Controller::new(Settings::default()))), after.ctl.view()));
+    let mut r = Rig { service: after, world, sent, between, w };
+    r.w.state.ledger_due = true;
+    r.w.state.ledger_at = 0.0;
     r.w.settle();
+    assert_eq!((before, r.w.state.lost.len(), r.w.state.unreadable), (1, 1, 1), "still said, and the record with it");
     let ctl = r.w.ctl.clone();
     let panel = |ui: &mut Ui, _: &mut Cx, s: &mut State| {
         let ctx = ui.ctx().clone();
         uncertain_panel(ui, &ctx, &ctl, s, G);
     };
     let text = words(&r.w.drawn(2, vec![], panel));
-    assert!(text.contains(tr("Check VRChat")) && text.contains("may or may not have been published"), "{text}");
-    assert!(!text.contains(tr("None of these")) && !text.contains(tr("This is it")));
-    // It is there, opened to everyone by someone else since: shown, for the person.
-    r.world.lock().unwrap().posts[0]["roleIds"] = json!([]);
-    r.w.check(&op);
-    let text = words(&r.w.drawn(2, vec![], panel));
-    assert!(text.contains(tr("This is it")) && text.contains(tr("None of these")) && text.contains(tr("not exactly what was sent")), "{text}");
-    let made = match &r.w.state.observed[&op] {
-        Observation::Candidates(l) => l[0].id.clone(),
-        other => panic!("{other:?}"),
-    };
-    r.w.state.say(&r.w.ctx.clone(), &r.w.ctl.clone(), &op, Said::Done, Some(made));
+    for want in [tr("Drop it"), tr("I looked: go on"), tr("Its answer was lost, and its record here cannot be read: look on vrchat.com before doing it again.")] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    r.w.prepare(write.clone());
+    assert!(r.w.until(|s| s.flow.is_none()));
+    assert_eq!(r.w.state.said, Some(failure_text(Failure::RecordUnreadable)));
+    assert_eq!(r.sent_writes(), 0, "the next program sends nothing by itself");
+    // The person looked, and goes on: kept aside, warned of.
+    let (ctx, scope) = (r.w.ctx.clone(), Scope::of(&r.w.snap));
+    r.w.state.jobs.ask(&ctx, &ctl, &scope, Kind::SetAside, Request::SetAside);
     r.w.settle();
-    assert_eq!(r.w.stands(&op), Some(Stands::Done));
-    assert!(r.w.state.open_writes(G).is_empty());
+    assert_eq!(r.w.state.unreadable, 0);
+    assert_eq!(r.w.confirm(write).warning, Some(Warning::RecordUnreadable));
+    assert!(path.with_extension("aside").exists());
+}
+
+/// verify3 Major 2: another Orbiters keeps the record: the window says so, and nothing is sent from here.
+#[test]
+fn another_program_on_the_record_is_said() {
+    let mut r = rig();
+    let write = r.write(Wrote::CreatePost);
+    let owner = crate::controller::groups::Ledger::at(r.service.ctl.groups_book_for_tests().dir());
+    r.service.ctl.groups_book_for_tests().let_go();
+    assert!(owner.owned());
+    r.w.state.ledger_due = true;
+    r.w.state.ledger_at = 0.0;
+    assert!(r.w.until(|s| s.elsewhere));
+    r.w.prepare(write);
+    assert!(r.w.until(|s| s.flow.is_none()));
+    assert_eq!(r.w.state.said, Some(failure_text(Failure::OtherOwner)));
+    assert_eq!(r.sent_writes(), 0);
+    owner.let_go();
+    r.w.state.ledger_at = 0.0;
+    assert!(r.w.until(|s| !s.elsewhere), "and when it is gone, so is that");
+}
+
+/// "Do it again" is a new operation: sealed anew, warned of, shown for the person's yes; nothing goes by the press itself.
+#[test]
+fn again_is_a_new_confirmed_operation() {
+    for kind in Wrote::ALL {
+        let mut r = rig();
+        let write = r.write(kind);
+        let op = r.w.confirm(write).op;
+        r.world.lock().unwrap().fault = Some(Fault::Drop { done: false });
+        r.w.send();
+        r.w.settle();
+        r.later();
+        r.w.check(&op);
+        let (ctx, ctl) = (r.w.ctx.clone(), r.w.ctl.clone());
+        if !matches!(r.w.state.observed.get(&op), Some(Observation::ShowsNot)) {
+            r.w.state.decide(&ctx, &ctl, &op, Choice::ShowsNot);
+            r.w.settle();
+        }
+        r.w.state.decide(&ctx, &ctl, &op, Choice::Again);
+        r.w.settle();
+        assert_eq!(r.sent_writes(), 1, "{kind:?}: nothing goes by the press");
+        assert_eq!(r.entry(&op).closed, Some(crate::controller::groups::Closing::Again));
+        if kind.tag().is_some() {
+            assert!(r.w.state.flow.is_none() && r.w.state.said.is_some(), "{kind:?}: its bytes went with it: done again where it was made");
+            continue;
+        }
+        assert!(r.w.until(|s| matches!(s.flow, Some(Flow::Confirming { .. }))), "{kind:?}");
+        let sealed = r.w.shown();
+        assert_eq!((sealed.op == op, sealed.warning), (false, Some(Warning::SameBefore)), "{kind:?}");
+        r.w.send();
+        r.w.settle();
+        assert_eq!((r.sent_writes(), r.w.stands(&sealed.op)), (2, Some(Stands::Done)), "{kind:?}");
+        // After a restart of the window, from the record alone where its ids say it all.
+        let next = r.another();
+        let known = next.state.again(&r.entry(&op)).is_some();
+        assert_eq!(known, matches!(kind, Wrote::AssignRole | Wrote::UnassignRole | Wrote::DeleteRole | Wrote::ApplyBanner | Wrote::ApplyIcon), "{kind:?}");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------------------ the matrix
@@ -673,8 +983,12 @@ struct Cell {
     state: Stands,
     sent: usize,
     identical: String,
+    /// The very same, sealed by another window before this one went, sent by it after.
+    second: String,
     check: String,
     decoys: String,
+    /// What the person can do of it in the end.
+    way_out: String,
 }
 
 /// One write, one failure point, done or not done at VRChat where the point allows either: the window's real state machine
@@ -691,6 +1005,10 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
         Write::Upload { tag, group, art, .. } => Write::Upload { tag: *tag, group: group.clone(), staged: stage_upload(bytes.as_ref().unwrap()).unwrap(), art: *art },
         other => other.clone(),
     };
+    // Another window has the very same ready, unwarned, before this one goes.
+    let mut other = r.another();
+    let twin = other.confirm(again(&write));
+    assert_eq!(twin.warning, None);
     let sealed = r.w.confirm(write.clone());
     let op = sealed.op.clone();
     r.w.settle();
@@ -771,12 +1089,7 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
         Point::AppRestart => {
             assert!(hold.until_reached());
             // Both programs end here: what the disk holds now is all there is.
-            let from = r.service.ctl.groups_book_for_tests().dir();
-            let to = from.with_extension("after");
-            std::fs::create_dir_all(&to).unwrap();
-            for f in std::fs::read_dir(&from).unwrap().flatten() {
-                std::fs::copy(f.path(), to.join(f.file_name())).unwrap();
-            }
+            let to = copied(&r.service.ctl.groups_book_for_tests().dir());
             hold.let_go();
             let after = service();
             after.ctl.groups_keep_book_for_tests(to);
@@ -816,6 +1129,29 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
         w.tags = vec!["system_supporter".into()];
     }
     r.service.ctl.groups_forget_waits_for_tests();
+    // The other window's Send on what it had ready.
+    let second = if restarted {
+        "gone with its service".to_string()
+    } else {
+        other.snap = r.service.ctl.view();
+        other.frame();
+        match &other.state.flow {
+            Some(Flow::Confirming { .. }) => {
+                let before = r.sent_writes();
+                other.send();
+                assert!(other.until(|s| s.flow.is_none()));
+                let went = r.sent_writes() - before;
+                match &other.state.said {
+                    None => format!("went ({went})"),
+                    Some(s) if *s == failure_text(Failure::Since) => format!("refused: look again ({went})"),
+                    Some(s) if *s == failure_text(Failure::MaySent) => format!("refused: check first ({went})"),
+                    Some(_) => format!("refused: it is so already, or changed ({went})"),
+                }
+            }
+            _ => "ended with its sign-in".to_string(),
+        }
+    };
+    let sent = sent + if second == "went (1)" { 1 } else { 0 };
     // The same again, by the window.
     r.w.prepare(again(&write));
     assert!(r.w.until(|s| !matches!(s.flow, Some(Flow::Preparing { .. }))));
@@ -835,8 +1171,8 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
     let mut decoyed = String::from("—");
     if state == Stands::Unknown {
         r.later();
-        let md5 = r.entry(&op).evidence.md5;
-        let list = decoys(kind, md5);
+        let e = r.entry(&op).evidence;
+        let list = decoys(kind, (e.md5, e.size));
         let n = list.len();
         let mut fooled = Vec::new();
         for (name, decoy) in list {
@@ -852,26 +1188,54 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
             }
             decoy(&mut r.world.lock().unwrap());
             r.w.check(&op);
-            let after = r.entry(&op).state;
-            if after != Stands::Unknown {
-                fooled.push(format!("{name} → {after:?}"));
-                r.service.ctl.groups_book_for_tests().end(&op, Stands::Unknown, None, None);
+            let after = r.entry(&op);
+            if !after.open() || after.answer == Some(Looked::Shows) {
+                fooled.push(format!("{name} → {:?} {:?}", after.state, after.closed));
             }
             let mut w = r.world.lock().unwrap();
             (w.roles, w.members, w.posts, w.files, w.banner, w.icon) = kept;
             w.instead.clear();
         }
-        decoyed = if fooled.is_empty() { format!("{n} of {n} settle nothing") } else { format!("FOOLED: {}", fooled.join("; ")) };
+        decoyed = if fooled.is_empty() { format!("{n} of {n} close nothing") } else { format!("FOOLED: {}", fooled.join("; ")) };
     }
     r.w.check(&op);
-    let check = match (r.entry(&op).state, r.w.state.observed.get(&op)) {
-        (Stands::Done, _) => "done".to_string(),
-        (Stands::Refused, _) => "not done".to_string(),
-        (_, Some(Observation::Candidates(l))) => format!("for the person ({} shown)", l.len()),
-        (_, Some(o)) => format!("{o:?}"),
-        (s, None) => format!("{s:?}"),
+    let check = match (r.entry(&op), r.w.state.observed.get(&op)) {
+        (e, _) if e.state == Stands::Done => "answered: done".to_string(),
+        (e, _) if e.state == Stands::Refused => "answered: refused, or not gone".to_string(),
+        (e, _) if e.closed.is_some() => "VRChat shows it".to_string(),
+        (_, Some(Observation::ShowsNot)) => "VRChat does not show it".to_string(),
+        (_, Some(Observation::Candidates(l))) => format!("cannot tell ({} shown)", l.len()),
+        (_, Some(Observation::CannotTell(u))) => format!("cannot tell ({u:?})"),
+        (e, o) => format!("{:?} {o:?}", e.state),
     };
-    Cell { state, sent, identical, check, decoys: decoyed }
+    // The way out, taken: what VRChat does not show is asked for again, as a new one; what it cannot tell is dropped.
+    let (ctx, ctl) = (r.w.ctx.clone(), r.w.ctl.clone());
+    let before = r.sent_writes();
+    let way_out = match r.w.state.observed.get(&op) {
+        _ if !r.entry(&op).open() => "—".to_string(),
+        Some(Observation::ShowsNot) => {
+            r.w.state.decide(&ctx, &ctl, &op, Choice::Again);
+            r.w.settle();
+            r.w.prepare(again(&write));
+            assert!(r.w.until(|s| !matches!(s.flow, Some(Flow::Preparing { .. }))));
+            match &r.w.state.flow {
+                Some(Flow::Confirming { sealed, .. }) if sealed.op != op && sealed.confirm => format!("again, confirmed ({:?})", sealed.warning),
+                _ => format!("again: {:?}", r.w.state.said),
+            }
+        }
+        Some(_) => {
+            r.w.state.decide(&ctx, &ctl, &op, Choice::Drop);
+            r.w.settle();
+            "dropped".to_string()
+        }
+        None => "none".to_string(),
+    };
+    r.w.state.end_flow();
+    r.w.settle();
+    assert!(!r.entry(&op).open(), "{kind:?}, {point:?}: it can be left");
+    assert!(r.entry(&op).state == state, "{kind:?}, {point:?}: what became of it is said by no one");
+    assert_eq!(r.sent_writes(), before, "{kind:?}, {point:?}: nothing goes by a decision");
+    Cell { state, sent, identical, second, check, decoys: decoyed, way_out }
 }
 
 /// Every write and every failure point, generated: the ledger's final state, one request at most, nothing by itself, the
@@ -907,7 +1271,8 @@ fn the_matrix_of_every_write_and_every_failure() {
                             Point::ServiceReplyLost | Point::PageClosed | Point::ScopeChange | Point::WindowClosed => Stands::Done,
                             _ => Stands::Unknown,
                         };
-                        let want_sent = usize::from(point != Point::BeforeDispatch);
+                        // Before the dispatch, it is the other window's that went.
+                        let want_sent = 1;
                         let mut wrong = Vec::new();
                         if c.state != want_state {
                             wrong.push(format!("state {:?}, wanted {want_state:?}", c.state));
@@ -915,25 +1280,46 @@ fn the_matrix_of_every_write_and_every_failure() {
                         if c.sent != want_sent {
                             wrong.push(format!("{} requests, wanted {want_sent}", c.sent));
                         }
+                        // What the other window had ready: it went only where this one never did.
+                        let second_ok = match (point, want_state) {
+                            (Point::AppRestart, _) => c.second == "gone with its service",
+                            (Point::ScopeChange, _) => c.second == "ended with its sign-in",
+                            (_, Stands::Refused) => c.second == "went (1)",
+                            _ => c.second.starts_with("refused") && c.second.ends_with("(0)"),
+                        };
+                        if !second_ok {
+                            wrong.push(format!("the other window: {}", c.second));
+                        }
                         let same = match want_state {
                             Stands::Unknown => c.identical == "refused: check first" || (done && c.identical == "refused: it is so already, or changed"),
                             Stands::Done if kind.makes() => c.identical == "confirmed, warned: AlreadyDone",
                             Stands::Done => c.identical == "refused: it is so already, or changed",
-                            _ => c.identical == "confirmed",
+                            // The other window's went: so is it here.
+                            _ if kind.makes() => c.identical == "confirmed, warned: AlreadyDone",
+                            _ => c.identical == "refused: it is so already, or changed",
                         };
                         // An apply of the picture that is there already is harmless; it is sealed and confirmed like any.
-                        let reapply = kind.slot().is_some() && want_state == Stands::Done && c.identical == "confirmed";
+                        let reapply = kind.slot().is_some() && want_state != Stands::Unknown && c.identical == "confirmed";
                         if !same && !reapply {
                             wrong.push(format!("the same again: {}", c.identical));
                         }
                         let want_check = match (want_state, kind, done) {
-                            (Stands::Done, ..) => "done",
-                            (Stands::Refused, ..) => "not done",
-                            (_, Wrote::DeletePost, true) => "Inconclusive(NotSeen)",
-                            (_, _, true) => "done",
-                            (_, k, false) if k.makes() => "for the person (0 shown)",
-                            _ => "not done",
+                            (Stands::Done, ..) => "answered: done",
+                            (Stands::Refused, ..) => "answered: refused, or not gone",
+                            (_, Wrote::DeletePost, true) => "cannot tell (NotSeen)",
+                            (_, k, true) if k.makes() => "cannot tell (1 shown)",
+                            (_, k, false) if k.makes() => "cannot tell (0 shown)",
+                            (_, _, true) => "VRChat shows it",
+                            _ => "VRChat does not show it",
                         };
+                        let want_out = match want_check {
+                            "VRChat does not show it" => "again, confirmed (Some(SameBefore))",
+                            w if w.starts_with("cannot tell") => "dropped",
+                            _ => "—",
+                        };
+                        if c.way_out != want_out {
+                            wrong.push(format!("the way out: {}, wanted {want_out}", c.way_out));
+                        }
                         if c.check != want_check {
                             wrong.push(format!("check: {}, wanted {want_check}", c.check));
                         }
@@ -941,7 +1327,7 @@ fn the_matrix_of_every_write_and_every_failure() {
                             wrong.push(c.decoys.clone());
                         }
                         let by_vrchat = if point == Point::BeforeDispatch { "—" } else if done { "done" } else { "not done" };
-                        (format!("| {kind:?} | {point:?} | {by_vrchat} | {:?} | {} | {} | {} | {} |", c.state, c.sent, c.identical, c.check, c.decoys), wrong)
+                        (format!("| {kind:?} | {point:?} | {by_vrchat} | {:?} | {} | {} | {} | {} | {} | {} |", c.state, c.sent, c.second, c.identical, c.check, c.decoys, c.way_out), wrong)
                     }
                 };
                 rows.lock().unwrap().push((i, row, wrong));
@@ -951,8 +1337,8 @@ fn the_matrix_of_every_write_and_every_failure() {
     let mut rows = rows.into_inner().unwrap();
     rows.sort_by_key(|r| r.0);
     println!("MATRIX {} cells", rows.len());
-    println!("| Write | Failure point | VRChat did it | Ledger | Requests | The same again | Check, right evidence | Check, look-alikes |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("| Write | Failure point | VRChat did it | Ledger | Requests | The same, ready in another window | The same again | Check | Check, look-alikes | The person's way out |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
     for (_, row, wrong) in &rows {
         println!("{row}{}", if wrong.is_empty() { String::new() } else { format!(" **{}**", wrong.join("; ")) });
     }

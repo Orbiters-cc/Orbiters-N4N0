@@ -12,7 +12,7 @@ use egui::{pos2, vec2, Color32, ColorImage, Rect};
 use orbiters_core::groups::*;
 use orbiters_core::vrchat_api::User;
 
-pub(super) const NAMES: [&str; 39] = [
+pub(super) const NAMES: [&str; 40] = [
     "groups-home-several",
     "groups-home-one",
     "groups-home-none",
@@ -42,21 +42,24 @@ pub(super) const NAMES: [&str; 39] = [
     "groups-confirm-edit-role",
     "groups-confirm-delete-role",
     "groups-confirm-post",
-    "groups-confirm-edit-post",
     "groups-confirm-delete-post",
     "groups-confirm-upload",
     "groups-confirm-apply",
     "groups-outcome-done",
     "groups-outcome-refused",
     "groups-outcome-unknown",
+    "groups-outcome-not-shown",
+    "groups-outcome-unreadable",
     "groups-home-several-fr",
     "groups-studio-anchored-ja",
     "groups-confirm-post-ja",
 ];
 /// Also in French or Japanese (the name and a language).
-const TRANSLATED: [(&str, &str, &str); 6] = [
+const TRANSLATED: [(&str, &str, &str); 8] = [
     ("groups-look-fr", "groups-look", "fr"),
     ("groups-outcome-unknown-fr", "groups-outcome-unknown", "fr"),
+    ("groups-outcome-not-shown-ja", "groups-outcome-not-shown", "ja"),
+    ("groups-posts-fr", "groups-posts", "fr"),
     ("groups-roles-edit-fr", "groups-roles-edit", "fr"),
     ("groups-members-roles-ja", "groups-members-roles", "ja"),
     ("groups-posts-compose-ja", "groups-posts-compose", "ja"),
@@ -226,7 +229,7 @@ fn page(owner: bool) -> GroupPage {
             online_count: c.online_count,
             owner_id: if owner { ME.into() } else { "usr_00000000-0000-4000-8000-00000000e0ff".into() },
             privacy: "default".into(),
-            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into(), whole: true, group_id: None }),
+            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into(), membership_id: "gmem_me".into(), rights_known: true, roles_known: true, managed_known: true, ..Default::default() }),
             roles: Some(roles()),
             ..Default::default()
         },
@@ -245,7 +248,7 @@ fn members() -> Vec<Member> {
             display_name: Some(n.to_string()),
             icon_url: format!("https://api.vrchat.cloud/api/1/file/file_member{i}/1/file"),
             role_ids: s(r),
-            joined_at: None,
+            joined_at: Some(format!("2025-0{}-12T18:00:00Z", i + 1)),
             roles_known: true,
             group_id: None,
         })
@@ -266,8 +269,8 @@ fn prepared(write: Write, role: Option<Role>) -> Sealed {
         _ => None,
     };
     let art = match &write {
-        Write::ApplyArt { file, .. } => Some(crate::controller::groups::SealedArt { file: Some(file.clone()), sha256: String::new(), size: 2_811_204 }),
-        Write::Upload { staged, .. } => Some(crate::controller::groups::SealedArt { file: None, sha256: String::new(), size: staged.size }),
+        Write::ApplyArt { file, .. } => Some(crate::controller::groups::SealedArt { file: Some(file.clone()), sha256: String::new(), size: 2_811_204, version: Some(1) }),
+        Write::Upload { staged, .. } => Some(crate::controller::groups::SealedArt { file: None, sha256: String::new(), size: staged.size, version: None }),
         _ => None,
     };
     let labels = roles().into_iter().map(|r| (r.id, r.name)).chain(catalogue().into_iter().map(|p| (p.name, p.display_name))).collect();
@@ -278,20 +281,27 @@ fn prepared(write: Write, role: Option<Role>) -> Sealed {
 /// A write of the ledger, as the service keeps it.
 fn entry(scope: &Scope, op: &str, kind: Kind, state: Stands, made: Option<&str>) -> Option<Entry> {
     Some(Entry {
+        v: 0,
         op: op.into(),
         key: Key::of(scope)?,
         group: G1.into(),
         kind,
-        target: Aim::default(),
+        target: match kind {
+            Kind::AssignRole => Aim { user: Some(members()[2].user_id.clone()), role: Some("grol_artist".into()), ..Default::default() },
+            _ => Aim::default(),
+        },
         payload: String::new(),
+        same: String::new(),
         evidence: Evidence::default(),
         state,
         by: None,
-        said: None,
         made: made.map(str::to_string),
-        checked: false,
+        checked: true,
+        answer: None,
+        looked: false,
+        closed: None,
         prepared_at: 0,
-        dispatched_at: Some(0),
+        dispatched_at: Some(1_795_286_400_000),
         ended_at: None,
     })
 }
@@ -364,7 +374,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     open.role_editor = Some(crate::pages::groups::RoleEditor::new(Some(r), draft));
                 }
                 "groups-posts-compose" => {
-                    open.composer = Some(crate::pages::groups::Composer::new(None, PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
+                    open.composer = Some(crate::pages::groups::Composer::new(PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
                 }
                 "groups-look-uploaded" => {}
                 "groups-outcome-refused" => {}
@@ -385,23 +395,35 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     Some(prepared(Write::EditRole { group: G1.into(), baseline: r[3].clone(), edit }, Some(r[3].clone())))
                 }
                 "groups-confirm-delete-role" => Some(prepared(Write::DeleteRole { group: G1.into(), role: "grol_events".into() }, Some(r[4].clone()))),
-                "groups-confirm-post" => Some(prepared(Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week. We start at 20:00 in the gallery world.".into(), role_ids: s(&["grol_artist", "grol_events"]), send_notification: true, ..Default::default() } }, None)),
-                "groups-confirm-edit-post" => {
-                    let p = posts()[1].clone();
-                    let edit = PostDraft { title: p.title.clone(), text: "Artists of the month now get their own role, colour and a spot on the banner.".into(), visibility: p.visibility, ..Default::default() };
-                    Some(prepared(Write::EditPost { group: G1.into(), baseline: p, edit }, None))
-                }
+                "groups-confirm-post" => Some(prepared(Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week. We start at 20:00 in the gallery world.".into(), role_ids: s(&["grol_artist", "grol_events"]), send_notification: true, ..Default::default() }, of: String::new() }, None)),
                 "groups-confirm-delete-post" => Some(prepared(Write::DeletePost { group: G1.into(), post: posts()[2].clone() }, None)),
                 "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, group: G1.into(), staged: crate::controller::groups::Staged { name: "00000000-0000-4000-8000-000000000000.png".into(), size: 2_811_204, sha256: String::new() }, art: None }, None)),
                 "groups-confirm-apply" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Banner, file: "file_up".into() }, None)),
                 _ => None,
             };
+            stage::named(state, "Desktop Tester");
             // The page-level states that are the window's, not the page's (uncertain writes, refusals, uploads kept).
             match n {
                 "groups-outcome-unknown" => {
                     if let Some(e) = entry(&Scope::of(snapshot), "op-unknown", Kind::CreatePost, Stands::Unknown, None) {
-                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), at: Some("2026-11-21T19:00:00Z".into()), same: false }];
+                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), url: String::new(), at: Some("2026-11-21T19:00:00Z".into()), same: false }];
                         stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
+                    }
+                }
+                "groups-outcome-not-shown" => {
+                    if let Some(e) = entry(&Scope::of(snapshot), "op-role", Kind::AssignRole, Stands::Unknown, None) {
+                        stage::entry(state, e, Some(crate::controller::groups::Observation::ShowsNot));
+                    }
+                    if let Some(e) = entry(&Scope::of(snapshot), "op-up", Kind::UploadGallery, Stands::Unknown, None) {
+                        stage::picture(ctx, state, "https://api.vrchat.cloud/api/1/file/file_up/1/file", color_image(&landscape(480, 270, 1)));
+                        let list = vec![crate::controller::groups::Candidate { id: "file_00000000-0000-4000-8000-0000000a11ce".into(), label: String::new(), url: "https://api.vrchat.cloud/api/1/file/file_up/1/file".into(), at: Some("2026-11-21T19:00:00Z".into()), same: true }];
+                        stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
+                    }
+                }
+                "groups-outcome-unreadable" => {
+                    stage::unreadable(state, 1);
+                    if let Some(e) = entry(&Scope::of(snapshot), "op-post", Kind::DeletePost, Stands::Unknown, None) {
+                        stage::entry(state, e, Some(crate::controller::groups::Observation::CannotTell(crate::controller::groups::Unclear::NotSeen)));
                     }
                 }
                 "groups-outcome-refused" => state.said = Some(crate::pages::groups::failure_text(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),

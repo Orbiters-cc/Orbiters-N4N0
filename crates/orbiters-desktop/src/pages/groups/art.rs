@@ -319,6 +319,22 @@ pub fn load_source(path: &Path) -> anyhow::Result<image::RgbaImage> {
     decode_source(&bytes)
 }
 
+/// The choice asked for last, in the whole window: an older one still waiting is not read at all (M5).
+static CHOICE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// One file is read and decoded at a time, whichever studio asked for it.
+static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A number for a choice about to be opened ([`open_choice`]).
+pub fn next_choice() -> u64 {
+    CHOICE.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
+}
+
+/// [`load_source`] for the choice `n`, one at a time; nothing when another was made while it waited.
+pub fn open_choice(n: u64, path: &Path) -> Option<anyhow::Result<image::RgbaImage>> {
+    let _one = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+    (CHOICE.load(std::sync::atomic::Ordering::Acquire) == n).then(|| load_source(path))
+}
+
 pub fn decode_source(bytes: &[u8]) -> anyhow::Result<image::RgbaImage> {
     decode_bounded(bytes, SOURCE_PIXELS)
 }
@@ -426,15 +442,30 @@ pub fn store_saved(account: &str, group: &str, saved: &Saved) {
     }
 }
 
-/// The new posts the person is writing, one file per account (the environment and Orbiters account too) and group: their
-/// own words, who they are for and the notification, nothing read from VRChat but the ids of the roles they chose. An
-/// edit of an existing post is never here (verify2 B-C).
+/// The new posts the person is writing, a file for each, per account (the environment and Orbiters account too): their own
+/// words, who they are for and the notification, nothing read from VRChat but the ids of the roles they chose (verify2
+/// B-C). Each has an id of its own, so that two windows writing in one group keep both (J9), and so that only the very one
+/// that was posted is cleared (verify3 Major 6).
 #[derive(Default)]
 pub struct Drafts {
-    posts: Vec<(String, PostDraft)>,
+    posts: Vec<Kept>,
     /// The last write failed: what is being written is in memory only.
     pub failed: bool,
 }
+
+/// A new post being written, as kept.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Kept {
+    pub id: String,
+    pub group: String,
+    pub draft: PostDraft,
+    /// Milliseconds since 1970 of its last change.
+    #[serde(default)]
+    pub at: i64,
+}
+
+/// Kept for one group at most: past this, the oldest goes.
+const DRAFTS_MAX: usize = 8;
 
 fn drafts_root() -> PathBuf {
     let root = orbiters_core::paths::local_data_root().join("group-drafts");
@@ -460,37 +491,55 @@ impl Drafts {
                 let _ = std::fs::remove_file(f.path());
             }
         }
-        let mut posts = Vec::new();
+        let mut posts: Vec<Kept> = Vec::new();
         if let Some(Ok(files)) = drafts_dir(scope).map(std::fs::read_dir) {
             for path in files.flatten().map(|f| f.path()) {
-                let Some(group) = path.file_stem().and_then(|s| s.to_str()).filter(|s| orbiters_core::groups::is_group_id(s)).map(str::to_string) else { continue };
-                if let Some(d) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<PostDraft>(&b).ok()) {
-                    posts.push((group, PostDraft { image_id: None, ..d }));
-                }
+                let kept = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Kept>(&b).ok());
+                let named = |k: &Kept| path.file_stem().and_then(|s| s.to_str()) == Some(k.id.as_str()) && orbiters_core::groups::is_group_id(&k.group);
+                posts.extend(kept.filter(named));
             }
         }
+        posts.sort_by_key(|k| -k.at);
         Self { posts, failed: false }
     }
-    pub fn composer(&self, group: &str) -> Option<&PostDraft> {
-        self.posts.iter().find(|(g, _)| g == group).map(|(_, d)| d)
+    /// The newest one being written in `group`.
+    pub fn newest(&self, group: &str) -> Option<&Kept> {
+        self.posts.iter().find(|k| k.group == group)
     }
-    /// The new post being written in `group`, or none any more. One that could not be written is tried again at the next
-    /// change or frame.
-    pub fn set(&mut self, scope: &Scope, group: &str, draft: Option<PostDraft>) {
-        let empty = |d: &PostDraft| d.title.trim().is_empty() && d.text.trim().is_empty();
-        let draft = draft.filter(|d| !empty(d)).map(|d| PostDraft { image_id: None, ..d });
-        if self.composer(group) == draft.as_ref() {
+    fn file(scope: &Scope, id: &str) -> Option<PathBuf> {
+        let plain = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        drafts_dir(scope).filter(|_| plain).map(|d| d.join(format!("{id}.json")))
+    }
+    /// The new post `id` being written in `group`, kept as it is now. One that could not be written is tried again at the
+    /// next change or frame.
+    pub fn keep(&mut self, scope: &Scope, group: &str, id: &str, draft: &PostDraft) {
+        if draft.title.trim().is_empty() && draft.text.trim().is_empty() {
+            return self.drop(scope, id);
+        }
+        if self.posts.iter().any(|k| k.id == id && k.draft == *draft) || !orbiters_core::groups::is_group_id(group) {
             return;
         }
-        let Some(file) = drafts_dir(scope).filter(|_| orbiters_core::groups::is_group_id(group)).map(|d| d.join(format!("{group}.json"))) else { return };
-        let written = match &draft {
-            Some(d) => file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && serde_json::to_vec(d).is_ok_and(|b| orbiters_core::write_atomic_private(&file, &b).is_ok()),
-            None => std::fs::remove_file(&file).is_ok() || !file.exists(),
-        };
+        let Some(file) = Self::file(scope, id) else { return };
+        let at = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        let kept = Kept { id: id.into(), group: group.into(), draft: draft.clone(), at };
+        let written = file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && serde_json::to_vec(&kept).is_ok_and(|b| orbiters_core::write_atomic_private(&file, &b).is_ok());
         self.failed = !written;
         if written {
-            self.posts.retain(|(g, _)| g != group);
-            self.posts.extend(draft.map(|d| (group.to_string(), d)));
+            self.posts.retain(|k| k.id != id);
+            self.posts.insert(0, kept);
+            let over: Vec<String> = self.posts.iter().filter(|k| k.group == group).skip(DRAFTS_MAX).map(|k| k.id.clone()).collect();
+            over.iter().for_each(|id| self.drop(scope, id));
+        }
+    }
+    /// Posted, or cancelled.
+    pub fn drop(&mut self, scope: &Scope, id: &str) {
+        if !self.posts.iter().any(|k| k.id == id) {
+            return;
+        }
+        let gone = Self::file(scope, id).is_some_and(|f| std::fs::remove_file(&f).is_ok() || !f.exists());
+        self.failed = !gone;
+        if gone {
+            self.posts.retain(|k| k.id != id);
         }
     }
 }

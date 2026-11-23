@@ -107,13 +107,47 @@ pub struct MyMember {
     pub permissions: Vec<String>,
     /// `member`, `requested`, `invited`, `banned`…; only `member` may assign itself a role.
     pub status: String,
-    /// Everything the rules decide by was in VRChat's answer, whole: the user id, both role arrays, the rights (none
-    /// dropped for its length or form) and the status. A membership read in part authorises nothing (verify2 B-D).
+    /// The membership itself (`gmem_…`) and when it began: leaving and joining again is another one.
     #[serde(default)]
-    pub whole: bool,
+    pub membership_id: String,
+    #[serde(default)]
+    pub joined_at: Option<String>,
+    /// What was in VRChat's answer, whole: the rights (none dropped for its length or form), the roles given by hand
+    /// (`roleIds`), the managed ones (`mRoleIds`). Each action asks for what it needs, and no more (verify3, deviation 9).
+    #[serde(default)]
+    pub rights_known: bool,
+    #[serde(default)]
+    pub roles_known: bool,
+    #[serde(default)]
+    pub managed_known: bool,
     /// The group the record says it is of, when it says.
     #[serde(default)]
     pub group_id: Option<String>,
+}
+
+impl MyMember {
+    /// The membership this is, when the record says which.
+    pub fn membership(&self) -> Option<Membership> {
+        Membership::of(&self.membership_id, &self.joined_at)
+    }
+}
+
+/// One membership: a person who leaves and joins again has another (verify3 Blocker 1). What is decided for one is not
+/// done to the other.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Membership {
+    pub id: String,
+    pub joined_at: Option<String>,
+}
+
+impl Membership {
+    fn of(id: &str, joined_at: &Option<String>) -> Option<Self> {
+        (!id.is_empty() && id.len() <= 64).then(|| Self { id: id.into(), joined_at: joined_at.clone() })
+    }
+    /// The same membership, as one comparable value (for the record: no id kept).
+    pub fn digest(&self) -> String {
+        digest(&["membership", &self.id, self.joined_at.as_deref().unwrap_or("-")])
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,8 +204,9 @@ pub struct Role {
     pub requires_two_factor: bool,
     pub requires_purchase: bool,
     pub updated_at: Option<String>,
-    /// Every field the rules decide by was in VRChat's answer (its rights, rank and the default/management/purchase
-    /// flags). A role read without them authorises nothing and counts as privileged (verify-r22 Blocker 4).
+    /// What the rules decide by was in VRChat's answer: its rights, its rank, and whether it is Everyone's or a bought one.
+    /// A role read without them authorises nothing and counts as privileged (verify-r22 Blocker 4). A management flag left
+    /// out reads as on (it is then confirmed, always), a "members can take it" left out as off: the strict side of each.
     #[serde(default)]
     pub known: bool,
     /// Its words and every flag were there too: only such a role is compared with what was asked (an edit, a check).
@@ -230,7 +265,11 @@ impl Member {
     /// The record of exactly this person in exactly this group, with its role arrays whole: what a role write is decided
     /// and checked by. Anything else says nothing about them (verify2 B-B, B-D).
     pub fn is_of(&self, group: &str, user: &str) -> bool {
-        self.roles_known && self.user_id == user && self.group_id.as_deref() == Some(group)
+        self.roles_known && self.user_id == user && self.group_id.as_deref() == Some(group) && self.membership().is_some()
+    }
+    /// The membership this is, when the record says which.
+    pub fn membership(&self) -> Option<Membership> {
+        Membership::of(&self.membership_id, &self.joined_at)
     }
 }
 
@@ -263,8 +302,8 @@ pub struct Post {
     /// When it was made, only when VRChat's text is a real RFC 3339 time (Minor 1).
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    /// Its audience was read whole (every role id kept, none over the limit): only then may it be edited or deleted
-    /// from here (Blocker 3).
+    /// Its words were there (as words) and its audience was read whole (every role id kept, none over the limit): only
+    /// then may it be deleted from here (Blocker 3, verify3 Major 5).
     #[serde(default)]
     pub complete: bool,
 }
@@ -275,7 +314,7 @@ pub fn time(s: &str) -> Option<String> {
     (s.len() <= 40 && time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).is_ok()).then(|| s.to_string())
 }
 
-/// The post's audience and content as one comparable value: what an edit or a deletion was made against.
+/// The post's audience and content as one comparable value: what a deletion was made against.
 pub fn same_post(a: &Post, b: &Post) -> bool {
     let mut ra = a.role_ids.clone();
     let mut rb = b.role_ids.clone();
@@ -295,21 +334,25 @@ pub fn digest(parts: &[&str]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn joined(list: &[String]) -> String {
+/// A set, in one order and once each: what goes over the wire, what is sealed and what is compared are the same bytes.
+pub fn in_order(list: &[String]) -> Vec<String> {
     let mut l = list.to_vec();
     l.sort();
-    l.join("\u{1f}")
+    l.dedup();
+    l
 }
 
-/// A part of a post, for what an edit changes and what a check compares.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PostField {
-    Title,
-    Text,
-    Visibility,
-    Roles,
-    Image,
+fn joined(list: &[String]) -> String {
+    in_order(list).join("\u{1f}")
+}
+
+/// Words as a person sees them, for telling "the same again" from something else: one Unicode form (NFKC), nothing
+/// invisible, every run of whitespace one space. Never sent or shown.
+pub fn canonical(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let invisible = |c: char| bidi(c) || matches!(c, '\u{00AD}' | '\u{034F}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}') || (c.is_control() && !c.is_whitespace());
+    let plain: String = text.nfkc().filter(|c| !invisible(*c)).collect();
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The parts of a post someone else changed, to say them (never what they hold).
@@ -334,39 +377,19 @@ pub struct RoleParts {
     pub standing: bool,
 }
 
-impl PostField {
-    pub const ALL: [PostField; 5] = [PostField::Title, PostField::Text, PostField::Visibility, PostField::Roles, PostField::Image];
-}
-
 impl Post {
-    fn part(&self, f: PostField) -> String {
-        match f {
-            PostField::Title => self.title.trim().to_string(),
-            PostField::Text => self.text.trim().to_string(),
-            PostField::Visibility => self.visibility.wire().to_string(),
-            PostField::Roles => joined(&self.role_ids),
-            PostField::Image => self.image_id.clone().unwrap_or_default(),
-        }
+    fn parts(&self) -> [String; 5] {
+        [self.title.trim().to_string(), self.text.trim().to_string(), self.visibility.wire().to_string(), joined(&self.role_ids), self.image_id.clone().unwrap_or_default()]
     }
-    /// What `fields` of this post hold, as one comparable value (no text kept).
-    pub fn digest_of(&self, fields: &[PostField]) -> String {
-        let parts: Vec<String> = PostField::ALL.iter().filter(|f| fields.contains(f)).flat_map(|f| [format!("{f:?}"), self.part(*f)]).collect();
-        digest(&parts.iter().map(String::as_str).collect::<Vec<_>>())
-    }
-    /// The post as it would be with `edit` made on it.
-    pub fn with(&self, edit: &PostDraft) -> Post {
-        let (role_ids, visibility) = (edit.audience(), edit.visibility);
-        Post { title: edit.title.trim().into(), text: edit.text.trim().into(), visibility, role_ids, image_id: edit.image_id.clone(), ..self.clone() }
+    /// Its words, audience and picture as one comparable value (no text kept).
+    pub fn content(&self) -> String {
+        let p = self.parts();
+        digest(&p.each_ref().map(String::as_str))
     }
     /// What is not the same in `now`, the same post read again.
     pub fn differs(&self, now: &Post) -> PostParts {
-        let d = |f| self.part(f) != now.part(f);
-        PostParts { title: d(PostField::Title), text: d(PostField::Text), visibility: d(PostField::Visibility), roles: d(PostField::Roles), image: d(PostField::Image) }
-    }
-    /// What `edit` changes of this post.
-    pub fn changed_by(&self, edit: &PostDraft) -> Vec<PostField> {
-        let after = self.with(edit);
-        PostField::ALL.into_iter().filter(|f| self.part(*f) != after.part(*f)).collect()
+        let (a, b) = (self.parts(), now.parts());
+        PostParts { title: a[0] != b[0], text: a[1] != b[1], visibility: a[2] != b[2], roles: a[3] != b[3], image: a[4] != b[4] }
     }
 }
 
@@ -422,6 +445,11 @@ impl Role {
 }
 
 impl RoleDraft {
+    /// What makes two new roles the same one again, whatever the spaces and the order of the rights.
+    pub fn canonical(&self) -> String {
+        let flag = |b: bool| if b { "1" } else { "0" }; // i18n: not shown (a record's words)
+        digest(&[&canonical(&self.name), &canonical(&self.description), &joined(&self.permissions), flag(self.self_assignable), flag(self.added_on_join), flag(self.requires_two_factor)])
+    }
     /// The new role's words, rights and flags as a role, to compare one VRChat made with it.
     pub fn as_role(&self) -> Role {
         Role {
@@ -553,6 +581,17 @@ impl RoleChange {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+    /// What makes two changes the same one again.
+    pub fn canonical(&self) -> String {
+        let flag = |b: Option<bool>| match b {
+            None => "-", // i18n: not shown (a record's words)
+            Some(true) => "1", // i18n: not shown (a record's words)
+            Some(false) => "0", // i18n: not shown (a record's words)
+        };
+        let words = |t: &Option<String>| t.as_deref().map_or_else(|| "-".to_string(), |t| format!("+{}", canonical(t))); // i18n: not shown (a record's words)
+        let rights = self.permissions.as_deref().map_or_else(|| "-".to_string(), |p| format!("+{}", joined(p))); // i18n: not shown (a record's words)
+        digest(&[&words(&self.name), &words(&self.description), &rights, flag(self.self_assignable), flag(self.added_on_join), flag(self.requires_two_factor)])
+    }
     /// The parts it changes.
     pub fn fields(&self) -> Vec<RoleField> {
         let on = [self.name.is_some(), self.description.is_some(), self.permissions.is_some(), self.self_assignable.is_some(), self.added_on_join.is_some(), self.requires_two_factor.is_some()];
@@ -575,25 +614,32 @@ impl RoleChange {
     }
 }
 
-/// A post as the person wrote it. The notification is off unless they turn it on (M7), and only creation can send one.
+/// A new post as the person wrote it. The notification is off unless they turn it on (M7). A post is created and deleted
+/// here, never edited: VRChat's edit carries the audience whole and takes no condition, so it can always undo another
+/// moderator's restriction (verify3 Blocker 4).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostDraft {
     pub title: String,
     pub text: String,
     pub visibility: Visibility,
     pub role_ids: Vec<String>,
-    pub image_id: Option<String>,
     pub send_notification: bool,
 }
 
 impl PostDraft {
     /// The roles a post is restricted to: none for a public one, whatever was chosen before (N3).
     pub fn audience(&self) -> Vec<String> {
-        if self.visibility == Visibility::Group { self.role_ids.clone() } else { Vec::new() }
+        if self.visibility == Visibility::Group { in_order(&self.role_ids) } else { Vec::new() }
     }
-    /// A new post's words, audience and picture as one comparable value (no text kept).
+    /// A new post's words and audience as one comparable value, exactly as they go (no text kept).
     pub fn content(&self) -> String {
-        Post::default().with(self).digest_of(&PostField::ALL)
+        Post { title: self.title.trim().into(), text: self.text.trim().into(), visibility: self.visibility, role_ids: self.audience(), ..Default::default() }.content()
+    }
+    /// What makes two new posts the same one again: their words as a person sees them and who they are for, whatever the
+    /// spaces, the Unicode form, the order of the roles, or the notification (the same words, notified or not, are the
+    /// same post a second time).
+    pub fn canonical(&self) -> String {
+        digest(&[&canonical(&self.title), &canonical(&self.text), self.visibility.wire(), &joined(&self.audience())])
     }
 }
 
@@ -709,21 +755,25 @@ pub struct Actor<'a> {
     pub group: &'a str,
     pub user_id: &'a str,
     pub permissions: &'a [String],
-    pub role_ids: &'a [String],
-    pub status: &'a str,
+    /// The roles their rank is read from, when VRChat gave those given by hand. Managed ones left out of the answer can
+    /// only make the rank read here lower than it is: what that allows is a part of what the account may do, never more.
+    pub role_ids: Option<&'a [String]>,
+    /// Only for taking a role oneself.
+    pub status: Option<&'a str>,
 }
 
 impl<'a> Actor<'a> {
-    /// The account's membership in `group`, only when it is whole, of this group, and the signed-in account's own.
+    /// The account's membership in `group`, only with its rights whole, of this group, and the signed-in account's own.
+    /// What one action alone needs (its roles, its status) is asked where it is used.
     pub fn of(group: &'a Group, signed_in: &str) -> Result<Self, Missing> {
         let me = group.my_member.as_ref().ok_or(Missing::Membership)?;
-        if !me.whole {
+        if !me.rights_known {
             return Err(Missing::Membership);
         }
         if me.user_id != signed_in || me.group_id.as_deref().is_some_and(|g| g != group.id) {
             return Err(Missing::Identity);
         }
-        Ok(Self { group: &group.id, user_id: &me.user_id, permissions: &me.permissions, role_ids: &me.role_ids, status: &me.status })
+        Ok(Self { group: &group.id, user_id: &me.user_id, permissions: &me.permissions, role_ids: me.roles_known.then_some(me.role_ids.as_slice()), status: Some(me.status.as_str()).filter(|s| !s.is_empty()) })
     }
 }
 
@@ -741,7 +791,7 @@ pub enum Action<'a> {
     CreateRole { draft: &'a RoleDraft },
     EditRole { role: &'a str, change: &'a RoleChange },
     DeleteRole { role: &'a str },
-    /// Write, edit or delete a post.
+    /// Write or delete a post.
     Post,
     /// Set the group's banner or icon to a file.
     ApplyArt,
@@ -779,11 +829,9 @@ impl From<Missing> for No {
 
 /// The actor's highest role's order (the smallest number): not known when a role of theirs or its order is not.
 fn top_order(actor: &Actor, roles: &[Role]) -> Result<i64, Missing> {
-    if actor.role_ids.is_empty() {
-        return Err(Missing::Membership);
-    }
+    let mine = actor.role_ids.filter(|r| !r.is_empty()).ok_or(Missing::Membership)?;
     let mut top = i64::MAX;
-    for id in actor.role_ids {
+    for id in mine {
         top = top.min(roles.iter().find(|r| r.id == *id).ok_or(Missing::Roles)?.order.ok_or(Missing::RoleOrder)?);
     }
     Ok(top)
@@ -882,7 +930,7 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
             }
             if *user == actor.user_id {
                 // Taking or leaving a role oneself: one members may take, or one below one's own with the right to assign.
-                if actor.status != "member" {
+                if actor.status.ok_or(Missing::Membership)? != "member" {
                     return Err(Why::NoPermission.into());
                 }
                 if !role.self_assignable {
@@ -922,7 +970,7 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
             }
             if role.is_owner_role() {
                 // Only its holder, and only its words (J6).
-                if !actor.role_ids.contains(&role.id) {
+                if !actor.role_ids.ok_or(Missing::Membership)?.contains(&role.id) {
                     return Err(Why::RoleAtOrAbove.into());
                 }
                 if !change.only_words() {
@@ -1093,10 +1141,10 @@ mod tests {
         let assign_only = s(&[ROLES_ASSIGN]);
         let mod_perms = s(&["group-instance-moderate"]);
         let (owner_roles, admin_roles, mod_roles) = (s(&["grol_owner"]), s(&["grol_admin"]), s(&["grol_mod"]));
-        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: &owner_roles, status: "member" };
-        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: &admin_roles, status: "member" };
-        let assigner = Actor { group: "grp_1", user_id: "usr_admin", permissions: &assign_only, role_ids: &admin_roles, status: "member" };
-        let moderator = Actor { group: "grp_1", user_id: "usr_mod", permissions: &mod_perms, role_ids: &mod_roles, status: "member" };
+        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member") };
+        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member") };
+        let assigner = Actor { group: "grp_1", user_id: "usr_admin", permissions: &assign_only, role_ids: Some(&admin_roles), status: Some("member") };
+        let moderator = Actor { group: "grp_1", user_id: "usr_mod", permissions: &mod_perms, role_ids: Some(&mod_roles), status: Some("member") };
         let rich_perms = s(&[ROLES_MANAGE, ROLES_ASSIGN, MEMBERS_MANAGE, "group-instance-join", "group-instance-moderate"]);
         let rich_admin = Actor { permissions: &rich_perms, ..admin };
         let open_up = RoleChange { self_assignable: Some(true), ..Default::default() };
@@ -1157,7 +1205,7 @@ mod tests {
     fn a_role_read_without_its_rights_authorises_nothing() {
         let owner_perms = s(&["*"]);
         let owner_roles = s(&["grol_owner"]);
-        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: &owner_roles, status: "member" };
+        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member") };
         let mut roles = roles();
         roles[3].known = false; // "grol_artist" arrived without its permission list
         let cat = Catalogue { roles: Some(&roles), permissions: None };
@@ -1166,26 +1214,56 @@ mod tests {
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
     }
 
-    /// verify2 B-D: the actor is a whole membership, of this group, of the signed-in account, or nothing at all.
+    /// verify2 B-D, verify3 deviation 9: the actor is the signed-in account's own membership of this group with its rights
+    /// whole, or nothing at all; what else is missing withholds what needs it, and only that.
     #[test]
-    fn an_actor_is_a_whole_membership_of_the_signed_in_account() {
-        let me = MyMember { user_id: "usr_me".into(), role_ids: s(&["grol_owner"]), permissions: s(&["*"]), status: "member".into(), whole: true, group_id: Some("grp_1".into()) };
+    fn an_actor_is_the_signed_in_accounts_own_with_its_rights_whole() {
+        let me = MyMember { user_id: "usr_me".into(), role_ids: s(&["grol_admin"]), permissions: s(&["*"]), status: "member".into(), rights_known: true, roles_known: true, managed_known: true, group_id: Some("grp_1".into()), ..Default::default() };
         let group = |m: Option<MyMember>| Group { id: "grp_1".into(), my_member: m, ..Default::default() };
         let of = |m: Option<MyMember>, who: &str| Actor::of(&group(m), who).map(|a| a.user_id.to_string());
         assert_eq!(of(Some(me.clone()), "usr_me"), Ok("usr_me".to_string()));
         assert_eq!(of(None, "usr_me"), Err(Missing::Membership));
-        assert_eq!(of(Some(MyMember { whole: false, ..me.clone() }), "usr_me"), Err(Missing::Membership));
+        assert_eq!(of(Some(MyMember { rights_known: false, ..me.clone() }), "usr_me"), Err(Missing::Membership));
         assert_eq!(of(Some(me.clone()), "usr_other"), Err(Missing::Identity));
         assert_eq!(of(Some(MyMember { group_id: Some("grp_2".into()), ..me.clone() }), "usr_me"), Err(Missing::Identity));
-        let g = group(Some(MyMember { whole: false, ..me }));
+        let g = group(Some(MyMember { rights_known: false, ..me.clone() }));
         assert_eq!(super::can(Action::Post, Actor::of(&g, "usr_me"), &Catalogue::default()), Authority::Unknown(Missing::Membership), "unknown, not refused and not allowed");
+        // A delegated manager whose managed roles or status VRChat leaves out still writes posts and changes pictures; with
+        // no role at all read, what needs a rank is withheld; the rank read from a part is never above the real one.
+        let roles = roles();
+        let cat = Catalogue { roles: Some(&roles), permissions: None };
+        let part = group(Some(MyMember { managed_known: false, status: String::new(), ..me.clone() }));
+        let none = group(Some(MyMember { roles_known: false, role_ids: vec![], ..me.clone() }));
+        for g in [&part, &none] {
+            assert!(super::can(Action::Post, Actor::of(g, "usr_me"), &cat).allowed() && super::can(Action::ApplyArt, Actor::of(g, "usr_me"), &cat).allowed());
+        }
+        let delete = Action::DeleteRole { role: "grol_mod" };
+        assert!(super::can(delete, Actor::of(&part, "usr_me"), &cat).allowed(), "below the role that was read");
+        assert_eq!(super::can(delete, Actor::of(&none, "usr_me"), &cat), Authority::Unknown(Missing::Membership));
+        let lower = group(Some(MyMember { role_ids: s(&["grol_artist"]), managed_known: false, ..me }));
+        assert_eq!(super::can(delete, Actor::of(&lower, "usr_me"), &cat), Authority::Refused(Why::RoleAtOrAbove), "a rank read low refuses more, never less");
+        let mine = Action::AssignRole { role: "grol_pronouns", user: "usr_me", add: true };
+        assert_eq!(super::can(mine, Actor::of(&part, "usr_me"), &cat), Authority::Unknown(Missing::Membership), "taking a role oneself needs the status");
+    }
+
+    /// verify3 Blocker 1: two memberships of one person are two.
+    #[test]
+    fn leaving_and_joining_again_is_another_membership() {
+        let m = |id: &str, at: Option<&str>| Member { user_id: "usr_a".into(), membership_id: id.into(), joined_at: at.map(str::to_string), roles_known: true, group_id: Some("grp_1".into()), ..Default::default() };
+        let one = m("gmem_1", Some("2026-01-01T00:00:00Z"));
+        assert!(one.is_of("grp_1", "usr_a") && !m("", None).is_of("grp_1", "usr_a"), "a record that does not say which membership it is says nothing");
+        let digest = |m: &Member| m.membership().unwrap().digest();
+        assert_eq!(digest(&one), digest(&one.clone()));
+        assert_ne!(digest(&one), digest(&m("gmem_2", Some("2026-01-01T00:00:00Z"))));
+        assert_ne!(digest(&one), digest(&m("gmem_1", Some("2026-02-01T00:00:00Z"))), "the same id, joined at another time");
+        assert_ne!(digest(&one), digest(&m("gmem_1", None)));
     }
 
     /// A permit is for one action, one account, one group; confirmation follows the role's own rights.
     #[test]
     fn a_permit_covers_only_what_was_decided() {
         let (rights, ids, roles) = (s(&["*"]), s(&["grol_owner"]), roles());
-        let actor = Actor { group: "grp_1", user_id: "usr_owner", permissions: &rights, role_ids: &ids, status: "member" };
+        let actor = Actor { group: "grp_1", user_id: "usr_owner", permissions: &rights, role_ids: Some(&ids), status: Some("member") };
         let cat = Catalogue { roles: Some(&roles), permissions: None };
         let give = |role: &'static str| Action::AssignRole { role, user: "usr_x", add: true };
         let Authority::Allowed(p) = super::can(give("grol_artist"), Ok(actor), &cat) else { panic!() };
@@ -1208,16 +1286,52 @@ mod tests {
         assert!(super::can_upload("usr_me", "grp_1", Some(&s(&["system_supporter"]))).allowed());
     }
 
-    /// What an edit changes, and one value per set of parts: no two different parts look alike.
+    /// One value per content: no two different ones look alike, whatever the order they were chosen in.
     #[test]
-    fn digests_tell_parts_apart() {
-        let now = Post { title: "a".into(), text: "b".into(), role_ids: s(&["grol_a", "grol_b"]), image_id: Some("file_x".into()), ..Default::default() };
-        let same = PostDraft { title: " a ".into(), text: "b".into(), role_ids: s(&["grol_b", "grol_a"]), image_id: Some("file_x".into()), send_notification: true, ..Default::default() };
-        assert!(now.changed_by(&same).is_empty());
-        assert_eq!(now.digest_of(&PostField::ALL), same.content());
-        assert_eq!(now.changed_by(&PostDraft { image_id: None, ..same.clone() }), [PostField::Image]);
-        assert_eq!(now.changed_by(&PostDraft { visibility: Visibility::Public, ..same }), [PostField::Visibility, PostField::Roles], "a public post has no restriction");
-        assert_ne!(Post { title: "ab".into(), ..Default::default() }.digest_of(&PostField::ALL), Post { title: "a".into(), text: "b".into(), ..Default::default() }.digest_of(&PostField::ALL));
+    fn digests_tell_contents_apart() {
+        let now = Post { title: "a".into(), text: "b".into(), role_ids: s(&["grol_a", "grol_b"]), ..Default::default() };
+        let same = PostDraft { title: " a ".into(), text: "b".into(), role_ids: s(&["grol_b", "grol_a", "grol_b"]), send_notification: true, ..Default::default() };
+        assert_eq!(now.content(), same.content());
+        assert_ne!(Post { image_id: Some("file_x".into()), ..now.clone() }.content(), same.content());
+        assert_ne!(now.content(), PostDraft { visibility: Visibility::Public, ..same.clone() }.content(), "a public post has no restriction");
+        assert_ne!(Post { title: "ab".into(), ..Default::default() }.content(), Post { title: "a".into(), text: "b".into(), ..Default::default() }.content());
+        let parts = now.differs(&Post { text: "c".into(), role_ids: s(&["grol_b", "grol_a"]), ..now.clone() });
+        assert_eq!(parts, PostParts { text: true, ..Default::default() });
+    }
+
+    /// verify3 Minor 2, the orchestrator's point 4: the same post in other bytes is the same post; another is not.
+    #[test]
+    fn the_same_again_is_seen_through_spaces_unicode_and_order() {
+        let post = |title: &str, text: &str, roles: &[&str]| PostDraft { title: title.into(), text: text.into(), role_ids: s(roles), ..Default::default() };
+        let one = post("Caf\u{e9} tonight", "Bring your art\nWe start at 20:00", &["grol_a", "grol_b"]);
+        for (what, other) in [
+            ("another order of the roles", post("Caf\u{e9} tonight", "Bring your art\nWe start at 20:00", &["grol_b", "grol_a"])),
+            ("a role twice", post("Caf\u{e9} tonight", "Bring your art\nWe start at 20:00", &["grol_a", "grol_b", "grol_a"])),
+            ("e and an accent apart", post("Cafe\u{301} tonight", "Bring your art\nWe start at 20:00", &["grol_a", "grol_b"])),
+            ("more spaces and lines", post(" Caf\u{e9}  tonight ", "Bring your art \n\n We start  at 20:00\n", &["grol_a", "grol_b"])),
+            ("a no-break space", post("Caf\u{e9}\u{a0}tonight", "Bring your art\r\nWe start at 20:00", &["grol_a", "grol_b"])),
+            ("something invisible", post("Caf\u{e9}\u{200b} tonight", "\u{feff}Bring your art\nWe start at 20:00\u{200d}", &["grol_a", "grol_b"])),
+            ("wide figures", post("Caf\u{e9} tonight", "Bring your art\nWe start at \u{ff12}\u{ff10}:00", &["grol_a", "grol_b"])),
+            ("notified", PostDraft { send_notification: true, ..one.clone() }),
+        ] {
+            assert_eq!(one.canonical(), other.canonical(), "{what}");
+        }
+        for (what, other) in [
+            ("other words", post("Caf\u{e9} tonight", "Bring your music\nWe start at 20:00", &["grol_a", "grol_b"])),
+            ("another case", post("CAF\u{c9} tonight", "Bring your art\nWe start at 20:00", &["grol_a", "grol_b"])),
+            ("words moved to the title", post("Caf\u{e9} tonight Bring", "your art\nWe start at 20:00", &["grol_a", "grol_b"])),
+            ("another audience", post("Caf\u{e9} tonight", "Bring your art\nWe start at 20:00", &["grol_a"])),
+            ("everyone", PostDraft { visibility: Visibility::Public, ..one.clone() }),
+        ] {
+            assert_ne!(one.canonical(), other.canonical(), "{what}");
+        }
+        let role = RoleDraft { name: "Greeters".into(), permissions: s(&["a", "b"]), ..Default::default() };
+        assert_eq!(role.canonical(), RoleDraft { name: "Greeters ".into(), permissions: s(&["b", "a"]), ..role.clone() }.canonical());
+        assert_ne!(role.canonical(), RoleDraft { self_assignable: true, ..role.clone() }.canonical());
+        let change = RoleChange { permissions: Some(s(&["a", "b"])), ..Default::default() };
+        assert_eq!(change.canonical(), RoleChange { permissions: Some(s(&["b", "a"])), ..Default::default() }.canonical());
+        assert_ne!(change.canonical(), RoleChange { permissions: Some(vec![]), ..Default::default() }.canonical());
+        assert_ne!(RoleChange { name: Some("-".into()), ..Default::default() }.canonical(), RoleChange::default().canonical(), "a name of that word is not no name");
     }
 
     /// Minor 2: the nameplate's apply is a seam with only "unavailable" in this version.
@@ -1232,7 +1346,7 @@ mod tests {
     fn missing_role_data_withholds() {
         let admin_perms = s(&[ROLES_MANAGE, ROLES_ASSIGN, MEMBERS_MANAGE]);
         let admin_roles = s(&["grol_admin"]);
-        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: &admin_roles, status: "member" };
+        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member") };
         let mut roles = roles();
         let rename = RoleChange { name: Some("x".into()), ..Default::default() };
         let none = Catalogue { roles: None, permissions: None };
@@ -1250,8 +1364,10 @@ mod tests {
         let unheld = RoleChange { permissions: Some(s(&["group-instance-join"])), ..Default::default() };
         assert_eq!(can(Action::EditRole { role: "grol_mod", change: &unheld }, &admin, &cat), Got::Withheld(Why::Escalation));
         let nobody: Vec<String> = vec![];
-        let roleless = Actor { role_ids: &nobody, ..admin };
+        let roleless = Actor { role_ids: Some(&nobody), ..admin };
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &roleless, &cat), Got::Unknown(Missing::Membership));
+        let unread = Actor { role_ids: None, ..admin };
+        assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &unread, &cat), Got::Unknown(Missing::Membership));
     }
 
     /// M1: listed are owners and managers, moderators with instance or ban rights included; viewers and plain members not.

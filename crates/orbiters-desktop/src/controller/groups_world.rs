@@ -74,6 +74,10 @@ pub(crate) struct World {
     pub then: Vec<(String, Box<dyn FnOnce(&mut World) + Send>)>,
     /// Writes carried out.
     pub done: Vec<String>,
+    /// VRChat gives a file by its id (or only on the list of its kind).
+    pub by_id: bool,
+    /// Reads of group data are refused (403).
+    pub refuses: bool,
     made: u32,
 }
 
@@ -82,7 +86,7 @@ pub(crate) fn role(id: &str, name: &str, order: i64, rights: &[&str], management
         "requiresPurchase": false, "isSelfAssignable": false, "isAddedOnJoin": false, "requiresTwoFactor": false})
 }
 pub(crate) fn member(user: &str, roles: &[&str]) -> Value {
-    json!({"id": format!("gmem_{}", &user[user.len() - 12..]), "groupId": G, "userId": user, "roleIds": roles, "mRoleIds": [], "user": {"displayName": "Sam"}})
+    json!({"id": format!("gmem_{}", &user[user.len() - 12..]), "groupId": G, "userId": user, "roleIds": roles, "mRoleIds": [], "joinedAt": "2025-05-05T05:05:05Z", "user": {"displayName": "Sam"}})
 }
 pub(crate) fn post(id: &str, author: &str, title: &str, text: &str, visibility: &str, roles: &[&str], image: Value) -> Value {
     json!({"id": id, "groupId": G, "authorId": author, "title": title, "text": text, "visibility": visibility, "roleIds": roles, "imageId": image, "createdAt": "2026-01-01T00:00:00Z"})
@@ -125,20 +129,25 @@ impl Default for World {
             instead: Vec::new(),
             then: Vec::new(),
             done: Vec::new(),
+            by_id: true,
+            refuses: false,
             made: 0,
         }
     }
 }
 
 impl World {
-    fn group(&self) -> Value {
+    pub(crate) fn group(&self) -> Value {
         json!({"id": G, "name": "Made-up Makers", "shortCode": "MAKE", "discriminator": "0001", "ownerId": "usr_test", "memberCount": 120, "bannerId": self.banner, "iconId": self.icon,
-            "myMember": {"id": "gmem_me", "groupId": G, "userId": "usr_test", "roleIds": ["grol_owner"], "mRoleIds": [], "permissions": self.rights, "membershipStatus": "member"},
+            "myMember": {"id": "gmem_me", "groupId": G, "userId": "usr_test", "roleIds": ["grol_owner"], "mRoleIds": [], "permissions": self.rights, "membershipStatus": "member", "joinedAt": "2025-01-01T00:00:00Z"},
             "roles": self.roles})
     }
     fn read(&mut self, path: &str) -> Routed {
         if let Some((_, v)) = self.instead.iter().find(|(k, _)| path.contains(k.as_str())) {
             return Routed::Answer(200, v.clone());
+        }
+        if self.refuses && (path.starts_with("/groups/") || path.starts_with("/file")) {
+            return Routed::Answer(403, json!({}));
         }
         let base = format!("/groups/{G}");
         let answer = |v: Value| Routed::Answer(200, v);
@@ -164,8 +173,12 @@ impl World {
             let offset: usize = q.split('&').find_map(|q| q.strip_prefix("offset=")).and_then(|o| o.parse().ok()).unwrap_or(0);
             return answer(Value::Array(self.files.iter().filter(|(t, _)| t == tag).map(|(_, f)| f.clone()).skip(offset).take(50).collect()));
         }
-        if let Some(id) = path.strip_prefix("/file/").and_then(|r| r.strip_suffix("/1/file")) {
-            return Routed::Bytes(200, picture(id));
+        if let Some(rest) = path.strip_prefix("/file/") {
+            return match rest.split('/').collect::<Vec<_>>().as_slice() {
+                [id, _, "file"] => Routed::Bytes(200, picture(id)),
+                [id] if self.by_id => self.files.iter().find(|(_, f)| f["id"] == *id).map_or(Routed::Answer(404, json!({})), |(_, f)| answer(f.clone())),
+                _ => Routed::Answer(403, json!({})),
+            };
         }
         Routed::Answer(404, json!({}))
     }
@@ -210,13 +223,6 @@ impl World {
                 v["createdAt"] = json!(now());
                 self.posts.insert(0, v.clone());
                 v
-            }
-            ("PUT", ["", "groups", _, "posts", id]) => {
-                let found = self.posts.iter_mut().find(|p| p["id"] == *id).unwrap();
-                for (k, x) in body.as_object().unwrap() {
-                    found[k.as_str()] = x.clone();
-                }
-                found.clone()
             }
             ("DELETE", ["", "groups", _, "posts", id]) => {
                 self.posts.retain(|p| p["id"] != *id);
@@ -336,12 +342,7 @@ pub(crate) fn write_of(kind: Kind, ask: &dyn Fn(Request) -> Reply) -> Write {
             Write::EditRole { group, baseline, edit }
         }
         Kind::DeleteRole => Write::DeleteRole { group, role: "grol_events".into() },
-        Kind::CreatePost => Write::CreatePost { group, draft: PostDraft { title: "Saturday".into(), text: "Bring your art".into(), role_ids: vec!["grol_artist".into()], send_notification: true, ..Default::default() } },
-        Kind::EditPost => {
-            let baseline = post("gpos_1");
-            let edit = PostDraft { title: "Meet-up!".into(), text: baseline.text.clone(), visibility: baseline.visibility, role_ids: baseline.role_ids.clone(), image_id: baseline.image_id.clone(), send_notification: true };
-            Write::EditPost { group, baseline, edit }
-        }
+        Kind::CreatePost => Write::CreatePost { group, draft: PostDraft { title: "Saturday".into(), text: "Bring your art".into(), role_ids: vec!["grol_artist".into()], send_notification: true, ..Default::default() }, of: "00000000-0000-4000-8000-00000000d0c0".into() },
         Kind::DeletePost => Write::DeletePost { group, post: post("gpos_2") },
         Kind::ApplyBanner => Write::ApplyArt { group, slot: ArtSlot::Banner, file: "file_gal1".into() },
         Kind::ApplyIcon => Write::ApplyArt { group, slot: ArtSlot::Icon, file: "file_ico1".into() },
@@ -350,10 +351,10 @@ pub(crate) fn write_of(kind: Kind, ask: &dyn Fn(Request) -> Reply) -> Write {
     }
 }
 
-/// What VRChat shows that looks like it, and is not evidence: after each, a check must settle nothing. `done`: whether
-/// the write was in fact carried out (the decoy hides it) or not (the decoy imitates it). They change `w` in place.
+/// What VRChat shows that looks like it, and does not show it: after each, a check must not say it shows what was asked, and
+/// must close nothing. The write was not carried out. They change `w` in place.
 #[allow(clippy::type_complexity)]
-pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str, Box<dyn Fn(&mut World)>)> {
+pub(crate) fn decoys(kind: Kind, bytes: (Option<String>, Option<u64>)) -> Vec<(&'static str, Box<dyn Fn(&mut World)>)> {
     let before = "2026-01-01T00:00:00Z";
     let instead = |key: String, v: Value| -> Box<dyn Fn(&mut World)> { Box::new(move |w: &mut World| w.instead = vec![(key.clone(), v.clone())]) };
     let members = |u: &str, has: bool| -> Vec<(&'static str, Box<dyn Fn(&mut World)>)> {
@@ -367,12 +368,24 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
         no_roles.as_object_mut().unwrap().remove("roleIds");
         let mut no_group = member(u, held);
         no_group.as_object_mut().unwrap().remove("groupId");
+        let mut rejoined = member(u, held);
+        rejoined["id"] = json!("gmem_another");
+        let mut later = member(u, held);
+        later["joinedAt"] = json!("2026-11-23T10:00:00Z");
+        let mut no_membership = member(u, held);
+        no_membership.as_object_mut().unwrap().remove("id");
+        let mut no_time = member(u, held);
+        no_time.as_object_mut().unwrap().remove("joinedAt");
         vec![
             ("another member's record", instead(key.clone(), member(TWIN, held))),
             ("the record of another group", instead(key.clone(), other_group)),
             ("no group in the record", instead(key.clone(), no_group)),
             ("no managed roles in the record", instead(key.clone(), no_managed)),
             ("no roles in the record", instead(key.clone(), no_roles)),
+            ("who left and joined again", instead(key.clone(), rejoined)),
+            ("the same membership id, joined later", instead(key.clone(), later)),
+            ("no membership in the record", instead(key.clone(), no_membership)),
+            ("no time of joining any more", instead(key.clone(), no_time)),
             ("not a member any more", instead(key, Value::Null)),
         ]
     };
@@ -422,6 +435,15 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
                 }),
             ),
             (
+                "the same role made by another moderator meanwhile",
+                Box::new(|w: &mut World| {
+                    let mut r = role("grol_theirs2", "Greeters", 6, &["group-instance-join"], false);
+                    r["description"] = json!("Say hello");
+                    r["createdAt"] = json!(now());
+                    w.roles.push(r);
+                }),
+            ),
+            (
                 "two such roles",
                 Box::new(|w: &mut World| {
                     for id in ["grol_one", "grol_two"] {
@@ -450,6 +472,7 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
         Kind::DeleteRole => vec![
             ("no list of roles", Box::new(|w: &mut World| w.instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x"}))])),
             ("an empty list of roles", Box::new(|w: &mut World| w.instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x", "roles": []}))])),
+            ("a list without the roles no group is without", Box::new(|w: &mut World| w.instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x", "roles": [role("grol_mod", "m", 2, &[], false)]}))])),
             ("a list cut short", Box::new(|w: &mut World| {
                 let many: Vec<Value> = (0..201).map(|i| role(&format!("grol_{i}"), "r", 6, &[], false)).collect();
                 w.instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x", "roles": many}))];
@@ -487,24 +510,12 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
                 p["createdAt"] = json!(before);
                 w.posts.insert(0, p);
             })),
+            ("the very same, posted from elsewhere by this account", Box::new(|w: &mut World| {
+                let mut p = post("gpos_again", "usr_test", "Saturday", "Bring your art", "group", &["grol_artist"], Value::Null);
+                p["createdAt"] = json!(now());
+                w.posts.insert(0, p);
+            })),
             ("no post at all", Box::new(|w: &mut World| w.posts.clear())),
-        ],
-        Kind::EditPost => vec![
-            ("the title asked, its picture gone", Box::new(|w: &mut World| {
-                w.posts[0]["title"] = json!("Someone else's");
-                w.posts[0]["imageId"] = Value::Null;
-            })),
-            ("another post with that title", Box::new(|w: &mut World| {
-                w.posts[1]["title"] = json!("Meet-up!");
-                w.posts[0]["text"] = json!("changed by another");
-            })),
-            ("the audience left out", Box::new(|w: &mut World| {
-                w.posts[0]["title"] = json!("Meet-up!");
-                w.posts[0].as_object_mut().unwrap().remove("roleIds");
-            })),
-            ("the post out of the list", Box::new(|w: &mut World| {
-                w.posts.remove(0);
-            })),
         ],
         Kind::DeletePost => vec![
             ("the post out of the list", Box::new(|w: &mut World| {
@@ -517,7 +528,8 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
         Kind::ApplyIcon => art("iconId"),
         Kind::UploadGallery | Kind::UploadIcon => {
             let tag = if kind == Kind::UploadGallery { "gallery" } else { "icon" };
-            let md5 = bytes_md5.unwrap_or_default();
+            let (md5, size) = (bytes.0.unwrap_or_default(), bytes.1.unwrap_or_default());
+            let (very, early) = ((md5.clone(), size), (md5.clone(), size));
             let with = move |id: &'static str, owner: &'static str, md5: Option<String>| -> Box<dyn Fn(&mut World)> {
                 Box::new(move |w: &mut World| {
                     let mut f = file(id, tag, owner, b"other");
@@ -535,6 +547,19 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
                 ("the same hash, another size", with("file_n2", "usr_test", Some(md5.clone()))),
                 ("the same hash, another owner", with("file_n3", OTHERS_ID, Some(md5))),
                 ("no hash", with("file_n4", "usr_test", None)),
+                ("the very bytes, uploaded from elsewhere", Box::new(move |w: &mut World| {
+                    let mut f = file("file_n5", tag, "usr_test", b"other");
+                    f["versions"][1]["file"]["md5"] = json!(very.0);
+                    f["versions"][1]["file"]["sizeInBytes"] = json!(very.1);
+                    w.files.push((tag.into(), f));
+                })),
+                ("the very bytes, there long before the send", Box::new(move |w: &mut World| {
+                    let mut f = file("file_n6", tag, "usr_test", b"other");
+                    f["versions"][1]["created_at"] = json!(before);
+                    f["versions"][1]["file"]["md5"] = json!(early.0);
+                    f["versions"][1]["file"]["sizeInBytes"] = json!(early.1);
+                    w.files.push((tag.into(), f));
+                })),
                 ("nothing new", Box::new(|_: &mut World| {})),
             ]
         }

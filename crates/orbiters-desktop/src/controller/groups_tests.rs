@@ -1,6 +1,6 @@
 //! Groups' service against a made-up VRChat (no network, no real group): the attack's, the two verifications' and the
 //! design's outcomes. The window's side, and the matrix of every write and every failure, are in `pages/groups`.
-use super::world::{decoys, role, route, scope, world, write_of, writes, Fault, Hold, Shown, World, G, OTHERS_WORDS, TWIN, U, V};
+use super::world::{decoys, role, route, scope, world, write_of, writes, Fault, Hold, Shown, World, G, OTHERS_ID, OTHERS_WORDS, TWIN, U, V};
 use super::*;
 use crate::controller::Shared;
 use orbiters_core::settings::Settings;
@@ -50,7 +50,7 @@ fn check(c: &Shared, op: &str) -> Observation {
     }
 }
 fn later(c: &Shared) {
-    c.groups_book().ahead_ms.store(super::super::groups_ledger::SETTLES_AFTER_MS + 1000, std::sync::atomic::Ordering::Relaxed);
+    c.groups_book().ahead_ms.store(SETTLES_AFTER_MS + 1000, std::sync::atomic::Ordering::Relaxed);
 }
 /// The write sent, carried out or not, its answer lost.
 fn lost(c: &Shared, w: &Shown, kind: Kind, done: bool) -> String {
@@ -145,79 +145,141 @@ fn every_write_goes_once_and_is_recorded() {
     }
 }
 
-/// verify2 B-B, per kind: only what identifies the very object settles anything; every look-alike leaves it unknown.
+/// verify3 Blocker 2, per kind: a check says what VRChat shows now and nothing else. It shows what was asked: closed,
+/// whoever did it. It does not: the person's to decide, and nothing is called "not done". It cannot tell: nothing changes.
 #[test]
-fn a_check_concludes_only_from_the_very_object() {
+fn a_check_says_what_vrchat_shows_now() {
     let mut rows = 0;
     for kind in Kind::ALL {
-        // The right evidence, carried out or not.
         for done in [true, false] {
             let (c, w, sent) = world();
             let op = lost(&c, &w, kind, done);
             let soon = check(&c, &op);
             later(&c);
-            let seen = if matches!(entry(&c, &op).state, State::Unknown) { check(&c, &op) } else { soon.clone() };
-            let want = match (kind, done) {
-                (Kind::DeletePost, true) => Observation::Inconclusive(Unclear::NotSeen),
-                (_, true) => Observation::Done,
-                (k, false) if k.makes() => Observation::Candidates(vec![]),
-                (_, false) => Observation::NotDone,
+            let seen = if entry(&c, &op).open() { check(&c, &op) } else { soon.clone() };
+            let shape = match &seen {
+                Observation::Candidates(l) => format!("{} shown, {} exactly it", l.len(), l.iter().filter(|c| c.same).count()),
+                o => format!("{o:?}"),
             };
-            assert_eq!(seen, want, "{kind:?}, done: {done}");
-            if want == Observation::NotDone {
-                assert_eq!(soon, Observation::Inconclusive(Unclear::TooSoon), "{kind:?}: read right after the send, absence says nothing");
+            let want = match (kind, done) {
+                (Kind::DeletePost, true) => "CannotTell(NotSeen)",
+                (k, true) if k.makes() => "1 shown, 1 exactly it",
+                (k, false) if k.makes() => "0 shown, 0 exactly it",
+                (_, true) => "Shows",
+                (_, false) => "ShowsNot",
+            };
+            assert_eq!(shape, want, "{kind:?}, done: {done}");
+            if want == "ShowsNot" {
+                assert_eq!(soon, Observation::CannotTell(Unclear::TooSoon), "{kind:?}: read right after the send, absence says nothing");
             }
-            let state = entry(&c, &op).state;
-            assert_eq!(state, match want { Observation::Done => State::Done, Observation::NotDone => State::Refused, _ => State::Unknown }, "{kind:?}");
+            let e = entry(&c, &op);
+            let (answer, closed) = match want {
+                "Shows" => (Answer::Shows, Some(Closing::Shows)),
+                "ShowsNot" => (Answer::ShowsNot, None),
+                _ => (Answer::CannotTell, None),
+            };
+            assert_eq!((e.state, e.answer, e.looked, e.closed), (State::Unknown, Some(answer), false, closed), "{kind:?}: what became of it stays unknown");
             assert_eq!(writes(&sent).len(), 1, "a check sends nothing");
+            if want == "Shows" {
+                assert_eq!(check(&c, &op), Observation::Shows);
+            }
         }
         // Every look-alike, the write in fact not carried out.
-        let count = decoys(kind, None).len();
+        let count = decoys(kind, (None, None)).len();
         for i in 0..count {
             let (c, w, _) = world();
             let op = lost(&c, &w, kind, false);
             later(&c);
-            let md5 = entry(&c, &op).evidence.md5;
-            let (name, decoy) = decoys(kind, md5).remove(i);
+            let e = entry(&c, &op);
+            let (name, decoy) = decoys(kind, (e.evidence.md5, e.evidence.size)).remove(i);
             decoy(&mut w.lock().unwrap());
             let seen = check(&c, &op);
-            assert!(matches!(seen, Observation::Candidates(_) | Observation::Inconclusive(_)), "{kind:?}, {name}: {seen:?}");
-            assert_eq!(entry(&c, &op).state, State::Unknown, "{kind:?}, {name}");
+            assert!(matches!(seen, Observation::Candidates(_) | Observation::CannotTell(_) | Observation::ShowsNot), "{kind:?}, {name}: {seen:?}");
+            let e = entry(&c, &op);
+            assert!(e.open() && e.answer != Some(Answer::Shows), "{kind:?}, {name}");
             rows += 1;
         }
+        // VRChat refuses the read: it cannot tell, and the person still has a way out (verify3 Major 3).
+        let (c, w, _) = world();
+        let op = lost(&c, &w, kind, true);
+        later(&c);
+        w.lock().unwrap().refuses = true;
+        assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::Failed(Failure::Api(GroupFailure::Forbidden))), "{kind:?}");
+        assert!(entry(&c, &op).checked);
+        assert_eq!(decide(&c, &op, Choice::Drop), Reply::Decided { op: op.clone() }, "{kind:?}");
+        assert_eq!(entry(&c, &op).closed, Some(Closing::Dropped));
+        assert_eq!(check(&c, &op), Observation::Closed);
     }
-    assert!(rows >= 50, "{rows} look-alikes");
+    assert!(rows >= 60, "{rows} look-alikes");
+}
+fn decide(c: &Shared, op: &str, choice: Choice) -> Reply {
+    ask(c, Request::Decide { op: op.into(), choice })
 }
 
-/// What the person says is kept as theirs: only after a check, only one of what they were shown, and a "not done" leaves
-/// the entry unknown (the same may then go again, with a warning).
+/// What someone else did since is what VRChat shows, and no more: a role given by another moderator closes it as "shows"
+/// with no one credited; one taken back since is "does not show", never "was not done"; and sending it again is a new
+/// operation, warned of, confirmed.
 #[test]
-fn the_persons_word_is_kept_as_theirs() {
+fn what_others_did_is_what_is_shown_and_no_one_is_credited() {
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::AssignRole, false);
+    w.lock().unwrap().members.get_mut(U).unwrap()["roleIds"] = json!(["grol_mod"]);
+    assert_eq!(check(&c, &op), Observation::Shows);
+    let e = entry(&c, &op);
+    assert_eq!((e.state, e.by, e.closed), (State::Unknown, None, Some(Closing::Shows)));
+    let (c, w, sent) = world();
+    let op = lost(&c, &w, Kind::EditRole, true);
+    w.lock().unwrap().roles = World::default().roles;
+    later(&c);
+    assert_eq!(check(&c, &op), Observation::ShowsNot);
+    assert_eq!(prepare(&c, the(&c, Kind::EditRole)), Err(Reply::MaySent { op: op.clone() }), "held until the person decides");
+    assert_eq!(decide(&c, &op, Choice::Again), Reply::Decided { op: op.clone() });
+    let s = prepare(&c, the(&c, Kind::EditRole)).unwrap();
+    assert_eq!((s.warning, s.confirm, s.op != op), (Some(Warning::SameBefore), true, true), "a new operation");
+    assert_eq!(writes(&sent).len(), 1, "nothing goes by the decision itself");
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+}
+
+/// What the person decides is kept as theirs: only after a check was asked for, only one of what they were shown, "again"
+/// only when a look says it is not there; the entry stays unknown, and the same again is warned of.
+#[test]
+fn the_persons_decision_is_kept_as_theirs() {
     let (c, w, sent) = world();
     let op = lost(&c, &w, Kind::CreatePost, true);
-    let say = |op: &str, said: Said, made: Option<&str>| ask(&c, Request::Said { op: op.into(), said, made: made.map(str::to_string) });
-    assert_eq!(say(&op, Said::NotDone, None), Reply::Failed(Failure::NotKept), "not before a check");
+    for choice in [Choice::Shows { made: None }, Choice::ShowsNot, Choice::Again, Choice::Drop] {
+        assert_eq!(decide(&c, &op, choice.clone()), Reply::Failed(Failure::NotKept), "not before a check: {choice:?}");
+    }
     // The post is there with another audience (someone changed it): shown, not concluded.
     w.lock().unwrap().posts[0]["roleIds"] = json!([]);
     let Observation::Candidates(list) = check(&c, &op) else { panic!() };
     assert_eq!((list.len(), list[0].same), (1, false));
-    assert_eq!(say(&op, Said::Done, Some("gpos_1")), Reply::Failed(Failure::Api(GroupFailure::Invalid)), "not one of those shown");
-    assert_eq!(say(&op, Said::Done, None), Reply::Failed(Failure::Api(GroupFailure::Invalid)));
+    assert_eq!(decide(&c, &op, Choice::Shows { made: Some("gpos_1".into()) }), Reply::Failed(Failure::Api(GroupFailure::Invalid)), "not one of those shown");
+    assert_eq!(decide(&c, &op, Choice::Again), Reply::Failed(Failure::NotKept), "a check that cannot tell is no ground for again");
     assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op: op.clone() }), "the same does not go meanwhile");
-    assert_eq!(say(&op, Said::NotDone, None), Reply::Said { op: op.clone() });
+    assert_eq!(decide(&c, &op, Choice::ShowsNot), Reply::Decided { op: op.clone() });
     let e = entry(&c, &op);
-    assert_eq!((e.state, e.said), (State::Unknown, Some(Said::NotDone)), "a word, not a result");
+    assert_eq!((e.state, e.answer, e.looked, e.open()), (State::Unknown, Some(Answer::ShowsNot), true, true), "their look, and still held");
+    assert_eq!(decide(&c, &op, Choice::Again), Reply::Decided { op: op.clone() });
     let again = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
-    assert_eq!((again.warning, again.confirm), (Some(Warning::SaidNotDone), true));
+    assert_eq!((again.warning, again.confirm), (Some(Warning::SameBefore), true));
     assert_eq!(writes(&sent).len(), 1);
+    assert_eq!(decide(&c, &op, Choice::Drop), Reply::Failed(Failure::NotKept), "closed once");
 
     let (c, w, _) = world();
     let op = lost(&c, &w, Kind::CreatePost, true);
     w.lock().unwrap().posts[0]["roleIds"] = json!([]);
     let Observation::Candidates(list) = check(&c, &op) else { panic!() };
-    assert_eq!(ask(&c, Request::Said { op: op.clone(), said: Said::Done, made: Some(list[0].id.clone()) }), Reply::Said { op: op.clone() });
+    assert_eq!(decide(&c, &op, Choice::Shows { made: Some(list[0].id.clone()) }), Reply::Decided { op: op.clone() });
     let e = entry(&c, &op);
-    assert_eq!((e.state, e.by, e.made.as_deref()), (State::Done, Some(By::Person), Some(list[0].id.as_str())));
+    assert_eq!((e.state, e.closed, e.looked, e.made.as_deref()), (State::Unknown, Some(Closing::Shows), true, Some(list[0].id.as_str())));
+    assert_eq!(prepare(&c, the(&c, Kind::CreatePost)).unwrap().warning, Some(Warning::AlreadyDone));
+    assert!(c.groups.lock().unwrap().candidates.is_empty(), "what was offered goes with the decision");
+    // Seen on vrchat.com and not among those shown: theirs to say, with no id.
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::CreateRole, false);
+    assert_eq!(check(&c, &op), Observation::Candidates(vec![]));
+    assert_eq!(decide(&c, &op, Choice::Shows { made: None }), Reply::Decided { op: op.clone() });
+    assert_eq!((entry(&c, &op).closed, entry(&c, &op).made), (Some(Closing::Shows), None));
 }
 
 /// The same thing is refused while it may have gone; another to the same object is warned of and confirmed; a second of
@@ -239,12 +301,12 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
         assert_eq!(writes(&sent).len(), 1, "{kind:?}");
     }
     let (c, w, _) = world();
-    lost(&c, &w, Kind::EditPost, false);
-    let Write::EditPost { group, baseline, edit } = the(&c, Kind::EditPost) else { panic!() };
-    let other = prepare(&c, Write::EditPost { group: group.clone(), baseline: baseline.clone(), edit: PostDraft { title: "Another".into(), ..edit } }).unwrap();
+    lost(&c, &w, Kind::EditRole, false);
+    let Write::EditRole { group, baseline, edit } = the(&c, Kind::EditRole) else { panic!() };
+    let other = prepare(&c, Write::EditRole { group: group.clone(), baseline: baseline.clone(), edit: RoleDraft { name: "Another".into(), ..edit } }).unwrap();
     assert_eq!((other.warning, other.confirm), (Some(Warning::AnotherMayHaveGone), true));
-    let gone = prepare(&c, Write::DeletePost { group, post: baseline }).unwrap();
-    assert_eq!(gone.warning, Some(Warning::AnotherMayHaveGone), "its deletion is of the same post");
+    let gone = prepare(&c, Write::DeleteRole { group, role: baseline.id }).unwrap();
+    assert_eq!(gone.warning, Some(Warning::AnotherMayHaveGone), "its deletion is of the same role");
     let (c, _, _) = world();
     let s = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
     assert!(matches!(commit(&c, &s), Outcome::Done(_)));
@@ -259,23 +321,122 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
     assert_eq!(commit(&c, &s), Outcome::Unknown);
     let s = prepare(&c, plain("grol_events")).unwrap();
     assert_eq!((s.warning, s.confirm), (Some(Warning::AnotherMayHaveGone), true));
-    // Sealed before the other went out (another window's): it was not told, so it does not go; sealed again, it is.
-    let (c, w, sent) = world();
-    let seal = |link: u64, role: &str| match c.groups(link, scope(&c), Request::Prepare { write: plain(role) }) {
+}
+
+/// A write sealed by another window (or any other surface of the service), and its end.
+fn seal(c: &Shared, link: u64, write: Write) -> Sealed {
+    match c.groups(link, scope(c), Request::Prepare { write }) {
         Reply::Prepared(s) => *s,
         r => panic!("{r:?}"),
-    };
-    let (one, two) = (seal(7, "grol_artist"), seal(8, "grol_events"));
-    assert_eq!(two.warning, None);
-    let go = |link: u64, s: &Sealed| match c.groups(link, scope(&c), Request::Commit { op: s.op.clone(), digest: s.digest() }) {
+    }
+}
+fn go(c: &Shared, link: u64, s: &Sealed) -> Outcome {
+    match c.groups(link, scope(c), Request::Commit { op: s.op.clone(), digest: s.digest() }) {
         Reply::Outcome { outcome, .. } => outcome,
         r => panic!("{r:?}"),
+    }
+}
+
+/// verify3 Blocker 3: whatever was sealed at the same time by other windows, one of the same goes; the others are told, and
+/// must confirm a deliberately different operation.
+#[test]
+fn of_the_same_in_several_windows_one_goes() {
+    for (what, fault) in [("done", None), ("unknown", Some(Fault::Drop { done: true })), ("unknown, not done", Some(Fault::Drop { done: false }))] {
+        for kind in Kind::ALL {
+            let (c, w, sent) = world();
+            let write = the(&c, kind);
+            let copy = |w: &Write| match w {
+                Write::Upload { tag, group, staged, art } => Write::Upload { tag: *tag, group: group.clone(), staged: crate::pages::groups::stage_upload(&staged.read().unwrap()).unwrap(), art: *art },
+                other => other.clone(),
+            };
+            let (w2, w3) = (copy(&write), copy(&write));
+            let (one, two, three) = (seal(&c, 7, write), seal(&c, 8, w2), seal(&c, 9, w3));
+            assert_eq!((one.warning, two.warning, three.warning), (None, None, None));
+            w.lock().unwrap().fault = fault.clone();
+            let first = go(&c, 7, &one);
+            assert_eq!(matches!(first, Outcome::Done(_)), fault.is_none(), "{kind:?}: {first:?}");
+            for (link, s) in [(8, &two), (9, &three)] {
+                let second = go(&c, link, s);
+                assert!(matches!(second, Outcome::Refused(Failure::Since | Failure::MaySent | Failure::Changed | Failure::RoleChanged(_) | Failure::Api(GroupFailure::NotFound))), "{kind:?}, the first {what}: {second:?}");
+            }
+            assert_eq!(writes(&sent).len(), 1, "{kind:?}, the first {what}");
+        }
+    }
+    // The same post in other bytes is the same post: another order, spaces, an accent apart, a notification or none.
+    let post = |title: &str, roles: &[&str], notify: bool| Write::CreatePost {
+        group: G.into(),
+        draft: PostDraft { title: title.into(), text: "Bring your art".into(), role_ids: roles.iter().map(|r| r.to_string()).collect(), send_notification: notify, ..Default::default() },
+        of: uuid::Uuid::new_v4().to_string(),
     };
+    for (what, other) in [
+        ("the roles in another order", post("Caf\u{e9}", &["grol_events", "grol_artist"], true)),
+        ("spaces", post("  Caf\u{e9} ", &["grol_artist", "grol_events"], true)),
+        ("an accent apart", post("Cafe\u{301}", &["grol_artist", "grol_events"], true)),
+        ("something invisible", post("Caf\u{e9}\u{200b}", &["grol_artist", "grol_events"], true)),
+        ("no notification", post("Caf\u{e9}", &["grol_artist", "grol_events"], false)),
+    ] {
+        let (c, _, sent) = world();
+        let (one, two) = (seal(&c, 7, post("Caf\u{e9}", &["grol_artist", "grol_events"], true)), seal(&c, 8, other.clone()));
+        assert!(matches!(go(&c, 7, &one), Outcome::Done(_)));
+        assert_eq!(go(&c, 8, &two), Outcome::Refused(Failure::Since), "{what}");
+        assert_eq!(writes(&sent).len(), 1, "{what}");
+        let again = seal(&c, 8, other);
+        assert_eq!((again.warning, again.confirm), (Some(Warning::AlreadyDone), true), "{what}: told, and confirmed");
+        assert!(matches!(go(&c, 8, &again), Outcome::Done(_)), "{what}: on purpose");
+        assert_eq!(writes(&sent).len(), 2);
+    }
+    for (what, other) in [("other words", post("Caf\u{e9}s", &["grol_artist", "grol_events"], true)), ("another audience", post("Caf\u{e9}", &["grol_artist"], true))] {
+        let (c, _, sent) = world();
+        let (one, two) = (seal(&c, 7, post("Caf\u{e9}", &["grol_artist", "grol_events"], true)), seal(&c, 8, other));
+        assert!(matches!(go(&c, 7, &one), Outcome::Done(_)));
+        assert!(matches!(go(&c, 8, &two), Outcome::Done(_)), "{what}: another post");
+        assert_eq!(writes(&sent).len(), 2);
+    }
+    // Sealed before another change of the same person went out and may have been done: it was not told of it.
+    let (c, w, sent) = world();
+    let plain = |role: &str| Write::MemberRole { group: G.into(), user: U.into(), role: role.into(), add: true };
+    let (one, two) = (seal(&c, 7, plain("grol_artist")), seal(&c, 8, plain("grol_events")));
     w.lock().unwrap().fault = Some(Fault::Drop { done: false });
-    assert_eq!(go(7, &one), Outcome::Unknown);
-    assert_eq!(go(8, &two), Outcome::Refused(Failure::MaySent));
+    assert_eq!(go(&c, 7, &one), Outcome::Unknown);
+    assert_eq!(go(&c, 8, &two), Outcome::Refused(Failure::Since));
     assert_eq!(writes(&sent).len(), 1);
-    assert_eq!(seal(8, "grol_events").warning, Some(Warning::AnotherMayHaveGone));
+    assert_eq!(seal(&c, 8, plain("grol_events")).warning, Some(Warning::AnotherMayHaveGone));
+}
+
+/// verify3 Blocker 1: a role is given to, or taken from, the membership that was shown: one who left and joined again
+/// between is another, at the send and at the check; so is one's own.
+#[test]
+fn a_role_change_is_for_one_membership() {
+    type Change = fn(&mut Value);
+    let changes: [(&str, Change); 3] = [("another membership", |m| m["id"] = json!("gmem_rejoined")), ("the same id, joined later", |m| m["joinedAt"] = json!("2026-11-23T10:00:00Z")), ("no time of joining any more", |m| drop(m.as_object_mut().unwrap().remove("joinedAt")))];
+    for (what, change) in changes {
+        for (kind, user) in [(Kind::AssignRole, U), (Kind::UnassignRole, V)] {
+            let (c, w, sent) = world();
+            let s = prepare(&c, the(&c, kind)).unwrap();
+            let sealed = s.member.as_ref().unwrap().membership().unwrap();
+            assert_eq!((sealed.id.as_str(), sealed.joined_at.as_deref()), (format!("gmem_{}", &user[user.len() - 12..]).as_str(), Some("2025-05-05T05:05:05Z")), "sealed, and shown");
+            change(w.lock().unwrap().members.get_mut(user).unwrap());
+            assert_eq!(commit(&c, &s), Outcome::Refused(Failure::Rejoined), "{kind:?}, {what}");
+            assert!(writes(&sent).is_empty());
+            let (c, w, _) = world();
+            let op = lost(&c, &w, kind, true);
+            change(w.lock().unwrap().members.get_mut(user).unwrap());
+            later(&c);
+            assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::Rejoined), "{kind:?}, {what}");
+            assert!(entry(&c, &op).open());
+        }
+    }
+    // One's own roles: the account's own membership.
+    let own = |add: bool| Write::MemberRole { group: G.into(), user: "usr_test".into(), role: "grol_artist".into(), add };
+    let (c, w, sent) = world();
+    let s = prepare(&c, own(true)).unwrap();
+    let mut g = w.lock().unwrap().group();
+    g["myMember"]["id"] = json!("gmem_me_again");
+    w.lock().unwrap().instead = vec![(format!("/groups/{G}?"), g)];
+    assert_eq!(commit(&c, &s), Outcome::Refused(Failure::Rejoined));
+    assert!(writes(&sent).is_empty());
+    let s = prepare(&c, own(true)).unwrap();
+    assert_eq!(s.member.unwrap().membership_id, "gmem_me_again", "looked at again: the new one");
 }
 
 /// Nothing is sent whose record cannot be kept first.
@@ -367,7 +528,7 @@ fn a_sealed_picture_is_the_files_own() {
     let bytes = staged.read().unwrap();
     let s = prepare(&c, write).unwrap();
     assert_eq!(ask(&c, Request::SealedArt { op: s.op.clone() }), Reply::Picture(bytes.clone()));
-    assert_eq!(s.art, Some(SealedArt { file: None, sha256: sha256(&bytes), size: bytes.len() as u64 }));
+    assert_eq!(s.art, Some(SealedArt { file: None, sha256: sha256(&bytes), size: bytes.len() as u64, version: None }));
 }
 
 /// J3: a staged picture lives as long as what it is for: a refusal, a cancel, another prepare, the link, an end.
@@ -399,44 +560,70 @@ fn a_staged_picture_goes_with_its_write() {
     let old = staging_dir().join("00000000-0000-4000-8000-00000000feed.png");
     std::fs::write(&old, b"x").unwrap();
     std::fs::File::options().write(true).open(&old).unwrap().set_modified(std::time::SystemTime::now() - Duration::from_secs(7200)).unwrap();
-    let _ = prepare(&c, the(&c, Kind::ApplyIcon));
-    assert!(!old.exists(), "left by an earlier program");
+    let _ = ask(&c, Request::Ledger { also: vec![] });
+    assert!(!old.exists(), "left by an earlier program, gone as soon as a page shows");
+    // Refused before it was looked at: another account, not signed in, too busy.
+    for (what, change) in [("another sign-in", (|c| c.update(|s| s.vrchat_login.revision += 1)) as fn(&Shared)), ("too busy", |c| c.groups.lock().unwrap().running = RUNNING_MAX)] {
+        let (c, _, _) = world();
+        let write = the(&c, Kind::UploadIcon);
+        let then = scope(&c);
+        change(&c);
+        assert!(matches!(c.groups(LINK, then, Request::Prepare { write: write.clone() }), Reply::Failed(_)), "{what}");
+        assert!(!path(&write).exists(), "{what}");
+    }
 }
 
-/// verify2 B-G, design 6: an edit says only what the person changed, on the post just read. Someone else's change between
-/// the confirmation and the last read stops it, whatever they changed; the post keeps what they made it.
+/// Blocker 7, verify3 Major 5: a post is deleted only as it was shown: whatever someone changed of it between the
+/// confirmation and the last read stops it.
 #[test]
-fn an_edit_never_writes_over_what_someone_else_just_changed() {
+fn a_deletion_never_takes_what_someone_just_changed() {
     type Other = fn(&mut World);
     let none = g::PostParts::default();
-    let others: [(&str, Other, Failure); 5] = [
+    let others: [(&str, Other, Failure); 7] = [
         ("restricted", |w| w.posts[0]["roleIds"] = json!(["grol_mod"]), Failure::PostChanged(g::PostParts { roles: true, ..none })),
         ("opened", |w| w.posts[0]["visibility"] = json!("public"), Failure::PostChanged(g::PostParts { visibility: true, ..none })),
         ("its picture removed", |w| w.posts[0]["imageId"] = Value::Null, Failure::PostChanged(g::PostParts { image: true, ..none })),
         ("its words changed", |w| w.posts[0]["text"] = json!("changed"), Failure::PostChanged(g::PostParts { text: true, ..none })),
         ("its audience unreadable", |w| w.posts[0]["roleIds"] = json!("?"), Failure::NotRead(Missing::Post)),
+        ("its text gone from the answer", |w| drop(w.posts[0].as_object_mut().unwrap().remove("text")), Failure::NotRead(Missing::Post)),
+        ("its title not a text", |w| w.posts[0]["title"] = json!(5), Failure::NotRead(Missing::Post)),
     ];
     for (what, other, want) in others {
-        for kind in [Kind::EditPost, Kind::DeletePost] {
-            let (c, w, sent) = world();
-            let write = match (kind, the(&c, Kind::EditPost)) {
-                (Kind::DeletePost, Write::EditPost { group, baseline, .. }) => Write::DeletePost { group, post: baseline },
-                (_, w) => w,
-            };
-            let s = prepare(&c, write).unwrap();
-            // After the group is read for the last time, before the post is: the last read is the post's own.
-            w.lock().unwrap().then = vec![(format!("/groups/{G}?"), Box::new(other))];
-            assert_eq!(commit(&c, &s), Outcome::Refused(want), "{kind:?}, {what}");
-            assert!(writes(&sent).is_empty(), "{kind:?}, {what}");
-            assert_eq!((entry(&c, &s.op).state, entry(&c, &s.op).by), (State::Refused, Some(By::BeforeSending)));
+        let (c, w, sent) = world();
+        let Reply::Posts(page) = ask(&c, Request::Posts { group: G.into(), offset: 0 }) else { panic!() };
+        let s = prepare(&c, Write::DeletePost { group: G.into(), post: page.items[0].clone() }).unwrap();
+        // After the group is read for the last time, before the post is: the last read is the post's own.
+        w.lock().unwrap().then = vec![(format!("/groups/{G}?"), Box::new(other))];
+        assert_eq!(commit(&c, &s), Outcome::Refused(want), "{what}");
+        assert!(writes(&sent).is_empty(), "{what}");
+        assert_eq!((entry(&c, &s.op).state, entry(&c, &s.op).by), (State::Refused, Some(By::BeforeSending)));
+        // Sealed on a post already so: not offered.
+        if matches!(want, Failure::NotRead(_)) {
+            let (c, w, _) = world();
+            other(&mut w.lock().unwrap());
+            let Reply::Posts(page) = ask(&c, Request::Posts { group: G.into(), offset: 0 }) else { panic!() };
+            assert!(!page.items[0].complete, "{what}");
+            assert_eq!(prepare(&c, Write::DeletePost { group: G.into(), post: page.items[0].clone() }), failed(want));
         }
     }
-    // The wire of a typo: the title; the audience and picture exactly as read; no notification.
-    let (c, _, sent) = world();
-    let s = prepare(&c, the(&c, Kind::EditPost)).unwrap();
-    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
-    let body: Value = serde_json::from_str(sent.lock().unwrap().last().unwrap().body.as_deref().unwrap()).unwrap();
-    assert_eq!(body, json!({"title": "Meet-up!", "text": OTHERS_WORDS, "visibility": "group", "roleIds": ["grol_artist"], "imageId": "file_pic"}));
+}
+
+/// verify3 Blocker 4: no write of this program edits a post: there is none to ask for, and what goes to a group's posts is a
+/// creation or a deletion, whatever is asked of everything else.
+#[test]
+fn no_post_is_ever_edited_from_here() {
+    for text in [r#"{"EditPost":{"group":"grp_1","baseline":{},"edit":{}}}"#, r#"{"editPost":{}}"#] {
+        assert!(serde_json::from_str::<Write>(text).is_err());
+    }
+    assert!(serde_json::from_str::<Kind>(r#""edit_post""#).is_err());
+    for kind in Kind::ALL {
+        let (c, _, sent) = world();
+        let s = prepare(&c, the(&c, kind)).unwrap();
+        let _ = commit(&c, &s);
+        let sent = sent.lock().unwrap();
+        assert!(sent.iter().all(|r| !(r.method == "PUT" && r.url.contains("/posts"))), "{kind:?}");
+        assert!(sent.iter().filter(|r| r.method != "GET").all(|r| !r.body.as_deref().unwrap_or("").contains("null")), "{kind:?}: and no null");
+    }
 }
 
 /// Design 6: what is left open is one step in memory. With the real pacing on, nothing is asked, written to disk or waited
@@ -444,7 +631,7 @@ fn an_edit_never_writes_over_what_someone_else_just_changed() {
 #[test]
 fn the_last_read_and_the_send_are_one_step() {
     let mut worst = Duration::ZERO;
-    for kind in [Kind::EditPost, Kind::DeletePost, Kind::EditRole, Kind::AssignRole, Kind::ApplyBanner] {
+    for kind in [Kind::DeletePost, Kind::EditRole, Kind::AssignRole, Kind::ApplyBanner] {
         let c = Controller::new(Settings::default());
         let w: Shown = Arc::new(Mutex::new(World::default()));
         let sent = c.test_vrchat_routed_paced(route(w.clone()));
@@ -462,7 +649,7 @@ fn the_last_read_and_the_send_are_one_step() {
         let at = sent.iter().rposition(|r| r.method != "GET").unwrap();
         let (last, write) = (&sent[at - 1], &sent[at]);
         let what = match kind {
-            Kind::EditPost | Kind::DeletePost => "/posts?",
+            Kind::DeletePost => "/posts?",
             Kind::AssignRole => "/members/",
             _ => "?includeRoles",
         };
@@ -479,10 +666,7 @@ fn the_last_read_and_the_send_are_one_step() {
 fn what_is_missing_is_never_allowed() {
     let without = |key: &'static str| -> Box<dyn Fn(&mut World)> {
         Box::new(move |w: &mut World| {
-            let c = Controller::new(Settings::default());
-            drop(c);
-            let mut g = serde_json::to_value(json!({"id": G, "name": "Made-up Makers", "bannerId": w.banner, "iconId": w.icon, "roles": w.roles,
-                "myMember": {"id": "gmem_me", "groupId": G, "userId": "usr_test", "roleIds": ["grol_owner"], "mRoleIds": [], "permissions": ["*"], "membershipStatus": "member"}})).unwrap();
+            let mut g = w.group();
             match key.split_once('.') {
                 Some(("me", k)) => {
                     g["myMember"].as_object_mut().unwrap().remove(k);
@@ -495,24 +679,36 @@ fn what_is_missing_is_never_allowed() {
             w.instead = vec![(format!("/groups/{G}?"), g)];
         })
     };
+    let no = |key: &'static str, of: &'static str| -> Box<dyn Fn(&mut World)> { Box::new(move |w: &mut World| drop(w.members.get_mut(of).unwrap().as_object_mut().unwrap().remove(key))) };
+    let no_file = |key: &'static str| -> Box<dyn Fn(&mut World)> {
+        Box::new(move |w: &mut World| match key {
+            "version" => drop(w.files[0].1["versions"][1].as_object_mut().unwrap().remove("version")),
+            key => drop(w.files[0].1.as_object_mut().unwrap().remove(key)),
+        })
+    };
     let cases: Vec<(&str, Kind, Box<dyn Fn(&mut World)>, Missing)> = vec![
         ("no membership", Kind::CreatePost, without("myMember"), Missing::Membership),
         ("no rights", Kind::CreatePost, without("me.permissions"), Missing::Membership),
         ("no roles of mine", Kind::DeleteRole, without("me.roleIds"), Missing::Membership),
-        ("no managed roles of mine", Kind::EditRole, without("me.mRoleIds"), Missing::Membership),
-        ("no status", Kind::ApplyBanner, without("me.membershipStatus"), Missing::Membership),
+        ("no rights for a picture", Kind::ApplyBanner, without("me.permissions"), Missing::Membership),
         ("another account's membership", Kind::ApplyIcon, without("me=.usr_other"), Missing::Identity),
         ("no roles", Kind::AssignRole, without("roles"), Missing::Roles),
         ("no banner field", Kind::ApplyBanner, without("bannerId"), Missing::Picture),
         ("no icon field", Kind::ApplyIcon, without("iconId"), Missing::Picture),
         ("the role's rights unknown", Kind::AssignRole, Box::new(|w| drop(w.roles[1].as_object_mut().unwrap().remove("permissions"))), Missing::RoleDefinition),
         ("a right too long to carry", Kind::AssignRole, Box::new(|w| w.roles[1]["permissions"] = json!(["r".repeat(3000)])), Missing::RoleDefinition),
-        ("the role's flag unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[3].as_object_mut().unwrap().remove("isManagementRole"))), Missing::RoleDefinition),
+        ("whether it is Everyone's unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[3].as_object_mut().unwrap().remove("defaultRole"))), Missing::RoleDefinition),
+        ("whether it is bought unknown", Kind::AssignRole, Box::new(|w| drop(w.roles[1].as_object_mut().unwrap().remove("requiresPurchase"))), Missing::RoleDefinition),
         ("my own role's place unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[0].as_object_mut().unwrap().remove("order"))), Missing::RoleOrder),
         ("the role's two-factor flag unknown", Kind::EditRole, Box::new(|w| drop(w.roles[2].as_object_mut().unwrap().remove("requiresTwoFactor"))), Missing::RoleDefinition),
         ("a right of the catalogue unreadable", Kind::CreateRole, Box::new(|w| w.instead = vec![("/permissions".into(), json!([{"name": "group-instance-join"}]))]), Missing::Catalogue),
-        ("the member without managed roles", Kind::AssignRole, Box::new(|w| drop(w.members.get_mut(U).unwrap().as_object_mut().unwrap().remove("mRoleIds"))), Missing::Member),
-        ("the member without a group", Kind::UnassignRole, Box::new(|w| drop(w.members.get_mut(V).unwrap().as_object_mut().unwrap().remove("groupId"))), Missing::Member),
+        ("the member without managed roles", Kind::AssignRole, no("mRoleIds", U), Missing::Member),
+        ("the member without roles", Kind::UnassignRole, no("roleIds", V), Missing::Member),
+        ("the member without a group", Kind::UnassignRole, no("groupId", V), Missing::Member),
+        ("the member without a membership", Kind::AssignRole, no("id", U), Missing::Member),
+        ("the picture without an owner", Kind::ApplyBanner, no_file("ownerId"), Missing::Picture),
+        ("the picture without its kind", Kind::ApplyBanner, no_file("tags"), Missing::Picture),
+        ("the picture without a version", Kind::ApplyBanner, no_file("version"), Missing::Picture),
         ("another member answered", Kind::AssignRole, Box::new(|w| w.instead = vec![(format!("/members/{U}"), super::world::member(TWIN, &[]))]), Missing::Member),
         ("the tags not given", Kind::UploadIcon, Box::new(|w| w.instead = vec![("/auth/user".into(), json!({"id": "usr_test"}))]), Missing::Entitlement),
         ("another account's tags", Kind::UploadIcon, Box::new(|w| w.instead = vec![("/auth/user".into(), json!({"id": "usr_other", "tags": ["system_supporter"]}))]), Missing::Entitlement),
@@ -532,17 +728,99 @@ fn what_is_missing_is_never_allowed() {
     }
 }
 
-/// N2: a picture not among the first pages of a longer list is "not read", not "not yours"; one not in a list seen to its
-/// end is not yours.
+/// verify3 deviation 9, the orchestrator's point 6: what VRChat leaves out withholds what needs it, and only that. Where
+/// the strict side of a missing value is safe, the action still works, with it: confirmed, or with less rank.
 #[test]
-fn a_picture_not_found_is_not_yet_not_yours() {
+fn what_is_left_out_withholds_only_what_needs_it() {
+    let mine = |gone: &'static [&'static str]| -> Box<dyn Fn(&mut World)> {
+        Box::new(move |w: &mut World| {
+            let mut g = w.group();
+            gone.iter().for_each(|k| drop(g["myMember"].as_object_mut().unwrap().remove(*k)));
+            w.instead = vec![(format!("/groups/{G}?"), g)];
+        })
+    };
+    let role = |i: usize, key: &'static str| -> Box<dyn Fn(&mut World)> { Box::new(move |w: &mut World| drop(w.roles[i].as_object_mut().unwrap().remove(key))) };
+    let cases: Vec<(&str, Kind, Box<dyn Fn(&mut World)>)> = vec![
+        ("my managed roles and status left out: a post", Kind::CreatePost, mine(&["mRoleIds", "membershipStatus"])),
+        ("all my roles left out: a post", Kind::DeletePost, mine(&["mRoleIds", "roleIds", "membershipStatus", "id", "joinedAt"])),
+        ("all my roles left out: a picture", Kind::ApplyBanner, mine(&["mRoleIds", "roleIds", "membershipStatus"])),
+        ("my managed roles left out: a role change, by those given by hand", Kind::EditRole, mine(&["mRoleIds", "membershipStatus"])),
+        ("my managed roles left out: a role given", Kind::AssignRole, mine(&["mRoleIds"])),
+        ("whether a role manages left out: deleted as a managing one", Kind::DeleteRole, role(3, "isManagementRole")),
+        ("whether members may take it left out: given", Kind::AssignRole, role(1, "isSelfAssignable")),
+    ];
+    for (what, kind, change) in cases {
+        let (c, w, sent) = world();
+        let write = the(&c, kind);
+        change(&mut w.lock().unwrap());
+        let s = prepare(&c, write).unwrap_or_else(|r| panic!("{what}: {r:?}"));
+        assert!(s.confirm, "{what}: confirmed");
+        assert!(matches!(commit(&c, &s), Outcome::Done(_)), "{what}");
+        assert_eq!(writes(&sent).len(), 1);
+    }
+    // Giving a cosmetic role whose management flag was left out is no longer "no confirmation".
     let (c, w, _) = world();
-    let apply = |file: &str| Write::ApplyArt { group: G.into(), slot: ArtSlot::Banner, file: file.into() };
-    assert_eq!(prepare(&c, apply("file_nobodys")), failed(Failure::Withheld(Why::NotYourPicture)));
-    let many: Vec<(String, Value)> = (0..260).map(|i| ("gallery".to_string(), super::world::file(&format!("file_m{i}"), "gallery", "usr_test", b"x"))).collect();
-    w.lock().unwrap().files = many;
-    assert_eq!(prepare(&c, apply("file_m250")), failed(Failure::NotRead(Missing::Picture)));
-    assert!(prepare(&c, apply("file_m150")).is_ok());
+    role(2, "isManagementRole")(&mut w.lock().unwrap());
+    assert!(prepare(&c, Write::MemberRole { group: G.into(), user: U.into(), role: "grol_artist".into(), add: true }).unwrap().confirm);
+    // One's own roles need one's own record whole.
+    for gone in [&["mRoleIds"][..], &["roleIds"], &["id"]] {
+        let (c, w, _) = world();
+        mine(if gone == ["mRoleIds"] { &["mRoleIds"] } else if gone == ["id"] { &["id"] } else { &["roleIds"] })(&mut w.lock().unwrap());
+        let r = prepare(&c, Write::MemberRole { group: G.into(), user: "usr_test".into(), role: "grol_artist".into(), add: true });
+        assert!(matches!(r, Err(Reply::Failed(Failure::NotRead(Missing::Member | Missing::Membership)))), "{gone:?}: {r:?}");
+    }
+}
+
+/// N2, verify3 Major 4: a picture is the account's own, of the slot's kind and the version shown, as VRChat says of that
+/// very file; whichever way VRChat gives it, by its id or on the list of its kind.
+#[test]
+fn a_picture_applied_is_the_one_that_was_shown() {
+    for by_id in [true, false] {
+        let (c, w, _) = world();
+        w.lock().unwrap().by_id = by_id;
+        let apply = |file: &str| Write::ApplyArt { group: G.into(), slot: ArtSlot::Banner, file: file.into() };
+        assert_eq!(prepare(&c, apply("file_nobodys")), failed(Failure::Withheld(Why::NotYourPicture)), "by id: {by_id}");
+        let many: Vec<(String, Value)> = (0..260).map(|i| ("gallery".to_string(), super::world::file(&format!("file_m{i}"), "gallery", "usr_test", b"x"))).collect();
+        w.lock().unwrap().files = many;
+        assert!(prepare(&c, apply("file_m150")).is_ok());
+        // Past the pages read, it is found by its id, or not read; never "not yours".
+        let far = prepare(&c, apply("file_m250"));
+        assert!(if by_id { far.is_ok() } else { far == failed(Failure::NotRead(Missing::Picture)) }, "by id: {by_id}: {far:?}");
+        type Change = fn(&mut Value);
+        let changes: [(&str, Change, Failure); 5] = [
+            ("another's", |f| f["ownerId"] = json!(OTHERS_ID), Failure::Withheld(Why::NotYourPicture)),
+            ("of another kind", |f| f["tags"] = json!(["icon"]), Failure::Withheld(Why::NotYourPicture)),
+            ("another version", |f| {
+                f["versions"][1]["version"] = json!(2);
+                f["versions"][1]["file"]["url"] = json!("https://api.vrchat.cloud/api/1/file/file_gal1/2/file");
+            }, Failure::Changed),
+            ("other bytes, the same version", |f| f["versions"][1]["file"]["md5"] = json!("AAAAAAAAAAAAAAAAAAAAAA=="), Failure::Changed),
+            ("its file gone", |f| f["versions"] = json!([{"version": 0}]), Failure::Changed),
+        ];
+        for (what, change, want) in changes {
+            let (c, w, sent) = world();
+            w.lock().unwrap().by_id = by_id;
+            let s = prepare(&c, the(&c, Kind::ApplyBanner)).unwrap();
+            assert_eq!(s.art.as_ref().unwrap().version, Some(1));
+            change(&mut w.lock().unwrap().files[0].1);
+            let outcome = commit(&c, &s);
+            let unread = what == "its file gone" && outcome == Outcome::Refused(Failure::Api(GroupFailure::BadAnswer));
+            assert!(outcome == Outcome::Refused(want) || unread, "by id: {by_id}, {what}: {outcome:?}");
+            assert!(writes(&sent).is_empty(), "{what}");
+            if matches!(want, Failure::Withheld(_)) {
+                let (c, w, _) = world();
+                w.lock().unwrap().by_id = by_id;
+                change(&mut w.lock().unwrap().files[0].1);
+                assert_eq!(prepare(&c, the(&c, Kind::ApplyBanner)), failed(want), "{what}");
+            }
+        }
+    }
+    // An upload's answer about other bytes settles nothing.
+    let (c, w, _) = world();
+    let s = prepare(&c, the(&c, Kind::UploadGallery)).unwrap();
+    let f = super::world::file("file_wrong", "gallery", "usr_test", b"completely different bytes");
+    w.lock().unwrap().fault = Some(Fault::Answer { done: false, status: 200, body: f });
+    assert_eq!(commit(&c, &s), Outcome::Unknown);
 }
 
 /// J6: the owner's role keeps its two-factor flag and every other one; only its words change. N3: a post made public
@@ -561,10 +839,10 @@ fn fixed_flags_and_the_public_switch() {
     assert_eq!(edit(|d| d.added_on_join = true), failed(Failure::Withheld(Why::OwnerRole)));
     assert!(edit(|d| d.name = "Founder".into()).is_ok());
     let draft = PostDraft { title: "t".into(), text: "x".into(), visibility: g::Visibility::Public, role_ids: vec!["grol_artist".into()], ..Default::default() };
-    let s = prepare(&c, Write::CreatePost { group: G.into(), draft }).unwrap();
+    let s = prepare(&c, Write::CreatePost { group: G.into(), draft, of: String::new() }).unwrap();
     assert!(matches!(&s.write, Write::CreatePost { draft, .. } if draft.role_ids.is_empty()), "what is shown, and goes, has no restriction");
     let odd = PostDraft { title: "t".into(), text: "x".into(), role_ids: vec!["not a role".into()], ..Default::default() };
-    assert_eq!(prepare(&c, Write::CreatePost { group: G.into(), draft: odd }), failed(Failure::Api(GroupFailure::Invalid)));
+    assert_eq!(prepare(&c, Write::CreatePost { group: G.into(), draft: odd, of: String::new() }), failed(Failure::Api(GroupFailure::Invalid)));
 }
 
 /// Blocker 7: a role or post that is not what was confirmed is not deleted; one not whole is not deleted from here.
@@ -611,7 +889,31 @@ fn an_account_switch_after_transmission_shows_nothing_and_keeps_the_truth() {
     c.update(|s| s.vrchat_login.revision += 1);
     hold.let_go();
     assert_eq!(sending.join().unwrap(), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown });
-    assert_eq!(check(&c, &s.op), Observation::Recorded { done: true }, "the durable scope is the same account's");
+    assert_eq!(check(&c, &s.op), Observation::Answered { done: true }, "the durable scope is the same account's");
+}
+
+/// verify3, "Scope": the account, its sign-in or the environment is looked at after the last read too: what changed while
+/// it was read stops the request.
+#[test]
+fn the_scope_is_looked_at_again_at_the_send() {
+    for kind in Kind::ALL {
+        let (c, w, sent) = world();
+        let s = prepare(&c, the(&c, kind)).unwrap();
+        let last = match kind {
+            Kind::DeletePost => "/posts?".to_string(),
+            Kind::AssignRole | Kind::UnassignRole => "/members/".into(),
+            Kind::UploadGallery | Kind::UploadIcon => "/auth/user".into(),
+            _ => format!("/groups/{G}?"),
+        };
+        let cc = c.clone();
+        // At the last read of all (the first of the group's, where two are made).
+        w.lock().unwrap().then.push((last, Box::new(move |_| cc.update(|s| s.vrchat_login.revision += 1))));
+        let Reply::Outcome { outcome, .. } = ask(&c, Request::Commit { op: s.op.clone(), digest: s.digest() }) else { panic!() };
+        assert!(!matches!(outcome, Outcome::Done(_)), "{kind:?}: {outcome:?}");
+        assert!(writes(&sent).is_empty(), "{kind:?}: nothing goes as the sign-in that ended");
+        let e = c.groups_book().of(&Key::of(&scope(&c)).unwrap()).into_iter().find(|e| e.op == s.op).unwrap();
+        assert_eq!(e.state, State::Refused, "{kind:?}: and it is known that nothing went");
+    }
 }
 
 /// M2 through the service: a moderator without the rights prepares nothing, and one that loses them between is stopped.
@@ -649,7 +951,7 @@ fn group_data_stays_out_of_the_snapshot_and_survives_the_link() {
     let (c, _, _) = world();
     let before = serde_json::to_string(&*c.view()).unwrap();
     let reply = ask(&c, Request::Open { group: G.into() });
-    let s = prepare(&c, the(&c, Kind::EditPost)).unwrap();
+    let s = prepare(&c, the(&c, Kind::DeletePost)).unwrap();
     assert_eq!(serde_json::to_string(&*c.view()).unwrap(), before);
     let text = serde_json::to_string(&crate::ipc::ToClient::Groups { id: "x".into(), reply: reply.clone() }).unwrap();
     assert!(matches!(serde_json::from_str(&text).unwrap(), crate::ipc::ToClient::Groups { reply: r, .. } if r == reply));
@@ -695,25 +997,17 @@ fn the_ledger_holds_no_words_and_no_one_else() {
 fn unknown_entry(c: &Shared, write: &Write, evidence: Evidence) -> String {
     let book = c.groups_book();
     let op = uuid::Uuid::new_v4().to_string();
-    book.prepare(Entry { op: op.clone(), key: Key::of(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target: write.ids(), payload: write.payload(), evidence, state: State::Prepared, by: None, said: None, made: None, checked: false, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
-    book.dispatch(&op, false).unwrap();
+    let mut target = write.ids();
+    if target.user.is_some() {
+        target.membership = Some("m".into());
+    }
+    book.prepare(Entry { v: FORMAT, op: op.clone(), key: Key::of(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target, payload: write.payload(), same: write.same(), evidence, state: State::Prepared, by: None, made: None, checked: false, answer: None, looked: false, closed: None, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
+    book.dispatch(&op, &[]).unwrap();
     book.end(&op, State::Unknown, None, None);
     later(c);
     op
 }
 
-#[test]
-fn verify2_photo_removal_requires_observing_the_removal() {
-    let (c, w, _) = world();
-    let Write::EditPost { group, baseline, edit } = the(&c, Kind::EditPost) else { panic!() };
-    let edit = PostDraft { title: baseline.title.clone(), image_id: None, ..edit };
-    let s = prepare(&c, Write::EditPost { group, baseline, edit }).unwrap();
-    w.lock().unwrap().fault = Some(Fault::Drop { done: false });
-    assert_eq!(commit(&c, &s), Outcome::Unknown);
-    later(&c);
-    assert_ne!(check(&c, &s.op), Observation::Done, "the picture is still there");
-    assert_eq!(entry(&c, &s.op).state, State::Refused, "seen as it was: not done");
-}
 #[test]
 fn verify2_duplicate_role_name_cannot_identify_a_creation() {
     let (c, _, _) = world();
@@ -726,13 +1020,190 @@ fn verify2_duplicate_role_name_cannot_identify_a_creation() {
 fn verify2_absent_art_field_is_inconclusive() {
     let (c, w, _) = world();
     w.lock().unwrap().instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x"}))];
-    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into() }, Evidence { previous: Some(Before { file: None }), ..Default::default() });
-    assert_eq!(check(&c, &op), Observation::Inconclusive(Unclear::NotRead));
+    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into() }, Evidence::default());
+    assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::NotRead));
 }
 #[test]
 fn verify2_disputed_member_must_be_the_requested_user() {
     let (c, w, _) = world();
     w.lock().unwrap().instead = vec![(format!("/members/{U}"), super::world::member(TWIN, &["grol_artist"]))];
     let op = unknown_entry(&c, &Write::MemberRole { group: G.into(), user: U.into(), role: "grol_artist".into(), add: true }, Evidence::default());
-    assert_eq!(check(&c, &op), Observation::Inconclusive(Unclear::NotRead));
+    assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::NotRead));
+}
+
+// --- the third verification's counterexamples (verify3-groups-scratch/probes.rs), as what should happen -----------------
+
+#[test]
+fn review3_b1_role_membership_changed_after_seal() {
+    let (c, w, sent) = world();
+    let s = prepare(&c, the(&c, Kind::AssignRole)).unwrap();
+    w.lock().unwrap().members.get_mut(U).unwrap()["id"] = json!("gmem_rejoined");
+    assert!(matches!(commit(&c, &s), Outcome::Refused(_)), "this person left and rejoined");
+    assert!(writes(&sent).is_empty());
+}
+#[test]
+fn review3_b1_rejoined_membership() {
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::AssignRole, false);
+    let mut rejoined = super::world::member(U, &["grol_mod"]);
+    rejoined["id"] = json!("gmem_new_membership");
+    w.lock().unwrap().members.insert(U.into(), rejoined);
+    later(&c);
+    let _ = check(&c, &op);
+    assert!(entry(&c, &op).open(), "another membership's role says nothing of this one's");
+}
+#[test]
+fn review3_b2_role_reverted_after_success() {
+    let (c, w, _) = world();
+    let before = w.lock().unwrap().roles.clone();
+    let op = lost(&c, &w, Kind::EditRole, true);
+    w.lock().unwrap().roles = before;
+    later(&c);
+    let _ = check(&c, &op);
+    assert_ne!(entry(&c, &op).state, State::Refused, "it was done and undone: never 'it was not done'");
+    assert!(entry(&c, &op).open(), "the person's to decide");
+}
+#[test]
+fn review3_b2_unrelated_identical_role() {
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::CreateRole, false);
+    let mut r = role("grol_another", "Greeters", 6, &["group-instance-join"], false);
+    r["description"] = json!("Say hello");
+    r["createdAt"] = json!(super::world::now());
+    w.lock().unwrap().roles.push(r);
+    later(&c);
+    let _ = check(&c, &op);
+    assert_ne!(entry(&c, &op).state, State::Done, "another moderator's role is not this creation");
+    assert!(entry(&c, &op).open());
+}
+#[test]
+fn review3_b2_upload_before_dispatch() {
+    let (c, w, _) = world();
+    let write = the(&c, Kind::UploadGallery);
+    let Write::Upload { staged, .. } = &write else { panic!() };
+    let bytes = staged.read().unwrap();
+    let sealed = prepare(&c, write).unwrap();
+    let mut f = super::world::file("file_other", "gallery", "usr_test", &bytes);
+    f["versions"][1]["created_at"] = json!("2025-01-01T00:00:00Z");
+    w.lock().unwrap().files.push(("gallery".into(), f));
+    w.lock().unwrap().fault = Some(Fault::Drop { done: false });
+    assert_eq!(commit(&c, &sealed), Outcome::Unknown);
+    let _ = check(&c, &sealed.op);
+    assert_ne!(entry(&c, &sealed.op).state, State::Done, "a file that was there before the send is not this upload");
+    assert!(entry(&c, &sealed.op).open());
+}
+#[test]
+fn review3_b3_two_prepared_windows() {
+    let (c, _, sent) = world();
+    let a = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
+    let Reply::Prepared(b) = c.groups(LINK + 1, scope(&c), Request::Prepare { write: a.write.clone() }) else { panic!() };
+    assert_eq!(b.warning, None);
+    assert!(matches!(commit(&c, &a), Outcome::Done(_)));
+    let Reply::Outcome { outcome, .. } = c.groups(LINK + 1, scope(&c), Request::Commit { op: b.op.clone(), digest: b.digest() }) else { panic!() };
+    assert!(matches!(outcome, Outcome::Refused(_)), "the second was shown nothing of the first: {outcome:?}");
+    assert_eq!(writes(&sent).len(), 1);
+}
+/// Blocker 4: its edit has left this version (`no_post_is_ever_edited_from_here`); a restriction put between the last read
+/// and the request of what is left, a deletion or a new post, is never undone by them.
+#[test]
+fn review3_b4_just_restricted_audience() {
+    let (c, w, _) = world();
+    let s = prepare(&c, the(&c, Kind::DeletePost)).unwrap();
+    w.lock().unwrap().then.push(("/posts?".into(), Box::new(|w| w.posts[0]["roleIds"] = json!(["grol_events"]))));
+    let _ = commit(&c, &s);
+    assert_eq!(w.lock().unwrap().posts[0]["roleIds"], json!(["grol_events"]), "the other moderator's restriction stays");
+    let (c, w, _) = world();
+    let s = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
+    w.lock().unwrap().then.push((format!("/groups/{G}?"), Box::new(|w| w.posts[0]["roleIds"] = json!(["grol_events"]))));
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    assert!(w.lock().unwrap().posts.iter().any(|p| p["id"] == "gpos_1" && p["roleIds"] == json!(["grol_events"])));
+}
+#[test]
+fn review3_equal_accounts_two_ledger_owners() {
+    let (a, _, sa) = world();
+    let (b, _, sb) = world();
+    b.groups_keep_book_for_tests(a.groups_book().dir());
+    let one = prepare(&a, the(&a, Kind::CreatePost));
+    assert_eq!(ask(&b, Request::Ledger { also: vec![] }), Reply::Failed(Failure::OtherOwner));
+    let two = prepare(&b, the(&b, Kind::CreatePost));
+    assert_eq!(two, failed(Failure::OtherOwner));
+    for (c, s) in [(&a, one), (&b, two)] {
+        if let Ok(s) = s {
+            let _ = commit(c, &s);
+        }
+    }
+    assert_eq!(writes(&sa).len() + writes(&sb).len(), 1, "one owner of the record at a time");
+}
+#[test]
+fn review3_unreadable_completed_record() {
+    let (c, _, _) = world();
+    let s = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    let dir = c.groups_book().dir();
+    c.groups_book().let_go();
+    let whole = std::fs::read(dir.join(format!("{}.json", s.op))).unwrap();
+    std::fs::write(dir.join(format!("{}.json", s.op)), &whole[..whole.len() / 2]).unwrap();
+    let (b, _, sent) = world();
+    b.groups_keep_book_for_tests(dir);
+    assert_eq!(check(&b, &s.op), Observation::CannotTell(Unclear::NoRecord), "a record that cannot be read is not 'never sent'");
+    assert_eq!(prepare(&b, the(&b, Kind::CreatePost)), failed(Failure::RecordUnreadable), "not sent past it unseen");
+    let Reply::Ledger { unreadable, .. } = ask(&b, Request::Ledger { also: vec![] }) else { panic!() };
+    assert_eq!(unreadable, 1, "and the window is told");
+    assert_eq!(ask(&b, Request::SetAside), Reply::Cancelled);
+    let again = prepare(&b, the(&b, Kind::CreatePost)).unwrap();
+    assert_eq!((again.warning, again.confirm), (Some(Warning::RecordUnreadable), true));
+    assert!(writes(&sent).is_empty());
+}
+/// Only its own newly started test program is ended, at each side of the request: the next program on the same record
+/// finds it unknown, sends nothing by itself and refuses the same.
+#[test]
+fn review3_real_process_kills() {
+    for phase in ["pre", "post"] {
+        let root = orbiters_core::paths::local_data_root().join("group-kills").join(uuid::Uuid::new_v4().to_string()).join(phase);
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(exe).args(["--exact", "controller::groups::tests::review3_kill_helper"]).env("GROUP_REVIEW3_KILL", &root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let start = Instant::now();
+        while !root.join("ready").exists() && start.elapsed() < Duration::from_secs(60) && child.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ready = root.join("ready").exists();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(ready, "{phase}");
+        let (c, _, sent) = world();
+        c.groups_keep_book_for_tests(root.join("book"));
+        let op = std::fs::read_to_string(root.join("op")).unwrap();
+        assert_eq!(entry(&c, &op).state, State::Unknown, "{phase}: its lock ended with it");
+        assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op }), "{phase}");
+        assert!(writes(&sent).is_empty(), "{phase}");
+    }
+}
+#[test]
+fn review3_kill_helper() {
+    let Some(dir) = std::env::var_os("GROUP_REVIEW3_KILL") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let (c, w, _) = world();
+    c.groups_keep_book_for_tests(dir.join("book"));
+    let s = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
+    std::fs::write(dir.join("op"), &s.op).unwrap();
+    if dir.ends_with("pre") {
+        w.lock().unwrap().then.push((
+            format!("/groups/{G}?"),
+            Box::new(move |_| {
+                std::fs::write(dir.join("ready"), "last read").unwrap();
+                loop {
+                    std::thread::park();
+                }
+            }),
+        ));
+    } else {
+        let hold = Arc::new(Hold::default());
+        w.lock().unwrap().fault = Some(Fault::Held(hold.clone()));
+        std::thread::spawn(move || {
+            assert!(hold.until_reached());
+            std::fs::write(dir.join("ready"), "applied, no answer yet").unwrap();
+        });
+    }
+    let _ = commit(&c, &s);
 }

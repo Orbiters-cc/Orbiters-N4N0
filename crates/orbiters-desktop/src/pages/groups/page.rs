@@ -1,8 +1,8 @@
 //! A group's page (REQUEST22 1): Look (its pictures, the nameplate banner, its words), Members (search, roles), Roles
-//! (create, change, delete) and Posts (write, change, delete). One scrolling region; what VRChat gives is shown as it
+//! (create, change, delete) and Posts (write, delete; changed on vrchat.com). One scrolling region; what VRChat gives is shown as it
 //! answered, and each control is offered only when `orbiters_core::groups::can` allows it on the data read (VRChat still
 //! decides).
-use super::{abilities_line, authority_text, failure_text, short_code, warning_text, Kind, State};
+use super::{abilities_line, authority_text, deliberate, failure_text, short_code, tail as id_tail, warning_text, Kind, State};
 use super::art::Drafts;
 use crate::controller::groups::{Done, Failure, Outcome, Page, Reply, Request, Sealed, Write};
 use crate::pages::Cx;
@@ -74,25 +74,22 @@ impl RoleEditor {
     }
 }
 
+/// A new post being written. Its id is its own for as long as it is written, on this computer and in the record of its
+/// send: only that one is cleared when it is out (verify3 Major 6).
 pub(crate) struct Composer {
-    number: u64,
-    pub baseline: Option<Post>,
+    pub id: String,
     pub draft: PostDraft,
     /// Brought back from disk as it was, and not touched since.
     pub restored: bool,
 }
 
 impl Composer {
-    pub fn new(baseline: Option<Post>, draft: PostDraft) -> Self {
-        Self { number: editor_number(), baseline, draft, restored: false }
-    }
-    /// The post's picture is to be removed by this edit (the draft has none, the post had one; Minor 6).
-    pub fn removes_picture(&self) -> bool {
-        self.draft.image_id.is_none() && self.baseline.as_ref().is_some_and(|b| b.image_id.is_some())
+    pub fn new(draft: PostDraft) -> Self {
+        Self { id: uuid::Uuid::new_v4().to_string(), draft, restored: false }
     }
 }
 
-/// The account's own pictures to choose from (gallery for banners and post pictures, icons for the icon).
+/// The account's own pictures to choose from (gallery for banners, icons for the icon).
 pub(crate) struct Picker {
     pub purpose: Purpose,
     pub files: Vec<InventoryFile>,
@@ -130,7 +127,9 @@ pub(crate) struct Open {
     pub member_roles: Option<String>,
     pub role_editor: Option<RoleEditor>,
     pub composer: Option<Composer>,
-    /// The editor the write on its way came from.
+    /// New posts no longer written (posted, cancelled): off this computer's disk at the next frame.
+    pub drafts_over: Vec<String>,
+    /// The role editor the write on its way came from.
     sent_editor: Option<u64>,
     pub picker: Option<Picker>,
     /// The signed-in account's id: what the rules are asked for.
@@ -145,7 +144,7 @@ pub(crate) struct Open {
 impl Open {
     /// The page of `card`, with the new post the person was writing for it brought back (Major 8).
     pub fn new(card: GroupCard, drafts: &Drafts) -> Self {
-        let composer = drafts.composer(&card.id).map(|d| Composer { restored: true, ..Composer::new(None, d.clone()) });
+        let composer = drafts.newest(&card.id).map(|k| Composer { id: k.id.clone(), draft: k.draft.clone(), restored: true });
         Self {
             id: card.id.clone(),
             card,
@@ -159,6 +158,7 @@ impl Open {
             member_roles: None,
             role_editor: None,
             composer,
+            drafts_over: Vec::new(),
             sent_editor: None,
             picker: None,
             me_id: String::new(),
@@ -166,6 +166,23 @@ impl Open {
             #[cfg(test)]
             rows_built: 0,
         }
+    }
+
+    /// The new post being written is over: posted, or cancelled.
+    pub(crate) fn end_composer(&mut self) {
+        if let Some(c) = self.composer.take() {
+            self.drafts_over.push(c.id);
+        }
+    }
+    /// A role's or a member's name, where the page has it.
+    pub(crate) fn role_name(&self, id: &str) -> Option<String> {
+        self.roles().iter().find(|r| r.id == id).map(|r| g::label(&r.name, g::ROLE_NAME_MAX))
+    }
+    pub(crate) fn member_name(&self, user: &str) -> Option<String> {
+        if user == self.me_id {
+            return Some(self.me_name.clone());
+        }
+        self.members.items.iter().find(|m| m.user_id == user).and_then(|m| m.display_name.clone())
     }
 
     /// Everything read again (after a check, or a refusal that says the page is out of date).
@@ -270,14 +287,10 @@ impl Open {
                     self.clear_role_editor(sealed, sent);
                 }
                 Done::Post(post) => {
-                    // The very editor it came from, still saying the very same.
-                    let same = |c: &Composer| match sealed.map(|s| &s.write) {
-                        Some(Write::CreatePost { draft, .. }) => c.baseline.is_none() && c.draft.content() == draft.content() && c.draft.send_notification == draft.send_notification,
-                        Some(Write::EditPost { baseline, edit, .. }) => c.baseline.as_ref().is_some_and(|b| b.id == baseline.id) && c.draft.content() == edit.content(),
-                        _ => false,
-                    };
-                    if self.composer.as_ref().is_some_and(|c| Some(c.number) == sent && same(c)) {
-                        self.composer = None;
+                    // The very one it came from, still saying the very same.
+                    let same = |c: &Composer| matches!(sealed.map(|s| &s.write), Some(Write::CreatePost { draft, of, .. }) if *of == c.id && c.draft.content() == draft.content() && c.draft.send_notification == draft.send_notification);
+                    if self.composer.as_ref().is_some_and(same) {
+                        self.end_composer();
                     }
                     self.posts.seen.insert(post.id.clone());
                     match self.posts.items.iter_mut().find(|p| p.id == post.id) {
@@ -301,7 +314,7 @@ impl Open {
             },
             Outcome::Refused(f) => {
                 // What it was made against moved: read again.
-                if matches!(f, Failure::Changed | Failure::PostChanged(_) | Failure::RoleChanged(_) | Failure::Withheld(_) | Failure::NotRead(_) | Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden)) {
+                if matches!(f, Failure::Changed | Failure::Rejoined | Failure::PostChanged(_) | Failure::RoleChanged(_) | Failure::Withheld(_) | Failure::NotRead(_) | Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden)) {
                     self.asked = false;
                     self.posts = PostList::default();
                 }
@@ -347,12 +360,6 @@ fn role_label(sealed: &Sealed, id: &str) -> String {
     sealed.label(id).map(str::to_string).unwrap_or_else(|| format!("{} {}", tr("A role"), id_tail(id)))
 }
 
-/// A short, stable tail of an id, to tell two people of the same name apart (Major 3).
-fn id_tail(id: &str) -> String {
-    let tail: String = id.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-    format!("…{tail}")
-}
-
 fn line(ui: &mut Ui, label: &str, value: &str) {
     let w = ui.available_width();
     let p = ui.painter().clone();
@@ -389,6 +396,10 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
             // Ids that tell two people of the same name apart (Major 3).
             let membership = sealed.member.as_ref().filter(|m| !m.membership_id.is_empty()).map(|m| id_tail(&m.membership_id)).unwrap_or_default();
             line(ui, tr("Account"), format!("{} {}", id_tail(user), membership).trim());
+            // The very membership it is for (verify3 Blocker 1).
+            if let Some(at) = sealed.member.as_ref().and_then(|m| m.joined_at.as_deref()) {
+                line(ui, tr("Joined"), &super::super::local_time(at));
+            }
             if let Some(role) = &sealed.role {
                 line(ui, tr("Role"), &g::label(&role.name, g::ROLE_NAME_MAX));
                 if !role.permissions.is_empty() {
@@ -451,46 +462,23 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
             }
             note(ui, tr("Members who have it lose it, and what it lets them do. This cannot be undone."), theme::DANGER);
         }
-        Write::CreatePost { draft, .. } | Write::EditPost { edit: draft, .. } => {
-            let baseline = match &sealed.write {
-                Write::EditPost { baseline, .. } => Some(baseline),
-                _ => None,
-            };
+        Write::CreatePost { draft, .. } => {
             line(ui, tr("Title"), &draft.title);
             line(ui, tr("Text"), &draft.text);
             line(ui, tr("Who sees it"), if draft.visibility == Visibility::Public { tr("Anyone, on VRChat's website too") } else { tr("Members of the group") });
             if draft.visibility == Visibility::Group && !draft.role_ids.is_empty() {
                 line(ui, tr("Restricted to"), &draft.role_ids.iter().map(|r| role_label(sealed, r)).collect::<Vec<_>>().join(", "));
             }
-            match (&draft.image_id, baseline.and_then(|b| b.image_id.as_ref())) {
-                (Some(id), _) => line(ui, tr("Picture"), &format!("{} {}", tr("The post's own"), id_tail(id))),
-                (None, Some(_)) => line(ui, tr("Picture"), tr("Removed from the post")),
-                (None, None) => {}
-            }
-            // What an edit changes against the post as VRChat has it (Blocker 3).
-            if let Some(b) = baseline {
-                let changed = b.changed_by(draft);
-                if changed.contains(&g::PostField::Visibility) {
-                    note(ui, tr("This changes who sees the post."), theme::WARN);
-                }
-                if changed.contains(&g::PostField::Roles) {
-                    note(ui, tr("This changes which roles see the post."), theme::WARN);
-                }
-                note(ui, tr("The post is read again just before it is sent: if someone changed it, nothing goes. VRChat offers no way to close the instant between."), theme::FG_3);
-            }
-            let notify = if baseline.is_some() {
-                tr("None: an edit notifies nobody again")
-            } else if draft.send_notification {
-                tr("Yes: members who follow the group's announcements are notified")
-            } else {
-                tr("No")
-            };
-            line(ui, tr("Notification"), notify);
+            line(ui, tr("Notification"), if draft.send_notification { tr("Yes: members who follow the group's announcements are notified") } else { tr("No") });
         }
         Write::DeletePost { post, .. } => {
             // The post exactly as read now (Blocker 7).
             line(ui, tr("Title"), &g::label(&post.title, g::POST_TITLE_MAX));
             line(ui, tr("Text"), &g::text(&post.text, 300));
+            line(ui, tr("Who sees it"), if post.visibility == Visibility::Public { tr("Anyone, on VRChat's website too") } else { tr("Members of the group") });
+            if post.visibility == Visibility::Group && !post.role_ids.is_empty() {
+                line(ui, tr("Restricted to"), &post.role_ids.iter().map(|r| role_label(sealed, r)).collect::<Vec<_>>().join(", "));
+            }
             note(ui, tr("It disappears for everyone. This cannot be undone."), theme::DANGER);
         }
         Write::Upload { tag, .. } => {
@@ -504,18 +492,27 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
             line(ui, tr("Picture"), if *slot == ArtSlot::Icon { tr("The group's icon") } else { tr("The group's banner") });
             line(ui, tr("File"), &id_tail(file));
             note(ui, tr("Everyone who looks at the group sees it."), theme::FG_3);
+            note(ui, tr("VRChat takes the file, not this picture of it: it is read again just before, and not sent if it changed."), theme::FG_3);
         }
     }
 }
 
-/// What VRChat's answer left out, and reading it again.
+/// What VRChat's answer left out, reading it again, and where it is done whatever VRChat leaves out here.
 fn unknown(ui: &mut Ui, a: &Authority, salt: &str, acts: &mut Vec<Act>) {
     if let (Authority::Unknown(_), Some(text)) = (a, authority_text(a)) {
-        note(ui, text, theme::WARN);
+        unread(ui, text, salt, acts);
+    }
+}
+fn unread(ui: &mut Ui, text: &str, salt: &str, acts: &mut Vec<Act>) {
+    note(ui, text, theme::WARN);
+    button_row(ui, |ui| {
         if widgets::Button::new(tr("Read again")).icon(icons::ARROW_CLOCKWISE).size(widgets::Size::Sm).id_salt(("group-read-again", salt)).show(ui).clicked() {
             acts.push(Act::Reload);
         }
-    }
+        if widgets::Button::new(tr("Open on vrchat.com")).icon(icons::ARROW_SQUARE_OUT).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("group-unread-web", salt)).show(ui).clicked() {
+            acts.push(Act::Web);
+        }
+    });
 }
 
 /// The art a picture write sends, as the confirmation shows it.
@@ -640,7 +637,6 @@ fn do_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, scope: &crate::co
         Act::Write(write, origin) => {
             if let Some(o) = state.open.as_mut() {
                 o.sent_editor = match &write {
-                    Write::CreatePost { .. } | Write::EditPost { .. } => o.composer.as_ref().map(|c| c.number),
                     Write::CreateRole { .. } | Write::EditRole { .. } => o.role_editor.as_ref().map(|e| e.number),
                     _ => None,
                 };
@@ -854,7 +850,7 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
             note(ui, tr("The picture is in your VRChat inventory. The group is unchanged until you apply it."), theme::FG_2);
             let label = if slot == ArtSlot::Icon { tr("Apply as the icon") } else { tr("Apply as the banner") };
             let resp = widgets::Button::new(label).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(!busy && art).id_salt(("look-apply-uploaded", file.as_str())).show(ui);
-            if widgets::activated_fresh(&resp) {
+            if deliberate(&resp) {
                 acts.push(Act::ApplyUploaded(slot, file.clone(), resp.rect));
             }
         });
@@ -1026,6 +1022,7 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         note(ui, tr("Many members are loaded: search by name to find someone."), theme::FG_3);
     }
     let w = ui.available_width();
+    let mut withheld = false;
     for row in rows {
         let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
         let Some(o) = state.open.as_mut() else { return };
@@ -1042,14 +1039,18 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
             o.rows_built += 1;
         }
         let member = match row {
-            None => me.as_ref().map(|me| Member { user_id: me.user_id.clone(), display_name: Some(o.me_name.clone()), role_ids: me.role_ids.clone(), roles_known: true, ..Default::default() }),
+            None => me.as_ref().map(|me| Member { user_id: me.user_id.clone(), membership_id: me.membership_id.clone(), joined_at: me.joined_at.clone(), display_name: Some(o.me_name.clone()), role_ids: me.role_ids.clone(), roles_known: me.roles_known && me.managed_known, ..Default::default() }),
             Some(i) => o.members.items.get(i).cloned(),
         };
         let Some(m) = member else { continue };
         let mine = row.is_none();
         let roles: Vec<Role> = o.roles().to_vec();
-        // Roles can be given or taken back only on a whole record (M8, Blocker 4), when some role allows it.
-        let assignable = (m.complete() && m.roles_known || mine) && roles.iter().any(|r| o.can(Action::AssignRole { role: &r.id, user: &m.user_id, add: !m.role_ids.contains(&r.id) }).allowed());
+        // Roles can be given or taken back only on a whole record that says which membership it is (M8, Blocker 4, verify3
+        // Blocker 1), when some role allows it.
+        let may = roles.iter().any(|r| o.can(Action::AssignRole { role: &r.id, user: &m.user_id, add: !m.role_ids.contains(&r.id) }).allowed());
+        let whole = (m.complete() || mine) && m.roles_known && m.membership().is_some();
+        let assignable = whole && may;
+        withheld |= may && !whole;
         let p = ui.painter().clone();
         widgets::frame(&p, rect, 14.0, theme::surface());
         let face = Rect::from_min_size(pos2(rect.left() + 12.0, rect.center().y - 18.0), vec2(36.0, 36.0));
@@ -1085,6 +1086,10 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
                 role_chooser(ui, o, &m, &roles, busy, acts);
             }
         }
+    }
+    // Members shown whose record VRChat gave in part: their roles are left alone here, and it says why.
+    if withheld {
+        unread(ui, super::missing_text(Missing::Member), "members", acts);
     }
     let Some(o) = state.open.as_ref() else { return };
     if o.members.loading {
@@ -1131,7 +1136,7 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
         }
         // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
         // alone (Major 3, Blocker 6).
-        if verdict.allowed() && widgets::activated_fresh(&resp) {
+        if verdict.allowed() && deliberate(&resp) {
             acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), role: r.id.clone(), add: !has }, cr));
         }
     }
@@ -1215,7 +1220,7 @@ fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
         let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
         if deletable.allowed() {
             let resp = widgets::Button::new(tr("Delete")).icon(icons::TRASH).variant(widgets::Variant::Danger).size(widgets::Size::Sm).enabled(!busy).id_salt(("role-delete", r.id.as_str())).show_at(ui, del);
-            if widgets::activated_fresh(&resp) {
+            if deliberate(&resp) {
                 acts.push(Act::Write(Write::DeleteRole { group: o.id.clone(), role: r.id.clone() }, resp.rect));
             }
         }
@@ -1298,7 +1303,7 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
         }
         button_row(ui, |ui| {
             let resp = widgets::Button::new(tr("Save")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(verdict.as_ref().is_some_and(|v| v.allowed()) && !busy).id_salt("role-save").show(ui);
-            if widgets::activated_fresh(&resp) {
+            if deliberate(&resp) {
                 save = Some(resp.rect);
             }
             if widgets::Button::new(tr("Cancel")).variant(widgets::Variant::Ghost).id_salt("role-cancel").show(ui).clicked() {
@@ -1375,14 +1380,14 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
             None => b,
         };
         if b.show(ui).clicked() {
-            o.composer = Some(Composer::new(None, PostDraft::default()));
+            o.composer = Some(Composer::new(PostDraft::default()));
         }
         unknown(ui, &can_post, "posts", acts);
         if can_post.refused().is_some() {
             note(ui, tr("Writing posts needs the right to manage the group's announcements."), theme::FG_3);
         }
     }
-    if o.composer.as_ref().is_some_and(|c| c.baseline.is_none()) {
+    if o.composer.is_some() {
         composer(ui, o, busy, kept, acts);
     }
     if let Some(f) = o.posts.failed {
@@ -1392,10 +1397,6 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
     let count = o.posts.items.len();
     for index in 0..count {
         let Some(id) = o.posts.items.get(index).map(|p| p.id.as_str()) else { break };
-        if o.composer.as_ref().and_then(|c| c.baseline.as_ref()).is_some_and(|b| b.id == id) {
-            composer(ui, o, busy, kept, acts);
-            continue;
-        }
         let w = ui.available_width();
         // Copied and laid out only in view; elsewhere its last measured height (or a guess) holds its place (Major 9).
         let h = o.post_heights.get(id).copied().unwrap_or(140.0);
@@ -1417,7 +1418,7 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
         }
         let rect = Rect::from_min_size(slot.min, vec2(w, measured.min(h.max(measured))));
         widgets::frame(&p, rect, theme::CARD_RADIUS, theme::surface());
-        widgets::text_truncated(&p, pos2(rect.left() + 24.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(g::label(&post.title, g::POST_TITLE_MAX), 16.0).weight(weight::SEMIBOLD), w - 260.0);
+        widgets::text_truncated(&p, pos2(rect.left() + 24.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(g::label(&post.title, g::POST_TITLE_MAX), 16.0).weight(weight::SEMIBOLD), w - 340.0);
         let who = if post.visibility == Visibility::Public {
             tr("Public").to_string()
         } else if post.role_ids.is_empty() {
@@ -1427,19 +1428,21 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
         };
         // A date VRChat gave in another form is not shown as it is (Minor 1).
         let when = post.created_at.as_deref().map(super::super::local_time).unwrap_or_else(|| "—".to_string());
-        widgets::text_truncated(&p, pos2(rect.left() + 24.0, rect.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(format!("{when} · {who}"), 12.0).color(theme::FG_3), w - 260.0);
+        widgets::text_truncated(&p, pos2(rect.left() + 24.0, rect.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(format!("{when} · {who}"), 12.0).color(theme::FG_3), w - 48.0);
         p.galley(pos2(rect.left() + 24.0, rect.top() + 70.0), text, theme::FG_2);
         if can_post.allowed() {
-            // A post this version cannot carry back whole is read-only here (Blocker 3).
+            // Changed on its group's page: VRChat's edit carries the audience whole and takes no condition, so one made here
+            // could undo another moderator's restriction (verify3 Blocker 4).
+            let edit_w = widgets::text_size(ui, &Txt::new(tr("Edit on vrchat.com"), 13.0).weight(weight::MEDIUM)).x + 52.0;
+            let edit = Rect::from_min_size(pos2(rect.right() - 116.0 - edit_w, rect.top() + 14.0), vec2(edit_w, 32.0));
+            if widgets::Button::new(tr("Edit on vrchat.com")).icon(icons::ARROW_SQUARE_OUT).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("post-edit-web", post.id.as_str())).show_at(ui, edit).clicked() {
+                acts.push(Act::Web);
+            }
+            // A post not read whole is not deleted from here (Blocker 3, verify3 Major 5).
             if post.complete {
-                let edit = Rect::from_min_size(pos2(rect.right() - 212.0, rect.top() + 14.0), vec2(96.0, 32.0));
-                if widgets::Button::new(tr("Edit")).icon(icons::PENCIL_SIMPLE).size(widgets::Size::Sm).enabled(!busy).id_salt(("post-edit", post.id.as_str())).show_at(ui, edit).clicked() {
-                    let draft = PostDraft { title: post.title.clone(), text: post.text.clone(), visibility: post.visibility, role_ids: post.role_ids.clone(), image_id: post.image_id.clone(), send_notification: false };
-                    o.composer = Some(Composer::new(Some(post.clone()), draft));
-                }
-            let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
-            let resp = widgets::Button::new(tr("Delete")).icon(icons::TRASH).variant(widgets::Variant::Danger).size(widgets::Size::Sm).enabled(!busy).id_salt(("post-delete", post.id.as_str())).show_at(ui, del);
-                if widgets::activated_fresh(&resp) {
+                let del = Rect::from_min_size(pos2(rect.right() - 108.0, rect.top() + 14.0), vec2(96.0, 32.0));
+                let resp = widgets::Button::new(tr("Delete")).icon(icons::TRASH).variant(widgets::Variant::Danger).size(widgets::Size::Sm).enabled(!busy).id_salt(("post-delete", post.id.as_str())).show_at(ui, del);
+                if deliberate(&resp) {
                     acts.push(Act::Write(Write::DeletePost { group: o.id.clone(), post: post.clone() }, resp.rect));
                 }
             }
@@ -1455,17 +1458,15 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
     }
 }
 
-/// Writing or changing a post: notification off unless turned on, and only for a new one (M7).
+/// Writing a post: notification off unless turned on (M7).
 fn composer(ui: &mut Ui, o: &mut Open, busy: bool, kept: bool, acts: &mut Vec<Act>) {
     let group = o.id.clone();
     let roles: Vec<Role> = o.roles().iter().filter(|r| !r.default_role).cloned().collect();
     let Some(c) = o.composer.as_mut() else { return };
     let before = c.draft.clone();
-    let editing = c.baseline.is_some();
     let mut send: Option<Rect> = None;
     let mut cancel = false;
-    let had_picture = c.baseline.as_ref().is_some_and(|b| b.image_id.is_some());
-    card(ui, icons::CHAT_CENTERED_TEXT, if editing { tr("Change the post") } else { tr("New post") }, |ui| {
+    card(ui, icons::CHAT_CENTERED_TEXT, tr("New post"), |ui| {
         // Held still while its write is prepared, confirmed and sent: what goes is what shows (Major 12).
         if busy {
             ui.disable();
@@ -1500,25 +1501,14 @@ fn composer(ui: &mut Ui, o: &mut Open, busy: bool, kept: bool, acts: &mut Vec<Ac
         if c.draft.visibility == Visibility::Public {
             note(ui, tr("A public post can be read by anyone on VRChat's website, members or not."), theme::WARN);
         }
-        // The post's picture: kept, or removed on purpose (Minor 6). VRCX sends `imageId: null` for a post without one.
-        if had_picture {
-            let mut keep = c.draft.image_id.is_some();
-            toggle_row(ui, tr("Keep the post's picture"), tr("Turn it off to remove the picture from the post."), &mut keep);
-            c.draft.image_id = if keep { c.baseline.as_ref().and_then(|b| b.image_id.clone()) } else { None };
-        }
-        if !editing {
-            toggle_row(ui, tr("Send a notification"), tr("Members who follow the group's announcements get one. Off unless you turn it on."), &mut c.draft.send_notification);
-        } else {
-            note(ui, tr("Changing a post notifies nobody again."), theme::FG_3);
-            note(ui, tr("A change of a post is not kept if you leave this page: the post is not copied to this computer."), theme::FG_3);
-        }
-        if !editing && !kept {
+        toggle_row(ui, tr("Send a notification"), tr("Members who follow the group's announcements get one. Off unless you turn it on."), &mut c.draft.send_notification);
+        if !kept {
             note(ui, tr("What you write could not be kept on this computer: it goes if you leave this page."), theme::WARN);
         }
         let ready = !c.draft.title.trim().is_empty() && !c.draft.text.trim().is_empty();
         button_row(ui, |ui| {
-            let resp = widgets::Button::new(if editing { tr("Review the change") } else { tr("Review the post") }).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(ready && !busy).id_salt("post-review").show(ui);
-            if widgets::activated_fresh(&resp) {
+            let resp = widgets::Button::new(tr("Review the post")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(ready && !busy).id_salt("post-review").show(ui);
+            if deliberate(&resp) {
                 send = Some(resp.rect);
             }
             if widgets::Button::new(tr("Cancel")).variant(widgets::Variant::Ghost).id_salt("post-cancel").show(ui).clicked() {
@@ -1530,14 +1520,10 @@ fn composer(ui: &mut Ui, o: &mut Open, busy: bool, kept: bool, acts: &mut Vec<Ac
         c.restored = false;
     }
     if cancel {
-        o.composer = None;
+        o.end_composer();
     } else if let Some(rect) = send {
         let c = o.composer.as_ref().unwrap();
-        let write = match &c.baseline {
-            Some(b) => Write::EditPost { group, baseline: b.clone(), edit: c.draft.clone() },
-            None => Write::CreatePost { group, draft: c.draft.clone() },
-        };
-        acts.push(Act::Write(write, rect));
+        acts.push(Act::Write(Write::CreatePost { group, draft: c.draft.clone(), of: c.id.clone() }, rect));
     }
 }
 
@@ -1556,7 +1542,7 @@ mod tests {
         ];
         let group = g::Group {
             id: "grp_1".into(),
-            my_member: Some(g::MyMember { user_id: "usr_me".into(), role_ids: my_roles.iter().map(|s| s.to_string()).collect(), permissions: rights.iter().map(|s| s.to_string()).collect(), status: "member".into(), whole: true, group_id: Some("grp_1".into()) }),
+            my_member: Some(g::MyMember { user_id: "usr_me".into(), membership_id: "gmem_me".into(), role_ids: my_roles.iter().map(|s| s.to_string()).collect(), permissions: rights.iter().map(|s| s.to_string()).collect(), status: "member".into(), rights_known: true, roles_known: true, managed_known: true, group_id: Some("grp_1".into()), ..Default::default() }),
             roles: Some(roles),
             ..Default::default()
         };
@@ -1577,31 +1563,32 @@ mod tests {
     #[test]
     fn an_unknown_post_keeps_its_draft() {
         let mut o = open_as(&["*"], &["grol_owner"]);
-        o.composer = Some(Composer::new(None, PostDraft { title: "t".into(), text: "x".into(), ..Default::default() }));
+        o.composer = Some(Composer::new(PostDraft { title: "t".into(), text: "x".into(), ..Default::default() }));
         o.ended(None, Outcome::Unknown);
         assert!(o.composer.is_some(), "the draft is kept");
     }
 
-    /// Major 12: a done write clears only the editor it came from, still saying exactly what was sent: another editor with
-    /// the same words (a recovered one), other flags, another notification or another post stays.
+    /// Major 12, verify3 Major 6: a done write clears only the very one it came from, still saying exactly what was sent:
+    /// another with the same words (a later one, a recovered one), other flags or another notification stays.
     #[test]
     fn a_done_write_clears_only_the_submitted_draft() {
         let sent = PostDraft { title: "t".into(), text: "first".into(), ..Default::default() };
         let done = || Outcome::Done(Done::Post(Post { id: "gpos_1".into(), ..Default::default() }));
-        let sealed = Sealed::made_up(Write::CreatePost { group: "grp_1".into(), draft: sent.clone() }, true);
-        let after = |composer: Composer, from: Option<u64>| {
+        let after = |change: &dyn Fn(&mut Composer)| {
             let mut o = open_as(&["*"], &["grol_owner"]);
-            let number = composer.number;
-            o.composer = Some(composer);
-            o.sent_editor = from.or(Some(number));
+            let mut c = Composer::new(sent.clone());
+            let sealed = Sealed::made_up(Write::CreatePost { group: "grp_1".into(), draft: sent.clone(), of: c.id.clone() }, true);
+            change(&mut c);
+            let id = c.id.clone();
+            o.composer = Some(c);
             o.ended(Some(&sealed), done());
+            assert_eq!(o.composer.is_none(), o.drafts_over == [id], "off the disk when, and only when, it is out");
             o.composer.is_some()
         };
-        assert!(!after(Composer::new(None, sent.clone()), None), "the one sent is cleared");
-        assert!(after(Composer::new(None, sent.clone()), Some(1)), "another editor with the same words stays");
-        assert!(after(Composer::new(None, PostDraft { text: "first, corrected".into(), ..sent.clone() }), None), "a newer draft stays");
-        assert!(after(Composer::new(None, PostDraft { send_notification: true, ..sent.clone() }), None), "another notification stays");
-        assert!(after(Composer::new(Some(Post { id: "gpos_9".into(), ..Default::default() }), sent.clone()), None), "an edit of a post stays");
+        assert!(!after(&|_| {}), "the one sent is cleared");
+        assert!(after(&|c| c.id = "another".into()), "another with the same words stays");
+        assert!(after(&|c| c.draft.text = "first, corrected".into()), "a newer draft stays");
+        assert!(after(&|c| c.draft.send_notification = true), "another notification stays");
         let role = RoleDraft { name: "n".into(), ..Default::default() };
         let sealed = Sealed::made_up(Write::CreateRole { group: "grp_1".into(), draft: role.clone() }, true);
         let after = |draft: RoleDraft| {
@@ -1649,7 +1636,7 @@ mod tests {
             o.page.as_mut().unwrap().group.roles.as_mut().unwrap().truncate(3);
             match what {
                 "the role's Save" => o.role_editor = Some(RoleEditor::new(None, RoleDraft { name: "n".into(), ..Default::default() })),
-                "the post's Review" => o.composer = Some(Composer::new(None, PostDraft { title: "t".into(), text: "x".into(), ..Default::default() })),
+                "the post's Review" => o.composer = Some(Composer::new(PostDraft { title: "t".into(), text: "x".into(), ..Default::default() })),
                 "a post's Delete" => o.posts = PostList { items: vec![Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), complete: true, ..Default::default() }], started: true, ..Default::default() },
                 _ => {}
             }
@@ -1710,7 +1697,7 @@ mod tests {
     #[test]
     fn what_is_unknown_is_explained_and_can_be_read_again() {
         let mut o = open_as(&["*"], &["grol_owner"]);
-        o.page.as_mut().unwrap().group.my_member.as_mut().unwrap().whole = false;
+        o.page.as_mut().unwrap().group.my_member.as_mut().unwrap().rights_known = false;
         assert_eq!(o.can(Action::Post), Authority::Unknown(Missing::Membership));
         let mut other = open_as(&["*"], &["grol_owner"]);
         other.me_id = "usr_someone".into();
@@ -1722,7 +1709,7 @@ mod tests {
         let mut out = ctx.run_ui(input, |ui| unknown(ui, &a, "t", &mut acts));
         out.textures_delta.clear();
         let said = words(&out);
-        assert!(said.contains(super::super::missing_text(Missing::Membership)) && said.contains(tr("Read again")), "{said}");
+        assert!(said.contains(super::super::missing_text(Missing::Membership)) && said.contains(tr("Read again")) && said.contains(tr("Open on vrchat.com")), "{said}");
     }
 
     /// The page offers what the rules allow: a moderator sees no role controls, an owner does.
@@ -1904,7 +1891,7 @@ mod tests {
     fn the_composer_is_held_still_while_its_write_goes() {
         let typed = |busy: bool| {
             let mut o = open_as(&["*"], &["grol_owner"]);
-            o.composer = Some(Composer::new(None, PostDraft { title: "Half".into(), text: "written".into(), ..Default::default() }));
+            o.composer = Some(Composer::new(PostDraft { title: "Half".into(), text: "written".into(), ..Default::default() }));
             let mut frames = vec![vec![], vec![]];
             for _ in 0..4 {
                 frames.extend(press(egui::Key::Tab));
@@ -1917,42 +1904,6 @@ mod tests {
         assert_eq!(typed(true), ("Half".to_string(), "written".to_string()), "held still");
         let (title, text) = typed(false);
         assert!(title.contains('X') || text.contains('X'), "the same keys do type when it is not: {title} / {text}");
-    }
-
-    /// Minor 6, through the composer itself: its toggle removes the post's picture, and the confirmation says so.
-    #[test]
-    fn the_composers_toggle_removes_the_picture_and_the_confirmation_says_so() {
-        let baseline = Post { id: "gpos_1".into(), title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), complete: true, ..Default::default() };
-        let mut o = open_as(&["*"], &["grol_owner"]);
-        o.composer = Some(Composer::new(Some(baseline.clone()), PostDraft { title: "t".into(), text: "x".into(), image_id: Some("file_x".into()), ..Default::default() }));
-        let ctx = egui::Context::default();
-        let mut t = 0.0;
-        let mut frame = |o: &mut Open, events: Vec<egui::Event>| {
-            t += 0.1;
-            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), time: Some(t), ..Default::default() };
-            input.events = events;
-            let mut out = ctx.run_ui(input, |ui| composer(ui, o, false, true, &mut Vec::new()));
-            out.textures_delta.clear();
-            out
-        };
-        frame(&mut o, vec![]);
-        let out = frame(&mut o, vec![]);
-        // The toggle is drawn left of its label (its switch is 48 x 28).
-        let label = out.shapes.iter().find_map(|c| match &c.shape {
-            egui::Shape::Text(t) if t.galley.text() == tr("Keep the post's picture") => Some(t.pos),
-            _ => None,
-        });
-        let label = label.expect("the composer of a post with a picture offers to remove it");
-        let at = pos2(label.x - 34.0, label.y + 14.0);
-        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
-        frame(&mut o, vec![egui::Event::PointerMoved(at)]);
-        frame(&mut o, vec![press(true)]);
-        frame(&mut o, vec![press(false)]);
-        let c = o.composer.expect("still being written");
-        assert!(c.removes_picture(), "the toggle removes the picture");
-        let edit = c.draft;
-        let said = confirmed(&sealed(Write::EditPost { group: "grp_1".into(), baseline, edit }));
-        assert!(said.contains(tr("Removed from the post")), "{said}");
     }
 
     /// Major 9: a large roster costs its rows in view, not every member loaded, each frame.
@@ -2008,15 +1959,5 @@ mod tests {
         }
         let built = state.open.unwrap().rows_built / 3;
         assert!(built > 1 && built < 20, "{built} posts a frame of {POSTS_MAX}");
-    }
-
-    /// Minor 6: an edit can remove the post's picture on purpose, and the confirmation says so.
-    #[test]
-    fn a_post_picture_can_be_removed_on_purpose() {
-        let baseline = Post { id: "gpos_1".into(), image_id: Some("file_x".into()), complete: true, ..Default::default() };
-        let c = Composer::new(Some(baseline.clone()), PostDraft { image_id: None, ..Default::default() });
-        assert!(c.removes_picture());
-        let kept = Composer::new(Some(baseline), PostDraft { image_id: Some("file_x".into()), ..Default::default() });
-        assert!(!kept.removes_picture());
     }
 }

@@ -216,14 +216,17 @@ fn load_file(ctx: &egui::Context, studio: &mut Studio, path: PathBuf) {
         return;
     }
     let choice = studio.choice;
+    let number = art::next_choice();
     let (tx, rx) = mpsc::channel();
     let ctx = ctx.clone();
     // Work of the window while it runs: it does not rest to the tray in the middle of it.
     let working = crate::pages::Working::begin();
     std::thread::spawn(move || {
         let _working = working;
-        let r = art::load_source(&path).map(|img| (img, Source::File(path))).map_err(|_| tr("That picture could not be read.").to_string());
-        let _ = tx.send(r);
+        // Nothing when another was chosen while it waited, in this studio or the next one (M5).
+        if let Some(r) = art::open_choice(number, &path) {
+            let _ = tx.send(r.map(|img| (img, Source::File(path))).map_err(|_| tr("That picture could not be read.").to_string()));
+        }
         ctx.request_repaint();
     });
     studio.loading.push(Loading::Source(choice, rx));
@@ -852,12 +855,12 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
             // The upload applied from here is only the one made from the art shown now (Blocker 5).
             if studio.upload_matches() {
                 let r = widgets::Button::new(tr("Apply as the group's banner")).icon(icons::CHECK).variant(widgets::Variant::Primary).enabled(art && !busy).id_salt("studio-apply").show(ui);
-                if widgets::activated_fresh(&r) {
+                if super::deliberate(&r) {
                     acts.push(Act::Apply(r.rect));
                 }
             } else {
                 let r = widgets::Button::new(tr("Upload to my gallery, then apply")).icon(icons::UPLOAD_SIMPLE).enabled(art && has && !busy && studio.making_upload.is_none()).id_salt("studio-upload").show(ui);
-                if widgets::activated_fresh(&r) {
+                if super::deliberate(&r) {
                     acts.push(Act::Upload(r.rect));
                 }
             }
@@ -1130,6 +1133,13 @@ mod tests {
         take_loading(&ctx, &mut s);
         assert!(s.pending.is_none(), "an older choice is dropped");
         assert!(s.queued.is_none() && s.loading.len() == 1, "the last one opens now");
+        // verify3 M5: a studio closed and opened again asks no more than one file at a time of this computer: what the old
+        // one still waited for is not read at all.
+        let old = art::next_choice();
+        let new = art::next_choice();
+        let missing = std::path::Path::new("C:/made-up/none.png");
+        assert!(art::open_choice(old, missing).is_none(), "not even looked for");
+        assert!(art::open_choice(new, missing).is_some_and(|r| r.is_err()) || art::next_choice() > new + 1, "the last one is");
     }
 
     /// verify2 B-E, the second verification's own assertion in the new shapes: upload A, start another upload for another

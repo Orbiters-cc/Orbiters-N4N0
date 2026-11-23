@@ -948,8 +948,7 @@ impl Projects {
         if !on_a_local_drive(&path) {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", path.display()), "Pass the project's path as unity_list_projects gives it."));
         }
-        let key = discovery::key(&path);
-        if let Some(found) = self.scan().projects.into_iter().find(|p| discovery::key(&p.path) == key) {
+        if let Some(found) = self.scan().projects.into_iter().find(|p| discovery::same(&p.path, &path)) {
             return Ok(found);
         }
         if !discovery::is_project(&path) {
@@ -959,7 +958,7 @@ impl Projects {
                 "Call unity_list_projects for the projects on this computer.",
             ));
         }
-        let listed = block_on(vpm::registered(&root())).unwrap_or_default().iter().any(|p| discovery::key(p) == key);
+        let listed = block_on(vpm::registered(&root())).unwrap_or_default().iter().any(|p| discovery::same(p, &path));
         Ok(discovery::describe(path, listed, &mut Default::default()))
     }
 

@@ -120,12 +120,25 @@ fn remove(dir: &Path, id: &str, held: Option<Lock>) {
     let _ = app.remove_file(&lock(id));
 }
 
+/// The lock of the copy `id`, when nobody works on it: somebody only asking (another window, the gallery's scan) has it for an
+/// instant, which is not a copy being made.
+fn free(app: &AppRoot, id: &str) -> std::io::Result<Option<Lock>> {
+    let mut held = app.try_lock(&lock(id))?;
+    for _ in 0..10 {
+        if held.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        held = app.try_lock(&lock(id))?;
+    }
+    Ok(held)
+}
+
 /// The copies to show: those recorded in `dir`, and where each stands. One of which nothing was made goes.
 pub fn shown(dir: &Path) -> Vec<(Copy, Status)> {
     let mut out = vec![];
     for c in all(dir) {
-        let held = AppRoot::existing(dir).and_then(|app| app.try_lock(&lock(&c.id)));
-        let Ok(Some(held)) = held else {
+        let Ok(Some(held)) = AppRoot::existing(dir).and_then(|app| free(&app, &c.id)) else {
             out.push((c, Status::Running));
             continue;
         };
@@ -153,8 +166,7 @@ pub(crate) fn folders(dir: &Path) -> Vec<PathBuf> {
 fn take(dir: &Path, id: &str) -> anyhow::Result<(Copy, Lock)> {
     anyhow::ensure!(is_id(id), "{}", tr("This copy is not recorded any more."));
     let app = AppRoot::existing(dir)?;
-    let held = app.try_lock(&lock(id))?;
-    let held = held.ok_or_else(|| anyhow::anyhow!("{}", tr("This copy is being made, in this window or another one.")))?;
+    let held = free(&app, id)?.ok_or_else(|| anyhow::anyhow!("{}", tr("This copy is being made, in this window or another one.")))?;
     let copy = read(&app, id).ok_or_else(|| anyhow::anyhow!("{}", tr("This copy is not recorded any more.")))?;
     Ok((copy, held))
 }

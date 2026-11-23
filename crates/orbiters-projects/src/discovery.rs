@@ -77,6 +77,30 @@ pub fn key(path: &Path) -> String {
     path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
+/// Whether two paths are one project's: the same however they are spelled, but not two folders whose names differ only by case
+/// where a disk keeps those apart.
+pub fn same(a: &Path, b: &Path) -> bool {
+    key(a) == key(b) && !apart(a, b)
+}
+
+/// Two folders there, whatever their names say.
+fn apart(a: &Path, b: &Path) -> bool {
+    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
+    plain(a) != plain(b) && crate::owned::id_of(a).ok().zip(crate::owned::id_of(b).ok()).is_some_and(|(a, b)| a != b)
+}
+
+/// For tests: a folder whose disk keeps names that differ by case apart, where this computer can make one.
+#[cfg(test)]
+pub(crate) fn by_case(dir: &Path) -> bool {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("fsutil.exe").args(["file", "setCaseSensitiveInfo"]).arg(dir).arg("enable").output();
+    std::fs::create_dir(dir.join("probe")).unwrap();
+    let apart = !dir.join("PROBE").exists();
+    std::fs::remove_dir(dir.join("probe")).unwrap();
+    apart
+}
+
 pub fn parse_version(text: &str) -> Option<String> {
     text.lines().find_map(|l| l.trim().strip_prefix("m_EditorVersion:").map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned))
 }
@@ -452,10 +476,8 @@ struct Known {
 /// by case only, by its very name.
 fn place(found: &HashMap<String, PathBuf>, p: &Path) -> String {
     let k = key(p);
-    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
-    let apart = |other: &PathBuf| plain(other) != plain(p) && crate::owned::id_of(other).ok().zip(crate::owned::id_of(p).ok()).is_some_and(|(a, b)| a != b);
     match found.get(&k) {
-        Some(other) if apart(other) => format!("={}", plain(p)),
+        Some(other) if apart(other, p) => format!("={}", p.to_string_lossy().replace('/', "\\")),
         _ => k,
     }
 }
@@ -1025,12 +1047,25 @@ mod retained_lists {
     #[test]
     fn folders_that_differ_by_case_are_told_apart_where_a_disk_does() {
         let temp = tempfile::Builder::new().prefix("case").tempdir().unwrap();
+        let disk = by_case(temp.path());
+        println!("a disk that tells names apart by case: {disk}");
         let (a, b) = (temp.path().join("Avatar"), temp.path().join("AVATAR"));
         for p in [&a, &b] {
             std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
             std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
         }
         let apart = crate::owned::id_of(&a).unwrap() != crate::owned::id_of(&b).unwrap();
+        assert_eq!((apart, same(&a, &b), same(&a, &a)), (disk, !disk, true));
+        // The list Creator Companion and ALCOM share has both, and Orbiters takes off the one named.
+        let (vcc, rt) = (temp.path().join("vcc"), crate::runtime().unwrap());
+        let listed = || rt.block_on(crate::vpm::registered(&vcc)).unwrap();
+        rt.block_on(crate::vpm::register(&vcc, &a, true)).unwrap();
+        rt.block_on(crate::vpm::register(&vcc, &b, true)).unwrap();
+        let mut both = listed();
+        both.sort();
+        assert_eq!(both, if disk { vec![b.clone(), a.clone()] } else { vec![a.clone()] });
+        rt.block_on(crate::vpm::register(&vcc, &a, false)).unwrap();
+        assert_eq!(listed(), if disk { vec![b.clone()] } else { vec![] });
         let mut found = HashMap::new();
         let first = put(&mut found, a.clone());
         assert_eq!(keep(&mut found, PathBuf::from(a.to_string_lossy().replace('\\', "/"))), first, "other separators are the same");

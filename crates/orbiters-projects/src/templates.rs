@@ -1205,7 +1205,7 @@ mod tests {
         project(&source, serde_json::json!({}));
         let (root, app) = (temp.path().join("vcc"), crate::data_dir());
         std::fs::write(&root, "x").unwrap();
-        let at = temp.path().join(".hidden/Copy");
+        let at = temp.path().join(".hidden").join("Copy");
         let rt = crate::runtime().unwrap();
         let said = rt.block_on(duplicate(&root, &source, at.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map(|_| ()).map_err(|e| format!("{e:#}")).unwrap_err();
         assert!(said.contains(&at.display().to_string()), "{said}");

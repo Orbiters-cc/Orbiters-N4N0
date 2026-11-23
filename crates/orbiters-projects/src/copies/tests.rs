@@ -82,3 +82,24 @@ fn a_record_that_cannot_be_read_hides_only_itself() {
     assert_eq!(shown(&e.app).len(), 1);
     assert!(at.is_file() && dismiss(&e.app, &first.id).is_err() && dismiss(&e.app, "../x").is_err());
 }
+
+/// Another window, or the gallery's scan, has a copy's lock for an instant when it only asks: that is not a copy being made.
+#[test]
+fn a_copy_being_looked_at_is_not_one_being_made() {
+    let e = env();
+    let at = e.root.join("Projects/Copy");
+    crate::unity6::trial::tests::copy_tree(&e.source, &at);
+    let mut h = held(&e, "Copy");
+    h.made(owned::id_of(&at).unwrap()).unwrap();
+    h.whole().unwrap();
+    let id = h.copy.id.clone();
+    drop(h);
+    let other = AppRoot::existing(&e.app).unwrap().try_lock(&lock(&id)).unwrap().unwrap();
+    let asked = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        drop(other);
+    });
+    assert_eq!(one(&e).1, Status::Unlisted);
+    asked.join().unwrap();
+    assert!(dismiss(&e.app, &id).is_ok());
+}

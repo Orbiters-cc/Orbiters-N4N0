@@ -91,9 +91,21 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(paths) = settings.user_projects() {
         projects.extend(paths.iter().map(|s| PathBuf::from(s.as_ref())));
     }
-    let mut seen = HashSet::new();
-    projects.retain(|p| seen.insert(crate::discovery::key(p)));
-    Ok(projects)
+    Ok(each_once(projects))
+}
+
+/// Once each, however it is spelled; two folders whose names differ only by case (where a disk keeps those apart) are two.
+fn each_once(mut projects: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    projects.retain(|p| {
+        let same = seen.entry(crate::discovery::key(p)).or_default();
+        let new = !same.iter().any(|other| crate::discovery::same(other, p));
+        if new {
+            same.push(p.clone());
+        }
+        new
+    });
+    projects
 }
 
 /// Puts the project at `path` on the list VCC and ALCOM share, or takes it off: the gallery's, the bridge's, Duplicate's and New
@@ -134,8 +146,7 @@ async fn register_any(root: &Path, path: &Path, add: bool) -> anyhow::Result<()>
             None => changed = false,
         }
     }
-    let key = crate::discovery::key(path);
-    let mut settings = crate::vcc_store::Settings::plan(root, text, add, others, |p| crate::discovery::key(Path::new(p)) == key)?;
+    let mut settings = crate::vcc_store::Settings::plan(root, text, add, others, |p| crate::discovery::same(Path::new(p), path))?;
     // The list first: a stop between the two leaves what both programs bring into the database themselves.
     settings.write()?;
     if changed {

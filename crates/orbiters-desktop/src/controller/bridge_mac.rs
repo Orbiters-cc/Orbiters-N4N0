@@ -1097,7 +1097,7 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.11", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.10", CLI_LEAST));
+        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);

@@ -1945,12 +1945,12 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
     assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| !t.repairing));
 }
 
-/// A program in `root` that answers as obelisk-cli 0.1.11 does: `steam play` runs a game until `stop` is written, its session
+/// A program in `root` that answers as obelisk-cli 0.1.12 does: `steam play` runs a game until `stop` is written, its session
 /// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
 #[cfg(target_os = "macos")]
 fn pretend_program(root: &std::path::Path) -> MacMachine {
     use std::os::unix::fs::PermissionsExt;
-    let folder = root.join("tools/obelisk-cli-0.1.11-arm64");
+    let folder = root.join("tools/obelisk-cli-0.1.12-arm64");
     std::fs::create_dir_all(folder.join("SteamNative")).unwrap();
     std::fs::create_dir_all(root.join("library/SteamSessions")).unwrap();
     std::fs::write(folder.join("SteamNative/obelisk-steam-host"), "").unwrap();
@@ -2175,7 +2175,7 @@ fn a_program_too_old_starts_no_vrchat() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let machine = pretend_program(&root);
-    std::fs::rename(root.join("tools/obelisk-cli-0.1.11-arm64"), root.join("tools/obelisk-cli-0.1.10-arm64")).unwrap();
+    std::fs::rename(root.join("tools/obelisk-cli-0.1.12-arm64"), root.join("tools/obelisk-cli-0.1.11-arm64")).unwrap();
     assert!(machine.start(&[]).is_err());
     assert!(!root.join("asked").exists());
     let _ = std::fs::remove_dir_all(&root);

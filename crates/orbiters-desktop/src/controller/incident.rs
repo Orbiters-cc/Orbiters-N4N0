@@ -163,7 +163,7 @@ pub(crate) fn redact(line: &str) -> String {
     kept.extend((!time.is_empty()).then(|| time.to_string()));
     kept.extend(level.map(|level| level.to_string()));
     kept.push(REMOVED.to_string());
-    kept.extend(counters(line));
+    kept.extend(counters(&unquoted(line)));
     kept.join(" ")
 }
 
@@ -194,6 +194,35 @@ fn timestamp(line: &str) -> (&str, &str) {
         return line.split_at(end);
     }
     ("", line)
+}
+
+/// `line` without what its quotes hold, however they are written: a quote ends at the same spelling of it. Where one does not
+/// end, nothing from the first one on.
+fn unquoted(line: &str) -> String {
+    const QUOTES: [char; 9] = ['"', '\'', '`', '\u{201c}', '\u{201d}', '\u{2018}', '\u{2019}', '\u{ab}', '\u{bb}'];
+    let mut outside = String::new();
+    let mut open: Option<&str> = None;
+    let mut first = None;
+    let mut rest = line;
+    while let Some((c, n)) = logical(rest) {
+        let (spelling, after) = rest.split_at(n);
+        match open {
+            Some(begun) if begun == spelling => open = None,
+            Some(_) => {}
+            None => {
+                if QUOTES.contains(&c) {
+                    open = Some(spelling);
+                    first.get_or_insert(outside.len());
+                }
+                outside.push_str(spelling);
+            }
+        }
+        rest = after;
+    }
+    if open.is_some() {
+        outside.truncate(first.unwrap_or_default());
+    }
+    outside
 }
 
 /// The frame counts a line says, by these names and no other: a whole number of a few digits, on its own, beside its word.
@@ -579,7 +608,8 @@ impl Followed {
         }
         let until = std::time::SystemTime::now();
         let engine = if self.engine.is_none() { engine_log(&self.engine_log, self.birth, until) } else { None };
-        let vrchat = if self.vrchat.is_none() { vrchat_log(vrchat_logs, self.birth, until, self.arguments.as_deref()) } else { None };
+        let arguments = self.arguments.as_deref().filter(|_| self.vrchat.is_none());
+        let vrchat = arguments.and_then(|arguments| vrchat_log(vrchat_logs, self.birth, until, arguments));
         let ring = if self.ring.is_none() { made_within(&ring_of(&self.engine_log), self.birth, until) } else { None };
         if (engine.is_some() || vrchat.is_some() || ring.is_some()) && lives() {
             self.engine = self.engine.take().or(engine);
@@ -804,13 +834,12 @@ fn run_bounded(program: &str, args: &[&str], limit: std::time::Duration) -> Resu
 }
 
 /// VRChat's own log of the launch born at `birth`, held open: of those in `dir` made from then to `until`, the one whose
-/// command line (what it repeats of it as it begins) is the one this launch's launcher starts the game with, `arguments`.
-/// Where those could not be read, the only one there is; of two, or of two that say the same, none: which is this launch's
-/// cannot be told.
-fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime, arguments: Option<&[String]>) -> Option<std::fs::File> {
+/// command line (what it repeats of it as it begins) is the one this launch's launcher starts the game with, `arguments`. Of
+/// two that say the same, none: which is this launch's cannot be told.
+fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime, arguments: &[String]) -> Option<std::fs::File> {
     let logs = std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"));
     let held = logs.filter_map(|e| made_within(&e.path(), birth, until));
-    let mut own: Vec<std::fs::File> = held.filter(|file| arguments.is_none_or(|arguments| begins_with(file, arguments))).collect();
+    let mut own: Vec<std::fs::File> = held.filter(|file| begins_with(file, arguments)).collect();
     (own.len() == 1).then(|| own.remove(0))
 }
 
@@ -1093,6 +1122,29 @@ mod tests {
         kept("2026-11-23T08:06:37 Error: Some One usr_1339e525-d75d", "2026-11-23T08:06:37 Error", "");
         kept("08:06:37.5 Some One vrchat://launch", "08:06:37.5", "");
         kept("err:ole:Some One ~private(x) frames=12, frame=x", "err", "frames=12");
+        // Eighth verification (the verifier's fixture): a count is no count inside quotes, however they are written, nested or cut
+        // short; outside them it is one, before and after.
+        for quoted in [
+            r#""alpha frame=86420 omega""#,
+            "'alpha frame=86420 omega'",
+            "`alpha frame=86420 omega`",
+            "\u{201c}alpha frame=86420 omega\u{201d}",
+            r#"%22alpha frame=86420 omega%22"#,
+            r#"%2522alpha frame=86420 omega%2522"#,
+            r#"\"alpha frame=86420 omega\""#,
+            r#"\u0022alpha frame=86420 omega\u0022"#,
+            r#""alpha \" frame=86420 omega""#,
+            r#""it's 'alpha' frame=86420 omega""#,
+            r#""alpha frame=86420 omega"#,
+            r#""alpha 86420 presents (12 shown events) omega""#,
+            r#""alpha" "86420 frames""#,
+        ] {
+            kept(&format!("token={quoted}"), "", "");
+            kept(&format!("frames=7 token={quoted}"), "", "frames=7");
+        }
+        kept(r#"token="alpha frame=86420 omega" 60 presents, frame=3"#, "", "60 presents frame=3");
+        kept(r#"token="alpha" 60 "beta" presents"#, "", "");
+        kept(r#"frames=7 token="alpha"beta frame=86420 omega""#, "", "frames=7");
         // What is not such a time, level or count is not one: no digits or words of a name or a value go by them.
         for line in [
             "08:06:37pm Some One token=1",
@@ -1565,7 +1617,8 @@ mod tests {
         }
         pause();
         let birth = birth_of(now());
-        let followed = || Followed { session: "s".into(), launcher: 1, birth, engine_log: engine_log.clone(), arguments: None, engine: None, vrchat: None, ring: None };
+        let begun = |text: &str| format!("Launching with args: 1\nx Arg: VRChat.exe\n{text}");
+        let followed = || Followed { session: "s".into(), launcher: 1, birth, engine_log: engine_log.clone(), arguments: Some(Vec::new()), engine: None, vrchat: None, ring: None };
         let mut f = followed();
         f.associate(&dir.join("vrchat"), &|| true);
         assert!(f.engine.is_none() && f.vrchat.is_none() && f.ring.is_none());
@@ -1575,7 +1628,7 @@ mod tests {
             std::fs::remove_file(path).unwrap();
             std::fs::write(path, "mine").unwrap();
         }
-        std::fs::write(vrchat("2"), "mine").unwrap();
+        std::fs::write(vrchat("2"), begun("mine")).unwrap();
         // Its launcher gone, or gone while it was looked: nothing is held.
         let mut gone = followed();
         gone.associate(&dir.join("vrchat"), &|| false);
@@ -1590,17 +1643,17 @@ mod tests {
             std::fs::remove_file(path).unwrap();
             std::fs::write(path, "next").unwrap();
         }
-        std::fs::write(vrchat("3"), "next").unwrap();
+        std::fs::write(vrchat("3"), begun("next")).unwrap();
         f.associate(&dir.join("vrchat"), &|| true);
         let held = f.held();
         for file in [&held.engine, &held.vrchat, &held.ring] {
             let mut text = String::new();
             file.as_ref().unwrap().try_clone().unwrap().read_to_string(&mut text).unwrap();
-            assert_eq!(text, "mine");
+            assert_eq!(text.lines().last(), Some("mine"));
         }
         // Made after the moment it is looked: not found to be anyone's.
         assert!(made_within(&vrchat("3"), birth, now() - std::time::Duration::from_secs(1)).is_none());
-        assert!(vrchat_log(&dir.join("vrchat"), birth, born_at(birth), None).is_none());
+        assert!(vrchat_log(&dir.join("vrchat"), birth, born_at(birth), &[]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1625,7 +1678,10 @@ mod tests {
         };
         let held = |arguments: Option<&[String]>| {
             let mut text = String::new();
-            vrchat_log(&dir, birth, std::time::SystemTime::now(), arguments)?.read_to_string(&mut text).unwrap();
+            let arguments = arguments.map(<[String]>::to_vec);
+            let mut followed = Followed { session: "s".into(), launcher: 1, birth, engine_log: dir.join("none"), arguments, engine: None, vrchat: None, ring: None };
+            followed.associate(&dir, &|| true);
+            followed.vrchat?.read_to_string(&mut text).unwrap();
             Some(text.lines().last().unwrap_or_default().to_string())
         };
         let own: Vec<String> = ["--no-vr", "-screen-fullscreen", "1", "vrchat://launch?id=x"].map(String::from).to_vec();
@@ -1633,11 +1689,11 @@ mod tests {
         // Another program's, first; then its own, which does not say all of its command line yet.
         write("1", begun(&["--no-vr"], "unrelated"));
         assert_eq!(held(Some(&own)), None, "the only one there is, and not its own");
-        assert_eq!(held(None).as_deref(), Some("unrelated"), "nothing to tell it by: the only one there is");
+        // Eighth verification (the verifier's fixture): nothing to tell it by, and the only one there is, is nobody's.
+        assert_eq!(held(None), None);
         let whole = begun(&args, "mine");
         write("2", whole[..whole.len() - 8].to_string());
         assert_eq!(held(Some(&own)), None);
-        assert_eq!(held(None), None, "two, and nothing to tell them by");
         write("2", whole);
         assert_eq!(held(Some(&own)).as_deref(), Some("mine"));
         // Its line anywhere else, one argument more or less, or in another order is another command line.

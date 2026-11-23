@@ -513,10 +513,6 @@ impl Desk {
     }
 
     /// Pictures of the page: nothing is asked.
-    pub fn set_quiet(&mut self) {
-        self.quiet = true;
-    }
-
     pub fn is_quiet(&self) -> bool {
         self.quiet
     }

@@ -1427,6 +1427,21 @@ mod tests {
         }
     }
 
+    /// verify2-r21 M2: who it belongs to: the member's id in its environment (exactly, spaces around it aside); the
+    /// credential only while one of the two has no id.
+    #[test]
+    fn verify2_the_owner_is_the_member_id_in_its_environment() {
+        let account = |token: &str, id: Option<&str>| orbiters_core::account::Account { token: token.into(), user: id.map(str::to_string), username: Some("tester".into()), avatar_url: None, features: None };
+        let of = |server, token: &str, id: Option<&str>| Owner::of(server, &account(token, id));
+        let (prod, dev) = (Server::Production, Server::Development);
+        assert!(of(prod, "a", Some("1")).same(&of(prod, "b", Some(" 1 "))), "the same member, another credential");
+        assert!(!of(prod, "a", Some("1")).same(&of(prod, "a", Some("2"))), "another member, whatever the credential");
+        assert!(!of(prod, "a", Some("1")).same(&of(dev, "a", Some("1"))), "another environment");
+        assert!(of(prod, "a", None).same(&of(prod, "a", Some("1"))), "its id learned later");
+        assert!(!of(prod, "a", None).same(&of(prod, "b", Some("1"))) && !of(prod, "a", None).same(&of(prod, "b", None)));
+        assert_eq!(of(prod, "a", Some("  ")).member, None, "no id is no member: nothing is kept on disk for it");
+    }
+
     /// What signing out says: its session kept in a file of the test's own, `break_it` making part of the removal fail,
     /// VRChat answering `logout`.
     fn signed_out(name: &str, logout: u16, break_it: impl FnOnce(&std::path::Path, &std::path::Path)) -> (Status, Vec<(String, String)>, std::path::PathBuf, std::path::PathBuf) {

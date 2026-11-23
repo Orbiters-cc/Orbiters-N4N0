@@ -2381,7 +2381,6 @@ mod tests {
             panic!("{what}");
         };
         let sent = |h: &Harness| h.recorder.launcher.lock().unwrap().clone();
-        let mine = |action: Action| Action::As { account: me.clone(), action: Box::new(action) };
         // The list: nothing is sent or asked by opening it.
         click(&mut h, "Previous instances");
         assert!(h.state.launcher_mut().places.previous.is_up());
@@ -3003,6 +3002,79 @@ mod tests {
         }
         let_pass(&mut h, 100);
         assert_eq!(starts(&h).len(), 2, "one more: {:?}", starts(&h));
+    }
+
+    /// verify2-r21 M3: an instance VRChat says is closed stays what is chosen, Play starts nothing (greyed, and says why),
+    /// and the line offers a new instance of its world; one VRChat did not say anything of is asked about again by Play.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_a_closed_choice_holds_play_and_an_unknown_one_is_asked_again() {
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(81, "Harbor Market");
+        let mut h = where_signed_in(vec![visit.clone()]);
+        *h.recorder.alive.lock().unwrap() = Some(false);
+        click(&mut h, "Previous instances");
+        click(&mut h, "Harbor Market");
+        frames_until(&mut h, "answered", |h| h.state.launcher_mut().places.notice().is_some());
+        h.frame(vec![key(Key::Escape)]);
+        h.settle();
+        assert_eq!(h.state.launcher_mut().places.selected_key(), Some(visit.key().as_str()), "still what is chosen");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), None, "and not gone to");
+        assert!(!try_click(&mut h, "Play in VR"), "greyed");
+        let_pass(&mut h, 50);
+        assert!(starts(&h).is_empty(), "{:?}", starts(&h));
+        // The line under Where: a new instance of its world, made at Play.
+        click(&mut h, "New instance of this world");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(visit.key().as_str()));
+        click(&mut h, "Play in VR");
+        frames_until(&mut h, "made and gone to", |h| !starts(h).is_empty());
+        assert!(matches!(starts(&h).as_slice(), [Action::PlayAt { destination, .. }] if destination.instance_id == MADE), "{:?}", starts(&h));
+        // Home world chosen, then the card it left: asked about again, VRChat does not say.
+        click(&mut h, "Home world");
+        *h.recorder.alive.lock().unwrap() = None;
+        let before = instance_checks(&h);
+        click(&mut h, "Harbor Market");
+        frames_until(&mut h, "not said", |h| h.state.launcher_mut().places.notice().is_some_and(|n| n.contains("did not say")));
+        assert_eq!(instance_checks(&h), before + 1);
+        // Play asks again; open by now: there.
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Play in Desktop");
+        frames_until(&mut h, "gone to", |h| starts(h).len() == 2);
+        assert_eq!(instance_checks(&h), before + 2);
+        assert!(matches!(starts(&h).last(), Some(Action::PlayAt { destination, .. }) if destination.instance_id == visit.instance), "{:?}", starts(&h));
+    }
+
+    /// verify2-r21 M3: the last instance's card goes by the same rule: its "open" counts for a minute, then Play asks.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn verify2_the_last_instances_card_is_asked_again_once_its_open_is_old() {
+        use crate::pages::launcher::destinations::{HistoryView, LastVisit};
+        use crate::pages::launcher::previous::OPEN_FOR;
+        use orbiters_core::launcher::Action;
+        orbiters_ui::widgets::watch_controls();
+        let visit = row_of(91, "Harbor Market");
+        let mut h = where_signed_in(Vec::new());
+        let last = LastVisit { world_id: visit.world_id.clone(), instance: visit.instance.clone(), name: visit.name.clone(), at: visit.at, picture: None };
+        h.state.launcher_mut().places.stand_in(Some(HistoryView { frequent: Vec::new(), last: Some(last) }), Vec::new(), Some(true), true);
+        h.settle();
+        click(&mut h, "Harbor Market");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), Some(format!("recent:{}", visit.world_id).as_str()));
+        click(&mut h, "Play in VR");
+        assert_eq!((starts(&h).len(), instance_checks(&h)), (1, 0), "said open a moment ago: {:?}", starts(&h));
+        h.state.launcher_mut().places.desk.age_check(OPEN_FOR + Duration::from_secs(5));
+        *h.recorder.alive.lock().unwrap() = Some(false);
+        click(&mut h, "Play in VR");
+        frames_until(&mut h, "asked", |h| instance_checks(h) == 1);
+        let_pass(&mut h, 100);
+        assert_eq!(starts(&h).len(), 1, "closed meanwhile: nothing starts");
+        assert_eq!(h.state.launcher_mut().places.chosen_key(), None);
+        *h.recorder.alive.lock().unwrap() = Some(true);
+        click(&mut h, "Home world");
+        click(&mut h, "Harbor Market");
+        click(&mut h, "Play in Desktop");
+        frames_until(&mut h, "gone to", |h| starts(h).len() == 2);
+        assert!(matches!(starts(&h).last(), Some(Action::PlayAt { destination, .. }) if destination.instance_id == visit.instance));
     }
 
     /// REQUEST23: the sample's friends with "Nova Sample" in a friends+ instance (joinable without asking) and "Pixel Fox"

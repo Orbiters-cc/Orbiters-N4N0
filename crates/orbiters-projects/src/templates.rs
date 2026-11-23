@@ -1197,6 +1197,28 @@ mod tests {
         assert_eq!(std::fs::read(source.join("Packages/half/old.txt")).unwrap(), b"old", "the source is the source's");
     }
 
+    /// AGENTS.md: a whole copy that could not be listed is in the gallery, wherever it is, with why, and can be listed again.
+    #[test]
+    fn a_whole_copy_that_could_not_be_listed_is_in_the_gallery() {
+        let temp = tempfile::Builder::new().prefix("unlisted").tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let (root, app) = (temp.path().join("vcc"), crate::data_dir());
+        std::fs::write(&root, "x").unwrap();
+        let at = temp.path().join(".hidden/Copy");
+        let rt = crate::runtime().unwrap();
+        let said = rt.block_on(duplicate(&root, &source, at.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map(|_| ()).map_err(|e| format!("{e:#}")).unwrap_err();
+        assert!(said.contains(&at.display().to_string()), "{said}");
+        let mine = || crate::copies::shown(&app).into_iter().find(|(c, _)| c.destination == at);
+        let (copy, status) = mine().expect("recorded");
+        assert_eq!((status, copy.error.as_deref()), (crate::copies::Status::Unlisted, Some(said.as_str())));
+        assert!(crate::copies::folders(&app).contains(&at), "in the gallery though its folder begins with a dot");
+        // The list is there again.
+        std::fs::remove_file(&root).unwrap();
+        crate::copies::list(&app, &root, &copy.id).unwrap();
+        assert!(mine().is_none() && is_registered(&rt, &root, &at));
+    }
+
     /// Room for a restore is asked of every disk it writes on, before anything is downloaded.
     #[test]
     fn a_restore_needs_room_on_every_disk_it_writes_on() {

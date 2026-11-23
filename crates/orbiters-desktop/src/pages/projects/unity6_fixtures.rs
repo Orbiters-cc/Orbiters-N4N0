@@ -215,7 +215,7 @@ impl State {
         } else {
             trial::Health::Fine
         };
-        let copies = match n {
+        let copies = match name {
             "projects-u6-jobs" => [
                 ("c1", "Club outfits", orbiters_projects::copies::State::Whole, "The copy is at H:/Unity projects/Club outfits copy, but registration failed: settings.json of Creator Companion or ALCOM is in use: close them, then try again. Nothing was changed."), // i18n: not shown (sample data of the screenshot scenes)
                 ("c2", "Test world", orbiters_projects::copies::State::Copying, ""), // i18n: not shown (sample data of the screenshot scenes)

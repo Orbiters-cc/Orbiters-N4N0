@@ -991,6 +991,62 @@ mod retained_lists {
         assert_eq!(kept, wanted);
     }
 
+    /// Orbiters' own: a Unity 6 trial is in the list without any list of VCC's, and says so; a copy not listed yet is found wherever
+    /// it is. Neither makes another project of its name.
+    #[test]
+    fn orbiters_own_projects_are_shown_by_its_own_record() {
+        let temp = tempfile::Builder::new().prefix("own").tempdir().unwrap();
+        let make = |at: &str| {
+            let p = temp.path().join(at);
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+            p
+        };
+        let (trial, copy, listed, plain) = (make(".a/Trial"), make(".b/Copy"), make("Listed"), make("Plain"));
+        let mut found = HashMap::new();
+        let mut known = Known::default();
+        known.listed.insert(put(&mut found, listed.clone()));
+        keep(&mut found, plain.clone());
+        for p in [&trial, &listed] {
+            known.trials.insert(keep(&mut found, p.clone()));
+        }
+        known.copies.insert(keep(&mut found, copy.clone()));
+        let mut scan = Scan::default();
+        rebuild(&mut scan, &found, &known);
+        let of = |p: &Path| scan.projects.iter().find(|x| x.path == p).map(|x| (x.registered, x.own));
+        assert_eq!(of(&trial), Some((true, true)), "in the list, by Orbiters' own record");
+        assert_eq!(of(&listed), Some((true, false)), "a trial the person added in VCC");
+        assert_eq!((of(&copy), of(&plain)), (Some((false, false)), Some((false, false))));
+        assert_eq!(scan.projects.len(), 4);
+    }
+
+    /// Fourth verification, Major 8: two folders whose names differ by case only are two projects, where a disk keeps them apart;
+    /// two spellings of one are one.
+    #[test]
+    fn folders_that_differ_by_case_are_told_apart_where_a_disk_does() {
+        let temp = tempfile::Builder::new().prefix("case").tempdir().unwrap();
+        let (a, b) = (temp.path().join("Avatar"), temp.path().join("AVATAR"));
+        for p in [&a, &b] {
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        }
+        let apart = crate::owned::id_of(&a).unwrap() != crate::owned::id_of(&b).unwrap();
+        let mut found = HashMap::new();
+        let first = put(&mut found, a.clone());
+        assert_eq!(keep(&mut found, PathBuf::from(a.to_string_lossy().replace('\\', "/"))), first, "other separators are the same");
+        let second = keep(&mut found, b.clone());
+        assert_eq!((first != second, found.len()), (apart, if apart { 2 } else { 1 }));
+        let known = Known { listed: [first.clone()].into_iter().collect(), ..Default::default() };
+        let mut scan = Scan::default();
+        rebuild(&mut scan, &found, &known);
+        assert_eq!(scan.projects.iter().filter(|p| p.registered).count(), 1, "the listed one alone");
+        // The same without a disk of either kind: two folders there, one name.
+        let mut apart: HashMap<String, PathBuf> = [(key(&a), temp.path().to_path_buf())].into();
+        assert_ne!(place(&apart, &a), key(&a));
+        apart.insert(key(&a), a.clone());
+        assert_eq!(place(&apart, &a), key(&a));
+    }
+
     /// PROJECTS-7: 740 publishes over a scan of a minute write the cache a dozen times, not 740.
     #[test]
     fn a_scan_writes_its_cache_now_and_then() {

@@ -1180,7 +1180,9 @@ fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     let whole = std::fs::read(&tgz).unwrap();
     for bad in [b"not an archive".to_vec(), vec![], whole[..whole.len() / 2].to_vec(), whole[..whole.len() - 9].to_vec()] {
         std::fs::write(broken.join("Packages/bad.tgz"), &bad).unwrap();
-        assert!(authority::upload(&e.app, &broken).unwrap().warning.unwrap().contains("bad.tgz"), "{} bytes", bad.len());
+        // (What could be read of it before its end counts as what it is.)
+        let warned = authority::upload(&e.app, &broken).unwrap().warning.unwrap();
+        assert!(warned.contains("bad.tgz") || warned.contains(&id(6)), "{} bytes: {warned}", bad.len());
     }
     // Nothing in common, and a file of it or of the trial that cannot be read: it may be.
     let apart = e.root.join("Projects/Apart");

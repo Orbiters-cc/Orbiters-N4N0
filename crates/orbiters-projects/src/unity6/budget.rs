@@ -380,6 +380,14 @@ mod tests {
         assert_eq!(EditorNeed::here(size, &six(with(true, true)), &Found::Exact(c(with(true, true)))), None);
         let one = EditorNeed::here(size, &six(with(false, true)), &Found::Exact(c(with(true, true)))).unwrap();
         assert_eq!(one.installed, size.android.unwrap()[1]);
+        // Third verification B6: where that editor really is, and its Android tools with it.
+        let mut elsewhere = c(with(true, false));
+        elsewhere.program = PathBuf::from("E:/Editors/6000/Editor/Unity.exe");
+        let at = EditorNeed::here(size, &Found::Exact(elsewhere), &Found::Exact(c(with(true, true)))).unwrap();
+        assert!(at.installed == size.ios.unwrap()[1] && at.install_at == Path::new("E:/Editors/6000/Editor"));
+        let no_tools = Modules { android: true, android_tools: false, ios: true };
+        assert_eq!(EditorNeed::here(size, &six(no_tools), &Found::Exact(c(with(true, true)))).unwrap().installed, size.android.unwrap()[1]);
+        assert_eq!(EditorNeed::here(size, &six(no_tools), &Found::Exact(c(no_tools))), None, "its 2022 editor has none either");
         let all = EditorNeed::here(size, &Found::Missing { wrong: vec![] }, &Found::Exact(c(with(false, false)))).unwrap();
         assert_eq!(all.installed, size.installed);
         let unknown = EditorNeed::here(size, &six(with(false, false)), &Found::Missing { wrong: vec![] }).unwrap();

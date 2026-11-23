@@ -596,6 +596,13 @@ mod tests {
         other["serial"] = serial.into();
         assert!(refresh(dir.path(), &public, &Fake::answering(sign(&other.to_string(), &private).unwrap().into_bytes()), "u", 10).is_err());
         assert!(refresh(dir.path(), &public, &Fake::answering(sign(&served(serial, false), &private).unwrap().into_bytes()), "u", 10).is_ok());
+        // Third verification M9: nor is one kept since before this version of the app had that number shown.
+        assert!(matches!(load(dir.path(), Some(&public)).origin, Origin::Served { .. }));
+        let kept = Kept { verified: 10, envelope: sign(&other.to_string(), &private).unwrap(), high: serial };
+        std::fs::write(dir.path().join(KEPT_FILE), serde_json::to_vec(&kept).unwrap()).unwrap();
+        let shown = load(dir.path(), Some(&public));
+        assert_eq!(shown.origin, Origin::BuiltIn);
+        assert_eq!(serde_json::to_value(&shown.data).unwrap(), serde_json::to_value(&Matrix::built_in().data).unwrap());
     }
 
     #[test]

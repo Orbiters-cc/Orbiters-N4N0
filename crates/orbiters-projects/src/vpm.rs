@@ -91,8 +91,12 @@ pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(paths) = settings.user_projects() {
         projects.extend(paths.iter().map(|s| PathBuf::from(s.as_ref())));
     }
-    let mut seen = HashSet::new();
-    projects.retain(|p| seen.insert(crate::discovery::key(p)));
+    // Once each, however it is spelled; two folders whose names differ only by case (where a disk keeps those apart) are two.
+    let mut seen: HashMap<String, PathBuf> = HashMap::new();
+    projects.retain(|p| match seen.get(&crate::discovery::key(p)) {
+        Some(first) => first != p && crate::owned::id_of(first).ok().zip(crate::owned::id_of(p).ok()).is_some_and(|(a, b)| a != b),
+        None => seen.insert(crate::discovery::key(p), p.clone()).is_none(),
+    });
     Ok(projects)
 }
 

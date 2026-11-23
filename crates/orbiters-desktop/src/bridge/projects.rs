@@ -1476,7 +1476,8 @@ impl Projects {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
         }
         let listed = block_on(vpm::registered(root)).map_err(|e| failed("vpm_failed", e, "Try again."))?;
-        let Some(exact) = listed.iter().find(|p| discovery::key(p) == discovery::key(given)) else {
+        // The very path first: where a disk keeps names of another case apart, they are other projects.
+        let Some(exact) = listed.iter().find(|p| p.as_path() == given).or_else(|| listed.iter().find(|p| discovery::key(p) == discovery::key(given))) else {
             return Err(Failure::new("not_listed", format!("{} is not in the project list.", given.display()), "unity_list_projects says which projects are listed."));
         };
         let name = exact.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

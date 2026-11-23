@@ -95,3 +95,6 @@ crates/orbiters-core/src/shared_view.rs
 # The Unity 6 trial's tests: the generated matrix and the fixtures (r22).
 crates/orbiters-projects/src/unity6/hostile/tests.rs
 crates/orbiters-projects/src/unity6/trial/tests.rs
+crates/orbiters-projects/src/unity6/content/tests.rs
+crates/orbiters-projects/src/unity6/gate/tests.rs
+crates/orbiters-projects/src/vcc_list/tests.rs

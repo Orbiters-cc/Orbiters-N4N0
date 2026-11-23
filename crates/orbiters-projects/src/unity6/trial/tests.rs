@@ -1076,12 +1076,14 @@ fn the_content_of_everything_that_ends_up_in_the_trial_is_known() {
     assert_eq!(all.unsure.len(), 1);
     let same_package = e.root.join("Projects/Other");
     project(&same_package, Some(U6), &[], &[]);
+    std::fs::create_dir_all(same_package.join("Packages")).unwrap();
     std::fs::write(same_package.join("Packages/manifest.json"), std::fs::read(e.source.join("Packages/manifest.json")).unwrap()).unwrap();
     assert!(authority::upload(&e.app, &same_package).unwrap_err().contains(&id(1)), "its package from outside has the content");
     // Nothing in common, and a file of it or of the trial that cannot be read: it may be.
     let apart = e.root.join("Projects/Apart");
     project(&apart, Some(U2022), &[], &[]);
     std::fs::create_dir_all(apart.join("Assets")).unwrap();
+    std::fs::create_dir_all(apart.join("Packages")).unwrap();
     assert!(authority::upload(&e.app, &apart).unwrap().warning.unwrap().contains("Broken.asset"), "of the trial");
     journal::set(&e.app, &job.id, |j| j.content_unsure.clear()).unwrap();
     assert!(authority::upload(&e.app, &apart).unwrap().warning.is_none());

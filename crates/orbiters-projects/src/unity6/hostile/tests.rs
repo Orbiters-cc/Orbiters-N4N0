@@ -444,6 +444,7 @@ fn quietly<T>(f: impl FnOnce() -> T) -> T {
 #[test]
 fn every_place_and_every_trouble_leaves_the_original_as_it_was() {
     let w = world();
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut all = places(&w);
     #[cfg(windows)]
     let drives = [Subst::of(&w.e.source), Subst::of(&w.e.root), Subst::of(&w.shared)];

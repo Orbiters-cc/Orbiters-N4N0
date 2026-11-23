@@ -774,4 +774,27 @@ mod write_tests {
         let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
         assert!(left.is_empty(), "{left:?}");
     }
+
+    /// Third verification B4: right before the start, the project is still the folder looked at, on the version and build its
+    /// editor was found for.
+    #[test]
+    fn a_project_changed_while_its_editor_is_found_is_not_opened() {
+        use crate::unity6::standing::EditorStamp;
+        let temp = tempfile::tempdir().unwrap();
+        let at = temp.path().join("P");
+        let write = |text: &str| {
+            std::fs::create_dir_all(at.join("ProjectSettings")).unwrap();
+            std::fs::write(at.join("ProjectSettings/ProjectVersion.txt"), text).unwrap();
+        };
+        write("m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (887be4894c44)\n");
+        let (id, stamp) = (crate::owned::id_of(&at).unwrap(), EditorStamp::read(&at));
+        assert!(super::as_it_was(&at, id, &stamp));
+        for other in ["m_EditorVersion: 6000.0.67f1\n", "m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (000000000000)\n", ""] {
+            write(other);
+            assert!(!super::as_it_was(&at, id, &stamp), "{other:?}");
+        }
+        std::fs::rename(&at, temp.path().join("Away")).unwrap();
+        write("m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (887be4894c44)\n");
+        assert!(!super::as_it_was(&at, id, &stamp), "another folder");
+    }
 }

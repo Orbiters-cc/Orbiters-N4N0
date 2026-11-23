@@ -137,13 +137,17 @@ pub fn judge_build(identity: Option<&Identity>, wanted: &str, revision: Option<&
         return Check::Unverified;
     }
     if !id.arch.contains(&Arch::here()) && Arch::here() != Arch::Other {
-        // Apple silicon runs an Intel editor through Rosetta: slower, not refused.
-        let rosetta = cfg!(target_os = "macos") && Arch::here() == Arch::Arm64 && id.arch.contains(&Arch::X86_64);
-        if !rosetta {
+        // Apple silicon runs an Intel editor through Rosetta, where Rosetta is installed: slower, not refused.
+        if !(id.arch.contains(&Arch::X86_64) && rosetta()) {
             return Check::Wrong(tr("it is built for another processor than this computer's").into());
         }
     }
     Check::Verified
+}
+
+/// Whether this is an Apple-silicon Mac that runs Intel programs (asked of the system's own files, not by running one).
+fn rosetta() -> bool {
+    cfg!(target_os = "macos") && Arch::here() == Arch::Arm64 && Path::new("/Library/Apple/usr/share/rosetta/rosetta").is_file()
 }
 
 /// Checks `hints` (in order) for `version` with `probe`: the first exact one, else the first that exists unverified,
@@ -446,9 +450,7 @@ mod tests {
         assert_eq!(judge(None, "6000.0.67f1"), Check::Unverified);
         let other = if Arch::here() == Arch::Arm64 { Arch::X86_64 } else { Arch::Arm64 };
         let foreign = Identity { version: "6000.0.67f1".into(), changeset: None, arch: vec![other] };
-        if !(cfg!(target_os = "macos") && Arch::here() == Arch::Arm64) {
-            assert!(matches!(judge(Some(&foreign), "6000.0.67f1"), Check::Wrong(_)), "built for another processor");
-        }
+        assert_eq!(matches!(judge(Some(&foreign), "6000.0.67f1"), Check::Wrong(_)), !rosetta(), "built for another processor");
         // Verification blocker 4: another build of the same version, or a program whose processor is unknown, is not it.
         let build = |c: &str| Identity { version: "6000.0.67f1".into(), changeset: Some(c.into()), arch: vec![Arch::here()] };
         assert_eq!(judge_build(Some(&build("78a1c2bbeb6a")), "6000.0.67f1", Some("78a1c2bbeb6a")), Check::Verified);

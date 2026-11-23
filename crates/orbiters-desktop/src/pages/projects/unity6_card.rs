@@ -681,13 +681,18 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         _ => {}
     }
     // What can always be done with a trial: nothing here deletes it.
+    let original = state.u6.look.as_ref().and_then(|l| l.pairs.iter().find(|p| p.job == job.id)).map(|p| p.original.clone());
     let list = [
-        (tr("Show the original"), icons::ARROW_LEFT, !state.u6.trials_of(&job.source.path).is_empty(), "original"),
+        (tr("Show the original"), icons::ARROW_LEFT, original.is_some(), "original"),
         (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"),
         (tr("Unregister the trial"), icons::X, state.u6.busy().is_none(), "unregister"),
     ];
     match buttons(ui, &list, false) {
-        Some(0) => state.open(&ctx, job.source.path.clone()),
+        Some(0) => {
+            if let Some(original) = original {
+                state.open(&ctx, original);
+            }
+        }
         Some(1) => {
             let _ = orbiters_projects::reveal(&job.unity6().path);
         }

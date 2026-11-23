@@ -71,12 +71,19 @@ pub fn look(dir: &Path, projects: &[PathBuf], running: &[String]) -> Look {
             (j, s)
         })
         .collect();
-    // Lineage needs a positive match of both folders (verification's major 10).
+    // Lineage needs a positive match of both folders (verification's major 10): the original where it was recorded, or
+    // the listed project that is that very folder, moved or renamed since.
+    let original = |j: &trial::Job| {
+        if j.source_verified() {
+            return Some(j.source.path.clone());
+        }
+        let id = j.source.id?;
+        projects.iter().find(|p| crate::owned::id_of(p).is_ok_and(|now| now == id)).cloned()
+    };
     let pairs = trials
         .iter()
         .filter(|(_, s)| !matches!(s, trial::Status::Replaced | trial::Status::Missing | trial::Status::Failed { .. } | trial::Status::Interrupted { complete: false }))
-        .filter(|(j, _)| j.source_verified())
-        .map(|(j, _)| Pair { original: j.source.path.clone(), trial: j.unity6().path.clone(), job: j.id.clone() })
+        .filter_map(|(j, _)| Some(Pair { original: original(j)?, trial: j.unity6().path.clone(), job: j.id.clone() }))
         .collect();
     let present = trials
         .iter()

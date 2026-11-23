@@ -1612,6 +1612,10 @@ pub(crate) mod tests {
         std::fs::rename(&e.source, e.root.join("Projects/Old")).unwrap();
         source(&e.root);
         assert!(crate::unity6::look(&e.app, std::slice::from_ref(&e.source), &[]).pairs.is_empty());
+        // The original, renamed, is listed: found again by its identity, not its name.
+        let moved = e.root.join("Projects/Old");
+        let pairs = crate::unity6::look(&e.app, &[e.source.clone(), moved.clone()], &[]).pairs;
+        assert_eq!(pairs.iter().map(|p| p.original.clone()).collect::<Vec<_>>(), [moved]);
     }
 
     /// Verification major 5: an attempt runs while its own editor does: not another program that was given its number

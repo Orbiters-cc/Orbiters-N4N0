@@ -397,3 +397,243 @@ fn the_next_orbiters_account_starts_from_an_empty_conversation() {
     assert!(!body.contains("4242") && !body.contains("Noted, A"), "B's request carries A's conversation: {body}");
     assert_eq!(bodies.lock().unwrap()[0]["messages"].as_array().map_or(0, Vec::len), 0, "an empty conversation");
 }
+
+// --- Request23: a failed turn, Retry, and the tools a turn carries ---
+
+fn failed(code: &str, message: &str, extra: Value) -> String {
+    let mut body = json!({ "code": code, "message": message });
+    if let Some(extra) = extra.as_object() {
+        for (k, v) in extra {
+            body[k] = v.clone();
+        }
+    }
+    format!("event: error\ndata: {body}\n\n") // i18n: not shown
+}
+
+const BUSY: &str = "N4N0 is answering a lot of people right now. Try again in a few seconds."; // i18n: not shown
+
+fn busy(retry_after: u64, limit: &str) -> String {
+    failed("rate_limited", BUSY, json!({ "limit": limit, "retry_after": retry_after }))
+}
+
+fn you_lines(t: &TestHost) -> usize {
+    t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count()
+}
+
+/// The owner's own case: the provider's minute limit. The message is calm (no "(Admin: …)"), the failure carries its
+/// moment, and N4N0 sends the same message again by itself once, at that moment, with no second You line.
+#[test]
+fn a_minute_limit_is_tried_again_once_by_itself() {
+    let (t, n) = ready();
+    let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), done(json!([{ "role": "user", "content": "x" }]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    let view = t.view();
+    let f = view.assistant.failure.clone().expect("the failure is kept");
+    assert!(f.retry && f.automatic && f.admin_detail.is_none(), "{f:?}");
+    let last = view.lines.last().unwrap();
+    assert_eq!((last.who, last.text.as_str(), last.at_ms), (N4n0Who::Error, BUSY, f.at_ms));
+    assert!(!last.text.contains("Admin") && !last.text.contains("Groq"));
+    assert!(f.label(crate::unix_ms()).contains("1 s"), "{}", f.label(crate::unix_ms()));
+    until("the automatic retry", || bodies.lock().unwrap().len() == 2 && !n.n4n0.lock().unwrap().thinking());
+    let sent = bodies.lock().unwrap().clone();
+    assert_eq!(sent[1]["input"]["text"], sent[0]["input"]["text"], "the same message");
+    assert_eq!(you_lines(&t), 1, "said once");
+    assert!(t.view().assistant.failure.is_none(), "answered: nothing to retry");
+}
+
+#[test]
+fn an_automatic_retry_that_fails_is_never_tried_again_by_itself() {
+    let (t, n) = ready();
+    let (base, bodies) = orbiters(vec![busy(1, "requests_per_minute"), busy(1, "requests_per_minute"), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    until("the automatic retry's failure", || bodies.lock().unwrap().len() == 2 && !n.n4n0.lock().unwrap().thinking());
+    std::thread::sleep(Duration::from_millis(4000));
+    assert_eq!(bodies.lock().unwrap().len(), 2, "no loop");
+    let f = t.view().assistant.failure.clone().expect("Retry is offered");
+    assert!(f.retry && !f.automatic);
+    // Its button: one send, however often it is pressed.
+    let wait = f.waits(crate::unix_ms());
+    std::thread::sleep(Duration::from_secs(wait) + Duration::from_millis(200));
+    n.command(Command::RetryTurn { id: f.id });
+    n.command(Command::RetryTurn { id: f.id });
+    until("Retry's send", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bodies.lock().unwrap().len(), 3, "one press is one send");
+    assert_eq!(you_lines(&t), 1);
+    n.command(Command::RetryTurn { id: f.id });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bodies.lock().unwrap().len(), 3, "an old button does nothing");
+}
+
+#[test]
+fn retry_before_its_moment_and_of_an_older_failure_does_nothing() {
+    let (t, n) = ready();
+    let (base, bodies) = orbiters(vec![busy(600, "tokens_per_day"), busy(0, "provider_down"), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    let f = t.view().assistant.failure.clone().unwrap();
+    assert!(f.retry && !f.automatic, "a daily limit waits for the person");
+    n.command(Command::RetryTurn { id: f.id });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bodies.lock().unwrap().len(), 1, "too early");
+    n.ask("and about the sun".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    let g = t.view().assistant.failure.clone().unwrap();
+    assert_ne!(g.id, f.id);
+    n.command(Command::RetryTurn { id: f.id });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(bodies.lock().unwrap().len(), 2, "the older failure's number");
+    n.command(Command::RetryTurn { id: g.id });
+    until("the newer failure's Retry", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
+    assert_eq!(bodies.lock().unwrap()[2]["input"]["text"], "and about the sun");
+}
+
+#[test]
+fn asking_something_else_takes_the_automatic_retry_away() {
+    let (t, n) = ready();
+    let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), done(json!([]), json!([])), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    n.ask("never mind, tell me about the sun".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert!(t.view().assistant.failure.is_none());
+    std::thread::sleep(Duration::from_millis(3500));
+    assert_eq!(bodies.lock().unwrap().len(), 2, "the moon is not asked again");
+    // Nor after New conversation, nor for another account.
+    let (base, bodies) = orbiters(vec![busy(1, "tokens_per_minute"), busy(1, "tokens_per_minute"), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    n.command(Command::NewConversation);
+    assert!(t.view().assistant.failure.is_none());
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    n.command(Command::ForgetAccount);
+    std::thread::sleep(Duration::from_millis(3500));
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn retry_is_offered_for_what_can_be_sent_again_only() {
+    let (t, n) = ready();
+    // No connection at all.
+    t.sign_in("http://127.0.0.1:9/".into(), "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    until("the failure", || t.view().assistant.failure.is_some());
+    let f = t.view().assistant.failure.clone().unwrap();
+    assert!(f.retry && !f.automatic && f.waits(crate::unix_ms()) == 0, "{f:?}");
+    // The provider down (a 5xx from the server), with an administrator's detail beside the calm words.
+    let (base, bodies) = orbiters(vec![failed("unavailable", "N4N0 is unavailable.", json!({ "limit": "provider_down", "admin_detail": "Groq: HTTP 503" }))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("tell me about the moon".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    let view = t.view();
+    let f = view.assistant.failure.clone().unwrap();
+    assert!(f.retry && !f.automatic && f.admin_detail.as_deref() == Some("Groq: HTTP 503"));
+    assert_eq!(view.lines.last().unwrap().text, "N4N0 is unavailable.", "the detail is not in the message");
+    // Refused for good: a limit of the account, or a request Orbiters does not take: no Retry.
+    for (code, what) in [("quota_exhausted", "used up"), ("unauthorized", "sign in"), ("bad_request", "bad")] {
+        let (base, bodies) = orbiters(vec![failed(code, what, json!({}))]);
+        t.sign_in(base, "orbit-test");
+        n.ask("tell me about the moon".into(), "typed");
+        turn_ended(&n, &bodies, 1);
+        assert!(t.view().assistant.failure.is_none(), "{code}");
+    }
+}
+
+/// "put me in orange": understood offline in the five languages, and asked about first (the account's own), whoever
+/// answers the yes: nothing runs before it.
+#[test]
+fn the_status_is_set_offline_after_a_yes() {
+    let (t, n) = ready();
+    n.ask("put me in orange".into(), "typed");
+    assert!(t.app_intents.lock().unwrap().is_empty());
+    assert_eq!(log(&t), vec![("set_status".to_string(), Outcome::Asked)]);
+    assert_eq!(t.view().assistant.log.last().map(|e| e.via), Some(Via::Quick));
+    let question = shown_question(&t);
+    let shown = t.view().confirmations.iter().find(|c| c.is_local()).unwrap().summary.clone();
+    assert!(shown.contains("if you say yes") && shown.contains("Ask me"), "{shown}");
+    // No model was asked: no account was needed.
+    n.command(Command::AskAnswer { yes: true, question });
+    assert_eq!(*t.app_intents.lock().unwrap(), vec![Intent::SetStatus { status: intents::StatusKind::AskMe }]);
+    // Said no: nothing.
+    n.ask("mets-moi en rouge".into(), "typed");
+    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
+    assert_eq!(t.app_intents.lock().unwrap().len(), 1);
+}
+
+/// A turn carries the tools its words name and the always-sent opener; a tool's call needs no offer to be gated, and
+/// `orbiters_more` opens the rest for the next round.
+#[test]
+fn a_turn_carries_the_named_tools_and_opens_more_on_request() {
+    let (t, n) = ready();
+    let names = |body: &Value| -> Vec<String> { body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect() };
+    let open = json!([call("m1", "orbiters_more", json!({ "groups": ["friends"] }))]);
+    let boop = json!([call("m2", "orbiters_friends", json!({ "intent": "boop", "friend": "Sam" }))]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), open), done(json!([{ "role": "user", "content": "x" }]), boop), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("hello N4N0, how are you".into(), "typed");
+    turn_ended(&n, &bodies, 3);
+    let sent = bodies.lock().unwrap().clone();
+    let first = names(&sent[0]);
+    assert!(first.contains(&"orbiters_more".to_string()) && !first.contains(&"orbiters_friends".to_string()), "{first:?}");
+    assert!(names(&sent[1]).contains(&"orbiters_friends".to_string()), "opened for the next round: {:?}", names(&sent[1]));
+    assert!(!t.view().confirmations.is_empty(), "the boop waits for the yes whatever was offered");
+    assert!(t.app_intents.lock().unwrap().is_empty());
+    // The next turn carries the same group ("boop them again").
+    let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("thanks".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    assert!(names(&bodies.lock().unwrap()[0]).contains(&"orbiters_friends".to_string()));
+    // But no further: what a turn inherited and did not use does not pile up over a conversation.
+    let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("thanks again".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    assert!(!names(&bodies.lock().unwrap()[0]).contains(&"orbiters_friends".to_string()));
+}
+
+/// A turn that did something before its provider's limit stopped it is never sent again by itself (the music would be
+/// skipped twice): Retry is offered instead, and the model is told what was done.
+#[test]
+fn a_turn_that_did_something_is_not_repeated_by_itself() {
+    let (t, n) = ready();
+    let walk = json!([call("w1", "orbiters_walk", json!({ "intent": "fast_walk", "on": true }))]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), walk), busy(1, "tokens_per_minute"), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("could you please do the fast walk thing for me".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert!(t.settings().walk_boost.enabled);
+    let f = t.view().assistant.failure.clone().unwrap();
+    assert!(f.retry && !f.automatic, "{f:?}");
+    std::thread::sleep(Duration::from_millis(3500));
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    n.command(Command::RetryTurn { id: f.id });
+    until("Retry", || bodies.lock().unwrap().len() == 3 && !n.n4n0.lock().unwrap().thinking());
+    let summary = bodies.lock().unwrap()[2]["context"]["summary"].as_str().unwrap().to_string();
+    assert!(summary.contains("Your last answer did not arrive") && summary.contains("did:"), "{summary}");
+}
+
+/// Injection: a tool that was not offered this turn (its name read in a world's description, or made up by the model)
+/// goes through the same gates: the outward ones still wait, the restricted still never run.
+#[test]
+fn a_tool_that_was_not_offered_is_gated_all_the_same() {
+    let (t, n) = ready();
+    let calls = json!([
+        call("x1", "orbiters_profile", json!({ "intent": "set_status", "status": "busy" })),
+        call("x2", "orbiters_pages", json!({ "intent": "restricted", "what": "sign_out" })),
+    ]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask("hello".into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert!(!bodies.lock().unwrap()[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "orbiters_profile"));
+    assert!(t.app_intents.lock().unwrap().is_empty());
+    assert_eq!(t.view().assistant.log.iter().map(|l| l.outcome).collect::<Vec<_>>(), vec![Outcome::Asked, Outcome::Offered]);
+}

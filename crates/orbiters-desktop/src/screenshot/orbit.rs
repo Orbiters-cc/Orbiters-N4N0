@@ -1633,6 +1633,25 @@ pub fn r20_ask_shots(out: &Path) -> anyhow::Result<()> {
                 ..idle.clone()
             };
             qm_scene(&format!("r20-ask-injection-{tag}"), out, hd, &injected, None, Some(Sheet::Talk))?;
+            // 6. A turn that failed (Request23): Retry, waiting for the moment the service named, then ready.
+            let failure = orbiters_n4n0::TurnFailure { id: 1, at_ms: now, retry: true, retry_at_ms: now + 25_000, automatic: true, admin_detail: None };
+            let failed = |at: u64| Facts {
+                talk_lines: vec![
+                    (true, said("put me in orange", "mets-moi en orange", "オレンジにして")),
+                    (
+                        false,
+                        said(
+                            "N4N0 is answering a lot of people right now. Try again in a few seconds.",
+                            "N4N0 répond à beaucoup de monde en ce moment. Réessaie dans quelques secondes.",
+                            "N4N0は今たくさんの人に答えています。数秒後にもう一度試してください。",
+                        ),
+                    ),
+                ],
+                talk_retry: Some((1, failure.label(at), failure.waits(at) == 0)),
+                ..idle.clone()
+            };
+            qm_scene(&format!("r23-ask-retry-wait-{tag}"), out, hd, &failed(now), None, Some(Sheet::Talk))?;
+            qm_scene(&format!("r23-ask-retry-{tag}"), out, hd, &failed(now + 25_000), None, Some(Sheet::Talk))?;
             Ok(())
         })?;
     }

@@ -2648,6 +2648,10 @@ impl Panels {
             talk_question: snap.n4n0.confirmations.iter().rev().find(|c| c.is_local()).map(|c| c.summary.trim_end_matches(orbiters_i18n::tr("(or say yes or no)")).trim().to_string()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
             // Its number goes with the Yes or No pressed on it: a late press answers nothing newer (verify-r21 1).
             talk_question_id: snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_retry: snap.n4n0.assistant.failure.as_ref().filter(|f| f.retry && !snap.n4n0.thinking && self.facts.sheet == Some(Sheet::Talk)).map(|f| {
+                let now = orbiters_n4n0::unix_ms();
+                (f.id, f.label(now), f.waits(now) == 0)
+            }),
             talk_doing: snap.n4n0.assistant.doing.clone().filter(|_| self.facts.sheet == Some(Sheet::Talk)),
             talk_log: if self.facts.sheet == Some(Sheet::Talk) { talk_log_rows(&snap.n4n0.assistant.log, orbiters_n4n0::unix_ms()) } else { Vec::new() },
             talk_actions: self.facts.talk_actions,
@@ -3445,6 +3449,12 @@ impl Panels {
             // The question's Yes or No, as saying it (REQUEST20 6).
             // The question drawn when it was pressed (the facts the page was laid out with).
             Action::AskAnswer(yes) => self.backend.n4n0(N4n0Command::AskAnswer { yes, question: self.facts.talk_question_id.unwrap_or(0) }),
+            // The failed message of the button as it was drawn: a late press of an older one is refused by its number.
+            Action::RetryTurn => {
+                if let Some((id, _, true)) = self.facts.talk_retry {
+                    self.backend.n4n0(N4n0Command::RetryTurn { id });
+                }
+            }
             Action::TalkActions => {
                 self.facts.talk_actions = !self.facts.talk_actions;
                 self.facts.gallery_scroll = 0.0;

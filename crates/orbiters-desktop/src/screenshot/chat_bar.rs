@@ -265,6 +265,26 @@ pub(super) fn shots(gpu: &mut Offscreen, out: &Path, settings: &Settings, scale:
     asking.n4n0.confirmations = vec![N4n0Confirmation { id: "1".into(), title: String::new(), summary: question.clone(), approve_url: format!("{}1", orbiters_n4n0::status::LOCAL_APPROVAL) }];
     open(gpu, asking, "chat-confirm", 0.6, &|_| {})?;
 
+    // A turn that failed (Request23): Retry on it, waiting for its moment (tried again by itself), then ready; an
+    // administrator's detail small under the words.
+    let now = orbiters_n4n0::unix_ms();
+    for (name, retry_at_ms, automatic, detail) in [("chat-retry-wait", now + 25_000, true, None), ("chat-retry", 0, false, None), ("chat-retry-admin", now + 3 * 3_600_000, false, Some("Groq rate limit reached (tokens per day: 198200 of 200000 used)"))] {
+        let mut failed = base.clone();
+        let busy = line(
+            N4n0Who::Error,
+            &said(
+                "N4N0 is answering a lot of people right now. Try again in a few seconds.",
+                "N4N0 répond à beaucoup de monde en ce moment. Réessaie dans quelques secondes.",
+                "N4N0は今たくさんの人に答えています。数秒後にもう一度試してください。",
+            ),
+            0,
+        );
+        let at_ms = busy.at_ms;
+        failed.n4n0.lines = vec![line(N4n0Who::You, &said("put me in orange", "mets-moi en orange", "オレンジにして"), 1), busy].into();
+        failed.n4n0.assistant.failure = Some(orbiters_n4n0::TurnFailure { id: 1, at_ms, retry: true, retry_at_ms, automatic, admin_detail: detail.map(String::from) });
+        open(gpu, failed, name, 0.6, &|_| {})?;
+    }
+
     if english {
         let mut failed = base.clone();
         failed.n4n0.lines = vec![

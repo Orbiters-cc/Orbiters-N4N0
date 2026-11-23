@@ -286,18 +286,23 @@ pub struct Play {
 }
 
 /// The slot: a lock beside the gate's file, held from before a start is decided (the gate read again from its file) until how
-/// its game ended is known and kept there. Two coordinators (two N4N0s at a cold start) never both reserve, neither creates an
-/// instance for a start the other makes, and neither decides on a gate the other has since closed.
+/// its game ended is known and kept there (or, where that cannot be written, until the wait it means is over). Two coordinators
+/// (two N4N0s at a cold start) never both reserve, neither creates an instance for a start the other makes, and neither decides
+/// on a gate the other has since closed.
 #[derive(Default)]
 struct Slot {
     file: Option<std::fs::File>,
     reserved: Option<u64>,
+    /// The launch it is held for, until how that one ended is known and kept.
     attached: Option<u64>,
+    /// The wait after an early end could not be written: until when it is held for it.
+    unwritten: Option<std::time::Instant>,
 }
 
 impl Slot {
     fn let_go(&mut self) {
-        if self.reserved.is_none() && self.attached.is_none() {
+        if self.reserved.is_none() && self.attached.is_none() && self.unwritten.is_none_or(|until| until <= std::time::Instant::now()) {
+            self.unwritten = None;
             self.file = None;
         }
     }
@@ -652,7 +657,25 @@ impl Play {
         self.take_slot_within(SLOT_WAIT)
     }
 
-    /// Lets go of the slot where nothing holds it: no reservation, and no launch.
+    /// The launch the slot is held for: one under way, or whose end is not known yet.
+    fn owner(&self) -> Option<u64> {
+        self.slot.lock().unwrap().attached
+    }
+
+    /// Holds the slot until `until`, for a wait that could not be written: whoever cannot read it starts nothing meanwhile.
+    fn hold_slot(&self, until: std::time::Instant) {
+        let _ = self.take_slot_within(Duration::ZERO);
+        self.slot.lock().unwrap().unwritten = Some(until);
+        let slot = Arc::downgrade(&self.slot);
+        let _ = std::thread::Builder::new().name("obelisk-unwritten".into()).spawn(move || {
+            std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
+            if let Some(slot) = slot.upgrade() {
+                slot.lock().unwrap().let_go();
+            }
+        });
+    }
+
+    /// Lets go of the slot where nothing holds it: no reservation, no launch, and no wait that could not be written.
     fn let_slot_go(&self) {
         self.slot.lock().unwrap().let_go();
     }
@@ -760,22 +783,30 @@ impl Play {
         let rewrite = self.reload(now, &clock);
         let kept = now.kept.as_mut().expect("read above");
         let (verdict, trouble, changed) = judge(&obelisk::scan_records(library), kept, &clock, wall, memory);
-        if held && (rewrite || changed) {
+        let unwritten = self.slot.lock().unwrap().unwritten.is_some();
+        if held && (rewrite || changed || unwritten) {
             self.write_kept(kept);
         }
         (verdict, trouble)
     }
 
-    /// Writes the kept gate whole (a part, then renamed over); a failure keeps it in this run's memory all the same.
-    fn write_kept(&self, kept: &Kept) {
-        let Some(file) = &self.gate_file else { return };
+    /// Writes the kept gate whole (a part, then renamed over): whether it is. A failure keeps it in this run's memory all the
+    /// same.
+    fn write_kept(&self, kept: &Kept) -> bool {
+        let Some(file) = &self.gate_file else { return true };
         if let Some(folder) = file.parent() {
             let _ = std::fs::create_dir_all(folder);
         }
         let part = file.with_extension("part");
-        if std::fs::write(&part, kept.to_json()).is_ok() && std::fs::rename(&part, file).is_err() {
-            let _ = std::fs::remove_file(&part);
+        if std::fs::write(&part, kept.to_json()).is_err() {
+            return false;
         }
+        if std::fs::rename(&part, file).is_err() {
+            let _ = std::fs::remove_file(&part);
+            return false;
+        }
+        self.slot.lock().unwrap().unwritten = None;
+        true
     }
 
     /// How long a start must still wait, decided under the slot: it is held when this returns `Ok(None)`, for the start or the
@@ -783,6 +814,10 @@ impl Play {
     fn admitted(&self, now: &mut Now, library: &Path, wall: std::time::SystemTime) -> Result<(), Refused> {
         self.reconcile(now, library);
         self.take_slot()?;
+        // Held for a launch whose end is not known yet, this run's own too.
+        if self.owner().is_some() {
+            return Err(Refused::Busy);
+        }
         let verdict = match self.judged(now, library, wall).0 {
             Ok(None) => return Ok(()),
             Ok(Some(wait)) => Refused::Wait(wait),
@@ -811,8 +846,10 @@ impl Play {
         if now.attached && (own_attached.is_none() || attached != own_attached) {
             return Err(Refused::Busy);
         }
-        if own_attached.is_none() {
-            self.admitted(&mut now, library, std::time::SystemTime::now())?;
+        match own_attached {
+            None => self.admitted(&mut now, library, std::time::SystemTime::now())?,
+            Some(_) if self.owner().is_some_and(|owner| Some(owner) != own_attached) => return Err(Refused::Busy),
+            Some(_) => {}
         }
         now.made += 1;
         let token = now.made;
@@ -1064,12 +1101,15 @@ impl Play {
 
     /// Notes that a start ended early: no start for [`obelisk::AFTER_EARLY_END`], at once and across a restart.
     fn cool_down(&self, now: &mut Now) {
-        now.cooldown = Some(std::time::Instant::now() + obelisk::AFTER_EARLY_END);
+        let cooldown = std::time::Instant::now() + obelisk::AFTER_EARLY_END;
+        now.cooldown = Some(cooldown);
         let clock = boot_clock();
         self.reload(now, &clock);
         let kept = now.kept.as_mut().expect("read above");
         kept.until = Some(clock.seconds + obelisk::AFTER_EARLY_END.as_secs_f64());
-        self.write_kept(kept);
+        if !self.write_kept(kept) {
+            self.hold_slot(cooldown);
+        }
     }
 
     /// One line the program said of launch `id`. Only a launch still followed changes anything, and only the current one
@@ -1891,6 +1931,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Eighth verification (the verifier's fixture): a cooldown that cannot be written holds the slot, so that no coordinator
+    /// starts, until it is written after all.
+    #[test]
+    fn a_cooldown_that_cannot_be_written_holds_every_coordinator() {
+        let dir = std::env::temp_dir().join(format!("orbiters-gate-unwritten-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (library, gate) = (dir.join("library"), dir.join("gate.json"));
+        std::fs::create_dir_all(dir.join("gate.part")).unwrap();
+        let program = fake_program(&dir.join("bin"), &[], 0);
+        let (a, b) = (Arc::new(Play::new(gate.clone())), Arc::new(Play::new(gate.clone())));
+        let id = a.start(&program, &library, &[]).unwrap();
+        wait_for(&a, id, |l| l.over);
+        for _ in 0..2 {
+            assert!(matches!(a.gate(&library), Ok(Some(_))), "its end was early");
+            assert!(matches!(a.reserve(&library, None), Err(Refused::Wait(_))));
+            assert_eq!(b.reserve(&library, None), Err(Refused::Busy));
+            assert_eq!(b.start(&program, &library, &[]), Err(Refused::Busy));
+            assert!(!gate.exists());
+        }
+        // It can be written again: the next look does, and the other one reads it.
+        std::fs::remove_dir(dir.join("gate.part")).unwrap();
+        assert!(matches!(a.gate(&library), Ok(Some(_))));
+        assert!(matches!(b.reserve(&library, None), Err(Refused::Wait(_))));
+        assert!(matches!(a.reserve(&library, None), Err(Refused::Wait(_))));
+        // Never written: let go of once the wait is over, whoever looks.
+        let other = dir.join("other/gate.json");
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let (a, b) = (Play::new(other.clone()), Play::new(other));
+        a.hold_slot(std::time::Instant::now() + Duration::from_millis(900));
+        a.let_slot_go();
+        assert_eq!(b.reserve(&library, None), Err(Refused::Busy));
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(b.reserve(&library, None).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Seventh verification: the slot is let go of only once how the launch ended is known and kept, so that no other
     /// coordinator decides before it; one whose supervisor and game are both gone counts as an early end, and never holds it
     /// for ever.
@@ -1925,6 +2001,14 @@ mod tests {
             assert_eq!(a.attached(), None);
             assert_eq!(a.gate(&library), Ok(None));
             assert_eq!(b.reserve(&library, None), Err(Refused::Busy), "its end is not known yet");
+            // Eighth verification: nor does its own coordinator start another over it, for Home or for the bridge, but to close
+            // that very game first.
+            assert_eq!(a.reserve(&library, None), Err(Refused::Busy));
+            assert_eq!(a.start(&program, &library, &[]), Err(Refused::Busy));
+            assert_eq!(a.reserve(&library, Some(launch + 1)), Err(Refused::Busy), "another's is not its own");
+            let token = a.reserve(&library, Some(launch)).unwrap();
+            assert_eq!(a.start_reserved(&program, &library, &[], Some(token)), Err(Refused::Busy), "not closed yet");
+            assert_eq!(b.reserve(&library, None), Err(Refused::Busy), "and it is kept");
             match ends {
                 true => write(&format!(r#"{{"id":"{id}","store":{{"app_id":438100}},"phase":"Finished","played":{{"seconds":40,"frames":{{"count":96}}}}}}"#)),
                 // Another birth: the process the record names is gone.

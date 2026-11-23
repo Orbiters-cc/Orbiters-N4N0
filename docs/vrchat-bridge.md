@@ -227,13 +227,16 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `start_wait` with `retry_after_s`, and the instance already made is **kept** (`Run::kept`, 15 minutes) with any failure before
   the launch (a `close_timeout`, a refused start): the next `go_to_world` to the same world and region resumes it instead of making
   another. Each start has a launch id; its outcome is kept by that id for whoever made it. The bridge starts nothing with an
-  obelisk-cli older than 0.1.11 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
+  obelisk-cli older than 0.1.12 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
   complete set of engine files from 0.1.9, from 0.1.10 no file of them replaced while anything of the engine runs and `steam
-  play --steam-id`, and from 0.1.11 one lock for the whole library and a repair compared with its archive); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
+  play --steam-id`, from 0.1.11 one lock for the whole library and a repair compared with its archive, and from 0.1.12 a lock file that cannot be
+  written held like any other and a release that lost its Wine named); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
   slot is a lock beside the gate's file, held from before a start is decided (the gate read again from its file, added to what this
   run knows) until how its game ended is known and kept there, so that two N4N0s (a cold start of both) never both reserve, neither
   creates an instance for a start the other makes, and neither decides on a gate the other has since closed. A launch whose program
-  was lost keeps it until its record says how it ended, or until neither its supervisor nor its game is there (an early end then).
+  was lost keeps it until its record says how it ended, or until neither its supervisor nor its game is there (an early end then):
+  this N4N0 starts nothing either meanwhile, and reserves only to close that very game. A wait after an early end that cannot be
+  written keeps it too, until it is written at a later look or is over.
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
 - **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose
@@ -326,9 +329,9 @@ How it is one verified game (`controller/bridge_mac.rs`):
   arguments), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
   each; a line that holds what could be a credential, a `vrchat://` link, a place, an instance's `~private(...)`, `~nonce(...)` and
   the like, or a `usr_`/`grp_` id is replaced whole, keeping only its time, its level and the frame counts it says: since the seventh
-  verification nothing before the field stays either). VRChat's own log is the one that begins with the command line this launch's
+  verification nothing before the field stays either, and since the eighth no count from inside quotes). VRChat's own log is the one that begins with the command line this launch's
   launcher starts the game with (`Launching with args: <n>` and its `Arg:` lines, compared one by one, kept nowhere); of two that say
-  the same, or two with nothing to tell them by, none is held. The engine's ring (`LKD_EVENT_RING`) has one path per game, not one
+  the same none is held, nor (since the eighth) any while that command line cannot be read. The engine's ring (`LKD_EVENT_RING`) has one path per game, not one
   per session: the shipped engine makes none (voile-lkd `bf0af9b` is held back), and a path per session would change the game's
   environment, so it stays told by its launcher's birth and life. Also two 2-second `/usr/bin/sample`s, 3 s apart, of the game's process
   (the largest in memory), the render server, `wsd` and the busiest, each process's birth checked before each round (a pid used
@@ -393,7 +396,8 @@ How it is one verified game (`controller/bridge_mac.rs`):
   drop and read after it ends no loss, nor confirms one (since the sixth: a confirmation is the log read then, or a count taken that
   long after the drop; a log its supervisor does not write says nothing); a count repeated is no frame: only one that grew in its own
   swapchain ends a loss, and once a loss is confirmed (since the seventh) the first count of a new swapchain is only where its
-  counting begins: an increase after it is the frame; a game that says its presents more slowly is given twice its own pace (60 s at most); a
+  counting begins: an increase after it is the frame (since the eighth, as the log says a swapchain made: a first count above another
+  swapchain's last is no increase); a game that says its presents more slowly is given twice its own pace (60 s at most); a
   loss the driver repeats without end is one, from its first word. It is **one decision per session** (`picture::of`, published by
   the follower every 5 s, stale after 30 s), which Home, the bridge's `renderer_lost` (before, its own rule, blind to an accepted
   quit) and the incident capture all use. Home offers **Restart VRChat** under its running line only for a confirmed loss

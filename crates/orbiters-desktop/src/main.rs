@@ -28,6 +28,8 @@ mod link_between;
 mod link_smoke;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(any(target_os = "macos", test))]
+mod mac_cover;
 #[cfg(target_os = "macos")]
 mod mac_display;
 #[cfg(target_os = "macos")]

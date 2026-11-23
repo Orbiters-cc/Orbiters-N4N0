@@ -30,6 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 const ENGINE_LOG_LOOK: usize = 8 << 20;
 /// How often the windows and the engine's log are looked at, at most: `seen` is asked many times a second while waiting.
 const LOOK_EVERY: Duration = Duration::from_millis(700);
+/// How often the bridge looks for a VRChat that is not its own, while none of its own runs.
+const OTHERS_EVERY: Duration = Duration::from_secs(1);
 /// How long the program may take to say a quit was taken.
 const QUIT_LIMIT: Duration = Duration::from_secs(20);
 /// The game draws while the frames it presented or showed grew within this (the engine counts shown frames every 2 s; its
@@ -378,11 +380,13 @@ pub(super) struct MacGame {
     mine: Mutex<Mine>,
     /// The shared start reserved by [`Game::admit_start`] for the next launch, until it is made or given back.
     reserved: Mutex<Option<u64>>,
+    /// Another's VRChat as it was last looked for, and when.
+    others: Mutex<Option<(Instant, Option<u32>)>>,
 }
 
 impl MacGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default() }
+        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), others: Mutex::default() }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -440,6 +444,20 @@ impl MacGame {
         mine.forget_game();
         mine.ident = Some(Ident { session, launcher: pid, birth: now.birth, wsd: None, verified: Instant::now() });
         Some(pid)
+    }
+
+    /// [`Self::others_game`] for the bridge's own look, ten times a second while nobody plays through it: every session
+    /// record the engine ever wrote is read for it, so at most every [`OTHERS_EVERY`]. Whoever decides on a start asks anew.
+    fn others_game_lately(&self) -> Option<u32> {
+        let mut lately = self.others.lock().unwrap();
+        match *lately {
+            Some((at, found)) if at.elapsed() < OTHERS_EVERY => found,
+            _ => {
+                let found = self.others_game(None);
+                *lately = Some((Instant::now(), found));
+                found
+            }
+        }
     }
 
     /// A VRChat that is not the bridge's: Home's, the person's own, one left from before a restart of the service.
@@ -715,7 +733,7 @@ impl Game for MacGame {
                         launch.ended.map(|(seconds, frames)| format!("VRChat ended after {} s with {} frames shown.", seconds.map_or("?".into(), |s| s.to_string()), frames.map_or("?".into(), |f| f.to_string()))) // i18n: not shown (an AI client reads it)
                     });
                 }
-                if let Some(pid) = self.others_game(None) {
+                if let Some(pid) = self.others_game_lately() {
                     // The person's (or one this run of the service did not start): running, and nothing else read.
                     seen.running = true;
                     seen.pid = Some(pid);
@@ -1079,7 +1097,7 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.11", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.10", CLI_LEAST));
+        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);

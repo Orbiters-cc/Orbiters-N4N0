@@ -515,6 +515,8 @@ pub fn renderer_lost(engine_log: &str) -> bool {
 pub enum GraphicsLine {
     /// The guest's driver presented this many frames on its current swapchain (each counts from its own 0).
     Presents(u64),
+    /// The game made a swapchain: its counting begins.
+    Swapchain,
     /// The graphics server dropped the game.
     Dropped,
 }
@@ -524,7 +526,11 @@ pub fn graphics_lines(text: &str) -> Vec<GraphicsLine> {
     text.lines()
         // what the engine's own log writer counts is not said again
         .filter(|line| !line.starts_with("[obelisk-log:")) // i18n: not shown (the engine's log lines)
-        .filter_map(|line| if renderer_lost(line) { Some(GraphicsLine::Dropped) } else { presents_last(line).map(GraphicsLine::Presents) })
+        .filter_map(|line| match line {
+            line if renderer_lost(line) => Some(GraphicsLine::Dropped),
+            line if line.contains("guest swapchain: created") => Some(GraphicsLine::Swapchain), // i18n: not shown (the engine's log lines)
+            line => presents_last(line).map(GraphicsLine::Presents),
+        })
         .collect()
 }
 
@@ -564,10 +570,11 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
-/// The first obelisk-cli N4N0 starts VRChat with (0.1.11: one lock for the whole library between every launch and every change
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.12: a lock file that cannot be written is held all the same, a release that
+/// lost its Wine says so; 0.1.11: one lock for the whole library between every launch and every change
 /// of its runtimes, a look at what runs that takes no failure for nothing, a repair compared with its archive byte for byte, and
 /// every file a start needs looked at; 0.1.10: `steam play --steam-id`, the session named in `starting`).
-pub const LEAST: (u32, u32, u32) = (0, 1, 11);
+pub const LEAST: (u32, u32, u32) = (0, 1, 12);
 
 /// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
 /// release is not known to be.
@@ -784,10 +791,10 @@ mod tests {
     #[test]
     fn an_obelisk_cli_older_than_the_least_starts_no_vrchat() {
         let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
-        for old in ["obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+        for old in ["obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
             assert!(too_old(&at(old)), "{old}");
         }
-        for fit in ["obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.12-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+        for fit in ["obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.13-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
             assert!(!too_old(&at(fit)), "{fit}");
         }
     }
@@ -1074,9 +1081,10 @@ mod tests {
 
     #[test]
     fn the_engine_s_log_is_read_in_the_order_it_says_things() {
-        use GraphicsLine::{Dropped, Presents};
+        use GraphicsLine::{Dropped, Presents, Swapchain};
         let text = "neptune unixlib wsi (wsd): 60 presents (0 shown events)\nsomething else\nnpt: destroying Neptune context 1\n[obelisk-log: 3 lines like this: VTEST_CLIENT_ERROR_CONTEXT_LOST]\nneptune unixlib wsi (wsd): alive: 61 presents, x\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n";
         assert_eq!(graphics_lines(text), [Presents(60), Dropped, Presents(61), Dropped]);
+        assert_eq!(graphics_lines("neptune: guest swapchain: created 1705x1109 fmt=28 buffers=2 hwnd=0000000000030070\nneptune unixlib wsi (wsd): 1 presents (0 shown events), last 1\n"), [Swapchain, Presents(1)]);
         assert_eq!(graphics_lines(""), []);
     }
 

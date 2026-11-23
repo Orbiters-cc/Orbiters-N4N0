@@ -1,3 +1,4 @@
 # REQUEST21 4-7 (stream r21-tabs-home, 2026-11-22): Video history; Photos & captures' capture element (pages/capture.rs, in
 # pages-capture); Home's three tiles and All tools; Where's Previous instances (below). The texts these changes added live here.
 crates/orbiters-desktop/src/pages/launcher/previous.rs
+crates/orbiters-desktop/src/pages/launcher/selection.rs

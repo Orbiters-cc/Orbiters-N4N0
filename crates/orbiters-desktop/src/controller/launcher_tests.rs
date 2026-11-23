@@ -507,8 +507,21 @@ struct PretendMac {
     failure: Mutex<Option<String>>,
     opened: Mutex<u32>,
     cannot_open: bool,
+    /// The Game session of Home's VRChat whose picture is lost (confirmed), and the restarts asked for.
+    lost: Mutex<Option<String>>,
+    restarts: Mutex<Vec<String>>,
 }
 impl Machine for PretendMac {
+    fn picture_lost(&self) -> Option<String> {
+        self.lost.lock().unwrap().clone()
+    }
+    fn restart_lost(&self, session: &str) -> Result<(), String> {
+        if self.picture_lost().as_deref() != Some(session) {
+            return Err("checked again: not lost".into());
+        }
+        self.restarts.lock().unwrap().push(session.to_owned());
+        Ok(())
+    }
     fn running(&self) -> Vec<(u32, bool)> {
         self.running.lock().unwrap().clone()
     }
@@ -1820,4 +1833,37 @@ fn launch_with_a_saved_session_times() {
         let (status, list) = launch_times(Duration::from_millis(150), Duration::from_millis(250));
         println!("r21 launch: sign-in status says signed in after {status:?}; the friends list read with it after {list:?}");
     }
+}
+
+/// R1 of the 2026-11-23 review: Home offers a restart only for a confirmed loss of its own still-running VRChat, and the
+/// click checks again (a game that draws again, or another one, is left alone).
+#[test]
+fn a_mac_offers_a_restart_only_for_a_confirmed_lost_picture_checked_on_the_click() {
+    let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
+    *machine.running.lock().unwrap() = vec![(4242, true)];
+    let c = mac(machine.clone());
+    c.launcher_game(machine.as_ref());
+    assert_eq!(c.view().launcher.game, Game::Running(LaunchMode::Desktop));
+    assert!(!c.view().launcher.picture_lost, "a healthy (or covered, or locked) game: nothing offered");
+    assert!(matches!(c.launcher_do(Action::RestartLostGame), Some(Notice::Error(_))));
+    // confirmed lost: offered
+    *machine.lost.lock().unwrap() = Some("s1".into());
+    c.launcher_game(machine.as_ref());
+    assert!(c.view().launcher.picture_lost);
+    // it draws again before the click: nothing done
+    *machine.lost.lock().unwrap() = None;
+    assert!(matches!(c.launcher_do(Action::RestartLostGame), Some(Notice::Error(_))));
+    assert!(machine.restarts.lock().unwrap().is_empty());
+    c.launcher_game(machine.as_ref());
+    assert!(!c.view().launcher.picture_lost, "the offer goes with the loss");
+    // lost, and the click: that very session is restarted
+    *machine.lost.lock().unwrap() = Some("s2".into());
+    assert_eq!(c.launcher_do(Action::RestartLostGame), None);
+    for _ in 0..200 {
+        if !machine.restarts.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(*machine.restarts.lock().unwrap(), ["s2"]);
 }

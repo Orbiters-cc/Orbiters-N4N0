@@ -30,8 +30,10 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
             let mut level = launch.mac_render_percent.clamp(25, 100) as f32;
             let size = move |v: f32| match sizes {
                 Some((backing, panel)) => {
+                    // what the engine will make of it: capped at the panel, never under 640 x 480 (its own rules)
                     let (w, h) = orbiters_core::obelisk::render_size(v.round() as u32, backing, panel);
-                    format!("{v:.0} % · {w} × {h}") // i18n: not shown (a number and a size)
+                    let applied = orbiters_core::obelisk::effective_percent(v.round() as u32, backing, panel);
+                    format!("{applied} % · {w} × {h}") // i18n: not shown (a number and a size)
                 }
                 None => format!("{v:.0} %"), // i18n: not shown (a number)
             };

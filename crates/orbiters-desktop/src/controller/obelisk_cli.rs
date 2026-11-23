@@ -650,8 +650,11 @@ impl Play {
 
     /// Starts as [`Play::start`] does, with the reservation `token` (used up by it); without one, a start reserved by
     /// someone else is refused.
+    /// The bridge's start: at 100 % always, said explicitly (fourth verification, finding 10: without the option the
+    /// engine applies the installation's saved percentage, while the bridge measures its coordinates at 100 %).
     pub fn start_reserved(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], token: Option<u64>) -> Result<u64, Refused> {
-        self.start_with(program, library, args, std::time::SystemTime::now(), token)
+        let full = obelisk::takes_render_percent(program).then_some(100);
+        self.start_full(program, library, args, std::time::SystemTime::now(), token, full)
     }
 
     #[cfg(test)]
@@ -1443,7 +1446,7 @@ mod tests {
     /// program that takes it (0.1.7 and later: an older one would refuse the whole start); the bridge's starts never do (its
     /// coordinates are the engine's own size).
     #[test]
-    fn home_s_start_asks_for_its_render_scale_and_the_bridge_s_never() {
+    fn home_s_start_asks_for_its_render_scale_and_the_bridge_s_for_the_whole_size() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("orbiters-render-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1482,7 +1485,14 @@ mod tests {
         clear(&play);
         std::fs::remove_file(&new_said).unwrap();
         let id = play.start_reserved(&new, &library, &args, None).expect("the bridge's start");
-        assert_eq!(said(&new_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "the bridge's: never a render scale");
+        // Fourth verification, finding 10: the bridge's start says 100 % itself, so that no percentage saved for the
+        // installation applies to the game the bridge measures at 100 %.
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "100", "--", "-screen-fullscreen", "1"], "the bridge's: always the whole size, said");
+        let _ = wait_for(&play, id, |l| l.over);
+        clear(&play);
+        std::fs::remove_file(&old_said).unwrap();
+        let id = play.start_reserved(&old, &library, &args, None).expect("the bridge's start, older program");
+        assert_eq!(said(&old_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "an older program has no percent to save or override");
         let _ = wait_for(&play, id, |l| l.over);
         let _ = std::fs::remove_dir_all(&dir);
     }

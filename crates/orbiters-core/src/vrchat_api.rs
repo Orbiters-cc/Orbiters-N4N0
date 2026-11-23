@@ -704,6 +704,24 @@ fn backup_of(path: &std::path::Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Beside the session file `path`, while a sign-out could not remove all of it: the session is over whatever is left of
+/// it, and the rest is removed at the next start ([`Client::clean_signed_out`]).
+fn marker_of(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".out");
+    PathBuf::from(name)
+}
+
+/// How a sign-out went: forgotten here in any case (the session is never used again); what could not be done is said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignedOut {
+    /// The session file and its copy are gone from this computer. `false`: one could not be removed (locked, denied); it
+    /// is marked as over, and removing it is tried again at the next start.
+    pub removed: bool,
+    /// Whether VRChat was told (or had nothing to be told). Not told, the session can stay valid on its side.
+    pub told: Result<()>,
+}
+
 /// Sealed bytes as cookies: `None` when they are not this Windows user's session (damaged, another user's, empty).
 fn unseal(bytes: &[u8]) -> Option<Cookies> {
     if bytes.is_empty() || bytes.len() > SESSION_MAX {
@@ -712,6 +730,28 @@ fn unseal(bytes: &[u8]) -> Option<Cookies> {
     let plain = crate::dpapi::crypt(bytes, ENTROPY, false).ok()?;
     let cookies: Cookies = serde_json::from_slice(&plain).ok()?;
     (!cookies.auth.is_empty()).then_some(cookies)
+}
+
+/// Removes the session file at `path` and its copy; whether both are gone. While one is left, a marker beside it says the
+/// session is over: it is never restored, whenever the rest can be removed.
+fn remove_session(path: &std::path::Path) -> bool {
+    let marker = marker_of(path);
+    let gone = |file: &std::path::Path| match std::fs::remove_file(file) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if !marker.exists() && path.exists() {
+        // Before anything is removed: a stop half-way leaves nothing that could be restored.
+        let _ = std::fs::write(&marker, b"");
+    }
+    let (main, copy) = (gone(path), gone(&backup_of(path)));
+    let all = main && copy;
+    if all {
+        let _ = std::fs::remove_file(&marker);
+    } else if !marker.exists() {
+        let _ = std::fs::write(&marker, b"");
+    }
+    all
 }
 
 /// Removes what a write killed half-way left beside the session (`<file>.<pid>-<n>.tmp`), once a minute old: sealed
@@ -840,6 +880,11 @@ impl Client {
     pub fn restore(&mut self) -> Result<bool> {
         self.permitted()?;
         let path = self.store.clone().ok_or(Error::Storage)?;
+        // Signed out, part of it could not be removed then: it is over, and what is left goes now if it can.
+        if marker_of(&path).exists() {
+            remove_session(&path);
+            return Ok(false);
+        }
         let bytes = match read_at_most(&path, SESSION_MAX) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -875,7 +920,12 @@ impl Client {
         crate::write_atomic_private(path, &sealed).map_err(|_| Error::Storage)?;
         // The copy is a spare: failing to write it does not fail the sign-in.
         let _ = crate::write_atomic_private(&backup_of(path), &sealed);
-        Ok(())
+        // A new session: what a sign-out before could not remove is replaced by it.
+        match std::fs::remove_file(marker_of(path)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(Error::Storage),
+        }
     }
     /// Lets go of the session in memory only (its file stays for a later restore).
     fn clear(&mut self) {
@@ -897,21 +947,17 @@ impl Client {
         }
         self.clear();
     }
-    /// The person's sign-out: memory, the session file and its copy.
-    fn forget(&mut self) -> Result<()> {
+    /// The person's sign-out: memory, the session file and its copy. Whether both are gone from this computer.
+    fn forget(&mut self) -> bool {
         self.clear();
         self.ended = None;
-        if let Some(path) = &self.store {
-            // The session file first: once it is gone the person is signed out even if the copy stays a moment.
-            for file in [path.clone(), backup_of(path)] {
-                match std::fs::remove_file(&file) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(Error::Storage),
-                }
-            }
-        }
-        Ok(())
+        self.store.as_deref().is_none_or(remove_session)
+    }
+    /// At the start: what a sign-out could not remove of the session is tried again (and a copy left without its session
+    /// file, which is never one, goes). Whether nothing of a session signed out is left.
+    pub fn clean_signed_out(&self) -> bool {
+        let Some(path) = &self.store else { return true };
+        if marker_of(path).exists() || (!path.exists() && backup_of(path).exists()) { remove_session(path) } else { true }
     }
     /// The client of a new grant (another Orbiters identity or environment, or Orbiters' yes asked again) with this one's
     /// session: cookies, who is signed in, what was read with it, its transport and saved file. This one keeps nothing
@@ -949,7 +995,7 @@ impl Client {
     }
     /// Whether a saved session is on this computer (the file is only looked for, not read).
     pub fn session_saved(&self) -> bool {
-        self.store.as_ref().is_some_and(|p| p.is_file())
+        self.store.as_ref().is_some_and(|p| p.is_file() && !marker_of(p).exists())
     }
     /// The account whose session VRChat ended, until a new sign-in.
     pub fn ended_user(&self) -> Option<&User> {
@@ -1203,11 +1249,14 @@ impl Client {
             _ => Err(Error::Unauthorized),
         }
     }
-    /// Forget locally even if VRChat is offline. Remote logout is best effort, with any failure reported.
-    pub fn sign_out(&mut self) -> Result<()> {
+    /// Forgotten here whatever VRChat answers; VRChat told whatever could be removed here. Each said for itself.
+    pub fn sign_out(&mut self) -> Result<SignedOut> {
         self.permitted()?;
         let cookie = self.cookies.header();
-        self.forget()?;
+        let removed = self.forget();
+        Ok(SignedOut { removed, told: self.tell_signed_out(cookie) })
+    }
+    fn tell_signed_out(&mut self, cookie: String) -> Result<()> {
         if cookie.is_empty() {
             return Ok(());
         }
@@ -2171,7 +2220,7 @@ pub(crate) mod tests {
         assert!(calls[1].url.ends_with("offset=24"));
         drop(calls);
         // Signing out forgets them.
-        c.forget().unwrap();
+        assert!(c.forget());
         assert_eq!(c.find_worlds(&WorldList::Popular, 0), Err(Error::Unauthorized));
     }
     #[test]
@@ -2541,7 +2590,7 @@ pub(crate) mod tests {
         assert_eq!(seen.lock().unwrap()[0].cookie, "auth=rotated");
         assert!(seen.lock().unwrap()[0].basic.is_none());
         assert!(backup_of(&path).exists(), "the last good copy beside it");
-        assert_eq!(c.sign_out(), Err(Error::Unavailable));
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: true, told: Err(Error::Unavailable) }));
         assert!(!path.exists() && !backup_of(&path).exists(), "the person's sign-out removes the session and its copy");
         assert!(!c.signed_in() && c.cookies.header().is_empty());
     }
@@ -2710,6 +2759,66 @@ pub(crate) mod tests {
         c.cancel_login().unwrap();
         assert!(path.is_file() && backup_of(&path).is_file());
         assert_eq!(seen.lock().unwrap().len(), 1, "no logout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// verify2-r21 M6: the session file's copy cannot be deleted: VRChat is still told (the cookie is in memory until then).
+    #[test]
+    fn a_copy_that_cannot_be_deleted_does_not_keep_vrchat_from_being_told() {
+        let dir = session_dir("locked-copy");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, seen) = mock(vec![response(200, "", &[])]);
+        c.store = Some(path.clone());
+        std::fs::write(&path, b"made-up").unwrap();
+        // A directory of that name: no system deletes it as a file.
+        std::fs::create_dir_all(backup_of(&path)).unwrap();
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: false, told: Ok(()) }));
+        assert!(!path.exists(), "the session file is gone");
+        assert!(c.cookies.header().is_empty() && !c.signed_in(), "gone from memory");
+        assert!(seen.lock().unwrap().iter().any(|r| r.url.ends_with("/logout")), "VRChat was told");
+        // The next start: the copy can be removed by now, and is.
+        assert!(!c.clean_signed_out(), "still there");
+        std::fs::remove_dir(backup_of(&path)).unwrap();
+        std::fs::write(backup_of(&path), b"made-up").unwrap();
+        assert!(c.clean_signed_out());
+        assert!(!backup_of(&path).exists() && !marker_of(&path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// verify2-r21 M6: the session file itself cannot be deleted (held open by something else): it is over all the same
+    /// (never restored), removed at the next start, and a new sign-in replaces it.
+    #[cfg(windows)]
+    #[test]
+    fn a_session_file_that_cannot_be_deleted_is_over_and_removed_later() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = session_dir("locked-session");
+        let path = dir.join(SESSION_FILE);
+        let (mut c, seen) = mock(vec![response(200, "", &[])]);
+        c.store = Some(path.clone());
+        c.save().unwrap();
+        assert!(c.session_saved());
+        // Read by another program that lets nobody delete it (FILE_SHARE_READ | FILE_SHARE_WRITE).
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+        assert_eq!(c.sign_out(), Ok(SignedOut { removed: false, told: Ok(()) }));
+        assert_eq!(seen.lock().unwrap().len(), 1, "VRChat was told");
+        assert!(path.exists() && !c.session_saved(), "left, and over");
+        let restored = |path: &std::path::Path| {
+            let (mut fresh, _) = mock(vec![]);
+            fresh.cookies = Cookies::default();
+            fresh.store = Some(path.to_path_buf());
+            fresh.restore()
+        };
+        assert_eq!(restored(&path), Ok(false), "never restored");
+        drop(held);
+        assert!(c.clean_signed_out());
+        assert!(!path.exists() && !backup_of(&path).exists() && !marker_of(&path).exists());
+        // Left again, then a new sign-in: that one is restored.
+        c.save().unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+        assert!(!c.forget());
+        drop(held);
+        c.cookies.auth = "new-session".into();
+        c.save().unwrap();
+        assert!(c.session_saved());
+        assert_eq!(restored(&path), Ok(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
     /// r20: a new grant (another Orbiters identity or environment) goes on with the session in memory: nothing read again,
@@ -2997,6 +3106,12 @@ pub fn test_server(
 #[cfg(feature = "test-support")]
 pub fn set_test_cookie(client: &mut Client, auth: &str) {
     client.cookies.auth = auth.into();
+}
+
+/// Another crate's test keeps the fake's session in a file of its own (made-up bytes), with its copy beside it.
+#[cfg(feature = "test-support")]
+pub fn set_test_store(client: &mut Client, path: &std::path::Path) {
+    client.store = Some(path.to_path_buf());
 }
 
 /// A client for another crate's tests: no saved session file, and any HTTP request panics.

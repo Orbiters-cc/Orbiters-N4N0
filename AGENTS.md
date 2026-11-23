@@ -27,8 +27,17 @@
   which only the person can allow. A real game on this Mac: at most a few starts, never one within 80 s of an early quit, close it
   when done (`obelisk-cli steam quit 438100 --wait 60`), and know each start signs the owner's Steam in here and out on his PC.
 
+- **The engine files change only as a recorded transaction, never under a running game** (obelisk-cli 0.1.8, its
+  `docs/CLI.md`, Keyboard layout): `linux/.obelisk-engine-patch.txn.json` says what a crash left, `.obelisk-engine-sessions.lock`
+  is held shared from a launch's preparation to its game's exit; a launch that finds them in a state it cannot repair is refused
+  with `engine patch: not started: …` on standard error naming the paths. voile-lkd `bf0af9b` (the attach stop as link state, the
+  event ring) is **held back**: one start of five on it got Easy Anti-Cheat's "Debugger detected" (`docs/vrchat-bridge.md`,
+  2026-11-23 08:06); never ship it before that is explained. Home offers
+  **Restart VRChat** only for a confirmed lost picture of its own running session (`controller/picture.rs`, R1): never make a
+  covered, locked or slow game look lost. Benchmarks: `tools/mac-bench/session.sh` (the screen must be unlocked; only valid
+  windows are scored).
 - **The engine patch (obelisk-cli's files over Voile's) must replace every earlier build's files.** Each manifest entry lists
-  the SHA-256 every earlier `cli-v*` put at that path (`previous`); `scripts/build-engine-patch.sh` writes none that leaves one
+  the SHA-256 every earlier `cli-v*` put at that path (`previous`); `scripts/build-engine-patch.sh` (from 0.1.8 reading every `cli-v*` release on GitHub) writes none that leaves one
   out, and `every_earlier_release_s_files_are_replaced` (with `OBELISK_PRISTINE_RELEASE`) checks it from the real tags. A file
   of ours loaded in the game's process (Neptune's `d3d11.dll`/`dxgi.dll`, the Wine driver) is changed only when necessary and
   soaked over several starts first. Measure VRChat on a Mac with `tools/mac-bench/bench.py` (`docs/mac-performance.md`): one

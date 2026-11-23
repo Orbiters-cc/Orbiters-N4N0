@@ -584,8 +584,8 @@ pub fn event_location(o: &orbiters_core::community::Overview) -> Option<String> 
 pub struct Places {
     history: Shared<HistoryView>,
     events: Shared<Vec<EventSoon>>,
-    /// Whether the last instance is open: its location, the account it was asked for, what VRChat said.
-    open: Shared<(String, String, Option<bool>)>,
+    /// Whether the last instance is open: its location, whom it was asked for, what VRChat said and when.
+    open: Shared<(String, Asker, Option<bool>, Instant)>,
     /// Where's destination and everything known of it: one value, its one owner ([`super::selection`]).
     pub desk: Desk,
     /// The kind of a new instance chosen on a card, by world (Friends+ otherwise).
@@ -627,7 +627,7 @@ impl Places {
         *self.history.lock().unwrap() = Read { value: history, at, busy: false };
         *self.events.lock().unwrap() = Read { value: Some(events), at, busy: false };
         let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
-        *self.open.lock().unwrap() = Read { value: Some((location, String::new(), last_open)), at, busy: false };
+        *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
     }
 
@@ -806,22 +806,24 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
         if rejoinable(&last.instance, me) {
             let known = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
             if reads {
-                if known.as_ref().is_some_and(|k| k.0 != location || k.1 != me) {
-                    // Another instance, or another account, since: asked about now.
+                if known.as_ref().is_some_and(|k| k.0 != location || k.1 != *state.places.desk.asker()) {
+                    // Another instance, account or profile since: asked about now.
                     let mut s = state.places.open.lock().unwrap_or_else(|e| e.into_inner());
                     s.at = None;
                     s.value = None;
                 }
                 if let Some(scope) = state.scope.clone() {
-                    let (ctl, world, instance, key, by) = (cx.ctl.clone(), last.world_id.clone(), last.instance.clone(), location.clone(), me.to_string());
-                    refresh(&state.places.open, OPEN_EVERY, &ctx, "open", move || match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
-                        Ok(Response::Instance(open)) => Some((key, by, open)),
-                        _ => Some((key, by, None)),
+                    let (ctl, world, instance, key, by) = (cx.ctl.clone(), last.world_id.clone(), last.instance.clone(), location.clone(), state.places.desk.asker().clone());
+                    refresh(&state.places.open, OPEN_EVERY, &ctx, "open", move || {
+                        let asked = Instant::now();
+                        let (open, at) = super::previous::said(asked, ctl.vrchat_data(scope, Request::InstanceSeen { world, instance, max_age_ms: 30_000 }));
+                        Some((key, by, open, at))
                     });
                 }
             }
-            // What was said to this account (handed in, for pictures of the page: to nobody in particular).
-            last_open = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone().filter(|k| k.0 == location && (k.1 == me || !reads)).and_then(|k| k.2);
+            // What was said to this account (handed in, for pictures of the page: to nobody in particular). On which profile,
+            // and how long ago, counts when it is chosen.
+            last_open = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone().filter(|k| k.0 == location && (k.1.account.as_deref() == Some(me) || !reads)).and_then(|k| k.2);
         }
     }
     let dismissed = |id: &str| state.dismissed.contains(id);
@@ -1467,7 +1469,8 @@ fn choose_last(state: &mut State, card: &Suggestion, place: &Place) {
     let staged = state.places.staged.is_some();
     let said = {
         let read = state.places.open.lock().unwrap_or_else(|e| e.into_inner());
-        read.value.as_ref().filter(|k| k.0 == visit.location() && k.2 == Some(true) && (staged || Some(&k.1) == asker.account.as_ref())).and(read.at)
+        // For the very account and profile chosen now, from when VRChat said it.
+        read.value.as_ref().filter(|k| k.0 == visit.location() && k.2 == Some(true) && (staged || k.1 == asker)).map(|k| k.3)
     };
     match said {
         Some(at) => state.places.desk.choose_open(card.key.clone(), visit, Origin::Recent, at, asker),
@@ -1507,7 +1510,10 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
         Decision::Plain => return plain(state),
         Decision::Check => return super::previous::check(state, cx, Some(mode)),
         Decision::Wait => return state.places.desk.wait(mode, Instant::now()),
-        Decision::Enter(visit) => return enter(state, cx, clock, &visit, mode, profile),
+        Decision::Enter(visit) => {
+            let account = state.places.desk.asker().account.clone();
+            return enter(state, cx, clock, &visit, mode, profile, account);
+        }
         Decision::Card(key) => state.places.cards.iter().find(|s| s.key == key).cloned(),
         Decision::New(visit) => state.places.cards.iter().find(|s| s.key == visit.key()).cloned().filter(|c| c.go == Go::New),
     };
@@ -1538,12 +1544,13 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
     });
 }
 
-/// VRChat starts in this instance: the selection said it is proven.
-pub(super) fn enter(state: &mut State, cx: &Cx, clock: f64, visit: &super::previous::Visit, mode: LaunchMode, profile: Option<u32>) {
+/// VRChat starts in this instance: the selection said it is proven, for `account`. The start goes bound to that account,
+/// whether its friends list is read yet or not: the service starts it for no other (verify3-r21 M1).
+pub(super) fn enter(state: &mut State, cx: &Cx, clock: f64, visit: &super::previous::Visit, mode: LaunchMode, profile: Option<u32>, account: Option<String>) {
     let Some(place) = orbiters_core::launcher_feed::place(&visit.location(), &visit.name) else { return };
-    if let Some(action) = action(&Launch::At(place), mode, profile) {
-        state.act(cx, clock, action);
-    }
+    // Nothing is proven for nobody.
+    let (Some(action), Some(account)) = (action(&Launch::At(place), mode, profile), account) else { return };
+    state.act_for(cx, clock, account, action);
 }
 
 /// Has VRChat make the new instance for the account signed in (the overlay's Go there's request). Going there is

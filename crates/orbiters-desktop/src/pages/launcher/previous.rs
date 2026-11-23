@@ -195,13 +195,14 @@ pub(super) fn button(ui: &mut Ui, state: &mut State, right_center: Pos2) -> f32 
 /// and an instance chosen before who is signed in was known (or chosen for another account or profile than now's): asked
 /// about as soon as there is someone to ask for, or given up when it takes this account no more.
 pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
+    // Who left comes first: an answer that came with the news of it starts nothing there (verify3-r21 M3).
+    friend_left(state, clock);
     for outcome in state.places.desk.take(Instant::now()) {
         match outcome {
-            Outcome::Launch { visit, mode, profile } => super::destinations::enter(state, cx, clock, &visit, mode, profile),
+            Outcome::Launch { visit, mode, profile, account } => super::destinations::enter(state, cx, clock, &visit, mode, profile, account),
             Outcome::MakeFailed(e) => state.places.notice = Some((e, clock)),
         }
     }
-    friend_left(state, clock);
     let desk = &state.places.desk;
     let selection = desk.selection();
     if desk.is_quiet() || *selection.verified() != Verified::Unverified {
@@ -372,6 +373,8 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         return;
     };
     let ctl = cx.ctl.clone();
+    // Play goes by what VRChat says now; a choice, by an answer good for a while yet.
+    let max_age_ms = if play.is_some() { 2_000 } else { 30_000 };
     // A read into memory (whether VRChat says the instance is open): nothing of the window's work, unless Play waits for
     // it: the window does not rest to the tray in the middle of that.
     let working = play.map(|_| crate::pages::Working::begin());
@@ -380,17 +383,24 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         let (world, instance) = (ticket.visit.world_id.clone(), ticket.visit.instance.clone());
         #[cfg(test)]
         let paused = instance.clone();
-        let open = match ctl.vrchat_data(scope, Request::Instance { world, instance }) {
-            Ok(Response::Instance(open)) => open,
-            _ => None,
-        };
+        let asked = Instant::now();
+        let (open, at) = said(asked, ctl.vrchat_data(scope, Request::InstanceSeen { world, instance, max_age_ms }));
         #[cfg(test)]
         pause_before_publishing(&paused);
-        ticket.answer(open, Instant::now());
+        ticket.answer(open, at);
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
     });
+}
+
+/// What VRChat said of an instance asked about at `asked`, and when it said so: the service may hand on an answer it kept,
+/// as old as it says (verify3-r21 M2); never counted younger than the asking.
+pub(super) fn said(asked: Instant, answer: crate::controller::vrchat_data::Result) -> (Option<bool>, Instant) {
+    match answer {
+        Ok(Response::InstanceSeen { open, age_ms }) => (open, asked.checked_sub(std::time::Duration::from_millis(age_ms)).unwrap_or(asked)),
+        _ => (None, asked),
+    }
 }
 
 /// Its world taken as a new instance.

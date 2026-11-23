@@ -70,6 +70,14 @@ fn signed_in_list(c: &Shared) {
     c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
 }
 
+/// The session there is (a made-up one, when the test made none), as whose list is read.
+fn by(c: &Shared) -> By {
+    if c.vrchat_session().is_none() {
+        c.test_vrchat(vec![]);
+    }
+    c.vrchat_session().expect("a made-up session").by
+}
+
 fn controller(machine: Arc<Pretend>) -> Shared {
     let c = Controller::new(Settings::default());
     c.launcher_machine(machine);
@@ -187,6 +195,8 @@ fn dismissing_an_invite_hides_it_at_vrchat_and_a_boop_only_here() {
 #[test]
 fn a_pipeline_message_moves_a_friend() {
     let c = controller(Arc::new(Pretend::default()));
+    by(&c);
+    signed_in_list(&c);
     c.update(|s| {
         s.launcher.friends = vec![launcher_feed::friend(&json!({"id": A, "displayName": "Nova", "location": "offline"}), false).unwrap()];
     });
@@ -343,17 +353,17 @@ fn an_accepted_invite_is_hidden_at_vrchat_only_once_the_account_got_there() {
     c.update(|s| s.launcher.invites = vec![invite("not_1")]);
     c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }));
     assert!(c.view().launcher.invites.is_empty(), "the card goes at once");
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert!(calls.lock().unwrap().is_empty(), "nothing hidden at VRChat while VRChat is only starting");
     // The account's own location arrives (the pipeline's user-location): now VRChat hides it.
     c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() }));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert_eq!(calls.lock().unwrap().len(), 1);
     assert!(calls.lock().unwrap()[0].1.ends_with("/auth/user/notifications/not_1/hide"));
     // One that never arrives comes back as a card, and VRChat was told nothing.
     c.update(|s| s.launcher.me = None);
     c.launcher.lock().unwrap().accepted.push(accepted(invite("not_2"), "usr_test", ARRIVE_WITHIN + Duration::from_secs(1)));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert_eq!(c.view().launcher.invites.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["not_2"]);
     assert_eq!(calls.lock().unwrap().len(), 1);
 }
@@ -432,17 +442,17 @@ fn a_failed_action_is_said_in_the_toast_and_every_outcome_goes_after_a_while() {
     let c = controller(Arc::new(Pretend::default()));
     let before = c.notices.lock().unwrap().len();
     let failed = Notice::Failed { to: A.into(), action: SentKind::Boop, text: "VRChat refused the request (HTTP 400).".into() };
-    c.launcher_notice(failed.clone());
+    c.launcher_notice(None, failed.clone());
     assert_eq!(c.notices.lock().unwrap().len(), before + 1, "a toast");
     assert_eq!(c.view().launcher.notice, Some(failed.clone()));
-    c.launcher_notice_over(&failed);
+    c.launcher_notice_over(None, &failed);
     assert_eq!(c.view().launcher.notice, None, "not kept for ever (the Request pill is pressable again)");
     let sent = Notice::Sent { to: A.into(), action: SentKind::RequestInvite };
-    c.launcher_notice(sent.clone());
+    c.launcher_notice(None, sent.clone());
     assert_eq!(c.notices.lock().unwrap().len(), before + 1, "a success is no toast");
     let newer = Notice::Sent { to: B.into(), action: SentKind::Boop };
-    c.launcher_notice(newer.clone());
-    c.launcher_notice_over(&sent);
+    c.launcher_notice(None, newer.clone());
+    c.launcher_notice_over(None, &sent);
     assert_eq!(c.view().launcher.notice, Some(newer), "a newer outcome stays its own time");
 }
 
@@ -457,8 +467,8 @@ fn a_world_that_failed_for_a_passing_reason_is_asked_again_later_not_never() {
         }
         launcher_feed::regroup(&mut s.launcher, &[]);
     });
-    c.launcher_resolve_worlds(&client);
-    c.launcher_resolve_worlds(&client);
+    c.launcher_resolve_worlds(&client, &by(&c));
+    c.launcher_resolve_worlds(&client, &by(&c));
     assert_eq!(calls.lock().unwrap().len(), 1, "not every tick");
     let rt = c.launcher.lock().unwrap();
     assert!(!rt.worlds.contains_key("wrld_00000000-0000-4000-8000-0000000000bb"), "not remembered as 'not given'");
@@ -787,21 +797,21 @@ fn an_accepted_invite_of_another_account_is_neither_hidden_nor_shown_and_a_faile
     c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() }));
     // A's invite, ten minutes on, while B's list is on show: B's list does not get A's card; B's session hides nothing.
     c.launcher.lock().unwrap().accepted.push(accepted(invite("not_a"), "usr_aaaa", ARRIVE_WITHIN + Duration::from_secs(1)));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert!(c.view().launcher.invites.is_empty());
     assert!(calls.lock().unwrap().is_empty());
     // An account change drops them.
     c.launcher.lock().unwrap().accepted.clear();
     // B's own, arrived: the hide fails once (503), is kept, and goes a minute later.
     c.launcher.lock().unwrap().accepted.push(accepted(invite("not_b"), "usr_test", Duration::from_secs(5)));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert_eq!(calls.lock().unwrap().len(), 1);
     {
         let mut rt = c.launcher.lock().unwrap();
         assert_eq!(rt.accepted.len(), 1, "a failed hide is not dropped");
         rt.accepted[0].hide_again = Some(Instant::now());
     }
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert_eq!(calls.lock().unwrap().len(), 2);
     assert!(c.launcher.lock().unwrap().accepted.is_empty(), "hidden: done");
 }
@@ -820,7 +830,7 @@ fn being_in_the_instance_already_is_no_arrival_and_a_second_accept_is_refused() 
         s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: Whereabouts::World(place.clone()), ..Default::default() });
     });
     c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Vr }));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert!(calls.lock().unwrap().is_empty(), "not hidden on a location seen before the press");
     // The same notification again from the pipeline: the card does not come back while the invite is on the way.
     c.update(|s| s.launcher.invites = vec![invite.clone()]);
@@ -848,11 +858,12 @@ fn an_unchanged_scheduled_full_read_publishes_nothing() {
     let state = (*c.view().launcher).clone();
     let before = c.publishes.load(Ordering::Relaxed);
     // The same list read again (as the 30-minute read would): applied through the read's own commit.
-    c.launcher_commit_read(state.clone());
+    let by = by(&c);
+    c.launcher_commit_read(&by, state.clone());
     assert_eq!(c.publishes.load(Ordering::Relaxed), before, "nothing new: nothing published");
     let mut moved = state;
     moved.friends[0].status_text = "new".into();
-    c.launcher_commit_read(moved);
+    c.launcher_commit_read(&by, moved);
     assert_eq!(c.publishes.load(Ordering::Relaxed), before + 1, "a change is published");
 }
 
@@ -952,7 +963,7 @@ fn an_invite_cleared_elsewhere_does_not_come_back_and_coming_back_to_the_room_co
     // Cleared on another device while accepted here: VRChat's pipeline says so.
     c.launcher.lock().unwrap().accepted.push(accepted(invite("not_1"), "usr_test", ARRIVE_WITHIN + Duration::from_secs(1)));
     c.launcher_message(&json!({"type": "hide-notification", "content": "not_1"}).to_string());
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert!(c.view().launcher.invites.is_empty(), "its card does not come back");
     // Accepted while in that very room: leaving, then coming back, is the arrival.
     let at = |p: Option<Place>| c.update(|s| s.launcher.me = Some(orbiters_core::launcher::Friend { id: "usr_test".into(), whereabouts: p.map_or(Whereabouts::Private, Whereabouts::World), ..Default::default() }));
@@ -960,13 +971,13 @@ fn an_invite_cleared_elsewhere_does_not_come_back_and_coming_back_to_the_room_co
     a.from = Some((place.world_id.clone(), place.instance_id.clone()));
     c.launcher.lock().unwrap().accepted.push(a);
     at(Some(place.clone()));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert!(calls.lock().unwrap().is_empty(), "still where it was at the press");
     let elsewhere = launcher_feed::place(&format!("{W}:1~region(eu)"), "").unwrap();
     at(Some(elsewhere));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     at(Some(place.clone()));
-    c.launcher_settle_accepted(Some(&client));
+    c.launcher_settle_accepted(Some(&client), Some(&by(&c)));
     assert_eq!(calls.lock().unwrap().len(), 1, "back in the room: hidden");
 }
 
@@ -1266,13 +1277,18 @@ fn a_vrchat_not_yet_identified_is_not_profile_0_and_holds_play() {
 fn an_answer_for_account_a_never_lands_on_bs_card() {
     use orbiters_core::launcher::{OwnPicture, ProfilePart, Saving};
     let c = controller(Arc::new(Pretend::default()));
-    c.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() });
+    let account = by(&c);
+    c.update(|s| {
+        s.vrchat_login.user.as_mut().unwrap().id = "usr_b".into();
+        s.launcher.source = Source::SignedIn { user_id: "usr_b".into(), name: String::new() };
+    });
+    let (a, b) = (By { user: "usr_a".into(), ..account.clone() }, By { user: "usr_b".into(), ..account });
     // A's picture list, or A's "saved", arriving after the switch to B.
-    let landed = c.launcher_mine_publish(Some("usr_a"), |m| m.icons = Some(vec![OwnPicture { id: "file_a".into(), url: "https://api.vrchat.cloud/api/1/file/file_a/1/file".into() }]));
+    let landed = c.launcher_mine_publish(&a, |m| m.icons = Some(vec![OwnPicture { id: "file_a".into(), url: "https://api.vrchat.cloud/api/1/file/file_a/1/file".into() }]));
     assert!(!landed);
-    c.launcher_mine_saving(Some("usr_a"), Saving::Saved(ProfilePart::Bio), None);
+    c.launcher_mine_saving(&a, Saving::Saved(ProfilePart::Bio), None);
     assert!(c.view().launcher.mine.is_none(), "B's card has nothing of A's");
-    assert!(c.launcher_mine_publish(Some("usr_b"), |m| m.bio = "B".into()));
+    assert!(c.launcher_mine_publish(&b, |m| m.bio = "B".into()));
     assert_eq!(c.view().launcher.mine.as_ref().unwrap().bio, "B");
 }
 
@@ -1313,11 +1329,14 @@ fn a_full_read_keeps_the_own_profile_and_the_game_profiles() {
         s.launcher.profiles = vec![GameProfile { profile: 1, running: Some(LaunchMode::Vr), ..GameProfile::default() }];
     });
     let same = LauncherState { source: c.view().launcher.source.clone(), ..LauncherState::default() };
-    c.launcher_commit_read(same);
+    let account = by(&c);
+    c.launcher_commit_read(&account, same);
     assert_eq!(c.view().launcher.mine.as_ref().map(|m| m.bio.as_str()), Some("kept"));
     assert_eq!(c.view().launcher.profiles.len(), 1);
     // Another account's read: its own profile is not the previous one's; the computer's profiles stay.
-    c.launcher_commit_read(LauncherState { source: Source::SignedIn { user_id: "usr_other".into(), name: String::new() }, ..LauncherState::default() });
+    c.update(|s| s.vrchat_login.user.as_mut().unwrap().id = "usr_other".into());
+    assert!(c.view().launcher.mine.is_none(), "the list on show is not this account's");
+    c.launcher_commit_read(&By { user: "usr_other".into(), ..account }, LauncherState { source: Source::SignedIn { user_id: "usr_other".into(), name: String::new() }, ..LauncherState::default() });
     assert!(c.view().launcher.mine.is_none());
     assert_eq!(c.view().launcher.profiles.len(), 1);
 }
@@ -1938,7 +1957,7 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
     until(&|| c.view().launcher.engine_trouble.as_ref().is_some_and(|t| t.repairing && t.percent == Some(40)));
     assert_eq!(c.launcher_do(Action::RepairEngine), None);
     c.launcher_game(machine.as_ref());
-    c.launcher_commit_read(LauncherState::default());
+    c.publish_local_list(|l| *l = LauncherState::default());
     assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| t.repairing && t.percent == Some(40)), "a list read keeps it");
     machine.hold_repair.store(false, Ordering::Relaxed);
     until(&|| c.view().launcher.engine_trouble.is_none());
@@ -2187,6 +2206,25 @@ fn a_program_too_old_starts_no_vrchat() {
     assert!(machine.start(&[]).is_err());
     assert!(!root.join("asked").exists());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// verify3-r21 M1: a destination verified for an account starts for that very account, its friends list read or not; for
+/// another login it starts nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn verify3_a_bound_destination_needs_its_account_not_its_list() {
+    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
+    let c = controller(machine.clone());
+    c.test_vrchat(vec![]);
+    let there = || Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::FriendsPlus, region: "eu".into() };
+    let play = || Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: there() };
+    let other = c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(play()) });
+    assert!(matches!(other, Some(Notice::Error(_))), "{other:?}");
+    assert!(machine.started.lock().unwrap().is_empty());
+    assert!(!matches!(c.view().launcher.source, Source::SignedIn { .. }), "its list is not read yet");
+    let sent = c.launcher_do(mine(play()));
+    assert!(matches!(sent, Some(Notice::Sent { .. })), "{sent:?}");
+    assert_eq!(machine.started.lock().unwrap().len(), 1);
 }
 
 // --- One VRChat at a time on a Mac, on the profile chosen on Home ---

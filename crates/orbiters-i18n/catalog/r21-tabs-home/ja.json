@@ -57,5 +57,6 @@
   "{name} is closed now: choose another place.": "{name}は閉じられています：別の場所を選んでください。",
   "VRChat did not say whether {name}'s instance is open: Play asks again.": "{name}のインスタンスが開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせます。",
   "VRChat did not say whether {name} is open: Play asks again.": "{name}が開いているかVRChatから返答がありません：「プレイ」でもう一度問い合わせます。",
-  "VRChat is not signed in for this profile: choose another place.": "このプロフィールではVRChatにサインインしていません：別の場所を選んでください。"
+  "VRChat is not signed in for this profile: choose another place.": "このプロフィールではVRChatにサインインしていません：別の場所を選んでください。",
+  "The saved VRChat session could not be removed from this computer and may sign in again at the next start: close what holds it, then remove it again.": "保存されたVRChatのセッションをこのコンピューターから削除できず、次回の起動時に再びサインインする可能性があります。ファイルを使用中のものを閉じてから、もう一度削除してください。"
 }

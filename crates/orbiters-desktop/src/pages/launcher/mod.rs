@@ -413,6 +413,15 @@ impl State {
         self.press(clock, action, |a| cx.ctl.launcher(a));
     }
 
+    /// Sends `action` bound to `account`, whatever list is on show: the service does it for that account signed in, and for
+    /// no other.
+    fn act_for(&mut self, cx: &Cx, clock: f64, account: String, action: Action) {
+        self.note(clock, &action);
+        if !cx.ctl.launcher(Action::As { account, action: Box::new(action.clone()) }) {
+            self.unnote(&action);
+        }
+    }
+
     /// [`Self::act`] with the sending given: shows the press, sends it bound to the account on show, and takes the
     /// press back when it never reached the service.
     fn press(&mut self, clock: f64, action: Action, send: impl FnOnce(Action) -> bool) {

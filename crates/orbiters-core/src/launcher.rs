@@ -478,10 +478,24 @@ pub enum Notice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SentKind { Boop, RequestInvite, Launch, Join }
 
+/// Whom what VRChat said of an account was verified for: the Orbiters identity's epoch, the member (a digest of the
+/// environment and their id, when known) and the VRChat account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct VerifiedFor {
+    pub epoch: u64,
+    #[serde(default)]
+    pub member: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
 /// What the Home page reads.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LauncherState {
     pub source: Source,
+    /// Whom a signed-in account's list was verified for; none for this computer's own copy (verify3-r21 B6).
+    #[serde(default)]
+    pub verified_for: Option<VerifiedFor>,
     pub possible: Possible,
     /// The account itself (top of the list), when known.
     pub me: Option<Friend>,
@@ -668,6 +682,7 @@ pub fn sample() -> LauncherState {
         loading: false,
     };
     LauncherState {
+        verified_for: None,
         source: Source::SignedIn { user_id: me.id.clone(), name: me.name.clone() },
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },
         me: Some(me),

@@ -18,7 +18,7 @@ crates/orbiters-projects/src/unity6/gate/sys_windows.rs
 crates/orbiters-projects/src/unity6/gate/sys_unix.rs
 crates/orbiters-projects/src/unity6/vcc.rs
 crates/orbiters-projects/src/unity6/content.rs
-crates/orbiters-projects/src/vcc_list.rs
+crates/orbiters-projects/src/copies.rs
 crates/orbiters-projects/src/copying.rs
 crates/orbiters-projects/src/bundled_templates.rs
 crates/orbiters-desktop/src/pages/projects/unity6.rs

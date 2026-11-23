@@ -99,4 +99,4 @@ crates/orbiters-projects/src/unity6/trial/tests.rs
 crates/orbiters-projects/src/unity6/content/tests.rs
 crates/orbiters-projects/src/unity6/gate/tests.rs
 crates/orbiters-projects/src/unity6/payload/tests.rs
-crates/orbiters-projects/src/vcc_list/tests.rs
+crates/orbiters-projects/src/copies/tests.rs

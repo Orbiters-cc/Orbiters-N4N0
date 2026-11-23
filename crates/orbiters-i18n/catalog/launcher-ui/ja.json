@@ -115,6 +115,7 @@
   "Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.": "VRChat 自身の終了と同じように終了を求め、ホームが起動したときと同じ方法で再び起動します。",
   "Restart VRChat": "VRChat を再起動",
   "VRChat's picture stopped on this Mac and will not come back: restart it.": "この Mac で VRChat の画面が止まり、元に戻りません。再起動してください。",
+  "The disk of {path} cannot be repaired in place: it is not an APFS disk. Nothing was changed.": "{path} のディスクはその場で修復できません（APFS のディスクではありません）。何も変更されていません。",
   "What runs VRChat on this Mac is not whole: press Repair on Home.": "この Mac で VRChat を動かすファイルが揃っていません。ホームの「修復」を押してください。",
   "An update of what runs VRChat was cut short while a game runs on it: quit that game, then press Play.": "VRChat を動かすファイルの更新が、ゲームの実行中に中断されました。そのゲームを終了してから「プレイ」を押してください。",
   "What runs VRChat on this Mac cannot be locked while it plays: check that its folder can be written and that its disk is not full.": "プレイ中に VRChat を動かすファイルをロックできません。フォルダーに書き込めること、ディスクに空きがあることを確認してください。",

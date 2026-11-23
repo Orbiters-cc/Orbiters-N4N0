@@ -62,6 +62,32 @@ pub enum Action {
     },
     /// One of the app's own features, from the catalogue of intents ([`crate::intents`]): its gate is its risk class.
     App(crate::intents::Intent),
+    /// `orbiters_more`: the model asks for more of the app's tools (r23); they come with the next request of the turn.
+    OpenTools {
+        groups: Vec<crate::intents::route::ToolGroup>,
+    },
+}
+
+/// The name of the tool that opens more of the app's tools.
+pub const MORE: &str = "orbiters_more";
+
+/// `orbiters_more`, sent with every request: the groups not offered yet, and the rules of the app's tools (once).
+pub fn more_spec(open: &std::collections::BTreeSet<crate::intents::route::ToolGroup>) -> Value {
+    use crate::intents::route::ToolGroup;
+    let closed: Vec<ToolGroup> = ToolGroup::ALL.into_iter().filter(|g| !open.contains(g)).collect();
+    let listed: Vec<String> = closed.iter().map(|g| format!("{} ({})", g.key(), g.about())).collect();
+    json!({
+        "name": MORE,
+        "description": format!("More of Orbiters - N4N0's tools for the owner's request, when the ones offered do not do it: {}. They come with your next request. {}", listed.join("; "), crate::intents::model::RULES), // i18n: not shown
+        "input_schema": { "type": "object", "properties": { "groups": { "type": "array", "items": { "enum": closed.iter().map(|g| g.key()).collect::<Vec<_>>() }, "minItems": 1, "maxItems": 4 } }, "required": ["groups"] }
+    })
+}
+
+/// The client tools of a turn that carries `groups` (r23): `orbiters_more` first, then the tools of those groups only.
+pub fn specs_for(bare_parameters: bool, groups: &std::collections::BTreeSet<crate::intents::route::ToolGroup>) -> Vec<Value> {
+    let mut out = vec![more_spec(groups)];
+    out.extend(specs(bare_parameters).into_iter().filter(|t| t["name"].as_str().and_then(crate::intents::route::group_of).is_some_and(|g| groups.contains(&g))));
+    out
 }
 
 /// The client tools, for `tools` of a turn. `bare_parameters`: the avatar has no manifest, so its parameters are
@@ -169,6 +195,14 @@ fn flag(input: &Value, key: &str) -> Option<bool> {
 
 /// The action a tool call asks for, or why it cannot be done.
 pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
+    if name == MORE {
+        let groups: Vec<crate::intents::route::ToolGroup> =
+            input.get("groups").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).filter_map(crate::intents::route::ToolGroup::of_key).collect()).unwrap_or_default();
+        if groups.is_empty() {
+            return Err(format!("{MORE} needs \"groups\": one or more of the names it lists.")); // i18n: not shown
+        }
+        return Ok(Action::OpenTools { groups });
+    }
     if let Some(intent) = crate::intents::parse(name, input) {
         return intent.map(Action::App);
     }

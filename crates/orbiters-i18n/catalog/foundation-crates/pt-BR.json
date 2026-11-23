@@ -289,5 +289,6 @@
   "not a PNG": "não é um PNG",
   "a damaged PNG chunk": "um bloco PNG danificado",
   "a PNG chunk this copy cannot keep": "um bloco PNG que esta cópia não pode manter",
-  "the key file is being written: try again": "o arquivo da chave está sendo gravado: tente de novo"
+  "the key file is being written: try again": "o arquivo da chave está sendo gravado: tente de novo",
+  "the key file could not be read: try again": "não foi possível ler o arquivo de chave: tente de novo"
 }

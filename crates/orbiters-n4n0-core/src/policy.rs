@@ -43,7 +43,7 @@ enum Kind {
 fn kind(action: &Action) -> Kind {
     match action {
         Action::SetControl { .. } | Action::SetParameter { .. } => Kind::Avatar,
-        Action::FindControls { .. } => Kind::Find,
+        Action::FindControls { .. } | Action::OpenTools { .. } => Kind::Find,
         Action::Hold { .. } => Kind::Hold,
         Action::TakePhoto { .. } => Kind::Photo,
         Action::SaveVideo => Kind::SaveVideo,
@@ -187,6 +187,7 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
         Action::Media { .. } => "control the music".into(), // i18n: not shown
         Action::Light { .. } => "change N4N0's light".into(), // i18n: not shown
         Action::App(intent) => intent.what(),
+        Action::OpenTools { .. } => "offer more of the app's tools".into(), // i18n: not shown
     }
 }
 
@@ -196,7 +197,7 @@ pub fn changes(action: &Action) -> bool {
     if let Action::App(intent) = action {
         return intent.spec().changes;
     }
-    !matches!(action, Action::FindControls { .. } | Action::ListSavedVideos | Action::Mood { .. } | Action::Media { command: None, volume_change: None })
+    !matches!(action, Action::FindControls { .. } | Action::OpenTools { .. } | Action::ListSavedVideos | Action::Mood { .. } | Action::Media { command: None, volume_change: None })
 }
 
 /// What the owner is asked, in their language: one whole sentence for an action that waits for their yes (TXT-22). The

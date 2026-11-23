@@ -1,0 +1,7 @@
+{
+  "Retry in {wait}": "Tentar de novo em {wait}",
+  "Trying again in {wait}": "Nova tentativa em {wait}",
+  "{n} min": "{n} min",
+  "{n} h": "{n} h",
+  "Sends your last message again, once.": "Envia sua última mensagem de novo, uma vez."
+}

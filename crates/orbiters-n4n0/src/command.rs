@@ -76,6 +76,13 @@ pub enum Command {
     Assistant { on: bool },
     /// Explicit retry after a microphone/worker failure; rechecks every preflight requirement.
     AskRetry,
+    /// Sends N4N0's last failed message again (its turn's number: [`crate::TurnFailure::id`]): one send per press, nothing
+    /// for a message that is not waiting any more or before its moment.
+    RetryTurn {
+        id: u64,
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
     /// A surface's Yes or No (the Ask page's, the window chat's card) to what N4N0 asked to do, stamped when it was
     /// pressed with the question it showed: it answers that question only, for the account it was shown to.
     AskAnswer {

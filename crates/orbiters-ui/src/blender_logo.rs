@@ -45,7 +45,7 @@ fn number(d: &str, i: &mut usize) -> Option<f32> {
 }
 
 /// Parses SVG path data with the commands the logo uses (`m`, `l`, `h`, `c`, `s` and `z`, relative or absolute).
-fn parse(d: &str) -> Option<Path> {
+pub(crate) fn parse(d: &str) -> Option<Path> {
     let b = d.as_bytes();
     let mut pb = PathBuilder::new();
     let (mut i, mut cmd) = (0, b'm');

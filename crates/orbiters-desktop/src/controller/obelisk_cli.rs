@@ -16,8 +16,6 @@ use std::time::Duration;
 
 /// How many times in a row a QR code nobody read is replaced by a new sign-in before the set-up gives up.
 const SIGN_INS: u32 = 8;
-/// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
-const TOO_SHORT: u64 = obelisk::EARLY_END.as_secs();
 
 /// A command of the program that failed: its code (`docs/CLI.md` of the fork), and a sentence for the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +87,8 @@ fn note(args: &[&str], code: &str, message: &str) {
 pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl FnMut(&str)) -> Result<(), String> {
     let mut child = spawn(program, args).map_err(|e| e.to_string())?;
     let out = child.stdout.take().expect("piped");
-    let (sender, receiver) = std::sync::mpsc::channel();
+    // A bounded queue: a program that floods its output waits for this reader, never fills memory.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             if sender.send(line).is_err() {
@@ -99,6 +98,12 @@ pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl Fn
     });
     let until = std::time::Instant::now() + limit;
     loop {
+        // One deadline for all of it, however many lines keep coming.
+        if std::time::Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(tr!("It did not answer within {seconds} s.", seconds = limit.as_secs()));
+        }
         match receiver.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
             Ok(line) => each(&line),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -116,6 +121,56 @@ pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl Fn
         Ok(())
     } else {
         Err(tr!("It ended with {status}.", status = status.to_string()))
+    }
+}
+
+/// Reads `out` line by line into `each` until it ends, `stop` is set (looked at every quarter second, whoever holds the
+/// pipe open meanwhile) or `each` says no more.
+#[cfg(unix)]
+pub(crate) fn read_lines_until(out: impl std::io::Read + std::os::unix::io::AsRawFd, stop: &AtomicBool, mut each: impl FnMut(String) -> bool) {
+    let fd = out.as_raw_fd();
+    let mut out = out;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 8192];
+    while !stop.load(Ordering::Relaxed) {
+        let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd of ours, for a descriptor this function holds open.
+        let ready = unsafe { libc::poll(&mut poll, 1, 250) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if ready == 0 {
+            continue;
+        }
+        let read = match out.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        pending.extend_from_slice(&buffer[..read]);
+        while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            if !each(String::from_utf8_lossy(&line[..line.len() - 1]).into_owned()) {
+                return;
+            }
+        }
+    }
+    if !pending.is_empty() && !stop.load(Ordering::Relaxed) {
+        each(String::from_utf8_lossy(&pending).into_owned());
+    }
+}
+
+/// Elsewhere (never run there: VRChat runs through Obelisk on a Mac only), a plain reader of lines.
+#[cfg(not(unix))]
+pub(crate) fn read_lines_until(out: impl std::io::Read, stop: &AtomicBool, mut each: impl FnMut(String) -> bool) {
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+        if stop.load(Ordering::Relaxed) || !each(line) {
+            return;
+        }
     }
 }
 
@@ -191,9 +246,12 @@ fn sign_in(program: &Path, progress: &dyn Fn(EngineSetup), stop: &AtomicBool) ->
 /// after a start that ended early, and each start's outcome kept by its launch id for whoever made it.
 ///
 /// The wait after an early end has three sources, the longest wins: the moment this run saw one end (a monotonic clock,
-/// at once, before the engine's record is written), a deadline kept in a file on the clock since the Mac booted (a
-/// restart of N4N0 keeps it, a wall clock set forward does not shorten it, a reboot ends it), and the engine's own records.
-/// Records that cannot be read are not "nothing ended early": the start is refused as [`Refused::Unknown`].
+/// at once, before the engine's record is written), a deadline kept in a file on the boot clock (`kern.bootsessionuuid`
+/// and the seconds since that boot: a restart of N4N0 keeps it, a wall clock set either way does not move it, a reboot
+/// ends it), and the engine's own records (on the same boot clock when they say it, obelisk-cli 0.1.6; else by when they
+/// were written). A record that cannot be read holds starts for [`obelisk::AFTER_EARLY_END`] from when it was first seen
+/// unchanged (whatever it was, it did not end within that time), then is history: a damaged record of the current
+/// session, which the engine itself stops at, holds starts until the person sets it aside from Home ([`Play::set_aside`]).
 #[derive(Default)]
 pub struct Play {
     now: Mutex<Now>,
@@ -215,7 +273,21 @@ struct Now {
     made: u64,
     /// No start before this (a start seen ending early, this run).
     cooldown: Option<std::time::Instant>,
+    /// The gate as kept on the boot clock, read once from its file and written through: never read anew at each try.
+    kept: Option<Kept>,
+    /// A start reserved by the bridge (its token, until when): no other start is made meanwhile, so that an instance it
+    /// creates for that start is not lost to one started between.
+    reserved: Option<(u64, std::time::Instant)>,
+    /// Failures not told yet to whoever started them, by launch id: kept apart from the launches (a few kept), so that later
+    /// starts never push them out.
+    unread: Vec<(u64, Failure)>,
 }
+
+/// How many untold failures are kept.
+const UNREAD_KEPT: usize = 32;
+
+/// How long a reservation holds at most when it is neither used nor given back (the bridge's call ended some other way).
+const RESERVED_FOR: Duration = Duration::from_secs(150);
 
 /// What became of one start, as the program said it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -234,6 +306,8 @@ pub struct Launch {
     pub over: bool,
     /// Its failure was told to the one who started it (Home's toast: once).
     pub told: bool,
+    /// Its program was lost while the engine's record said the game runs: the record is read again until it ends.
+    pub unreconciled: bool,
 }
 
 /// Why a start was not made.
@@ -243,10 +317,32 @@ pub enum Refused {
     Busy,
     /// A start ended early this long ago: Easy Anti-Cheat fails a start this soon after one.
     Wait(Duration),
-    /// Whether a start ended early could not be told (the engine's records could not be read): no start until it can.
-    Unknown,
+    /// A record of the engine's could not be read ([`Trouble`] says which, and what can be done).
+    Records(Trouble),
     /// The program could not be run.
     Failed(String),
+}
+
+/// A record of the engine's that cannot be read, as Home and the bridge tell it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trouble {
+    /// The file (or the folder, when it cannot be listed).
+    pub file: PathBuf,
+    /// The folder of the records cannot be listed: nothing here can mend that.
+    pub unlistable: bool,
+    /// It is the current session's (the engine stops at it).
+    pub current: bool,
+    /// Starts are held by it now.
+    pub blocks: bool,
+    /// How long until it is known to be history (and may be set aside); `None` once it is.
+    pub settled_in: Option<Duration>,
+}
+
+impl Trouble {
+    /// What a start held by it waits for: `None` when only the person can end it (setting it aside, or the folder).
+    pub fn wait(&self) -> Option<Duration> {
+        (!self.current && !self.unlistable).then_some(self.settled_in).flatten()
+    }
 }
 
 impl Refused {
@@ -255,10 +351,19 @@ impl Refused {
         match self {
             Refused::Busy => tr("VRChat is already starting.").into(),
             Refused::Wait(wait) => tr!("VRChat ended early a moment ago: it can be started again in {seconds} s.", seconds = wait.as_secs().max(1)),
-            Refused::Unknown => tr("VRChat's last start could not be checked yet. Try again in a moment.").into(),
+            Refused::Records(trouble) if trouble.unlistable => tr!("The folder of VRChat's start records cannot be read: {file}", file = trouble.file.display().to_string()),
+            Refused::Records(trouble) => match trouble.wait() {
+                Some(wait) => tr!("A record of an earlier VRChat start cannot be read ({file}): VRChat can be started in {seconds} s.", file = file_name(&trouble.file), seconds = wait.as_secs().max(1)),
+                None => tr!("A record of an earlier VRChat start cannot be read ({file}): set it aside in Home to play.", file = file_name(&trouble.file)),
+            },
             Refused::Failed(why) => why.clone(),
         }
     }
+}
+
+/// A file's own name, for the person.
+pub fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// How many launches' outcomes are kept.
@@ -266,6 +371,8 @@ const LAUNCHES_KEPT: usize = 8;
 /// How long the program's output may stay open after the program itself ended (a process it started holds it): then the
 /// start is over all the same.
 const OUTPUT_AFTER_EXIT: Duration = Duration::from_secs(3);
+/// How far ahead a kept deadline may be: one further is not a deadline any start wrote, and is taken as one just written.
+const KEPT_AHEAD: f64 = obelisk::AFTER_EARLY_END.as_secs_f64() + 1.0;
 
 /// Whether the process `pid` still runs (one that ended and was not yet waited for does not).
 fn alive(pid: u32) -> bool {
@@ -275,31 +382,173 @@ fn alive(pid: u32) -> bool {
     system.process(pid).is_some_and(|p| !matches!(p.status(), sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead))
 }
 
-/// The clock since this Mac booted, which goes on while it sleeps: (when it booted, Unix seconds; seconds since).
-fn boot_clock() -> Option<(u64, f64)> {
+/// Whether a process of the engine runs from `library` (its Wine, its servers, the game in it): any process whose
+/// program or arguments are under that folder.
+fn engine_runs(library: &Path) -> bool {
+    let text = library.to_string_lossy();
+    let mut system = sysinfo::System::new();
+    let kind = sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always).with_cmd(sysinfo::UpdateKind::Always);
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, kind);
+    system.processes().values().any(|p| p.exe().is_some_and(|e| e.starts_with(library)) || p.cmd().iter().any(|a| a.to_string_lossy().contains(&*text)))
+}
+
+/// The clock since this Mac booted, sleep included: this boot's session UUID and the seconds since it. Where the boot's
+/// UUID cannot be read, this process's own clock (kept for this run only: its deadline ends with the run).
+pub(crate) fn boot_clock() -> obelisk::BootInstant {
+    static PROCESS: std::sync::OnceLock<(String, std::time::Instant)> = std::sync::OnceLock::new();
     #[cfg(target_os = "macos")]
     {
         let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        // SAFETY: a plain query into a timespec of ours. CLOCK_MONOTONIC on macOS counts while asleep.
-        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
-            return None;
+        let mut uuid = [0u8; 64];
+        let mut len = uuid.len();
+        // SAFETY: plain queries into buffers of ours, their sizes passed. CLOCK_MONOTONIC on macOS counts while asleep.
+        let (clock, boot) = unsafe {
+            (
+                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time),
+                libc::sysctlbyname(c"kern.bootsessionuuid".as_ptr(), uuid.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0),
+            )
+        };
+        let boot = std::str::from_utf8(&uuid[..len.min(uuid.len())]).ok().map(|s| s.trim_end_matches('\0').to_ascii_uppercase()).filter(|_| boot == 0);
+        if let (0, Some(boot)) = (clock, boot.filter(|b| b.len() == 36)) {
+            return obelisk::BootInstant { boot, seconds: time.tv_sec as f64 + time.tv_nsec as f64 / 1e9 };
         }
-        Some((sysinfo::System::boot_time(), time.tv_sec as f64 + time.tv_nsec as f64 / 1e9))
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
+    let (boot, at) = PROCESS.get_or_init(|| (format!("process-{}-{}", std::process::id(), time::OffsetDateTime::now_utc().unix_timestamp_nanos()), std::time::Instant::now()));
+    obelisk::BootInstant { boot: boot.clone(), seconds: at.elapsed().as_secs_f64() + 1.0 }
+}
+
+/// The gate as kept on the boot clock: the deadline after the last early end this N4N0 saw, and when each record that
+/// could not be read was first seen as it is.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Kept {
+    boot: String,
+    until: Option<f64>,
+    /// A damaged record's key ([`damage_key`]) and when it was first seen so, on this boot.
+    seen: Vec<(String, f64)>,
+}
+
+impl Kept {
+    fn to_json(&self) -> String {
+        let seen: serde_json::Map<String, serde_json::Value> = self.seen.iter().map(|(k, at)| (k.clone(), serde_json::json!(at))).collect();
+        serde_json::json!({ "version": 2, "boot": self.boot, "until": self.until, "seen": seen }).to_string()
     }
 }
 
-/// The boot-relative deadline in `text` (`{"boot":<Unix s>,"until":<s since boot>}`): how long is left at `clock`. A
-/// deadline of another boot is over.
-fn gate_left(text: &str, clock: (u64, f64)) -> Option<Duration> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let boot = value.get("boot")?.as_u64()?;
-    let until = value.get("until")?.as_f64()?;
-    // A boot time read twice may differ by a second.
-    (boot.abs_diff(clock.0) <= 2 && until > clock.1).then(|| Duration::from_secs_f64((until - clock.1).min(obelisk::AFTER_EARLY_END.as_secs_f64())))
+/// Reads the kept gate at `clock`: a file of another boot holds nothing; a file that cannot be read or is not one is no
+/// proof of none, and holds starts for the wait after an early end from now, once (it is written again as it is now).
+/// The returned flag says the file must be written again.
+fn read_kept(text: Option<Result<String, ()>>, clock: &obelisk::BootInstant) -> (Kept, bool) {
+    let fresh = Kept { boot: clock.boot.clone(), ..Default::default() };
+    let uncertain = || (Kept { until: Some(clock.seconds + obelisk::AFTER_EARLY_END.as_secs_f64()), ..fresh.clone() }, true);
+    let text = match text {
+        None => return (fresh, false),
+        Some(Err(())) => return uncertain(),
+        Some(Ok(text)) => text,
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return uncertain() };
+    match value.get("boot") {
+        // Before 0.3.9-dev.24 the boot was told by its time (`{"boot":<Unix s>,"until":<s since boot>}`): kept while that
+        // same boot's deadline is still ahead, else nothing.
+        Some(serde_json::Value::Number(booted)) => {
+            let until = value.get("until").and_then(serde_json::Value::as_f64);
+            let same = booted.as_u64().is_some_and(|b| b.abs_diff(sysinfo::System::boot_time()) <= 2);
+            let until = until.filter(|u| same && *u > clock.seconds);
+            (Kept { until, ..fresh }, true)
+        }
+        Some(serde_json::Value::String(boot)) if value.get("version").and_then(serde_json::Value::as_u64) == Some(2) && (boot.len() == 36 || boot.starts_with("process-")) => {
+            let until = match value.get("until") {
+                Some(serde_json::Value::Null) | None => None,
+                Some(u) => match u.as_f64().filter(|u| u.is_finite()) {
+                    Some(u) => Some(u),
+                    None => return uncertain(),
+                },
+            };
+            let Some(seen) = value.get("seen").and_then(serde_json::Value::as_object) else { return uncertain() };
+            let seen: Option<Vec<(String, f64)>> = seen.iter().map(|(k, v)| Some((k.clone(), v.as_f64().filter(|v| v.is_finite())?))).collect();
+            let Some(seen) = seen else { return uncertain() };
+            if !boot.eq_ignore_ascii_case(&clock.boot) {
+                return (fresh, true);
+            }
+            (Kept { boot: clock.boot.clone(), until, seen }, false)
+        }
+        _ => uncertain(),
+    }
+}
+
+/// What tells one damaged record as it is now from itself after any change.
+fn damage_key(damaged: &obelisk::Damaged) -> String {
+    match damaged.identity {
+        Some((dev, ino, len, changed)) => format!("{}|{dev}|{ino}|{len}|{changed}", damaged.path.display()),
+        None => format!("{}|unreadable", damaged.path.display()),
+    }
+}
+
+/// The gate at `clock` (and the wall clock `wall`, for older records), from the records' `scan`, the kept gate (updated
+/// in place: the flag says to write it) and this run's own wait `memory`. `Ok(None)`: a start may be made now. Also the
+/// trouble to show in Home, if any, blocking or not.
+fn judge(scan: &Result<obelisk::RecordScan, obelisk::Unlistable>, kept: &mut Kept, clock: &obelisk::BootInstant, wall: std::time::SystemTime, memory: Option<Duration>) -> (Result<Option<Duration>, Refused>, Option<Trouble>, bool) {
+    let after = obelisk::AFTER_EARLY_END.as_secs_f64();
+    let mut write = false;
+    if kept.boot != clock.boot {
+        *kept = Kept { boot: clock.boot.clone(), ..Default::default() };
+        write = true;
+    }
+    // A deadline further ahead than any start writes one: as if written now, once.
+    if kept.until.is_some_and(|u| u - clock.seconds > KEPT_AHEAD) {
+        kept.until = Some(clock.seconds + after);
+        write = true;
+    }
+    let left = |until: f64| (until > clock.seconds).then(|| Duration::from_secs_f64((until - clock.seconds).min(after)));
+    let mut waits: Vec<Duration> = memory.into_iter().chain(kept.until.and_then(left)).collect();
+    let scan = match scan {
+        Ok(scan) => scan,
+        Err(obelisk::Unlistable(folder)) => {
+            let trouble = Trouble { file: folder.clone(), unlistable: true, current: false, blocks: true, settled_in: None };
+            return (Err(Refused::Records(trouble.clone())), Some(trouble), write);
+        }
+    };
+    for (written, ended) in &scan.early_ends {
+        match ended {
+            Some(ended) if ended.boot.eq_ignore_ascii_case(&clock.boot) => waits.extend(left(ended.seconds + after)),
+            // Ended on another boot: a reboot is past any wait.
+            Some(_) => {}
+            None => waits.extend(obelisk::start_wait(Some(*written), wall)),
+        }
+    }
+    // Each damaged record: first seen so now, or when the kept gate says; the ones no longer there are forgotten.
+    let keys: Vec<String> = scan.damaged.iter().map(damage_key).collect();
+    let before = kept.seen.len();
+    kept.seen.retain(|(k, _)| keys.contains(k));
+    write |= kept.seen.len() != before;
+    let mut trouble: Option<Trouble> = None;
+    let mut blocking: Option<Trouble> = None;
+    for (damaged, key) in scan.damaged.iter().zip(&keys) {
+        let first = match kept.seen.iter().find(|(k, _)| k == key) {
+            Some((_, first)) => (*first).min(clock.seconds),
+            None => {
+                kept.seen.push((key.clone(), clock.seconds));
+                write = true;
+                clock.seconds
+            }
+        };
+        let settled_in = left(first + after);
+        let blocks = damaged.current || settled_in.is_some();
+        let this = Trouble { file: damaged.path.clone(), unlistable: false, current: damaged.current, blocks, settled_in };
+        // The current session's first, then one that holds starts, then any.
+        let rank = |t: &Trouble| (t.current, t.blocks, t.settled_in);
+        if trouble.as_ref().is_none_or(|t| rank(&this) > rank(t)) {
+            trouble = Some(this.clone());
+        }
+        if blocks && blocking.as_ref().is_none_or(|t| rank(&this) > rank(t)) {
+            blocking = Some(this);
+        }
+    }
+    let wait = waits.into_iter().max().filter(|w| !w.is_zero());
+    let verdict = match blocking {
+        Some(t) if t.current || t.settled_in >= wait => Err(Refused::Records(t)),
+        _ => Ok(wait),
+    };
+    (verdict, trouble, write)
 }
 
 impl Now {
@@ -320,20 +569,98 @@ impl Play {
         self.start_at(program, library, args, std::time::SystemTime::now())
     }
 
-    /// How long a start must still wait (the longest of the three sources), or [`Refused::Unknown`].
-    fn wait(&self, now: &Now, library: &Path, now_is: std::time::SystemTime) -> Result<Option<Duration>, Refused> {
+    /// How long a start must still wait (the longest of the three sources), or why it cannot be made; and the trouble with
+    /// the records to show, blocking or not.
+    fn judged(&self, now: &mut Now, library: &Path, wall: std::time::SystemTime) -> (Result<Option<Duration>, Refused>, Option<Trouble>) {
+        self.reconcile(now, library);
+        let clock = boot_clock();
         let memory = now.cooldown.and_then(|until| until.checked_duration_since(std::time::Instant::now()));
-        let kept = self.gate_file.as_ref().and_then(|file| std::fs::read_to_string(file).ok()).zip(boot_clock()).and_then(|(text, clock)| gate_left(&text, clock));
-        let records = obelisk::start_wait(obelisk::early_end_in_records(library).map_err(|_| Refused::Unknown)?, now_is);
-        Ok([memory, kept, records].into_iter().flatten().max().filter(|wait| !wait.is_zero()))
+        let mut write = false;
+        if now.kept.is_none() {
+            let text = self.gate_file.as_ref().and_then(|file| match std::fs::read_to_string(file) {
+                Ok(text) => Some(Ok(text)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => Some(Err(())),
+            });
+            let (kept, rewrite) = read_kept(text, &clock);
+            now.kept = Some(kept);
+            write = rewrite;
+        }
+        let kept = now.kept.as_mut().expect("read above");
+        let (verdict, trouble, changed) = judge(&obelisk::scan_records(library), kept, &clock, wall, memory);
+        if write || changed {
+            self.write_kept(kept);
+        }
+        (verdict, trouble)
+    }
+
+    /// Writes the kept gate whole (a part, then renamed over); a failure keeps it in this run's memory all the same.
+    fn write_kept(&self, kept: &Kept) {
+        let Some(file) = &self.gate_file else { return };
+        if let Some(folder) = file.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        let part = file.with_extension("part");
+        if std::fs::write(&part, kept.to_json()).is_ok() && std::fs::rename(&part, file).is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+    }
+
+    fn wait(&self, now: &mut Now, library: &Path, wall: std::time::SystemTime) -> Result<Option<Duration>, Refused> {
+        self.judged(now, library, wall).0
+    }
+
+    /// Reserves the next start for whoever holds the token returned (the bridge, before it creates an instance for it):
+    /// refused like a start would be now, except for a game of the reserver's own still attached when `own_attached` is
+    /// that launch (it is to be closed first, its end and any wait after it are waited for).
+    pub fn reserve(&self, library: &Path, own_attached: Option<u64>) -> Result<u64, Refused> {
+        let mut now = self.now.lock().unwrap();
+        if now.reserved.is_some_and(|(_, until)| until > std::time::Instant::now()) {
+            return Err(Refused::Busy);
+        }
+        let attached = now.attached.then(|| now.launches.last().map(|l| l.id)).flatten();
+        if now.attached && (own_attached.is_none() || attached != own_attached) {
+            return Err(Refused::Busy);
+        }
+        if own_attached.is_none() {
+            if let Some(wait) = self.wait(&mut now, library, std::time::SystemTime::now())? {
+                return Err(Refused::Wait(wait));
+            }
+        }
+        now.made += 1;
+        let token = now.made;
+        now.reserved = Some((token, std::time::Instant::now() + RESERVED_FOR));
+        Ok(token)
+    }
+
+    /// Gives a reservation back unused.
+    pub fn unreserve(&self, token: u64) {
+        let mut now = self.now.lock().unwrap();
+        if now.reserved.is_some_and(|(t, _)| t == token) {
+            now.reserved = None;
+        }
+    }
+
+    /// Starts as [`Play::start`] does, with the reservation `token` (used up by it); without one, a start reserved by
+    /// someone else is refused.
+    pub fn start_reserved(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], token: Option<u64>) -> Result<u64, Refused> {
+        self.start_with(program, library, args, std::time::SystemTime::now(), token)
     }
 
     pub(crate) fn start_at(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime) -> Result<u64, Refused> {
+        self.start_with(program, library, args, now_is, None)
+    }
+
+    fn start_with(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>) -> Result<u64, Refused> {
         let mut now = self.now.lock().unwrap();
         if now.attached {
             return Err(Refused::Busy);
         }
-        if let Some(wait) = self.wait(&now, library, now_is)? {
+        match now.reserved {
+            Some((held, until)) if until > std::time::Instant::now() && Some(held) != token => return Err(Refused::Busy),
+            _ => now.reserved = None,
+        }
+        if let Some(wait) = self.wait(&mut now, library, now_is)? {
             return Err(Refused::Wait(wait));
         }
         let mut command: Vec<&str> = vec!["steam", "play", obelisk::STEAM_APP];
@@ -356,48 +683,127 @@ impl Play {
         let drop_old = now.launches.len().saturating_sub(LAUNCHES_KEPT);
         now.launches.drain(..drop_old);
         drop(now);
-        // The program's output, followed on a thread; the program's own end, waited for on another: a process the program
-        // started may hold its output open long after it is gone.
+        // One owner for the whole of this launch: it reads the program's output through a reader it can end, waits for the
+        // program itself, and ends the launch once the program is gone (its output given a moment for its last lines),
+        // whoever else still holds that output open (the game's supervisor inherits it).
         let play = self.clone();
         let library_for = library.to_path_buf();
-        let followed = std::thread::Builder::new().name("obelisk-play".into()).spawn(move || {
-            play.follow(id, &library_for, BufReader::new(out).lines().map_while(Result::ok));
-            play.finish(id, &library_for);
-        });
-        if followed.is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            self.abandon(id);
-            return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
-        }
-        let child = Arc::new(Mutex::new(Some(child)));
-        let waited = child.clone();
-        let play = self.clone();
-        let library_for = library.to_path_buf();
-        let reaped = std::thread::Builder::new().name("obelisk-play-exit".into()).spawn(move || {
-            if let Some(mut child) = waited.lock().unwrap().take() {
-                let _ = child.wait();
-            }
-            // The output gets a moment to tell its last lines, then the start is over whoever holds it.
-            std::thread::sleep(OUTPUT_AFTER_EXIT);
-            play.finish(id, &library_for);
-        });
-        if reaped.is_err() {
-            // Nothing would wait for the program: it is ended now, and the start was not made.
-            if let Some(mut child) = child.lock().unwrap().take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        let owner = std::thread::Builder::new().name("obelisk-play".into()).spawn(move || play.own(id, &library_for, child, out));
+        if owner.is_err() {
+            // The child moved into the closure that could not run: it is dropped with it (its pipe closed); the start is
+            // as never made, and the program, without a reader, is ended by the next look of the engine's records.
             self.abandon(id);
             return Err(Refused::Failed(tr("VRChat could not be followed.").into()));
         }
         Ok(id)
     }
 
-    /// How long a start must still wait now, `Err(Refused::Unknown)` when it cannot be told.
+    /// The owner of launch `id`: its program `child` and its output `out`, to the end.
+    fn own(&self, id: u64, library: &Path, mut child: Child, out: std::process::ChildStdout) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (send, lines) = std::sync::mpsc::channel::<String>();
+        let reading = stop.clone();
+        let reader = std::thread::Builder::new().name("obelisk-play-out".into()).spawn(move || read_lines_until(out, &reading, |line| send.send(line).is_ok()));
+        if reader.is_err() {
+            let _ = child.kill();
+        }
+        let mut status = None;
+        let mut exited_at: Option<std::time::Instant> = None;
+        loop {
+            match lines.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => self.follow_line(id, library, &line),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) if exited_at.is_some() => break,
+                Err(_) => {}
+            }
+            if exited_at.is_none() {
+                match child.try_wait() {
+                    Ok(Some(s)) => {
+                        status = Some(s);
+                        exited_at = Some(std::time::Instant::now());
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // It cannot be waited for: ended, and reaped.
+                        let _ = child.kill();
+                        status = child.wait().ok();
+                        exited_at = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            // The program is gone: its last lines a moment, then the launch is over, whoever holds its output.
+            if exited_at.is_some_and(|at| at.elapsed() >= OUTPUT_AFTER_EXIT) {
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        while let Ok(line) = lines.try_recv() {
+            self.follow_line(id, library, &line);
+        }
+        self.finish(id, library, status);
+    }
+
+    /// How long a start must still wait now, or why none can be made.
     pub fn gate(&self, library: &Path) -> Result<Option<Duration>, Refused> {
-        let now = self.now.lock().unwrap();
-        self.wait(&now, library, std::time::SystemTime::now())
+        let mut now = self.now.lock().unwrap();
+        self.wait(&mut now, library, std::time::SystemTime::now())
+    }
+
+    /// A record of the engine's that cannot be read, for Home to show (whether or not it holds starts now).
+    pub fn trouble(&self, library: &Path) -> Option<Trouble> {
+        let mut now = self.now.lock().unwrap();
+        self.judged(&mut now, library, std::time::SystemTime::now()).1
+    }
+
+    /// Sets the damaged record `file` aside, out of the engine's records (into `Set aside` in the library, never deleted):
+    /// only one listed as damaged now, unchanged since it was first seen so for the whole wait after an early end, with no
+    /// game of this N4N0 attached, no supervisor of the engine holding its records (its lock is held for the move) and no
+    /// process of the engine running. Where it went, or why it was left.
+    pub fn set_aside(&self, library: &Path, file: &Path) -> Result<PathBuf, String> {
+        let mut now = self.now.lock().unwrap();
+        if now.attached {
+            return Err(tr("VRChat is starting or running: set the record aside once it has closed.").into());
+        }
+        let trouble = self.judged(&mut now, library, std::time::SystemTime::now()).1;
+        let scan = obelisk::scan_records(library).map_err(|obelisk::Unlistable(folder)| tr!("The folder of VRChat's start records cannot be read: {file}", file = folder.display().to_string()))?;
+        let Some(damaged) = scan.damaged.iter().find(|d| d.path == file) else {
+            return Err(tr("That record can be read now, or is gone: nothing was set aside.").into());
+        };
+        let _ = trouble;
+        let key = damage_key(damaged);
+        let clock = boot_clock();
+        let first = now.kept.as_ref().and_then(|k| k.seen.iter().find(|(k, _)| *k == key).map(|(_, at)| *at)).unwrap_or(clock.seconds);
+        let settled = clock.seconds - first >= obelisk::AFTER_EARLY_END.as_secs_f64();
+        if !settled {
+            let wait = (obelisk::AFTER_EARLY_END.as_secs_f64() - (clock.seconds - first)).max(1.0).ceil() as u64;
+            return Err(tr!("The record was seen damaged only a moment ago: it can be set aside in {seconds} s.", seconds = wait));
+        }
+        let sessions = obelisk::sessions_dir(library);
+        // The engine's own lock on its records: held for the move, so that no supervisor starts meanwhile.
+        let lock = match std::fs::File::open(sessions.join("owner.lock")) {
+            Ok(lock) => Some(lock),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(tr("VRChat's engine could not be checked: nothing was set aside.").into()),
+        };
+        if lock.as_ref().is_some_and(|l| l.try_lock().is_err()) {
+            return Err(tr("VRChat's engine is running: set the record aside once it has closed.").into());
+        }
+        if engine_runs(library) {
+            return Err(tr("VRChat's engine is running: set the record aside once it has closed.").into());
+        }
+        if obelisk::file_identity(file) != damaged.identity {
+            return Err(tr("The record changed meanwhile: nothing was set aside. Look again in a moment.").into());
+        }
+        let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
+        let aside = library.join("Set aside").join(format!("{}.{stamp}.set-aside", file_name(file)));
+        std::fs::create_dir_all(aside.parent().expect("a folder")).and_then(|()| std::fs::rename(file, &aside)).map_err(|e| tr!("The record could not be moved: {reason}", reason = e.to_string()))?;
+        drop(lock);
+        // It is gone from the records: forgotten by the gate.
+        if let Some(kept) = now.kept.as_mut() {
+            kept.seen.retain(|(k, _)| *k != key);
+            let kept = kept.clone();
+            self.write_kept(&kept);
+        }
+        Ok(aside)
     }
 
     /// The launch the program is attached to now, if one is (a start under way, a game running, or its end finalizing).
@@ -418,104 +824,121 @@ impl Play {
     /// Notes that a start ended early: no start for [`obelisk::AFTER_EARLY_END`], at once and across a restart.
     fn cool_down(&self, now: &mut Now) {
         now.cooldown = Some(std::time::Instant::now() + obelisk::AFTER_EARLY_END);
-        if let (Some(file), Some((boot, since))) = (&self.gate_file, boot_clock()) {
-            let text = serde_json::json!({ "boot": boot, "until": since + obelisk::AFTER_EARLY_END.as_secs_f64() }).to_string();
-            if let Some(folder) = file.parent() {
-                let _ = std::fs::create_dir_all(folder);
-            }
-            let part = file.with_extension("part");
-            if std::fs::write(&part, text).is_ok() {
-                let _ = std::fs::rename(&part, file);
-            }
-        }
+        let clock = boot_clock();
+        let mut kept = match now.kept.take() {
+            Some(kept) if kept.boot == clock.boot => kept,
+            _ => Kept { boot: clock.boot.clone(), ..Default::default() },
+        };
+        kept.until = Some(clock.seconds + obelisk::AFTER_EARLY_END.as_secs_f64());
+        self.write_kept(&kept);
+        now.kept = Some(kept);
     }
 
-    /// What the program says of launch `id`, line by line.
-    fn follow(&self, id: u64, library: &Path, lines: impl Iterator<Item = String>) {
-        for line in lines {
-            let Some(event) = obelisk::event(&line) else { continue };
-            let mut now = self.now.lock().unwrap();
-            match event {
-                Event::Running { pid, session } => {
+    /// One line the program said of launch `id`. Only a launch still followed changes anything, and only the current one
+    /// what runs now.
+    fn follow_line(&self, id: u64, library: &Path, line: &str) {
+        let Some(event) = obelisk::event(line) else { return };
+        let mut now = self.now.lock().unwrap();
+        if now.launch(id).is_none_or(|l| l.over) {
+            return;
+        }
+        let current = now.launches.last().is_some_and(|l| l.id == id);
+        match event {
+            Event::Running { pid, session } => {
+                if current {
                     now.running = Some(pid);
-                    // Before 0.1.3 the program does not name the session: the engine's record of the game does.
-                    let session = session.or_else(|| {
-                        pid.and_then(|pid| obelisk::session_records(library).into_iter().find(|(r, _)| r.game == Some(pid) && !r.over()).map(|(r, _)| r.id))
-                    });
-                    if let Some(launch) = now.launch(id) {
-                        launch.launcher = pid;
-                        launch.session = session;
-                        launch.running = true;
-                    }
                 }
-                Event::Exited { code, seconds, frames, session } => {
-                    // Another session's end is not this launch's.
-                    let ours = now.launch(id).is_some_and(|l| l.session.is_none() || session.is_none() || l.session == session);
-                    if !ours {
-                        continue;
-                    }
-                    now.running = None;
-                    if !cfg!(test) {
-                        note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s, {frames:?} frames shown")); // i18n: not shown (for the log)
-                    }
-                    self.ended(&mut now, id, seconds, frames);
+                // Before 0.1.3 the program does not name the session: the engine's record of the game does.
+                let session = session.or_else(|| {
+                    pid.and_then(|pid| obelisk::session_records(library).into_iter().find(|(r, _)| r.game == Some(pid) && !r.over()).map(|(r, _)| r.id))
+                });
+                if let Some(launch) = now.launch(id) {
+                    launch.launcher = pid;
+                    launch.session = session;
+                    launch.running = true;
                 }
-                // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
-                Event::Error { code, message } => {
-                    if !cfg!(test) {
-                        note(&["steam", "play"], &code, &message);
-                    }
-                    let ran = now.launch(id).is_some_and(|l| l.running || l.ended.is_some());
-                    if !ran {
-                        if let Some(launch) = now.launch(id) {
-                            launch.failure = Some(Failure::new(&code, words(&code, &message)));
-                        }
-                    }
-                }
-                _ => {}
             }
+            Event::Exited { code, seconds, frames, session } => {
+                // Another session's end is not this launch's.
+                let ours = now.launch(id).is_some_and(|l| l.session.is_none() || session.is_none() || l.session == session);
+                if !ours {
+                    return;
+                }
+                if current {
+                    now.running = None;
+                }
+                if !cfg!(test) {
+                    note(&["steam", "play"], "exited", &format!("exit code {code:?} after {seconds:?} s, {frames:?} frames shown")); // i18n: not shown (for the log)
+                }
+                self.ended(&mut now, id, seconds, frames);
+            }
+            // A failure after the game ran (its session, its Cloud saves) is not a start that failed.
+            Event::Error { code, message } => {
+                if !cfg!(test) {
+                    note(&["steam", "play"], &code, &message);
+                }
+                let ran = now.launch(id).is_some_and(|l| l.running || l.ended.is_some());
+                if !ran {
+                    let failure = Failure::new(&code, words(&code, &message));
+                    if let Some(launch) = now.launch(id) {
+                        launch.failure = Some(failure);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
     /// Launch `id`'s game ended after `seconds` with `frames` shown (each `None` when not known).
     fn ended(&self, now: &mut Now, id: u64, seconds: Option<u64>, frames: Option<u64>) {
-        let early = seconds.is_some_and(|s| s < TOO_SHORT) || frames == Some(0);
-        if early {
+        let early = obelisk::early(seconds, frames);
+        // An early end is a wait for every start after it, unless another start was made since (it is moot then).
+        if early && now.launches.last().is_some_and(|l| l.id == id) {
             self.cool_down(now);
         }
         let failure = early.then(|| Failure::new("ended_at_once", tr("VRChat closed shortly after it started. If it crashed, press Play again.")));
         if let Some(launch) = now.launch(id) {
             launch.running = false;
             launch.ended = Some((seconds, frames));
+            launch.unreconciled = false;
             if launch.failure.is_none() {
                 launch.failure = failure;
             }
         }
     }
 
-    /// The program is gone (or its output ended): the start is over. A program that ended without saying how the game
-    /// did is asked of the engine's record of its session; without one, the start failed.
-    fn finish(&self, id: u64, library: &Path) {
+    /// The program is gone: the launch is over. One that ended without saying how the game did is asked of the engine's
+    /// record of its session: a record still running is looked at again later ([`Play::reconcile`]); without one, the
+    /// start failed (with the program's exit status).
+    fn finish(&self, id: u64, library: &Path, status: Option<std::process::ExitStatus>) {
         let mut now = self.now.lock().unwrap();
         let Some(launch) = now.launch(id).cloned() else { return };
         if launch.over {
             return;
         }
         if launch.ended.is_none() {
-            let record = launch.session.as_deref().and_then(|s| obelisk::session_record_of(library, s).ok().flatten());
+            let record = launch.session.as_deref().map(|s| obelisk::session_record_of(library, s));
             match record {
-                Some(record) if record.over() => self.ended(&mut now, id, record.seconds, record.frames),
-                // Still running by the engine's word (`MacMachine::running` reads the records): only this N4N0 lost it.
-                Some(_) => {}
-                None if launch.failure.is_none() => {
+                Some(Ok(Some(record))) if record.over() => self.ended(&mut now, id, record.seconds, record.frames),
+                // Still running by the engine's word (or not readable now): only this N4N0 lost the program; the record is
+                // read again until it says how the game ended.
+                Some(Ok(Some(_))) | Some(Err(_)) => {
+                    if let Some(launch) = now.launch(id) {
+                        launch.unreconciled = true;
+                    }
+                }
+                _ if launch.failure.is_none() => {
+                    let said = status.map(|s| s.to_string()).unwrap_or_else(|| "?".into());
                     if let Some(launch) = now.launch(id) {
                         launch.running = false;
-                        launch.failure = Some(Failure::new("internal", tr("What runs VRChat on this Mac stopped without saying why.")));
+                        launch.failure = Some(Failure::new("internal", tr!("What runs VRChat on this Mac stopped without saying why ({status}).", status = said)));
                     }
                     // Not known to have ended late: as a start that ended early.
-                    self.cool_down(&mut now);
+                    if now.launches.last().is_some_and(|l| l.id == id) {
+                        self.cool_down(&mut now);
+                    }
                 }
-                None => {}
+                _ => {}
             }
         }
         if now.launches.last().is_some_and(|l| l.id == id) {
@@ -526,6 +949,28 @@ impl Play {
         if let Some(launch) = now.launch(id) {
             launch.over = true;
             launch.running = false;
+        }
+        // An outcome nobody read yet is kept apart, whatever later launches push out of the list.
+        if let Some(failure) = now.launch(id).filter(|l| !l.told).and_then(|l| l.failure.clone()) {
+            now.unread.retain(|(i, _)| *i != id);
+            now.unread.push((id, failure));
+            let drop_old = now.unread.len().saturating_sub(UNREAD_KEPT);
+            now.unread.drain(..drop_old);
+        }
+    }
+
+    /// Reads again the records of launches whose program was lost while their game ran: how each ended, once it did.
+    fn reconcile(&self, now: &mut Now, library: &Path) {
+        let pending: Vec<(u64, String)> = now.launches.iter().filter(|l| l.unreconciled).filter_map(|l| Some((l.id, l.session.clone()?))).collect();
+        for (id, session) in pending {
+            if let Ok(Some(record)) = obelisk::session_record_of(library, &session) {
+                if record.over() {
+                    self.ended(now, id, record.seconds, record.frames);
+                    if let Some(failure) = now.launch(id).filter(|l| !l.told).and_then(|l| l.failure.clone()) {
+                        now.unread.push((id, failure));
+                    }
+                }
+            }
         }
     }
 
@@ -551,12 +996,15 @@ impl Play {
     /// Why launch `id` failed, told once to whoever started it (Home's toast); `None` before it failed or once told.
     pub fn take_failure(&self, id: u64) -> Option<Failure> {
         let mut now = self.now.lock().unwrap();
-        let launch = now.launch(id)?;
-        if launch.told {
+        let kept = now.unread.iter().position(|(i, _)| *i == id).map(|at| now.unread.remove(at).1);
+        let launch = now.launch(id);
+        if launch.as_ref().is_some_and(|l| l.told) {
             return None;
         }
-        let failure = launch.failure.clone()?;
-        launch.told = true;
+        let failure = kept.or_else(|| launch.as_ref().and_then(|l| l.failure.clone()))?;
+        if let Some(launch) = now.launch(id) {
+            launch.told = true;
+        }
         Some(failure)
     }
 
@@ -639,6 +1087,131 @@ fn genuine(folder: &Path) -> bool {
     })
 }
 
+/// The gate's rules on a clock of the test's (every computer).
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use obelisk::{BootInstant, Damaged, RecordScan, Unlistable};
+    use std::time::SystemTime;
+
+    const BOOT: &str = "11466E1D-BF8E-4060-A996-1C47BE650634";
+    fn at(seconds: f64) -> BootInstant {
+        BootInstant { boot: BOOT.into(), seconds }
+    }
+    fn damaged(name: &str, current: bool, len: u64) -> Damaged {
+        Damaged { path: PathBuf::from(format!("/L/SteamSessions/{name}")), identity: Some((1, 2, len, 3)), current }
+    }
+    fn scan(damaged: Vec<Damaged>) -> Result<RecordScan, Unlistable> {
+        Ok(RecordScan { early_ends: Vec::new(), damaged })
+    }
+    fn kept() -> Kept {
+        Kept { boot: BOOT.into(), ..Default::default() }
+    }
+    const WALL: SystemTime = SystemTime::UNIX_EPOCH;
+
+    /// B3: one old damaged record (another session's) holds starts only while it may still be a start that just ended;
+    /// unchanged for the whole wait it is history, shown but holding nothing. A change to it is a new file, seen anew.
+    #[test]
+    fn a_damaged_old_record_holds_starts_for_the_wait_once_then_is_history() {
+        let mut k = kept();
+        let records = scan(vec![damaged("a.v2.json", false, 10)]);
+        let (verdict, trouble, write) = judge(&records, &mut k, &at(1000.0), WALL, None);
+        assert!(matches!(&verdict, Err(Refused::Records(t)) if t.wait() == Some(Duration::from_secs(80))), "{verdict:?}");
+        assert!(write, "first seen: kept");
+        assert!(trouble.unwrap().blocks);
+        // Retried again and again: the wait counts down, never starts again.
+        let (verdict, _, _) = judge(&records, &mut k, &at(1030.0), WALL, None);
+        assert!(matches!(&verdict, Err(Refused::Records(t)) if t.wait() == Some(Duration::from_secs(50))), "{verdict:?}");
+        let (verdict, trouble, _) = judge(&records, &mut k, &at(1081.0), WALL, None);
+        assert_eq!(verdict, Ok(None), "history now: Play plays");
+        let trouble = trouble.expect("still shown, to be set aside");
+        assert!(!trouble.blocks && trouble.settled_in.is_none() && !trouble.current);
+        // The same file written again: another content, seen anew.
+        let changed = scan(vec![damaged("a.v2.json", false, 11)]);
+        assert!(judge(&changed, &mut k, &at(1100.0), WALL, None).0.is_err());
+        // Gone (set aside, or mended): forgotten.
+        let (verdict, trouble, write) = judge(&scan(Vec::new()), &mut k, &at(1101.0), WALL, None);
+        assert_eq!((verdict, trouble, write), (Ok(None), None, true));
+        assert!(k.seen.is_empty());
+    }
+
+    /// The pointer to the current session, or the record it names, damaged: the engine stops there itself, so Home holds
+    /// Play until the person sets it aside; it may be set aside once it was seen unchanged for the wait.
+    #[test]
+    fn a_damaged_current_record_holds_starts_until_it_is_set_aside() {
+        let mut k = kept();
+        let records = scan(vec![damaged("old.v2.json", false, 4), damaged("session.v2.json", true, 9)]);
+        let (verdict, trouble, _) = judge(&records, &mut k, &at(50.0), WALL, None);
+        let Err(Refused::Records(t)) = verdict else { panic!("{verdict:?}") };
+        assert!(t.current && t.file.ends_with("session.v2.json") && t.wait().is_none(), "{t:?}");
+        assert_eq!(trouble.unwrap().settled_in, Some(Duration::from_secs(80)));
+        let (verdict, trouble, _) = judge(&records, &mut k, &at(500.0), WALL, None);
+        assert!(matches!(verdict, Err(Refused::Records(t)) if t.current), "still held: only setting it aside ends it");
+        assert_eq!(trouble.unwrap().settled_in, None, "now it may be set aside");
+        assert!(Refused::Records(t).words().contains("session.v2.json"), "Home names the file");
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_listed_holds_starts_and_says_which() {
+        let mut k = kept();
+        let (verdict, trouble, _) = judge(&Err(Unlistable(PathBuf::from("/L/SteamSessions"))), &mut k, &at(5.0), WALL, None);
+        assert!(matches!(&verdict, Err(Refused::Records(t)) if t.unlistable && t.wait().is_none()));
+        assert!(trouble.unwrap().unlistable);
+        assert!(verdict.unwrap_err().words().contains("/L/SteamSessions"));
+    }
+
+    /// The kept gate: on this boot's UUID, so a wall clock set forward with a restart of N4N0 does not end it; another
+    /// boot's is over; a deadline too far ahead counts down from now, not anew at each try; a file that is not one holds
+    /// starts for the wait once, then is written again as it is.
+    #[test]
+    fn the_kept_deadline_is_bounded_and_survives_a_wall_clock_change() {
+        let file = |text: &str| Some(Ok(text.to_string()));
+        let (mut k, write) = read_kept(file(&format!(r#"{{"version":2,"boot":"{BOOT}","until":1080.0,"seen":{{}}}}"#)), &at(1030.0));
+        assert!(!write);
+        // The wall clock moved a day ahead: nothing of it is read.
+        let tomorrow = WALL + Duration::from_secs(86_400);
+        assert_eq!(judge(&scan(Vec::new()), &mut k, &at(1030.0), tomorrow, None).0, Ok(Some(Duration::from_secs(50))));
+        let (mut other, write) = read_kept(file(&format!(r#"{{"version":2,"boot":"{BOOT}","until":1080.0,"seen":{{}}}}"#)), &BootInstant { boot: "AAAAAAAA-BF8E-4060-A996-1C47BE650634".into(), seconds: 20.0 });
+        assert!(write && other.until.is_none(), "another boot: over");
+        assert_eq!(judge(&scan(Vec::new()), &mut other, &BootInstant { boot: "AAAAAAAA-BF8E-4060-A996-1C47BE650634".into(), seconds: 20.0 }, WALL, None).0, Ok(None));
+        // Far ahead: as if written now, then counted down.
+        let (mut far, _) = read_kept(file(&format!(r#"{{"version":2,"boot":"{BOOT}","until":99999999.0,"seen":{{}}}}"#)), &at(100.0));
+        let (verdict, _, write) = judge(&scan(Vec::new()), &mut far, &at(100.0), WALL, None);
+        assert_eq!((verdict, write), (Ok(Some(Duration::from_secs(80))), true));
+        assert_eq!(judge(&scan(Vec::new()), &mut far, &at(130.0), WALL, None).0, Ok(Some(Duration::from_secs(50))), "not 80 s again");
+        assert_eq!(judge(&scan(Vec::new()), &mut far, &at(181.0), WALL, None).0, Ok(None));
+        // Not a gate file: no proof of none, held for the wait once, from now.
+        for broken in ["not json", "{}", r#"{"version":2,"boot":"x"}"#, r#"{"version":2,"boot":"11466E1D-BF8E-4060-A996-1C47BE650634","until":"soon","seen":{}}"#] {
+            let (mut k, write) = read_kept(file(broken), &at(10.0));
+            assert!(write, "{broken}: written again");
+            assert_eq!(judge(&scan(Vec::new()), &mut k, &at(10.0), WALL, None).0, Ok(Some(Duration::from_secs(80))), "{broken}");
+            assert_eq!(judge(&scan(Vec::new()), &mut k, &at(91.0), WALL, None).0, Ok(None), "{broken}: bounded");
+        }
+        let (mut k, write) = read_kept(Some(Err(())), &at(10.0));
+        assert!(write && judge(&scan(Vec::new()), &mut k, &at(10.0), WALL, None).0.is_ok_and(|w| w.is_some()), "unreadable: the same");
+        let (k, write) = read_kept(None, &at(10.0));
+        assert!(!write && k.until.is_none(), "no file: nothing ever ended early here");
+        // Its own text reads back the same.
+        let kept = Kept { boot: BOOT.into(), until: Some(12.5), seen: vec![("/L/a|1|2|3|4".into(), 3.0)] };
+        assert_eq!(read_kept(file(&kept.to_json()), &at(5.0)), (kept, false));
+    }
+
+    /// Records that say when they ended on the boot clock (obelisk-cli 0.1.6) are read on it; older ones by when they were
+    /// written; a record of another boot is over.
+    #[test]
+    fn an_early_end_is_read_on_the_boot_clock_when_its_record_says_it() {
+        let mut k = kept();
+        let wall = SystemTime::now();
+        let ends = |ended: Option<BootInstant>, written: SystemTime| Ok(RecordScan { early_ends: vec![(written, ended)], damaged: Vec::new() });
+        let long_ago = wall - Duration::from_secs(86_400);
+        assert_eq!(judge(&ends(Some(at(990.0)), long_ago), &mut k, &at(1000.0), wall, None).0, Ok(Some(Duration::from_secs(70))), "a wall clock set forward does not end it");
+        assert_eq!(judge(&ends(Some(BootInstant { boot: "AAAAAAAA-BF8E-4060-A996-1C47BE650634".into(), seconds: 990.0 }), wall), &mut k, &at(1000.0), wall, None).0, Ok(None), "another boot");
+        assert!(judge(&ends(None, wall - Duration::from_secs(10)), &mut k, &at(1000.0), wall, None).0.unwrap().is_some_and(|w| w > Duration::from_secs(60)), "an older record: by when it was written");
+        // This run's own wait wins when longer.
+        assert_eq!(judge(&scan(Vec::new()), &mut k, &at(1000.0), wall, Some(Duration::from_secs(33))).0, Ok(Some(Duration::from_secs(33))));
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -716,7 +1289,7 @@ mod tests {
         // Seen ending early by this run: no start for 80 s at once, before any record says so.
         let launch = wait_for(&play, id, |l| l.over);
         assert!(matches!(play.start(&program, &library, &[]), Err(Refused::Wait(_))), "the exit just seen holds the next start");
-        play.now.lock().unwrap().cooldown = None;
+        clear(&play);
         assert_eq!((launch.launcher, launch.session.as_deref()), (Some(83030), Some("6da7c40d-9fd2-4f3b-8770-aadffa2d0088")));
         assert_eq!(launch.ended, Some((Some(100), Some(0))));
         assert_eq!(launch.failure.as_ref().map(|f| f.code.as_str()), Some("ended_at_once"), "no frame shown: a start that did not work");
@@ -733,11 +1306,16 @@ mod tests {
         // It ended without a word of the game: a failed start, and the same wait as after an early end.
         assert_eq!(gone.failure.map(|f| f.code), Some("internal".into()));
         assert!(matches!(play.start(&program, &library, &[]), Err(Refused::Wait(_))));
-        play.now.lock().unwrap().cooldown = None;
+        clear(&play);
 
         // An early end in the engine's records holds every start for 80 s, from the records (a restart of N4N0 keeps it).
         std::fs::create_dir_all(library.join("SteamSessions")).unwrap();
-        std::fs::write(library.join("SteamSessions").join("a.v2.json"), r#"{"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}}}"#).unwrap();
+        let record = library.join("SteamSessions").join("6da7c40d-9fd2-4f3b-8770-aadffa2d0088.v2.json");
+        std::fs::write(&record, r#"{"id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","store":{"app_id":438100},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}}}"#).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let refused = play.start(&program, &library, &[]).unwrap_err();
         assert!(matches!(refused, Refused::Wait(wait) if wait > Duration::from_secs(70)), "{refused:?}");
         assert!(refused.words().contains("s."));
@@ -769,25 +1347,186 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Forgets this run's own wait (memory and kept), as a later run of N4N0 without a gate file would.
+    fn clear(play: &Play) {
+        let mut now = play.now.lock().unwrap();
+        now.cooldown = None;
+        now.kept = None;
+    }
+
     #[test]
-    fn the_wait_kept_on_the_boot_clock_outlives_a_restart_and_a_wall_clock_set_forward() {
-        let kept = r#"{"boot":1795380000,"until":5080.0}"#;
-        // 30 s after the early end, the same boot: 50 s left, whatever the wall clock says.
-        assert_eq!(gate_left(kept, (1795380000, 5030.0)), Some(Duration::from_secs(50)));
-        assert_eq!(gate_left(kept, (1795380001, 5030.0)), Some(Duration::from_secs(50)), "a boot time read a second apart");
-        assert_eq!(gate_left(kept, (1795380000, 5081.0)), None, "over");
-        assert_eq!(gate_left(kept, (1795390000, 20.0)), None, "another boot: long over");
-        assert_eq!(gate_left("not json", (1795380000, 5030.0)), None);
-        // And the file a start that ended early writes is read back by the next run.
+    fn the_wait_kept_on_the_boot_clock_is_read_back_by_the_next_run() {
         let file = std::env::temp_dir().join(format!("orbiters-gate-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let play = Play::new(file.clone());
         play.cool_down(&mut play.now.lock().unwrap());
         let next_run = Play::new(file.clone());
         let library = std::env::temp_dir().join(format!("orbiters-gate-library-{}", std::process::id()));
-        #[cfg(target_os = "macos")]
         assert!(matches!(next_run.gate(&library), Ok(Some(wait)) if wait > Duration::from_secs(70)), "{:?}", next_run.gate(&library));
+        assert!(std::fs::read_to_string(&file).unwrap().contains(&boot_clock().boot), "kept on this boot's own UUID");
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// B3's recovery in Home: a damaged current record holds Play and is named; it is set aside only once it is history,
+    /// never while the engine holds its records, never once it changed; set aside, Play plays, and the file is kept.
+    #[test]
+    fn a_damaged_record_is_set_aside_only_once_it_is_history_and_then_play_plays() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-set-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let sessions = obelisk::sessions_dir(&library);
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let write = |name: &str, text: &str| {
+            let path = sessions.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            path
+        };
+        let id = "c29c0b3a-9cd4-4ca7-aeeb-e69195577759";
+        write(obelisk::POINTER, &format!(r#"{{"version":2,"id":"{id}"}}"#));
+        let record = write(&format!("{id}.v2.json"), r#"{"version":2,"id":"c29c"#);
+        let play = Arc::new(Play::new(dir.join("gate.json")));
+        let program = fake_program(&dir.join("bin"), &[], 0);
+        let refused = play.start(&program, &library, &[]).unwrap_err();
+        assert!(matches!(&refused, Refused::Records(t) if t.current && t.file == record), "{refused:?}");
+        assert!(refused.words().contains(&format!("{id}.v2.json")), "the file is named: {}", refused.words());
+        // Just seen: it may still be a start that just ended.
+        assert!(play.set_aside(&library, &record).unwrap_err().contains(" s."));
+        assert!(play.trouble(&library).unwrap().settled_in.is_some());
+        // Seen unchanged for the whole wait (the kept first sight moved back, as 81 s on).
+        let age = |play: &Play| {
+            let mut now = play.now.lock().unwrap();
+            for (_, first) in &mut now.kept.as_mut().unwrap().seen {
+                *first -= 81.0;
+            }
+        };
+        age(&play);
+        assert_eq!(play.trouble(&library).unwrap().settled_in, None);
+        // The engine's supervisor holds its records: left.
+        let owner = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(sessions.join("owner.lock")).unwrap();
+        owner.lock().unwrap();
+        assert!(play.set_aside(&library, &record).is_err(), "a supervisor holds the records");
+        owner.unlock().unwrap();
+        // Written again meanwhile: another file, seen anew.
+        std::thread::sleep(Duration::from_millis(5));
+        write(&format!("{id}.v2.json"), r#"{"version":2,"id":"c29c0b3a"#);
+        assert!(play.set_aside(&library, &record).unwrap_err().contains(" s."), "changed: seen anew, not history");
+        age(&play);
+        // A path that is no damaged record: nothing.
+        assert!(play.set_aside(&library, &sessions.join("owner.lock")).is_err());
+        let aside = play.set_aside(&library, &record).expect("set aside");
+        assert!(aside.starts_with(library.join("Set aside")) && aside.is_file() && !record.exists(), "kept, out of the records: {aside:?}");
+        assert_eq!(play.trouble(&library), None);
+        assert!(play.gate(&library).is_ok_and(|w| w.is_none()), "Play plays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B4: the bridge's reservation, taken before it creates an instance, holds Home's start off until the bridge's launch
+    /// uses it or gives it back; a second reservation is refused; the reserver's own launch goes.
+    #[test]
+    fn a_reserved_start_is_the_reserver_s_alone_until_used_or_given_back() {
+        let dir = std::env::temp_dir().join(format!("orbiters-reserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let program = fake_program(&dir, &[r#"{"event":"starting","app_id":438100}"#], 1);
+        let play = Arc::new(Play::default());
+        let token = play.reserve(&library, None).expect("reserved");
+        assert_eq!(play.start(&program, &library, &[]), Err(Refused::Busy), "Home's start waits for the bridge's");
+        assert_eq!(play.reserve(&library, None), Err(Refused::Busy), "one reservation at a time");
+        play.unreserve(token);
+        let home = play.start(&program, &library, &[]).expect("given back: Home starts");
+        assert_eq!(play.reserve(&library, None), Err(Refused::Busy), "Home's game is attached");
+        assert!(play.reserve(&library, Some(home + 1000)).is_err(), "not the reserver's own game");
+        let own = play.reserve(&library, Some(home)).expect("its own attached game, to be closed first");
+        let _ = wait_for(&play, home, |l| l.over);
+        clear(&play);
+        assert_eq!(play.start(&program, &library, &[]), Err(Refused::Busy), "reserved");
+        let bridge = play.start_reserved(&program, &library, &[], Some(own)).expect("the reserver's launch");
+        let _ = wait_for(&play, bridge, |l| l.over);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M9: one owner of each launch: the program's output closing while it lives does not end the launch; a process that
+    /// keeps its output and speaks after the launch ended changes nothing of the next one; the exit status says why;
+    /// untold failures outlive later launches.
+    #[test]
+    fn a_launch_ends_with_its_program_never_by_its_output_and_late_words_change_nothing() {
+        let dir = std::env::temp_dir().join(format!("orbiters-play-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let play = Arc::new(Play::default());
+        // Output closed, the program still there for 2 s.
+        let quiet = fake_program(&dir.join("quiet"), &[], 0);
+        std::fs::write(&quiet, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"starting\",\"app_id\":438100}'\nexec 1>&-\nsleep 2\nexit 3\n").unwrap();
+        let id = play.start(&quiet, &library, &[]).unwrap();
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(!play.launch(id).unwrap().over && play.attached() == Some(id), "the program lives: the launch goes on");
+        let gone = wait_for(&play, id, |l| l.over);
+        assert!(gone.failure.as_ref().is_some_and(|f| f.words.contains('3')), "its exit status said: {:?}", gone.failure);
+        clear(&play);
+        // A child keeps the output and speaks after the program ended.
+        let late = fake_program(&dir.join("late"), &[], 0);
+        std::fs::write(&late, "#!/bin/sh\nprintf '%s\\n' '{\"event\":\"starting\",\"app_id\":438100}'\n(sleep 5; printf '%s\\n' '{\"event\":\"running\",\"app_id\":438100,\"pid\":4242}') &\nexit 0\n").unwrap();
+        let first = play.start(&late, &library, &[]).unwrap();
+        let first = wait_for(&play, first, |l| l.over);
+        assert!(!first.running);
+        clear(&play);
+        let slow = fake_program(&dir.join("slow"), &[r#"{"event":"starting","app_id":438100}"#], 4);
+        let second = play.start(&slow, &library, &[]).unwrap();
+        std::thread::sleep(Duration::from_millis(3000));
+        assert_eq!(play.running(), None, "the first one's late words are not the second's");
+        assert!(!play.launch(first.id).unwrap().running);
+        let _ = wait_for(&play, second, |l| l.over);
+        // Untold failures stay for their starter, however many launches came after.
+        clear(&play);
+        let fails = fake_program(&dir.join("fails"), &[], 0);
+        std::fs::write(&fails, "#!/bin/sh\nexit 7\n").unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..(LAUNCHES_KEPT + 3) {
+            let id = play.start(&fails, &library, &[]).unwrap();
+            let _ = wait_for(&play, id, |l| l.over);
+            clear(&play);
+            ids.push(id);
+        }
+        assert!(play.launch(ids[0]).is_none(), "pushed out of the list");
+        assert!(play.take_failure(ids[0]).is_some(), "its failure is still there for its starter");
+        assert!(play.take_failure(ids[0]).is_none(), "told once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M9: a program lost while the engine's record says the game runs is read again later: once the record says it ended
+    /// early, the wait after an early end holds and its failure is there to tell.
+    #[test]
+    fn a_launch_whose_program_was_lost_is_reconciled_from_its_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orbiters-play-reconcile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        let sessions = obelisk::sessions_dir(&library);
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let id = "f16d947e-7d8f-4331-8731-bede005d29fe";
+        let record = sessions.join(format!("{id}.v2.json"));
+        let write = |text: &str| {
+            std::fs::write(&record, text).unwrap();
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write(&format!(r#"{{"id":"{id}","store":{{"app_id":438100}},"phase":"Running","game":{{"pid":4242}}}}"#));
+        let program = fake_program(&dir, &[&format!(r#"{{"event":"running","app_id":438100,"pid":4242,"session_id":"{id}"}}"#)], 0);
+        let play = Arc::new(Play::default());
+        let launch = play.start(&program, &library, &[]).unwrap();
+        let lost = wait_for(&play, launch, |l| l.over);
+        assert!(lost.unreconciled && lost.failure.is_none(), "{lost:?}");
+        assert!(play.gate(&library).unwrap().is_none(), "nothing known to have ended early yet");
+        write(&format!(r#"{{"id":"{id}","store":{{"app_id":438100}},"phase":"Finished","played":{{"seconds":40,"frames":{{"count":96}}}}}}"#));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(matches!(play.gate(&library), Ok(Some(_))), "ended early: the wait holds");
+        let reconciled = play.launch(launch).unwrap();
+        assert_eq!(reconciled.ended, Some((Some(40), Some(96))));
+        assert_eq!(play.take_failure(launch).map(|f| f.code), Some("ended_at_once".into()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -804,6 +1543,12 @@ mod tests {
         let fails = fake_program(&dir.join("fails"), &[], 0);
         std::fs::write(&fails, "#!/bin/sh\nexit 3\n").unwrap();
         assert!(run_for(&fails, &[], Duration::from_secs(5), |_| {}).is_err());
+        // M14: one that never stops talking is held to the same deadline.
+        let talker = fake_program(&dir.join("talker"), &[], 0);
+        std::fs::write(&talker, "#!/bin/sh\nwhile :; do echo '{\"event\":\"x\"}'; done\n").unwrap();
+        let begun = std::time::Instant::now();
+        assert!(run_for(&talker, &[], Duration::from_millis(500), |_| {}).is_err());
+        assert!(begun.elapsed() < Duration::from_secs(3), "{:?}", begun.elapsed());
         let fine = fake_program(&dir.join("fine"), &[r#"{"event":"done"}"#], 0);
         let mut heard = 0;
         assert!(run_for(&fine, &[], Duration::from_secs(5), |_| heard += 1).is_ok());

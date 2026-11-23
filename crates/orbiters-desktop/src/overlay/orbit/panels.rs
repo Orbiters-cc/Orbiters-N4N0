@@ -260,6 +260,8 @@ pub enum Action {
     NewConversation,
     /// The answer to what N4N0 asked to do (REQUEST20 6): yes, or no; the same as saying it.
     AskAnswer(bool),
+    /// Retry of N4N0's last failed message (Ask N4N0's page).
+    RetryTurn,
     /// Ask N4N0's page shows what N4N0 did (its action log), or the conversation again.
     TalkActions,
     /// A YouTube result, the `n`-th: its link, for the world's player.
@@ -735,6 +737,8 @@ pub struct Facts {
     pub talk_question: Option<String>,
     /// Its number (what its Yes and No answer).
     pub talk_question_id: Option<u64>,
+    /// The last turn failed and can be sent again: its turn's number, its button's words, and whether it may be pressed.
+    pub talk_retry: Option<(u64, String, bool)>,
     /// What N4N0 is doing now.
     pub talk_doing: Option<String>,
     /// What N4N0 did, newest first, and whether the page shows it rather than the conversation.
@@ -981,6 +985,7 @@ pub enum Look {
     NewTalk,
     /// Yes, or No, to what N4N0 asks (REQUEST20 6).
     AskAnswer(bool),
+    RetryTurn,
     /// Actions, or Conversation: what Ask N4N0's page shows.
     TalkActions,
     /// A world the person was in: its picture, name and last time.
@@ -1697,6 +1702,10 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 out.push(Item { action: Action::AskAnswer(true), rect: r(card.right() - 16.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(true) });
                 out.push(Item { action: Action::AskAnswer(false), rect: r(card.right() - 16.0 - 170.0 - 12.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(false) });
             }
+            if let Some((_, _, can)) = talk_retry(facts) {
+                let action = if *can { Action::RetryTurn } else { Action::Idle };
+                out.push(Item { action, rect: talk_retry_rect(facts), look: Look::RetryTurn });
+            }
             out
         }
         Sheet::Instances => {
@@ -2031,12 +2040,27 @@ fn talk_question_card(facts: &Facts) -> Rect {
     Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 12.0 - height), vec2(TALK_WIDTH, height))
 }
 
+/// Retry at the foot of Ask N4N0's page: its failure has its line above.
+const TALK_RETRY_WIDTH: f32 = 300.0;
+const TALK_RETRY_HEIGHT: f32 = 48.0;
+
+/// The last turn's failure, when its Retry shows: a question or what is being done comes first.
+fn talk_retry(facts: &Facts) -> Option<&(u64, String, bool)> {
+    facts.talk_retry.as_ref().filter(|_| facts.talk_question.is_none() && facts.talk_doing.is_none())
+}
+
+fn talk_retry_rect(_facts: &Facts) -> Rect {
+    Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 8.0 - TALK_RETRY_HEIGHT), vec2(TALK_RETRY_WIDTH, TALK_RETRY_HEIGHT))
+}
+
 /// Where the conversation (or the log) ends: above the question, or the line of what is being done.
 fn talk_bottom(facts: &Facts) -> f32 {
     if facts.talk_question.is_some() {
         talk_question_card(facts).top() - 8.0
     } else if facts.talk_doing.is_some() {
         576.0 - 8.0 - TALK_DOING_HEIGHT
+    } else if talk_retry(facts).is_some() {
+        talk_retry_rect(facts).top() - 8.0
     } else {
         576.0
     }
@@ -2675,6 +2699,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
             _ => (tr("Talk to N4N0").into(), tr("Press, speak, and press again.").into()),
         },
         Action::NewConversation => (tr("New conversation").into(), tr("N4N0 starts over.").into()),
+        Action::RetryTurn => (facts.talk_retry.as_ref().map(|(_, l, _)| l.clone()).unwrap_or_default(), tr("Sends your last message again, once.").into()),
         Action::AskAnswer(true) => (tr("Yes, do it").into(), tr("N4N0 does what it asked, this once.").into()),
         Action::AskAnswer(false) => (tr("No, leave it").into(), tr("Nothing is done.").into()),
         Action::TalkActions if facts.talk_actions => (tr("Conversation").into(), tr("Back to what was said.").into()),
@@ -4127,6 +4152,20 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), if on { icons::CHAT_TEARDROP_TEXT } else { icons::LIST }, 18.0, if on { look::accent() } else { look::MUTED });
             let (words, font) = fitted(p, &words, 15.0, weight::SEMIBOLD, rect.width() - 50.0, 13.0);
             p.text(pos2(rect.left() + 38.0, rect.center().y), Align2::LEFT_CENTER, words, font, look::LABEL);
+        }
+        Look::RetryTurn => {
+            let (label, can) = facts.talk_retry.as_ref().map(|(_, l, c)| (l.as_str(), *c)).unwrap_or(("", false));
+            let fill = if !can { look::TILE } else if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else { look::accent() };
+            p.rect_filled(rect, look::radius(rect.height() / 2.0), fill);
+            if can && hovered && !pressed {
+                p.rect_stroke(rect, look::radius(rect.height() / 2.0), Stroke::new(2.0, Color32::from_white_alpha(120)), egui::StrokeKind::Inside);
+            }
+            let ink = if can { look::on_accent() } else { look::MUTED };
+            let (words, font) = fitted(p, label, 17.0, weight::SEMIBOLD, rect.width() - 60.0, 13.0);
+            let wide = p.layout_no_wrap(words.clone(), font.clone(), ink).size().x;
+            let left = rect.center().x - (wide + 28.0) / 2.0;
+            widgets::icon(p, pos2(left + 9.0, rect.center().y), icons::ARROW_CLOCKWISE, 18.0, ink);
+            p.text(pos2(left + 28.0, rect.center().y), Align2::LEFT_CENTER, words, font, ink);
         }
         Look::AskAnswer(yes) => {
             let fill = if yes { if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else { look::accent() } } else if hovered { look::TILE_HOVER } else { look::TILE };
@@ -6192,6 +6231,23 @@ mod tests {
         assert!(sheet_items(Sheet::Talk, &talked).iter().any(|i| i.action == Action::NewConversation));
         assert!(max_scroll(Sheet::Talk, &talked) > 1000.0);
         assert_eq!(max_scroll(Sheet::Talk, &Facts { talk_lines: vec![(true, "Hello".into())], ..facts() }), 0.0);
+    }
+
+    /// Request23: Retry at the foot of the page for a failed turn, disabled while it waits, giving way to a question.
+    #[test]
+    fn the_ask_page_retries_a_failed_turn() {
+        let failed = |can: bool| Facts { talk_retry: Some((9, if can { "Retry".into() } else { "Retry in 25 s".into() }, can)), talk_lines: vec![(true, "put me in orange".into())], ..facts() };
+        let item = |f: &Facts| sheet_items(Sheet::Talk, f).into_iter().find(|i| i.look == Look::RetryTurn);
+        assert!(item(&facts()).is_none());
+        let shown = item(&failed(true)).unwrap();
+        assert_eq!(shown.action, Action::RetryTurn);
+        assert!(shown.rect.bottom() <= 576.0 && shown.rect.right() <= 1024.0);
+        assert!(talk_bottom(&failed(true)) < shown.rect.top(), "the conversation ends above it");
+        assert_eq!(item(&failed(false)).unwrap().action, Action::Idle, "not a press before its moment");
+        assert_eq!(caption(Action::RetryTurn, &failed(true)).unwrap().0, "Retry");
+        // A question or what is being done comes first.
+        assert!(item(&Facts { talk_question: Some("?".into()), ..failed(true) }).is_none());
+        assert!(item(&Facts { talk_doing: Some("x".into()), ..failed(true) }).is_none());
     }
 
     /// REQUEST20 6: what N4N0 asks is answered with a press as well as by voice, and what it did is a press away.

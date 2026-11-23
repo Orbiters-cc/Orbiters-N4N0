@@ -466,13 +466,37 @@ const NOTARY_WAIT: &str = "3m";
 /// Sends `file` to Apple's notary and waits for its answer: whether it was accepted in time.
 fn notarized(profile: &str, file: &Path) -> bool {
     println!("> notarytool submit {}", file.display());
-    let answered = Command::new("xcrun").args(["notarytool", "submit", "--wait", "--timeout", NOTARY_WAIT, "--keychain-profile", profile]).arg(file).output();
-    let text = answered.map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)).unwrap_or_default();
-    let accepted = text.lines().any(|l| l.trim() == "status: Accepted");
+    let submit = || {
+        let answered = Command::new("xcrun").args(["notarytool", "submit", "--wait", "--timeout", NOTARY_WAIT, "--keychain-profile", profile]).arg(file).output();
+        answered.map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)).unwrap_or_default()
+    };
+    let text = submit();
+    // `notarytool store-credentials` keeps a profile in the data protection keychain (not login.keychain-db, where
+    // `--keychain` would look), which only a process of the person's own login session reaches: run elsewhere (a sandbox,
+    // ssh, a launchd job), notarytool says it found no item. Said plainly, as nothing else can be done from here.
+    if no_profile_item(&text) {
+        println!(
+            "notarytool found no keychain item for the profile `{profile}`: this process is outside the login session that \
+             keeps it (run the release from a terminal of the Mac's own session, outside any sandbox), or the profile is gone \
+             (`xcrun notarytool store-credentials {profile}`)."
+        );
+    }    let accepted = text.lines().any(|l| l.trim() == "status: Accepted");
     if !accepted {
         println!("Apple's notary did not accept {} within {NOTARY_WAIT}:\n{}", file.display(), text.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
     accepted
+}
+
+#[cfg(test)]
+#[test]
+fn notarytool_s_missing_profile_is_told_apart() {
+    assert!(no_profile_item("Error: No Keychain password item found for profile: orbiters"));
+    assert!(!no_profile_item("  status: In Progress"));
+}
+
+/// Whether notarytool's answer says it found no keychain item for its profile.
+fn no_profile_item(text: &str) -> bool {
+    text.contains("No Keychain password item found")
 }
 
 fn sign_image(identity: &Identity, image: &Path) -> anyhow::Result<()> {

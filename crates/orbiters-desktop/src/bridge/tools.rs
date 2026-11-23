@@ -168,59 +168,137 @@ fn number(args: &Value, key: &str, default: f64) -> f64 {
     args[key].as_f64().unwrap_or(default)
 }
 
-/// The tools this computer offers (caps.rs), as `tools/list` gives them: on Windows every one, as [`list`].
-/// Why `args` do not fit the tool's input schema `schema` (as `tools/list` gives it on this computer): an argument it does
-/// not name, of another type, or outside its enum or minimum, or a required one missing. `None` when they fit.
-pub fn schema_refusal(name: &str, schema: &Value, args: &Value) -> Option<Failure> {
-    let bad = |why: String| Some(Failure::new("bad_arguments", format!("{name}: {why}, so nothing was done."), "Pass the arguments tools/list gives for this tool on this computer, with their types.")); // i18n: not shown (an AI client reads it)
-    let given = match args {
-        Value::Null => return None,
-        Value::Object(given) => given,
-        _ => return bad("the arguments are not an object".into()),
+/// The schema keywords [`schema_refusal`] holds arguments to; a schema using any other is a test failure
+/// (`every_schema_uses_only_what_is_checked`), never an argument let through unchecked.
+pub const CHECKED_KEYWORDS: [&str; 19] = ["type", "enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "pattern", "items", "minItems", "maxItems", "uniqueItems", "properties", "required", "additionalProperties", "description", "default"];
+
+/// Why `value` does not fit `spec` (one JSON Schema of the subset in [`CHECKED_KEYWORDS`]), `at` naming where it is.
+fn misfit(spec: &Value, value: &Value, at: &str) -> Option<String> {
+    let types: Vec<&str> = match &spec["type"] {
+        Value::String(t) => vec![t.as_str()],
+        Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
     };
-    let properties = schema["properties"].as_object().cloned().unwrap_or_default();
-    for required in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-        if given.get(required).is_none_or(Value::is_null) {
-            return bad(format!("{required} is required"));
+    let is = |t: &str| match t {
+        "string" => value.is_string(),
+        "integer" => value.is_u64() || value.is_i64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        "null" => value.is_null(),
+        _ => false,
+    };
+    // A null is an argument of its own: only where the schema says null (else leave the argument out).
+    if value.is_null() && !types.contains(&"null") {
+        return Some(format!("{at} must not be null (leave it out instead)"));
+    }
+    if !types.is_empty() && !types.iter().any(|t| is(t)) {
+        return Some(format!("{at} must be of type {}", types.join(" or ")));
+    }
+    if let Some(choices) = spec["enum"].as_array() {
+        if !choices.contains(value) {
+            return Some(format!("{at} must be one of {}", Value::Array(choices.clone())));
         }
     }
-    for (key, value) in given {
-        let Some(spec) = properties.get(key) else {
-            return bad(format!("{key} is not an argument it takes here"));
-        };
-        if value.is_null() {
-            continue;
+    if let Some(one) = spec.get("const") {
+        if one != value {
+            return Some(format!("{at} must be {one}"));
         }
-        let fits = match spec["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_u64() || value.is_i64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value.is_array(),
-            Some("object") => value.is_object(),
-            _ => true,
-        };
-        if !fits {
-            return bad(format!("{key} must be of type {}", spec["type"].as_str().unwrap_or("?")));
+    }
+    if let Some(v) = value.as_f64() {
+        let bound = |key: &str| spec[key].as_f64();
+        if bound("minimum").is_some_and(|m| v < m) || bound("exclusiveMinimum").is_some_and(|m| v <= m) {
+            return Some(format!("{at} is below its least ({})", bound("minimum").or(bound("exclusiveMinimum")).unwrap_or_default()));
         }
-        if let Some(choices) = spec["enum"].as_array() {
-            if !choices.contains(value) {
-                return bad(format!("{key} must be one of {}", Value::Array(choices.clone())));
+        if bound("maximum").is_some_and(|m| v > m) || bound("exclusiveMaximum").is_some_and(|m| v >= m) {
+            return Some(format!("{at} is above its most ({})", bound("maximum").or(bound("exclusiveMaximum")).unwrap_or_default()));
+        }
+    }
+    if let Some(text) = value.as_str() {
+        let chars = text.chars().count() as u64;
+        if spec["minLength"].as_u64().is_some_and(|m| chars < m) || spec["maxLength"].as_u64().is_some_and(|m| chars > m) {
+            return Some(format!("{at} has a length outside what it takes"));
+        }
+        // A pattern that is not one fits nothing.
+        if let Some(pattern) = spec["pattern"].as_str() {
+            if !regex::Regex::new(pattern).is_ok_and(|re| re.is_match(text)) {
+                return Some(format!("{at} does not have the form {pattern}"));
             }
         }
-        if let (Some(least), Some(v)) = (spec["minimum"].as_f64(), value.as_f64()) {
-            if v < least {
-                return bad(format!("{key} must be at least {least}"));
+    }
+    if let Some(items) = value.as_array() {
+        if spec["minItems"].as_u64().is_some_and(|m| (items.len() as u64) < m) || spec["maxItems"].as_u64().is_some_and(|m| (items.len() as u64) > m) {
+            return Some(format!("{at} has a number of items outside what it takes"));
+        }
+        if spec["uniqueItems"] == json!(true) && items.iter().enumerate().any(|(i, a)| items[..i].contains(a)) {
+            return Some(format!("{at} names an item twice"));
+        }
+        if let Some(each) = spec.get("items").filter(|i| i.is_object()) {
+            for (i, item) in items.iter().enumerate() {
+                if let Some(why) = misfit(each, item, &format!("{at}[{i}]")) {
+                    return Some(why);
+                }
+            }
+        }
+    }
+    if let Some(given) = value.as_object() {
+        let properties = spec["properties"].as_object();
+        for required in spec["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if !given.contains_key(required) {
+                return Some(format!("{at}.{required} is required"));
+            }
+        }
+        // An object of the schema's takes only what it names, unless it says otherwise.
+        let open = spec["additionalProperties"] == json!(true) || (properties.is_none() && spec.get("additionalProperties").is_none());
+        for (key, item) in given {
+            match properties.and_then(|p| p.get(key)) {
+                Some(each) => {
+                    if let Some(why) = misfit(each, item, &format!("{at}.{key}")) {
+                        return Some(why);
+                    }
+                }
+                None if open => {}
+                None => return Some(format!("{key} is not an argument it takes here")),
             }
         }
     }
     None
 }
 
+/// Why `args` do not fit the tool's input schema `schema` (as `tools/list` gives it on this computer): not an object (an
+/// explicit `null` included: no arguments is `{}`, or none given at all), an argument it does not name, a null where none is
+/// taken, of another type, outside its enum, its least or its most, an item of a list that does not fit, or a required one
+/// missing. `None` when they fit. The same on every computer, before any session is chosen or anything done.
+pub fn schema_refusal(name: &str, schema: &Value, args: &Value) -> Option<Failure> {
+    let bad = |why: String| Some(Failure::new("bad_arguments", format!("{name}: {why}, so nothing was done."), "Pass the arguments tools/list gives for this tool on this computer, with their types; leave out what you do not set.")); // i18n: not shown (an AI client reads it)
+    if !args.is_object() {
+        return bad("the arguments are not an object".into());
+    }
+    let schema = if schema.get("type").is_none() { json!({ "type": "object", "properties": schema["properties"].clone(), "required": schema["required"].clone() }) } else { schema.clone() };
+    misfit(&schema, args, "arguments").and_then(|why| bad(why.trim_start_matches("arguments.").to_string()))
+}
+
+/// The input schema of the tool `name` as this computer offers it, when it offers it.
+pub fn tool_schema(caps: &super::caps::Capabilities, name: &str) -> Option<Value> {
+    list_for(caps).as_array()?.iter().find(|t| t["name"] == name).map(|t| t["inputSchema"].clone())
+}
+
 /// How long go_to_world waits, after closing the bridge's own game, for the next start to be allowed (its end finalized, the
 /// 80 s after an early end): past it, the start is asked for all the same and says why it was refused.
-const START_READY_LIMIT: Duration = Duration::from_secs(100);
+const START_READY_LIMIT: Duration = Duration::from_secs(20);
 
+/// What each `wait_for` condition means, as its description says it.
+const WAIT_SAID: [(&str, &str); 6] = [
+    ("in_world", "in_world: go_to_world arrived, or its failure."),
+    ("closed", "closed: VRChat is gone."),
+    ("signed_in", "signed_in: a session's VRChat is signed in (or asks for a sign-in)."),
+    ("picture_saved", "picture_saved: the last recording is saved."),
+    ("reconstructions_done", "reconstructions_done: none running or waiting (with the app set to wait for VRChat, only true once it is closed)."),
+    ("not_paused", "not_paused: the person left the computer alone."),
+];
+
+/// The tools this computer offers (caps.rs), as `tools/list` gives them: on Windows every one, as [`list`].
 pub fn list_for(caps: &super::caps::Capabilities) -> Value {
     if caps.all() {
         return list();
@@ -235,7 +313,11 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
             // A Unity tool's `session` is a capture's folder, not a bridge session: it stays.
             let bridge_tool = !super::projects::NAMES.contains(&tool["name"].as_str().unwrap_or_default());
             if tool["name"] == "wait_for" {
-                tool["inputSchema"]["properties"]["until"]["enum"] = json!(caps.waits());
+                let waits = caps.waits();
+                tool["inputSchema"]["properties"]["until"]["enum"] = json!(waits);
+                // Its description names only what can be waited for here.
+                let said: Vec<&str> = WAIT_SAID.iter().filter(|(name, _)| waits.contains(name)).map(|(_, what)| *what).collect();
+                tool["inputSchema"]["properties"]["until"]["description"] = json!(said.join(" "));
             }
             let properties = &mut tool["inputSchema"]["properties"];
             if let Some(properties) = properties.as_object_mut() {
@@ -248,7 +330,7 @@ pub fn list_for(caps: &super::caps::Capabilities) -> Value {
                 }
             }
             match tool["name"].as_str() {
-                Some("go_to_world") => tool["description"] = json!("Goes to a new private instance of a world, owned by the signed-in VRChat account: starts VRChat on this Mac in a window in that instance, closing the one this bridge started first (every world is a new start here). Waits up to about 40 s and returns `arrived`; if false, call wait_for with until in_world. Only private instances exist here: there is no way to name an instance, or to join anyone. At most one every 30 s, and none for 80 s after a start that ended early."),
+                Some("go_to_world") => tool["description"] = json!("Goes to a new private instance of a world, owned by the signed-in VRChat account: starts VRChat on this Mac in a window in that instance, closing the one this bridge started first (every world is a new start here). One call can take up to about 2 minutes: closing the previous game (up to its close limit), then up to 20 s for the next start to be allowed (past that it answers start_wait with retry_after_s, and the same call again resumes the instance already made), then up to 40 s for the arrival; it returns `arrived`, and if false, call wait_for with until in_world. Only private instances exist here: there is no way to name an instance, or to join anyone. At most one every 30 s, and none for 80 s after a start that ended early."),
                 Some("screenshot") => tool["description"] = json!("A picture of VRChat's window and nothing else, even when something covers it: its content without the title bar. Returns the JPEG, and timestamp, window_width and window_height (the content in pixels, as VRChat renders it), image_width, image_height, and scale (image pixels per window pixel). all_black true means the loading screen; renderer_lost true means the game stopped drawing. Needs macOS's Screen Recording permission for Orbiters - N4N0 (screen_recording_not_allowed otherwise). Refused while the person is at the computer, or in an instance that is not private."),
                 Some("close_vrchat") => tool["description"] = json!("Closes the VRChat this bridge started, as the game's own Quit does (never forced), and waits for it to go. Call it at the end of a run."),
                 _ => {}
@@ -546,10 +628,10 @@ impl Bridge {
         // What this computer cannot do is refused before anything else: no instance made, no game started or closed.
         let caps = self.capabilities();
         let mut refused = caps.refusal(name, args);
-        // Where the tool list is this computer's own (a Mac), the arguments are held to it before anything else: none it
-        // does not name, none of another type (a number for `session` read as the main one, a text for `profile` ignored).
-        if refused.is_none() && !caps.all() {
-            refused = list_for(&caps).as_array().and_then(|tools| tools.iter().find(|t| t["name"] == name).cloned()).and_then(|tool| schema_refusal(name, &tool["inputSchema"], args));
+        // On every computer the arguments are held to the tool list it gives before anything else: none it does not name,
+        // none of another type (a number for `session` read as the main one, a text for `profile` ignored), no null.
+        if refused.is_none() {
+            refused = tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, args));
         }
         let result = match name {
             _ if refused.is_some() => Err(refused.unwrap_or_else(|| Failure::new("not_on_this_computer", "", ""))),
@@ -1378,10 +1460,23 @@ impl Bridge {
             return Err(Failure::new("picture_under_way", "A recording is under way.", "Call wait_for with until picture_saved first."));
         }
         // Nothing is made for a start the game's gate refuses now (a start of the person's under way, the wait after an
-        // early end): checked before VRChat's API is asked for an instance.
+        // early end): checked before VRChat's API is asked for an instance, and held (reserved) from here until the launch
+        // or the failure that gives it back.
         s.game.admit_start(pid.is_some())?;
+        let result = self.go_to_world_admitted(s, args, call, world_id, region, &seen, pid);
+        if result.is_err() {
+            s.game.release_start();
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn go_to_world_admitted(&self, s: &Session, args: &Value, call: &Call, world_id: &str, region: &str, seen: &Seen, pid: Option<u32>) -> Result<Answer, Failure> {
+        let seen = seen.clone();
+        // A destination made for a start that did not happen, of this world and region: resumed, not made again.
+        let resumed = s.is_main().then(|| s.run.lock().unwrap().kept.clone()).flatten().filter(|k| k.world_id == world_id && k.region == region && k.at.elapsed() < super::KEPT_FOR);
         let every = self.timing.instance_every;
-        if let Some(wait) = s.run.lock().unwrap().last_instance.map(|at| at.elapsed()).filter(|e| *e < every).map(|e| every - e) {
+        if let Some(wait) = s.run.lock().unwrap().last_instance.map(|at| at.elapsed()).filter(|e| *e < every).map(|e| every - e).filter(|_| resumed.is_none()) {
             let seconds = wait.as_secs() + 1;
             return Err(Failure::new(
                 "too_soon",
@@ -1394,7 +1489,11 @@ impl Bridge {
         // travel to that location", measured 2026-11-15): it makes its own, as VRChat's client does, strict private and owned
         // by its own account (`<n>~private(<its usr>)~region(<r>)~nonce(<uuid>)`: joined at once, 2026-11-15 03:11).
         let (instance, owner) = if s.is_main() {
-            (s.game.create_private_instance(world_id, region)?, seen.vrchat_user.as_ref().map(|u| u.0.clone()))
+            let instance = match &resumed {
+                Some(kept) => kept.instance.clone(),
+                None => s.game.create_private_instance(world_id, region)?,
+            };
+            (instance, seen.vrchat_user.as_ref().map(|u| u.0.clone()))
         } else {
             let Some((account, _)) = seen.session_account.clone() else {
                 // Not running and its account not known yet: not a sign-in page, but a start that never came up.
@@ -1436,6 +1535,10 @@ impl Bridge {
             let drop_old = run.earlier.len().saturating_sub(64);
             run.earlier.drain(..drop_old);
             run.going = Some(Going { world_id: world_id.to_string(), instance: instance.clone(), since: Instant::now(), started: false });
+            // Kept until a launch into it is made: a failure before that leaves it to be resumed.
+            if s.is_main() {
+                run.kept = Some(super::Kept { world_id: world_id.to_string(), region: region.to_string(), instance: instance.clone(), at: resumed.as_ref().map_or_else(Instant::now, |k| k.at) });
+            }
         }
         // From here on, ending early must hand the reconstructions back.
         s.game.hold_reconstructions(true);
@@ -1462,14 +1565,32 @@ impl Bridge {
                 }
             }
             if let Some(pid) = pid {
+                // Asked for a while ago (the instance's creation): the person, a Stop or the client gone since, and the
+                // game is left as it is.
+                if let Some(paused) = self.paused_in(s) {
+                    return Err(paused_failure(&paused));
+                }
+                if self.stopped_since(call) {
+                    return Err(self.stopped_failure());
+                }
+                if call.client_gone() {
+                    return Err(Failure::new("client_gone", "The client disconnected.", "Call get_state when back."));
+                }
                 self.release_session(s);
                 self.close_and_wait(s, pid, call)?;
                 // The same destination, once the game's end is finalized and any wait after an early end is over (a Mac's
-                // shared start; nothing to wait for on Windows): this call goes on rather than failing with a made instance.
+                // shared start; nothing to wait for on Windows): waited for a little in this call; past that, the call
+                // says how long, and the destination is kept for the next call to resume.
                 let until = Instant::now() + START_READY_LIMIT;
                 while let Some(wait) = s.game.start_ready() {
                     if Instant::now() >= until {
-                        break;
+                        let seconds = wait.as_secs().max(1);
+                        return Err(Failure::new(
+                            "start_wait",
+                            "The VRChat this bridge started was closed; the next start must wait a little more (its end is being saved, or it ended early and Easy Anti-Cheat needs 80 s).", // i18n: not shown (an AI client reads it)
+                            format!("Call go_to_world again with the same world_id in {seconds} s: the private instance already made is used."),
+                        )
+                        .retry_after(seconds));
                     }
                     let _ = self.wait_until(wait.min(Duration::from_secs(2)), call, || false)?;
                     if self.paused_in(s).is_some() || self.stopped_since(call) {
@@ -1504,6 +1625,8 @@ impl Bridge {
         }
         {
             let mut run = s.run.lock().unwrap();
+            // Launched into it: no longer a destination to resume.
+            run.kept = None;
             if let Some(going) = run.going.as_mut() {
                 going.started = true;
                 going.since = Instant::now();
@@ -1733,7 +1856,7 @@ impl Bridge {
         let pid = self.ours(s, &seen)?;
         // Between worlds there is nobody to see; in a world, only in a private one. Where the bridge cannot prove what lies
         // between (a Mac), only once it arrived in a private one.
-        if seen.in_world {
+        if seen.in_world && (seen.arrival.is_some() || !self.capabilities().screenshot_needs_arrival) {
             Self::in_private_instance(&seen)?;
         } else if self.capabilities().screenshot_needs_arrival {
             return Err(Failure::new(
@@ -1770,6 +1893,18 @@ impl Bridge {
         let fit = self.paused().is_none() && self.capabilities().keys_and_mouse;
         let (window, restored) = if fit { self.fit_window(s, pid, window) } else { (window, false) };
         let shot = s.game.capture(&window, max_width)?;
+        // Where arrival must be proven, the picture is given only if the arrival it was taken under still holds: the same
+        // one, in the same instance, of the same game (a world left, a log lost, another game meanwhile: discarded).
+        if self.capabilities().screenshot_needs_arrival {
+            let now = s.game.seen();
+            if seen.arrival.is_none() || now.arrival != seen.arrival || now.instance != seen.instance || now.pid != seen.pid || !now.in_world {
+                return Err(Failure::new(
+                    "not_in_world",
+                    "VRChat left its private instance (or its log could no longer be followed) while the picture was taken, so it was not kept.", // i18n: not shown (an AI client reads it)
+                    "Call wait_for with until in_world, then take the screenshot.", // i18n: not shown
+                ));
+            }
+        }
         let scale = if window.width == 0 { 1.0 } else { shot.width as f64 / window.width as f64 };
         let info = json!({
             "timestamp": orbiters_core::visited::now(),
@@ -3001,6 +3136,86 @@ fn is_avatar_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::caps::Capabilities;
+
+    /// B5: the same validation on both computers' tool lists (Windows' every capability, a Mac's), pure logic over the
+    /// schema: a malformed close never reaches session selection, `{}` stays the valid no-argument close.
+    #[test]
+    fn malformed_arguments_are_refused_on_every_computer_before_anything() {
+        for caps in [Capabilities::WINDOWS, Capabilities::MAC] {
+            let check = |name: &str, args: Value| tool_schema(&caps, name).and_then(|schema| schema_refusal(name, &schema, &args)).map(|f| f.code);
+            let refused = |name: &str, args: Value| assert_eq!(check(name, args.clone()), Some("bad_arguments"), "{:?} {name} {args}", caps.platform);
+            let fits = |name: &str, args: Value| assert_eq!(check(name, args.clone()), None, "{:?} {name} {args}", caps.platform);
+            fits("close_vrchat", json!({}));
+            refused("close_vrchat", Value::Null);
+            refused("close_vrchat", json!([]));
+            refused("close_vrchat", json!("main"));
+            refused("close_vrchat", json!({ "nonsense": 1 }));
+            fits("get_state", json!({}));
+            refused("get_state", json!({ "x": null }));
+            fits("go_to_world", json!({ "world_id": "wrld_4f3b5bc4-87f0-4872-bc7e-22c5c071fdcf" }));
+            refused("go_to_world", json!({ "world_id": null }));
+            refused("go_to_world", json!({ "world_id": 5 }));
+            refused("go_to_world", json!({ "world_id": "wrld_x", "region": null }));
+            refused("screenshot", json!({ "max_width": 99999 }));
+            refused("screenshot", json!({ "max_width": 1280.5 }));
+            fits("screenshot", json!({ "max_width": 1280 }));
+            refused("wait_for", json!({ "until": "in_world", "timeout_s": 0 }));
+            refused("wait_for", json!({ "until": "not_a_state" }));
+            if caps.offers("label_world") {
+                refused("label_world", json!({ "add": ["mirror", "mirror"] }));
+            }
+        }
+        assert!(tool_schema(&Capabilities::WINDOWS, "wear_avatar").and_then(|s| schema_refusal("wear_avatar", &s, &json!({ "avatar_id": "avtr_x" }))).is_some(), "its pattern");
+        // Windows' sessions: a number is no session name, and a null not the main one.
+        let windows = Capabilities::WINDOWS;
+        let check = |name: &str, args: Value| tool_schema(&windows, name).and_then(|schema| schema_refusal(name, &schema, &args)).map(|f| f.code);
+        assert_eq!(check("close_vrchat", json!({ "session": 3 })), Some("bad_arguments"));
+        assert_eq!(check("close_vrchat", json!({ "session": null })), Some("bad_arguments"));
+        assert_eq!(check("close_vrchat", json!({ "session": "main" })), None);
+        // A Mac has no sessions to name.
+        assert_eq!(tool_schema(&Capabilities::MAC, "close_vrchat").and_then(|s| schema_refusal("close_vrchat", &s, &json!({ "session": "main" }))).map(|f| f.code), Some("bad_arguments"));
+        // Nested items: a list of the wrong items is refused (unity_change_packages' pairs).
+        let schema = json!({ "type": "object", "properties": { "pairs": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } } } });
+        assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }, { "name": 3 }] })).is_some());
+        assert!(schema_refusal("t", &schema, &json!({ "pairs": [{}] })).is_some());
+        assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a", "other": 1 }] })).is_some());
+        assert!(schema_refusal("t", &schema, &json!({ "pairs": [{ "name": "a" }] })).is_none());
+    }
+
+    /// Writes Windows' tool list to `$ORBITERS_TOOLS_OUT` (to check other computers' test calls against it).
+    #[test]
+    #[ignore]
+    fn write_the_windows_tool_list() {
+        if let Some(out) = std::env::var_os("ORBITERS_TOOLS_OUT") {
+            std::fs::write(out, list_for(&Capabilities::WINDOWS).to_string()).unwrap();
+        }
+    }
+
+    /// Every keyword any tool's schema uses, on either computer, is one the validation holds arguments to.
+    #[test]
+    fn every_schema_uses_only_what_is_checked() {
+        fn walk(spec: &Value, at: &str, found: &mut Vec<String>) {
+            let Some(map) = spec.as_object() else { return };
+            for (key, value) in map {
+                if !CHECKED_KEYWORDS.contains(&key.as_str()) {
+                    found.push(format!("{at}: {key}"));
+                }
+                match key.as_str() {
+                    "properties" => value.as_object().into_iter().flatten().for_each(|(k, v)| walk(v, &format!("{at}.{k}"), found)),
+                    "items" => walk(value, &format!("{at}[]"), found),
+                    _ => {}
+                }
+            }
+        }
+        for caps in [Capabilities::WINDOWS, Capabilities::MAC] {
+            let mut found = Vec::new();
+            for tool in list_for(&caps).as_array().unwrap() {
+                walk(&tool["inputSchema"], tool["name"].as_str().unwrap(), &mut found);
+            }
+            assert!(found.is_empty(), "keywords not checked: {found:?}");
+        }
+    }
 
     #[test]
     fn only_an_avatars_own_id_goes_to_vrchat() {

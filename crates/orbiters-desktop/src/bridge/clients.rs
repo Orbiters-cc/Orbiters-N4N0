@@ -306,8 +306,10 @@ fn run(exe: &Path, args: &[&str], home: Option<&Path>, environment: &[(&str, &st
             Err(e) => return Err(tr!("It could not be followed: {error}", error = e)),
         }
     };
-    // A helper it left behind may hold a pipe open: what was said by now is what counts.
-    let text = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| String::from_utf8_lossy(&receiver.recv_timeout(Duration::from_secs(2)).unwrap_or_default()).into_owned();
+    // A helper it left behind may hold a pipe open: what was said by the one deadline (the limit, and a moment after the
+    // program ended) is what counts.
+    let until = (begin + limit).max(Instant::now() + Duration::from_millis(200)).min(Instant::now() + Duration::from_secs(2));
+    let text = |receiver: std::sync::mpsc::Receiver<Vec<u8>>| String::from_utf8_lossy(&receiver.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap_or_default()).into_owned();
     Ok(Ran { success, out: text(out), err: text(err) })
 }
 
@@ -358,15 +360,35 @@ fn ask_shell(shell: &std::ffi::OsStr, limit: Duration) -> Option<Vec<u8>> {
         .spawn()
         .ok()?;
     let mut out = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let until = std::time::Instant::now() + limit;
+    let (sender, said) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = out.read_to_end(&mut bytes);
-        bytes
+        let _ = sender.send(bytes);
     });
     let status = super::mac::wait_until(&mut child, limit).ok()?;
-    // A process the profile left behind may hold the output open: it is not waited for.
-    let bytes = status.success().then(|| reader.join().ok()).flatten()?;
-    Some(bytes)
+    // A process the profile left behind may hold the output open: it is waited for only until the same deadline, never
+    // joined (the reader is let go).
+    if !status.success() {
+        return None;
+    }
+    said.recv_timeout(until.saturating_duration_since(std::time::Instant::now()).max(Duration::from_millis(100))).ok()
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn a_login_shell_whose_child_keeps_its_output_is_not_waited_for_past_its_limit() {
+    // M14: the shell ends at once, a process its profile left behind keeps the output open for 30 s.
+    use std::os::unix::fs::PermissionsExt;
+    let shell = std::env::temp_dir().join(format!("orbiters-shell-{}", std::process::id()));
+    std::fs::write(&shell, "#!/bin/sh\n(sleep 30) &\nprintf '/usr/bin\\0'\nexit 0\n").unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let begun = std::time::Instant::now();
+    let said = ask_shell(shell.as_os_str(), Duration::from_secs(1));
+    assert!(begun.elapsed() < Duration::from_secs(3), "{:?}", begun.elapsed());
+    assert_eq!(said, None, "nothing whole was said by the deadline");
+    let _ = std::fs::remove_file(&shell);
 }
 
 /// `PATH` and `CODEX_HOME` from what [`ask_shell`] printed; an empty value is none.
@@ -513,13 +535,20 @@ impl CodexCli {
 
     /// The settings file Codex reads: `CODEX_HOME`, else `.codex` in the home folder.
     fn config_file(&self) -> Option<PathBuf> {
-        let dir = self.home.clone().or_else(codex_home).or_else(|| home().map(|h| h.join(".codex")))?;
+        let dir = self.codex_dir().or_else(|| home().map(|h| h.join(".codex")))?;
         Some(dir.join("config.toml"))
+    }
+
+    /// The `CODEX_HOME` both the settings file edited and every `codex` run use: the test's, else the person's own (this
+    /// process's, or their login shell's). The same for both, or `codex mcp get` would read another file than the one edited.
+    fn codex_dir(&self) -> Option<PathBuf> {
+        self.home.clone().or_else(codex_home)
     }
 
     fn run(&self, args: &[&str]) -> Result<Ran, String> {
         let exe = self.program().ok_or_else(|| tr("Codex is not installed on this computer."))?;
-        let environment = self.home.iter().map(|h| ("CODEX_HOME", h.as_os_str())).collect::<Vec<_>>();
+        let dir = self.codex_dir();
+        let environment = dir.iter().map(|h| ("CODEX_HOME", h.as_os_str())).collect::<Vec<_>>();
         run(&exe, args, home().as_deref(), &environment, COMMAND_LIMIT)
     }
 }

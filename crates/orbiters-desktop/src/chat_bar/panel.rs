@@ -64,7 +64,8 @@ pub enum Item<'a> {
     N4n0 { line: &'a N4n0Line, first: bool },
     /// Something N4N0 did or noticed.
     Note(&'a str),
-    Error(&'a str),
+    /// A failure; with its Retry (and what an administrator reads) when it is the last turn's (r23).
+    Error { text: &'a str, failure: Option<&'a orbiters_n4n0::TurnFailure> },
     /// Before the first words of an answer.
     Thinking,
     /// N4N0 hears the person (the microphone's level).
@@ -89,7 +90,15 @@ pub fn items(n4n0: &N4n0Status) -> Vec<Item<'_>> {
             }
             N4n0Who::Note if asked.iter().any(|q| !q.is_empty() && (*q == line.text || q.starts_with(line.text.as_str()))) => {}
             N4n0Who::Note => out.push(Item::Note(&line.text)),
-            N4n0Who::Error => out.push(Item::Error(&line.text)),
+            N4n0Who::Error => out.push(Item::Error { text: &line.text, failure: None }),
+        }
+    }
+    // The last turn's failure, on its own line (the last error said at its moment).
+    if let Some(failure) = n4n0.assistant.failure.as_ref().filter(|_| !n4n0.thinking) {
+        let at = n4n0.lines.iter().rev().position(|l| l.who == N4n0Who::Error && l.at_ms == failure.at_ms).map(|back| n4n0.lines.len() - 1 - back);
+        let text = at.map(|i| n4n0.lines[i].text.as_str());
+        if let Some(Item::Error { failure: slot, .. }) = out.iter_mut().rev().find(|i| matches!(i, Item::Error { text: t, .. } if Some(*t) == text)) {
+            *slot = Some(failure);
         }
     }
     let arriving = n4n0.lines.last().is_some_and(|l| l.streaming);
@@ -135,7 +144,7 @@ pub fn show(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, panel: R
     tu.set_clip_rect(thread.intersect(shape));
     match gate(snap) {
         Gate::Ready if bar.log => log(&mut tu, snap, now_ms),
-        Gate::Ready => conversation(bar, &mut tu, ctl, snap, thread),
+        Gate::Ready => conversation(bar, &mut tu, ctl, snap, thread, now_ms),
         g => gated(&mut tu, ctl, snap, thread, g),
     }
     dock(bar, ui, ctl, snap, composer);
@@ -213,7 +222,7 @@ fn gated(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, g: Gate) {
 }
 
 /// The conversation: the column of messages, in the chat's one scroll region.
-fn conversation(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect) {
+fn conversation(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, now_ms: u64) {
     let all = items(&snap.n4n0);
     if all.is_empty() {
         empty(ui, thread);
@@ -233,7 +242,7 @@ fn conversation(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thre
             let left = ui.max_rect().center().x - column_w / 2.0;
             let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(pos2(left, top), vec2(column_w, 4000.0))));
             cu.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            item_ui(bar, &mut cu, ctl, item, i, i == last, now);
+            item_ui(bar, &mut cu, ctl, item, i, i == last, now, now_ms);
             let used = cu.min_rect().height();
             // Steps of one turn sit closer than turns.
             let gap = match (item, all.get(i + 1)) {
@@ -278,7 +287,7 @@ fn empty(ui: &mut Ui, thread: Rect) {
 
 /// One step of the thread in the column `ui`.
 #[allow(clippy::too_many_arguments)]
-fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: usize, last: bool, now: f64) {
+fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: usize, last: bool, now: f64, now_ms: u64) {
     let width = ui.available_width();
     match item {
         Item::You(line) => {
@@ -323,12 +332,26 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             widgets::icon(ui.painter(), pos2(r.left() + 8.0, r.top() + 9.0), icons::CHECK_CIRCLE, 13.0, theme::alpha(theme::ACCENT, 0.8));
             ui.painter().galley(pos2(r.left() + 24.0, r.top()), g, theme::FG_3);
         }
-        Item::Error(text) => {
+        Item::Error { text, failure } => {
             let g = ui.painter().layout_job(Txt::new(*text, 13.0).color(theme::DANGER).line_height(19.0).job(width - 52.0));
-            let (r, _) = ui.allocate_exact_size(vec2(width, g.size().y + 20.0), Sense::hover());
+            // An administrator's detail, small; nobody else is sent one.
+            let detail = failure
+                .and_then(|f| f.admin_detail.as_deref())
+                .map(|d| ui.painter().layout_job(Txt::new(d, 11.0).color(theme::FG_3).line_height(15.0).job(width - 52.0)));
+            let detail_h = detail.as_ref().map_or(0.0, |d| d.size().y + 6.0);
+            let retry = failure.filter(|f| f.retry);
+            let foot = if retry.is_some() { 44.0 } else { 0.0 };
+            let (r, _) = ui.allocate_exact_size(vec2(width, g.size().y + detail_h + foot + 20.0), Sense::hover());
             ui.painter().rect_filled(r, theme::radius(14.0), theme::alpha(theme::DANGER, 0.1));
             widgets::icon(ui.painter(), pos2(r.left() + 20.0, r.top() + 19.5), icons::WARNING_CIRCLE, 15.0, theme::DANGER);
+            let text_h = g.size().y;
             ui.painter().galley(pos2(r.left() + 38.0, r.top() + 10.0), g, theme::DANGER);
+            if let Some(d) = detail {
+                ui.painter().galley(pos2(r.left() + 38.0, r.top() + 10.0 + text_h + 6.0), d, theme::FG_3);
+            }
+            if let Some(f) = retry {
+                retry_button(bar, ui, ctl, f, pos2(r.left() + 38.0, r.bottom() - 10.0 - 32.0), now_ms);
+            }
         }
         Item::Thinking | Item::Listening(_) => {
             let (r, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
@@ -407,6 +430,24 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
         if go.show_at(ui, Rect::from_min_size(pos2(card.right() - 16.0 - w, foot), vec2(w, 34.0))).clicked() {
             ctl.n4n0(N4n0Command::OpenLink { url: c.approve_url.clone() });
         }
+    }
+}
+
+/// Retry on the last turn's failure, at `at`: the message again, once a press; its wait until then.
+fn retry_button(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, f: &orbiters_n4n0::TurnFailure, at: Pos2, now_ms: u64) {
+    let waits = f.waits(now_ms) > 0;
+    let sent = bar.retried == Some(f.id);
+    let label = f.label(now_ms);
+    let b = Button::new(&label).icon(icons::ARROW_CLOCKWISE).variant(Variant::Secondary).size(Size::Sm).enabled(!waits && !sent).id_salt(("chat-retry", f.id));
+    let w = b.desired_width(ui);
+    let resp = b.show_at(ui, Rect::from_min_size(at, vec2(w, 32.0)));
+    if waits {
+        // The seconds left, as they pass.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    } else if !sent && fresh_activation(ui, &resp) {
+        ctl.n4n0(N4n0Command::RetryTurn { id: f.id });
+        bar.retried = Some(f.id);
+        bar.focus = true;
     }
 }
 

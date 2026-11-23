@@ -43,20 +43,20 @@ pub fn game_window(windows: &[MacWindow], owner: u32) -> Option<MacWindow> {
         .copied()
 }
 
-/// The content of `window` in backing pixels at `scale` (title bar left out).
-pub fn content_pixels(window: &MacWindow, scale: f64) -> (u32, u32) {
+/// The content of `window` in backing pixels at `scale`, its title bar of `title` points left out.
+pub fn content_pixels(window: &MacWindow, scale: f64, title: f64) -> (u32, u32) {
     let w = (window.width * scale).round().max(0.0) as u32;
-    let h = ((window.height - TITLE_BAR_POINTS) * scale).round().max(0.0) as u32;
+    let h = ((window.height - title) * scale).round().max(0.0) as u32;
     (w, h)
 }
 
-/// The rows of a window capture that are its title bar, at the capture's own size: a capture of a frame `frame_height`
-/// points high `image_height` pixels tall.
-pub fn title_rows(image_height: u32, frame_height: f64) -> u32 {
-    if frame_height <= TITLE_BAR_POINTS {
+/// The rows of a window capture that are its title bar of `title` points, at the capture's own size: a capture of a frame
+/// `frame_height` points high `image_height` pixels tall.
+pub fn title_rows(image_height: u32, frame_height: f64, title: f64) -> u32 {
+    if frame_height <= title || title <= 0.0 {
         return 0;
     }
-    ((image_height as f64) * TITLE_BAR_POINTS / frame_height).round() as u32
+    ((image_height as f64) * title / frame_height).round() as u32
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -101,6 +101,7 @@ mod imp {
         fn CGMainDisplayID() -> u32;
         fn CGGetDisplaysWithRect(rect: CGRect, max: u32, displays: *mut u32, count: *mut u32) -> i32;
         fn CGDisplayCopyDisplayMode(display: u32) -> CFTypeRef;
+        fn CGDisplayBounds(display: u32) -> CGRect;
         fn CGDisplayModeGetWidth(mode: CFTypeRef) -> usize;
         fn CGDisplayModeGetPixelWidth(mode: CFTypeRef) -> usize;
         fn CGDisplayModeRelease(mode: CFTypeRef);
@@ -220,12 +221,9 @@ mod imp {
     /// Backing pixels per point of the display that shows most of `window` (2 on a Retina display), from its display mode:
     /// `CGDisplayPixelsWide` and `CGDisplayBounds` both count points (1470 on this Mac's 2940-pixel panel).
     pub fn scale_of(window: &MacWindow) -> f64 {
-        let rect = CGRect { x: window.x, y: window.y, w: window.width.max(1.0), h: window.height.max(1.0) };
-        let mut displays = [0u32; 4];
-        let mut count = 0u32;
-        // SAFETY: plain queries into buffers of ours; the mode is released.
+        let Some(display) = display_of(window) else { return 1.0 };
+        // SAFETY: plain queries; the mode is released.
         unsafe {
-            let display = if CGGetDisplaysWithRect(rect, displays.len() as u32, displays.as_mut_ptr(), &mut count) == 0 && count > 0 { displays[0] } else { CGMainDisplayID() };
             let mode = CGDisplayCopyDisplayMode(display);
             if mode.is_null() {
                 return 1.0;
@@ -234,6 +232,32 @@ mod imp {
             CGDisplayModeRelease(mode);
             scale
         }
+    }
+
+    /// The display that shows most of `window` (by the area of each display it covers), else the main one.
+    fn display_of(window: &MacWindow) -> Option<u32> {
+        let rect = CGRect { x: window.x, y: window.y, w: window.width.max(1.0), h: window.height.max(1.0) };
+        let mut displays = [0u32; 8];
+        let mut count = 0u32;
+        // SAFETY: plain queries into buffers of ours.
+        unsafe {
+            if CGGetDisplaysWithRect(rect, displays.len() as u32, displays.as_mut_ptr(), &mut count) != 0 || count == 0 {
+                return Some(CGMainDisplayID());
+            }
+            let bounds: Vec<(u32, super::Frame)> = displays[..count as usize].iter().map(|d| {
+                let b = CGDisplayBounds(*d);
+                (*d, (b.x, b.y, b.w, b.h))
+            }).collect();
+            super::most_covered((window.x, window.y, window.width, window.height), &bounds).or(Some(CGMainDisplayID()))
+        }
+    }
+
+    /// The frame of the display that shows most of `window`, in points.
+    pub fn display_frame(window: &MacWindow) -> Option<super::Frame> {
+        let display = display_of(window)?;
+        // SAFETY: a plain query.
+        let b = unsafe { CGDisplayBounds(display) };
+        Some((b.x, b.y, b.w, b.h))
     }
 
     /// Seconds since the last keyboard, mouse or trackpad event of the HID system, whoever's (the bridge sends none on a Mac).
@@ -247,24 +271,55 @@ mod imp {
     pub fn capture_png(id: u32) -> Result<Vec<u8>, String> {
         let folder = std::env::temp_dir().join(format!("orbiters-bridge-shot-{}-{id}-{}", std::process::id(), super::next_shot()));
         std::fs::create_dir(&folder).map_err(|e| e.to_string())?;
+        // Removed however this call ends (a failure, a panic): no picture is left behind.
+        let _gone = super::Gone(folder.clone());
         let file = folder.join("shot.png");
-        let result = (|| {
-            let mut child = std::process::Command::new("/usr/sbin/screencapture")
-                .args(["-l", &id.to_string(), "-o", "-x", "-t", "png"])
-                .arg(&file)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            let status = super::wait_until(&mut child, super::CAPTURE_LIMIT)?;
-            if !status.success() {
-                return Err(format!("screencapture ended with {status}")); // i18n: not shown (an AI client reads it)
-            }
-            std::fs::read(&file).map_err(|e| e.to_string())
-        })();
-        let _ = std::fs::remove_dir_all(&folder);
-        result
+        let mut child = std::process::Command::new("/usr/sbin/screencapture")
+            .args(["-l", &id.to_string(), "-o", "-x", "-t", "png"])
+            .arg(&file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let status = super::wait_until(&mut child, super::CAPTURE_LIMIT)?;
+        if !status.success() {
+            return Err(format!("screencapture ended with {status}")); // i18n: not shown (an AI client reads it)
+        }
+        std::fs::read(&file).map_err(|e| e.to_string())
+    }
+}
+
+/// A folder of this process's own, removed when dropped.
+pub struct Gone(pub std::path::PathBuf);
+
+impl Drop for Gone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A frame in points: x, y, width, height.
+pub type Frame = (f64, f64, f64, f64);
+
+/// The display (of `displays`: id, frame) that `window`'s frame covers the most of; `None` when it covers none.
+pub fn most_covered(window: Frame, displays: &[(u32, Frame)]) -> Option<u32> {
+    let area = |d: &(f64, f64, f64, f64)| {
+        let w = (window.0 + window.2).min(d.0 + d.2) - window.0.max(d.0);
+        let h = (window.1 + window.3).min(d.1 + d.3) - window.1.max(d.1);
+        w.max(0.0) * h.max(0.0)
+    };
+    displays.iter().map(|(id, d)| (*id, area(d))).filter(|(_, a)| *a > 0.0).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
+}
+
+/// The title bar of a window, in points: none when the window covers its whole display (the game borderless or full
+/// screen), else the engine's 32.
+pub fn title_points(window: &MacWindow, display: Option<Frame>) -> f64 {
+    let covers = display.is_some_and(|(x, y, w, h)| (window.x - x).abs() < 1.0 && (window.y - y).abs() < 1.0 && (window.width - w).abs() < 1.0 && (window.height - h).abs() < 1.0);
+    if covers {
+        0.0
+    } else {
+        TITLE_BAR_POINTS
     }
 }
 
@@ -284,13 +339,27 @@ pub fn wait_until(child: &mut std::process::Child, limit: std::time::Duration) -
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) if std::time::Instant::now() >= until => {
-                let _ = child.kill();
-                let _ = child.wait();
+                end(child);
                 return Err(format!("no answer within {} s", limit.as_secs())); // i18n: not shown (an AI client reads it)
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                end(child);
+                return Err(e.to_string());
+            }
         }
+    }
+}
+
+/// Ends `child` and reaps it, waiting a moment at most: a kill that failed never leads to a wait without end.
+fn end(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < until {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -318,9 +387,20 @@ mod tests {
         assert_eq!(game_window(&listed[..2], 7), None, "the splash alone is no game yet");
         assert_eq!(game_window(&listed, 8), None, "another window server's");
         assert_eq!(game_window(&[w(3, 640.0, 392.0, 0, false)], 7), None, "not shown");
-        assert_eq!(content_pixels(&listed[2], 2.0), (1280, 720));
-        assert_eq!(title_rows(784, 392.0), 64, "the capture of a 640 x 392 frame at scale 2");
-        assert_eq!(title_rows(392, 392.0), 32);
+        assert_eq!(content_pixels(&listed[2], 2.0, TITLE_BAR_POINTS), (1280, 720));
+        assert_eq!(title_rows(784, 392.0, TITLE_BAR_POINTS), 64, "the capture of a 640 x 392 frame at scale 2");
+        assert_eq!(title_rows(392, 392.0, TITLE_BAR_POINTS), 32);
+        // m17: a borderless game covering its display has no title bar to cut.
+        let whole = MacWindow { x: 0.0, y: 0.0, width: 1470.0, height: 956.0, ..listed[2] };
+        assert_eq!(title_points(&whole, Some((0.0, 0.0, 1470.0, 956.0))), 0.0);
+        assert_eq!(title_points(&listed[2], Some((0.0, 0.0, 1470.0, 956.0))), TITLE_BAR_POINTS);
+        assert_eq!(title_rows(1912, 956.0, 0.0), 0);
+        assert_eq!(content_pixels(&whole, 2.0, 0.0), (2940, 1912));
+        // A window across two displays is on the one it covers the most of.
+        let displays = [(1, (0.0, 0.0, 1470.0, 956.0)), (2, (1470.0, 0.0, 1920.0, 1080.0))];
+        assert_eq!(most_covered((1400.0, 100.0, 640.0, 392.0), &displays), Some(2), "570 points on the second, 70 on the first");
+        assert_eq!(most_covered((100.0, 100.0, 640.0, 392.0), &displays), Some(1));
+        assert_eq!(most_covered((5000.0, 5000.0, 10.0, 10.0), &displays), None);
     }
 
     /// The verifier's case: this Mac's 2940-pixel panel drawn as 1470 points. The window's content is 1280 x 720 pixels,
@@ -331,7 +411,7 @@ mod tests {
         assert_eq!(mode_scale(1920, 1920), 1.0);
         assert_eq!(mode_scale(0, 1470), 1.0, "a mode that says nothing");
         let game = w(3, 640.0, 392.0, 0, true);
-        assert_eq!(content_pixels(&game, mode_scale(2940, 1470)), (1280, 720));
+        assert_eq!(content_pixels(&game, mode_scale(2940, 1470), TITLE_BAR_POINTS), (1280, 720));
     }
 
     #[cfg(unix)]

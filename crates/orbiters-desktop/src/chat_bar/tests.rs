@@ -219,7 +219,7 @@ fn the_thread_names_n4n0_once_a_run_and_lets_the_card_say_its_question() {
     let items = panel::items(&snap.n4n0);
     assert!(matches!(items[1], panel::Item::N4n0 { first: true, .. }) && matches!(items[2], panel::Item::N4n0 { first: false, .. }));
     assert!(!items.iter().any(|i| matches!(i, panel::Item::Note(_))), "the question is the card's");
-    assert!(matches!(items[3], panel::Item::Error(_)));
+    assert!(matches!(items[3], panel::Item::Error { .. }));
     assert!(matches!(items[4], panel::Item::Thinking), "dots before an answer's first words");
     assert!(matches!(items.last(), Some(panel::Item::Confirm(_))), "the question waits at the end");
     snap.n4n0.lines.push(N4n0Line { streaming: true, ..line(N4n0Who::N4n0, "Booping", 6) });
@@ -927,4 +927,65 @@ fn a_typed_reply_is_bound_to_the_question_shown_at_its_enter() {
     w.frame(Vec::new());
     let sent: Vec<Option<u64>> = w.backend.sent().iter().filter_map(|c| match c { N4n0Command::Ask { question, .. } => Some(*question), _ => None }).collect(); // BEFORE
     assert_eq!(sent, vec![Some(7)], "{:?}", w.backend.sent());
+}
+
+// --- Request23: Retry on a failed turn ---
+
+fn failure(id: u64, at_ms: u64, retry_at_ms: u64, automatic: bool) -> orbiters_n4n0::TurnFailure {
+    orbiters_n4n0::TurnFailure { id, at_ms, retry: true, retry_at_ms, automatic, admin_detail: None }
+}
+
+#[test]
+fn a_failed_turn_offers_retry_on_its_own_line() {
+    let mut snap = Snapshot::new(Settings::default());
+    snap.n4n0.lines = vec![line(N4n0Who::You, "put me in orange", 1), line(N4n0Who::Error, "N4N0 is busy.", 2)].into();
+    snap.n4n0.assistant.failure = Some(failure(9, 2, 0, false));
+    assert!(matches!(panel::items(&snap.n4n0)[1], panel::Item::Error { failure: Some(f), .. } if f.id == 9));
+    // Another error said since: the older line shows none.
+    snap.n4n0.lines.push(line(N4n0Who::Error, "Something else.", 3));
+    let items = panel::items(&snap.n4n0);
+    assert!(matches!(items[1], panel::Item::Error { failure: Some(_), .. }) && matches!(items[2], panel::Item::Error { failure: None, .. }));
+    // While N4N0 answers, no Retry.
+    snap.n4n0.thinking = true;
+    assert!(panel::items(&snap.n4n0).iter().all(|i| !matches!(i, panel::Item::Error { failure: Some(_), .. })));
+    // The label counts the wait down, then says Retry.
+    let f = failure(9, 2, 25_000, false);
+    assert_eq!(f.label(0), "Retry in 25 s");
+    assert_eq!(f.label(24_100), "Retry in 1 s");
+    assert_eq!(f.label(25_000), "Retry");
+    assert_eq!(failure(9, 2, 25_000, true).label(0), "Trying again in 25 s");
+    assert_eq!(failure(9, 2, 240_000, false).label(0), "Retry in 4 min");
+    assert_eq!(failure(9, 2, 7_200_000, false).label(0), "Retry in 2 h");
+}
+
+#[test]
+fn the_chats_retry_is_one_send_a_press_and_waits_for_its_moment() {
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::You, "put me in orange", 1), line(N4n0Who::Error, "N4N0 is busy.", 2)].into();
+    snap.n4n0.assistant.failure = Some(failure(9, 2, now() + 3_600_000, false));
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let retry = |w: &Window| orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Retry")).is_some();
+    assert!(!retry(&w), "it waits: its words say so");
+    let waiting = orbiters_ui::widgets::control(&w.ctx, &failure(9, 2, now() + 3_600_000, false).label(now()));
+    assert!(waiting.is_none_or(|(_, enabled)| !enabled), "disabled while it waits");
+    let sent = w.backend.sent().len();
+    if let Some((rect, _)) = waiting {
+        w.press(rect.center());
+    }
+    assert_eq!(w.backend.sent().len(), sent, "too early");
+    // Its moment: one press is one send, however often the button is pressed.
+    w.backend.set(|s| s.n4n0.assistant.failure = Some(failure(9, 2, now().saturating_sub(1), false)));
+    w.settle();
+    let (rect, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Retry")).expect("Retry is drawn");
+    assert!(on);
+    w.press(rect.center());
+    w.press(rect.center());
+    assert_eq!(w.backend.sent().iter().filter(|c| matches!(c, N4n0Command::RetryTurn { .. })).count(), 1);
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::RetryTurn { id: 9 })), "{:?}", w.backend.sent());
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }

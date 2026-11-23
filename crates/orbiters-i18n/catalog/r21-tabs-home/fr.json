@@ -57,5 +57,6 @@
   "{name} is closed now: choose another place.": "{name} est fermé : choisis un autre endroit.",
   "VRChat did not say whether {name}'s instance is open: Play asks again.": "VRChat n’a pas dit si l’instance de {name} est ouverte : Jouer redemande.",
   "VRChat did not say whether {name} is open: Play asks again.": "VRChat n’a pas dit si {name} est ouvert : Jouer redemande.",
-  "VRChat is not signed in for this profile: choose another place.": "VRChat n’est pas connecté sur ce profil : choisis un autre endroit."
+  "VRChat is not signed in for this profile: choose another place.": "VRChat n’est pas connecté sur ce profil : choisis un autre endroit.",
+  "The saved VRChat session could not be removed from this computer and may sign in again at the next start: close what holds it, then remove it again.": "La session VRChat enregistrée n’a pas pu être supprimée de cet ordinateur et pourrait se reconnecter au prochain démarrage : ferme ce qui l’utilise, puis supprime-la à nouveau."
 }

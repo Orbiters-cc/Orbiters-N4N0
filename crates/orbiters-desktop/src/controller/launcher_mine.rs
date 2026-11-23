@@ -74,39 +74,31 @@ pub fn over_limit(edit: &ProfileEdit) -> Option<String> {
 impl Controller {
     /// The account's own profile, after a signed-in read of `account`: into the state only while that account's list
     /// is on show.
-    pub(super) fn launcher_read_mine(&self, client: &Arc<Mutex<Client>>, account: &str) {
-        let Ok(v) = send_as(client, account, |c| c.own_profile()) else { return };
-        self.update_if(|s| {
-            if !matches!(&s.launcher.source, Source::SignedIn { user_id, .. } if user_id == account) {
-                return false;
+    pub(super) fn launcher_read_mine(&self, session: &Session) {
+        let by = &session.by;
+        let Ok(v) = send_as(&session.client, &by.user, |c| c.own_profile()) else { return };
+        self.publish_launcher(by, |l| {
+            if matches!(&l.source, Source::SignedIn { user_id, .. } if *user_id == by.user) {
+                l.mine = Some(my_profile(&v, l.mine.as_ref()));
             }
-            let mine = my_profile(&v, s.launcher.mine.as_ref());
-            let changed = s.launcher.mine.as_ref() != Some(&mine);
-            if changed {
-                s.launcher.mine = Some(mine);
-            }
-            changed
         });
     }
 
-    /// Changes the own profile on show, only while the list on show is `account`'s (`None`: no signed-in list): an answer
-    /// that comes back after the person switched accounts lands on nobody's card (REQUEST15 fix B3). Whether it landed.
-    pub(super) fn launcher_mine_publish(&self, account: Option<&str>, f: impl FnOnce(&mut MyProfile)) -> bool {
-        self.update_if(|s| {
-            let shown = match &s.launcher.source {
-                Source::SignedIn { user_id, .. } => Some(user_id.as_str()),
-                _ => None,
-            };
-            if shown != account {
-                return false;
+    /// Changes the own profile on show, only while the list on show is `by`'s: an answer that comes back after the person
+    /// switched accounts (VRChat's or Orbiters') lands on nobody's card (REQUEST15 fix B3). Whether it landed.
+    pub(super) fn launcher_mine_publish(&self, by: &By, f: impl FnOnce(&mut MyProfile)) -> bool {
+        let mut landed = false;
+        let written = self.publish_launcher(by, |l| {
+            if matches!(&l.source, Source::SignedIn { user_id, .. } if *user_id == by.user) {
+                f(l.mine.get_or_insert_with(MyProfile::default));
+                landed = true;
             }
-            f(s.launcher.mine.get_or_insert_with(MyProfile::default));
-            true
-        })
+        });
+        written && landed
     }
 
-    pub(super) fn launcher_mine_saving(&self, account: Option<&str>, saving: Saving, next: Option<i64>) {
-        self.launcher_mine_publish(account, |mine| {
+    pub(super) fn launcher_mine_saving(&self, by: &By, saving: Saving, next: Option<i64>) {
+        self.launcher_mine_publish(by, |mine| {
             // Saving is no answer yet; Saved and Failed are.
             if !matches!(saving, Saving::Saving(_)) {
                 mine.answered += 1;
@@ -122,29 +114,29 @@ impl Controller {
     /// limits and our own pace, then sent with that account's session only. The card shows Saving, then Saved or why not.
     pub(super) fn launcher_edit_mine(self: &Shared, edit: ProfileEdit, account: Option<&str>) -> Option<Notice> {
         let part = edit.part();
-        if self.launcher_client().is_none() {
-            self.launcher_mine_saving(account, Saving::Failed(part, tr("Sign in to VRChat in Settings to change your profile here.").into()), None);
-            return None;
-        }
-        let (client, account) = match (self.launcher_sender(account), account) {
-            (Ok(client), Some(account)) => (client, account.to_string()),
+        let asked = self.vrchat_now();
+        let (Session { client, by }, account) = match (self.launcher_sender(account), account) {
+            (Ok(session), Some(account)) => (session, account.to_string()),
             (sender, _) => {
+                // Not this account's session: said on the card of the list on show, when it is still the one pressed.
                 let text = match notice_or_changed(sender.err()) {
                     Notice::Error(t) | Notice::Failed { text: t, .. } => t,
                     _ => tr("Sign in to VRChat in Settings to change your profile here.").to_string(),
                 };
-                self.launcher_mine_saving(account, Saving::Failed(part, text), None);
+                if let (Some(stamp), Some(account)) = (asked, account) {
+                    self.launcher_mine_saving(&By { stamp, user: account.to_string() }, Saving::Failed(part, text), None);
+                }
                 return None;
             }
         };
         // A bio is only ever changed from the one VRChat gave: never from a placeholder whose empty bio would replace the
         // account's real one (REQUEST15 second pass, S6).
         if matches!(edit, ProfileEdit::Bio(_)) && !self.view().launcher.mine.as_ref().is_some_and(|m| m.loaded) {
-            self.launcher_mine_saving(Some(&account), Saving::Failed(part, tr("Your profile has not been read yet, so your bio is not known here: press Read again first.").into()), None);
+            self.launcher_mine_saving(&by, Saving::Failed(part, tr("Your profile has not been read yet, so your bio is not known here: press Read again first.").into()), None);
             return None;
         }
         if let Some(why) = over_limit(&edit) {
-            self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
+            self.launcher_mine_saving(&by, Saving::Failed(part, why), None);
             return None;
         }
         // One change at a time, a few seconds apart.
@@ -153,12 +145,12 @@ impl Controller {
             if let Some(at) = rt.mine_next.filter(|at| Instant::now() < *at) {
                 let left = at.saturating_duration_since(Instant::now()).as_secs().max(1);
                 drop(rt);
-                self.launcher_mine_saving(Some(&account), Saving::Failed(part, tr!("VRChat takes one change every few seconds: try again in {n} s.", n = left)), None);
+                self.launcher_mine_saving(&by, Saving::Failed(part, tr!("VRChat takes one change every few seconds: try again in {n} s.", n = left)), None);
                 return None;
             }
             rt.mine_next = Some(Instant::now() + CHANGE_EVERY);
         }
-        self.launcher_mine_saving(Some(&account), Saving::Saving(part), Some(now() + CHANGE_EVERY.as_secs() as i64));
+        self.launcher_mine_saving(&by, Saving::Saving(part), Some(now() + CHANGE_EVERY.as_secs() as i64));
         // A picture goes only when it is one of this account's own files, as VRChat lists them now: never a URL that
         // merely looks like one (another person's file on the same host, a list read for another account).
         let own = match &edit {
@@ -175,7 +167,7 @@ impl Controller {
                 Err(_) => Some(tr("VRChat did not take the change. Try again in a moment.").to_string()),
             };
             if let Some(why) = why {
-                self.launcher_mine_saving(Some(&account), Saving::Failed(part, why), None);
+                self.launcher_mine_saving(&by, Saving::Failed(part, why), None);
                 return None;
             }
         }
@@ -188,12 +180,12 @@ impl Controller {
             },
         };
         match sent {
-            Ok(v) => self.update(|s| {
-                if !matches!(&s.launcher.source, Source::SignedIn { user_id, .. } if *user_id == account) {
+            Ok(v) => drop(self.publish_launcher(&by, |l| {
+                if !matches!(&l.source, Source::SignedIn { user_id, .. } if *user_id == account) {
                     return;
                 }
-                let avatar = s.launcher.mine.as_ref().map(|m| m.avatar_picture.clone()).unwrap_or_default();
-                if let Some(me) = s.launcher.me.as_mut() {
+                let avatar = l.mine.as_ref().map(|m| m.avatar_picture.clone()).unwrap_or_default();
+                if let Some(me) = l.me.as_mut() {
                     // What VRChat answered is what shows; what it did not say, what was asked for.
                     match &edit {
                         // VRChat answers with the whole account: its status and its text, both as they now are.
@@ -224,7 +216,7 @@ impl Controller {
                         ProfileEdit::Bio(_) => {}
                     }
                 }
-                let mine = s.launcher.mine.get_or_insert_with(MyProfile::default);
+                let mine = l.mine.get_or_insert_with(MyProfile::default);
                 match &edit {
                     ProfileEdit::Bio(t) => mine.bio = v.get("bio").and_then(Value::as_str).map_or_else(|| t.clone(), str::to_string),
                     ProfileEdit::Picture(url) => mine.icon = url.clone(),
@@ -241,13 +233,13 @@ impl Controller {
                 }
                 mine.saving = Some(Saving::Saved(part));
                 mine.answered += 1;
-            }),
+            })),
             Err(notice) => {
                 let text = match notice {
                     Notice::Error(t) | Notice::Failed { text: t, .. } => t,
                     _ => tr("VRChat did not take the change. Try again in a moment.").to_string(),
                 };
-                self.launcher_mine_saving(Some(&account), Saving::Failed(part, text), None);
+                self.launcher_mine_saving(&by, Saving::Failed(part, text), None);
             }
         }
         None
@@ -255,18 +247,18 @@ impl Controller {
 
     /// The account's own icons or gallery pictures, to choose among (read on the person's press only).
     pub(super) fn launcher_list_pictures(&self, kind: PictureKind, account: Option<&str>) {
-        let (client, account) = match (self.launcher_sender(account), account) {
-            (Ok(client), Some(account)) => (client, account.to_string()),
+        let (Session { client, by }, account) = match (self.launcher_sender(account), account) {
+            (Ok(session), Some(account)) => (session, account.to_string()),
             _ => return,
         };
-        self.launcher_mine_publish(Some(&account), |mine| mine.listing = Some(kind));
+        self.launcher_mine_publish(&by, |mine| mine.listing = Some(kind));
         let tag = match kind {
             PictureKind::Icons => "icon",
             PictureKind::Gallery => "gallery",
         };
         let read = send_as(&client, &account, |c| c.own_files(tag));
         // Only onto the card of the account it was read for (the person may have switched meanwhile).
-        self.launcher_mine_publish(Some(&account), |mine| {
+        self.launcher_mine_publish(&by, |mine| {
             mine.listing = None;
             match read {
                 Ok(files) => {

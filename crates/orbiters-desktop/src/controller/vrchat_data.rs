@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Scope {
     development: bool,
     member: Option<String>,
+    /// Whom the VRChat account is verified for (verify3-r21 B6: a name can be another member's).
+    verified_for: Option<orbiters_core::launcher::VerifiedFor>,
     allowed: bool,
     user: Option<String>,
     revision: u64,
@@ -24,6 +26,7 @@ impl Scope {
         Self {
             development: s.settings.development,
             member: s.account.state.username().map(str::to_owned),
+            verified_for: s.vrchat_login.verified_for.clone(),
             allowed: s.vrchat_login.allowed,
             user: s.vrchat_login.user.as_ref().map(|u| u.id.clone()),
             revision: s.vrchat_login.revision,
@@ -53,6 +56,13 @@ pub enum Request {
     Instance {
         world: String,
         instance: String,
+    },
+    /// Whether it is open, as VRChat said at most `max_age_ms` ago, and how long ago that was: what Play goes by
+    /// (verify3-r21 M2).
+    InstanceSeen {
+        world: String,
+        instance: String,
+        max_age_ms: u64,
     },
     Image {
         url: String,
@@ -91,6 +101,7 @@ pub enum Response {
     Avatars { pictures: Vec<(String, super::vrchat_login::Picture)>, errors: Vec<String> },
     Friends(Vec<User>),
     Instance(Option<bool>),
+    InstanceSeen { open: Option<bool>, age_ms: u64 },
     /// The file's bytes, as base64 on the link (CTL2-1).
     Image(#[serde(with = "super::vrchat_login::bytes_b64")] Vec<u8>),
     Owned(Vec<String>),
@@ -249,6 +260,10 @@ impl Controller {
                 }
                 Request::Friends => Response::Friends(source.friends()?),
                 Request::Instance { world, instance } => Response::Instance(source.instance_alive(&world, &instance)?),
+                Request::InstanceSeen { world, instance, max_age_ms } => {
+                    let (open, age) = source.instance_seen(&world, &instance, std::time::Duration::from_millis(max_age_ms))?;
+                    Response::InstanceSeen { open, age_ms: age.as_millis() as u64 }
+                }
                 Request::Image { url } => Response::Image(source.image(&url)?),
                 Request::Owned { ids } => {
                     anyhow::ensure!(ids.len() <= OWNED_BATCH, "{}", tr("Too many avatars and worlds asked about."));
@@ -410,9 +425,10 @@ impl Controller {
             return self.notify(NoticeKind::Error, tr("Only avatars' and worlds' pictures can be changed."));
         }
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut refused = None;
-        self.update_if(|s| {
-            let login = &mut s.vrchat_login;
+        let mut refused = Some(tr("The account changed. Please try again."));
+        let Some(stamp) = self.vrchat_now() else { return self.notify(NoticeKind::Error, tr("Sign in to VRChat in Settings to change pictures.")) };
+        self.publish_login(&stamp, |login, _| {
+            refused = None;
             if !login.allowed || login.user.is_none() {
                 refused = Some(tr("Sign in to VRChat in Settings to change pictures."));
             } else if login.upload.as_ref().is_some_and(PictureUpload::running) {
@@ -420,20 +436,20 @@ impl Controller {
             } else {
                 login.upload = Some(PictureUpload { serial, id: id.clone(), step: Some(Step::Checking), outcome: None });
             }
-            refused.is_none()
         });
         if let Some(message) = refused {
             return self.notify(NoticeKind::Error, message);
         }
         let ctl = self.clone();
+        let theirs = stamp.clone();
         let finish = move |ctl: &Controller, result: std::result::Result<(), String>| {
-            let ours = ctl.update_if(|s| match s.vrchat_login.upload.as_mut().filter(|u| u.serial == serial) {
-                Some(u) => {
+            let mut ours = false;
+            ctl.publish_login(&stamp, |login, _| {
+                if let Some(u) = login.upload.as_mut().filter(|u| u.serial == serial) {
                     u.step = None;
                     u.outcome = Some(result.clone());
-                    true
+                    ours = true;
                 }
-                None => false,
             });
             // An account change meanwhile discarded it with the rest of the session's state.
             if ours {
@@ -446,7 +462,7 @@ impl Controller {
         let spawned = std::thread::Builder::new().name("vrchat-picture".into()).spawn({
             let finish = finish.clone();
             move || {
-                let result = ctl.replace_picture(&scope, serial, &id, &path).map_err(|e| format!("{e:#}"));
+                let result = ctl.replace_picture(&scope, &theirs, serial, &id, &path).map_err(|e| format!("{e:#}"));
                 finish(&ctl, result);
             }
         });
@@ -454,16 +470,14 @@ impl Controller {
             finish(self, Err(tr("The upload could not start.").into()));
         }
     }
-    fn replace_picture(&self, scope: &Scope, serial: u64, id: &str, path: &Path) -> anyhow::Result<()> {
+    fn replace_picture(&self, scope: &Scope, stamp: &super::vrchat_scope::Stamp, serial: u64, id: &str, path: &Path) -> anyhow::Result<()> {
         let png = read_picture(path)?;
         anyhow::ensure!(*scope == Scope::of(&self.view()), "{}", tr("The account changed. Please try again."));
         self.vrchat_source().replace_image(id, &png, |step| {
-            self.update_if(|s| match s.vrchat_login.upload.as_mut().filter(|u| u.serial == serial) {
-                Some(u) => {
+            self.publish_login(stamp, |login, _| {
+                if let Some(u) = login.upload.as_mut().filter(|u| u.serial == serial) {
                     u.step = Some(step);
-                    true
                 }
-                None => false,
             });
         })?;
         keep_picture(&orbiters_projects::data_dir(), id, &png);
@@ -800,17 +814,12 @@ mod tests {
     }
     #[test]
     fn pictures_need_a_vrchat_session_and_go_one_at_a_time() {
-        use crate::state::AccountState;
-        use orbiters_core::account::Server;
         let c = Controller::new(orbiters_core::settings::Settings::default());
         c.vrchat_picture(Scope::of(&c.view()), "avtr_a".into(), "picture.png".into());
         assert!(c.view().vrchat_login.upload.is_none());
         assert!(c.take_notices().iter().any(|n| format!("{n:?}").contains("Sign in to VRChat")));
+        c.test_vrchat(vec![]);
         c.update(|s| {
-            s.account.state = AccountState::SignedIn { username: "tester".into() };
-            s.account.development = Server::current() == Server::Development;
-            s.vrchat_login.allowed = true;
-            s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() });
             s.vrchat_login.upload =
                 Some(super::super::vrchat_login::PictureUpload { serial: 0, id: "avtr_b".into(), step: Some(Step::Uploading), outcome: None });
         });

@@ -181,7 +181,8 @@ pub enum Decision {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     /// Play was waiting for this: VRChat starts there now.
-    Launch { visit: Visit, mode: LaunchMode, profile: Option<u32> },
+    /// `account`: whom it was said open for, and whom the start is bound to.
+    Launch { visit: Visit, mode: LaunchMode, profile: Option<u32>, account: Option<String> },
     /// The new instance could not be made, or gone to.
     MakeFailed(String),
 }
@@ -466,7 +467,7 @@ impl Desk {
                 let play = self.pending.take().filter(|p| p.generation == generation && now.saturating_duration_since(p.at) <= PLAY_WAIT)?;
                 // Only from an "open" good now, however long the answer waited to be read.
                 let visit = self.enterable(now)?;
-                Some(Outcome::Launch { visit, mode: play.mode, profile: self.asker.profile })
+                Some(Outcome::Launch { visit, mode: play.mode, profile: self.asker.profile, account: self.asker.account.clone() })
             }
         }
     }

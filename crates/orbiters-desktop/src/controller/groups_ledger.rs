@@ -577,8 +577,8 @@ mod tests {
         for op in ["prepared", "sent", "done"] {
             l.prepare(entry(&l, op, Kind::CreatePost, None, op)).unwrap();
         }
-        l.dispatch("sent", false).unwrap();
-        l.dispatch("done", false).unwrap();
+        l.dispatch("sent", true).unwrap();
+        l.dispatch("done", true).unwrap();
         l.end("done", State::Done, Some(By::Answer), Some("gpos_1".into()));
         let l2 = again(&l);
         let state = |op: &str| l2.get(&key(), op).map(|e| (e.state, e.by)).unwrap();
@@ -644,7 +644,7 @@ mod tests {
         for i in 0..ENDED_MAX + 80 {
             let op = format!("op-{i}");
             l.prepare(entry(&l, &op, Kind::CreatePost, None, &op)).unwrap();
-            l.dispatch(&op, false).unwrap();
+            l.dispatch(&op, true).unwrap();
             if i % 2 == 0 {
                 l.end(&op, State::Done, Some(By::Answer), None);
             } else {

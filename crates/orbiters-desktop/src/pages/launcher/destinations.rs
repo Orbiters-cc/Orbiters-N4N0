@@ -456,7 +456,7 @@ pub fn launch(card: &Suggestion, access: CreateAccess, can_create: bool, seed: u
     }
 }
 
-/// The action Play sends for `launch` in `mode` on `profile` (`None`: a Mac, one VRChat, no profile choice); none for a
+/// The action Play sends for `launch` in `mode` on `profile` (`None`: no profile choice, VRChat's default); none for a
 /// new instance still to be made.
 pub fn action(launch: &Launch, mode: LaunchMode, profile: Option<u32>) -> Option<Action> {
     Some(match (launch, profile) {
@@ -856,14 +856,10 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         state.places.previous.stand_in_close();
         return;
     }
-    let (play, profile, profile_account) = if orbiters_core::vrchat_launch::VR_HERE {
-        let offered = super::states::profiles(&state.data, state.added_profile);
-        let next = super::states::next_profile(&offered, state.chosen_profile);
-        let account = offered.iter().find(|p| p.profile == next).and_then(|p| p.account.clone());
-        (super::states::play_on(&state.data, &offered, next), Some(next), account)
-    } else {
-        (super::states::play(&state.data), None, None)
-    };
+    let offered = super::states::profiles(&state.data, state.added_profile);
+    let next = super::states::next_here(&offered, state.chosen_profile);
+    let profile_account = offered.iter().find(|p| p.profile == next).and_then(|p| p.account.clone());
+    let (play, profile) = (super::states::play_here(&state.data, &offered, next), Some(next));
     if !showing(play) {
         // VRChat runs on the profile chosen: the previous instances' sheet goes with Where, and so does a press of Play
         // that waits for an answer.
@@ -1482,7 +1478,7 @@ fn choose_last(state: &mut State, card: &Suggestion, place: &Place) {
     }
 }
 
-/// Play pressed in `mode`, on `profile` (`None`: a Mac): what the selection says ([`Desk::decide`]). VRChat starts in the
+/// Play pressed in `mode`, on `profile` (`None`: no profile choice): what the selection says ([`Desk::decide`]). VRChat starts in the
 /// chosen place, or as it always does; an instance not said open lately is asked about first; a new instance is first
 /// made by VRChat for the account (on a thread: the button turns meanwhile).
 pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: Option<u32>) {

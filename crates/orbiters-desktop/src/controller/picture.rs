@@ -6,8 +6,9 @@
 //! a confirmed loss: the graphics of that run will not come back. A frame after it ends the loss.
 //! Both need evidence of their own: a confirmation one dated after the drop, and late enough after it to show that no frame
 //! came; an end of the loss a counter that grew, in the swapchain it counts. A count repeated, one taken before the drop, one
-//! with no date and one that could not be read say neither; nor, once the loss is confirmed, does the first count of a swapchain
-//! made since, which is only where its own counting begins.
+//! with no date and one that could not be read say neither; nor, once the loss is confirmed, does the first count of a swapchain,
+//! which is only where its own counting begins. The lines name no swapchain, so that as many counts as there are swapchains not
+//! known to have begun are taken for such firsts: only a count more than those is one that grew.
 //!
 //! The tracker ([`Tracker`]) is pure and tested on every computer. One follower (`incident::follow`) feeds it what the
 //! engine's log says in the order it says it ([`LogEvent`]) and the frames the session's record counts, each reading with
@@ -83,8 +84,8 @@ struct Loss {
 pub(crate) struct Tracker {
     /// The last count said of each swapchain: the lines name none, and each counts from its own 0.
     presents: Vec<u64>,
-    /// Those said before the last swapchain was made: a count above one of them may be that swapchain's first.
-    before: Vec<u64>,
+    /// The swapchains made whose first count is not known to have been said: a count may be that of one of them.
+    unstarted: usize,
     shown: Option<u64>,
     grew_at: Option<f64>,
     /// When the presents were last said, and how far apart they were.
@@ -100,27 +101,25 @@ const SWAPCHAINS: usize = 8;
 impl Tracker {
     /// Takes a count of presents: whether it says frames since the last one of its own swapchain. It is the swapchain's whose
     /// last count it comes closest after; one that repeats a count says nothing, and one under every count is a new
-    /// swapchain's, which counted from its own 0. The very first one has nothing to have grown from.
-    fn count(&mut self, count: u64) -> bool {
-        if self.presents.contains(&count) || self.before.contains(&count) {
+    /// swapchain's, which counted from its own 0, as is (`begins`) one that may be. The very first one has nothing to have
+    /// grown from.
+    fn count(&mut self, count: u64, begins: bool) -> bool {
+        if self.presents.contains(&count) {
             return false;
         }
-        if let Some(last) = self.presents.iter_mut().filter(|last| **last < count).max() {
-            *last = count;
-            return true;
+        match self.presents.iter_mut().filter(|last| **last < count).max() {
+            Some(last) if !begins => {
+                *last = count;
+                return true;
+            }
+            _ => self.unstarted = self.unstarted.saturating_sub(1),
         }
-        let first = self.presents.is_empty() && self.before.is_empty();
+        let first = self.presents.is_empty();
         if self.presents.len() == SWAPCHAINS {
             self.presents.remove(0);
         }
         self.presents.push(count);
         !first && count > 0
-    }
-
-    /// A swapchain was made: the next count may be its first.
-    fn made(&mut self) {
-        self.before.append(&mut self.presents);
-        self.before.drain(..self.before.len().saturating_sub(SWAPCHAINS));
     }
 
     /// The picture at this look.
@@ -133,18 +132,19 @@ impl Tracker {
                     Some(drop) => drop.said = 0,
                     None => self.dropped = Some(Loss { at, wall: look.wall, said: 0, shown: None }),
                 },
-                LogEvent::Swapchain => self.made(),
+                LogEvent::Swapchain => self.unstarted = (self.unstarted + 1).min(SWAPCHAINS),
                 LogEvent::Presents(count) => {
-                    let mut said = self.presents.iter().chain(&self.before).peekable();
-                    let new = said.peek().is_some() && said.all(|last| count < *last);
-                    let grown = self.presents.iter().any(|last| *last < count);
-                    if !self.count(count) {
+                    let new = !self.presents.is_empty() && self.presents.iter().all(|last| count < *last);
+                    // Confirmed lost, it is the first of a swapchain for as long as it may be.
+                    let begins = self.lost && self.unstarted > 0;
+                    let grown = !begins && self.presents.iter().any(|last| *last < count);
+                    if !self.count(count, begins) {
                         continue;
                     }
                     match &mut self.dropped {
                         None => self.grew_at = Some(at),
-                        // Confirmed lost, the first count of a swapchain made since is where its counting begins: only
-                        // what it grows to afterwards is a frame.
+                        // Confirmed lost, the first count of a swapchain is where its counting begins: only what it
+                        // grows to afterwards is a frame.
                         Some(_) if !grown && self.lost => {}
                         Some(drop) => {
                             drop.said += 1;
@@ -525,6 +525,29 @@ mod tests {
             assert_eq!(t.look(&log(18.0, &[&made()[..1], &[Presents(120)]].concat())), Picture::Lost, "another one's first");
             assert_eq!(t.look(&log(19.0, &[Presents(180)])), Picture::Presenting, "what it grew to");
         }
+        // Ninth verification (the verifier's fixture): several made before any has counted: each one's first count is none to
+        // have grown from, in whatever order; one more than they are has to be.
+        for before in 0..=2 {
+            let mut t = Tracker::default();
+            t.look(&log(0.0, &[Presents(600)]));
+            t.look(&log(0.5, &vec![LogEvent::Swapchain; before]));
+            t.look(&log(1.0, &[Dropped]));
+            assert_eq!(t.look(&log(15.0, &[])), Picture::Lost);
+            let since = [vec![LogEvent::Swapchain; 2 - before], vec![Presents(20)]].concat();
+            assert_eq!(t.look(&log(16.0, &since)), Picture::Lost, "the first of one");
+            assert_eq!(t.look(&log(17.0, &[Presents(60)])), Picture::Lost, "the first of the other");
+            assert_eq!(t.look(&log(18.0, &[Presents(20), Presents(60), Presents(600)])), Picture::Lost, "said again");
+            assert_eq!(t.look(&log(19.0, &[Presents(80)])), Picture::Presenting, "one of the three grew");
+        }
+        // While it presents, a count above another's last may be a new swapchain's first or that one's next: it settles neither,
+        // and the loss after it still waits for one more.
+        let mut t = Tracker::default();
+        t.look(&log(0.0, &[Presents(600)]));
+        assert_eq!(t.look(&log(1.0, &[LogEvent::Swapchain, Presents(660)])), Picture::Presenting);
+        t.look(&log(2.0, &[Dropped]));
+        assert_eq!(t.look(&log(15.0, &[])), Picture::Lost);
+        assert_eq!(t.look(&log(16.0, &[Presents(700)])), Picture::Lost);
+        assert_eq!(t.look(&log(17.0, &[Presents(760)])), Picture::Presenting);
         // Not confirmed yet, a swapchain made since that counts is a frame after the drop, as before.
         let mut t = Tracker::default();
         t.look(&log(0.0, &[Presents(600), Presents(20)]));

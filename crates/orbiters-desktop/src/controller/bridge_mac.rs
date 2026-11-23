@@ -961,6 +961,11 @@ impl MacOpener {
     fn running(&self) -> Vec<u32> {
         self.ctl.upgrade().map(|c| c.launcher_machine_now().running().into_iter().map(|(pid, _)| pid).collect()).unwrap_or_default()
     }
+
+    /// The profile of each VRChat here (Home starts one on any; the bridge's own is the default one), where it is known.
+    fn profiles(&self) -> Vec<Option<u32>> {
+        self.ctl.upgrade().map(|c| c.launcher_machine_now().running_profiles().into_iter().map(|(_, _, profile)| profile).collect()).unwrap_or_default()
+    }
 }
 
 impl crate::bridge::game::Opener for MacOpener {
@@ -977,8 +982,7 @@ impl crate::bridge::game::Opener for MacOpener {
     }
 
     fn others_profiles(&self) -> Vec<u32> {
-        // One engine library, one Steam game: every VRChat here runs on the default profile.
-        self.running().iter().map(|_| 0).collect()
+        self.profiles().into_iter().flatten().collect()
     }
 
     fn eac(&self) -> crate::bridge::sessions::Eac {
@@ -1010,9 +1014,9 @@ impl crate::bridge::game::Opener for MacOpener {
 
     fn vrchats(&self) -> serde_json::Value {
         serde_json::Value::Array(
-            self.running()
+            self.profiles()
                 .into_iter()
-                .map(|_| serde_json::json!({ "profile": 0, "account": null, "world_name": null, "desktop": true, "camera_open": null, "driven_by": null, "pictures_here": false }))
+                .map(|profile| serde_json::json!({ "profile": profile, "account": null, "world_name": null, "desktop": true, "camera_open": null, "driven_by": null, "pictures_here": false }))
                 .collect(),
         )
     }

@@ -193,7 +193,19 @@ game started or closed). Settings shows the bridge's section on a Mac too, with 
 | --- | --- | --- |
 | `walk`, `turn`, `press`, `mouse`, `focus_game`, `wear_avatar`, `aim_camera` | Person first: no synthetic input until a guard can release it after a crash and the engine has an input interface with targets, units and releases. OSC reaches the game (Phase 0 below), but nothing proves a datagram to port 9000 is this session's game rather than a headset's on the network. | Phase 2: OSC bound to the verified session's own `--osc` ports; clicks and keys through `wsd` (below). |
 | `take_3d_picture`, `open_camera` | No Spout under the engine: the capture kit's strip lives in the stream camera's render target, and the window shows a scaled viewfinder. | Phase 3: an engine-side export of the stream camera's render target. |
-| `open_session`, `close_session`, profiles, VR sessions, travel by link | One Steam game per engine library; no SteamVR; no link pipe into a running game. | Out of scope. |
+| `open_session`, `close_session`, profiles, VR sessions, travel by link | One Steam game per engine library; no SteamVR; no link pipe into a running game. The bridge's own start is the default profile's (Home's Play takes another, below): it would have to verify whose account and private destination a profile's are. | Out of scope. |
+
+**VRChat's profiles on a Mac are Home's** (2026-11-23): its Play has the profile choice of Windows' Home (0 to 15,
+`vrchat_launch::main_profile`), for one game at a time (`vrchat_launch::SEVERAL_HERE`). A nonzero one adds exactly `--profile=N` to
+the game's arguments, before the destination's link (`obelisk::game_arguments`, which lets nothing else of a PC's through), on every
+start of Home's: Play, Where's destination, an invite, a friend's Join, the first start after the set-up, and a restart after a lost
+picture, which is of the very arguments of the launch it is shown for. The launch keeps its profile (`obelisk_cli::Launch::profile`);
+what runs is on the profile its launcher's own command line says (whoever started it), else its launch's, else unknown. Who is signed
+in on it comes only from the log of that launch (`incident::SignedIn`: the one made since its launcher was born that begins with its
+launcher's very arguments, held open; none of two that say the same), and the bridge is told none of it: without one the profile's
+last known account is shown, or none. While a game starts or runs, whoever started it, no other profile starts: the one start refuses it
+as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
+`get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
 How it is one verified game (`controller/bridge_mac.rs`):
 
@@ -235,8 +247,12 @@ How it is one verified game (`controller/bridge_mac.rs`):
   run knows) until how its game ended is known and kept there, so that two N4N0s (a cold start of both) never both reserve, neither
   creates an instance for a start the other makes, and neither decides on a gate the other has since closed. A launch whose program
   was lost keeps it until its record says how it ended, or until neither its supervisor nor its game is there (an early end then):
-  this N4N0 starts nothing either meanwhile, and reserves only to close that very game. A wait after an early end that cannot be
-  written keeps it too, until it is written at a later look or is over.
+  this N4N0 starts nothing either meanwhile, and reserves only to close that very game, for as long as the slot is held for it: a
+  launch that has ended since it was looked at admits nothing. A wait after an early end that cannot be
+  written keeps it too, until it is written at a later look or is over. The lock's own file says a start from before it is made
+  (its boot and time, then its session, then the end of a wait that could not be written): a holder that dies leaves it there, and the
+  next to take the slot reads it. Over by its session's record, it is what the record says; still running, nothing is started over
+  it; else it counts as an early end from when it was found, once.
 - **Arguments:** `--no-vr -screen-fullscreen 0 -screen-width 1280 -screen-height 720 vrchat://launch?ref=orbiters.cc&id=<world>:<instance>`,
   after Steam's own `--no-vr`, exactly as given (measured).
 - **Ownership.** A game is the bridge's only when it is its own launch's: the Game session the program names in `running`, whose
@@ -249,7 +265,8 @@ How it is one verified game (`controller/bridge_mac.rs`):
   first, `LogWatcher::held`, which must be the one whose arguments were verified: replaced, cut, unreadable or gone, the follower is
   lost for good, what it said is forgotten, the place with it, and a screenshot is refused): VRChat's own folder in the engine's Wine prefix (`…/cc.orbiters.obelisk-cli/Prefixes/steam-438100-windows-linux/prefix/drive_c/users/crossover/AppData/LocalLow/VRChat/VRChat`,
   `obelisk::vrchat_log_dir`), the one file of this start, followed by its own `LogWatcher`. The app's other VRChat features on a
-  Mac still follow the VRChat on the network: they are not changed by this.
+  Mac still follow the VRChat on the network (Home's profile choice alone reads this log, only for who is signed in): they are not
+  changed by this.
 - **Arrival** is the local player in this launch's own destination (the world and instance of its launch link exactly) after the
   last `Joining` line (`WorldState::arrived`: never between the join and VRChat's "is local" line, the loading and spawning of
   01:06:33 to 01:07:02), in its own held log, **while the game draws** (renderer evidence): its window on screen **and its frames
@@ -329,7 +346,7 @@ How it is one verified game (`controller/bridge_mac.rs`):
   arguments), `memory.txt` (pressure level, `memory_pressure -Q`, `vm_stat`), the end of the engine's and VRChat's logs (24 MiB
   each; a line that holds what could be a credential, a `vrchat://` link, a place, an instance's `~private(...)`, `~nonce(...)` and
   the like, or a `usr_`/`grp_` id is replaced whole, keeping only its time, its level and the frame counts it says: since the seventh
-  verification nothing before the field stays either, and since the eighth no count from inside quotes). VRChat's own log is the one that begins with the command line this launch's
+  verification nothing before the field stays either, and since the eighth no count from inside quotes, since the ninth curly ones and their encodings too). VRChat's own log is the one that begins with the command line this launch's
   launcher starts the game with (`Launching with args: <n>` and its `Arg:` lines, compared one by one, kept nowhere); of two that say
   the same none is held, nor (since the eighth) any while that command line cannot be read. The engine's ring (`LKD_EVENT_RING`) has one path per game, not one
   per session: the shipped engine makes none (voile-lkd `bf0af9b` is held back), and a path per session would change the game's
@@ -397,7 +414,8 @@ How it is one verified game (`controller/bridge_mac.rs`):
   long after the drop; a log its supervisor does not write says nothing); a count repeated is no frame: only one that grew in its own
   swapchain ends a loss, and once a loss is confirmed (since the seventh) the first count of a new swapchain is only where its
   counting begins: an increase after it is the frame (since the eighth, as the log says a swapchain made: a first count above another
-  swapchain's last is no increase); a game that says its presents more slowly is given twice its own pace (60 s at most); a
+  swapchain's last is no increase; since the ninth, the lines naming none, as many counts as there are swapchains not known to have
+  begun are taken for firsts); a game that says its presents more slowly is given twice its own pace (60 s at most); a
   loss the driver repeats without end is one, from its first word. It is **one decision per session** (`picture::of`, published by
   the follower every 5 s, stale after 30 s), which Home, the bridge's `renderer_lost` (before, its own rule, blind to an accepted
   quit) and the incident capture all use. Home offers **Restart VRChat** under its running line only for a confirmed loss

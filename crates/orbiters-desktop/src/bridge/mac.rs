@@ -24,6 +24,8 @@ pub struct MacWindow {
     pub height: f64,
     pub layer: i64,
     pub on_screen: bool,
+    /// How opaque it is as a whole (1: what it holds may still be clear in places); `None` when macOS does not say.
+    pub alpha: Option<f64>,
 }
 
 /// The title bar of the engine's windows, in points (measured: a 640 x 360 content in a 640 x 392 frame).
@@ -117,6 +119,7 @@ mod imp {
         static kCGWindowBounds: CFTypeRef;
         static kCGWindowLayer: CFTypeRef;
         static kCGWindowIsOnscreen: CFTypeRef;
+        static kCGWindowAlpha: CFTypeRef;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -136,6 +139,8 @@ mod imp {
     const EXCLUDE_DESKTOP: u32 = 16;
     /// `kCFNumberSInt64Type`.
     const SINT64: CFIndex = 4;
+    /// `kCFNumberFloat64Type`.
+    const FLOAT64: CFIndex = 6;
 
     /// Whether this process may record the screen (no question is shown).
     pub fn screen_recording() -> Option<bool> {
@@ -163,22 +168,35 @@ mod imp {
     }
 
     fn list(option: u32) -> Vec<MacWindow> {
+        listed(option).0
+    }
+
+    /// The windows, and whether that is all of them: the list was given, and every entry of it could be read.
+    fn listed(option: u32) -> (Vec<MacWindow>, bool) {
         let mut out = Vec::new();
+        let mut whole = true;
         // SAFETY: the list is ours (copied) and released once; its entries are read while it lives.
         unsafe {
             let array = CGWindowListCopyWindowInfo(option, 0);
             if array.is_null() {
-                return out;
+                return (out, false);
             }
             for i in 0..CFArrayGetCount(array) {
                 let dict = CFArrayGetValueAtIndex(array, i);
-                let (Some(id), Some(owner)) = (number(dict, kCGWindowNumber), number(dict, kCGWindowOwnerPID)) else { continue };
+                let (Some(id), Some(owner)) = (number(dict, kCGWindowNumber), number(dict, kCGWindowOwnerPID)) else {
+                    whole = false;
+                    continue;
+                };
                 let mut rect = CGRect::default();
                 let bounds = CFDictionaryGetValue(dict, kCGWindowBounds);
                 if bounds.is_null() || !CGRectMakeWithDictionaryRepresentation(bounds, &mut rect) {
+                    whole = false;
                     continue;
                 }
                 let on = CFDictionaryGetValue(dict, kCGWindowIsOnscreen);
+                let mut alpha = 0f64;
+                let opacity = CFDictionaryGetValue(dict, kCGWindowAlpha);
+                let alpha = (!opacity.is_null() && CFNumberGetValue(opacity, FLOAT64, &mut alpha as *mut f64 as *mut c_void)).then_some(alpha);
                 out.push(MacWindow {
                     id: id as u32,
                     owner: owner as u32,
@@ -188,11 +206,12 @@ mod imp {
                     height: rect.h,
                     layer: number(dict, kCGWindowLayer).unwrap_or(-1),
                     on_screen: !on.is_null() && CFBooleanGetValue(on),
+                    alpha,
                 });
             }
             CFRelease(array);
         }
-        out
+        (out, whole)
     }
 
     /// Whether the Mac's screen is locked now. Measured 2026-11-22: while it is, the engine's window server shows no frame of
@@ -218,9 +237,10 @@ mod imp {
         list(LIST_ALL)
     }
 
-    /// The windows on screen, front to back, those of the desktop left out.
-    pub fn on_screen() -> Vec<MacWindow> {
-        list(ON_SCREEN_ONLY | EXCLUDE_DESKTOP)
+    /// The windows on screen, front to back, those of the desktop left out; `None` when they could not all be listed.
+    pub fn on_screen() -> Option<Vec<MacWindow>> {
+        let (windows, whole) = listed(ON_SCREEN_ONLY | EXCLUDE_DESKTOP);
+        whole.then_some(windows)
     }
 
     /// The ordinary window in front of all others now.
@@ -322,11 +342,15 @@ pub fn most_covered(window: Frame, displays: &[(u32, Frame)]) -> Option<u32> {
     displays.iter().map(|(id, d)| (*id, area(d))).filter(|(_, a)| *a > 0.0).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
 }
 
+/// Whether the window is its whole display's: the game borderless or full screen.
+pub fn whole_display(window: &MacWindow, display: Option<Frame>) -> bool {
+    display.is_some_and(|(x, y, w, h)| (window.x - x).abs() < 1.0 && (window.y - y).abs() < 1.0 && (window.width - w).abs() < 1.0 && (window.height - h).abs() < 1.0)
+}
+
 /// The title bar of a window, in points: none when the window covers its whole display (the game borderless or full
 /// screen), else the engine's 32.
 pub fn title_points(window: &MacWindow, display: Option<Frame>) -> f64 {
-    let covers = display.is_some_and(|(x, y, w, h)| (window.x - x).abs() < 1.0 && (window.y - y).abs() < 1.0 && (window.width - w).abs() < 1.0 && (window.height - h).abs() < 1.0);
-    if covers {
+    if whole_display(window, display) {
         0.0
     } else {
         TITLE_BAR_POINTS
@@ -505,7 +529,7 @@ mod tests {
     use super::*;
 
     fn w(id: u32, width: f64, height: f64, layer: i64, on_screen: bool) -> MacWindow {
-        MacWindow { id, owner: 7, x: 0.0, y: 0.0, width, height, layer, on_screen }
+        MacWindow { id, owner: 7, x: 0.0, y: 0.0, width, height, layer, on_screen, alpha: Some(1.0) }
     }
 
     /// Fifth verification, finding 15: a swapchain that is not the window's size, stretched in a smaller borderless window,

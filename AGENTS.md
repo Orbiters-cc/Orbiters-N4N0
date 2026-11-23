@@ -5,7 +5,9 @@
   there; one that goes over OSC talks with the VRChat on the network (`orbiters_core::lan`). Native code goes behind
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
   `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
-  VRChat itself does run on a Mac, started by N4N0 through Obelisk's engine without its window: `obelisk-cli`, built
+  VRChat itself does run on a Mac, one game at a time on the profile chosen on Home (`vrchat_launch::SEVERAL_HERE`; every start of
+  Home's carries it, a restart included, and an account is learnt only from that launch's own log), started by N4N0 through
+  Obelisk's engine without its window: `obelisk-cli`, built
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
@@ -19,7 +21,8 @@
   that cannot be read holds starts 80 s from first sight, then is history, except the current session's, which Home names with a
   **Set aside** button: never a lock for ever, never "nothing"; one slot for the computer, a lock beside the gate's file, held from
   before the gate is read again and the start decided until how its game ended is known and kept, also against this very N4N0, and
-  while the wait after an early end cannot be written, until that wait is over), only with obelisk-cli 0.1.12 or later (the record's `shown` frames
+  while the wait after an early end cannot be written, until that wait is over; the lock's own file says a start from before it is
+  made, so that an N4N0 that dies leaves it as an early end to whoever takes the slot next), only with obelisk-cli 0.1.12 or later (the record's `shown` frames
   are its renderer evidence; Home's Play holds to the same `obelisk::LEAST`), arrives only once the local player is in its own destination in its own held log, closes with
   `steam quit --session` and never `--force`. A stall, a quit that does not finish or a lost renderer of any session the engine
   runs is captured once (`controller/incident.rs`, `<logs>/incidents/`, Settings' Log says where): look there before guessing. VRChat's freeze about 5 s after the

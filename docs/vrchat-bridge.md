@@ -496,7 +496,9 @@ threads more than 4,096 times in 5 minutes (`lkd: ptrace: attach 4096:`), one ev
 ### Render scale and Low Power Mode (0.3.9-dev.30)
 
 Home's Play on a Mac starts VRChat at Settings' **Picture detail** (VRChat, Play VRChat), 25 to 100 % per side of the display's
-drawing resolution, 58 by default (ruling 1: a third of the pixels), "100 %" being the panel's own pixels (this Mac: 2558 x 1663,
+drawing resolution, 45 by default (a fifth of the pixels; the owner, 2026-11-23: about 39 frames a second in VRChat Home on his M3 Air,
+31 at 58 %, 19 at 100 %; until 0.3.9-dev.44 it was 58, ruling 1, which every settings file said whether it was chosen or not: a saved 58
+becomes 45 once, `settings::migrated`, and any other value stays), "100 %" being the panel's own pixels (this Mac: 2558 x 1663,
 the engine's 87 %), never more; the size is shown beside it. It goes to the CLI as `steam play --render-percent <engine percent>`
 for that launch only (0.1.7 and later: an older program would refuse the whole start, so it is given none), never written into the
 engine's settings (R7). The size shown is the engine's own result: capped at the panel (87 to 100 all say 87 % and one size on this

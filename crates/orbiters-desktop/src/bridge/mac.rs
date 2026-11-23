@@ -646,7 +646,7 @@ mod tests {
     }
 
     /// R2: at both scales, the game's pixels, the window's points and a capture's pixels kept apart. Full screen on this
-    /// Mac (1470 x 956 points at 2x): 2940 x 1912 drawn at 100 %, 1705 x 1109 at 58 % (Home's default), while a capture
+    /// Mac (1470 x 956 points at 2x): 2940 x 1912 drawn at 100 %, 1705 x 1109 at 58 %, 1323 x 860 at 45 % (Home's default), while a capture
     /// stays 2940 x 1912 and has no title bar to cut; a 640 x 360-point window at 100 % is 1280 x 720 either way.
     #[test]
     fn the_game_s_pixels_follow_the_render_percent_and_a_capture_s_do_not() {
@@ -655,6 +655,7 @@ mod tests {
         assert_eq!(title, 0.0);
         assert_eq!(guest_pixels(&whole, 2.0, title, 100), (2940, 1912));
         assert_eq!(guest_pixels(&whole, 2.0, title, 58), (1705, 1109));
+        assert_eq!(guest_pixels(&whole, 2.0, title, orbiters_core::obelisk::DEFAULT_RENDER_PERCENT), (1323, 860));
         assert_eq!(content_pixels(&whole, 2.0, title), (2940, 1912), "the capture");
         assert_eq!(title_rows(1912, 956.0, title), 0);
         let windowed = w(3, 640.0, 392.0, 0, true);

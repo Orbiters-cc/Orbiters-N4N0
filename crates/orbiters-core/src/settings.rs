@@ -1167,9 +1167,28 @@ fn migrated(text: &str) -> Option<String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
     let fields = value.as_object_mut()?;
-    let legacy = fields.remove(LEGACY_N4N0_KEY)?;
-    fields.entry("n4n0").or_insert(legacy);
+    let legacy = fields.remove(LEGACY_N4N0_KEY);
+    let moved = legacy.is_some();
+    if let Some(legacy) = legacy {
+        fields.entry("n4n0").or_insert(legacy);
+    }
+    let rendered = cfg!(target_os = "macos") && fields.get_mut("launch").is_some_and(earlier_render_default);
+    if !moved && !rendered {
+        return None;
+    }
     serde_json::to_string(&value).ok()
+}
+
+/// A Mac's Picture detail saved while its default was another: every file said it, chosen or not, and 58 % is taken for that
+/// default, once (any other value was chosen; 58 % chosen from now on stays).
+fn earlier_render_default(launch: &mut serde_json::Value) -> bool {
+    let Some(launch) = launch.as_object_mut() else { return false };
+    let earlier = !launch.contains_key("mac_render_default") && launch.get("mac_render_percent").and_then(serde_json::Value::as_u64) == Some(u64::from(crate::obelisk::EARLIER_RENDER_PERCENT));
+    if earlier {
+        launch.insert("mac_render_percent".into(), crate::obelisk::DEFAULT_RENDER_PERCENT.into());
+        launch.insert("mac_render_default".into(), crate::obelisk::DEFAULT_RENDER_PERCENT.into());
+    }
+    earlier
 }
 
 #[cfg(test)]
@@ -1230,6 +1249,39 @@ mod tests {
         let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
         std::fs::write(&path, both).unwrap();
         assert!(!Settings::load_from(&path).n4n0.wake_word);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The Mac's Picture detail: 45 % for whoever never chose one, who is told from nobody else by the files saved until now
+    /// (all said 58): those become 45 once. Any other value stays, and so does 58 chosen from now on.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_earlier_default_picture_detail_becomes_today_s_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-render-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let read = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            Settings::load_from(&path).launch.mac_render_percent
+        };
+        assert_eq!(Settings::default().launch.mac_render_percent, 45);
+        assert_eq!(read(r#"{"launch": {"fps": 72}}"#), 45, "never saved");
+        assert_eq!(read(r#"{"launch": {"fps": 72, "mac_render_percent": 58}}"#), 45);
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((&saved["launch"]["mac_render_percent"], &saved["launch"]["fps"]), (&45.into(), &72.into()), "written again at once, the rest as it was");
+        for chosen in [25, 45, 57, 59, 75, 100] {
+            assert_eq!(read(&format!(r#"{{"launch": {{"mac_render_percent": {chosen}}}}}"#)), chosen, "chosen");
+        }
+        // Chosen from now on.
+        let mut settings = Settings::load_from(&path);
+        settings.launch.mac_render_percent = 58;
+        settings.save_to(&path).unwrap();
+        for _ in 0..2 {
+            assert_eq!(Settings::load_from(&path).launch.mac_render_percent, 58);
+        }
+        // Beside N4N0's section under its earlier key: both.
+        assert_eq!(read(&format!(r#"{{"{LEGACY_N4N0_KEY}": {{"wake_word": true}}, "launch": {{"mac_render_percent": 58}}}}"#)), 45);
+        assert!(Settings::load_from(&path).n4n0.wake_word);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -717,9 +717,13 @@ pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://") || crate::vrchat_launch::is_profile_arg(a))).collect()
 }
 
-/// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
-/// draws (the owner's choice, 2026-11-23). The bridge's own starts take none (`render_percent`).
-pub const DEFAULT_RENDER_PERCENT: u32 = 58;
+/// The render scale of Home's Play on a Mac when the person chose none: 45 % per side, a fifth of the pixels the Mac
+/// draws (the owner's choice, 2026-11-23: about 39 frames a second in VRChat Home on an M3 Air, 31 at 58 %, 19 at 100 %). The
+/// bridge's own starts take none (`render_percent`).
+pub const DEFAULT_RENDER_PERCENT: u32 = 45;
+/// The default of before (0.3.9-dev.30 to dev.44), which the settings saved as any other value: one of those saved then is
+/// [`DEFAULT_RENDER_PERCENT`], once (`settings::migrated`).
+pub const EARLIER_RENDER_PERCENT: u32 = 58;
 /// The range Settings offers.
 pub const RENDER_PERCENTS: std::ops::RangeInclusive<u32> = 25..=100;
 
@@ -770,6 +774,9 @@ mod tests {
         let (backing, panel) = ((2940, 1912), (2560, 1664));
         assert_eq!(render_percent(58, backing.0, panel.0), 58);
         assert_eq!(render_size(58, backing, panel), (1705, 1109));
+        let (w, h) = render_size(DEFAULT_RENDER_PERCENT, backing, panel);
+        assert_eq!((DEFAULT_RENDER_PERCENT, render_percent(DEFAULT_RENDER_PERCENT, backing.0, panel.0), w, h), (45, 45, 1323, 860));
+        assert_eq!((w * h * 100 + 50 * 2940 * 1912 / 100) / (2940 * 1912), 20, "a fifth of the pixels");
         assert_eq!(render_percent(100, backing.0, panel.0), 87);
         assert_eq!(render_size(100, backing, panel), (2558, 1663));
         assert_eq!(render_percent(90, backing.0, panel.0), 87, "above the panel is the panel");

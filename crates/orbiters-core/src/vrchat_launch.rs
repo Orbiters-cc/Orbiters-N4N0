@@ -76,6 +76,9 @@ pub struct LaunchSettings {
     /// On a Mac: the share of the display's drawing resolution, per side, Home's Play has VRChat draw at (25 to 100, 100
     /// being the panel's real pixels; macOS scales the picture to the screen). Not used elsewhere.
     pub mac_render_percent: u32,
+    /// The default that was when these were saved: a file that says none was saved while it was 58 %, and its 58 was that
+    /// default as far as can be told (not a setting).
+    pub mac_render_default: u32,
 }
 
 impl Default for LaunchSettings {
@@ -94,6 +97,7 @@ impl Default for LaunchSettings {
             profiles: std::collections::BTreeMap::new(),
             profile_ids: std::collections::BTreeMap::new(),
             mac_render_percent: crate::obelisk::DEFAULT_RENDER_PERCENT,
+            mac_render_default: crate::obelisk::DEFAULT_RENDER_PERCENT,
         }
     }
 }

@@ -80,7 +80,8 @@ pub(super) fn buttons(ui: &mut Ui, list: &[(&str, &str, bool, &str)], primary: b
         let variant = if primary && i == 0 { Variant::Primary } else { Variant::Ghost };
         let b = Button::new(label).icon(glyph).size(Size::Sm).variant(variant).enabled(*enabled).id_salt(("u6-button", *salt));
         let rect = Rect::from_min_size(r.min + at, vec2(widths[i], 32.0));
-        if widgets::activated(&b.show_at(ui, rect)) {
+        // A press of the person's own: several of these are hard to take back.
+        if b.confirm_at(ui, rect) {
             pressed = Some(i);
         }
     }
@@ -292,14 +293,12 @@ fn package_rows(ui: &mut Ui, state: &State, rows: &[compat::Row]) {
                 None => tr!("Its SDK range is {range}.", range = range.range),
             });
         }
-        for k in &r.issues {
-            if let Some(issue) = m.data.issues.get(*k) {
-                let who = match issue.kind {
-                    matrix::IssueKind::Publisher => tr("Publisher"),
-                    matrix::IssueKind::Report => tr("Reported"),
-                };
-                lines.push(format!("{who} ({}): {} {}", issue.date, issue.text(), issue.link));
-            }
+        for issue in &r.issues {
+            let who = match issue.kind {
+                matrix::IssueKind::Publisher => tr("Publisher"),
+                matrix::IssueKind::Report => tr("Reported"),
+            };
+            lines.push(format!("{who} ({}): {} {}", issue.date, issue.text(), issue.link));
         }
         lines.push(tr("Tested on Unity 6 by Orbiters: no evidence.").to_string());
         let title = match &r.version {
@@ -558,13 +557,16 @@ fn outcome_text(o: &outcome::Outcome) -> (Tone, String) {
             Tone::Warn,
             format!("{}\n{}", tr!("The log lists {count} compiler errors, by where they are (the folder holding a file is not necessarily its cause):", count = errors.len()), list(errors)),
         ),
-        outcome::Outcome::Imported { running: true } => (Tone::Ok, tr("The import finished with no compiler error in this log. Unity is open: VRChat's Upgrade Wizard may be waiting for you there. Then check with the SDK's Build & Test.").to_string()),
-        outcome::Outcome::Imported { running: false } => (Tone::Ok, tr("The import finished with no compiler error in this log, and Unity is closed. Check with the SDK's Build & Test.").to_string()),
+        // Only the log's end was read: an error before it would not be seen.
+        outcome::Outcome::Imported { cut: true, .. } => (Tone::Info, tr("The import finished. The log is too long to be read whole: the part read lists no compiler error. Check with the SDK's Build & Test.").to_string()),
+        outcome::Outcome::Imported { running: true, .. } => (Tone::Ok, tr("The import finished with no compiler error in this log. Unity is open: VRChat's Upgrade Wizard may be waiting for you there. Then check with the SDK's Build & Test.").to_string()),
+        outcome::Outcome::Imported { running: false, .. } => (Tone::Ok, tr("The import finished with no compiler error in this log, and Unity is closed. Check with the SDK's Build & Test.").to_string()),
         outcome::Outcome::Undetermined { why, running } => {
             let mut text = match why {
                 outcome::Unknown::NoLog => tr("Cannot tell: Unity wrote no log for this opening."),
                 outcome::Unknown::Empty => tr("Cannot tell: the log is empty."),
                 outcome::Unknown::EndedEarly => tr("Cannot tell: Unity closed before its log said the import finished."),
+                outcome::Unknown::Unreadable => tr("Cannot tell: the log could not be read."),
                 outcome::Unknown::NotYet => tr("Cannot tell yet: its log says nothing Orbiters reads so far."),
             }
             .to_string();
@@ -601,6 +603,9 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         return;
     }
     ids_warning(ui, worlds);
+    if !job.linked.is_empty() {
+        para(ui, &tr!("Links of the original whose files were copied: {links}.", links = job.linked.join(", ")), 12.0, theme::FG_3);
+    }
     if !job.localized.is_empty() {
         para(ui, &tr!("Local packages made part of the trial, named so in its Packages/manifest.json: {packages}.", packages = job.localized.join(", ")), 12.0, theme::FG_3);
     }
@@ -615,12 +620,23 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
             if let Some(beside) = vcc_copy {
                 item(ui, icons::CHECK_CIRCLE, theme::OK, tr("Creator Companion made a migrated copy"), Some(&beside.display().to_string()));
                 if buttons(ui, &[(tr("Use the migrated copy"), icons::CHECK, state.u6.busy().is_none(), "adopt")], true).is_some() {
-                    let id = job.id.clone();
+                    let (id, beside) = (job.id.clone(), beside.clone());
                     state.u6.act(&ctx, tr("Taking the migrated copy…"), move || {
-                        orbiters_projects::unity6::trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                        trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &beside)?;
                         Ok(tr("The migrated copy is the trial now.").to_string())
                     });
                 }
+            } else if buttons(ui, &[(tr("Locate the migrated copy…"), icons::FOLDER_OPEN, state.u6.busy().is_none(), "adopt-locate")], false).is_some() {
+                let (id, start) = (job.id.clone(), job.trial.path.parent().map(Path::to_path_buf));
+                state.u6.act(&ctx, tr("Taking the migrated copy…"), move || {
+                    let mut d = rfd::FileDialog::new().set_title(tr("The copy Creator Companion migrated"));
+                    if let Some(start) = start {
+                        d = d.set_directory(start);
+                    }
+                    let Some(folder) = d.pick_folder() else { return Ok(String::new()) };
+                    trial::adopt_vcc_copy(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &folder)?;
+                    Ok(tr("The migrated copy is the trial now.").to_string())
+                });
             }
             vcc_steps(ui, state, &job.trial.path, &job.target);
         }
@@ -699,7 +715,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         Some(2) => {
             let id = job.id.clone();
             state.u6.act(&ctx, tr("Unregistering the trial…"), move || {
-                let left = trial::unregister(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
                 Ok(tr!("The trial stays at {path}; it is no longer listed. Add existing brings it back.", path = left.display()))
             });
         }
@@ -711,26 +727,30 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
 pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
     let ctx = ui.ctx().clone();
     let jobs: Vec<(trial::Job, trial::Status)> = state.u6.jobs().into_iter().cloned().collect();
-    let damaged = match state.u6.health() {
-        trial::Health::Damaged { why, backup } => Some((why, backup)),
-        trial::Health::Fine => None,
-    };
-    if jobs.is_empty() && damaged.is_none() {
+    let health = state.u6.health();
+    if jobs.is_empty() && health == trial::Health::Fine {
         return;
     }
-    if let Some((why, backup)) = damaged {
-        ui.add_space(28.0);
-        let text = if backup {
-            tr!("The Unity 6 trials record cannot be read ({why}). Its last good copy is shown and keeps the trials protected; Orbiters changes nothing in it until it is set aside.", why = why)
-        } else {
-            tr!("The Unity 6 trials record cannot be read ({why}), and there is no good copy of it. Orbiters changes nothing in it until it is set aside.", why = why)
-        };
-        notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &text);
-        if buttons(ui, &[(tr("Set the damaged record aside"), icons::ARROW_COUNTER_CLOCKWISE, state.u6.busy().is_none(), "set-aside")], false).is_some() {
-            state.u6.act(&ctx, tr("Setting the damaged record aside…"), || {
-                let aside = trial::set_aside(&orbiters_projects::data_dir())?;
-                Ok(tr!("The damaged record is kept at {path}.", path = aside.display()))
-            });
+    match health {
+        trial::Health::Fine => {}
+        trial::Health::Unreadable(why) => {
+            ui.add_space(28.0);
+            notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &tr!("The Unity 6 trials record cannot be read ({why}): Orbiters opens and changes no project until it can, since one of them may be a trial.", why = why));
+        }
+        trial::Health::Damaged { lines, why, newer } => {
+            ui.add_space(28.0);
+            let text = if newer {
+                tr!("A newer version of Orbiters wrote part of the Unity 6 trials record: this version does not act on the trials it is about ({why}).", why = why)
+            } else {
+                tr!("Part of the Unity 6 trials record cannot be read ({count} lines: {why}). Every other trial is shown; Orbiters does not act on those it may be about until it is set aside.", count = lines, why = why)
+            };
+            notice(ui, Tone::Warn, tr("Unity 6 trials record damaged"), &text);
+            if !newer && buttons(ui, &[(tr("Set the damaged record aside"), icons::ARROW_COUNTER_CLOCKWISE, state.u6.busy().is_none(), "set-aside")], false).is_some() {
+                state.u6.act(&ctx, tr("Setting the damaged record aside…"), || {
+                    let aside = trial::set_aside(&orbiters_projects::data_dir())?;
+                    Ok(tr!("The damaged record is kept at {path}.", path = aside.display()))
+                });
+            }
         }
     }
     if jobs.is_empty() {
@@ -748,42 +768,49 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         let bg = ui.painter().add(egui::Shape::Noop);
         let (glyph, tint, text) = match &status {
             trial::Status::Running => {
-                let p = state.u6.run.as_ref().map(|r| r.progress.lock().unwrap().clone()).unwrap_or_default();
-                let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
-                (icons::CIRCLE_NOTCH, theme::ACCENT, format!("{}{pct}", super::unity6::phase_label(&p.phase)))
+                let mine = state.u6.run.as_ref().filter(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str()));
+                match mine.map(|r| r.progress.lock().unwrap().clone()) {
+                    Some(p) => {
+                        let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
+                        (icons::CIRCLE_NOTCH, theme::ACCENT, format!("{}{pct}", super::unity6::phase_label(&p.phase)))
+                    }
+                    None => (icons::CIRCLE_NOTCH, theme::ACCENT, tr("Orbiters is working on it in another window.").to_string()),
+                }
             }
-            trial::Status::Interrupted { complete: false } => (icons::WARNING_CIRCLE, theme::WARN, tr("The copy was interrupted before every file was in. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.").to_string()),
-            trial::Status::Interrupted { complete: true } => (icons::WARNING_CIRCLE, theme::WARN, tr("Every file is in, but the trial was not listed before Orbiters stopped. List it to go on.").to_string()),
-            trial::Status::Failed { kept } => (
-                icons::X_CIRCLE,
-                theme::DANGER,
-                format!("{} {}", job.error.clone().unwrap_or_default(), if *kept { tr("Part of the copy is still in this folder.") } else { tr("Nothing of it is left.") }),
-            ),
-            trial::Status::RegistrationFailed => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied, but it could not be listed.").to_string())),
-            trial::Status::Unfinished => (
-                icons::WARNING_CIRCLE,
-                theme::WARN,
-                format!("{} {}", tr("The trial is listed but not independent of the original yet: it is not ready for Creator Companion."), job.error.clone().unwrap_or_default()),
-            ),
+            trial::Status::Interrupted => (icons::WARNING_CIRCLE, theme::WARN, tr("The copy was interrupted. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.").to_string()),
+            trial::Status::Failed { kept } => {
+                let mut text = format!("{} {}", job.error.clone().unwrap_or_default(), if *kept { tr("Part of the copy is still in this folder.") } else { tr("Nothing of it is left.") });
+                for d in job.differences.iter().take(5) {
+                    text.push_str(&format!("\n{d}"));
+                }
+                if job.differences.len() > 5 {
+                    text.push_str(&format!("\n{}", tr!("And {count} more differences.", count = job.differences.len() - 5)));
+                }
+                (icons::X_CIRCLE, theme::DANGER, text)
+            }
+            trial::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied and compared, but it could not be listed.").to_string())),
+            trial::Status::Uncertain(why) => (icons::PROHIBIT, theme::WARN, orbiters_projects::unity6::journal::uncertain_text(why)),
             trial::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
             trial::Status::Replaced => (icons::PROHIBIT, theme::FG_3, tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
             _ => continue,
         };
         item(&mut inner, glyph, tint, &tr!("{name}, a Unity 6 trial of {original}", name = job.trial.name, original = job.source.name), Some(&format!("{}\n{text}", job.trial.path.display())));
         let mut list: Vec<(&str, &str, bool, &str)> = vec![];
-        if matches!(status, trial::Status::Interrupted { complete: true } | trial::Status::RegistrationFailed) {
+        if matches!(status, trial::Status::Unlisted) {
             list.push((tr("List it"), icons::PLUS, state.u6.busy().is_none(), "list"));
         }
-        if matches!(status, trial::Status::Unfinished) {
-            list.push((tr("Finish it"), icons::CHECK, state.u6.busy().is_none(), "list"));
-        }
+        let mine = state.u6.run.as_ref().is_some_and(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str()));
         if matches!(status, trial::Status::Running) {
-            list.push((tr("Stop copying"), icons::X, true, "stop"));
+            if mine {
+                list.push((tr("Stop copying"), icons::X, true, "stop"));
+            }
         } else {
             if state.u6.present(&job.trial.path) {
                 list.push((tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"));
             }
-            list.push((tr("Forget this entry"), icons::X, state.u6.busy().is_none(), "forget"));
+            if !matches!(status, trial::Status::Uncertain(_)) {
+                list.push((tr("Take it off"), icons::X, state.u6.busy().is_none(), "forget"));
+            }
         }
         let salted: Vec<(&str, &str, bool, String)> = list.iter().map(|(l, g, e, s)| (*l, *g, *e, format!("{}-{s}", job.id))).collect();
         let refs: Vec<(&str, &str, bool, &str)> = salted.iter().map(|(l, g, e, s)| (*l, *g, *e, s.as_str())).collect();
@@ -796,7 +823,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         let id = job.id.clone();
         match pressed {
             Some("list") => state.u6.act(&ctx, tr("Listing the trial…"), move || {
-                trial::register_again(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &Default::default(), &Default::default())?;
+                trial::finish(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &Default::default(), &Default::default())?;
                 Ok(tr("The trial is listed.").to_string())
             }),
             Some("stop") => {
@@ -807,9 +834,10 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             Some("reveal") => {
                 let _ = orbiters_projects::reveal(&job.trial.path);
             }
-            Some("forget") => state.u6.act(&ctx, tr("Forgetting the entry…"), move || {
-                trial::forget(&orbiters_projects::data_dir(), &id)?;
-                Ok(String::new())
+            // Off VCC's list too when it is on it; its folder stays, and stays known.
+            Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
+                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                Ok(if left.exists() { tr!("It is off the lists. Its folder stays at {path}.", path = left.display()) } else { tr("It is off the lists.").to_string() })
             }),
             _ => {}
         }

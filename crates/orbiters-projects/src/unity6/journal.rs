@@ -309,6 +309,12 @@ pub fn read(dir: &Path) -> Record {
             let text = String::from_utf8_lossy(raw).into_owned();
             record.unread.push(Unread { line, why, newer, about: about(&text), text, sha: sha256(raw) });
         };
+        // Its version first: what a newer one holds besides is not known here.
+        let v = serde_json::from_slice::<serde_json::Value>(raw).ok().and_then(|l| l["v"].as_u64()).unwrap_or(0);
+        if v > u64::from(VERSION) {
+            unread(tr!("it is of format {schema}, which this version of Orbiters does not read", schema = v), true);
+            continue;
+        }
         let parsed: Line = match serde_json::from_slice(raw) {
             Ok(l) => l,
             Err(e) => {
@@ -316,10 +322,6 @@ pub fn read(dir: &Path) -> Record {
                 continue;
             }
         };
-        if parsed.v > VERSION {
-            unread(tr!("it is of format {schema}, which this version of Orbiters does not read", schema = parsed.v), true);
-            continue;
-        }
         if parsed.crc != format!("{:08x}", crc32(parsed.body.as_bytes())) {
             unread(tr("its checksum does not match what it says").into(), false);
             continue;

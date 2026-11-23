@@ -458,7 +458,8 @@ mod tests {
             r#"{"name":"vrchat.blackstartx.gesture-manager","version":"3.9.8","unity":"2019.4","vpmDependencies":{"com.vrchat.avatars":">=3.5.0 <3.11.0"}}"#,
         );
         write(root, "Packages/my.embedded/package.json", r#"{"name":"my.embedded","version":"1.0.0","unity":"2022.3","unityRelease":"0f1"}"#);
-        write(root, "Packages/manifest.json", r#"{"dependencies":{"com.unity.timeline":"1.7.5","com.unity.modules.ai":"1.0.0","com.example.git":"https://example.com/repo.git","com.example.reg":"2.0.0"}}"#);
+        write(root, "Packages/manifest.json", r#"{"dependencies":{"com.unity.timeline":"1.7.5","com.unity.modules.ai":"1.0.0","com.example.git":"https://example.com/repo.git","com.example.reg":"2.0.0","com.example.asked":"^1.2.0"}}"#);
+        write(root, "Packages/packages-lock.json", r#"{"dependencies":{"com.unity.timeline":{"version":"1.7.5","source":"registry"},"com.example.reg":{"version":"2.0.1","source":"registry"}}}"#);
         let rows = packages(root, &Matrix::built_in(), "3.11.0-beta.1");
         let by = |n: &str| rows.iter().find(|r| r.name == n).unwrap_or_else(|| panic!("{n} missing: {rows:?}"));
         assert!(rows.iter().all(|r| !r.name.starts_with("com.vrchat.")), "the SDK is the standing's");
@@ -480,7 +481,10 @@ mod tests {
         let embedded = by("my.embedded");
         assert_eq!((embedded.source, embedded.unity_min.as_deref()), (Source::Embedded, Some("2022.3.0f1")));
         assert_eq!(by("com.example.git").source, Source::UpmGit);
-        assert_eq!((by("com.example.reg").source, by("com.example.reg").version.as_deref()), (Source::UpmRegistry, Some("2.0.0")));
+        assert_eq!((by("com.example.reg").source, by("com.example.reg").version.as_deref()), (Source::UpmRegistry, Some("2.0.1")));
+        assert_eq!(by("com.example.reg").requested.as_deref(), Some("2.0.0"));
+        // Second verification minor 2: what is asked for is no installed version.
+        assert_eq!((by("com.example.asked").version.as_deref(), by("com.example.asked").requested.as_deref()), (None, Some("^1.2.0")));
     }
 
     #[test]
@@ -488,6 +492,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         project(root, Some(U2022), &[("com.vrchat.base", "3.10.6"), ("com.vrchat.worlds", "3.10.6")], &[]);
+        // Second verification major 8: manifests or package folders that cannot be read may hold what is asked.
+        assert!(checklist(root, Content::Worlds, &AtomicBool::new(false)).skipped.contains(&"Packages/manifest.json".to_string()));
+        assert!(checklist(&root.join("nowhere"), Content::Worlds, &AtomicBool::new(false)).skipped.contains(&"Packages".to_string()));
+        write(root, "Packages/manifest.json", "{}");
         write(root, "Assets/Scripts/Door.cs", "class Door : UdonSharpBehaviour { void F(Rigidbody r) { r.velocity = v; r.AddForce(f, ForceMode.VelocityChange); } }");
         write(root, "Assets/Main.unity", "--- !u!195 &1\nNavMeshAgent:\n  m_GameObject: {fileID: 10}\n--- !u!208 &2\nNavMeshObstacle:\n  m_GameObject: {fileID: 10}\n  ringBufferMode: 2\n");
         write(root, "Assets/Apart.unity", "--- !u!195 &1\nNavMeshAgent:\n  m_GameObject: {fileID: 10}\n--- !u!208 &2\nNavMeshObstacle:\n  m_GameObject: {fileID: 20}\n");

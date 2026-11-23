@@ -192,6 +192,9 @@ fn no_other_module_writes() {
         "MoveFile", "DeleteFile", "CreateFile", "copy_keeping", "copy_local_packages", "templates::copy", "storage::", "vpm::register", "vpm::change", ".persist(", "libc::", "NtCreateFile",
     ];
     for (name, text) in here {
+        let text = text.replace("
+", "
+");
         let production = text.split("#[cfg(test)]\npub(crate) mod tests").next().unwrap().split("#[cfg(test)]\nmod tests").next().unwrap();
         for (n, line) in production.lines().enumerate() {
             let code = line.split("//").next().unwrap();

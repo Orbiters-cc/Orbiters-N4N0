@@ -60,6 +60,8 @@ pub(super) struct Flow {
     pub unity_open: bool,
     pub result: Option<setup::ResultFile>,
     pub packages_only: bool,
+    /// What the person is told before uploading from this project.
+    pub warning: Option<String>,
     pub acknowledged: bool,
 }
 pub(super) enum Outcome {
@@ -1259,16 +1261,18 @@ impl State {
         self.flow = None;
         self.pending = Some((project.name.clone(), avatar.name.clone(), nano));
         self.task(ctx, if nano { tr("Installing My Avatar and preparing N4N0…") } else { tr("Installing My Avatar…") }, move || {
+            // It ends in an upload of the avatar: leave for that first, from the project as it is now.
+            let leave = orbiters_projects::unity6::authority::upload(&orbiters_projects::data_dir(), &project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
             orbiters_projects::runtime()?.block_on(vpm::install_my_avatar(&orbiters_projects::vcc_dir(), &project.path))?;
             let request = if nano {
                 let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), server.api(), env!("ORBITERS_VERSION"))?;
-                setup::write(&project.path, &r)?;
+                setup::write(&project.path, &r, &leave)?;
                 Some(r.id)
             } else {
                 None
             };
             let unity_open = orbiters_projects::unity_open(&project.path);
-            Ok(Outcome::Setup(Flow { project, avatar, request, unity_open, result: None, packages_only: !nano, acknowledged: false }))
+            Ok(Outcome::Setup(Flow { project, avatar, request, unity_open, result: None, packages_only: !nano, acknowledged: false, warning: leave.warning }))
         });
     }
     /// The registered projects' copies of the avatar `id`, with their projects.
@@ -1497,6 +1501,7 @@ impl State {
                 installed: vec![],
             }),
             packages_only,
+            warning: None,
             acknowledged: true,
         };
         let now = discovery::now();

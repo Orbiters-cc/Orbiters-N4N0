@@ -7,7 +7,7 @@ use orbiters_i18n::{mark, tr};
 use super::art;
 use super::dialogs::{inline_warning, note};
 use super::state::{Modal, State};
-use super::unity6::{Checked, Sheet, Step};
+use super::unity6::{Checked, CheckedPlace, Sheet, Step};
 use super::unity6_card::{ids_warning, item, notice, para, vcc_steps};
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Rect, Sense, Ui, UiBuilder};
@@ -61,24 +61,23 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
         return;
     }
     let source = project.path.clone();
-    let target = state.u6.matrix().unity6_target().cloned();
-    // Unity 6000 counts as installed only when verified; the modules counted are those the project's 2022 editor has.
-    let editor_missing = target.as_ref().is_some_and(|t| !matches!(state.u6.editors.get(&t.unity), Some(orbiters_projects::unity6::editors::Found::Exact(_))));
-    let modules = state.u6.standing(&project.path).and_then(|s| state.u6.editors.get(&s.editor.text)).and_then(|f| f.usable().map(|c| c.modules)).unwrap_or_default();
+    let Some(target) = state.u6.matrix().unity6_target().cloned() else { return };
+    let dir = orbiters_projects::data_dir();
     state.u6.sheet.check = Job::spawn(ctx, move || {
         let checked: Checked = (|| -> anyhow::Result<_> {
-            let destination = PathBuf::from(&key.0).join(&key.1);
-            let copy = orbiters_projects::templates::duplication_bytes(&source, orbiters_projects::templates::Keep::default())?;
+            // The same look the copy starts with, by reading only: the place is refused here as it would be there.
+            let l = trial::look(&dir, &source, Path::new(&key.0), &key.1, trial::is_open(&source), &Default::default());
+            let place = match l.place {
+                Ok(p) => p,
+                // What is in the way of any trial comes before what is wrong with this place.
+                Err(_) if !l.blockers.is_empty() => PathBuf::from(&key.0).join(&key.1),
+                Err(why) => anyhow::bail!("{why}"),
+            };
             let library = orbiters_projects::size::lookup(&source).size.map(|s| s.library);
-            let editor = target.as_ref().and_then(|t| t.size_here()).filter(|_| editor_missing).map(|s| budget::EditorNeed::of(s, modules.android, modules.ios));
-            let (demands, guessed) = budget::demands(&destination, copy, library, editor);
-            let plan = budget::plan(demands, &budget::Disks, guessed);
-            let s = standing::read(&source, &unity6::matrix::Matrix::built_in());
-            let blockers = trial::blockers(&source, &s, trial::is_open(&source));
-            if destination.exists() {
-                anyhow::bail!("{}", tr!("{path} exists already: choose another name.", path = destination.display()));
-            }
-            Ok((plan, blockers))
+            let (plan, _) = super::unity6::plan_for(&source, &place, l.bytes, library, &target);
+            let mut outside: Vec<String> = l.linked.iter().map(|x| tr!("{link} is a link to {folder}: the trial gets its files, not the link.", link = x.at, folder = x.to.display())).collect();
+            outside.extend(l.outside.iter().map(|x| tr!("The local package {package} is at {folder}: the trial gets a copy of it, named so in its Packages/manifest.json.", package = x.name, folder = x.from.display())));
+            Ok(CheckedPlace { plan, blockers: l.blockers, outside })
         })()
         .map_err(|e| format!("{e:#}"));
         (key, checked)
@@ -157,7 +156,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             ctx.data_mut(|d| d.insert_temp(egui::Id::unique(("u6-baseline", &project.path)), confirmed));
             let open = state.session(&project.path).open();
             let b = Button::new(if open { tr("Unity has it open") } else { tr("Open in Unity 2022") }).icon(icons::PLAY).variant(Variant::Ghost).enabled(!open && !state.running()).id_salt("u6-open-2022");
-            if widgets::activated(&b.show(ui)) {
+            if b.confirm(ui) {
                 state.open_unity_as_is(&ctx, &project);
             }
         }
@@ -189,10 +188,16 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             match state.u6.sheet.checked.clone() {
                 None => para(ui, tr("Measuring the copy and the room on each disk…"), 12.0, theme::FG_3),
                 Some((_, Err(e))) => inline_warning(ui, &e),
-                Some((_, Ok((plan, blockers)))) => {
-                    budget_view(ui, &plan);
-                    if !blockers.is_empty() {
-                        notice(ui, Tone::Warn, tr("Not ready for a trial yet"), &unity6::describe_blockers(&blockers));
+                Some((_, Ok(found))) => {
+                    budget_view(ui, &found.plan);
+                    if !found.blockers.is_empty() {
+                        notice(ui, Tone::Warn, tr("Not ready for a trial yet"), &unity6::describe_blockers(&found.blockers));
+                    }
+                    for line in found.outside.iter().take(6) {
+                        note(ui, line);
+                    }
+                    if found.outside.len() > 6 {
+                        note(ui, &tr!("And {count} more outside the project.", count = found.outside.len() - 6));
                     }
                 }
             }
@@ -236,7 +241,8 @@ pub(super) fn footer(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             state.close_modal(ui.ctx());
         }
     };
-    let next = |ui: &mut Ui, label: &str, enabled: bool| widgets::activated(&Button::new(label).variant(Variant::Primary).enabled(enabled).id_salt(("u6-next", label)).show(ui));
+    // A press of the person's own (a held key's repeat never answers the next step).
+    let next = |ui: &mut Ui, label: &str, enabled: bool| Button::new(label).variant(Variant::Primary).enabled(enabled).id_salt(("u6-next", label)).confirm(ui);
     match state.u6.sheet.step {
         Step::Ids => {
             if next(ui, tr("I understand, go on"), true) {
@@ -255,7 +261,7 @@ pub(super) fn footer(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
         }
         Step::Place => {
             let key = (state.u6.sheet.location.trim().to_string(), state.u6.sheet.name.clone());
-            let ready = state.u6.sheet.checked.as_ref().is_some_and(|(k, c)| *k == key && c.as_ref().is_ok_and(|(plan, blockers)| plan.fits() && blockers.is_empty()))
+            let ready = state.u6.sheet.checked.as_ref().is_some_and(|(k, c)| *k == key && c.as_ref().is_ok_and(|c| c.plan.fits() && c.blockers.is_empty()))
                 && orbiters_projects::templates::validate_name(&key.1).is_ok()
                 && Path::new(&key.0).is_absolute();
             if next(ui, tr("Make the trial copy"), ready && state.u6.run.is_none()) {
@@ -266,7 +272,7 @@ pub(super) fn footer(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             }
         }
         Step::Copying => {
-            if widgets::activated(&Button::new(tr("Stop copying")).variant(Variant::Ghost).id_salt("u6-stop").show(ui)) {
+            if Button::new(tr("Stop copying")).variant(Variant::Ghost).id_salt("u6-stop").confirm(ui) {
                 if let Some(r) = &state.u6.run {
                     r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }

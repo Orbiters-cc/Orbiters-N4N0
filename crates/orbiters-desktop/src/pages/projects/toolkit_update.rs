@@ -24,14 +24,15 @@ pub enum ToolkitOffer {
 
 /// Among `projects`, the one that holds the avatar `id`, never a Unity 6 trial (`trial`): a trial shares its original's
 /// avatar IDs, and an upload from Unity 6 would end the avatar's uploads from Unity 2022. A project VCC lists comes before
-/// one merely found on a disk. Several listed projects holding it is not decided here: `Err` names them.
+/// one merely found on a disk. Several holding it (listed, or with none listed found) is not decided here: `Err` names them.
 pub fn project_of<'a>(projects: &'a [Project], id: &str, trial: impl Fn(&Project) -> bool) -> Result<Option<&'a Project>, Vec<String>> {
     let holds = |p: &&Project| !p.missing && p.avatars.iter().any(|a| a.id == id) && !trial(p);
     let listed: Vec<&Project> = projects.iter().filter(|p| p.registered).filter(holds).collect();
-    match listed.len() {
-        0 => Ok(projects.iter().find(holds)),
-        1 => Ok(Some(listed[0])),
-        _ => Err(listed.iter().map(|p| p.name.clone()).collect()),
+    let among = if listed.is_empty() { projects.iter().filter(holds).collect() } else { listed };
+    match &among[..] {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        many => Err(many.iter().map(|p| p.name.clone()).collect()),
     }
 }
 
@@ -46,6 +47,10 @@ pub fn refusal(avatar: Option<&str>) -> String {
 impl State {
     /// [`ToolkitOffer`] of the avatar `id`.
     pub fn toolkit_offer(&self, id: &str) -> ToolkitOffer {
+        // Which of them are trials is not known yet: nothing is offered before it is.
+        if self.u6.look.is_none() {
+            return ToolkitOffer::Looking;
+        }
         let is_trial = |p: &Project| self.u6.trial_at(&p.path).is_some();
         match project_of(&self.scan.projects, id, is_trial) {
             Ok(Some(p)) => ToolkitOffer::Project(p.name.clone()),
@@ -66,11 +71,17 @@ impl State {
 
     /// Updates the Toolkit in the project that holds the avatar `id`, then opens it in Unity (or brings it forward).
     pub fn update_toolkit(&mut self, ctx: &egui::Context, id: &str, avatar: Option<&str>) {
+        if self.u6.look.is_none() {
+            return;
+        }
         let is_trial = |p: &Project| self.u6.trial_at(&p.path).is_some();
         let Ok(Some(project)) = project_of(&self.scan.projects, id, is_trial).map(|p| p.cloned()) else { return };
         let name = project.name.clone();
         let avatar = avatar.map(str::to_string);
         self.task(ctx, &tr!("Updating Orbiters Toolkit in {name}…", name = name), move || {
+            // It ends in an upload from VRChat's SDK panel: leave for that first, from the project as it is now (a trial, a
+            // duplicate of one or a project sharing its content IDs is refused or warned about, whatever the page knew).
+            let leave = orbiters_projects::unity6::authority::upload(&orbiters_projects::data_dir(), &project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
             match orbiters_projects::runtime()?.block_on(vpm::install_orbiters(&orbiters_projects::vcc_dir(), &project.path, &["orbiters.toolkit"])) {
                 Ok(()) => {}
                 // Not cancelled: the plan making it coherent, in its dialog.
@@ -80,9 +91,13 @@ impl State {
                 },
             }
             orbiters_projects::open_project(&project)?;
-            Ok(Outcome::Changed(match &avatar {
+            let said = match &avatar {
                 Some(avatar) => tr!("{name} has the current Orbiters Toolkit and is open in Unity. Upload {avatar} from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.", name = name, avatar = avatar),
                 None => tr!("{name} has the current Orbiters Toolkit and is open in Unity. Upload your avatar from VRChat's SDK panel when you're ready: N4N0 uploads nothing by itself.", name = name),
+            };
+            Ok(Outcome::Changed(match leave.warning {
+                Some(warning) => format!("{said} {warning}"),
+                None => said,
             }))
         });
     }
@@ -137,6 +152,8 @@ mod tests {
         let trial = |p: &Project| p.name.ends_with("(Unity 6)");
         assert_eq!(project_of(&projects, "avtr_a", trial).unwrap().map(|p| p.name.as_str()), Some("listed"));
         assert!(project_of(&projects[1..], "avtr_a", trial).unwrap().is_none(), "a trial alone is not offered");
+        let found = [project("one", false, false, &["avtr_a"]), project("two", false, false, &["avtr_a"])];
+        assert_eq!(project_of(&found, "avtr_a", |_: &Project| false).unwrap_err().len(), 2, "two merely found are not decided either");
         let two = [project("one", true, false, &["avtr_a"]), project("two", true, false, &["avtr_a"])];
         assert_eq!(project_of(&two, "avtr_a", |_: &Project| false).unwrap_err(), vec!["one".to_string(), "two".to_string()]);
     }

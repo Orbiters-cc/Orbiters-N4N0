@@ -113,6 +113,7 @@ fn links_are_followed_reported_and_protected() {
         assert!(p.protected.iter().any(|x| x.id == crate::owned::id_of(d).ok()), "{}", d.display());
     }
     // A link that leads nowhere: the project is not copied without it.
+    drop(p);
     std::fs::remove_dir_all(&deeper).unwrap();
     assert!(scan(&e.source, "T", "", &AtomicBool::new(false)).is_err());
 }

@@ -862,6 +862,9 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
     widgets::text(p, pos2(r.left() + 92.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::new(headline, 17.0).weight(weight::SEMIBOLD));
     p.galley(pos2(r.left() + 92.0, r.top() + 34.0), g, theme::FG_2);
 
+    if let Some(warning) = state.flow.as_ref().and_then(|f| f.warning.clone()) {
+        inline_warning(ui, &warning);
+    }
     // The steps, on a thread.
     let mut steps: Vec<(&str, Step)> =
         vec![(if nano { tr("Install My Avatar and Toolkit") } else { tr("Install My Avatar") }, if s == Stage::Installing { Step::Now } else { Step::Done })];

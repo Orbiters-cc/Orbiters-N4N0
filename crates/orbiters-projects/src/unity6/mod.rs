@@ -16,6 +16,8 @@ pub mod payload;
 pub mod standing;
 pub mod trial;
 pub mod vcc;
+#[cfg(test)]
+mod hostile_tests;
 
 use orbiters_i18n::tr;
 use std::collections::{HashMap, HashSet};

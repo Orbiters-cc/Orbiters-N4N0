@@ -570,13 +570,30 @@ mod tests {
         back["high"] = 7.into();
         std::fs::write(dir.path().join(KEPT_FILE), back.to_string()).unwrap();
         assert!(refresh(dir.path(), &public, &Fake::answering(sign(&served(3, false), &private).unwrap().into_bytes()), url, 5_700).is_err());
+        // Second verification major 9: nor is it shown, not even when the whole older file is put back.
+        assert_eq!(load(dir.path(), Some(&public)).origin, Origin::BuiltIn);
         std::fs::write(dir.path().join(KEPT_FILE), &older_kept).unwrap();
+        assert_eq!(load(dir.path(), Some(&public)).origin, Origin::BuiltIn);
+        // (Both put back, it is a computer that never took the newer one.)
+        std::fs::remove_file(dir.path().join(HIGH_FILE)).unwrap();
 
         // A network failure: the kept copy stays.
         let failing = Fake { answer: RefCell::new(Err(anyhow::anyhow!("offline"))), asked: RefCell::default() };
         assert!(refresh(dir.path(), &public, &failing, url, 6_000).is_err());
         assert_eq!(failing.asked.borrow().as_slice(), [url]);
         assert_eq!(load(dir.path(), Some(&public)).data.serial, 2);
+    }
+
+    /// Second verification major 9: the built-in list's own number served with other contents is refused too.
+    #[test]
+    fn the_built_in_lists_number_with_other_contents_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, private, public) = key_pair();
+        let serial = Matrix::built_in().data.serial;
+        let mut other: serde_json::Value = serde_json::from_str(&served(serial, true)).unwrap();
+        other["serial"] = serial.into();
+        assert!(refresh(dir.path(), &public, &Fake::answering(sign(&other.to_string(), &private).unwrap().into_bytes()), "u", 10).is_err());
+        assert!(refresh(dir.path(), &public, &Fake::answering(sign(&served(serial, false), &private).unwrap().into_bytes()), "u", 10).is_ok());
     }
 
     #[test]

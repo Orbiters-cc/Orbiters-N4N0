@@ -584,9 +584,10 @@ fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unit
         State::OtherLine => "other_line",
         State::LineUnknown => "line_unknown",
     };
-    let key = discovery::key(path);
-    // By identity, not by path alone (verification's major 10): a folder replaced at a recorded path is not the one recorded.
-    let here = |place: &unity6::trial::Place| discovery::key(&place.path) == key && place.verified() == Some(true);
+    // By identity, wherever it is now and whatever it is called (the window asks the same): a folder replaced at a recorded
+    // path is not the one recorded, and one renamed since still is.
+    let now = std::fs::canonicalize(path).ok().and_then(|p| orbiters_projects::owned::id_of(&p).ok());
+    let here = |place: &unity6::trial::Place| now.is_some() && place.id == now;
     let as_trial = trials.iter().find(|(j, s)| !matches!(s, unity6::trial::Status::Replaced) && (here(j.unity6()) || here(&j.trial)));
     let of_it: Vec<Value> = trials
         .iter()
@@ -662,10 +663,8 @@ fn unity6_target_json(matrix: &unity6::matrix::Matrix) -> Value {
 fn unity6_facts() -> (unity6::matrix::Matrix, Vec<(unity6::trial::Job, unity6::trial::Status)>) {
     let dir = orbiters_projects::data_dir();
     let matrix = unity6::matrix::load(&dir, unity6::key().as_ref());
-    let trials = unity6::trial::jobs(&dir).into_iter().map(|j| {
-        let s = unity6::trial::status(&j, false);
-        (j, s)
-    }).collect();
+    let record = unity6::journal::read(&dir);
+    let trials = record.jobs.iter().map(|j| (j.clone(), unity6::trial::status(&dir, &record, j))).filter(|(_, s)| !matches!(s, unity6::trial::Status::Abandoned)).collect();
     (matrix, trials)
 }
 
@@ -1387,7 +1386,7 @@ impl Projects {
                 if let Some(job) = self.moving_library(&project.path) {
                     return Err(Failure::new("library_moving", format!("Job {job} is moving the Library of {}.", project.name), "Unity can open it once that ends (unity_get_job)."));
                 }
-                let opened = orbiters_projects::open_project(&project).map_err(|e| failed("open_failed", e, "Tell the person what it says: a Unity version to install with Unity Hub, a disk to connect."))?;
+                let opened = orbiters_projects::open_project_from_bridge(&project).map_err(|e| failed("open_failed", e, "Tell the person what it says: a Unity version to install with Unity Hub, a disk to connect."))?;
                 Ok(json!({
                     "opened": true,
                     "already_open": opened.already_open,
@@ -1693,6 +1692,14 @@ impl Projects {
             }
             _ => return Err(bad("what must be mixer, toolkit, my_avatar or n4n0.", "Pass one of those.")),
         };
+        // Everything that would be refused at the end is refused before anything is done.
+        let dir = orbiters_projects::data_dir();
+        use unity6::authority::{allow, Action, Caller};
+        let refuse = |why: String| Failure::new("refused", why, "Tell the person: nothing was done.");
+        allow(&dir, &path, Action::Packages).map_err(refuse)?;
+        if open_unity {
+            allow(&dir, &path, Action::Open(Caller::Bridge)).map_err(refuse)?;
+        }
         let request: Arc<Mutex<Option<String>>> = Arc::default();
         let probe = {
             let (request, path) = (request.clone(), path.clone());
@@ -1708,6 +1715,11 @@ impl Projects {
         let project_now = project.clone();
         self.spawn(Lane::Action, label, Some(path.clone()), false, Progress::None, Arc::default(), Some(probe), args, call, move || {
             let root = root();
+            // What leads to an upload from VRChat's SDK panel asks leave for it first (Mixer does not).
+            let leave = match what.as_str() {
+                "mixer" => None,
+                _ => Some(unity6::authority::upload(&dir, &path).map_err(|why| Failure::new("refused", why, "Tell the person: nothing was done."))?),
+            };
             let installed = match what.as_str() {
                 "mixer" => block_on(vpm::install_orbiters(&root, &path, &[MIXER])),
                 "toolkit" => block_on(vpm::install_orbiters(&root, &path, &[TOOLKIT])),
@@ -1723,9 +1735,12 @@ impl Projects {
             if outcome["conflict"] == json!(true) {
                 return Ok(outcome);
             }
-            if let (Some(avatar), Some(asset)) = (avatar, server.n4n0_gallery_asset_id()) {
+            if let Some(warning) = leave.as_ref().and_then(|l| l.warning.as_ref()) {
+                outcome["upload_warning"] = json!(warning);
+            }
+            if let (Some(avatar), Some(asset), Some(leave)) = (avatar, server.n4n0_gallery_asset_id(), &leave) {
                 let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("ORBITERS_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
-                orbiters_projects::setup::write(&path, &r).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
+                orbiters_projects::setup::write(&path, &r, leave).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 outcome["setup_request"] = json!(r.id);
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");
                 *request.lock().unwrap() = Some(r.id);
@@ -1734,7 +1749,7 @@ impl Projects {
                 // The person came back meanwhile: Unity is not opened in front of them.
                 outcome["unity"] = json!({ "opened": false, "error": "the person is using the computer: open it later with unity_editor open" });
             } else if open_unity {
-                match orbiters_projects::open_project(&project_now) {
+                match orbiters_projects::open_project_from_bridge(&project_now) {
                     Ok(opened) => outcome["unity"] = json!({ "opened": true, "already_open": opened.already_open }),
                     Err(e) => outcome["unity"] = json!({ "opened": false, "error": format!("{e:#}") }),
                 }
@@ -2228,13 +2243,18 @@ mod unity6_tests {
             created: 1_763_800_000,
             source: place(&original, "Avatar"),
             trial: place(&trial, "Avatar (Unity 6)"),
-            phase: Phase::Prepared,
+            phase: Phase::Listed,
             target: Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
             error: None,
+            differences: vec![],
             attempts: vec![],
             migrated: None,
-            siblings: vec![],
+            beside: None,
             localized: vec![],
+            linked: vec![],
+            content: vec![],
+            guid: String::new(),
+            manifest: None,
             import_high: 0,
         };
         let trials = vec![(job.clone(), Status::OnUnity6)];
@@ -2251,6 +2271,8 @@ mod unity6_tests {
         project(&original, "2022.3.22f1", "3.10.6", "2022.3");
         assert!(unity_line_json(&original, &m, &trials)["trials"].as_array().unwrap().is_empty());
         assert_eq!(unity_line_json(&trial, &m, &trials)["trial_of"]["original_is_still_there"], "replaced");
+        // Second verification major 10: the original, renamed, keeps its trials here as in the window.
+        assert_eq!(unity_line_json(&temp.join("Avatar moved"), &m, &trials)["trials"].as_array().unwrap().len(), 1);
         // Verification minor 1: both tools say the target and its dated facts the same way.
         let projects = Projects::default();
         *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }], ..Default::default() });
@@ -2276,10 +2298,12 @@ mod unity6_tests {
         let original = temp.join("Avatar");
         project(&original, "2022.3.22f1", "3.10.6", "2022.3");
         std::fs::create_dir_all(original.join("Assets")).unwrap();
+        std::fs::write(original.join("Packages/manifest.json"), r#"{"dependencies":{}}"#).unwrap();
+        std::fs::write(original.join("ProjectSettings/ProjectSettings.asset"), "PlayerSettings:\n  productGUID: 0\n").unwrap();
         let target = Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() };
         let dir = orbiters_projects::data_dir();
         let job = unity6::trial::prepare(
-            unity6::trial::Prepare { dir: &dir, vcc: &root(), source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_| Ok(0), recorded: &|_| {} },
+            unity6::trial::Prepare { dir: &dir, vcc: &root(), source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_, _| Ok(0), recorded: &|_| {} },
             &AtomicBool::new(false),
             &Default::default(),
         )
@@ -2298,7 +2322,40 @@ mod unity6_tests {
         let opened = said(projects.call("unity_editor", &json!({ "path": at, "action": "open" }), &call(), None));
         assert!(opened.contains("open_failed") && opened.contains("Creator Companion"), "{opened}");
         assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
-        unity6::trial::forget(&dir, &job.id).unwrap();
+        // Toolkit, My Avatar, Mixer: refused before anything is done.
+        for what in ["toolkit", "my_avatar", "mixer"] {
+            let said = said(projects.call("unity_add_orbiters", &json!({ "path": at, "what": what, "wait_s": 20 }), &call(), None));
+            assert!(said.contains("refused") && said.contains("Creator Companion"), "{what}: {said}");
+        }
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
+        unity6::trial::abandon(&dir, &root(), &job.id).unwrap();
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Second verification N4: no tool opens a project on Unity 6, trial or not, and the optional open of another tool is
+    /// refused before that tool does anything. (No such editor exists: nothing can start.)
+    #[test]
+    fn no_tool_opens_a_unity6_project() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-u6-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let at = temp.join("Six");
+        project(&at, "6000.0.99f9", "3.11.0-beta.1", "6000.0");
+        std::fs::create_dir_all(at.join("Assets")).unwrap();
+        let projects = Projects::default();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
+        let said = |r: Result<Answer, Failure>| match r {
+            Err(f) => format!("{} {}", f.code, f.message),
+            Ok(Answer::Data(v)) => v.to_string(),
+            Ok(_) => panic!("data"),
+        };
+        let opened = said(projects.call("unity_editor", &json!({ "path": at, "action": "open" }), &call(), None));
+        assert!(opened.contains("open_failed") && opened.contains("Unity 6") && !opened.contains("not installed"), "{opened}");
+        for what in ["mixer", "toolkit", "my_avatar"] {
+            let added = said(projects.call("unity_add_orbiters", &json!({ "path": at, "what": what, "open_unity": true, "wait_s": 20 }), &call(), None));
+            assert!(added.contains("refused") && added.contains("Unity 6"), "{what}: {added}");
+        }
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

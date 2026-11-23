@@ -175,6 +175,17 @@ mod tests {
         // Verification major 4: running with no log, or a log saying nothing read here, is not "importing".
         assert_eq!(judge(None, true), Outcome::Undetermined { why: Unknown::NoLog, running: true });
         assert_eq!(judge(Some(START), true), Outcome::Undetermined { why: Unknown::NotYet, running: true });
+        // Second verification major 4: the line's words in another order, or a line that only holds them, are not its end.
+        for not in [
+            "InitialRefreshV2 cancelled: Asset Pipeline Refresh failed; Total: unknown",
+            "Asset Pipeline Refresh (id=ab): Total: many seconds - Initiated by InitialRefreshV2(X)",
+            "Asset Pipeline Refresh (id=ab): Total: 1.5 seconds - Initiated by StopAssetImportingV2(X)",
+            "Asset Pipeline Refresh (id=): Total: 1.5 seconds - Initiated by InitialRefreshV2(X)",
+            "Asset Pipeline Refresh (id=ab): Total: NaN seconds - Initiated by InitialRefreshV2(X)",
+            "x Asset Pipeline Refresh (id=ab): Total: 1.5 seconds - Initiated by InitialRefreshV2(X)",
+        ] {
+            assert!(!matches!(judge(Some(not), false), Outcome::Imported { .. }), "{not}");
+        }
         // A mention of the operation is not its end.
         assert_eq!(judge(Some(&format!("{START}InitialRefreshV2 started\n")), false), Outcome::Undetermined { why: Unknown::EndedEarly, running: false });
         assert_eq!(judge(Some(&format!("{START}InitialRefreshV2 started\n")), true), Outcome::Importing);

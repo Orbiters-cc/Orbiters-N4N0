@@ -327,10 +327,17 @@ struct Window {
     size: egui::Vec2,
     /// The last frame asked for another.
     repaint: bool,
+    /// Frames painted on the offscreen GPU (the page's blur made for real), when given.
+    gpu: Option<orbiters_ui::offscreen::Offscreen>,
 }
 
 impl Window {
     fn new(snap: Snapshot, width: f32) -> Self {
+        Self::painted(snap, width, None)
+    }
+
+    /// The window, painted on `gpu` from its first frame when given.
+    fn painted(snap: Snapshot, width: f32, gpu: Option<orbiters_ui::offscreen::Offscreen>) -> Self {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);
         orbiters_ui::widgets::watch_controls();
@@ -339,7 +346,10 @@ impl Window {
         let mut app = App::offline(ctl);
         app.skip_splash();
         app.set_page(Page::N4n0, 0.0);
-        let mut w = Self { ctx, app, backend, time: 0.0, size: vec2(width, 820.0), repaint: false };
+        if let Some(gpu) = &gpu {
+            app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
+        }
+        let mut w = Self { ctx, app, backend, time: 0.0, size: vec2(width, 820.0), repaint: false, gpu };
         w.settle();
         w
     }
@@ -354,6 +364,14 @@ impl Window {
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
         input.events = events;
         let app = &mut self.app;
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.frame_timed(&self.ctx, input, |ui| {
+                app.logic_offline(ui.ctx());
+                app.draw(ui);
+            })
+            .expect("a painted frame");
+            return;
+        }
         let mut out = self.ctx.run_ui(input, |ui| {
             app.logic_offline(ui.ctx());
             app.draw(ui);
@@ -374,8 +392,12 @@ impl Window {
         self.frame(vec![Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
     }
 
+    /// A key pressed and let go (egui tells a repeat from a press by the keys it holds down).
     fn key(&mut self, key: Key, modifiers: Modifiers) {
-        self.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]);
+        self.frame(vec![
+            Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
+            Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
+        ]);
     }
 
     fn type_text(&mut self, text: &str) {
@@ -414,7 +436,7 @@ fn the_shortcut_takes_the_keyboard_to_the_bar_and_typing_grows_the_chat() {
     w.settle();
     assert!(w.focused(), "the field kept the keyboard on its way down");
     w.key(Key::Enter, Modifiers::NONE);
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text }) if text == "hello"), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, .. }) if text == "hello"), "{:?}", w.backend.sent());
     assert_eq!(w.chat().draft(), "", "sent and cleared");
 }
 
@@ -431,20 +453,28 @@ fn ctrl_k_stays_the_settings_search_s_and_ctrl_j_is_the_chat_s_on_every_page() {
     assert!(w.focused(), "Ctrl+J: the bar, on Settings too");
 }
 
-/// Verify-r21 blocker 2: what sends is a fresh press of Enter, never a held Enter's repeats, nor the Enter that comes in
-/// the same moment as a paste; the text then needs its own fresh Enter.
+/// Verify-r21 blocker 2: what sends is a fresh press of Enter, never a held Enter's repeats (egui marks a press of a key
+/// it holds down as a repeat), nor the Enter that comes in the same moment as a paste; the text then needs its own fresh
+/// Enter.
 #[test]
 fn a_held_enter_or_a_paste_never_sends() {
     let mut w = Window::new(ready(), 1280.0);
     w.key(Key::J, Modifiers::COMMAND);
-    w.type_text("yes");
-    let repeat = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE };
-    w.frame(vec![repeat.clone()]);
-    w.frame(vec![repeat]);
-    assert!(w.backend.sent().is_empty(), "a held Enter's repeats sent {:?}", w.backend.sent());
-    let fresh = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
-    w.frame(vec![Event::Paste(" please".into()), fresh]);
-    assert!(w.backend.sent().is_empty(), "a paste with an Enter in the same moment sent {:?}", w.backend.sent());
+    w.type_text("hello");
+    let enter = |pressed: bool| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    // Enter pressed (it sends) and held.
+    w.frame(vec![enter(true)]);
+    assert_eq!(w.backend.sent().len(), 1, "{:?}", w.backend.sent());
+    // While it is held: a reply pasted, and the key's repeats.
+    w.frame(vec![Event::Paste("yes".into()), enter(true)]);
+    w.frame(vec![enter(true)]);
+    w.frame(vec![enter(true)]);
+    assert_eq!(w.backend.sent().len(), 1, "a held Enter's repeats sent {:?}", w.backend.sent());
+    assert_eq!(w.chat().draft(), "yes");
+    w.frame(vec![enter(false)]);
+    // A paste and a fresh Enter in the same moment: the paste needs its own Enter.
+    w.frame(vec![Event::Paste(" please".into()), enter(true), enter(false)]);
+    assert_eq!(w.backend.sent().len(), 1, "a paste with an Enter in the same moment sent {:?}", w.backend.sent());
     assert_eq!(w.chat().draft(), "yes please");
     w.key(Key::Enter, Modifiers::NONE);
     assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, .. }) if text == "yes please"), "{:?}", w.backend.sent());
@@ -461,11 +491,15 @@ fn shift_enter_starts_a_line_and_a_composing_input_method_keeps_its_enter() {
     assert!(w.backend.sent().is_empty());
     // Japanese: the Enter that commits the composition is the input method's.
     w.frame(vec![Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: None })]);
-    w.frame(vec![Event::Ime(egui::ImeEvent::Commit("日本".into())), Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    w.frame(vec![
+        Event::Ime(egui::ImeEvent::Commit("日本".into())),
+        Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+        Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE },
+    ]);
     assert!(w.backend.sent().is_empty(), "the committing Enter sends nothing");
     assert!(w.chat().draft().ends_with("日本"), "{:?}", w.chat().draft());
     w.key(Key::Enter, Modifiers::NONE);
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text }) if text == "first\nsecond日本"));
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, .. }) if text == "first\nsecond日本"));
 }
 
 #[test]
@@ -597,10 +631,13 @@ fn a_question_is_answered_with_its_buttons() {
     let (yes, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes is drawn");
     assert!(on);
     w.press(yes.center());
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true })), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, question: 7 })), "{:?}", w.backend.sent());
+    // The next question: its own buttons.
+    w.backend.set(|s| s.n4n0.confirmations = vec![N4n0Confirmation { approve_url: format!("{}8", orbiters_n4n0::status::LOCAL_APPROVAL), ..s.n4n0.confirmations[0].clone() }]);
+    w.settle();
     let (no, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("No, leave it")).expect("No is drawn");
     w.press(no.center());
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: false })));
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: false, question: 8 })), "{:?}", w.backend.sent());
 }
 
 #[test]
@@ -626,4 +663,249 @@ fn signed_out_and_assistant_off_say_so_and_lead_to_the_fix() {
     w.press(on.center());
     let patch = w.backend.patches.lock().unwrap().last().cloned().expect("settings patched");
     assert_eq!(patch["n4n0"]["assistant"], serde_json::json!(true), "{patch}");
+}
+
+// --- Verify-r21 fixes ---
+
+fn local_question(n: u64, summary: &str) -> N4n0Confirmation {
+    N4n0Confirmation { id: format!("n4n0-{n}"), title: String::new(), summary: summary.into(), approve_url: format!("{}{n}", orbiters_n4n0::status::LOCAL_APPROVAL) }
+}
+
+/// Blocker 1: the card's Yes and No name the question it shows, a typed reply names the question shown when it was
+/// sent, and an answered card says so instead of offering its buttons again.
+#[test]
+fn every_answer_from_the_chat_names_the_question_it_was_shown() {
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, "N4N0 will do this if you say yes: Boop \"Sam\".")];
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let (yes, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes is drawn");
+    w.press(yes.center());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, question: 7 })), "{:?}", w.backend.sent());
+    w.settle();
+    assert!(orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).is_none(), "the card says the answer went");
+    let sent_before = w.backend.sent().len();
+    w.press(yes.center());
+    assert_eq!(w.backend.sent().len(), sent_before, "an answered card answers nothing more");
+    // A typed reply goes with the question shown.
+    w.type_text("no");
+    w.key(Key::Enter, Modifiers::NONE);
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, question: Some(7) }) if text == "no"), "{:?}", w.backend.sent());
+}
+
+/// Blocker 2: egui turns a held Enter's (or Space's) repeats into clicks of the focused button; an answer button takes
+/// only a pointer's press, an accessibility tool's, or a fresh key press.
+#[test]
+fn a_focused_answer_button_takes_no_held_keys_repeats() {
+    let ctx = egui::Context::default();
+    let mut run = |events: Vec<Event>, focus: bool| -> (bool, bool) {
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
+        input.events = events;
+        let mut seen = (false, false);
+        let mut out = ctx.run_ui(input, |ui| {
+            let resp = ui.button("Yes");
+            if focus {
+                ui.memory_mut(|m| m.request_focus(resp.id));
+            }
+            seen = (resp.clicked(), super::panel::fresh_activation(ui, &resp));
+        });
+        out.textures_delta.clear();
+        seen
+    };
+    run(Vec::new(), true);
+    run(Vec::new(), false);
+    let key = |key: Key, pressed: bool| Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    for k in [Key::Enter, Key::Space] {
+        assert_eq!(run(vec![key(k, true)], false), (true, true), "{k:?}: a fresh press answers");
+        assert_eq!(run(vec![key(k, true)], false), (true, false), "{k:?} held: egui clicks on its repeat; the answer does not");
+        assert_eq!(run(vec![key(k, true)], false), (true, false));
+        run(vec![key(k, false)], false);
+    }
+}
+
+/// Blocker 3 (the window): another Orbiters account signed in (N4N0's account epoch moves): what was typed goes, with
+/// the chat; the same account (pages changed, a reconnect) keeps it.
+#[test]
+fn what_was_typed_goes_with_the_orbiters_account() {
+    let mut w = Window::new(ready(), 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("A's unsent words");
+    w.settle();
+    w.app.set_page(Page::Settings, w.time);
+    w.backend.set(|s| s.account.state = AccountState::Checking { username: Some("Sample".into()) });
+    w.settle();
+    assert_eq!(w.chat().draft(), "A's unsent words", "the same account (a page changed, a reconnect)");
+    w.backend.set(|s| s.n4n0.account_epoch += 1);
+    w.settle();
+    assert_eq!(w.chat().draft(), "", "another account: nothing of A's draft");
+    assert!(!w.chat().shows());
+    // Nor its undo steps.
+    w.key(Key::J, Modifiers::COMMAND);
+    w.key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(w.chat().draft(), "", "Ctrl+Z brings nothing of A's back");
+}
+
+/// Major 7: a sheet over the page (Previous instances) or the first-use notice owns the keyboard: Ctrl+J opens no chat
+/// under it, Esc is the sheet's; and a chat that was open stands aside when a sheet comes up over it.
+#[test]
+fn a_sheet_or_a_notice_over_the_page_owns_the_keyboard() {
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::N4n0, "Hi.", 1)].into();
+    // Made-up launcher data: Where and its sheet show.
+    snap.launcher = orbiters_core::launcher::sample().into();
+    let mut w = Window::new(snap.clone(), 1280.0);
+    w.app.set_page(Page::Home, w.time);
+    w.settle();
+    w.app.home_mut().launcher_mut().places.previous.stand_in(Vec::new(), "");
+    w.settle();
+    assert!(w.app.home_mut().launcher_mut().places.previous.is_up(), "the sheet is up (precondition)");
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    assert!(!w.chat().shows() && !w.focused(), "Ctrl+J under the sheet opens nothing");
+    // (Esc there is the sheet's: the chat consumes no key under a modal, `under_a_modal_the_chat_takes_no_key`.)
+    w.app.home_mut().launcher_mut().places.previous.stand_in_close();
+    w.settle();
+    // The chat open, then a sheet comes up: the chat stands aside (its draft kept).
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("kept");
+    w.settle();
+    assert!(w.chat().is_open());
+    w.app.home_mut().launcher_mut().places.previous.stand_in(Vec::new(), "");
+    w.settle();
+    assert!(!w.chat().shows() && !w.focused(), "the chat stood aside");
+    assert_eq!(w.chat().draft(), "kept");
+    // The first-use notice over the page: the same.
+    snap.settings.usage.told = false;
+    snap.settings.usage.told_perf = false;
+    snap.settings.usage.told_account = false;
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    assert!(!w.chat().shows() && !w.focused(), "Ctrl+J under the first-use notice opens nothing");
+}
+
+/// Major 7, at the chat's edge: under a modal, the chat takes none of the frame's keys (Esc, the shortcut, typing): the
+/// modal drawn after it gets them all; without one, the open chat takes Esc and holds the keys back from the page.
+#[test]
+fn under_a_modal_the_chat_takes_no_key() {
+    let ctx = egui::Context::default();
+    let snap = ready();
+    let mut chat = ChatBar::default();
+    let keys = || {
+        vec![
+            Event::Key { key: Key::J, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND },
+            Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            Event::Text("x".into()),
+        ]
+    };
+    let mut run = |chat: &mut ChatBar, modal: bool| -> (bool, bool, bool) {
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
+        input.events = keys();
+        let mut seen = (false, false, false);
+        let mut out = ctx.run_ui(input, |ui| {
+            chat.before_page(ui.ctx(), &snap, modal);
+            // What the page (and a modal on it) gets.
+            seen = ui.input(|i| (i.key_pressed(Key::Escape), i.events.iter().any(|e| matches!(e, Event::Text(_))), i.key_pressed(Key::J)));
+        });
+        out.textures_delta.clear();
+        seen
+    };
+    assert_eq!(run(&mut chat, true), (true, true, true), "a modal gets Esc, the shortcut and the typing");
+    assert!(!chat.is_open());
+    chat.open();
+    assert_eq!(run(&mut chat, true), (true, true, true), "an open chat stands aside for a modal");
+    assert!(!chat.is_open());
+    chat.open();
+    assert_eq!(run(&mut chat, false), (false, false, false), "no modal: the open chat has the keys");
+}
+
+/// Major 8: the window's automatic rest to the tray waits while the chat is up, holds a draft, or Talk is held.
+#[test]
+fn the_automatic_rest_waits_for_the_chat() {
+    let mut w = Window::new(ready(), 1280.0);
+    let chat_vetoes = |w: &Window| {
+        let snap = w.backend.view();
+        w.app.idle_facts(&w.ctx, &snap).iter().any(|(fact, idle)| fact.contains("N4N0's chat") && !*idle)
+    };
+    assert!(!chat_vetoes(&w), "nothing of the chat at rest");
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("a draft");
+    w.settle();
+    assert!(chat_vetoes(&w), "the chat up with a draft");
+    w.key(Key::Escape, Modifiers::NONE);
+    w.settle();
+    assert!(!w.chat().shows());
+    assert!(chat_vetoes(&w), "the draft alone, the chat closed");
+    let snap = w.backend.view();
+    assert!(!w.app.may_rest(&w.ctx, &snap));
+}
+
+/// Minor 3: a draft longer than the composer adds no scroll region: the composer follows the caret.
+#[test]
+fn a_long_draft_follows_its_caret_without_a_second_scroll_region() {
+    let mut w = Window::new(ready(), 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("start");
+    for i in 0..14 {
+        w.key(Key::Enter, Modifiers::SHIFT);
+        w.type_text(&format!("line {i}"));
+    }
+    w.settle();
+    assert!(w.chat().draft_offset() > 0.0, "the composer moved to its caret at the end");
+    // The caret back at the start: the composer follows it up.
+    let mut state = egui::TextEdit::load_state(&w.ctx, field_id()).expect("the field's state");
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+    state.store(&w.ctx, field_id());
+    w.settle();
+    assert_eq!(w.chat().draft_offset(), 0.0);
+}
+
+/// Minor 5: a full conversation (its oldest lines dropped as new ones come) still lights the bar for a new answer.
+#[test]
+fn a_new_answer_lights_the_bar_in_a_full_conversation() {
+    // The runtime keeps 60 lines: a full conversation, half of them answers.
+    let mut snap = ready();
+    snap.n4n0.lines = (0..60u64)
+        .map(|i| N4n0Line { at_ms: 1000 + i, ..line(if i % 2 == 0 { N4n0Who::You } else { N4n0Who::N4n0 }, &format!("line {i}"), 0) })
+        .collect::<Vec<_>>()
+        .into();
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    w.key(Key::Escape, Modifiers::NONE);
+    w.settle();
+    assert!(!w.chat().says_answered(&w.backend.view()), "seen with the chat open");
+    // Two lines more, two dropped: as many answers as before, one of them new.
+    w.backend.set(|s| {
+        let mut lines: Vec<N4n0Line> = s.n4n0.lines.iter().skip(2).cloned().collect();
+        lines.push(N4n0Line { at_ms: 5000, ..line(N4n0Who::You, "one more", 0) });
+        lines.push(N4n0Line { at_ms: 5001, ..line(N4n0Who::N4n0, "a new answer", 0) });
+        s.n4n0.lines = lines.into();
+    });
+    w.settle();
+    assert!(w.chat().says_answered(&w.backend.view()), "the new answer lights the bar");
+}
+
+/// Major 9: the page's blur holds its GPU objects only while the chat shows: once it has closed, nothing is held,
+/// over repeated cycles. On the offscreen GPU (skipped without one).
+#[test]
+fn the_blur_gives_its_gpu_objects_back_when_the_chat_has_closed() {
+    let Ok(gpu) = orbiters_ui::offscreen::Offscreen::new() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let textures = gpu.textures().clone();
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::N4n0, "Hi.", 1)].into();
+    let mut w = Window::painted(snap, 1280.0, Some(gpu));
+    for _ in 0..3 {
+        w.key(Key::J, Modifiers::COMMAND);
+        w.settle();
+        assert_eq!(orbiters_ui::backdrop::count(&textures), 1, "the page blurred behind the open chat");
+        w.key(Key::Escape, Modifiers::NONE);
+        w.settle();
+        assert_eq!(orbiters_ui::backdrop::count(&textures), 0, "nothing held once closed");
+    }
 }

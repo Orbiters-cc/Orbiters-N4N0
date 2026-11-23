@@ -733,6 +733,8 @@ pub struct Facts {
     pub talk_lines: Vec<(bool, String)>,
     /// What N4N0 asks to do and waits for the person's yes for, in their language (REQUEST20 6).
     pub talk_question: Option<String>,
+    /// Its number (what its Yes and No answer).
+    pub talk_question_id: Option<u64>,
     /// What N4N0 is doing now.
     pub talk_doing: Option<String>,
     /// What N4N0 did, newest first, and whether the page shows it rather than the conversation.

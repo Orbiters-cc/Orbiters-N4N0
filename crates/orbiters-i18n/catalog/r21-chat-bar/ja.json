@@ -18,5 +18,13 @@
   "Send (Enter)": "送信（Enter）",
   "N4N0 is answering…": "N4N0が返答しています…",
   "Enter to send · Shift+Enter for a new line": "Enterで送信 · Shift+Enterで改行",
-  "Pick a feature, or talk to N4N0 at the top of the window": "機能を選ぶか、ウィンドウ上部でN4N0と話しましょう"
+  "Pick a feature, or talk to N4N0 at the top of the window": "機能を選ぶか、ウィンドウ上部でN4N0と話しましょう",
+  "N4N0 cannot hear yet: install its speech models in Orbiters - N4N0 › Settings › Voice & assistant.": "N4N0はまだ音声を聞き取れません。Orbiters - N4N0 › 設定 › 音声とアシスタントで音声モデルをインストールしてください。",
+  "N4N0's assistant is off: turn it on in Orbiters - N4N0 › Settings › Voice & assistant.": "N4N0のアシスタントはオフです。Orbiters - N4N0 › 設定 › 音声とアシスタントでオンにしてください。",
+  "N4N0 prepared something that needs your approval: see N4N0's chat at the top of Orbiters - N4N0.": "N4N0があなたの承認が必要な内容を用意しました。Orbiters - N4N0上部のN4N0のチャットを確認してください。",
+  "Calls are off: Orbiters - N4N0 › Settings › N4N0 companion": "通話はオフです：Orbiters - N4N0 › 設定 › N4N0 コンパニオン",
+  "That answer was for a question N4N0 no longer asks: nothing was done. Answer the one shown now.": "その返答はN4N0がもう尋ねていない質問へのものでした。何も実行されていません。今表示されている質問に答えてください。",
+  "Answer sent": "返答を送信しました",
+  "Turn it on in Orbiters - N4N0 › Settings › Voice & assistant": "Orbiters - N4N0 › 設定 › 音声とアシスタントでオンにしてください",
+  "Install its ears in Orbiters - N4N0 › Settings › Voice & assistant": "Orbiters - N4N0 › 設定 › 音声とアシスタントで耳をインストールしてください"
 }

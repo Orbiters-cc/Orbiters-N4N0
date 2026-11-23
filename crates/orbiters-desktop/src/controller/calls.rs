@@ -2134,7 +2134,7 @@ mod tests {
             (s.n4n0.lines.len(), s.n4n0.assistant.log.len())
         };
         // A short command N4N0 does by itself (no server): a line of A's, an entry of A's log.
-        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into() });
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), question: None });
         let (lines, log) = said(&ctl);
         assert!(lines > 0 && log > 0, "A said something ({lines} lines, {log} log entries)");
         assert!(!ctl.leave_unless_same(Some((server, "orbit-a"))), "the same account read again");

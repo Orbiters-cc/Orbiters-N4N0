@@ -312,6 +312,28 @@ pub enum PostField {
     Image,
 }
 
+/// The parts of a post someone else changed, to say them (never what they hold).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostParts {
+    pub title: bool,
+    pub text: bool,
+    pub visibility: bool,
+    pub roles: bool,
+    pub image: bool,
+}
+
+/// The parts of a role someone else changed, to say them. `standing` is its place among the roles and its fixed flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleParts {
+    pub name: bool,
+    pub description: bool,
+    pub permissions: bool,
+    pub self_assignable: bool,
+    pub added_on_join: bool,
+    pub two_factor: bool,
+    pub standing: bool,
+}
+
 impl PostField {
     pub const ALL: [PostField; 5] = [PostField::Title, PostField::Text, PostField::Visibility, PostField::Roles, PostField::Image];
 }
@@ -335,6 +357,11 @@ impl Post {
     pub fn with(&self, edit: &PostDraft) -> Post {
         let (role_ids, visibility) = (edit.audience(), edit.visibility);
         Post { title: edit.title.trim().into(), text: edit.text.trim().into(), visibility, role_ids, image_id: edit.image_id.clone(), ..self.clone() }
+    }
+    /// What is not the same in `now`, the same post read again.
+    pub fn differs(&self, now: &Post) -> PostParts {
+        let d = |f| self.part(f) != now.part(f);
+        PostParts { title: d(PostField::Title), text: d(PostField::Text), visibility: d(PostField::Visibility), roles: d(PostField::Roles), image: d(PostField::Image) }
     }
     /// What `edit` changes of this post.
     pub fn changed_by(&self, edit: &PostDraft) -> Vec<PostField> {

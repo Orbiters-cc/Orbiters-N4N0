@@ -437,7 +437,14 @@ pub struct Drafts {
 }
 
 fn drafts_root() -> PathBuf {
-    orbiters_core::paths::local_data_root().join("group-drafts")
+    let root = orbiters_core::paths::local_data_root().join("group-drafts");
+    // Each test's windows share theirs, and no other test's.
+    #[cfg(test)]
+    let root = {
+        thread_local!(static OWN: String = uuid::Uuid::new_v4().to_string());
+        OWN.with(|own| root.join(own))
+    };
+    root
 }
 
 /// The folder of one account's drafts.
@@ -668,6 +675,14 @@ mod tests {
         let mid = sample(&edge, 0.5, 0.0, 2.0, 1.0).0;
         assert_eq!((mid[0], mid[2]), (255, 0), "no colour from the transparent pixel: {mid:?}");
         assert!(mid[3].abs_diff(128) <= 1);
+        // The same when a source over the working size is first reduced: columns of red beside transparent blue.
+        let wide = image::RgbaImage::from_fn(8, 4, |x, _| if x % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 0]) });
+        let small = shrink(&wide, 4, 2);
+        assert_eq!((small.width(), small.height()), (4, 2));
+        for p in small.pixels() {
+            assert_eq!((p.0[0], p.0[1], p.0[2]), (255, 0, 0), "no fringe: {p:?}");
+            assert!(p.0[3].abs_diff(128) <= 1);
+        }
     }
 
     /// Major 10: an EXIF orientation in a real file is applied (a picture turned a quarter on its side comes upright).

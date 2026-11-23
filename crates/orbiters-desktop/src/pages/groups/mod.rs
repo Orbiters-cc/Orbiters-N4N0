@@ -604,6 +604,15 @@ impl State {
             Reply::Failed(f) => Outcome::Refused(f),
             _ => Outcome::Unknown,
         };
+        // Its view went meanwhile: what came of it is told, and no other view takes anything from it (B-F).
+        if !mine {
+            match outcome {
+                Outcome::Done(done) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(&done)),
+                Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, failure_text(f)),
+                Outcome::Unknown => {}
+            }
+            return;
+        }
         self.ended(ctx, cx, sealed, outcome);
     }
     fn cancel(&mut self) {
@@ -674,6 +683,7 @@ impl State {
             Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
             _ => None,
         };
+        // Without one: refused as it was being prepared, for the view still waiting for it.
         let group = sealed.as_ref().map(|s| s.group.clone());
         if let Some(studio) = self.studio.as_mut().filter(|s| group.as_ref() == Some(&s.card.id)) {
             studio.ended(sealed.as_ref(), &outcome);
@@ -723,6 +733,15 @@ pub(crate) fn failure_text_for(write: Option<&Write>, f: Failure) -> String {
     }
 }
 
+/// What someone else changed meanwhile, by the names of its parts; and what is left open, said (design 6).
+fn changed_text(parts: &[(bool, &str)]) -> String {
+    let what: Vec<&str> = parts.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+    orbiters_i18n::tr!(
+        "Someone changed it on VRChat since you opened it ({what}), so nothing was sent. It is read again just before each send; VRChat offers no way to close the instant between.",
+        what = what.join(", ")
+    )
+}
+
 /// A failure in the person's words (local codes only: nothing of VRChat's text, M5, M10).
 pub(crate) fn failure_text(f: Failure) -> String {
     match f {
@@ -741,6 +760,20 @@ pub(crate) fn failure_text(f: Failure) -> String {
         Failure::Expired => tr("This waited too long. Do it again to send it."),
         Failure::Duplicate => tr("This was already sent once."),
         Failure::Changed => tr("It changed on VRChat since you opened it. Look again before trying."),
+        Failure::PostChanged(p) => {
+            return changed_text(&[(p.title, tr("Title")), (p.text, tr("Text")), (p.visibility, tr("Who sees it")), (p.roles, tr("Restricted to")), (p.image, tr("Picture"))]);
+        }
+        Failure::RoleChanged(p) => {
+            return changed_text(&[
+                (p.name, tr("Name")),
+                (p.description, tr("Description")),
+                (p.permissions, tr("Its rights")),
+                (p.self_assignable, tr("Members can take it themselves")),
+                (p.added_on_join, tr("Given to everyone who joins")),
+                (p.two_factor, tr("Needs two-factor authentication")),
+                (p.standing, tr("Its place among the roles")),
+            ]);
+        }
         Failure::MaySent => tr("This may already have been sent: check first."),
         Failure::NotKept => tr("Its record could not be kept on this computer, so nothing was sent. Check the disk's free space."),
         Failure::Offline => tr("The Orbiters service could not be reached: nothing was sent."),
@@ -1139,6 +1172,10 @@ pub fn show_page(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         state.close();
         return;
     }
+    // What is in front of the page says so, for what stands aside under it (the confirmation says it as a dialog).
+    if state.holds() {
+        orbiters_ui::front::hold(&ctx, Id::unique("groups-sheet"));
+    }
     if state.studio.is_some() {
         studio::show(ui, cx, state);
     } else if state.open.is_some() {
@@ -1308,7 +1345,7 @@ mod tests {
             let text = done_text(&done);
             assert!(!text.contains("Secret") && !text.contains("usr_"), "{text}");
         }
-        for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::Withheld(Why::RoleAtOrAbove), Failure::NotRead(Missing::RoleOrder), Failure::MaySent, Failure::NotKept, Failure::Offline, Failure::Lost] {
+        for f in [Failure::Api(GroupFailure::Forbidden), Failure::Changed, Failure::PostChanged(Default::default()), Failure::RoleChanged(Default::default()), Failure::Withheld(Why::RoleAtOrAbove), Failure::NotRead(Missing::RoleOrder), Failure::MaySent, Failure::NotKept, Failure::Offline, Failure::Lost] {
             assert!(!failure_text(f).is_empty());
         }
     }

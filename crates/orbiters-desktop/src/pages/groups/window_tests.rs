@@ -67,7 +67,7 @@ impl Window {
     }
     fn prepare(&mut self, write: Write) {
         let ctl = self.ctl.clone();
-        self.state.prepare(&self.ctx, &ctl, write, Rect::NOTHING);
+        self.state.prepare(&self.ctx, &ctl, write, Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(80.0, 30.0)));
     }
     /// The sealed write its confirmation shows.
     fn shown(&self) -> Sealed {
@@ -383,7 +383,6 @@ fn verify2_pending_send_survives_window_drop() {
 #[test]
 fn verify2_editing_someone_elses_post_writes_no_private_baseline() {
     let mut r = rig();
-    let before = files();
     let Write::EditPost { baseline, edit, .. } = r.write(Wrote::EditPost) else { panic!() };
     assert!(baseline.text.contains(OTHERS_WORDS) && baseline.author_id == OTHERS_ID, "the fixture is someone else's");
     let mut o = page::Open::new(card(), &r.w.state.drafts);
@@ -405,7 +404,8 @@ fn verify2_editing_someone_elses_post_writes_no_private_baseline() {
     r.w.state.close();
     let mut mine = false;
     let mut scanned = 0;
-    for path in files().into_iter().filter(|f| !before.contains(f)) {
+    // Everything the feature keeps, this test's and whatever else is there: nobody else's words or id in any of it.
+    for path in files() {
         let bytes = std::fs::read(&path).unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes);
         for theirs in [OTHERS_WORDS, OTHERS_ID] {
@@ -589,6 +589,30 @@ fn groups_own_the_keyboard_while_they_are_up() {
     assert!(!home.modal_up());
     home.groups_mut().studio = Some(studio::Studio::new(card(), "usr_test", None));
     assert!(home.modal_up(), "Home says so to the chat");
+    // The same through the one place every layer says it: the studio, the page's editors, the confirmation.
+    let front = |w: &mut Window| {
+        w.drawn(3, vec![], show_page);
+        orbiters_ui::front::held(&w.ctx)
+    };
+    let (ctl, snap) = local();
+    let mut w = Window::new(ctl, snap);
+    w.state.staged = true;
+    w.state.scope = Some(Scope::of(&w.snap));
+    w.state.open = Some(page::Open::new(card(), &w.state.drafts));
+    assert!(!front(&mut w), "a page to read holds nothing");
+    w.state.open.as_mut().unwrap().composer = Some(page::Composer::new(None, PostDraft::default()));
+    assert!(front(&mut w), "the composer");
+    w.state.open.as_mut().unwrap().composer = None;
+    assert!(!front(&mut w), "closed");
+    w.state.open.as_mut().unwrap().role_editor = Some(page::RoleEditor::new(None, Default::default()));
+    assert!(front(&mut w), "the role editor");
+    w.state.open.as_mut().unwrap().role_editor = None;
+    w.state.studio = Some(studio::Studio::new(card(), "usr_test", None));
+    assert!(front(&mut w), "the studio");
+    w.state.studio = None;
+    stage::confirming(&mut w.state, Sealed::made_up(Write::DeleteRole { group: G.into(), role: "grol_a".into() }, true), Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(80.0, 30.0)), None);
+    assert!(front(&mut w), "a confirmation");
+    assert!(orbiters_ui::front::missing(&w.ctx).is_empty(), "no layer here that did not say so");
 }
 
 /// The panel: what may have been done, what the check saw, and the person's word, from the real service; nothing offered
@@ -606,13 +630,13 @@ fn the_panel_offers_the_persons_word_only_after_a_check() {
         let ctx = ui.ctx().clone();
         uncertain_panel(ui, &ctx, &ctl, s, G);
     };
-    let text = words(&r.w.drawn(2, vec![], &panel));
+    let text = words(&r.w.drawn(2, vec![], panel));
     assert!(text.contains(tr("Check VRChat")) && text.contains("may or may not have been published"), "{text}");
     assert!(!text.contains(tr("None of these")) && !text.contains(tr("This is it")));
     // It is there, opened to everyone by someone else since: shown, for the person.
     r.world.lock().unwrap().posts[0]["roleIds"] = json!([]);
     r.w.check(&op);
-    let text = words(&r.w.drawn(2, vec![], &panel));
+    let text = words(&r.w.drawn(2, vec![], panel));
     assert!(text.contains(tr("This is it")) && text.contains(tr("None of these")) && text.contains(tr("not exactly what was sent")), "{text}");
     let made = match &r.w.state.observed[&op] {
         Observation::Candidates(l) => l[0].id.clone(),
@@ -675,12 +699,13 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
         let mut w = r.world.lock().unwrap();
         w.fault = match point {
             Point::BeforeDispatch | Point::ServiceReplyLost => None,
-            Point::VrchatReplyLost | Point::Timeout => Some(Fault::Drop { done }),
+            Point::VrchatReplyLost => Some(Fault::Drop { done }),
+            Point::Timeout | Point::AppRestart => Some(Fault::Late { done, hold: hold.clone() }),
             Point::Status500 => Some(Fault::Answer { done, status: 502, body: json!({}) }),
             Point::Status429 => Some(Fault::Answer { done, status: 429, body: json!({}) }),
             Point::DecodeFailure => Some(Fault::Garbage { done }),
             Point::ContradictoryAnswer => Some(Fault::Answer { done, status: 200, body: json!({"id": "gpos_other", "unrelated": true}) }),
-            Point::PageClosed | Point::ScopeChange | Point::WindowClosed | Point::AppRestart => Some(Fault::Held(hold.clone())),
+            Point::PageClosed | Point::ScopeChange | Point::WindowClosed => Some(Fault::Held(hold.clone())),
         };
         if point == Point::BeforeDispatch {
             // The account loses what it needs between the seal and the send.
@@ -708,6 +733,16 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
             let client = crate::ipc::Client::connect(&r.service.endpoint_for_tests(), Role::Window).unwrap();
             r.w.ctl = Arc::new(Remote(client));
             r.w.settle();
+        }
+        Point::Timeout => {
+            assert!(hold.until_reached());
+            // No answer yet: it is being sent, to the ledger and to a check, and settles nothing.
+            assert_eq!(r.entry(&op).state, Stands::Dispatched, "{kind:?}: on the disk as sent before its answer");
+            let ctl = r.w.ctl.clone();
+            r.w.state.check(&r.w.ctx, &ctl, &op);
+            assert!(r.w.until(|s| s.observed.contains_key(&op)));
+            assert_eq!(r.w.state.observed.get(&op), Some(&Observation::Running), "{kind:?}");
+            hold.let_go();
         }
         Point::PageClosed => {
             assert!(hold.until_reached());
@@ -773,7 +808,7 @@ fn cell(kind: Wrote, point: Point, done: bool) -> Cell {
     let sent = r.sent_writes() + usize::from(restarted);
     let state = r.entry(&op).state;
     assert_eq!(r.w.stands(&op), Some(state), "{kind:?}, {point:?}: the window's view is the ledger");
-    assert!(matches!(r.w.state.flow, None), "{kind:?}, {point:?}");
+    assert!(r.w.state.flow.is_none(), "{kind:?}, {point:?}");
     // The account has its rights again; VRChat's wait is over.
     {
         let mut w = r.world.lock().unwrap();
@@ -848,7 +883,7 @@ fn the_matrix_of_every_write_and_every_failure() {
         .into_iter()
         .flat_map(|k| POINTS.into_iter().flat_map(move |p| {
             // Where VRChat may have done it or not, both.
-            let both = matches!(p, Point::VrchatReplyLost | Point::Timeout | Point::Status500 | Point::Status429 | Point::DecodeFailure | Point::ContradictoryAnswer);
+            let both = matches!(p, Point::VrchatReplyLost | Point::Timeout | Point::Status500 | Point::Status429 | Point::DecodeFailure | Point::ContradictoryAnswer | Point::AppRestart);
             let dones: &[bool] = if both { &[true, false] } else if p == Point::BeforeDispatch { &[false] } else { &[true] };
             dones.iter().map(move |d| (k, p, *d)).collect::<Vec<_>>()
         }))

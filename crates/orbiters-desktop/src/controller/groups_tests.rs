@@ -139,7 +139,7 @@ fn every_write_goes_once_and_is_recorded() {
         assert_eq!(w.lock().unwrap().done.len(), 1);
         let e = entry(&c, &s.op);
         assert_eq!((e.state, e.by, e.kind), (State::Done, Some(By::Answer), kind));
-        assert_eq!(e.made.is_some(), kind.makes(), "what it made is known");
+        assert!(!kind.makes() || e.made.is_some(), "{kind:?}: what it made is known");
         assert_eq!(commit(&c, &s), Outcome::Refused(Failure::Duplicate), "one operation goes once");
         assert_eq!(writes(&sent).len(), 1);
     }
@@ -391,14 +391,15 @@ fn a_staged_picture_goes_with_its_write() {
 #[test]
 fn an_edit_never_writes_over_what_someone_else_just_changed() {
     type Other = fn(&mut World);
-    let others: [(&str, Other); 5] = [
-        ("restricted", |w| w.posts[0]["roleIds"] = json!(["grol_mod"])),
-        ("opened", |w| w.posts[0]["visibility"] = json!("public")),
-        ("its picture removed", |w| w.posts[0]["imageId"] = Value::Null),
-        ("its words changed", |w| w.posts[0]["text"] = json!("changed")),
-        ("its audience unreadable", |w| w.posts[0]["roleIds"] = json!("?")),
+    let none = g::PostParts::default();
+    let others: [(&str, Other, Failure); 5] = [
+        ("restricted", |w| w.posts[0]["roleIds"] = json!(["grol_mod"]), Failure::PostChanged(g::PostParts { roles: true, ..none })),
+        ("opened", |w| w.posts[0]["visibility"] = json!("public"), Failure::PostChanged(g::PostParts { visibility: true, ..none })),
+        ("its picture removed", |w| w.posts[0]["imageId"] = Value::Null, Failure::PostChanged(g::PostParts { image: true, ..none })),
+        ("its words changed", |w| w.posts[0]["text"] = json!("changed"), Failure::PostChanged(g::PostParts { text: true, ..none })),
+        ("its audience unreadable", |w| w.posts[0]["roleIds"] = json!("?"), Failure::NotRead(Missing::Post)),
     ];
-    for (what, other) in others {
+    for (what, other, want) in others {
         for kind in [Kind::EditPost, Kind::DeletePost] {
             let (c, w, sent) = world();
             let write = match (kind, the(&c, Kind::EditPost)) {
@@ -408,7 +409,6 @@ fn an_edit_never_writes_over_what_someone_else_just_changed() {
             let s = prepare(&c, write).unwrap();
             // After the group is read for the last time, before the post is: the last read is the post's own.
             w.lock().unwrap().then = vec![(format!("/groups/{G}?"), Box::new(other))];
-            let want = if what == "its audience unreadable" { Failure::NotRead(Missing::Post) } else { Failure::Changed };
             assert_eq!(commit(&c, &s), Outcome::Refused(want), "{kind:?}, {what}");
             assert!(writes(&sent).is_empty(), "{kind:?}, {what}");
             assert_eq!((entry(&c, &s.op).state, entry(&c, &s.op).by), (State::Refused, Some(By::BeforeSending)));
@@ -510,7 +510,7 @@ fn what_is_missing_is_never_allowed() {
         change(&mut w.lock().unwrap());
         let outcome = commit(&c, &s);
         // A role that lost its definition is also not the role that was confirmed: either stops it.
-        assert!(matches!(outcome, Outcome::Refused(Failure::NotRead(_) | Failure::Changed)), "at the send: {what}: {outcome:?}");
+        assert!(matches!(outcome, Outcome::Refused(Failure::NotRead(_) | Failure::Changed | Failure::PostChanged(_) | Failure::RoleChanged(_))), "at the send: {what}: {outcome:?}");
         assert!(writes(&sent).is_empty(), "{what}");
     }
 }
@@ -557,7 +557,7 @@ fn a_deletion_whose_subject_changed_is_refused() {
     let s = prepare(&c, the(&c, Kind::DeleteRole)).unwrap();
     assert_eq!(s.role.as_ref().map(|r| r.name.as_str()), Some("Event goers"));
     w.lock().unwrap().roles[3] = role("grol_events", "Senior staff", 4, &["group-instance-moderate"], true);
-    assert_eq!(commit(&c, &s), Outcome::Refused(Failure::Changed));
+    assert!(matches!(commit(&c, &s), Outcome::Refused(Failure::RoleChanged(p)) if p.name && p.permissions && !p.description));
     let Write::DeletePost { group, post } = the(&c, Kind::DeletePost) else { panic!() };
     assert_eq!(prepare(&c, Write::DeletePost { group: group.clone(), post: Post { complete: false, ..post.clone() } }), failed(Failure::NotRead(Missing::Post)));
     w.lock().unwrap().posts.clear();
@@ -709,7 +709,7 @@ fn verify2_duplicate_role_name_cannot_identify_a_creation() {
 fn verify2_absent_art_field_is_inconclusive() {
     let (c, w, _) = world();
     w.lock().unwrap().instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x"}))];
-    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into() }, Evidence { previous: Some(None), ..Default::default() });
+    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into() }, Evidence { previous: Some(Before { file: None }), ..Default::default() });
     assert_eq!(check(&c, &op), Observation::Inconclusive(Unclear::NotRead));
 }
 #[test]

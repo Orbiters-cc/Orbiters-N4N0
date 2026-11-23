@@ -22,7 +22,7 @@
 use super::vrchat_data::Scope;
 use super::vrchat_login::Presence;
 use super::Controller;
-pub use super::groups_ledger::{By, Entry, Evidence, Key, Kind, Ledger, Said, State, Stop, Target, Warning};
+pub use super::groups_ledger::{Before, By, Entry, Evidence, Key, Kind, Ledger, Said, State, Stop, Target, Warning};
 use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Missing, PermissionInfo, Permit, Post, PostDraft, PostField, Role, RoleChange, RoleDraft, RoleField, Why};
 use orbiters_core::vrchat_api::{Client, GroupFailure, GroupInventory, Members, Posts};
 use serde::{Deserialize, Serialize};
@@ -357,8 +357,12 @@ pub enum Failure {
     Expired,
     /// This prepared write was already committed once.
     Duplicate,
-    /// What it was made against changed since (the role, the member's roles, the post).
+    /// What it was made against changed since (the member's roles, the picture, what is there).
     Changed,
+    /// Someone changed the post since the person saw it, and these parts: nothing was sent.
+    PostChanged(g::PostParts),
+    /// Someone changed the role since the person saw it, and these parts: nothing was sent.
+    RoleChanged(g::RoleParts),
     /// This very write may already have been sent: check first.
     MaySent,
     /// The record of the write could not be kept on this computer: nothing was sent.
@@ -373,6 +377,9 @@ pub enum Failure {
     Offline,
 }
 
+/// Each card asked, or why it could not be read.
+pub type Hydrated = Vec<(String, Result<GroupCard, Failure>)>;
+
 /// The group's page as read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
@@ -386,7 +393,7 @@ pub struct Page {
 pub enum Reply {
     Discovered(Vec<GroupCard>),
     /// Each card asked, or why it could not be read: one that fails leaves the others (J8).
-    Hydrated(Vec<(String, Result<GroupCard, Failure>)>),
+    Hydrated(Hydrated),
     Opened(Box<Page>),
     Members(Members),
     Posts(Posts),
@@ -495,23 +502,26 @@ fn read<T>(r: Result<T, GroupFailure>) -> Result<T, Failure> {
 }
 
 /// The same role for the purpose of a write made against `then`: its rights, rank, words and flags unchanged.
-fn same_role(then: &Role, now: &Role) -> bool {
+fn same_role(then: &Role, now: &Role) -> Result<(), Failure> {
     let mut a = then.permissions.clone();
     let mut b = now.permissions.clone();
     a.sort();
     b.sort();
-    a == b
-        && then.known == now.known
-        && then.whole == now.whole
-        && then.order == now.order
-        && then.name == now.name
-        && then.description == now.description
-        && then.default_role == now.default_role
-        && then.management == now.management
-        && then.self_assignable == now.self_assignable
-        && then.added_on_join == now.added_on_join
-        && then.requires_two_factor == now.requires_two_factor
-        && then.requires_purchase == now.requires_purchase
+    let parts = g::RoleParts {
+        name: then.name != now.name,
+        description: then.description != now.description,
+        permissions: a != b || then.known != now.known,
+        self_assignable: then.self_assignable != now.self_assignable,
+        added_on_join: then.added_on_join != now.added_on_join,
+        two_factor: then.requires_two_factor != now.requires_two_factor,
+        standing: then.whole != now.whole || then.order != now.order || then.default_role != now.default_role || then.management != now.management || then.requires_purchase != now.requires_purchase,
+    };
+    if parts == g::RoleParts::default() { Ok(()) } else { Err(Failure::RoleChanged(parts)) }
+}
+
+/// The post as the person saw it, or what of it is not.
+fn same_post(then: &Post, now: &Post) -> Result<(), Failure> {
+    if g::same_post(then, now) { Ok(()) } else { Err(Failure::PostChanged(then.differs(now))) }
 }
 
 impl Controller {
@@ -679,7 +689,7 @@ impl Controller {
     }
 
     /// The cards of groups listed without a name yet, read one by one (a few at a time, as they come into view).
-    fn groups_hydrate(&self, scope: &Scope, ids: Vec<String>) -> Result<Vec<(String, Result<GroupCard, Failure>)>, Failure> {
+    fn groups_hydrate(&self, scope: &Scope, ids: Vec<String>) -> Result<Hydrated, Failure> {
         let me = scope_user(scope)?;
         if ids.len() > HYDRATE_BATCH || ids.iter().any(|id| !g::is_group_id(id)) {
             return Err(Failure::Api(GroupFailure::Invalid));
@@ -899,9 +909,7 @@ impl Controller {
                     return Err(Failure::NotRead(Missing::RoleDefinition));
                 }
                 // Made against what is no longer so (another manager changed it): nothing is sent (M4).
-                if !same_role(&baseline, &now) {
-                    return Err(Failure::Changed);
-                }
+                same_role(&baseline, &now)?;
                 let change = RoleChange::between(&now, &edit);
                 if change.is_empty() {
                     return Err(Failure::Api(GroupFailure::Invalid));
@@ -942,9 +950,7 @@ impl Controller {
                 if !now.complete {
                     return Err(Failure::NotRead(Missing::Post));
                 }
-                if !g::same_post(&now, &baseline) {
-                    return Err(Failure::Changed);
-                }
+                same_post(&baseline, &now)?;
                 let fields = now.changed_by(&edit);
                 if fields.is_empty() {
                     return Err(Failure::Api(GroupFailure::Invalid));
@@ -969,9 +975,7 @@ impl Controller {
                 if !now.complete {
                     return Err(Failure::NotRead(Missing::Post));
                 }
-                if !g::same_post(&now, &post) {
-                    return Err(Failure::Changed);
-                }
+                same_post(&post, &now)?;
                 let labels = names(&found, None, &now.role_ids, &[]);
                 Ok(Ready { post: Some(now.clone()), labels, offset, ..Ready::new(Write::DeletePost { group, post: now }, permit, &found) })
             }
@@ -1013,7 +1017,7 @@ impl Controller {
                     return Err(Failure::NotRead(Missing::Picture));
                 }
                 let sealed = SealedArt { file: Some(file.clone()), sha256: sha256(&bytes), size: bytes.len() as u64 };
-                let evidence = Evidence { previous: Some(previous), ..Default::default() };
+                let evidence = Evidence { previous: Some(Before { file: previous }), ..Default::default() };
                 Ok(Ready { evidence, art: Some(sealed), picture: Some(bytes), ..Ready::new(Write::ApplyArt { group, slot, file }, permit, &found) })
             }
         }
@@ -1187,16 +1191,14 @@ impl Controller {
                 if !now.complete {
                     return Gone::Stopped(Failure::NotRead(Missing::Post));
                 }
-                if !g::same_post(&now, baseline) {
-                    return Gone::Stopped(Failure::Changed);
-                }
+                stop!(same_post(baseline, &now));
                 post = Some(now);
             }
             Write::ApplyArt { group, slot, .. } => {
                 let found = stop!(read(c.group(group)));
                 permit = Some(stop!(authority(&Action::ApplyArt, &found, me, None)));
                 let now = stop!(found.art(*slot).ok_or(Failure::NotRead(Missing::Picture)));
-                let then = self.groups_book().get(&stop!(Key::of(scope).ok_or(Failure::SignedOut)), &sealed.op).and_then(|e| e.evidence.previous).flatten();
+                let then = self.groups_book().get(&stop!(Key::of(scope).ok_or(Failure::SignedOut)), &sealed.op).and_then(|e| e.evidence.previous).and_then(|p| p.file);
                 if now != then.as_deref() {
                     return Gone::Stopped(Failure::Changed);
                 }
@@ -1213,10 +1215,7 @@ impl Controller {
     /// The role as sealed is the role as read now.
     fn groups_same_role(&self, found: &Group, id: &str, sealed: &Sealed) -> Result<(), Failure> {
         let now = found.roles.as_ref().ok_or(Failure::NotRead(Missing::Roles))?.iter().find(|r| r.id == id).ok_or(Failure::Changed)?;
-        match &sealed.role {
-            Some(then) if same_role(then, now) => Ok(()),
-            _ => Err(Failure::Changed),
-        }
+        same_role(sealed.role.as_ref().ok_or(Failure::Changed)?, now)
     }
 
     /// The request itself. It takes the proof the rules gave on the last read, for exactly this; there is no other way to
@@ -1404,7 +1403,7 @@ impl Controller {
                 let Some(now) = e.kind.slot().and_then(|s| found.art(s)) else { return Ok(Seen::Unclear(Unclear::NotRead)) };
                 if now.is_some() && now == e.target.file.as_deref() {
                     Seen::Done(None)
-                } else if e.evidence.previous.as_ref().is_some_and(|p| p.as_deref() == now) {
+                } else if e.evidence.previous.as_ref().is_some_and(|p| p.file.as_deref() == now) {
                     Seen::NotDone
                 } else {
                     Seen::Unclear(Unclear::Otherwise)

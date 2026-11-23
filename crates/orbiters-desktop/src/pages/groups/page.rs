@@ -301,7 +301,7 @@ impl Open {
             },
             Outcome::Refused(f) => {
                 // What it was made against moved: read again.
-                if matches!(f, Failure::Changed | Failure::Withheld(_) | Failure::NotRead(_) | Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden)) {
+                if matches!(f, Failure::Changed | Failure::PostChanged(_) | Failure::RoleChanged(_) | Failure::Withheld(_) | Failure::NotRead(_) | Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden)) {
                     self.asked = false;
                     self.posts = PostList::default();
                 }
@@ -332,6 +332,11 @@ impl Open {
         let Some(page) = self.page.as_ref() else { return Authority::Unknown(Missing::Membership) };
         g::can(action, Actor::of(&page.group, &self.me_id), &Catalogue { roles: page.group.roles.as_deref(), permissions: page.catalogue.as_deref() })
     }
+}
+
+/// A right as the role editor lists it: plain text, whatever VRChat gave.
+fn listed_label(perm: &g::PermissionInfo) -> String {
+    g::label(if perm.display_name.is_empty() { &perm.name } else { &perm.display_name }, 64)
 }
 
 /// A right by its display name, or its key through the text policy (Minor 1).
@@ -1273,7 +1278,7 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
                 for perm in cat.iter().filter(|p| p.name != g::ALL) {
                     let mut on = ed.draft.permissions.contains(&perm.name);
                     let before = on;
-                    let label = if perm.display_name.is_empty() { g::label(&perm.name, 64) } else { perm.display_name.clone() };
+                    let label = listed_label(perm);
                     ui.add_enabled_ui(perm.allowed_to_add, |ui| toggle_row(ui, &label, &perm.help, &mut on));
                     if on != before {
                         ed.draft.permissions = g::toggled(&ed.draft.permissions, &perm.name, on, cat);
@@ -1812,6 +1817,9 @@ mod tests {
     /// Minor 1: a right's key with no display name, or one holding controls, is shown through the text policy.
     #[test]
     fn fallback_names_go_through_the_text_policy() {
+        let perm = |name: &str, display: &str| g::PermissionInfo { name: name.into(), display_name: display.into(), ..Default::default() };
+        assert_eq!(listed_label(&perm("group-\u{202E}x", "")), "group-x");
+        assert_eq!(listed_label(&perm("group-x", "Bad\u{202E}name")), "Badname");
         let mut s = Sealed::made_up(Write::DeleteRole { group: "grp_1".into(), role: "grol_a".into() }, true);
         s.labels = vec![("group-x".to_string(), "Bad\u{202E}name".to_string())];
         assert_eq!(right_label(&s, "group-x"), "Badname");

@@ -52,6 +52,8 @@ pub(crate) enum Fault {
     Drop { done: bool },
     /// Carried out, the answer held back.
     Held(Arc<Hold>),
+    /// Carried out or not, no answer for a long time, then the request's own time limit.
+    Late { done: bool, hold: Arc<Hold> },
 }
 
 pub(crate) struct World {
@@ -116,7 +118,7 @@ impl Default for World {
                 everyone,
             ],
             members: [(U, member(U, &[])), (V, member(V, &["grol_mod"])), (TWIN, member(TWIN, &["grol_mod"]))].into_iter().map(|(u, m)| (u.to_string(), m)).collect(),
-            posts: vec![post("gpos-1".replace('-', "_").as_str(), OTHERS_ID, "Meet-up", OTHERS_WORDS, "group", &["grol_artist"], json!("file_pic")), post("gpos_2", "usr_test", "Old news", "Nothing", "public", &[], Value::Null)],
+            posts: vec![post("gpos_1", OTHERS_ID, "Meet-up", OTHERS_WORDS, "group", &["grol_artist"], json!("file_pic")), post("gpos_2", "usr_test", "Old news", "Nothing", "public", &[], Value::Null)],
             files: vec![("gallery".into(), file("file_gal1", "gallery", "usr_test", &g1)), ("icon".into(), file("file_ico1", "icon", "usr_test", &i1))],
             tags: vec!["system_supporter".into()],
             fault: None,
@@ -276,6 +278,14 @@ pub(crate) fn route(world: Shown) -> Arc<dyn Fn(&Sent) -> Routed + Send + Sync> 
                 }
                 Routed::Drop
             }
+            Some(Fault::Late { done, hold }) => {
+                if done {
+                    w.carry_out(r, &path);
+                }
+                drop(w);
+                hold.wait();
+                Routed::Drop
+            }
             Some(Fault::Held(hold)) => {
                 let v = w.carry_out(r, &path);
                 drop(w);
@@ -379,7 +389,7 @@ pub(crate) fn decoys(kind: Kind, bytes_md5: Option<String>) -> Vec<(&'static str
                 w.instead = vec![(format!("/groups/{G}?"), g)];
             })
         };
-        vec![("the field left out", set(None)), ("an address instead of a file", set(Some(json!("https://elsewhere/x")))), ("a picture someone else put", set(Some(json!("file_someone_else".replace("_someone_else", "-else").replacen('-', "_", 1).as_str()))))]
+        vec![("the field left out", set(None)), ("an address instead of a file", set(Some(json!("https://elsewhere/x")))), ("a picture someone else put", set(Some(json!("file_else"))))]
     };
     match kind {
         Kind::AssignRole => members(U, true),

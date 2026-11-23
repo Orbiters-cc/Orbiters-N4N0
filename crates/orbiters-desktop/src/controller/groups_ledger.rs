@@ -118,6 +118,12 @@ pub struct Target {
     pub file: Option<String>,
 }
 
+/// The file a slot held, or none: a value of its own, as "none there" and "not known" are not the same on the disk either.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Before {
+    pub file: Option<String>,
+}
+
 /// What a check compares with, as hashes and ids.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
@@ -136,9 +142,9 @@ pub struct Evidence {
     /// The ids there were just before (posts, roles, files): what is made is none of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<Vec<String>>,
-    /// The file in the slot just before (`Some(None)` is "none").
+    /// What was in the slot just before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous: Option<Option<String>>,
+    pub previous: Option<Before>,
     /// An upload's bytes: MD5 and size as VRChat's file API says them, and the studio's art they were made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub md5: Option<String>,
@@ -339,8 +345,18 @@ impl Ledger {
         if std::mem::replace(&mut k.loaded, true) {
             return;
         }
-        let Ok(files) = std::fs::read_dir(&self.dir) else { return };
-        for f in files.flatten() {
+        let files = match std::fs::read_dir(&self.dir) {
+            Ok(files) => files,
+            Err(e) => {
+                k.unreadable = e.kind() != std::io::ErrorKind::NotFound;
+                return;
+            }
+        };
+        for f in files {
+            let Ok(f) = f else {
+                k.unreadable = true;
+                continue;
+            };
             let path = f.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
@@ -453,14 +469,19 @@ impl Ledger {
         let now = self.now();
         self.with(|k| {
             let active = k.active.contains(op);
-            let Some(e) = k.entries.iter_mut().find(|e| e.op == op && e.state == State::Unknown && e.checked && !active) else { return false };
+            let Some(at) = k.entries.iter().position(|e| e.op == op && e.state == State::Unknown && e.checked && !active) else { return false };
+            let mut e = k.entries[at].clone();
             e.said = Some(said);
             if said == Said::Done {
                 (e.state, e.by, e.ended_at) = (State::Done, Some(By::Person), Some(now));
                 e.made = made.or(e.made.take());
             }
-            let e = e.clone();
-            self.write(&e).is_ok()
+            // Kept, or not said at all: a hold is never lifted by words the next program would not find.
+            if self.write(&e).is_err() {
+                return false;
+            }
+            k.entries[at] = e;
+            true
         })
     }
     pub fn get(&self, key: &Key, op: &str) -> Option<Entry> {
@@ -475,10 +496,16 @@ impl Ledger {
     }
     /// Prepared and not sent: gone, as never sent.
     pub fn never_sent(&self, op: &str) {
-        let prepared = self.with(|k| k.entries.iter().any(|e| e.op == op && e.state == State::Prepared));
-        if prepared {
-            self.end(op, State::Refused, Some(By::NeverSent), None);
-        }
+        let now = self.now();
+        // One step: what a commit dispatches meanwhile is not called unsent.
+        self.with(|k| {
+            if let Some(e) = k.entries.iter_mut().find(|e| e.op == op && e.state == State::Prepared) {
+                (e.state, e.by, e.ended_at) = (State::Refused, Some(By::NeverSent), Some(now));
+                let e = e.clone();
+                let _ = self.write(&e);
+            }
+            self.trim(k);
+        });
     }
 }
 
@@ -514,6 +541,32 @@ mod tests {
     /// Another program over the same folder.
     fn again(l: &Ledger) -> Ledger {
         Ledger::at(l.dir())
+    }
+
+    /// Nothing a check compares with is another thing once it has been on the disk: "none there" above all, which is not
+    /// "not known".
+    #[test]
+    fn the_disk_keeps_every_part() {
+        let l = fresh();
+        for (i, previous) in [None, Some(Before { file: None }), Some(Before { file: Some("file_a".into()) })].into_iter().enumerate() {
+            let mut e = entry(&l, &format!("op-{i}"), Kind::ApplyIcon, None, "p");
+            e.target = Target { user: Some("usr_b".into()), role: Some("grol_a".into()), post: Some("gpos_a".into()), file: Some("file_b".into()) };
+            e.evidence = Evidence {
+                content: Some("c".into()),
+                post_fields: PostField::ALL.to_vec(),
+                role_fields: RoleField::ALL.to_vec(),
+                wanted: Some("w".into()),
+                was: Some("x".into()),
+                before: Some(vec![]),
+                previous,
+                md5: Some("m".into()),
+                size: Some(u64::MAX),
+                art: Some(u64::MAX),
+            };
+            (e.state, e.by, e.made, e.checked, e.dispatched_at) = (State::Unknown, Some(By::Read), Some("gpos_b".into()), true, Some(5));
+            l.prepare(e.clone()).unwrap();
+            assert_eq!(again(&l).get(&key(), &e.op), Some(e));
+        }
     }
 
     /// B-A: whatever ends the program, what was sent is still there, as unknown; what was only prepared was never sent.

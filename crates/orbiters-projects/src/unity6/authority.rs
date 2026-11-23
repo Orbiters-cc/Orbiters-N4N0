@@ -84,9 +84,8 @@ pub fn state_in(dir: &Path, record: &Record, path: &Path) -> TrialState {
     if let Phase::Abandoned { whole } = job.phase {
         return TrialState::Abandoned { job, whole };
     }
-    let working = journal::Lease::held(dir, &job.id);
     match job.phase {
-        Phase::Planned | Phase::Copying if working => TrialState::Copying(job),
+        Phase::Planned | Phase::Copying if journal::Lease::held(dir, &job.id) => TrialState::Copying(job),
         // Nobody works on it: it was cut short, and is never taken up again.
         Phase::Planned | Phase::Copying | Phase::Failed => TrialState::CopyFailed(job),
         Phase::Verified => TrialState::CopiedVerified(job),

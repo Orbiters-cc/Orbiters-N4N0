@@ -307,7 +307,7 @@ fn copy_keeping_then(
     anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
     let mut files = vec![];
     // Where the source's links lead: a copy inside one of those would be seen in the source (r22's second verification, N1).
-    let mut linked = if project { local_package_folders(&source) } else { vec![] };
+    let mut linked = if project { folders_used_outside(&source) } else { vec![] };
     // Folders too, empty ones included (PROJECTS-41): an empty asset folder has its .meta beside it.
     let mut folders = vec![];
     for entry in walkdir::WalkDir::new(&source)
@@ -550,12 +550,15 @@ pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
     Ok(total)
 }
 
-/// The folders outside it that `source` takes local (`file:`) packages from.
-fn local_package_folders(source: &Path) -> Vec<PathBuf> {
-    let Ok(bytes) = std::fs::read(source.join("Packages/manifest.json")) else { return vec![] };
-    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+/// The folders outside it that `source` uses besides the links copied with it: where its local (`file:`) packages are, and
+/// what the links at its top lead to.
+fn folders_used_outside(source: &Path) -> Vec<PathBuf> {
+    let manifest: serde_json::Value = std::fs::read(source.join("Packages/manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // What a link at its top leads to as well, copied or not (a Library kept on another disk).
+    let tops = std::fs::read_dir(source).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| crate::owned::is_link(&m)));
+    let tops = tops.filter_map(|p| std::fs::canonicalize(p).ok()).collect::<Vec<_>>();
     let locals = manifest["dependencies"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()?.strip_prefix("file:"));
-    locals.filter_map(|local| std::fs::canonicalize(source.join("Packages").join(local)).ok()).filter(|p| p.is_dir()).collect()
+    locals.filter_map(|local| std::fs::canonicalize(source.join("Packages").join(local)).ok()).filter(|p| p.is_dir()).chain(tops).collect()
 }
 
 /// Where a copy of `source` (canonical) may go, decided from what exists before anything is created: the nearest existing

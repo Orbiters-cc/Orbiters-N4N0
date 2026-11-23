@@ -10,6 +10,12 @@ crates/orbiters-projects/src/unity6/compat.rs
 crates/orbiters-projects/src/unity6/budget.rs
 crates/orbiters-projects/src/unity6/outcome.rs
 crates/orbiters-projects/src/unity6/trial.rs
+crates/orbiters-projects/src/unity6/authority.rs
+crates/orbiters-projects/src/unity6/journal.rs
+crates/orbiters-projects/src/unity6/payload.rs
+crates/orbiters-projects/src/unity6/gate/mod.rs
+crates/orbiters-projects/src/unity6/gate/sys_windows.rs
+crates/orbiters-projects/src/unity6/gate/sys_unix.rs
 crates/orbiters-projects/src/unity6/vcc.rs
 crates/orbiters-desktop/src/pages/projects/unity6.rs
 crates/orbiters-desktop/src/pages/projects/unity6_card.rs

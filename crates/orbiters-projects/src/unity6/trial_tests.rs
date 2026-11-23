@@ -331,7 +331,13 @@ fn the_source_open_check_sees_unitys_lock() {
         use std::os::windows::fs::OpenOptionsExt;
         let _held = std::fs::OpenOptions::new().write(true).share_mode(0).open(e.source.join("Temp/UnityLockfile")).unwrap();
         assert!(is_open(&e.source));
+        drop(_held);
+        // Held for writing, shared with readers: still held.
+        let _held = std::fs::OpenOptions::new().write(true).share_mode(7).open(e.source.join("Temp/UnityLockfile")).unwrap();
+        assert!(is_open(&e.source));
     }
+    #[cfg(windows)]
+    assert!(!is_open(&e.source), "left behind by a crash");
 }
 
 #[test]
@@ -360,8 +366,8 @@ fn taking_a_trial_off_unlists_it_and_keeps_its_folder_known() {
     let e = env();
     let job = run(&e).unwrap();
     assert!(listed(&e, &job.trial.path));
-    let at = abandon(&e.app, &e.vcc, &job.id).unwrap();
-    assert_eq!(at, job.trial.path);
+    let (at, there) = abandon(&e.app, &e.vcc, &job.id).unwrap();
+    assert!(at == job.trial.path && there);
     assert!(!listed(&e, &job.trial.path) && job.trial.path.join("Assets/Avatar.unity").is_file());
     assert!(matches!(authority::state(&e.app, &job.trial.path), TrialState::Abandoned { whole: true, .. }));
     assert!(authority::allow(&e.app, &job.trial.path, authority::Action::Packages).is_ok(), "a verified copy is an ordinary project now");

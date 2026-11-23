@@ -514,4 +514,15 @@ mod tests {
         std::fs::create_dir_all(engines.join("iOSSupport")).unwrap();
         assert_eq!(modules(&p), Modules { android: true, android_tools: true, ios: true });
     }
+
+    /// Second verification B4: a build asked for needs a program that names its own, whatever else it says.
+    #[test]
+    fn a_program_that_names_no_build_is_not_the_build_asked_for() {
+        let id = |changeset: Option<&str>| Identity { version: "6000.0.67f1".into(), changeset: changeset.map(Into::into), arch: vec![Arch::here()] };
+        let judged = |have, want| judge_build(Some(&id(have)), "6000.0.67f1", want);
+        assert_eq!(judged(Some("78a1c2bbeb6a"), Some("78a1c2bbeb6a")), Check::Verified);
+        assert_eq!(judged(None, Some("78a1c2bbeb6a")), Check::Unverified);
+        assert!(matches!(judged(Some("0123456789ab"), Some("78a1c2bbeb6a")), Check::Wrong(_)));
+        assert_eq!(judged(None, None), Check::Verified, "the project names none");
+    }
 }

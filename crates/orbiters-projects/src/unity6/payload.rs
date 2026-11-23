@@ -82,6 +82,8 @@ const DEEPEST: usize = 64;
 
 struct Scan<'a> {
     cancel: &'a AtomicBool,
+    /// Whether scenes and prefabs are read for what they were uploaded as.
+    content: bool,
     out: Payload,
     /// The folders being gone through, so that a link to one of them is refused instead of followed for ever.
     open: Vec<crate::owned::FileId>,
@@ -138,7 +140,7 @@ impl Scan<'_> {
                     let len = if matches!(e.kind, Kind::Link { .. }) { size_of(&mut self.out.roots[root].file(&from, true)?)? } else { e.len };
                     self.out.bytes = self.out.bytes.saturating_add(len);
                     let origin = Origin { root, rel: from, follow };
-                    if project {
+                    if project && self.content {
                         self.content(&to, &origin)?;
                     }
                     self.put(to, Item::File(origin));
@@ -155,10 +157,11 @@ impl Scan<'_> {
         }
     }
 
-    /// The content IDs a scene or prefab was uploaded as.
+    /// The content IDs a scene or prefab was uploaded as. (The SDK's own samples are nobody's upload: every project has them.)
     fn content(&mut self, at: &Path, origin: &Origin) -> anyhow::Result<()> {
         let is = |x: &str| at.extension().is_some_and(|e| e.eq_ignore_ascii_case(x));
-        if is("unity") || is("prefab") {
+        let sdk = at.components().nth(1).is_some_and(|c| c.as_os_str().to_string_lossy().to_lowercase().starts_with("com.vrchat.")) && at.starts_with("Packages");
+        if (is("unity") || is("prefab")) && !sdk {
             let mut bytes = vec![];
             self.out.open(origin)?.read_to_end(&mut bytes)?;
             self.out.content.extend(content_ids(&bytes));
@@ -209,10 +212,20 @@ pub fn content_ids(bytes: &[u8]) -> BTreeSet<String> {
 
 /// Reads what a trial of `original` holds. `guid`: the trial's product GUID; `name`: its folder's name.
 pub fn scan(original: &Path, name: &str, guid: &str, cancel: &AtomicBool) -> anyhow::Result<Payload> {
+    scan_for(original, name, guid, true, cancel)
+}
+
+/// [`scan`] without reading any scene ([`Payload::content`] is empty): for looking at a place.
+pub fn scan_layout(original: &Path, name: &str, cancel: &AtomicBool) -> anyhow::Result<Payload> {
+    scan_for(original, name, "", false, cancel)
+}
+
+fn scan_for(original: &Path, name: &str, guid: &str, content: bool, cancel: &AtomicBool) -> anyhow::Result<Payload> {
     let root = ReadRoot::open(original).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = original.display(), error = e)))?;
     let (id, protected) = (root.id, root.protected());
     let mut scan = Scan {
         cancel,
+        content,
         out: Payload {
             roots: vec![root],
             items: BTreeMap::new(),
@@ -589,6 +602,7 @@ pub fn content_of(project: &Path, cancel: &AtomicBool) -> anyhow::Result<BTreeSe
     let id = root.id;
     let mut scan = Scan {
         cancel,
+        content: true,
         out: Payload {
             roots: vec![root],
             items: BTreeMap::new(),

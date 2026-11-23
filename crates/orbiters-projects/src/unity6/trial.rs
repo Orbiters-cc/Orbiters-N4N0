@@ -258,7 +258,7 @@ pub fn blockers(dir: &Path, source: &Path, standing: &Standing, open: bool, payl
 
 /// Whether Unity has `project` open (its lock held, or an editor whose command line names it).
 pub fn is_open(project: &Path) -> bool {
-    crate::unity_open(project) || crate::editor::of(&crate::editor::running(), project, false).is_some()
+    super::gate::unity_holds(project) || crate::editor::of(&crate::editor::running(), project, false).is_some()
 }
 
 /// The default name of a trial of `name`.
@@ -279,7 +279,8 @@ pub struct Look {
 /// Looks at making a trial of `source` at `parent`/`name`, by reading only.
 pub fn look(dir: &Path, source: &Path, parent: &Path, name: &str, open: bool, cancel: &AtomicBool) -> Look {
     let standing = standing::read(source, &super::matrix::Matrix::built_in());
-    match payload::scan(source, name, "", cancel) {
+    // Without reading the scenes: what they were uploaded as is read when the trial is made.
+    match payload::scan_layout(source, name, cancel) {
         Ok(p) => Look {
             place: Destination::check(parent, name, &p.protected).map(|d| d.path()).map_err(|e| e.text()),
             bytes: p.bytes,
@@ -394,14 +395,14 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
         return Err(failed(&job.id, format!("{e:#}"), vec![]));
     }
     // Every byte, read again on both sides; the original is listed anew, so what was added or removed meanwhile is seen too.
-    progress.lock().unwrap().phase = mark("Comparing every file with the original").into();
+    let step = comparing(progress, payload.items.len() * 2);
     let wanted = (|| -> anyhow::Result<payload::Digests> {
         let again = payload::scan(p.source, p.name, &guid, cancel)?;
         anyhow::ensure!(Place::of(p.source)?.id == job.source.id, "{}", tr!("The original at {path} is not the folder the trial was copied from.", path = p.source.display()));
-        again.digests(cancel, |at| progress.lock().unwrap().file = at.display().to_string())
+        again.digests(cancel, &step)
     })();
     let compared = wanted.and_then(|wanted| {
-        let (found, odd) = payload::trial_digests(&root, cancel, |at| progress.lock().unwrap().file = at.display().to_string())?;
+        let (found, odd) = payload::trial_digests(&root, cancel, &step)?;
         Ok((payload::differences(&wanted, &found, &odd), wanted))
     });
     let (differences, wanted) = match compared {
@@ -432,6 +433,16 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
     drop(new);
     between(Step::Verified)?;
     list(p.dir, p.vcc, &job, &root, progress)
+}
+
+/// The progress of a comparison of `total` entries, one step at a time.
+fn comparing(progress: &SharedProgress, total: usize) -> impl Fn(&Path) + '_ {
+    *progress.lock().unwrap() = Progress { copied: 0, total, file: String::new(), phase: mark("Comparing every file with the original").into() };
+    move |at| {
+        let mut p = progress.lock().unwrap();
+        p.copied = (p.copied + 1).min(p.total);
+        p.file = at.display().to_string();
+    }
 }
 
 /// What this run made, so that a Stop removes exactly that.
@@ -570,13 +581,12 @@ pub fn finish(dir: &Path, vcc: &Path, id: &str, cancel: &AtomicBool, progress: &
     let job = record.job(id).cloned().ok_or_else(|| anyhow::anyhow!("{}", journal::gone_text()))?;
     anyhow::ensure!(job.phase == Phase::Verified, "{}", tr!("The copy at {path} is not a verified one: start a new trial.", path = job.trial.path.display()));
     let root = TrialRoot::open(&job.trial)?;
-    progress.lock().unwrap().phase = mark("Comparing every file with the original").into();
     let kept = super::gate::AppRoot::open(dir)?.read(&job.logs().join(VERIFIED));
     let wanted = kept.ok().filter(|b| Some(journal::sha256(b)) == job.manifest).and_then(|b| payload::from_text(&String::from_utf8_lossy(&b)));
     let Some(wanted) = wanted else {
         anyhow::bail!("{}", tr!("What was verified of the copy at {path} cannot be read any more: start a new trial.", path = job.trial.path.display()));
     };
-    let (found, odd) = payload::trial_digests(&root, cancel, |at| progress.lock().unwrap().file = at.display().to_string())?;
+    let (found, odd) = payload::trial_digests(&root, cancel, comparing(progress, wanted.len()))?;
     let mut differences = payload::differences(&wanted, &found, &odd);
     if differences.is_empty() && !crate::templates::installed_dependencies_complete(&job.trial.path).unwrap_or(false) {
         differences.push(tr("its installed packages are not the ones its lock names").into());
@@ -609,8 +619,8 @@ pub fn adopt_vcc_copy(dir: &Path, vcc: &Path, id: &str, path: &Path) -> anyhow::
 
 /// Takes a trial off: off VCC's and ALCOM's list and out of what Orbiters shows, never deleting any of it. Its folder and its
 /// content IDs stay known. A folder that is no longer the one recorded is not touched (it is someone else's now). Answers
-/// where the folder is.
-pub fn abandon(dir: &Path, vcc: &Path, id: &str) -> anyhow::Result<PathBuf> {
+/// where the folder is, and whether it is there.
+pub fn abandon(dir: &Path, vcc: &Path, id: &str) -> anyhow::Result<(PathBuf, bool)> {
     let _lease = Lease::take(dir, id)?;
     let job = journal::read(dir).job(id).cloned().ok_or_else(|| anyhow::anyhow!("{}", journal::gone_text()))?;
     for place in [Some(&job.trial), job.migrated.as_ref()].into_iter().flatten() {
@@ -623,7 +633,9 @@ pub fn abandon(dir: &Path, vcc: &Path, id: &str) -> anyhow::Result<PathBuf> {
     }
     let whole = matches!(job.phase, Phase::Verified | Phase::Listed);
     let job = journal::set(dir, id, |j| j.phase = Phase::Abandoned { whole })?;
-    Ok(job.unity6().path.clone())
+    let at = job.unity6().path.clone();
+    let there = at.exists();
+    Ok((at, there))
 }
 
 /// What a launch needs: the editor's program, the project, the attempt's log; answers the process id when it has one.

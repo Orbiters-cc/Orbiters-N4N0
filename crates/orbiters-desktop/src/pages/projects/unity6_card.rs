@@ -715,7 +715,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         Some(2) => {
             let id = job.id.clone();
             state.u6.act(&ctx, tr("Unregistering the trial…"), move || {
-                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                let (left, _) = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
                 Ok(tr!("The trial stays at {path}; it is no longer listed. Add existing brings it back.", path = left.display()))
             });
         }
@@ -766,10 +766,13 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(top + vec2(16.0, 14.0), vec2(w - 32.0, 10_000.0))).id_salt(("u6-job", &job.id)));
         inner.spacing_mut().item_spacing = vec2(0.0, 8.0);
         let bg = ui.painter().add(egui::Shape::Noop);
+        // What this window does with it now, if it does: its Stop and its progress.
+        let run = state.u6.run.as_ref().filter(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str())).map(|r| (r.cancel.clone(), r.progress.clone()));
+        let finishing = state.u6.finishing.as_ref().filter(|f| f.0 == job.id && state.u6.busy().is_some()).map(|f| (f.1.clone(), f.2.clone()));
+        let mine = run.or(finishing);
         let (glyph, tint, text) = match &status {
             trial::Status::Running => {
-                let mine = state.u6.run.as_ref().filter(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str()));
-                match mine.map(|r| r.progress.lock().unwrap().clone()) {
+                match mine.as_ref().map(|(_, p)| p.lock().unwrap().clone()) {
                     Some(p) => {
                         let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
                         (icons::CIRCLE_NOTCH, theme::ACCENT, format!("{}{pct}", super::unity6::phase_label(&p.phase)))
@@ -799,10 +802,9 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         if matches!(status, trial::Status::Unlisted) {
             list.push((tr("List it"), icons::PLUS, state.u6.busy().is_none(), "list"));
         }
-        let mine = state.u6.run.as_ref().is_some_and(|r| r.recorded.lock().unwrap().as_deref() == Some(job.id.as_str()));
         if matches!(status, trial::Status::Running) {
-            if mine {
-                list.push((tr("Stop copying"), icons::X, true, "stop"));
+            if mine.is_some() {
+                list.push((tr("Stop"), icons::X, true, "stop"));
             }
         } else {
             if state.u6.present(&job.trial.path) {
@@ -822,13 +824,17 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
         ui.add_space(10.0);
         let id = job.id.clone();
         match pressed {
-            Some("list") => state.u6.act(&ctx, tr("Listing the trial…"), move || {
-                trial::finish(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &Default::default(), &Default::default())?;
-                Ok(tr("The trial is listed.").to_string())
-            }),
+            Some("list") => {
+                let (stop, progress): (std::sync::Arc<std::sync::atomic::AtomicBool>, orbiters_projects::templates::SharedProgress) = Default::default();
+                state.u6.finishing = Some((id.clone(), stop.clone(), progress.clone()));
+                state.u6.act(&ctx, tr("Listing the trial…"), move || {
+                    trial::finish(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id, &stop, &progress)?;
+                    Ok(tr("The trial is listed.").to_string())
+                });
+            }
             Some("stop") => {
-                if let Some(r) = &state.u6.run {
-                    r.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some((stop, _)) = &mine {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             Some("reveal") => {
@@ -836,8 +842,8 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             }
             // Off VCC's list too when it is on it; its folder stays, and stays known.
             Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
-                let left = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
-                Ok(if left.exists() { tr!("It is off the lists. Its folder stays at {path}.", path = left.display()) } else { tr("It is off the lists.").to_string() })
+                let (left, there) = trial::abandon(&orbiters_projects::data_dir(), &orbiters_projects::vcc_dir(), &id)?;
+                Ok(if there { tr!("It is off the lists. Its folder stays at {path}.", path = left.display()) } else { tr("It is off the lists.").to_string() })
             }),
             _ => {}
         }

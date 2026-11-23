@@ -329,4 +329,58 @@ mod tests {
         let b = Disks.of(&temp.path().join("not/made/yet")).unwrap();
         assert_eq!(a.0, b.0, "a folder not made yet is on its nearest parent's volume");
     }
+
+    /// Second verification B6: two folders of one disk with different room (a quota) count the lesser; a network spelling of a
+    /// disk, or one that cannot be named, has no known room, so nothing fits there.
+    #[test]
+    fn the_lesser_room_of_one_disk_counts_and_a_network_has_none() {
+        struct Quota;
+        impl Room for Quota {
+            fn of(&self, path: &Path) -> Option<(String, u64)> {
+                match path.to_str()? {
+                    "a" => Some(("disk".into(), 100)),
+                    "b" => Some(("disk".into(), 10)),
+                    _ => None,
+                }
+            }
+        }
+        let d = |at: &str, bytes| Demand { need: Need::Copy, at: PathBuf::from(at), bytes, low: None };
+        let p = plan(vec![d("a", 5), d("b", 4)], &Quota, false);
+        assert_eq!((p.volumes.len(), p.volumes[0].free, p.fits()), (1, Some(10), true));
+        assert!(!plan(vec![d("a", 5), d("b", 6)], &Quota, false).fits());
+        assert!(!plan(vec![d("elsewhere", 1)], &Quota, false).fits());
+        #[cfg(windows)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let text = std::fs::canonicalize(temp.path()).unwrap().display().to_string();
+            let rest = text.trim_start_matches(r"\\?\");
+            let unc = PathBuf::from(format!(r"\\localhost\{}$\{}", &rest[..1], &rest[3..]));
+            assert!(Disks.of(temp.path()).is_some());
+            if unc.exists() {
+                assert!(Disks.of(&unc).is_none(), "{}", unc.display());
+            }
+        }
+    }
+
+    /// Second verification B6: an editor that is there and lacks modules the project's 2022 editor has costs those; one that
+    /// is not verified costs all of it; a 2022 editor that cannot be told counts every module.
+    #[test]
+    fn missing_modules_of_an_installed_editor_are_counted() {
+        use super::super::editors::{Candidate, Check, Found, Hint, Modules};
+        let matrix = super::super::matrix::Matrix::built_in();
+        let row = matrix.unity6_target().unwrap();
+        let size = row.editor.get("windows-x86_64").unwrap();
+        let c = |m: Modules| Candidate { program: "x".into(), hint: Hint::HubFolder, check: Check::Verified, identity: None, modules: m };
+        let with = |android, ios| Modules { android, android_tools: android, ios };
+        let six = |m| Found::Exact(c(m));
+        assert_eq!(EditorNeed::here(size, &six(with(true, true)), &Found::Exact(c(with(true, true)))), None);
+        let one = EditorNeed::here(size, &six(with(false, true)), &Found::Exact(c(with(true, true)))).unwrap();
+        assert_eq!(one.installed, size.android.unwrap()[1]);
+        let all = EditorNeed::here(size, &Found::Missing { wrong: vec![] }, &Found::Exact(c(with(false, false)))).unwrap();
+        assert_eq!(all.installed, size.installed);
+        let unknown = EditorNeed::here(size, &six(with(false, false)), &Found::Missing { wrong: vec![] }).unwrap();
+        assert_eq!(unknown.installed, size.android.unwrap()[1] + size.ios.unwrap()[1]);
+        let unverified = EditorNeed::here(size, &Found::Unverified(c(with(true, true))), &Found::Exact(c(with(true, false)))).unwrap();
+        assert_eq!(unverified.installed, size.installed + size.android.unwrap()[1]);
+    }
 }

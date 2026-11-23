@@ -450,7 +450,17 @@ impl Lease {
     /// The job's lease, when nobody works on it.
     pub fn take(dir: &Path, id: &str) -> anyhow::Result<Lease> {
         let app = AppRoot::open(dir)?;
-        match app.try_lock(&Self::name(id)?)? {
+        let name = Self::name(id)?;
+        let mut lock = app.try_lock(&name)?;
+        // Somebody only asking whether it is held has it for an instant.
+        for _ in 0..20 {
+            if lock.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            lock = app.try_lock(&name)?;
+        }
+        match lock {
             Some(lock) => Ok(Lease(lock)),
             None => anyhow::bail!("{}", tr("Orbiters is already working on this trial, in this window or another one. Wait for that to end.")),
         }

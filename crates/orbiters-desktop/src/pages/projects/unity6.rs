@@ -105,6 +105,8 @@ pub(crate) struct U6 {
     /// A trial's smaller actions (list again, forget, take VCC's copy, unregister, locate, open in Unity 6), one at a time.
     pub action: Job<Result<String, String>>,
     pub action_label: String,
+    /// A verified trial being compared again and listed: which, its Stop and its progress.
+    pub finishing: Option<(String, Arc<AtomicBool>, SharedProgress)>,
     pub error: Option<String>,
     /// The compatibility view's packages shown.
     pub show_packages: bool,

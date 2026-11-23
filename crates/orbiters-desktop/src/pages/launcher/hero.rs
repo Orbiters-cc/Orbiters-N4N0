@@ -116,7 +116,7 @@ fn hero_play(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize, play: Pl
         (_, PlayState::Ready | PlayState::Starting(_)) => {
             if !VR_HERE {
                 // A Mac: one button, the desktop game.
-                if play_button(ui, rect, LaunchMode::Desktop, play, true, None) {
+                if play_button(ui, rect, LaunchMode::Desktop, play, true, None, state.places.held()) {
                     super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Desktop, None);
                 }
                 return;
@@ -125,10 +125,10 @@ fn hero_play(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize, play: Pl
             let w = (rect.width() - gap) * 0.5;
             let vr = Rect::from_min_size(rect.min, vec2(w, rect.height()));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, rect.top()), vec2(w, rect.height()));
-            if play_button(ui, vr, LaunchMode::Vr, play, true, None) {
+            if play_button(ui, vr, LaunchMode::Vr, play, true, None, state.places.held()) {
                 super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Vr, None);
             }
-            if play_button(ui, desk, LaunchMode::Desktop, play, true, None) {
+            if play_button(ui, desk, LaunchMode::Desktop, play, true, None, state.places.held()) {
                 super::destinations::play(state, cx, anim::time(ui.ctx()), LaunchMode::Desktop, None);
             }
         }
@@ -295,7 +295,7 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             None => orbiters_i18n::tr!("On profile {n}", n = next),
         });
         for (r, mode) in [(vr, LaunchMode::Vr), (desk, LaunchMode::Desktop)] {
-            if play_button(ui, r, mode, play, true, whose.as_deref()) {
+            if play_button(ui, r, mode, play, true, whose.as_deref(), state.places.held()) {
                 // The choice stays on the profile just started, so the buttons say it starts, then runs.
                 state.chosen_profile = Some(next);
                 // Into the place chosen above (Where), or VRChat's own start.
@@ -352,7 +352,8 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
 
 /// A big Play button: VR in Orbiters green, desktop in grey, an icon, a name and what it uses. While it starts, a
 /// turning ring and "Starting…"; the other one waits. Returns whether it was pressed.
-fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool, whose: Option<&str>) -> bool {
+/// `held`: why it starts nothing now (the place chosen is closed, or nobody can be asked about it): greyed, with that.
+fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: bool, whose: Option<&str>, held: Option<&str>) -> bool {
     let ctx = ui.ctx().clone();
     let (label, sub, glyph) = match mode {
         LaunchMode::Vr => (tr("Play in VR"), tr("With your headset, through SteamVR"), icons::VIRTUAL_REALITY),
@@ -362,7 +363,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let starting = play == PlayState::Starting(mode);
     // The big buttons stay while VRChat runs on the chosen profile: the one of its mode says so, neither starts a second.
     let running = big && play == PlayState::Running(mode);
-    let enabled = play == PlayState::Ready || (!big && matches!(play, PlayState::Running(m) if m == mode));
+    let enabled = (play == PlayState::Ready && held.is_none()) || (!big && matches!(play, PlayState::Running(m) if m == mode));
     let id = Id::unique(("launcher-play", mode == LaunchMode::Vr, big));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     widgets::note_control(&ctx, label, rect, enabled);
@@ -371,13 +372,17 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));
     let mut p = ui.painter().clone();
+    // Held by the place chosen, it says why: readable, in grey.
+    let held = held.filter(|_| play == PlayState::Ready);
     if !enabled && !starting && !running {
-        p.multiply_opacity(0.4);
+        p.multiply_opacity(if held.is_some() { 0.75 } else { 0.4 });
     }
     // The one button of a Mac is the green one.
     let primary = mode == LaunchMode::Vr || !VR_HERE;
     let (fill, fg, fg2) = if running {
         (theme::alpha(theme::ACCENT, 0.14), theme::FG, theme::FG_2)
+    } else if held.is_some() {
+        (theme::control(), theme::FG_2, theme::FG_2)
     } else if primary {
         (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
     } else {
@@ -416,6 +421,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             false => (label, sub),
         };
         let sub: &str = match (whose, starting, running) {
+            (_, false, false) if held.is_some() => held.unwrap_or_default(),
             (Some(w), false, false) if play != PlayState::OtherStarting => w,
             _ => sub,
         };
@@ -528,16 +534,16 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             let gap = 10.0;
             let bw = ((right - x - gap) * 0.5).min(220.0);
             if !VR_HERE {
-                if play_button(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh)), LaunchMode::Desktop, play, false, None) {
+                if play_button(ui, Rect::from_min_size(pos2(x, by), vec2(bw, bh)), LaunchMode::Desktop, play, false, None, None) {
                     state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
                 }
             } else {
             let vr = Rect::from_min_size(pos2(x, by), vec2(bw, bh));
             let desk = Rect::from_min_size(pos2(vr.right() + gap, by), vec2(bw, bh));
-            if play_button(ui, vr, LaunchMode::Vr, play, false, None) {
+            if play_button(ui, vr, LaunchMode::Vr, play, false, None, None) {
                 state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Vr });
             }
-            if play_button(ui, desk, LaunchMode::Desktop, play, false, None) {
+            if play_button(ui, desk, LaunchMode::Desktop, play, false, None, None) {
                 state.act(cx, clock, Action::AcceptInvite { invite: invite.id.clone(), mode: LaunchMode::Desktop });
             }
             }

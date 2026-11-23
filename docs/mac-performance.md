@@ -34,8 +34,10 @@ from then on), waits `--warm`
 seconds and then until 20 s pass without a frame held over 250 ms (within 180 s, else nothing is scored), records `--windows` windows of `--window` seconds
 with nobody touching the game, takes 3 s stack samples only after them, and in every case (an arrival that never came, a
 failed start, an interruption) quits by session (`steam quit --session --wait 60`, never forced) and writes its results
-file with its `outcome`. The session is the one **the program started here names** (its `starting` event, obelisk-cli 0.1.10),
-the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A run
+file with its `outcome`. The session is the one **the program started here names in its own `starting` event** (obelisk-cli 0.1.10),
+the only one ever asked to quit, whether or not that program still lives; its own record says how it ended (`terminal`). A
+`running` event that names another session (the program found somebody else's again) is an error: nothing is asked to quit, and
+the series stops. A run
 whose session is not known to have ended, or that may have started one it was never told the name of, exits with 5, and `session.sh` stops the series there, as it does after any
 run that failed.
 

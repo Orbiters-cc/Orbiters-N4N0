@@ -146,14 +146,71 @@ impl Detector {
     }
 }
 
-/// A line with what could be a credential taken out (whatever follows a word that names one), and what says where the
-/// person was or who they are: VRChat links (any case, encoded too), a location's whole world, instance and access parts
-/// (`wrld_…:…~private(…)~nonce(…)`, whether its parts are closed, cut short or encoded), account and group ids (`usr_…`,
-/// `grp_…`) and a nonce (or an instance's secure or short name) given as a value, however its name and value are set apart.
-/// Whatever is looked for is looked for under its encodings: percent-encoded, up to [`LAYERS`] times over, in part or whole,
-/// and as JSON escapes it.
+/// A line as a capture keeps it: whole when it holds nothing private, else a placeholder ([`REMOVED`]) with the line's own
+/// time and level and the frame counts it says, and nothing else of it, before or after. Private is what could be a
+/// credential (a word that names one), and what says where the person was or who they are: VRChat links (any case, encoded
+/// too), a location's world, instance and access parts (`wrld_…:…~private(…)~nonce(…)`, whether its parts are closed, cut
+/// short or encoded), account and group ids (`usr_…`, `grp_…`) and a nonce (or an instance's secure or short name) given as a
+/// value, however its name and value are set apart. Whatever is looked for is looked for under its encodings:
+/// percent-encoded, up to [`LAYERS`] times over, in part or whole, and as JSON escapes it.
 pub(crate) fn redact(line: &str) -> String {
-    private(&credentials(line))
+    if !holds_private(line) {
+        return line.to_string();
+    }
+    let (time, rest) = timestamp(line);
+    let level = LEVELS.iter().find(|level| rest.trim_start().strip_prefix(**level).is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric())));
+    let mut kept: Vec<String> = Vec::new();
+    kept.extend((!time.is_empty()).then(|| time.to_string()));
+    kept.extend(level.map(|level| level.to_string()));
+    kept.push(REMOVED.to_string());
+    kept.extend(counters(line));
+    kept.join(" ")
+}
+
+/// What stands for a line that held something private.
+pub(crate) const REMOVED: &str = "[a line with something private in it was removed]"; // i18n: not shown (a log copy)
+
+/// The levels a line of VRChat's, Wine's or the engine's begins with, after its time.
+const LEVELS: [&str; 10] = ["Debug", "Log", "Warning", "Error", "Exception", "Info", "warn", "err", "fixme", "trace"]; // i18n: not shown (words looked for in logs)
+
+/// The time at the start of `line` (digits in one of the shapes the logs write), and what follows it.
+fn timestamp(line: &str) -> (&str, &str) {
+    const SHAPES: [&str; 4] = ["dddd.dd.dd dd:dd:dd", "dddd-dd-dd dd:dd:dd", "dddd-dd-ddTdd:dd:dd", "dd:dd:dd"];
+    let shaped = |text: &str, shape: &str| {
+        let text = text.as_bytes();
+        text.len() >= shape.len() && shape.bytes().zip(text).all(|(expected, byte)| if expected == b'd' { byte.is_ascii_digit() } else { *byte == expected })
+    };
+    for shape in SHAPES {
+        if !shaped(line, shape) {
+            continue;
+        }
+        let after = &line[shape.len()..];
+        // a fraction of a second, of a few digits
+        let fraction = after.strip_prefix('.').map_or(0, |digits| digits.bytes().take_while(u8::is_ascii_digit).count());
+        let end = shape.len() + if (1..=6).contains(&fraction) { fraction + 1 } else { 0 };
+        if line[end..].starts_with(|c: char| c.is_alphanumeric()) {
+            break;
+        }
+        return line.split_at(end);
+    }
+    ("", line)
+}
+
+/// The frame counts a line says, by these names and no other: a whole number of a few digits, on its own, beside its word.
+fn counters(line: &str) -> Vec<String> {
+    const COUNTS: [&str; 3] = ["presents", "frames", "shown events"]; // i18n: not shown (words looked for in logs)
+    const NAMED: [&str; 2] = ["frame=", "frames="];
+    let number = |text: &str| (1..=10).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit());
+    let words: Vec<&str> = line.split(' ').map(|word| word.trim_matches(|c| matches!(c, '(' | ')' | ',' | ';' | ':'))).collect();
+    let mut said = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        if number(word) {
+            let after = words[at + 1..].iter().take(2).copied().collect::<Vec<_>>().join(" ");
+            said.extend(COUNTS.iter().find(|name| after == **name || after.strip_prefix(**name).is_some_and(|rest| rest.starts_with(' '))).map(|name| format!("{word} {name}")));
+        }
+        said.extend(NAMED.iter().find(|name| word.strip_prefix(**name).is_some_and(number)).map(|_| word.to_string()));
+    }
+    said
 }
 
 /// How many times over a value may be encoded (percent-encoded, or as JSON escapes it) and still be read.
@@ -217,131 +274,58 @@ fn run_of(s: &str, is: impl Fn(char) -> bool) -> usize {
     at
 }
 
-/// Characters a location or a link is made of.
-fn location_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "_-:~().%+=&?/#!$*@,;|^<>[]{}".contains(c)
-}
-
-/// The length of the run of location characters at the start of `s`; whatever is inside parentheses is of it, to their
-/// close or to the end of the line when they are cut short.
-fn location_run(s: &str) -> usize {
-    let mut depth = 0_usize;
-    let mut at = 0;
-    while let Some((c, n)) = logical(&s[at..]) {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            c if depth == 0 && !location_char(c) => break,
-            _ => {}
-        }
-        at += n;
-    }
-    at
-}
-
-/// An instance part at the start of `s` (`~name(`): its name and the length up to the value.
-fn instance_part(s: &str) -> Option<(String, usize)> {
-    let tilde = reads(s, "~")?;
+/// The name of an instance part at the start of `s` (`~name(`).
+fn instance_part(s: &str) -> Option<String> {
+    let mut at = reads(s, "~")?;
     let mut name = String::new();
-    let mut at = tilde;
     while let Some((c, n)) = logical(&s[at..]).filter(|(c, _)| c.is_ascii_alphabetic()) {
         name.push(c.to_ascii_lowercase());
         at += n;
     }
-    let open = reads(&s[at..], "(")?;
-    (!name.is_empty()).then_some((name, at + open))
+    reads(&s[at..], "(")?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Names whose value is a key to a private instance.
 const KEYS: [&str; 3] = ["nonce", "securename", "shortname"];
 
 /// One of [`KEYS`] at the start of `s` given a value (`nonce=…`, `nonce = …`, `"nonce":  "…"`, `nonce => '…'`, `nonce(…)`,
-/// encoded or not): the name.
-fn keyed(s: &str) -> Option<&'static str> {
-    let (key, mut at) = KEYS.iter().find_map(|key| Some((*key, reads(s, key)?)))?;
+/// encoded or not).
+fn keyed(s: &str) -> bool {
+    let Some(mut at) = KEYS.iter().find_map(|key| reads(s, key)) else { return false };
     let space = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '`' | '+');
     at += run_of(&s[at..], space);
-    let (separator, _) = logical(&s[at..])?;
-    matches!(separator, ':' | '=' | '(' | '[').then_some(key)
+    logical(&s[at..]).is_some_and(|(separator, _)| matches!(separator, ':' | '=' | '(' | '['))
 }
 
-/// Whatever says where or who, taken out.
-fn private(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some((begins, n)) = logical(rest) {
-        // Nothing looked for begins with any other character. One whole character as it reads: never the middle of an
-        // encoding, from which nothing would be found.
-        if !matches!(begins.to_ascii_lowercase(), 'v' | 'w' | '~' | 'u' | 'g' | 'n' | 's') {
-            out.push_str(&rest[..n]);
-            rest = &rest[n..];
-            continue;
+/// Whether `line` holds something private, looked for from each of its characters.
+fn holds_private(line: &str) -> bool {
+    line.char_indices().any(|(at, _)| {
+        let rest = &line[at..];
+        let Some((begins, _)) = logical(rest) else { return false };
+        let begins = begins.to_ascii_lowercase();
+        // a word that names a credential
+        if WORDS.iter().any(|word| word.chars().next() == Some(begins) && reads(rest, word).is_some()) {
+            return true;
         }
-        // a VRChat link, as it is or encoded: its scheme only
-        if let Some(n) = reads(rest, "vrchat:/") {
-            out.push_str("vrchat://[removed]");
-            rest = &rest[n..];
-            rest = &rest[location_run(rest)..];
-            continue;
+        match begins {
+            // a VRChat link, as it is or encoded
+            'v' => reads(rest, "vrchat:/").is_some(),
+            // a location: the world, its instance and every part after them
+            'w' => reads(rest, "wrld_").is_some(),
+            // an instance part on its own (~region(eu) says nothing of the person)
+            '~' => instance_part(rest).is_some_and(|name| name != "region"),
+            // account and group ids
+            'u' | 'g' => ["usr_", "grp_"].iter().filter_map(|prefix| reads(rest, prefix)).any(|n| run_of(&rest[n..], |c| c.is_ascii_hexdigit() || c == '-') >= 8),
+            // a nonce, or an instance's key, given as a value
+            'n' | 's' => keyed(rest),
+            _ => false,
         }
-        // a location: the world, its instance and every part after them
-        if reads(rest, "wrld_").is_some() {
-            out.push_str("[location removed]");
-            rest = &rest[location_run(rest)..];
-            continue;
-        }
-        // an instance part on its own (~region(eu) is kept: a region says nothing of the person)
-        if let Some((name, n)) = instance_part(rest) {
-            if name != "region" {
-                out.push('~');
-                out.push_str(&name);
-                out.push_str("([removed])");
-                let value = &rest[n..];
-                // up to its close, whatever is in it, or to the end of the line when it is cut short
-                let inside = run_of(value, |c| c != ')');
-                rest = &value[inside + reads(&value[inside..], ")").unwrap_or(0)..];
-                continue;
-            }
-        }
-        // account and group ids
-        if let Some((name, n)) = ["usr_", "grp_"].iter().find_map(|p| Some((*p, reads(rest, p)?))) {
-            let after = &rest[n..];
-            let end = run_of(after, |c| c.is_ascii_hexdigit() || c == '-');
-            let digits = after[..end].len();
-            if digits >= 8 {
-                out.push_str(name);
-                out.push_str("[removed]");
-                rest = &after[end..];
-                continue;
-            }
-        }
-        // a nonce, or an instance's key, given as a value: to the end of the line, for where a value ends is the line's own
-        // to say (quotes in quotes, spaces, encodings), and none of it may stay
-        if let Some(name) = keyed(rest) {
-            out.push_str(name);
-            out.push_str("=[removed]");
-            break;
-        }
-        out.push_str(&rest[..n]);
-        rest = &rest[n..];
-    }
-    out
+    })
 }
 
 /// Words that name a credential.
 const WORDS: [&str; 12] = ["password", "passwd", "token", "secret", "cookie", "authorization", "auth=", "authcookie", "apikey", "api_key", "session_key", "ticket"]; // i18n: not shown (words looked for in logs)
-
-/// A line with whatever follows the first word that names a credential, as it is or under any encoding, taken out.
-fn credentials(line: &str) -> String {
-    for (at, _) in line.char_indices() {
-        let begins = logical(&line[at..]).map(|(c, _)| c.to_ascii_lowercase());
-        let words = WORDS.iter().filter(|word| word.chars().next() == begins);
-        if let Some(n) = words.filter_map(|word| reads(&line[at..], word)).min() {
-            return format!("{}[removed]", &line[..at + n]);
-        }
-    }
-    line.to_string()
-}
 
 /// The incident folders of `root` to remove so that at most [`KEPT`] stay and they weigh at most [`KEPT_BYTES`]
 /// together: the oldest first (`folders` are (name, bytes); names begin with their date, so they sort by age).
@@ -484,7 +468,9 @@ pub(crate) fn ring_lines(bytes: &[u8]) -> Vec<String> {
         .filter_map(|chunk| {
             let text = String::from_utf8_lossy(chunk).trim_end().to_string();
             let seq = text.get(..12)?.parse().ok()?;
-            Some((seq, redact(&text)))
+            // Its number and its time are the ring's own: what it says comes after them.
+            let own = text.get(..25).filter(|own| own.bytes().all(|byte| byte.is_ascii_digit() || byte == b' ')).map_or(0, str::len);
+            Some((seq, format!("{}{}", &text[..own], redact(&text[own..]))))
         })
         .collect();
     lines.sort_by_key(|(seq, _)| *seq);
@@ -568,6 +554,9 @@ pub(crate) struct Followed {
     pub launcher: u32,
     pub birth: (u64, u32),
     pub engine_log: PathBuf,
+    /// The arguments its launcher starts the game with, which VRChat's own log begins by repeating: never written anywhere.
+    /// `None` while they could not be read.
+    pub arguments: Option<Vec<String>>,
     pub engine: Option<std::fs::File>,
     pub vrchat: Option<std::fs::File>,
     /// voile-lkd's recent-event ring, where its launch makes one.
@@ -578,7 +567,7 @@ impl Followed {
     /// The same, holding the same files: taken when a capture is scheduled.
     pub(crate) fn held(&self) -> Followed {
         let same = |file: &Option<std::fs::File>| file.as_ref().and_then(|f| f.try_clone().ok());
-        Followed { session: self.session.clone(), launcher: self.launcher, birth: self.birth, engine_log: self.engine_log.clone(), engine: same(&self.engine), vrchat: same(&self.vrchat), ring: same(&self.ring) }
+        Followed { session: self.session.clone(), launcher: self.launcher, birth: self.birth, engine_log: self.engine_log.clone(), arguments: None, engine: same(&self.engine), vrchat: same(&self.vrchat), ring: same(&self.ring) }
     }
 
     /// Opens what is this launch's and not held yet: made since its launcher was born and before now, while that launcher
@@ -590,7 +579,7 @@ impl Followed {
         }
         let until = std::time::SystemTime::now();
         let engine = if self.engine.is_none() { engine_log(&self.engine_log, self.birth, until) } else { None };
-        let vrchat = if self.vrchat.is_none() { vrchat_log(vrchat_logs, self.birth, until) } else { None };
+        let vrchat = if self.vrchat.is_none() { vrchat_log(vrchat_logs, self.birth, until, self.arguments.as_deref()) } else { None };
         let ring = if self.ring.is_none() { made_within(&ring_of(&self.engine_log), self.birth, until) } else { None };
         if (engine.is_some() || vrchat.is_some() || ring.is_some()) && lives() {
             self.engine = self.engine.take().or(engine);
@@ -814,19 +803,41 @@ fn run_bounded(program: &str, args: &[&str], limit: std::time::Duration) -> Resu
     }
 }
 
-/// The first of VRChat's own logs in `dir` made from `birth` (its launcher's) to `until`, held open.
-fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime) -> Option<std::fs::File> {
-    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-        .filter_map(|e| Some((e.metadata().ok()?.created().ok()?, e.path())))
-        .filter(|(made, _)| *made >= born_at(birth))
-        .collect();
-    logs.sort();
-    let (at, path) = logs.into_iter().next()?;
-    // The file found is the one opened.
-    made_within(&path, birth, until).filter(|file| file.metadata().and_then(|meta| meta.created()).is_ok_and(|made| made == at))
+/// VRChat's own log of the launch born at `birth`, held open: of those in `dir` made from then to `until`, the one whose
+/// command line (what it repeats of it as it begins) is the one this launch's launcher starts the game with, `arguments`.
+/// Where those could not be read, the only one there is; of two, or of two that say the same, none: which is this launch's
+/// cannot be told.
+fn vrchat_log(dir: &Path, birth: (u64, u32), until: std::time::SystemTime, arguments: Option<&[String]>) -> Option<std::fs::File> {
+    let logs = std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"));
+    let held = logs.filter_map(|e| made_within(&e.path(), birth, until));
+    let mut own: Vec<std::fs::File> = held.filter(|file| arguments.is_none_or(|arguments| begins_with(file, arguments))).collect();
+    (own.len() == 1).then(|| own.remove(0))
+}
+
+/// How far into VRChat's log its command line is looked for (it is within its first lines).
+const COMMAND_LINE_WITHIN: u64 = 64 << 10;
+
+/// Whether VRChat's log `file` says it was started with `arguments` (after its program): `Launching with args: <n>`, then n
+/// lines `Arg: …`. One that does not say all of them yet says nothing.
+fn begins_with(file: &std::fs::File, arguments: &[String]) -> bool {
+    let Ok(bytes) = read_at(file, 0, COMMAND_LINE_WITHIN) else { return false };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.split_inclusive('\n').filter_map(|line| line.strip_suffix('\n')).map(|line| line.trim_end_matches('\r'));
+    let count = lines.find_map(|line| line.split_once("Launching with args: ")?.1.trim().parse::<usize>().ok()); // i18n: not shown (VRChat's log line)
+    let Some(count) = count else { return false };
+    let said: Vec<&str> = lines.filter_map(|line| Some(line.split_once(" Arg: ")?.1)).take(count).collect();
+    said.len() == count && count > 0 && said[1..].iter().eq(arguments.iter())
+}
+
+/// What the engine's launcher, started with `command`, starts the game with: what follows the game's program in the guest's
+/// command line (after `--`: the storefront's helper, the program, its arguments).
+fn game_arguments(command: &[String]) -> Option<Vec<String>> {
+    if !command.iter().any(|word| word == "obelisk-linux-engine") {
+        return None;
+    }
+    let guest = &command[command.iter().position(|word| word == "--")? + 1..];
+    let program = guest.iter().position(|word| word.starts_with("/opt/game/"))?;
+    Some(guest[program + 1..].to_vec())
 }
 
 /// A process's birth as a time.
@@ -876,10 +887,14 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let alive = super::bridge_mac::born(launcher) == Some(birth);
         if current.as_ref().is_none_or(|(f, ..)| f.session != record.id || f.launcher != launcher || f.birth != birth) {
             let engine_log = orbiters_core::obelisk::engine_log(&home);
-            let followed = Followed { session: record.id.clone(), launcher, birth, engine_log, engine: None, vrchat: None, ring: None };
+            let followed = Followed { session: record.id.clone(), launcher, birth, engine_log, arguments: None, engine: None, vrchat: None, ring: None };
             current = Some((followed, Detector::default(), Lines::default(), Lines::default(), super::picture::Tracker::default()));
         }
         let Some((followed, detector, engine_lines, vrchat_lines, picture)) = current.as_mut() else { continue };
+        // What it starts the game with, once the helper has become the launcher.
+        if followed.arguments.is_none() && followed.vrchat.is_none() {
+            followed.arguments = super::bridge_mac::started_with(launcher, birth).and_then(|(command, _)| game_arguments(&command));
+        }
         // Held once found to be this launch's (the engine's log is a new file each start; VRChat's begins a while after).
         followed.associate(&orbiters_core::obelisk::vrchat_log_dir(&library), &|| super::bridge_mac::born(launcher) == Some(birth) && pointer(&library).as_deref() == Some(&*id));
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
@@ -1059,11 +1074,39 @@ mod tests {
 
     #[test]
     fn credentials_never_reach_a_capture() {
-        assert_eq!(redact("steam: refresh_token=abc.def.ghi"), "steam: refresh_token[removed]");
-        assert_eq!(redact("Cookie: auth=authcookie_123"), "Cookie[removed]");
-        assert_eq!(redact("PASSWORD hunter2"), "PASSWORD[removed]");
+        assert_eq!(redact("steam: refresh_token=abc.def.ghi"), REMOVED);
+        assert_eq!(redact("Cookie: auth=authcookie_123"), REMOVED);
+        assert_eq!(redact("PASSWORD hunter2"), REMOVED);
+        assert_eq!(redact("%5cookie: sid"), REMOVED, "a word whose first letter is of an encoding too");
         assert_eq!(redact("wsd: window 1 overlay: frame held 100.0 ms"), "wsd: window 1 overlay: frame held 100.0 ms");
-        assert_eq!(redact("été ticket=1"), "été ticket[removed]", "a line that is not ASCII");
+        assert_eq!(redact("été ticket=1"), REMOVED, "a line that is not ASCII");
+    }
+
+    /// Seventh verification (the verifier's fixture): a line that holds a private field keeps its time, its level and the frame
+    /// counts it says, and nothing else, before the field or after it.
+    #[test]
+    fn a_line_with_a_private_field_keeps_its_time_level_and_frame_counts_only() {
+        assert_eq!(redact("tester@example.invalid token=synthetic_renderer_label frame=60"), format!("{REMOVED} frame=60"));
+        let kept = |line: &str, time: &str, counts: &str| assert_eq!(redact(line), [time, REMOVED, counts].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" "), "{line}");
+        kept("2026.11.23 08:06:37 Debug      -  [Behaviour] someone@example.invalid nonce=x 6480 presents (12 shown events)", "2026.11.23 08:06:37 Debug", "6480 presents 12 shown events");
+        kept("2026-11-23 08:06:37.123 wsd[500:1] Some One wrld_4432ea9b:1 651 frames", "2026-11-23 08:06:37.123", "651 frames");
+        kept("2026-11-23T08:06:37 Error: Some One usr_1339e525-d75d", "2026-11-23T08:06:37 Error", "");
+        kept("08:06:37.5 Some One vrchat://launch", "08:06:37.5", "");
+        kept("err:ole:Some One ~private(x) frames=12, frame=x", "err", "frames=12");
+        // What is not such a time, level or count is not one: no digits or words of a name or a value go by them.
+        for line in [
+            "08:06:37pm Some One token=1",
+            "2026.11.23 Some One token=1",
+            "1234.56.78 99:99:9x Some One token=1",
+            "Debugger Some One token=1",
+            "20611223 Some One token=1 12345678901234 frames 12x presents frame=9f frames=",
+            "token=1 4c1f0e7a frames",
+            "shortName=abc 77 people",
+            "08:06:37.123456789 token=1",
+        ] {
+            let out = redact(line);
+            assert_eq!(out.replace("08:06:37", "").trim(), REMOVED, "{line}: {out}");
+        }
     }
 
     /// Finding 5: no private destination or account id in a capture (the 03:43 incident kept a private instance's owner and
@@ -1073,11 +1116,11 @@ mod tests {
         let arg = "sh C:\\steam.exe --no-vr vrchat://launch?ref=orbiters.cc&id=wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:63402~private(usr_1339e525-d75d-4832-9104-98dd89287681)~region(eu)";
         let out = redact(arg);
         assert!(!out.contains("usr_1339") && !out.contains("wrld_4432") && !out.contains("63402"), "{out}");
-        assert!(out.contains("vrchat://[removed]"), "{out}");
+        assert_eq!(out, REMOVED);
         let line = "[Behaviour] Joining wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:63402~private(usr_1339e525-d75d-4832-9104-98dd89287681)~nonce(4c1f0e7a-2d3e-4b0a-9f01-7a2b3c4d5e6f)~region(eu)";
         let out = redact(line);
-        assert_eq!(out, "[Behaviour] Joining [location removed]", "the whole location: world, instance and every part");
-        assert_eq!(redact("OnPlayerJoined blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)"), "OnPlayerJoined blackorbit (usr_[removed])");
+        assert_eq!(out, REMOVED, "the whole location, and who or what is beside it");
+        assert_eq!(redact("2026.11.23 08:06:37 Debug      -  [Behaviour] OnPlayerJoined Some One (usr_1339e525-d75d-4832-9104-98dd89287681)"), format!("2026.11.23 08:06:37 Debug {REMOVED}"));
         assert_eq!(redact("wsd: window 1 overlay: frame held 100.0 ms"), "wsd: window 1 overlay: frame held 100.0 ms");
     }
 
@@ -1143,6 +1186,7 @@ mod tests {
             birth: super::super::bridge_mac::born(launcher.id()).unwrap(),
             engine: Some(std::fs::File::open(&engine_log).unwrap()),
             engine_log: engine_log.clone(),
+            arguments: None,
             vrchat: None,
             ring: None,
         };
@@ -1174,7 +1218,7 @@ mod tests {
         std::fs::write(&from, "first line\nsecond token=abc\nthird\n").unwrap();
         let held = std::fs::File::open(&from).unwrap();
         copy_tail(&held, &dir.join("all.log"), 1 << 20).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("all.log")).unwrap(), "first line\nsecond token[removed]\nthird\n");
+        assert_eq!(std::fs::read_to_string(dir.join("all.log")).unwrap(), format!("first line\n{REMOVED}\nthird\n"));
         copy_tail(&held, &dir.join("end.log"), 12).unwrap();
         let end = std::fs::read_to_string(dir.join("end.log")).unwrap();
         assert!(end.ends_with("third\n") && !end.contains("first line") && end.starts_with("[the first"), "{end}");
@@ -1182,7 +1226,7 @@ mod tests {
     }
     /// Fourth verification, finding 8: the forms that survived before (a percent-encoded nonce, an unterminated
     /// `~nonce(`, an upper-case link) and their neighbours (doubly encoded, a nonce as a value, a group id, an instance
-    /// part alone) are all taken out; text around them stays.
+    /// part alone) are all taken out, with the line that holds them.
     #[test]
     fn encoded_truncated_and_upper_case_private_values_are_taken_out() {
         let secrets = ["4c1f0e7a", "1339e525", "4432ea9b", "63402", "0b9a"];
@@ -1205,9 +1249,9 @@ mod tests {
                 assert!(!out.to_ascii_lowercase().contains(secret), "{secret} survived in {out:?} (from {line:?})");
             }
         }
-        assert_eq!(redact("cut ~nonce(4c1f0e7a-2d3e-4b0a-9f01"), "cut ~nonce([removed])");
-        assert_eq!(redact("OPEN VRCHAT://LAUNCH?ID=WRLD_4432EA9B end"), "OPEN vrchat://[removed] end");
-        assert_eq!(redact("member grp_0b9a1234-5678-4abc-9def-0123456789ab end"), "member grp_[removed] end");
+        assert_eq!(redact("cut ~nonce(4c1f0e7a-2d3e-4b0a-9f01"), REMOVED);
+        assert_eq!(redact("OPEN VRCHAT://LAUNCH?ID=WRLD_4432EA9B end"), REMOVED);
+        assert_eq!(redact("member grp_0b9a1234-5678-4abc-9def-0123456789ab end"), REMOVED);
         assert_eq!(redact("in ~region(eu) still"), "in ~region(eu) still", "a region says nothing of the person");
         assert_eq!(redact("neptune unixlib wsi (wsd): 6480 presents"), "neptune unixlib wsi (wsd): 6480 presents");
     }
@@ -1298,7 +1342,7 @@ mod tests {
         bytes.extend(line(5, "sig: SIGCONT resumes process 3 wrld_4432ea9b:1~nonce(x)"));
         let lines = ring_lines(&bytes);
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("000000000005") && lines[0].contains("[location removed]") && !lines[0].contains("4432"), "{lines:?}");
+        assert!(lines[0].starts_with("000000000005") && lines[0].ends_with(REMOVED) && !lines[0].contains("4432"), "{lines:?}");
         assert!(lines[1].contains("ptrace: attach 7"));
         assert_eq!(ring_of(Path::new("/L/wine-438100.log")), Path::new("/L/wine-438100.lkd-events"));
     }
@@ -1467,14 +1511,11 @@ mod tests {
             for value in values {
                 for (separator, close) in separators {
                     for (encoding, encode) in &encodings {
-                        for before in ["", "2026.11.23 08:06:37 Debug - ", "\u{e9}{\""] {
+                        // (the last: a name, an address and a place, before the field: nothing of them stays either)
+                        for (before, kept) in [("", ""), ("2026.11.23 08:06:37 Debug - ", "2026.11.23 08:06:37 Debug "), ("\u{e9}{\"", ""), ("2026.11.23 08:06:37 Some One <someone@example.invalid> 4 rue X, ", "2026.11.23 08:06:37 ")] {
                             let hidden = encode(&format!("{name}{separator}{value}{close}"));
                             let out = redact(&format!("{before}{hidden} after"));
-                            let kept = out.strip_prefix(before).unwrap_or_else(|| panic!("{out:?}"));
-                            let named = kept.strip_suffix("[removed]").unwrap_or_else(|| panic!("{name} {separator:?} {value:?} {encoding}: {out:?}"));
-                            // What stays is the name (as it was written) and no more.
-                            let longest = encode(name).len().max(name.len()) + 1;
-                            assert!(named.len() <= longest, "{name} {separator:?} {value:?} {encoding}: {out:?}");
+                            assert_eq!(out, format!("{kept}{REMOVED}"), "{name} {separator:?} {value:?} {encoding}");
                             tried += 1;
                         }
                     }
@@ -1482,7 +1523,7 @@ mod tests {
             }
         }
         assert!(tried > 30_000, "{tried}");
-        // Instance parts: to their close, whatever is in them; cut short, to the end of the line.
+        // Instance parts, closed or cut short.
         for part in ["private", "hidden", "friends", "group", "nonce", "shortName"] {
             for value in ["first second", "it's \"quoted\"", "\u{2603}suffix"] {
                 for (_, encode) in &encodings {
@@ -1524,7 +1565,7 @@ mod tests {
         }
         pause();
         let birth = birth_of(now());
-        let followed = || Followed { session: "s".into(), launcher: 1, birth, engine_log: engine_log.clone(), engine: None, vrchat: None, ring: None };
+        let followed = || Followed { session: "s".into(), launcher: 1, birth, engine_log: engine_log.clone(), arguments: None, engine: None, vrchat: None, ring: None };
         let mut f = followed();
         f.associate(&dir.join("vrchat"), &|| true);
         assert!(f.engine.is_none() && f.vrchat.is_none() && f.ring.is_none());
@@ -1559,8 +1600,61 @@ mod tests {
         }
         // Made after the moment it is looked: not found to be anyone's.
         assert!(made_within(&vrchat("3"), birth, now() - std::time::Duration::from_secs(1)).is_none());
-        assert!(vrchat_log(&dir.join("vrchat"), birth, born_at(birth)).is_none());
+        assert!(vrchat_log(&dir.join("vrchat"), birth, born_at(birth), None).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Seventh verification (the verifier's fixture: of two logs the first was taken): VRChat's log is the one that begins with
+    /// the command line this launch's launcher starts the game with; of two, with nothing that tells them apart, none is.
+    #[test]
+    fn vrchat_s_log_is_the_one_that_names_this_launch_s_own_command_line() {
+        use std::io::Read as _;
+        let dir = std::env::temp_dir().join(format!("orbiters-incident-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let birth = (since.as_secs(), since.subsec_micros());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let write = |name: &str, text: String| std::fs::write(dir.join(format!("output_log_{name}.txt")), text).unwrap();
+        let begun = |args: &[&str], tail: &str| {
+            let mut text = format!("2026.11.23 11:29:14 Debug      -  Launching with args: {}\r\n", args.len() + 1);
+            for arg in ["Z:\\opt\\game\\VRChat.exe"].iter().chain(args) {
+                text.push_str(&format!("2026.11.23 11:29:14 Debug      -  Arg: {arg}\r\n"));
+            }
+            text + tail
+        };
+        let held = |arguments: Option<&[String]>| {
+            let mut text = String::new();
+            vrchat_log(&dir, birth, std::time::SystemTime::now(), arguments)?.read_to_string(&mut text).unwrap();
+            Some(text.lines().last().unwrap_or_default().to_string())
+        };
+        let own: Vec<String> = ["--no-vr", "-screen-fullscreen", "1", "vrchat://launch?id=x"].map(String::from).to_vec();
+        let args: Vec<&str> = own.iter().map(String::as_str).collect();
+        // Another program's, first; then its own, which does not say all of its command line yet.
+        write("1", begun(&["--no-vr"], "unrelated"));
+        assert_eq!(held(Some(&own)), None, "the only one there is, and not its own");
+        assert_eq!(held(None).as_deref(), Some("unrelated"), "nothing to tell it by: the only one there is");
+        let whole = begun(&args, "mine");
+        write("2", whole[..whole.len() - 8].to_string());
+        assert_eq!(held(Some(&own)), None);
+        assert_eq!(held(None), None, "two, and nothing to tell them by");
+        write("2", whole);
+        assert_eq!(held(Some(&own)).as_deref(), Some("mine"));
+        // Its line anywhere else, one argument more or less, or in another order is another command line.
+        write("1", format!("2026.11.23 11:29:14 Debug      -  seen: Arg: {}\n{}", args.join(" "), begun(&args[1..], "unrelated")));
+        assert_eq!(held(Some(&own)).as_deref(), Some("mine"));
+        write("1", begun(&["-screen-fullscreen", "--no-vr", "1", "vrchat://launch?id=x"], "unrelated"));
+        assert_eq!(held(Some(&own)).as_deref(), Some("mine"));
+        // The same command line twice: which one is this launch's cannot be told.
+        write("1", begun(&args, "unrelated"));
+        assert_eq!(held(Some(&own)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        // What the launcher's own command line says of it.
+        let words = |text: &str| text.split(' ').map(String::from).collect::<Vec<_>>();
+        let launcher = words("/bin/bash -c script obelisk-linux-engine /r /h /i /opt/game --graphics dxmt --env A=B -- C:\\windows\\system32\\steam.exe /opt/game/start_protected_game.exe --no-vr -- x");
+        assert_eq!(game_arguments(&launcher).unwrap(), ["--no-vr", "--", "x"]);
+        assert_eq!(game_arguments(&words("/x/obelisk-steam-host game-exec")), None, "not the launcher yet");
+        assert_eq!(game_arguments(&words("/bin/bash -c script obelisk-linux-engine /r")), None);
     }
 
     /// Sixth verification: a sample whose process cannot be told to be the one chosen, after it was taken, is nobody's.

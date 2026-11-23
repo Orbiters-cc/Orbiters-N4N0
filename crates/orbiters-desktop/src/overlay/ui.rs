@@ -356,11 +356,11 @@ impl OverlayUi {
         p.circle_filled(center, if held { 84.0 } else { 88.0 }, fill);
         widgets::icon(&p, center, icons::MICROPHONE, 64.0, if can_talk { theme::ON_ACCENT } else { theme::FG_3 });
         let (title, sub) = if !settings.enabled || !settings.assistant {
-            (tr("N4N0's assistant is off"), tr("Turn it on in Orbiters - N4N0 › N4N0"))
+            (tr("N4N0's assistant is off"), tr("Turn it on in Orbiters - N4N0 › Settings › Voice & assistant"))
         } else if !signed_in {
             (tr("Sign in to talk to N4N0"), tr("In Orbiters - N4N0 › Settings"))
         } else if !n4n0.voice.installed {
-            (tr("N4N0 cannot hear yet"), tr("Install its ears in Orbiters - N4N0 › N4N0"))
+            (tr("N4N0 cannot hear yet"), tr("Install its ears in Orbiters - N4N0 › Settings › Voice & assistant"))
         } else if n4n0.listening {
             (tr("Listening…"), tr("Let go when you are done"))
         } else if n4n0.thinking {

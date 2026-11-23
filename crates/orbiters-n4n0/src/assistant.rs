@@ -75,6 +75,19 @@ pub(crate) struct AssistantRuntime {
     share_next: Option<ShareNext>,
 }
 
+impl AssistantRuntime {
+    /// Forgets everything of the Orbiters account before (verify-r21 3): the log, what is being done, the page asked for,
+    /// undo steps, the lists "the second one" points into, a share waiting for the next capture. The rate limits stay.
+    /// The last page request's number stays (each interface opens a numbered request once: a new one must count on),
+    /// without the world it named.
+    pub(crate) fn forget(&mut self) {
+        let limiter = std::mem::take(&mut self.limiter);
+        let open = self.view.open.take().map(|o| OpenAsk { world: None, ..o });
+        *self = Self { limiter, ..Self::default() };
+        self.view.open = open;
+    }
+}
+
 /// Which list an intent's results are, or its index counts in.
 fn list_of(intent: &Intent) -> Option<&'static str> {
     Some(match intent {

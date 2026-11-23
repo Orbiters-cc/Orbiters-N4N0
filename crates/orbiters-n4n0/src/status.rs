@@ -75,6 +75,11 @@ impl N4n0Confirmation {
     pub fn is_local(&self) -> bool {
         self.approve_url.starts_with(LOCAL_APPROVAL)
     }
+
+    /// The number of a question N4N0 asks here (what a surface's Yes or No names: `Command::AskAnswer`).
+    pub fn local_question(&self) -> Option<u64> {
+        self.approve_url.strip_prefix(LOCAL_APPROVAL).and_then(|n| n.parse().ok())
+    }
 }
 
 /// The speech models and the voice worker.
@@ -294,6 +299,10 @@ pub struct N4n0Status {
     /// The assistant's actions (REQUEST20 6): its log, what it does now, the page it asked to open.
     #[serde(default)]
     pub assistant: Slice<crate::assistant::AssistantView>,
+    /// How many times the Orbiters account changed under N4N0 ([`crate::Command::ForgetAccount`]): a window drops what was
+    /// being typed when it moves.
+    #[serde(default)]
+    pub account_epoch: u64,
 }
 
 // The avatar's states and the world feedback stay plain values for now (copied with the state, compared by value):
@@ -303,6 +312,7 @@ orbiters_core::parts!(N4n0Status {
         avatar_id, prop_sync, manifest, controls, face, panel, listening, thinking, afk, confirmations, quota, voice, test_face, test_cycle, test_afk,
         bot, bot_keeps_menu, test_pictures, screen, screen_open, desktop_mode, menu_request, menu_toggle, dictation, photo_countdown, photo_wait, light, states,
         can_drop, card, tracking, tracking_note, suggestion, versions, keys, world_video, photo_note, invite, qr, feedback, input_params, mirror,
+        account_epoch,
     ],
     slices: [lines, videos, resources, calls, captures, friends, assistant],
     identity: [],
@@ -507,7 +517,7 @@ impl CallsStatus {
             CallLink::Linked { .. } => (true, ""),
             CallLink::ComingSoon => (false, CALLS_SOON_WHY),
             // Kept as English: the menu draws what it holds through `tr`, so the note follows the language.
-            CallLink::Off => (false, mark("Calls are off: Orbiters - N4N0 › N4N0 › Calls")),
+            CallLink::Off => (false, mark("Calls are off: Orbiters - N4N0 › Settings › N4N0 companion")),
             CallLink::SignedOut => (false, mark("Sign in to Orbiters to call friends")),
             CallLink::NoAccount => (false, mark("VRChat's account here is unknown: open VRChat")),
             CallLink::NotLinked { .. } => (false, mark("Link this VRChat account on Orbiters to call")),

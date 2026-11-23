@@ -2122,6 +2122,28 @@ mod tests {
         }
     }
 
+    /// Verify-r21 blocker 3: N4N0's conversation, its log and what it asks belong to the Orbiters account that had them.
+    /// Another account (or nobody) installed: all of it goes, through the same gate the calls leave by; the same account
+    /// read again keeps it.
+    #[test]
+    fn the_next_orbiters_account_inherits_nothing_of_n4n0s_conversation() {
+        let server = orbiters_core::account::Server::Production;
+        let ctl = signed_in_as_a_in_a_call();
+        let said = |ctl: &crate::controller::Shared| {
+            let s = ctl.snapshot.lock().unwrap();
+            (s.n4n0.lines.len(), s.n4n0.assistant.log.len())
+        };
+        // A short command N4N0 does by itself (no server): a line of A's, an entry of A's log.
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), question: None });
+        let (lines, log) = said(&ctl);
+        assert!(lines > 0 && log > 0, "A said something ({lines} lines, {log} log entries)");
+        assert!(!ctl.leave_unless_same(Some((server, "orbit-a"))), "the same account read again");
+        assert_eq!(said(&ctl), (lines, log), "kept for the same account");
+        assert!(ctl.leave_unless_same(Some((server, "orbit-b"))), "B signs in");
+        assert_eq!(said(&ctl), (0, 0), "nothing of A's conversation or log for B");
+        assert!(ctl.snapshot.lock().unwrap().n4n0.confirmations.is_empty());
+    }
+
     /// Verify5 (2): a friend calling just before a sign-out: the toast naming them goes with the account, not at the end
     /// of its 4.2 seconds.
     #[test]

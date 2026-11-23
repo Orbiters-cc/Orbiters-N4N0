@@ -113,7 +113,7 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     assert_eq!(question.matches("if you say yes").count(), 1, "one sentence for what waits: {question}");
     assert_eq!(log(&t), vec![("fast_walk".into(), Outcome::Done), ("boop".into(), Outcome::Asked), ("restricted".into(), Outcome::Offered)]);
     // No (the Ask page's button): nothing goes.
-    n.command(Command::AskAnswer { yes: false });
+    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
     assert!(t.app_intents.lock().unwrap().is_empty());
     assert!(log(&t).ends_with(&[("boop".into(), Outcome::Declined), ("restricted".into(), Outcome::Declined)]));
 
@@ -127,7 +127,7 @@ fn outward_actions_wait_for_a_yes_and_page_only_ones_never_run() {
     n.ask("boop Sam and sign me out".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert!(t.app_intents.lock().unwrap().is_empty(), "still nothing before the yes");
-    n.command(Command::AskAnswer { yes: true });
+    n.command(Command::AskAnswer { yes: true, question: shown_question(&t) });
     let ran = t.app_intents.lock().unwrap().clone();
     assert_eq!(ran, vec![Intent::Boop { friend: Some("Sam".into()) }, Intent::OpenPage { page: Page::AppSettings }], "the boop, then Settings' page: never a sign-out");
     assert_eq!(t.view().assistant.open.as_ref().map(|o| o.page), Some(Page::AppSettings));
@@ -173,7 +173,7 @@ fn a_world_named_like_a_command_gets_nothing_done() {
         assert!(!error && r["waiting_for_owner"] == true, "{id}: {r}");
     }
     // The owner says something else: none of it ever runs.
-    n.command(Command::AskAnswer { yes: false });
+    n.command(Command::AskAnswer { yes: false, question: shown_question(&t) });
     assert!(t.app_intents.lock().unwrap().is_empty());
     assert!(!t.settings().walk_boost.enabled);
 }
@@ -314,4 +314,86 @@ fn the_next_capture_is_shared_once_it_is_ready() {
     let shares = t.shares.lock().unwrap().clone();
     assert_eq!(shares.len(), 1);
     assert_eq!((shares[0].key.as_str(), shares[0].recipients[0].id.as_str()), ("new", "usr_b"));
+}
+
+/// The question number a surface shows (`N4n0Confirmation::approve_url`'s local number).
+fn shown_question(t: &TestHost) -> u64 {
+    let c = t.view().confirmations.iter().find(|c| c.is_local()).cloned().expect("a question waits");
+    c.approve_url.strip_prefix(LOCAL_APPROVAL).and_then(|n| n.parse().ok()).expect("a local question's number")
+}
+
+/// One turn in which the model asks to boop `friend` (a harmless stand-in action that waits for a yes).
+fn ask_to_boop(t: &TestHost, n: &Shared, friend: &str) {
+    let calls = json!([call("b1", "orbiters_friends", json!({ "intent": "boop", "friend": friend }))]);
+    let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), calls), done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-test");
+    n.ask(format!("boop {friend}"), "typed");
+    turn_ended(n, &bodies, 2);
+}
+
+/// The answer a surface sends for the question it showed.
+fn answer_shown(n: &Shared, yes: bool, question: u64) {
+    n.command(Command::AskAnswer { yes, question });
+}
+
+/// Verify-r21 blocker 1: question A is answered on one surface, question B arrives, then another surface's late answer
+/// to A (still on screen there) comes in: it answers nothing. B neither runs (a stale Yes) nor goes (a stale No), and
+/// B's own answer still works. The same for a typed yes sent while A was the question shown.
+#[test]
+fn a_late_answer_to_an_older_question_never_resolves_the_next_one() {
+    for late_yes in [true, false] {
+        let (t, n) = ready();
+        let sam = Intent::Boop { friend: Some("Sam".into()) };
+        let mira = Intent::Boop { friend: Some("Mira".into()) };
+        ask_to_boop(&t, &n, "Sam");
+        let a = shown_question(&t);
+        // The overlay's Yes to A.
+        answer_shown(&n, true, a);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()]);
+        ask_to_boop(&t, &n, "Mira");
+        let b = shown_question(&t);
+        assert_ne!(a, b);
+        // The window's late answer to A, still on its screen.
+        answer_shown(&n, late_yes, a);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a late answer to A ran B ({late_yes})");
+        assert_eq!(shown_question(&t), b, "B still waits ({late_yes})");
+        // A typed yes sent while A was the question on screen: nothing either.
+        n.command(Command::Ask { text: "yes".into(), question: Some(a) });
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone()], "a typed yes for A ran B");
+        assert_eq!(shown_question(&t), b, "B still waits after a typed yes for A");
+        // B's own answer.
+        answer_shown(&n, true, b);
+        assert_eq!(*t.app_intents.lock().unwrap(), vec![sam.clone(), mira.clone()]);
+    }
+}
+
+/// Verify-r21 blocker 3: A talks with N4N0 (its answer, its question, its log), then another Orbiters account is signed
+/// in: the next request carries nothing of A's conversation, and nothing of A's shows or waits.
+#[test]
+fn the_next_orbiters_account_starts_from_an_empty_conversation() {
+    let (t, n) = ready();
+    let secret = "A's own words: the code is 4242";
+    let first = done(json!([{ "role": "user", "content": secret }, { "role": "assistant", "content": "Noted, A." }]), json!([call("b1", "orbiters_friends", json!({ "intent": "boop", "friend": "Sam" }))]));
+    let (base, bodies) = orbiters(vec![first, done(json!([{ "role": "user", "content": secret }]), json!([]))]);
+    t.sign_in(base, "orbit-a");
+    n.ask(secret.into(), "typed");
+    turn_ended(&n, &bodies, 2);
+    assert!(!t.view().lines.is_empty() && !t.view().confirmations.is_empty() && !t.view().assistant.log.is_empty());
+    assert!(!n.n4n0.lock().unwrap().conversation.is_empty(), "A's conversation is kept for A's next turn");
+    let epoch = t.view().account_epoch;
+    // The controller's identity gate: B is signed in.
+    n.command(Command::ForgetAccount);
+    let view = t.view();
+    assert!(view.lines.is_empty() && view.confirmations.is_empty() && view.assistant.log.is_empty() && view.quota.is_none(), "{:?}", view.lines);
+    assert_eq!(view.account_epoch, epoch + 1);
+    // A late yes for A's question: nothing waits any more.
+    n.command(Command::AskAnswer { yes: true, question: 1 });
+    assert!(t.app_intents.lock().unwrap().is_empty());
+    let (base, bodies) = orbiters(vec![done(json!([]), json!([]))]);
+    t.sign_in(base, "orbit-b");
+    n.ask("hello".into(), "typed");
+    turn_ended(&n, &bodies, 1);
+    let body = bodies.lock().unwrap()[0].to_string();
+    assert!(!body.contains("4242") && !body.contains("Noted, A"), "B's request carries A's conversation: {body}");
+    assert_eq!(bodies.lock().unwrap()[0]["messages"].as_array().map_or(0, Vec::len), 0, "an empty conversation");
 }

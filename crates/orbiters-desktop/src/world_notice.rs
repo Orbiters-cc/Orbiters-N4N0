@@ -153,7 +153,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, notice: Option<&WorldNotice>, lift: f32)
     let rect = Rect::from_min_size(pos2(screen.right() - MARGIN - size.x, screen.bottom() - MARGIN - size.y - lift), size);
     let id = Id::unique(("orbiters-world-notice", notice.id));
     let shown = opacity(notice, now);
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, id, Order::Foreground, false).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
         let mut p = ui.painter().clone();
         p.multiply_opacity(shown);
         let card = ui.interact(rect, id.with("card"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);

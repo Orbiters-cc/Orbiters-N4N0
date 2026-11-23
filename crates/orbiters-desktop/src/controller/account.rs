@@ -40,6 +40,8 @@ pub struct AccountRuntime {
     offline_since: Option<Instant>,
     /// The credential was refused: when, and how many times in a row.
     refused: Option<(Instant, u32)>,
+    /// Whose all this is, and its epoch (controller/identity.rs).
+    pub(super) epochs: super::identity::Epochs,
 }
 
 /// A sign-in waiting for the browser: the page it opened, and the switch that closes its listener.
@@ -163,9 +165,9 @@ impl Controller {
     /// one is installed: the account file read (another tool signed in or out, the environment switched), a browser
     /// sign-in, a sign-out. When `next` is not the identity installed now, the account installed now leaves first
     /// (`calls_leave`: its call ends here, its media stops, nothing of it or of its shares stays shown), with its own
-    /// credential for what Orbiters hears. N4N0's conversation, what it asked and its action log go with it, and a turn
-    /// under way for it comes to nothing (verify-r21 3). The same identity read again (a same-credential refresh)
-    /// leaves nothing. True when the account left.
+    /// credential for what Orbiters hears. (N4N0's conversation goes as the next one is installed, and by the member, not
+    /// the credential: [`Controller::install_account`].) The same identity read again (a same-credential refresh) leaves
+    /// nothing. True when the account left.
     pub(super) fn leave_unless_same(&self, next: Option<(Server, &str)>) -> bool {
         let held = {
             let rt = self.account_runtime.lock().unwrap();
@@ -176,7 +178,6 @@ impl Controller {
             return false;
         }
         self.calls_leave(Some((Api::new(server).url(""), token)));
-        self.n4n0.command(crate::ipc::N4n0Command::ForgetAccount);
         true
     }
 
@@ -209,20 +210,19 @@ impl Controller {
         if self.account_runtime.lock().unwrap().generation == before {
             self.leave_unless_same(saved.as_ref().map(|a| (server, a.token.as_str())));
         }
-        let previous_token;
-        let (generation, refusals) = {
-            let mut rt = self.account_runtime.lock().unwrap();
+        let installed = self.install_account(|rt| {
             if rt.generation != before {
-                return;
+                return None;
             }
-            previous_token = rt.account.as_ref().map(|a| a.token.clone());
+            let previous_token = rt.account.as_ref().map(|a| a.token.clone());
             rt.read = Some((server, modified));
             rt.account = saved.clone();
             rt.offline_since = None;
             let refusals = if again_refused { rt.refused.map_or(0, |(_, n)| n) } else { 0 };
             rt.refused = None;
-            (rt.generation, refusals)
-        };
+            Some((previous_token, rt.generation, refusals))
+        });
+        let Some((previous_token, generation, refusals)) = installed else { return };
         let development = server == Server::Development;
         let current = || self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
         let Some(saved) = saved else {
@@ -256,32 +256,33 @@ impl Controller {
             });
         }
         let answer = check(&saved.token);
-        let mut rt = self.account_runtime.lock().unwrap();
-        // Signed in or out meanwhile: that newer state wins.
-        if rt.generation != generation || rt.account.as_ref().map(|a| &a.token) != Some(&saved.token) {
-            return;
-        }
         // The account's features as the check says them (N4N0 calls), for once the lock is let go.
         let mut features = None;
-        let state = match answer {
-            Ok(Check::Valid(current)) => {
-                // For the account as it is kept just below (its id as the server says it), with this credential.
-                features = Some((current.user.clone(), current.features.clone()));
-                let name = current.username.clone().or(saved.username.clone()).unwrap_or_default();
-                rt.account = Some(Account { token: saved.token.clone(), ..current });
-                AccountState::SignedIn { username: name }
+        let state = self.install_account(|rt| {
+            // Signed in or out meanwhile: that newer state wins.
+            if rt.generation != generation || rt.account.as_ref().map(|a| &a.token) != Some(&saved.token) {
+                return None;
             }
-            Ok(Check::Refused) => {
-                rt.refused = Some((Instant::now(), refusals.saturating_add(1)));
-                AccountState::Expired { username: saved.username.clone() }
-            }
-            Err(e) => {
-                eprintln!("account check: {e:#}");
-                rt.offline_since = Some(Instant::now());
-                AccountState::Offline { username: saved.username.clone() }
-            }
-        };
-        drop(rt);
+            Some(match answer {
+                Ok(Check::Valid(current)) => {
+                    // For the account as it is kept just below (its id as the server says it), with this credential.
+                    features = Some((current.user.clone(), current.features.clone()));
+                    let name = current.username.clone().or(saved.username.clone()).unwrap_or_default();
+                    rt.account = Some(Account { token: saved.token.clone(), ..current });
+                    AccountState::SignedIn { username: name }
+                }
+                Ok(Check::Refused) => {
+                    rt.refused = Some((Instant::now(), refusals.saturating_add(1)));
+                    AccountState::Expired { username: saved.username.clone() }
+                }
+                Err(e) => {
+                    eprintln!("account check: {e:#}");
+                    rt.offline_since = Some(Instant::now());
+                    AccountState::Offline { username: saved.username.clone() }
+                }
+            })
+        });
+        let Some(state) = state else { return };
         if let Some((user, features)) = features {
             self.calls_access_checked(server, user.as_deref(), &saved.token, features.as_ref());
         }
@@ -383,34 +384,44 @@ impl Controller {
                     self.leave_unless_same(Some((server, account.token.as_str())));
                 }
             }
-            let mut rt = self.account_runtime.lock().unwrap();
-            if rt.generation != generation {
-                // Cancelled while Orbiters answered: nothing is kept.
-                return account::Answer { location: link.failed_url(), done: true };
-            }
+            // Cancelled while Orbiters answered: nothing is kept.
+            let cancelled = || account::Answer { location: link.failed_url(), done: true };
             let answer = link.answer(&exchange);
-            match exchange {
-                Exchange::Done(account) => {
+            if let Exchange::Done(account) = exchange {
+                let name = account.username.clone().unwrap_or_default();
+                let saved = self.install_account(|rt| {
+                    if rt.generation != generation {
+                        return None;
+                    }
                     rt.signing_in = None;
                     // Tests never touch the Unity tools' account.
                     let saved = if cfg!(test) { Ok(()) } else { account::save(server, &account) };
-                    let name = account.username.clone().unwrap_or_default();
                     rt.account = Some(account);
                     rt.read = Some((server, account::modified(server)));
                     rt.offline_since = None;
                     rt.refused = None;
-                    drop(rt);
-                    if let Err(e) = saved {
-                        self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
-                    }
-                    // Calls follow the account signed in now at once.
-                    self.calls_account_changed();
-                    // Shown only if no sign-out or cancel came since the lock above (verify-controller): under the
-                    // snapshot's lock, against the generation those bump before they publish.
-                    if self.commit_account_check(generation, AccountState::SignedIn { username: name.clone() }) {
-                        self.notify(NoticeKind::Success, tr!("Signed in to Orbiters as {name}.", name = name));
-                    }
+                    Some(saved)
+                });
+                let Some(saved) = saved else { return cancelled() };
+                if let Err(e) = saved {
+                    self.notify(NoticeKind::Warning, tr!("Signed in, but the Unity tools will not share it: {error}", error = e));
                 }
+                // Calls follow the account signed in now at once.
+                self.calls_account_changed();
+                // Shown only if no sign-out or cancel came since the lock above (verify-controller): under the
+                // snapshot's lock, against the generation those bump before they publish.
+                if self.commit_account_check(generation, AccountState::SignedIn { username: name.clone() }) {
+                    self.notify(NoticeKind::Success, tr!("Signed in to Orbiters as {name}.", name = name));
+                }
+                return answer;
+            }
+            let mut rt = self.account_runtime.lock().unwrap();
+            if rt.generation != generation {
+                return cancelled();
+            }
+            match exchange {
+                // Installed above.
+                Exchange::Done(_) => {}
                 // The browser can bring another (Connect clicked again): the error shows meanwhile.
                 Exchange::Retry(message) => {
                     drop(rt);
@@ -487,14 +498,13 @@ impl Controller {
         remove()?;
         // The account leaves before it is gone from the runtime (its credential for what Orbiters hears, PRIV-7).
         self.leave_unless_same(None);
-        {
-            let mut rt = self.account_runtime.lock().unwrap();
+        self.install_account(|rt| {
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             rt.signing_in = None;
             rt.account = None;
             rt.read = Some((server, None));
-        }
+        });
         self.update(|s| {
             s.account.state = AccountState::SignedOut;
             s.account.error = None;
@@ -607,7 +617,8 @@ mod tests {
 
     /// Something said to N4N0 that it does by itself (no server): a line of the conversation.
     fn say(ctl: &Shared) {
-        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), question: None }); // BEFORE
+        let stamp = orbiters_n4n0::Stamp { epoch: ctl.identity_epoch(), question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() };
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), stamp: Some(stamp) });
     }
 
     fn lines(ctl: &Shared) -> usize {
@@ -639,8 +650,11 @@ mod tests {
             say(&ctl);
             let said = lines(&ctl);
             assert!(said > 0, "{name}: something was said");
+            let epoch = ctl.identity_epoch();
             change(&ctl);
             let after = lines(&ctl);
+            assert_eq!(ctl.identity_epoch(), epoch + clears as u64, "{name}: the epoch");
+            assert!(!clears || ctl.snapshot.lock().unwrap().n4n0.account_epoch == epoch + 1, "{name}: the windows are shown the new one");
             if clears != (after == 0) {
                 wrong.push(format!("{name}: {said} lines before, {after} after (expected {})", if clears { "none" } else { "kept" }));
             }

@@ -723,6 +723,7 @@ pub fn over_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     if let Some(since) = state.drawer {
         let open = anim::spring_from(&ctx, Id::unique(("launcher-drawer", since.to_bits())), [0.0], [1.0], Spring::EXPAND)[0];
         let layer = LayerId::new(Order::Middle, Id::unique("launcher-drawer-layer"));
+        orbiters_ui::front::layer(&ctx, layer, true);
         let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer));
         let scrim = over.interact(page, Id::unique("launcher-drawer-scrim"), Sense::click());
         over.painter().rect_filled(page, 0.0, theme::black(0.45 * open.clamp(0.0, 1.0)));

@@ -186,6 +186,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let mut height = 820.0f32;
     let mut width = 1280.0f32;
     let mut only: Option<String> = None;
+    let mut layers = false;
     let mut frames = Frames::default();
     let mut text_report = None;
     crate::audio_devices::made_up_mics();
@@ -198,6 +199,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             "--raw" => settings.raw_captures_dir = PathBuf::from(it.next().context("--raw <folder>")?),
             "--scale" => scale = it.next().context("--scale <factor>")?.parse()?,
             "--only" => only = Some(it.next().context("--only <name>")?.clone()),
+            // No pictures and no GPU: every frame of every scene laid out, and its layers looked at.
+            "--layers" => layers = true,
             "--height" => height = it.next().context("--height <points>")?.parse()?,
             "--width" => width = it.next().context("--width <points>")?.parse()?,
             "--extend" => frames.extend = it.next().context("--extend <frames>")?.parse()?,
@@ -2577,7 +2580,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         art: Some(std::sync::Arc::new(crate::media::Art { key: crate::overlay::menu_pages::SAMPLE_ART.into(), rgb: crate::overlay::menu_pages::sample_art() })),
     });
 
-    let mut gpu = Offscreen::new()?;
+    let mut gpu = if layers { None } else { Some(Offscreen::new()?) };
+    let mut missing = std::collections::BTreeSet::new();
     for sc in scenarios {
         // `--only a,b,c`: several scenarios in one run (the scenarios are made once).
         if only.as_deref().is_some_and(|list| list.split(',').all(|o| {
@@ -2595,10 +2599,18 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if only.is_none() && sc.name.starts_with("projects-preview-native") && std::env::var_os("ORBITERS_PREVIEW_PROJECT").is_none() {
             continue;
         }
+        // Walked for their layers with nothing of the network's.
+        if layers && sc.name.ends_with("-live") {
+            continue;
+        }
         let path = out.join(format!("{}.png", sc.name));
-        render(&mut gpu, &sc, scale, vec2(width, height), &path, frames)?;
+        missing.extend(render(gpu.as_mut(), &sc, scale, vec2(width, height), &path, frames)?);
         println!("{}", path.display());
     }
+    // Whatever shows over the page says so as it is shown (`orbiters_ui::front`).
+    anyhow::ensure!(missing.is_empty(), "layers over the page that do not say they are shown:
+{}", missing.into_iter().collect::<Vec<_>>().join("
+")); // i18n: not shown
     Ok(())
 }
 
@@ -2673,7 +2685,10 @@ struct Frames {
     sequence: u32,
 }
 
-fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path, run: Frames) -> anyhow::Result<()> {
+/// Draws `sc` and keeps its picture; without a `gpu`, only lays its frames out. The layers over the page that did not say
+/// they are shown, in any of its frames ([`orbiters_ui::front::missing`]).
+fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2, path: &std::path::Path, run: Frames) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let mut missing = std::collections::BTreeSet::new();
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
@@ -2690,7 +2705,9 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
     if sc.name == "vrchat-login-entering-password" {
         app.stage_vrchat_login();
     }
-    app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
+    if let Some(gpu) = gpu.as_deref() {
+        app.set_gpu(crate::gpu::Handles::of_offscreen(gpu));
+    }
     if !sc.splash {
         app.skip_splash();
     }
@@ -2941,10 +2958,11 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
         if capture {
             // What the page still reads (the list, pictures) lands before the shot: a slow disk makes the run
             // longer, not the picture emptier. The frames meanwhile stand at the same time.
-            let limit = Instant::now() + Duration::from_secs(20);
+            let limit = Instant::now() + Duration::from_secs(if gpu.is_some() { 20 } else { 1 });
             while app.page_busy() && Instant::now() < limit {
                 std::thread::sleep(Duration::from_millis(10));
-                gpu.frame(
+                lay_out(
+                    gpu.as_deref_mut(),
                     &ctx,
                     input.clone(),
                     |ui| {
@@ -2955,7 +2973,8 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
                 )?;
             }
         }
-        let image = gpu.frame(
+        let image = lay_out(
+            gpu.as_deref_mut(),
             &ctx,
             input,
             |ui| {
@@ -2964,6 +2983,7 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             },
             capture,
         )?;
+        missing.extend(orbiters_ui::front::missing(&ctx).into_iter().map(|layer| format!("{} (frame {f}): {}", sc.name, layer.short_debug_format()))); // i18n: not shown
         if let Some(image) = image {
             if f + run.sequence >= total {
                 save_png(&path.with_file_name(format!("{}-{f:03}.png", sc.name)), &image)?;
@@ -2973,9 +2993,22 @@ fn render(gpu: &mut Offscreen, sc: &Scenario, scale: f32, size: Vec2, path: &std
             }
         }
         // Background jobs (session list, thumbnails) land between frames.
-        std::thread::sleep(Duration::from_millis(3));
+        if gpu.is_some() {
+            std::thread::sleep(Duration::from_millis(3));
+        }
     }
-    Ok(())
+    Ok(missing)
+}
+
+/// A frame of `ui`: drawn (and read back when `capture`) with a `gpu`, else only laid out.
+fn lay_out(gpu: Option<&mut Offscreen>, ctx: &egui::Context, input: RawInput, ui: impl FnMut(&mut egui::Ui), capture: bool) -> anyhow::Result<Option<egui::ColorImage>> {
+    match gpu {
+        Some(gpu) => gpu.frame(ctx, input, ui, capture),
+        None => {
+            let _ = ctx.run_ui(input, ui);
+            Ok(None)
+        }
+    }
 }
 
 /// The Videos page over made-up videos and lists, never this computer's (`videos`: the history; `videos-list`: the
@@ -4159,6 +4192,74 @@ mod dashboard_tests {
             sw.free_textures(&mut full.textures_delta);
         }
         image
+    }
+
+    /// Verify2-r21 M5: every frame of every scene, laid out: what shows over the page and takes a press or a key said so as
+    /// it was shown. In a process of its own (this same executable, [`the_layers_walk`]): the screenshots' private folders
+    /// stand for a whole process.
+    #[test]
+    fn every_layer_over_the_page_says_it_is_shown() {
+        let out = std::env::temp_dir().join(format!("orbiters-layers-{}", std::process::id()));
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "screenshot::tests::the_layers_walk", "--ignored", "--nocapture"]).env("ORBITERS_LAYERS_OUT", &out).env("RUST_MIN_STACK", (32 << 20).to_string());
+        for name in ["ORBITERS_HARNESS_FIXTURES", "ORBITERS_SCREENSHOT_SCROLL", "ORBITERS_SCREENSHOT_PICTURE_FOLDERS", "ORBITERS_SCREENSHOT_KEEP_SANDBOX"] {
+            child.env_remove(name);
+        }
+        let done = child.output().unwrap();
+        let _ = std::fs::remove_dir_all(&out);
+        let (said, wrong) = (String::from_utf8_lossy(&done.stdout).to_string(), String::from_utf8_lossy(&done.stderr).to_string());
+        let end = |t: &str| t.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("
+");
+        assert!(done.status.success(), "{}
+{}", end(&said), end(&wrong));
+        let scenes = said.lines().filter(|l| l.ends_with(".png")).count();
+        assert!(scenes > 200, "{scenes} scenes walked: {}", end(&said));
+    }
+
+    /// The walk of [`every_layer_over_the_page_says_it_is_shown`], alone in its process.
+    #[test]
+    #[ignore]
+    fn the_layers_walk() {
+        let out = std::env::var("ORBITERS_LAYERS_OUT").expect("ORBITERS_LAYERS_OUT");
+        let args: Vec<String> = ["--screenshot", out.as_str(), "--layers"].iter().map(|a| a.to_string()).collect();
+        let _roots = crate::harness::prepare(&args).unwrap();
+        run(&args[1..]).unwrap();
+    }
+
+    /// Verify2-r21 M5: an `Area` is made through `orbiters_ui::front` and nowhere else, and what draws on a layer of its own
+    /// says so there.
+    #[test]
+    fn areas_are_made_through_front_only() {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    sources(&p, out);
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        sources(&here.join("src"), &mut files);
+        sources(&here.join("../orbiters-ui/src"), &mut files);
+        let mut wrong = Vec::new();
+        for f in files.iter().filter(|f| !f.ends_with("front.rs") && !f.ends_with("screenshot.rs")) {
+            let text = std::fs::read_to_string(f).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                let area = line.replace("ScrollArea::new(", "").contains("Area::new(");
+                let window = line.contains("egui::Window::new(") || line.contains("egui::Modal::new(");
+                // A layer drawn without an area: said in the line before.
+                let layer = line.contains(".layer_id(layer") && !(n > 0 && lines[n - 1].contains("front::layer("));
+                if area || window || layer {
+                    wrong.push(format!("{}:{}: {}", f.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("
+"));
     }
 
     /// Enzo (F15): with nothing to stop, the dashboard's recorder starts nothing, and its button looks so: no bright red dot that reads as Record.

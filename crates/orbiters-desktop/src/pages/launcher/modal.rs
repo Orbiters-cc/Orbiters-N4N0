@@ -64,6 +64,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cloc
 
     // The whole window dims (the sidebar too): one thing at a time.
     let screen = ctx.content_rect();
+    orbiters_ui::front::layer(&ctx, layer(), closing.is_none());
     let mut over = ui.new_child(UiBuilder::new().max_rect(screen).layer_id(layer()));
     over.set_clip_rect(screen);
     let scrim = over.interact(screen, Id::unique("launcher-profile-scrim"), Sense::click());

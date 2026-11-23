@@ -6,6 +6,7 @@
 //!
 //! [`Ears`]: crate::Ears
 
+use crate::command::{Stamp, Surface};
 use crate::platform::VoiceWorker;
 use crate::runtime::{N4n0, Shared, Source};
 use crate::status::{NoticeKind, N4n0Who, VoiceStatus};
@@ -63,9 +64,9 @@ pub(crate) struct VoiceRuntime {
     load_crashes: u32,
     /// The models load no more (the worker stopped twice while loading them): the next install repairs them.
     repair: bool,
-    /// The last listen's number, and whether it still waits for its sentence.
+    /// The last listen's number, and (while it still waits for its sentence) what its Talk press saw.
     next_listen: u64,
-    current: Option<u64>,
+    current: Option<(u64, Stamp)>,
     /// Listens cancelled before their sentence came (newest last).
     cancelled: std::collections::VecDeque<u64>,
     /// Keeps the worker while a sentence asked for with VRChat closed is under way.
@@ -82,6 +83,24 @@ impl VoiceRuntime {
             }
             None => false,
         }
+    }
+
+    /// The number of the listen that waits for its sentence.
+    fn current_id(&self) -> Option<u64> {
+        self.current.map(|(id, _)| id)
+    }
+
+    /// The listen that waits is dropped: nothing heard for it goes anywhere, and the worker stops it.
+    fn drop_current(&mut self) -> bool {
+        let Some((id, _)) = self.current.take() else { return false };
+        self.cancelled.push_back(id);
+        while self.cancelled.len() > CANCELLED_KEPT {
+            self.cancelled.pop_front();
+        }
+        if let Some(handle) = self.handle.as_mut() {
+            let _ = handle.inner.send(&VoiceCommand::Cancel);
+        }
+        true
     }
 
     /// How long to wait before starting a worker again after `crashes` ends in a row: 30 s, then twice as long each
@@ -191,7 +210,7 @@ impl N4n0 {
         self.publish();
     }
 
-    pub(crate) fn ask_talk(self: &Shared, down: bool) {
+    pub(crate) fn ask_talk(self: &Shared, down: bool, stamp: Option<Stamp>) {
         let _lifecycle = self.voice_lifecycle.lock();
         let takeover = {
             let mut rt = self.n4n0.lock().unwrap();
@@ -202,7 +221,7 @@ impl N4n0 {
             takeover
         };
         if takeover { self.voice_cancel(); }
-        self.talk(down, Source::Overlay);
+        self.talk(down, Source::Overlay, stamp);
     }
 
     /// Called by the runtime watcher, independently of page paint and audio callbacks.
@@ -212,7 +231,7 @@ impl N4n0 {
         let (cancel, arm) = {
             let mut rt = self.n4n0.lock().unwrap();
             let cancel = (!ready && (rt.listening.is_some() || rt.voice.finalizing))
-                || (rt.voice.ask_open && rt.ask_busy() && rt.listening.is_some());
+                || (rt.voice.ask_open && rt.listening.is_some_and(|(source, _)| rt.busy_for(source)));
             if cancel { rt.listening = None; }
             let arm = ready && rt.voice.ask_open && rt.voice.automatic && rt.listening.is_none()
                 && !rt.ask_busy();
@@ -228,7 +247,7 @@ impl N4n0 {
             rt.voice.finalizing = false;
             if !ready { rt.voice.automatic = false; }
         }
-        if arm { self.voice_listen(Source::AskAuto); }
+        if arm { self.voice_listen(Source::AskAuto, None); }
     }
 
     /// Whether the speech models are on this device.
@@ -336,15 +355,17 @@ impl N4n0 {
 
     /// N4N0 listens for a sentence from `source` (the worker starts if it was not running, as for the window's Talk
     /// button with VRChat closed, and stays a while after).
-    pub(crate) fn voice_listen(self: &Shared, source: Source) {
+    /// `stamp`: what the Talk press that starts it saw; a listen N4N0 starts by itself is stamped now.
+    pub(crate) fn voice_listen(self: &Shared, source: Source, stamp: Option<Stamp>) {
         let _lifecycle = self.voice_lifecycle.lock();
         if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
         let settings = self.with_settings(|s| s.n4n0.clone());
         let ask = {
             let n = self.n4n0.lock().unwrap();
-            if n.ask_busy() || (source == Source::AskAuto && (!n.voice.ask_open || !n.voice.automatic)) { return; }
+            if n.busy_for(source) || (source == Source::AskAuto && (!n.voice.ask_open || !n.voice.automatic)) { return; }
             n.voice.ask_open
         };
+        let stamp = stamp.unwrap_or_else(|| self.own_stamp(Surface::Avatar));
         let mut rt = self.voice.lock().unwrap();
         if !ask { rt.ask_owned = false; }
         rt.lease_until = Some(Instant::now() + LISTEN_LIMIT + LISTEN_LEASE);
@@ -355,7 +376,7 @@ impl N4n0 {
         let hold = matches!(source, Source::Menu | Source::Window | Source::Overlay);
         rt.next_listen += 1;
         let id = rt.next_listen;
-        rt.current = Some(id);
+        rt.current = Some((id, stamp));
         self.n4n0.lock().unwrap().listening = Some((source, Instant::now()));
         if let Some(handle) = rt.handle.as_mut() {
             // The sentence as it is spoken shows on the Ask page only: elsewhere, no work for it.
@@ -376,20 +397,19 @@ impl N4n0 {
     pub(crate) fn voice_cancel(self: &Shared) {
         let _lifecycle = self.voice_lifecycle.lock();
         let mut rt = self.voice.lock().unwrap();
-        let Some(id) = rt.current.take() else { return };
-        rt.cancelled.push_back(id);
-        while rt.cancelled.len() > CANCELLED_KEPT {
-            rt.cancelled.pop_front();
-        }
-        if let Some(handle) = rt.handle.as_mut() {
-            let _ = handle.inner.send(&VoiceCommand::Cancel);
-        }
+        if !rt.drop_current() { return; }
         drop(rt);
         let mut n = self.n4n0.lock().unwrap();
         n.voice.provisional = None;
         n.voice.level = 0.0;
         n.voice.speech = false;
         n.voice.finalizing = false;
+    }
+
+    /// The sentence being listened to was the last member's (an identity handover: nothing acts, so the lifecycle's lock is
+    /// not needed, and not taken).
+    pub(crate) fn voice_forget(&self) {
+        self.voice.lock().unwrap().drop_current();
     }
 
     /// Downloads the speech models in a worker of their own, its progress on the N4N0 page: what is missing or cut
@@ -449,7 +469,7 @@ impl N4n0 {
         match event {
             VoiceEvent::Finalizing { listen } => {
                 let rt = self.voice.lock().unwrap();
-                if rt.current != Some(listen) { return; }
+                if rt.current_id() != Some(listen) { return; }
                 { let mut n = self.n4n0.lock().unwrap(); n.listening = None; n.voice.finalizing = true; }
                 drop(rt);
                 self.publish();
@@ -457,7 +477,7 @@ impl N4n0 {
             VoiceEvent::Provisional { listen, text } => {
                 if self.voice_readiness() != crate::status::VoiceReadiness::Ready { return; }
                 let rt = self.voice.lock().unwrap();
-                if rt.current != Some(listen) || self.n4n0.lock().unwrap().voice.finalizing { return; }
+                if rt.current_id() != Some(listen) || self.n4n0.lock().unwrap().voice.finalizing { return; }
                 self.voice_status(|v| v.provisional = (!text.is_empty()).then_some(crate::status::ProvisionalSpeech { listen, text }));
             }
             VoiceEvent::Ready { engine, load_ms } => {
@@ -501,27 +521,22 @@ impl N4n0 {
                     // A wake result can start a follow-up capture. It does not own a finalizing listen. When its sound began
                     // tells whether it was heard during a call (its recognition may end after hang-up).
                     let began = Instant::now().checked_sub(Duration::from_secs_f32(if seconds.is_finite() { seconds.clamp(0.0, 600.0) } else { 0.0 }) + Duration::from_millis(decode_ms as u64));
-                    self.heard_since(text, false, false, began);
+                    self.heard_since(text, None, began);
                     return;
                 }
-                if for_n4n0 {
-                    eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");
-                }
-                // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening.
-                let (dropped, current) = {
+                eprintln!("voice: {seconds:.1} s transcribed in {decode_ms} ms");
+                // A sentence for a cancelled listen goes nowhere; one for the latest listen ends N4N0's listening, and is
+                // taken as of that listen's start (its stamp), however late it was recognised.
+                let stamp = {
                     let mut rt = self.voice.lock().unwrap();
-                    let dropped = for_n4n0 && (rt.cancelled_take(listen) || rt.current != Some(listen));
-                    let current = for_n4n0 && rt.current == Some(listen);
-                    if current {
-                        rt.current = None;
-                    }
+                    let dropped = rt.cancelled_take(listen) || rt.current_id() != Some(listen);
                     // It heard: it works.
                     rt.crashes = 0;
-                    (dropped, current)
+                    if dropped { None } else { rt.current.take().map(|(_, stamp)| stamp) }
                 };
-                if dropped { return; }
-                self.voice_status(|v| { v.finalizing = true; v.level = 0.0; if current { v.provisional = None; v.speech = false; } });
-                self.heard(text, for_n4n0, current);
+                let Some(stamp) = stamp else { return };
+                self.voice_status(|v| { v.finalizing = true; v.level = 0.0; v.provisional = None; v.speech = false; });
+                self.heard(text, stamp);
                 self.voice_status(|v| v.finalizing = false);
             }
             VoiceEvent::Installing { fraction } => self.voice_status(|v| v.downloading = Some(fraction)),

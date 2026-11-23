@@ -20,6 +20,7 @@ mod mirror;
 mod pointer_log;
 pub mod platform;
 mod qr;
+mod fence;
 mod runtime;
 mod screen;
 mod states;
@@ -30,7 +31,8 @@ mod voice;
 mod tests;
 
 pub use assistant::{AssistantView, OpenAsk, TurnFailure};
-pub use command::{Command, MenuHolder};
+pub use command::{Command, MenuHolder, Stamp, Surface, FIRST_EPOCH};
+pub use fence::{next_input, Paused};
 pub use platform::{
     language_of, Actions, Browser, CallRequest, Clipboard, Ears, Files, Host, Locale, Mouse, MouseState, NoMouse, Osc, Platform, QrEvents, QrGlimpse, QrScan, QrSeen, QrSide,
     Scene, Sounds, VoiceEnded, VoiceEvents, VoiceWorker,

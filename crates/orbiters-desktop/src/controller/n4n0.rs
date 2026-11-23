@@ -94,6 +94,14 @@ impl Host for Link {
         self.with(|c| c.account_api()).flatten()
     }
 
+    fn identity_epoch(&self) -> u64 {
+        self.with(|c| c.identity_epoch()).unwrap_or(orbiters_n4n0::FIRST_EPOCH)
+    }
+
+    fn account_for(&self, epoch: u64) -> Option<(Api, String)> {
+        self.with(|c| c.account_api_of(epoch)).flatten()
+    }
+
     /// With the VRChat account connected in Settings, when there is one (REQUEST20 4).
     fn invite_self(&self, location: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
         self.with(|c| c.previous_instance_invite(location)).flatten()
@@ -357,8 +365,8 @@ impl Controller {
     }
 
     /// The Talk button of the window, or of the overlay (`overlay`), from the service's link with it.
-    pub fn n4n0_app_talk(self: &Shared, down: bool, overlay: bool) {
-        self.n4n0.app_talk(down, overlay);
+    pub fn n4n0_app_talk(self: &Shared, down: bool, overlay: bool, stamp: Option<orbiters_n4n0::Stamp>) {
+        self.n4n0.app_talk(down, overlay, stamp);
     }
 
     /// The window or the overlay went away: a Talk button it held is let go without its sentence, and the overlay's menu

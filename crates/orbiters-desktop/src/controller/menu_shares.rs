@@ -31,7 +31,8 @@ pub(super) enum AskState {
 #[derive(Clone, Debug)]
 enum Asked {
     /// Its 3D view first, since `since`.
-    Waiting { entry: Box<Entry>, ask: ShareAsk, since: Instant },
+    /// For the Orbiters identity that asked (its epoch): nobody else's.
+    Waiting { entry: Box<Entry>, ask: ShareAsk, since: Instant, epoch: u64 },
     /// A Photos & captures job (its id), started at `since`.
     Job { id: String, ask: ShareAsk, since: Instant },
     /// It could not go: why.
@@ -226,8 +227,11 @@ impl super::Controller {
         }
         // Shares waiting for a 3D view: they go once it is made, and give up when nothing makes it.
         let mut go = Vec::new();
+        // Another member signed in since: what the one before asked is not shared as them.
+        let now = self.identity_epoch();
+        m.asked.retain(|_, asked| !matches!(asked, Asked::Waiting { epoch, .. } if *epoch != now));
         for (name, asked) in m.asked.iter_mut() {
-            let Asked::Waiting { entry, ask, since } = asked else { continue };
+            let Asked::Waiting { entry, ask, since, .. } = asked else { continue };
             let made = m.made.contains(name) || entry.local.as_ref().is_some_and(|l| orbiters_core::reconstruction::read_report(l.path()).is_some());
             let busy =
                 snap.reconstruction.as_ref().is_some_and(|j| folder(&j.session_dir) == *name) || snap.reconstruct_queue.iter().any(|d| folder(d) == *name);
@@ -242,7 +246,7 @@ impl super::Controller {
             }
         }
         for (name, entry, ask) in go {
-            m.asked.insert(name, self.menu_share_job(entry, ask, snap.settings.development));
+            m.asked.insert(name, self.menu_share_job(entry, ask, snap.settings.development, now));
         }
         let view = m.view(&snap);
         if m.sent.as_ref() != Some(&view) {
@@ -270,6 +274,7 @@ impl super::Controller {
             return Err(tr_latin("Choose who to share it with").into());
         }
         let name = folder_of(&ask.key);
+        let epoch = self.identity_epoch();
         let snap = self.view();
         if snap.capture.session_dir.as_deref().is_some_and(|d| folder(d) == name) && (snap.is_capturing() || snap.capture.state == CaptureState::Stopping) {
             return Err(tr_latin("It is still being recorded: share it once it is saved").into());
@@ -292,14 +297,14 @@ impl super::Controller {
         let made = self.menu_shares.lock().unwrap().made.contains(&name);
         entry.ready |= made;
         let asked = if entry.ready {
-            self.menu_share_job(entry, ask, settings.development)
+            self.menu_share_job(entry, ask, settings.development, epoch)
         } else {
             let dir = entry.local.as_ref().map(|l| l.path().to_path_buf()).unwrap_or_default();
             let busy = snap.reconstruction.as_ref().is_some_and(|j| folder(&j.session_dir) == name) || snap.reconstruct_queue.iter().any(|d| folder(d) == name);
             if !busy {
                 self.queue_reconstruction(dir).map_err(|e| fill(tr_latin("Its 3D view cannot be made: {error}"), &[("error", &on_screen(&e.to_string()))]))?;
             }
-            Asked::Waiting { entry: Box::new(entry), ask, since: Instant::now() }
+            Asked::Waiting { entry: Box::new(entry), ask, since: Instant::now(), epoch }
         };
         {
             let mut m = self.menu_shares.lock().unwrap();
@@ -323,14 +328,15 @@ impl super::Controller {
     }
 
     /// Starts the Photos & captures job sharing `entry` as `ask` says.
-    fn menu_share_job(self: &Shared, entry: Entry, ask: ShareAsk, development: bool) -> Asked {
+    /// Shared as the member of `epoch`, whose account it is (not the one saved when its thread starts).
+    fn menu_share_job(self: &Shared, entry: Entry, ask: ShareAsk, development: bool, epoch: u64) -> Asked {
         let id = format!("n4n0-menu-{}", uuid::Uuid::new_v4().simple());
         let recipients =
             ask.recipients.iter().map(|f| orbiters_core::shares::Recipient { vrchat_user_id: f.id.clone(), display_name: f.name.clone() }).collect();
         let share = orbiters_core::shares::Share { public: ask.public, recipients, acknowledge_explicit: ask.acknowledge_explicit, message: String::new() };
         let request = Request { id: id.clone(), server: server(development), entry, extra: Vec::new(), operation: Operation::Share(share) };
         // The tray owns it from here (its work runs on a thread of its own).
-        self.capture_share(request);
+        self.capture_share_as(request, self.account_api_of(epoch));
         Asked::Job { id, ask, since: Instant::now() }
     }
 
@@ -449,7 +455,7 @@ mod tests {
         assert_eq!((flagged.sharing, flagged.explicit), (Sharing::Explicit, true));
         snap.capture_shares[0].outcome = Some(Outcome::Failed { message: "Sign in to Orbiters in Settings first.".into(), explicit: false });
         assert_eq!(row(&m, &snap).sharing, Sharing::Failed { message: "Sign in to Orbiters in Settings first.".into() });
-        m.asked.insert(name, Asked::Waiting { entry: Box::new(entry(&dir, false)), ask, since: Instant::now() });
+        m.asked.insert(name, Asked::Waiting { entry: Box::new(entry(&dir, false)), ask, since: Instant::now(), epoch: 1 });
         assert_eq!(row(&m, &snap).sharing, Sharing::Waiting { public: true, people: 0 });
     }
 

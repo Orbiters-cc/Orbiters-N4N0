@@ -14,6 +14,7 @@ pub mod dialog;
 pub mod feedback;
 pub mod fonts;
 pub mod format;
+pub mod front;
 pub mod glow;
 pub mod icons;
 pub mod layout;

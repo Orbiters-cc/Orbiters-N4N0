@@ -279,7 +279,7 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
         Rect::from_min_size(pos2(base.center().x - size.x * 0.5, base.bottom() - size.y + 6.0 * (1.0 - kk)), size)
     };
     let mut picked = None;
-    let area = egui::Area::new(id.with("list")).order(Order::Tooltip).fixed_pos(rect.min).show(ctx, |ui| {
+    let area = crate::front::area(ctx, id.with("list"), Order::Tooltip, open).fixed_pos(rect.min).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         ui.multiply_opacity(k.clamp(0.0, 1.0));
         widgets::panel(ui.painter(), rect, 14.0);

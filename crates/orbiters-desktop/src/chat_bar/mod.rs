@@ -10,7 +10,9 @@
 //! way (from wherever it is: a reversal half-way is one motion); the conversation stays, and the bar says there is one.
 //!
 //! The conversation is N4N0's own (the runtime's lines, its questions waiting for a yes, its action log: the same as the
-//! Ask page beside VRChat's menu shows), sent with [`N4n0Command::Ask`], answered with [`N4n0Command::AskAnswer`]; what
+//! Ask page beside VRChat's menu shows), sent with [`N4n0Command::Ask`], answered with [`N4n0Command::AskAnswer`]. Each
+//! is stamped as it is captured with what the person was shown then, the last frame drawn ([`Shown`]): the member signed
+//! in, and the question whose card was in view. The service takes it for that member and that question only. What
 //! is being typed is kept here, across pages. While the bar or the chat has the keyboard, the page under it gets no keys
 //! ([`ChatBar::before_page`]), and while the chat is open no presses or wheel either: one scroll region, the chat's.
 
@@ -23,10 +25,11 @@ mod tests;
 use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::state::{AccountState, N4n0Who, Snapshot};
-use egui::{pos2, vec2, Align2, Area, CursorIcon, Event, Id, Key, KeyboardShortcut, LayerId, Modifiers, Order, Rect, Sense, Ui};
+use egui::{pos2, vec2, Align2, CursorIcon, Event, Id, Key, KeyboardShortcut, LayerId, Modifiers, Order, Rect, Sense, Ui};
 use layout::{Bar, Strip};
 use morph::Morph;
 use orbiters_i18n::tr;
+use orbiters_n4n0::{Stamp, Surface};
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::{anim, icons, widgets};
 
@@ -104,6 +107,15 @@ fn unread(bar: &ChatBar, snap: &Snapshot) -> bool {
     !bar.morph.is_open() && latest_answer(snap).is_some_and(|latest| bar.seen != Some(latest))
 }
 
+/// What the last frame drawn showed: what the person could answer to as they pressed what this frame handles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Shown {
+    /// The Orbiters identity's epoch the chat showed (0: none yet, which the service lets nothing in for).
+    epoch: u64,
+    /// The question whose card was in view in the open chat.
+    question: Option<u64>,
+}
+
 /// The chat's state in the window.
 #[derive(Default)]
 pub struct ChatBar {
@@ -132,11 +144,16 @@ pub struct ChatBar {
     count: usize,
     /// Where the strip put the bar last frame.
     strip: Option<Strip>,
-    /// A fresh Enter came with the last letters typed: it sends on the next frame.
-    enter_later: bool,
+    /// What was typed after an Enter in the same frame: it is the next message's, and waits for the next frame.
+    after_enter: Vec<Event>,
+    shown: Shown,
+    /// The question whose card the frame being drawn shows.
+    drawing: Option<u64>,
+    /// A sheet, dialog or menu of the page is up: nothing of the chat or the bar takes a press.
+    modal: bool,
     /// How far a draft longer than the composer is moved up to show its caret.
     draft_offset: f32,
-    /// The Orbiters account's turn as N4N0 counts them (`N4n0Status::account_epoch`): when it moves, what was typed goes.
+    /// The Orbiters identity's epoch (`N4n0Status::account_epoch`): when it moves, what was typed goes.
     epoch: Option<u64>,
     /// The question this window answered (its card says so until it is gone).
     answered: Option<u64>,
@@ -204,8 +221,13 @@ impl ChatBar {
     pub fn leave(&mut self, ctl: &Ctl) {
         if self.talking {
             self.talking = false;
-            ctl.n4n0(N4n0Command::Talk { down: false });
+            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
         }
+    }
+
+    /// The stamp of what the person does now: what the last frame showed them.
+    fn stamp(&self) -> Option<Stamp> {
+        Some(Stamp { epoch: self.shown.epoch, question: self.shown.question, surface: Surface::Window, seq: orbiters_n4n0::next_input() })
     }
 
     /// What the chat holds that closing the window would lose: the chat itself up, something typed, Talk held. The
@@ -214,14 +236,20 @@ impl ChatBar {
         self.shows() || !self.draft.trim().is_empty() || self.talking
     }
 
-    /// Another Orbiters account (or nobody) is signed in now (`N4n0Status::account_epoch` moved, after N4N0 forgot the
-    /// conversation): what was typed for the account before goes too, with the text field's undo steps (verify-r21 3).
+    /// Another Orbiters member (or nobody) is signed in now (`N4n0Status::account_epoch` moved, after N4N0 forgot the
+    /// conversation): what was typed for the one before goes too, with the text field's undo steps (verify-r21 3) and what
+    /// this frame brings (it was typed into what the last frame showed). The service refuses what the last member's
+    /// stamps say in any case.
     fn follow_account(&mut self, ctx: &egui::Context, snap: &Snapshot) {
         let epoch = snap.n4n0.account_epoch;
         if self.epoch.is_some_and(|seen| seen != epoch) {
             self.draft.clear();
             self.draft_offset = 0.0;
-            self.enter_later = false;
+            self.after_enter.clear();
+            self.held.clear();
+            if ctx.memory(|m| m.has_focus(field_id())) {
+                ctx.input_mut(|i| i.events.retain(|e| !is_key_event(e)));
+            }
             (self.reveal, self.seen, self.copied, self.answered, self.retried) = (None, None, None, None, None);
             self.log = false;
             self.count = 0;
@@ -239,7 +267,9 @@ impl ChatBar {
     /// chat stands aside: closed, its shortcut and Esc left to the modal (verify-r21 major 7).
     pub fn before_page(&mut self, ctx: &egui::Context, snap: &Snapshot, modal: bool) {
         self.follow_account(ctx, snap);
+        self.modal = modal;
         if modal {
+            self.after_enter.clear();
             if self.morph.is_open() || ctx.memory(|m| m.has_focus(field_id())) {
                 self.close(ctx);
             }
@@ -281,6 +311,10 @@ impl ChatBar {
             }
             ctx.input_mut(|i| i.events.extend(held));
         }
+        if !self.after_enter.is_empty() {
+            let after = std::mem::take(&mut self.after_enter);
+            ctx.input_mut(|i| drop(i.events.splice(0..0, after)));
+        }
         self.follow_input_method(&ctx);
         let now = anim::time(&ctx);
         if self.morph.step(now, snap.settings.reduce_motion) {
@@ -313,6 +347,8 @@ impl ChatBar {
             ctx.memory_mut(|m| m.request_focus(field_id()));
             self.focus = false;
         }
+        // What the person answers to from here on.
+        self.shown = Shown { epoch: snap.n4n0.account_epoch, question: self.drawing.take() };
     }
 
     /// The page behind the chat, blurred and darkened as far as it has opened; a press on it closes the chat.
@@ -320,7 +356,7 @@ impl ChatBar {
         let body = Rect::from_min_max(pos2(strip.window.left(), strip.window.top() + strip.title_h), strip.window.max);
         let strength = self.morph.openness();
         let mut close = false;
-        Area::new(backdrop_layer().id).order(Order::Middle).fixed_pos(body.min).interactable(true).constrain(false).show(ctx, |ui| {
+        orbiters_ui::front::area(ctx, backdrop_layer().id, Order::Middle, false).fixed_pos(body.min).interactable(true).constrain(false).show(ctx, |ui| {
             let resp = ui.allocate_rect(body, Sense::click());
             let look = orbiters_ui::backdrop::Look { strength, focus, radius, ..BEHIND };
             let blurred = gpu.is_some_and(|gpu| {
@@ -348,10 +384,10 @@ impl ChatBar {
         let panel = layout::panel(strip.window);
         let bar = strip.bar.rect();
         let (rect, radius) = layout::shape(bar, panel, t);
-        Area::new(id).order(Order::Middle).fixed_pos(rect.min).interactable(true).constrain(false).show(ctx, |ui| {
+        orbiters_ui::front::area(ctx, id, Order::Middle, false).fixed_pos(rect.min).interactable(true).constrain(false).show(ctx, |ui| {
             ui.set_clip_rect(rect.expand(64.0));
             ui.multiply_opacity(alpha);
-            let shape = ui.allocate_rect(rect, Sense::click());
+            let shape = ui.allocate_rect(rect, if self.modal { Sense::hover() } else { Sense::click() });
             let open_k = t.clamp(0.0, 1.0);
             paint_surface(ui, rect, radius, open_k, ctx.memory(|m| m.has_focus(field_id())), shape.hovered() && open_k < 0.05);
             let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -375,6 +411,10 @@ impl ChatBar {
                 chat.set_clip_rect(rect);
                 chat.multiply_opacity(chat_alpha);
                 panel::show(self, &mut chat, ctl, snap, panel, rect, composer, now_ms());
+                if chat_alpha * alpha < 0.5 {
+                    // Not there yet to be read.
+                    self.drawing = None;
+                }
             }
             if field && !(matches!(strip.bar, Bar::Icon(_)) && open_k < 0.05) {
                 let in_bar = bar_field(strip.bar, snap);
@@ -455,7 +495,7 @@ impl ChatBar {
 
     /// Hold to talk: N4N0 listens while it is held (as the menus' Talk does). Says when it was pressed or let go.
     fn talk_button(&mut self, ui: &mut Ui, ctl: &Ctl, rect: Rect, glyph: f32, alpha: f32, salt: &str) -> Option<bool> {
-        let resp = ui.interact(rect, Id::unique(salt), Sense::click_and_drag()).on_hover_text(tr("Hold to talk"));
+        let resp = ui.interact(rect, Id::unique(salt), if self.modal { Sense::hover() } else { Sense::click_and_drag() }).on_hover_text(tr("Hold to talk"));
         let held = resp.is_pointer_button_down_on();
         let ctx = ui.ctx().clone();
         let hover = anim::toggle(&ctx, resp.id.with("hover"), resp.hovered() || held, anim::Spring::SNAPPY);
@@ -468,7 +508,8 @@ impl ChatBar {
             return None;
         }
         self.talking = held;
-        ctl.n4n0(N4n0Command::Talk { down: held });
+        // What is heard is taken as of this press, however late it is recognised.
+        ctl.n4n0(N4n0Command::Talk { down: held, stamp: self.stamp().filter(|_| held) });
         Some(held)
     }
 
@@ -493,24 +534,15 @@ impl ChatBar {
         // Enter sends (Shift+Enter is a new line); never while an input method composes, nor the Enter that commits it.
         let committed = ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Ime(egui::ImeEvent::Commit(_)))));
         // Only a fresh press of Enter sends (never a held Enter's repeats), and never the Enter that comes with a paste:
-        // what was pasted needs its own Enter. One typed in the same moment as its last letters sends on the next frame.
-        let (pasted, typed) = ui.input(|i| {
-            let pasted = i.events.iter().any(|e| matches!(e, Event::Paste(_)));
-            (pasted, i.events.iter().any(|e| matches!(e, Event::Text(_))))
-        });
+        // what was pasted needs its own Enter. The letters that come with it, before it, are the message's (the field takes
+        // them below, then it is sent, in this frame: what it answers is what was shown at the Enter); those after it are
+        // the next one's.
         let mut enter = false;
-        if focused && ready && !self.composing && !committed {
-            if take_plain_enter(ui) {
-                if typed && !pasted {
-                    self.enter_later = true;
-                } else {
-                    enter = !pasted;
-                }
-            } else if std::mem::take(&mut self.enter_later) {
-                enter = !pasted;
+        if focused && ready && !self.modal && !self.composing && !committed {
+            enter = take_plain_enter(ui, &mut self.after_enter) && !ui.input(|i| i.events.iter().any(|e| matches!(e, Event::Paste(_))));
+            if !self.after_enter.is_empty() {
+                ui.ctx().request_repaint();
             }
-        } else {
-            self.enter_later = false;
         }
         let font = theme::font(egui::lerp(13.0..=14.0, t), weight::REGULAR);
         let rows = if t < 0.5 { 1 } else { panel::draft_rows(ui, &self.draft, at.width()) };
@@ -528,7 +560,7 @@ impl ChatBar {
             .text_color(theme::FG)
             .desired_width(at.width())
             .desired_rows(rows)
-            .interactive(ready)
+            .interactive(ready && !self.modal)
             .return_key(Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)));
         let out = edit.show(&mut child);
         let resp = out.response.response.clone();
@@ -580,25 +612,25 @@ impl ChatBar {
         self.follow = true;
         self.log = false;
         self.open();
-        // With the question shown now: a typed yes or no answers that one only (verify-r21 1).
-        ctl.n4n0(N4n0Command::Ask { text, question: shown_question(snap) });
+        // With the question whose card was in view: a typed yes or no answers that one only (verify-r21 1).
+        ctl.n4n0(N4n0Command::Ask { text, stamp: self.stamp() });
         true
     }
 }
 
-/// The question N4N0 asks that the chat shows now (its number), if any.
-pub fn shown_question(snap: &Snapshot) -> Option<u64> {
-    snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question())
-}
-
 /// Takes this frame's plain Enters out of its events (egui's `consume_key` would take Shift+Enter for one too); true
-/// when one of them is a fresh press, not a held Enter's repeat (verify-r21 2).
-fn take_plain_enter(ui: &Ui) -> bool {
+/// when one of them is a fresh press, not a held Enter's repeat (verify-r21 2). What was typed after it goes to `after`.
+fn take_plain_enter(ui: &Ui, after: &mut Vec<Event>) -> bool {
     ui.input_mut(|i| {
         let plain = |e: &Event| matches!(e, Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.command);
-        let fresh = i.events.iter().any(|e| plain(e) && matches!(e, Event::Key { repeat: false, .. }));
+        let fresh = i.events.iter().position(|e| plain(e) && matches!(e, Event::Key { repeat: false, .. }));
+        if let Some(at) = fresh {
+            let (later, rest): (Vec<Event>, Vec<Event>) = i.events.drain(at..).skip(1).partition(is_key_event);
+            after.extend(later);
+            i.events.extend(rest);
+        }
         i.events.retain(|e| !plain(e));
-        fresh
+        fresh.is_some()
     })
 }
 

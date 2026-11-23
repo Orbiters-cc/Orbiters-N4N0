@@ -183,7 +183,7 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
     }
     let rect = pop.rect;
     let mut action = None;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!p.closing).show(ctx, |ui| {
+    let area = orbiters_ui::front::area(ctx, id, Order::Foreground, !p.closing).fixed_pos(rect.min).interactable(!p.closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         ui.multiply_opacity(pop.opacity);
         if p.closing {

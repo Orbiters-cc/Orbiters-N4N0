@@ -93,7 +93,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Sett
                     state.said = Some((e.to_string(), theme::WARN));
                 }
             }
-            if Button::new(tr("Delete all")).icon(icons::TRASH).variant(Variant::Secondary).size(Size::Sm).enabled(all > 0 && !sending).show(ui).clicked() {
+            if Button::new(tr("Delete all")).icon(icons::TRASH).variant(Variant::Secondary).size(Size::Sm).enabled(all > 0 && !sending).confirm(ui) {
                 let gone = crate::mismatch::delete_all();
                 state.counted = None;
                 state.said = Some((tr_n("{count} report deleted.", "{count} reports deleted.", gone as u64), theme::FG_2));

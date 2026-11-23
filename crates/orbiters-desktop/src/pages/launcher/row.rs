@@ -195,7 +195,7 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
         Reach::NotNow | Reach::SignIn => false,
         Reach::Ready => {
             let resp = ui.interact(rect, id, Sense::click());
-            let pressed = widgets::activated(&resp);
+            let pressed = widgets::pressed_fresh(&resp);
             widgets::note_control(ui.ctx(), label, rect, true);
             let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
             let down = anim::toggle(ui.ctx(), id.with("down"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
@@ -254,7 +254,7 @@ pub(super) fn boop_button(ui: &mut Ui, center: egui::Pos2, size: f32, salt: (&st
     let (fill, fg) = match reach {
         Reach::Ready => {
             let resp = ui.interact(rect, id, Sense::click());
-            pressed = widgets::activated(&resp);
+            pressed = widgets::pressed_fresh(&resp);
             widgets::note_control(&ctx, orbiters_i18n::mark("Boop"), rect, true);
             let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
             resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Boop"));

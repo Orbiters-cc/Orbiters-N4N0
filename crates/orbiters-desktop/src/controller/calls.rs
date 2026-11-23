@@ -2122,26 +2122,40 @@ mod tests {
         }
     }
 
-    /// Verify-r21 blocker 3: N4N0's conversation, its log and what it asks belong to the Orbiters account that had them.
-    /// Another account (or nobody) installed: all of it goes, through the same gate the calls leave by; the same account
-    /// read again keeps it.
+    /// Verify-r21 blocker 3: N4N0's conversation, its log and what it asks belong to the Orbiters member that had them.
+    /// Another one (or nobody) installed: all of it goes as they are; the same one read again keeps it.
     #[test]
     fn the_next_orbiters_account_inherits_nothing_of_n4n0s_conversation() {
-        let server = orbiters_core::account::Server::Production;
+        use orbiters_core::account::{Account, Server};
         let ctl = signed_in_as_a_in_a_call();
         let said = |ctl: &crate::controller::Shared| {
             let s = ctl.snapshot.lock().unwrap();
             (s.n4n0.lines.len(), s.n4n0.assistant.log.len())
         };
+        // As the account thread reads A's file.
+        let a = ctl.account_runtime.lock().unwrap().account.clone().expect("A is signed in");
+        let installs = |account: Option<Account>| {
+            ctl.install_account(|rt| {
+                rt.read = Some((Server::Production, None));
+                rt.account = account;
+            })
+        };
+        installs(Some(a.clone()));
+        let stamp = orbiters_n4n0::Stamp { epoch: ctl.identity_epoch(), question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() };
         // A short command N4N0 does by itself (no server): a line of A's, an entry of A's log.
-        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), question: None });
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn on fast walk".into(), stamp: Some(stamp) });
         let (lines, log) = said(&ctl);
         assert!(lines > 0 && log > 0, "A said something ({lines} lines, {log} log entries)");
-        assert!(!ctl.leave_unless_same(Some((server, "orbit-a"))), "the same account read again");
+        assert!(!ctl.leave_unless_same(Some((Server::Production, a.token.as_str()))), "the same account read again");
+        installs(Some(a));
         assert_eq!(said(&ctl), (lines, log), "kept for the same account");
-        assert!(ctl.leave_unless_same(Some((server, "orbit-b"))), "B signs in");
+        installs(Some(Account { token: "orbit-b".into(), user: Some("b".into()), username: Some("b".into()), avatar_url: None, features: None }));
         assert_eq!(said(&ctl), (0, 0), "nothing of A's conversation or log for B");
         assert!(ctl.snapshot.lock().unwrap().n4n0.confirmations.is_empty());
+        // A sentence typed for A, arriving now: nothing of it is done.
+        let late = orbiters_n4n0::Stamp { seq: orbiters_n4n0::next_input(), ..stamp };
+        ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "turn off fast walk".into(), stamp: Some(late) });
+        assert_eq!(ctl.snapshot.lock().unwrap().n4n0.assistant.log.len(), 0);
     }
 
     /// Verify5 (2): a friend calling just before a sign-out: the toast naming them goes with the account, not at the end

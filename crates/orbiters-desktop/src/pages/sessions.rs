@@ -466,7 +466,7 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let window = ctx.content_rect();
         let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
         let mut open = true;
-        egui::Area::new(Id::unique(("splat-viewer-area", &v.session))).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, Id::unique(("splat-viewer-area", &v.session)), Order::Foreground, true).fixed_pos(rect.min).show(&ctx, |ui| {
             ui.set_min_size(rect.size());
             open = v.show(ui, rect, integrated);
         });
@@ -913,7 +913,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
     let busy = cx.snap.capture.state != crate::state::CaptureState::Idle;
     let mut close = false;
     let mut start: Option<RawCaptureSummary> = None;
-    let area = egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
+    let area = orbiters_ui::front::area(ctx, id, Order::Foreground, !closing).fixed_pos(rect.min).interactable(!closing).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         ui.multiply_opacity(pop.opacity);
         if closing {
@@ -1063,7 +1063,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
     let window = ctx.content_rect();
     let catcher = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
     // While it closes, the page takes presses again.
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(catcher.min).interactable(!d.closing).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, id, Order::Foreground, !d.closing).fixed_pos(catcher.min).interactable(!d.closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(catcher.size(), Sense::click());
         if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) && !asking {
             close = true;
@@ -1332,8 +1332,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
                 .icon(icons::TRASH)
                 .variant(Variant::Danger)
                 .width(w)
-                .show_at(&mut bu, Rect::from_center_size(r.center(), r.size() * k))
-                .clicked()
+                .confirm_at(&mut bu, Rect::from_center_size(r.center(), r.size() * k))
             {
                 trash = true;
             }

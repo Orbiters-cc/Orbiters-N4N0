@@ -44,7 +44,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<WakeOffer>) {
     let enter = anim::spring_from(ctx, id.with("enter"), [0.0], [1.0], Spring::BOUNCY)[0];
     let base = Rect::from_min_size(pos2(screen.right() - MARGIN - WIDTH, screen.bottom() - MARGIN - HEIGHT), vec2(WIDTH, HEIGHT));
     let rect = Rect::from_center_size(base.center() + vec2(60.0 * (1.0 - enter), 0.0), base.size() * (0.92 + 0.08 * enter.min(1.0)));
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, id, Order::Foreground, false).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
         let mut p = ui.painter().clone();
         p.multiply_opacity(enter.clamp(0.0, 1.0));
         // The card itself takes the clicks around its buttons (nothing under it is pressed through it).

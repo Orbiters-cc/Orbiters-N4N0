@@ -10,8 +10,9 @@ use crate::backend::Ctl;
 use crate::ipc::N4n0Command;
 use crate::overlay::orbit::panels::{TalkLogRow, TalkTone};
 use crate::state::{AccountState, N4n0Confirmation, N4n0Line, N4n0Status, N4n0Who, Snapshot};
-use egui::{Event, Key, pos2, vec2, Align2, CornerRadius, Id, Painter, Pos2, Rect, Sense, Ui};
+use egui::{pos2, vec2, Align2, CornerRadius, Id, Painter, Pos2, Rect, Sense, Ui};
 use orbiters_i18n::{mark, tr};
+use orbiters_n4n0::Stamp;
 use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, IconButton, Size, Variant};
 use orbiters_ui::{anim, icons};
@@ -402,6 +403,11 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     let foot = card.bottom() - 16.0 - 34.0;
     let id = Id::unique(("chat-confirm", &c.id));
     let question = c.local_question();
+    // Its card is in view: what is typed or said from here on can answer it (and nothing newer).
+    let seen = card.intersect(ui.clip_rect()).height();
+    if question.is_some() && ui.is_rect_visible(card) && seen >= 0.6 * card.height().min(ui.clip_rect().height()) {
+        bar.drawing = question;
+    }
     if local && question.is_some() && bar.answered == question {
         // Answered from here: it says so until the question is gone (or, answered late, N4N0 says it was no longer the
         // one waiting).
@@ -418,8 +424,9 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
         let no_resp = no.show_at(ui, Rect::from_min_size(pos2(yes_rect.left() - 8.0 - nw, foot), vec2(nw, 34.0)));
         let yes_resp = yes.show_at(ui, yes_rect);
         for (resp, answer) in [(no_resp, false), (yes_resp, true)] {
-            if fresh_activation(ui, &resp) {
-                ctl.n4n0(N4n0Command::AskAnswer { yes: answer, question });
+            if widgets::activated_fresh(&resp) {
+                let stamp = bar.stamp().map(|s| Stamp { question: Some(question), ..s });
+                ctl.n4n0(N4n0Command::AskAnswer { yes: answer, stamp });
                 bar.answered = Some(question);
                 bar.focus = true;
             }
@@ -427,7 +434,7 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     } else if !local {
         let go = Button::new(tr("Approve on Orbiters")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt(id.with("approve"));
         let w = go.desired_width(ui);
-        if go.show_at(ui, Rect::from_min_size(pos2(card.right() - 16.0 - w, foot), vec2(w, 34.0))).clicked() {
+        if go.confirm_at(ui, Rect::from_min_size(pos2(card.right() - 16.0 - w, foot), vec2(w, 34.0))) {
             ctl.n4n0(N4n0Command::OpenLink { url: c.approve_url.clone() });
         }
     }
@@ -444,31 +451,11 @@ fn retry_button(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, f: &orbiters_n4n0::Tu
     if waits {
         // The seconds left, as they pass.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-    } else if !sent && fresh_activation(ui, &resp) {
-        ctl.n4n0(N4n0Command::RetryTurn { id: f.id });
+    } else if !sent && widgets::activated_fresh(&resp) {
+        ctl.n4n0(N4n0Command::RetryTurn { id: f.id, stamp: bar.stamp() });
         bar.retried = Some(f.id);
         bar.focus = true;
     }
-}
-
-/// A press of an answer or send button that is the person's own: a pointer's, an accessibility tool's, or a fresh press
-/// of Enter or Space on the button with the keyboard — never a held key's repeats, which egui also turns into clicks of
-/// the focused button (verify-r21 2).
-pub(crate) fn fresh_activation(ui: &Ui, resp: &egui::Response) -> bool {
-    if !resp.clicked() {
-        return false;
-    }
-    if !resp.has_focus() {
-        return true;
-    }
-    let (fresh, repeated) = ui.input(|i| {
-        i.events.iter().fold((false, false), |(fresh, repeated), e| match e {
-            Event::Key { key: Key::Enter | Key::Space, pressed: true, repeat, .. } => (fresh || !repeat, repeated || *repeat),
-            _ => (fresh, repeated),
-        })
-    });
-    let pointer = resp.hovered() && ui.input(|i| i.pointer.primary_released());
-    fresh || pointer || !repeated
 }
 
 /// A message's copy button at `at` (shown on the last answer and the message pointed at); a check for a moment once
@@ -558,7 +545,7 @@ fn dock(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, composer: Re
     let fill = theme::mix(theme::white(0.08), theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), on);
     p.circle_filled(send.center(), 16.0, fill);
     widgets::icon(&p, send.center(), icons::ARROW_UP, 16.0, theme::mix(theme::FG_4, theme::ON_ACCENT, on));
-    if can && fresh_activation(ui, &resp) {
+    if can && widgets::activated_fresh(&resp) {
         bar.send(ctl, snap);
     }
     let hint = if !ready {

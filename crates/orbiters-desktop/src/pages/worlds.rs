@@ -1523,7 +1523,7 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
     let width = (page.width() - 64.0).min(640.0);
     let rect = Rect::from_min_size(pos2(page.center().x - width / 2.0, page.bottom() - 24.0 - 64.0 + 40.0 * (1.0 - k)), vec2(width, 64.0));
     let mut action = None;
-    egui::Area::new(id.with("area")).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, id.with("area"), Order::Middle, false).fixed_pos(rect.min).show(ctx, |ui| {
         ui.set_min_size(rect.size());
         // The panel's shadow reaches past the bar.
         ui.set_clip_rect(ctx.content_rect());
@@ -1644,7 +1644,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     let mut toggle = false;
     let selected = o.selected.contains(&shot.path);
     // While it closes, the page takes presses again.
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(area.min).interactable(!closing).show(ctx, |ui| {
+    orbiters_ui::front::area(ctx, id, Order::Foreground, !closing).fixed_pos(area.min).interactable(!closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
         let p = ui.painter().clone();
         p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * morph::smoothstep(0.05, 0.6, t)));

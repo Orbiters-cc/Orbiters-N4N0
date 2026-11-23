@@ -307,7 +307,9 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let label = if select.is_some() { tr_ctx("choose an instance", "Select") } else { tr("Request invite") };
     let wide = |l: &str| widgets::text_size(ui, &Txt::new(l, 12.5).weight(weight::SEMIBOLD)).x + 46.0;
     let pill_w = match reach {
-        Reach::Ready | Reach::Sent => wide(tr("Request invite")).max(wide(tr_ctx("choose an instance", "Select"))),
+        // As wide as what it says: Select leaves the world's name its room beside Join.
+        Reach::Ready => wide(label),
+        Reach::Sent => wide(tr("Request invite")),
         Reach::Cooling(_) => 80.0,
         _ => 0.0,
     };

@@ -625,7 +625,9 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
                 studio.remember();
             }
             if studio.target != Target::GroupBanner {
-                ui.horizontal(|ui| {
+                // Its own size, so that the row wraps before it (a row in a row would not, and would widen the page).
+                let tw = widgets::text_size(ui, &Txt::new(tr("Show the zones"), 13.0)).x;
+                ui.allocate_ui_with_layout(vec2(48.0 + 10.0 + tw + 8.0, 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     widgets::toggle(ui, "studio-zones", &mut studio.show_zones);
                     ui.label(egui::RichText::new(tr("Show the zones")).color(theme::FG_2).size(13.0));
                 });
@@ -1016,6 +1018,39 @@ mod tests {
         let mut s = Studio::new(card, "usr_00000000-0000-4000-8000-0000000000e1", Some(image::RgbaImage::new(64, 36)), &art::Drafts::default());
         s.saved.source = Some(Source::File("C:/made-up/a.png".into()));
         s
+    }
+
+    /// The studio keeps to a narrow window (900 px: 604 for the page), in the languages with the longest words.
+    #[test]
+    fn the_studio_keeps_to_a_narrow_window() {
+        let ctl: crate::backend::Ctl = Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = ctl.view();
+        for lang in orbiters_i18n::Language::ALL {
+            for target in Target::ALL {
+                let ctx = egui::Context::default();
+                let mut s = studio();
+                s.target = target;
+                let img = image::RgbaImage::new(64, 36);
+                s.source = Some(Loaded { texture: texture_of(&ctx, &img), full: Arc::new(img) });
+                let mut wide = 0.0;
+                for t in 0..2 {
+                    let mut toasts = orbiters_ui::toast::Toasts::default();
+                    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 820.0))), time: Some(t as f64), ..Default::default() };
+                    let mut out = orbiters_i18n::in_language(lang, || {
+                        ctx.run_ui(input, |ui| {
+                            let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                            ui.allocate_ui(vec2(604.0, 820.0), |ui| {
+                                ui.set_max_width(604.0);
+                                body(ui, &cx, &mut s, &HashMap::new(), false, false, &mut Vec::new());
+                                wide = ui.min_rect().width();
+                            });
+                        })
+                    });
+                    out.textures_delta.clear();
+                }
+                assert!(wide <= 604.5, "{target:?} in {lang:?}: {wide} px wide");
+            }
+        }
     }
 
     /// Minor 3: three targets exported, the second's write failing: the first and third are reported done with their

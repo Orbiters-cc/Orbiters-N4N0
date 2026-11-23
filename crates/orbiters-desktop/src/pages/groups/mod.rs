@@ -291,6 +291,12 @@ impl State {
         }
         self.pictures.get(ctx, &mut self.jobs, ctl, scope, url)
     }
+    /// The address of one of the account's own pictures, by its file id, from the chooser it was picked in or the
+    /// uploads kept.
+    fn own_picture(&self, file: &str) -> Option<String> {
+        let picked = self.open.as_ref().and_then(|o| o.picker.as_ref()).and_then(|p| p.files.iter().find(|f| f.id == file));
+        picked.or_else(|| self.drafts.uploaded.iter().map(|u| &u.file).find(|f| f.id == file)).map(|f| f.url.clone())
+    }
     /// A group's page or the studio is open in Home's place.
     pub fn page_open(&self) -> bool {
         self.open.is_some() || self.studio.is_some()
@@ -650,26 +656,31 @@ pub(crate) fn why_text(why: Why) -> &'static str {
 pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state: &mut State, group: &str) {
     let list = state.uncertain_of(group);
     let checking: Vec<String> = list.iter().filter(|u| state.jobs.running(&Kind::Check(u.op.clone()))).map(|u| u.op.clone()).collect();
+    let fits = |ui: &Ui, label: &str, glyph: f32| widgets::text_size(ui, &Txt::new(label, 14.0).weight(weight::MEDIUM)).x + 36.0 + glyph;
+    let check_w = fits(ui, tr("Check VRChat"), 24.0).max(fits(ui, tr("Checking…"), 24.0)).max(136.0);
+    let release_w = fits(ui, tr("Let it go"), 0.0).max(110.0);
     for u in list {
         let w = ui.available_width();
+        let inconclusive = u.observation == Some(Observation::Inconclusive);
+        let buttons = check_w + if inconclusive { release_w + 10.0 } else { 0.0 };
         let (what, more) = uncertain_words(&u);
         let text = format!("{what} {more}");
         let p = ui.painter().clone();
-        let galley = p.layout_job(Txt::new(&text, 13.0).color(theme::FG).line_height(19.0).job(w - 300.0));
+        let galley = p.layout_job(Txt::new(&text, 13.0).color(theme::FG).line_height(19.0).job((w - 42.0 - buttons - 34.0).max(120.0)));
         let h = galley.size().y.max(20.0) + 28.0;
         let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
         p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::WARN, 0.12));
         p.rect_stroke(rect, theme::radius(14.0), egui::Stroke::new(1.0, theme::alpha(theme::WARN, 0.45)), egui::StrokeKind::Inside);
         widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
         p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
-        let check = Rect::from_min_size(pos2(rect.right() - 150.0, rect.top() + 10.0), vec2(136.0, 34.0));
+        let check = Rect::from_min_size(pos2(rect.right() - 14.0 - check_w, rect.top() + 10.0), vec2(check_w, 34.0));
         let busy = checking.contains(&u.op);
         let label = if busy { tr("Checking…") } else { tr("Check VRChat") };
         if widgets::Button::new(label).icon(icons::ARROW_CLOCKWISE).variant(widgets::Variant::Warn).size(widgets::Size::Sm).enabled(!busy).id_salt(("group-check", u.op.as_str())).show_at(ui, check).clicked() {
             state.check(ctx, ctl, &u.op);
         }
-        if u.observation == Some(Observation::Inconclusive) {
-            let release = Rect::from_min_size(pos2(rect.right() - 296.0, rect.top() + 10.0), vec2(138.0, 34.0));
+        if inconclusive {
+            let release = Rect::from_min_size(pos2(check.left() - 10.0 - release_w, rect.top() + 10.0), vec2(release_w, 34.0));
             let r = widgets::Button::new(tr("Let it go")).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("group-release", u.op.as_str())).show_at(ui, release);
             if crate::chat_bar::fresh_activation(ui, &r) {
                 state.release(ctx, ctl, &u.op);
@@ -936,12 +947,19 @@ fn confirmation(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         (None, Some(s)) => page::Names::of_card(&s.card),
         _ => page::Names::default(),
     };
-    let art = state.confirm_art.clone();
+    let mut art = state.confirm_art.clone();
+    if let (None, Write::ApplyArt { file, .. }, Some(scope)) = (&art, &prepared.write, state.scope.clone()) {
+        if let Some(url) = state.own_picture(file) {
+            art = state.picture(&ctx, cx.ctl, &scope, &url);
+        }
+    }
+    // A picture goes only once it shows here: nobody applies one they cannot see (Blocker 5).
+    let shown = art.is_some() || !matches!(prepared.write, Write::ApplyArt { .. } | Write::Upload { .. });
     let response = orbiters_ui::dialog::Dialog::new(id, origin, &title).width(520.0).glyph(if danger { icons::WARNING } else { icons::CHECK_CIRCLE }).footer(true).show(&ctx, |ui, part| match part {
         orbiters_ui::dialog::Part::Body => page::confirm_body(ui, &prepared, &names, art.as_ref()),
         orbiters_ui::dialog::Part::Footer => {
             let variant = if danger { widgets::Variant::Danger } else { widgets::Variant::Primary };
-            let button = widgets::Button::new(&action).variant(variant).id_salt("group-confirm-send").show(ui);
+            let button = widgets::Button::new(&action).variant(variant).enabled(shown).id_salt("group-confirm-send").show(ui);
             if crate::chat_bar::fresh_activation(ui, &button) {
                 send = true;
             }
@@ -1025,6 +1043,12 @@ pub mod stage {
     pub fn studio_empty(state: &mut State, card: GroupCard) {
         state.staged = true;
         state.studio = Some(studio::Studio::staged_empty(card));
+    }
+    /// The picture a staged confirmation shows (a staged address).
+    pub fn confirm_art(state: &mut State, url: &str) {
+        if let Some(Pic::Ready(t)) = state.pictures.map.get(url) {
+            state.confirm_art = Some(t.clone());
+        }
     }
     pub fn confirming(state: &mut State, prepared: Prepared, origin: Rect) {
         state.serial += 1;

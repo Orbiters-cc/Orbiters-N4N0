@@ -489,7 +489,10 @@ pub(crate) fn confirm_body(ui: &mut Ui, prepared: &Prepared, names: &Names, art:
 
 /// The art a picture write sends, as the confirmation shows it.
 fn art_preview(ui: &mut Ui, art: Option<&egui::TextureHandle>) {
-    let Some(t) = art else { return };
+    let Some(t) = art else {
+        note(ui, tr("Its picture is not here yet: it can go once it shows here."), theme::WARN);
+        return;
+    };
     let w = ui.available_width().min(360.0);
     let size = t.size_vec2();
     let h = (w * size.y / size.x.max(1.0)).min(220.0);

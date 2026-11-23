@@ -177,6 +177,43 @@ fn a_held_key_never_sends_a_confirmation() {
     assert!(matches!(w.state.flow, Some(Flow::Sending { .. })), "a fresh press sends it");
 }
 
+/// Blocker 5: a picture that does not show in its confirmation cannot be sent from it; once it shows, it can.
+#[test]
+fn a_picture_is_applied_only_once_it_shows_in_its_confirmation() {
+    let ctl: Ctl = Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+    let snap = ctl.view();
+    let mut w = Window::new(ctl.clone(), snap.clone());
+    w.state.staged = true;
+    let write = Write::ApplyArt { group: G.into(), slot: orbiters_core::groups::ArtSlot::Banner, file: "file_up".into() };
+    let prepared = Prepared { op: "op-1".into(), write, confirm: true, role: None, post: None, member: None };
+    stage::confirming(&mut w.state, prepared, Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(80.0, 30.0)));
+    orbiters_ui::widgets::watch_controls();
+    let mut toasts = orbiters_ui::toast::Toasts::default();
+    let mut t = 0.0;
+    let mut sendable = |w: &mut Window| {
+        for _ in 0..60 {
+            t += 1.0 / 60.0;
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), time: Some(t), ..Default::default() };
+            let state = &mut w.state;
+            let (ctl, snap, toasts) = (&ctl, &snap, &mut toasts);
+            let mut out = w.ctx.run_ui(input, move |ui| {
+                let mut cx = Cx { ctl, snap, toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                confirmation(ui, &mut cx, state);
+            });
+            out.textures_delta.clear();
+        }
+        orbiters_ui::widgets::control(&w.ctx, "Change the banner").expect("its button is drawn").1
+    };
+    assert!(!sendable(&mut w), "no picture: it cannot be sent");
+    // The upload kept for that file, its picture read: it shows, and can go.
+    let url = "https://api.vrchat.cloud/api/1/file/file_up/1/file";
+    w.state.drafts.set_uploaded(art::UploadedRef { group: G.into(), slot: orbiters_core::groups::ArtSlot::Banner, file: orbiters_core::groups::InventoryFile { id: "file_up".into(), url: url.into() }, revision: None });
+    assert!(!sendable(&mut w), "known, not read yet");
+    let ctx = w.ctx.clone();
+    stage::picture(&ctx, &mut w.state, url, egui::ColorImage::filled([8, 8], egui::Color32::RED));
+    assert!(sendable(&mut w), "it shows");
+}
+
 /// Major 1: an upload of the largest size accepted crosses the real link as a small message (its PNG is staged on
 /// disk), one byte more is refused before anything is sent, and the link stays up for the next request.
 #[test]

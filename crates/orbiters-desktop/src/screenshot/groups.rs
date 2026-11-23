@@ -367,7 +367,8 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             match n {
                 "groups-outcome-unknown" => stage::uncertain(state, "op-unknown", Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "x".into(), ..Default::default() } }, None),
                 "groups-outcome-refused" => state.said = Some(crate::pages::groups::failure_text(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),
-                "groups-look-uploaded" => state.drafts.set_uploaded(crate::pages::groups::art::UploadedRef { group: G1.into(), slot: ArtSlot::Banner, file: InventoryFile { id: "file_up".into(), url: cards()[1].banner_url.clone() }, revision: None }),
+                "groups-confirm-upload" => stage::confirm_art(state, &cards()[1].banner_url),
+                "groups-look-uploaded" | "groups-confirm-apply" => state.drafts.set_uploaded(crate::pages::groups::art::UploadedRef { group: G1.into(), slot: ArtSlot::Banner, file: InventoryFile { id: "file_up".into(), url: cards()[1].banner_url.clone() }, revision: None }),
                 _ => {}
             }
             if let Some(p) = confirm {

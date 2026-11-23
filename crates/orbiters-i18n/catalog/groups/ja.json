@@ -247,5 +247,6 @@
   "Keep the post's picture": "投稿の画像を残す",
   "Turn it off to remove the picture from the post.": "オフにすると投稿から画像を削除します。",
   "The art changed since its upload: upload it again to apply it here. The earlier upload can be applied from the group's Look tab, where it is shown.": "アップロード後に画像が変わりました。ここで適用するには、もう一度アップロードしてください。以前のアップロードは、表示されているグループの「見た目」タブから適用できます。",
-  "Direct apply is unavailable in this version. Export both modes and upload them on the group's page on vrchat.com.": "このバージョンでは直接適用できません。両方のモードを書き出して、vrchat.comのグループページでアップロードしてください。"
+  "Direct apply is unavailable in this version. Export both modes and upload them on the group's page on vrchat.com.": "このバージョンでは直接適用できません。両方のモードを書き出して、vrchat.comのグループページでアップロードしてください。",
+  "Its picture is not here yet: it can go once it shows here.": "画像がまだ表示されていません。ここに表示されると送信できます。"
 }

@@ -3290,19 +3290,16 @@ mod tests {
         h.settle();
         assert_eq!(instance_checks(&h), 1);
         std::thread::sleep(Duration::from_millis(1300));
+        // Answered from what was kept once more, past the minute by now: nothing starts from it.
+        *h.recorder.age_ms.lock().unwrap() = 61_000;
         click(&mut h, "Play in VR");
         frames_until(&mut h, "asked again", |h| instance_checks(h) == 2);
-        // Answered from the service's keep once more, past the minute by now: still nothing starts from it.
-        *h.recorder.age_ms.lock().unwrap() = 61_000;
         let_pass(&mut h, 200);
-        let sent = starts(&h).len();
-        click(&mut h, "Play in VR");
-        let_pass(&mut h, 200);
-        assert_eq!(starts(&h).len(), sent, "an answer older than a minute starts nothing: {:?}", starts(&h));
+        assert!(starts(&h).is_empty(), "an answer older than a minute starts nothing: {:?}", starts(&h));
         // VRChat's own answer, now: there.
         *h.recorder.age_ms.lock().unwrap() = 0;
         click(&mut h, "Play in VR");
-        frames_until(&mut h, "started", |h| starts(h).len() == sent + 1);
+        frames_until(&mut h, "started", |h| starts(h).len() == 1);
     }
 
     /// verify3-r21 M1: a destination verified for an account goes to the service bound to that account, also while the

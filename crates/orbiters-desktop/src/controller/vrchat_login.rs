@@ -223,7 +223,8 @@ pub(super) struct Pair {
     pub epoch: u64,
     pub status: bool,
     pub list: bool,
-    /// What they say they were verified for (the epoch and the member's key), each with its VRChat account.
+    /// The status or the list says it was verified for anyone but the member (or the time) it goes out with.
+    pub foreign: bool,
     pub text: String,
 }
 
@@ -866,34 +867,36 @@ fn not_removed() -> String {
     tr("Signed out, but the saved VRChat session could not be fully removed from this computer. It is not used any more; removing it is tried again at the next start.").into()
 }
 
-/// The sign-in's state as the Orbiters account goes: nobody signed in to Orbiters (or its credential refused) stops VRChat's
-/// grant at once and nothing of it shows as usable; the environment switching (its account not read yet) stops the grant
-/// too, but the session shows as kept and waiting, not signed out (r20). The session itself is never dropped here: it
-/// stays in memory and on disk for the next grant.
-pub(super) fn follow_orbiters_session(s: &mut crate::state::Snapshot, rt: &mut Runtime) {
-    // The Orbiters account changed (read, checked, signed in or out, the environment): VRChat's next look comes at once.
-    let seen = (std::mem::discriminant(&s.account.state), s.account.development);
-    if rt.seen_account != Some(seen) {
-        rt.seen_account = Some(seen);
-        rt.bell.ring();
-    }
-    let switching = s.account.development != (Server::current() == Server::Development) || s.account.state == AccountState::Unknown;
-    let gone = matches!(s.account.state, AccountState::SignedOut | AccountState::Expired { .. });
-    if !switching && !gone {
-        return;
-    }
-    if rt.identity.is_some() || rt.gate.allowed() {
-        rt.suspend();
-    }
-    let st = &mut s.vrchat_login;
-    if gone {
-        if st.allowed || st.user.is_some() || st.waiting || st.busy {
-            let known = st.user.take().or(st.known.take());
-            *st = Status { revision: st.revision, known, upload: st.upload.take(), ..Status::default() };
+/// Where the Orbiters account leaves VRChat's grant.
+pub(super) enum Grounds {
+    Kept,
+    /// The environment is switching: its account is not read yet.
+    Switching,
+    /// Nobody is signed in to Orbiters, or its credential was refused.
+    Gone,
+}
+
+impl Runtime {
+    /// The grant as the Orbiters account goes: stopped at once when nobody is signed in to Orbiters (or the credential was
+    /// refused) and while the environment switches. The session itself is never dropped here: it stays in memory and on
+    /// disk for the next grant. What shows of it follows ([`enforce`]).
+    pub(super) fn follow_account(&mut self, account: &crate::state::AccountStatus) -> Grounds {
+        // The Orbiters account changed (read, checked, signed in or out, the environment): VRChat's next look comes at once.
+        let seen = (std::mem::discriminant(&account.state), account.development);
+        if self.seen_account != Some(seen) {
+            self.seen_account = Some(seen);
+            self.bell.ring();
         }
-    } else if st.allowed || st.user.is_some() {
-        let known = st.user.take().or(st.known.take());
-        *st = Status { revision: st.revision, waiting: true, restoring: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
+        let switching = account.development != (Server::current() == Server::Development) || account.state == AccountState::Unknown;
+        let gone = matches!(account.state, AccountState::SignedOut | AccountState::Expired { .. });
+        if (switching || gone) && (self.identity.is_some() || self.gate.allowed()) {
+            self.suspend();
+        }
+        match (gone, switching) {
+            (true, _) => Grounds::Gone,
+            (_, true) => Grounds::Switching,
+            _ => Grounds::Kept,
+        }
     }
 }
 
@@ -911,6 +914,10 @@ pub(super) fn follow_orbiters_and_record(s: &mut crate::state::Snapshot, rt: &mu
             epoch: now.map_or(0, |n| n.epoch),
             status: login.user.is_some() || login.known.is_some() || login.picture.is_some() || login.upload.is_some(),
             list: signed || (list.me.is_some() || list.profile.is_some() || list.mine.is_some()) && !matches!(list.source, orbiters_core::launcher::Source::Database { .. }),
+            foreign: [&login.verified_for, &list.verified_for]
+                .into_iter()
+                .flatten()
+                .any(|v| now.is_none_or(|n| v.epoch != n.epoch || v.member != n.owner.member)),
             text: format!("user {:?} known {:?} list {:?}", login.user.as_ref().map(|u| &u.id), login.known.as_ref().map(|u| &u.id), list.source),
         });
     }
@@ -1544,7 +1551,7 @@ mod tests {
     /// What was published of VRChat while another member than `key` (or nobody) was signed in to Orbiters.
     fn wrong_pairs(c: &Controller, key: &str) -> Vec<Pair> {
         let rt = c.vrchat_login.lock().unwrap();
-        rt.pairs.iter().filter(|p| (p.status || p.list) && p.member.as_deref() != Some(key)).cloned().collect()
+        rt.pairs.iter().filter(|p| p.foreign || (p.status || p.list) && p.member.as_deref() != Some(key)).cloned().collect()
     }
 
     /// Member 1 of this environment, signed in to VRChat, with their list on show; the key their publishes have.
@@ -1689,13 +1696,32 @@ mod tests {
                     }
                 }));
             }
-            for _ in 0..40 {
-                let roll = dice.lock().unwrap().roll(8);
+            for _ in 0..80 {
+                let roll = dice.lock().unwrap().roll(13);
                 match roll {
                     0..=2 => change(&c),
                     3 | 4 => c.vrchat_feature_tick(),
                     5 => c.test_list(their_list()),
                     6 => c.test_finish(Ok(Some(Login::SignedIn(User { id: "usr_test".into(), ..Default::default() })))),
+                    7 => {
+                        // Signed out of VRChat and, some day, in again (a look puts the session there is back).
+                        c.forget_login(|st| *st = Status { allowed: st.allowed, ..Status::default() });
+                    }
+                    // Read with the session there was; what else there is of its account is written some changes later.
+                    8..=11 => {
+                        let Some(session) = c.vrchat_session() else { continue };
+                        let changes = dice.lock().unwrap().roll(3);
+                        for _ in 0..changes {
+                            change(&c);
+                        }
+                        let mine = their_list();
+                        match roll {
+                            8 => drop(c.publish_launcher(&session.by, |l| l.profile = Some(orbiters_core::launcher::Profile { friend: mine.friends[0].clone(), ..Default::default() }))),
+                            9 => drop(c.publish_launcher(&session.by, |l| (l.me, l.mine) = (mine.me, mine.mine))),
+                            10 => drop(c.publish_login(&session.by.stamp, |st, _| st.upload = Some(PictureUpload { serial: 1, id: "avtr_theirs".into(), step: None, outcome: None }))),
+                            _ => drop(c.publish_login(&session.by.stamp, |st, _| st.known = Some(User { id: "usr_test".into(), ..Default::default() }))),
+                        }
+                    }
                     _ => c.update(|_| {}),
                 }
             }
@@ -1705,7 +1731,7 @@ mod tests {
             drop(rt);
             assert_eq!(wrong_pairs(&c, &key), Vec::new(), "seed {seed}");
         }
-        assert!(looked > 2000 && shown > 100, "the walk went through it: {looked} published, {shown} with VRChat's");
+        assert!(looked > 2500 && shown > 300, "the walk went through it: {looked} published, {shown} with VRChat's");
     }
 
     /// verify3-r21 M4: VRChat could not be told, and part of the session was left here: cleaning that up later does not
@@ -1741,6 +1767,33 @@ mod tests {
         assert!(!again.contains("could not be fully removed"), "{again}");
         assert!(again.contains("until it expires"), "VRChat was never told: {again:?}");
         assert_eq!(calls.lock().unwrap().iter().filter(|(_, url)| url.ends_with("/logout")).count(), 1, "nothing left to tell it with");
+    }
+
+    /// verify3-r21 M4: what a sign-out could still not remove at the next start is said then too, with the way to try
+    /// again; also once somebody is signed in to Orbiters and the first looks are over.
+    #[test]
+    fn a_start_that_can_still_not_remove_a_session_says_so() {
+        let c = Controller::new(orbiters_core::settings::Settings::default());
+        c.test_vrchat(vec![]);
+        c.update(|s| s.vrchat_login = Status::default());
+        let dir = crate::pages::test_root().join("vrchat-left-at-start");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("vrchat-account.json");
+        as_folder(&cache);
+        {
+            let mut rt = c.vrchat_login.lock().unwrap();
+            rt.client = Arc::new(Mutex::new(orbiters_core::vrchat_api::offline_client(rt.gate.clone())));
+            rt.cache_path = Some(cache.clone());
+            rt.saved = Some(false);
+        }
+        c.start_vrchat_login();
+        for _ in 0..3 {
+            c.vrchat_feature_tick();
+            let status = c.view().vrchat_login.clone();
+            assert!(status.error.as_deref().is_some_and(|e| e.contains("could not be fully removed")), "{status:?}");
+            assert_eq!(status.recovery, Recovery::RemoveSavedSession);
+        }
     }
 
     /// r21: a launch with a session saved here, as the service's `start()` makes it: the account file read (Checking),

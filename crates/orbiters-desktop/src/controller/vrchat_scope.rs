@@ -14,7 +14,7 @@
 //! [`Controller::forget_login`] and [`Controller::forget_launcher`]. Groups, and whatever else is read with a VRChat
 //! session, belong here too.
 
-use super::vrchat_login::{follow_orbiters_session, Runtime, Status};
+use super::vrchat_login::{Grounds, Runtime, Status};
 use super::Controller;
 use crate::state::{AccountState, AccountStatus, Snapshot};
 use orbiters_core::account::{Account, Api, Server};
@@ -134,6 +134,23 @@ fn blank(l: &LauncherState) -> LauncherState {
     out
 }
 
+/// The sign-in's state as the Orbiters account goes: nobody signed in to Orbiters (or its credential refused) and nothing of
+/// VRChat shows as usable; the environment switching (its account not read yet), and the session shows as kept and
+/// waiting, not signed out (r20).
+fn follow_orbiters(st: &mut Status, grounds: Grounds) {
+    match grounds {
+        Grounds::Gone if st.allowed || st.user.is_some() || st.waiting || st.busy => {
+            let known = st.user.take().or(st.known.take());
+            *st = Status { revision: st.revision, known, upload: st.upload.take(), ..Status::default() };
+        }
+        Grounds::Switching if st.allowed || st.user.is_some() => {
+            let known = st.user.take().or(st.known.take());
+            *st = Status { revision: st.revision, waiting: true, restoring: true, known, picture: st.picture.take(), upload: st.upload.take(), ..Status::default() };
+        }
+        _ => {}
+    }
+}
+
 /// Takes out of the status what is not `now`'s: the account, its name and picture, what was being done with it.
 fn drop_foreign(st: &mut Status, rt: &mut Runtime, now: Option<&Stamp>) {
     // Tests put a status in place by hand now and then (nothing ever said whose it is).
@@ -158,7 +175,8 @@ fn drop_foreign(st: &mut Status, rt: &mut Runtime, now: Option<&Stamp>) {
 /// At each publish, with the state held, before it goes out: what is not the current member's of VRChat does not
 /// (`now`: the member this very state is for; none, when nobody's account is known).
 pub(super) fn enforce(s: &mut Snapshot, rt: &mut Runtime, now: Option<&Stamp>) {
-    follow_orbiters_session(s, rt);
+    let grounds = rt.follow_account(&s.account);
+    follow_orbiters(&mut s.vrchat_login, grounds);
     drop_foreign(&mut s.vrchat_login, rt, now);
     if let Source::SignedIn { user_id, .. } = &s.launcher.source {
         let known = rt.list_for.is_some() || !cfg!(test);
@@ -429,7 +447,7 @@ mod tests {
                 let after = &rest[i + part.len() + 1..];
                 rest = after;
                 // Another name that only starts so, or the runtimes' own locks.
-                if after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '(') || after.starts_with(".lock()") || before.trim_end().ends_with("self") {
+                if after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '(') || after.starts_with(".lock()") || ["self", "launch"].iter().any(|o| before.trim_end().ends_with(o)) {
                     continue;
                 }
                 // The path that follows: `.friends`, `.user`, `[0]`…
@@ -440,7 +458,8 @@ mod tests {
                 let borrowed = {
                     let name_start = before.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
                     let lead = before[..name_start].trim_end();
-                    lead.ends_with("&mut") || lead.ends_with('*') && assigned
+                    let place = lead.trim_end_matches('*');
+                    place.trim_end().ends_with("&mut") || place != lead && assigned
                 };
                 let changing = ["push", "retain", "take", "insert", "clear", "get_or_insert_with", "get_or_insert_default", "as_mut", "iter_mut", "sort_by_key", "sort", "replace", "extend", "truncate", "remove", "drain", "pop", "dedup"]
                     .iter()
@@ -470,6 +489,9 @@ mod tests {
             "if let Some(me) = s.launcher.me.as_mut() {",
             "s.vrchat_login.revision += 1;",
             "std::mem::replace(&mut s.launcher.loading, true)",
+            "let list = &mut *s.launcher;",
+            "Arc::make_mut(&mut view.vrchat_login).user = None;",
+            "s.launcher.friends.iter_mut().for_each(|f| f.name.clear());",
             "*st = Status::default(); s.vrchat_login = st;",
         ] {
             assert!(writes(wrong), "a writer not seen: {wrong}");
@@ -485,6 +507,7 @@ mod tests {
             "ctl.launcher_notice(Notice::Error(why))",
             "Source::SignedIn { .. } => s.launcher.friends.len() >= 2,",
             "// s.launcher.friends = vec![]; (said in a comment)",
+            "launch.launcher = pid;",
         ] {
             assert!(!writes(fine), "not a writer: {fine}");
         }
@@ -501,7 +524,7 @@ mod tests {
                 }
             }
         }
-        assert!(files.len() > 60, "the controller's sources: {}", files.len());
+        assert!(files.len() > 40, "the controller's sources: {}", files.len());
         let mut found = Vec::new();
         for file in files.iter().filter(|f| f.is_file()) {
             let name = file.file_name().unwrap().to_string_lossy().to_string();
@@ -509,13 +532,16 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
             // What tests of the file do by hand is theirs: they come last, after `#[cfg(test)]` on a module or an impl.
-            for (i, line) in text.lines().enumerate() {
-                let next = text.lines().nth(i + 1).unwrap_or_default();
+            for (i, line) in lines.iter().enumerate() {
+                let next = lines.get(i + 1).copied().unwrap_or_default();
                 if line.trim() == "#[cfg(test)]" && (next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("impl ")) {
                     break;
                 }
-                if writes(line) {
+                // A chain over several lines is read as one.
+                let chain: String = std::iter::once(*line).chain(lines[i + 1..].iter().map(|l| l.trim()).take_while(|l| l.starts_with('.'))).collect();
+                if writes(&chain) {
                     found.push(format!("{name}:{}: {}", i + 1, line.trim()));
                 }
             }

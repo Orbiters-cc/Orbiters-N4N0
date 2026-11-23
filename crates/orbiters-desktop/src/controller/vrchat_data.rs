@@ -794,17 +794,12 @@ mod tests {
     }
     #[test]
     fn pictures_need_a_vrchat_session_and_go_one_at_a_time() {
-        use crate::state::AccountState;
-        use orbiters_core::account::Server;
         let c = Controller::new(orbiters_core::settings::Settings::default());
         c.vrchat_picture(Scope::of(&c.view()), "avtr_a".into(), "picture.png".into());
         assert!(c.view().vrchat_login.upload.is_none());
         assert!(c.take_notices().iter().any(|n| format!("{n:?}").contains("Sign in to VRChat")));
+        c.test_vrchat(vec![]);
         c.update(|s| {
-            s.account.state = AccountState::SignedIn { username: "tester".into() };
-            s.account.development = Server::current() == Server::Development;
-            s.vrchat_login.allowed = true;
-            s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() });
             s.vrchat_login.upload =
                 Some(super::super::vrchat_login::PictureUpload { serial: 0, id: "avtr_b".into(), step: Some(Step::Uploading), outcome: None });
         });

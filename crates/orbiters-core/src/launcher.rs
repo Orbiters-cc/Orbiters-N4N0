@@ -443,6 +443,8 @@ pub enum Action {
     OpenEngine,
     /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play.
     InstallEngine,
+    /// On a Mac: move the engine's damaged start record `file` ([`StartTrouble`]) out of its records, kept aside.
+    SetAsideRecord { file: String },
     /// Open the profile modal; the details arrive in [`LauncherState::profile`].
     OpenProfile { id: String },
     CloseProfile,
@@ -503,6 +505,23 @@ pub struct LauncherState {
     /// On a Mac: how getting Obelisk goes, from the press of its button until VRChat is in it.
     #[serde(default)]
     pub engine_setup: Option<EngineSetup>,
+    /// On a Mac: a record of the engine's that cannot be read, which Home names (and, once it is known to be history,
+    /// offers to set aside).
+    #[serde(default)]
+    pub start_trouble: Option<StartTrouble>,
+}
+
+/// A record of VRChat's engine on a Mac that cannot be read ([`LauncherState::start_trouble`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartTrouble {
+    /// The file, whole (or its folder, when that cannot be listed).
+    pub file: String,
+    /// The folder of the records cannot be listed: only its permissions can mend it.
+    pub folder: bool,
+    /// Play is held by it now.
+    pub blocks: bool,
+    /// How long until it may be set aside (it may still be a start that just ended); `None` once it may be, or never can.
+    pub set_aside_in: Option<u64>,
 }
 
 impl LauncherState {
@@ -638,6 +657,7 @@ pub fn sample() -> LauncherState {
             GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
         ],
         engine_setup: None,
+        start_trouble: None,
         mine: Some(MyProfile {
             loaded: true,
             bio: "Made-up account for drawing the page.

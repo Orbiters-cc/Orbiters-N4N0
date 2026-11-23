@@ -255,20 +255,90 @@ pub(crate) fn on_a_local_drive(path: &Path) -> bool {
     }
 }
 
-/// A Mac or Linux: an absolute path whose nearest existing folder is on a volume the system calls local (`statfs`'s
-/// `MNT_LOCAL` on a Mac): never a network share (SMB, AFP, NFS) or a folder linked to one.
+/// A Mac or Linux: an absolute path that resolves, link by link, to a place on a volume the system calls local (`MNT_LOCAL`
+/// on a Mac, and not a network or automounted file system): never a network share (SMB, AFP, NFS, WebDAV) or a folder
+/// linked to one. No part of the path under a mount that is not local is ever touched (a share that stopped answering
+/// holds any look at it for minutes).
 #[cfg(unix)]
 fn lexical_or_absolute_local(path: &Path) -> bool {
     if !path.is_absolute() {
         return false;
     }
-    // From the mount table first, without touching the path: a network share that stopped answering would hold `exists`
-    // and `canonicalize` for minutes.
-    if mount_is_local(path, &mounts()) == Some(false) {
-        return false;
+    let mounts = mounts();
+    resolve_locally(path, &mounts, &|p: &Path| look(p)).is_some_and(|real| mount_is_local(&real, &mounts) != Some(false))
+}
+
+/// What one part of a path is, looked at without following it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Missing,
+    Plain,
+    Link(PathBuf),
+    Unreadable,
+}
+
+#[cfg(unix)]
+fn look(path: &Path) -> Part {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(path).map_or(Part::Unreadable, Part::Link),
+        Ok(_) => Part::Plain,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Part::Missing,
+        Err(_) => Part::Unreadable,
     }
-    let Some(existing) = path.ancestors().find(|p| p.exists()) else { return true };
-    local_volume(existing).unwrap_or(false)
+}
+
+/// Resolves `path` (absolute) part by part with `look`, following its links, checking each part against the mount table
+/// `mounts` BEFORE it is looked at: `None` as soon as a part is under a mount that is not local (never looked at), a link
+/// loops, or a part cannot be read. The parts past the first one missing are taken as written (a project to make).
+pub(crate) fn resolve_locally(path: &Path, mounts: &[(PathBuf, bool)], look: &dyn Fn(&Path) -> Part) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut todo: Vec<std::ffi::OsString> = path.components().rev().filter_map(|c| match c {
+        Component::Normal(n) => Some(n.to_os_string()),
+        Component::ParentDir => Some("..".into()),
+        _ => None,
+    }).collect();
+    let mut real = PathBuf::from("/");
+    let mut links = 0;
+    let mut missing = false;
+    while let Some(part) = todo.pop() {
+        if part == ".." {
+            real.pop();
+            continue;
+        }
+        let next = real.join(&part);
+        if mount_is_local(&next, mounts) == Some(false) {
+            return None;
+        }
+        if missing {
+            real = next;
+            continue;
+        }
+        match look(&next) {
+            Part::Plain => real = next,
+            Part::Missing => {
+                missing = true;
+                real = next;
+            }
+            Part::Unreadable => return None,
+            Part::Link(target) => {
+                links += 1;
+                if links > 40 {
+                    return None;
+                }
+                // The link's target, then what was left of the path, are resolved in turn.
+                let rest: Vec<std::ffi::OsString> = target.components().rev().filter_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_os_string()),
+                    Component::ParentDir => Some("..".into()),
+                    _ => None,
+                }).collect();
+                if target.is_absolute() {
+                    real = PathBuf::from("/");
+                }
+                todo.extend(rest);
+            }
+        }
+    }
+    Some(real)
 }
 
 /// Whether the volume `path` is on, by its mount point alone (the longest one it is under), is local; `None` when no mount
@@ -277,27 +347,48 @@ pub(crate) fn mount_is_local(path: &Path, mounts: &[(PathBuf, bool)]) -> Option<
     mounts.iter().filter(|(point, _)| path.starts_with(point)).max_by_key(|(point, _)| point.as_os_str().len()).map(|(_, local)| *local)
 }
 
-/// The mounted volumes, each with whether the system calls it local (`getmntinfo` without waiting on any of them).
+/// The file systems that are never local, whatever their flags say (an automounted point contacts a server when entered).
+const REMOTE_KINDS: [&str; 7] = ["smbfs", "nfs", "afpfs", "webdav", "autofs", "ftp", "cifs"];
+
+/// The mounted volumes, each with whether the system calls it local (`getfsstat` into a buffer of this call's own, without
+/// waiting on any of them: thread-safe, unlike `getmntinfo`'s shared one).
 #[cfg(target_os = "macos")]
 fn mounts() -> Vec<(PathBuf, bool)> {
     use std::os::unix::ffi::OsStrExt;
     const MNT_LOCAL: u32 = 0x0000_1000;
     const MNT_NOWAIT: i32 = 2;
-    let mut list: *mut libc::statfs = std::ptr::null_mut();
-    // SAFETY: the system fills a pointer to its own array of `count` entries, valid until the next call on this thread.
-    let count = unsafe { libc::getmntinfo(&mut list, MNT_NOWAIT) };
-    if count <= 0 || list.is_null() {
-        return Vec::new();
+    let field = |chars: &[libc::c_char]| chars.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect::<Vec<u8>>();
+    for _ in 0..4 {
+        // SAFETY: a null buffer asks only how many there are.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, MNT_NOWAIT) };
+        if count <= 0 {
+            return Vec::new();
+        }
+        // Room for a few mounted meanwhile; a full buffer is asked again.
+        let room = count as usize + 8;
+        let mut entries: Vec<libc::statfs> = Vec::with_capacity(room);
+        let bytes = (room * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+        // SAFETY: the buffer is ours, `bytes` long; the call writes at most that many and says how many entries it wrote.
+        let got = unsafe { libc::getfsstat(entries.as_mut_ptr(), bytes, MNT_NOWAIT) };
+        if got < 0 {
+            return Vec::new();
+        }
+        let got = got as usize;
+        if got >= room {
+            continue;
+        }
+        // SAFETY: the call initialised the first `got` entries.
+        unsafe { entries.set_len(got) };
+        return entries
+            .iter()
+            .map(|e| {
+                let kind = String::from_utf8_lossy(&field(&e.f_fstypename)).into_owned();
+                let local = e.f_flags & MNT_LOCAL != 0 && !REMOTE_KINDS.contains(&kind.as_str());
+                (PathBuf::from(std::ffi::OsStr::from_bytes(&field(&e.f_mntonname))), local)
+            })
+            .collect();
     }
-    // SAFETY: as above.
-    let entries = unsafe { std::slice::from_raw_parts(list, count as usize) };
-    entries
-        .iter()
-        .map(|e| {
-            let name = e.f_mntonname.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect::<Vec<u8>>();
-            (PathBuf::from(std::ffi::OsStr::from_bytes(&name)), e.f_flags & MNT_LOCAL != 0)
-        })
-        .collect()
+    Vec::new()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -316,6 +407,48 @@ fn a_path_on_a_network_mount_is_told_from_the_mount_table_alone() {
     assert_eq!(mount_is_local(Path::new("/x"), &[]), None);
     #[cfg(target_os = "macos")]
     assert!(mounts().iter().any(|(point, local)| point == Path::new("/") && *local), "this Mac's own disk");
+}
+
+/// B2: a local-looking path whose link leads into a share is refused without the share ever being looked at; links are
+/// followed part by part, loops and unreadable parts refused, a missing tail taken as written.
+#[cfg(test)]
+#[test]
+fn a_link_into_a_share_is_refused_without_touching_the_share() {
+    let table = [(PathBuf::from("/"), true), (PathBuf::from("/Volumes/Share"), false)];
+    let looked = std::sync::Mutex::new(Vec::<PathBuf>::new());
+    let fs = |p: &Path| {
+        looked.lock().unwrap().push(p.to_path_buf());
+        match p.to_str().unwrap() {
+            "/Users" | "/Users/me" | "/Users/me/Projects" => Part::Plain,
+            "/Users/me/Linked" => Part::Link(PathBuf::from("/Volumes/Share/World")),
+            "/Users/me/Up" => Part::Link(PathBuf::from("../me/Projects")),
+            "/Users/me/Loop" => Part::Link(PathBuf::from("/Users/me/Loop")),
+            "/Users/me/Locked" => Part::Unreadable,
+            _ => Part::Missing,
+        }
+    };
+    assert_eq!(resolve_locally(Path::new("/Users/me/Linked/Assets"), &table, &fs), None);
+    assert!(looked.lock().unwrap().iter().all(|p| !p.starts_with("/Volumes/Share")), "the share was never looked at: {:?}", looked.lock().unwrap());
+    assert_eq!(resolve_locally(Path::new("/Volumes/Share/x"), &table, &fs), None);
+    assert_eq!(resolve_locally(Path::new("/Users/me/Up/World"), &table, &fs), Some(PathBuf::from("/Users/me/Projects/World")), "a relative link, then a part to make");
+    assert_eq!(resolve_locally(Path::new("/Users/me/Loop"), &table, &fs), None, "a loop");
+    assert_eq!(resolve_locally(Path::new("/Users/me/Locked/x"), &table, &fs), None);
+    assert_eq!(resolve_locally(Path::new("/Users/me/New/Deeper"), &table, &fs), Some(PathBuf::from("/Users/me/New/Deeper")));
+    assert_eq!(resolve_locally(Path::new("/Users/me/New/../../me/Linked"), &table, &fs), Some(PathBuf::from("/Users/me/Linked")), "past a missing part, the rest is taken as written, never looked at");
+}
+
+/// B2: the mount table is read by each thread into its own buffer: many at once give the same table.
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn the_mount_table_is_read_by_many_threads_at_once() {
+    let first = mounts();
+    assert!(!first.is_empty());
+    let threads: Vec<_> = (0..16).map(|_| std::thread::spawn(|| (0..50).map(|_| mounts()).collect::<Vec<_>>())).collect();
+    for t in threads {
+        for table in t.join().unwrap() {
+            assert_eq!(table, first);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

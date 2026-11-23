@@ -85,6 +85,8 @@ pub struct Behaviour {
     /// After a close, no start for this long (a Mac: the end being finalized, the wait after an early end): `launch`
     /// refuses meanwhile, and `start_ready` says how long is left.
     pub gate_after_close: Duration,
+    /// How long VRChat's API takes to make an instance.
+    pub create_takes: Duration,
 }
 
 impl Default for Behaviour {
@@ -115,6 +117,7 @@ impl Default for Behaviour {
             comes_up_after: None,
             admit_refused: None,
             gate_after_close: Duration::ZERO,
+            create_takes: Duration::ZERO,
         }
     }
 }
@@ -503,7 +506,11 @@ impl Game for LabGame {
         let running = state.pid.is_some();
         let reads = running && !(state.follows_beside && state.beside.is_some());
         let walking = ["/input/MoveForward", "/input/MoveBackward", "/input/MoveLeft", "/input/MoveRight"].iter().any(|a| self.last_value(a) == Some(1.0));
+        // The lab's arrival: in its world with its local player there (numbered by its instance, which a move changes).
+        let local = reads && state.player_from.is_none_or(|from| Instant::now() >= from);
+        let arrival = (world.in_world && reads && local).then(|| world.instance.as_deref().map_or(0, |i| i.bytes().fold(7u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64))));
         Seen {
+            arrival,
             running,
             pid: if state.follows_beside { state.beside.or(state.pid) } else { state.pid.or(state.beside) },
             log_found: true,
@@ -541,6 +548,8 @@ impl Game for LabGame {
     }
 
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {
+        let takes = self.state.lock().unwrap().behaviour.create_takes;
+        std::thread::sleep(takes);
         let mut state = self.state.lock().unwrap();
         let instance = format!("{}~private({LAB_USER})~region({region})~nonce(lab)", 10_000 + state.instances.len());
         state.instances.push(format!("{world}:{instance}"));

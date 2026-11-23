@@ -2,7 +2,8 @@
 //! with its timer, undo) understood from the person's own sentence alone, in the five languages, with no model and no
 //! network: they work at once, signed in or not. A sentence is matched whole (after the words that never change its
 //! meaning are dropped: [`phrases::FILLERS`]); one that is not exactly a known command, or that joins one with anything
-//! else, goes to the model as it is. Only harmless, reversible actions are ever taken here.
+//! else, goes to the model as it is. Only harmless, reversible actions are taken at once; the VRChat status (an account
+//! action, r23) is asked about first, as the model's would be.
 
 use super::phrases::{self, Feature, Media};
 use super::{Intent, Page};
@@ -22,6 +23,8 @@ enum Said {
     StopRecording,
     Picture(PhotoMode),
     Open(Page),
+    /// The VRChat status: an account action, which still waits for the owner's yes (r23).
+    Status(super::StatusKind),
 }
 
 /// `text` lower case, accents and punctuation gone, as words.
@@ -106,6 +109,13 @@ fn table() -> &'static HashMap<String, Said> {
             }
             for p in phrases::PICTURE[lang] {
                 add(lang, p.to_string(), Said::Picture(PhotoMode::People));
+            }
+            for status in [super::StatusKind::JoinMe, super::StatusKind::Online, super::StatusKind::AskMe, super::StatusKind::Busy] {
+                for name in phrases::status_names(status) {
+                    for p in phrases::STATUS[lang] {
+                        add(lang, p.replace("{c}", name), Said::Status(status));
+                    }
+                }
             }
             for page in Page::ALL {
                 for name in phrases::page_names(page)[lang] {
@@ -250,5 +260,6 @@ fn action(said: Said, seconds: u32) -> Option<Action> {
         Said::StopRecording => Action::App(Intent::StopRecording),
         Said::Picture(of) => Action::App(Intent::Picture3d { of: Some(of), seconds }),
         Said::Open(page) => Action::App(Intent::OpenPage { page }),
+        Said::Status(status) => Action::App(Intent::SetStatus { status }),
     })
 }

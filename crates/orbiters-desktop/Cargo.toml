@@ -45,6 +45,7 @@ rosc = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
 rfd = "0.17"
 sysinfo = "0.37"
+regex = "1.13"
 trash = "5"
 arboard = { version = "3", default-features = false }
 # The QR code scanner (N4N0's menu, More): QR codes in VRChat's stream camera. Pure Rust, MIT or Apache-2.0 (quirc's ISC parts).

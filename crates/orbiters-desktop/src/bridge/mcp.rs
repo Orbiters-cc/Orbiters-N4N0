@@ -535,6 +535,7 @@ fn decorate(mut result: Value, modern: bool) -> Value {
 /// Runs a tool; a client going away while it runs ends it.
 fn call_tool(shared: &Shared, message: &Value, stream: &TcpStream) -> Value {
     let name = message["params"]["name"].as_str().unwrap_or_default();
+    // No arguments given is `{}`; an explicit `null` stays one, and the tool's schema refuses it.
     let args = message["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
     let gone = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));

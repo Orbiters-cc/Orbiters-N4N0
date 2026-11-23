@@ -72,6 +72,10 @@ pub struct WorldState {
     /// The last video a video player of the world played in this instance.
     #[serde(default)]
     pub last_video: Option<VideoSeen>,
+    /// The local player arrived in the instance of the last join (VRChat said who is local after it): until then the
+    /// instance is only being joined (loading, spawning).
+    #[serde(default)]
+    pub arrived: bool,
 }
 
 impl WorldState {
@@ -84,6 +88,7 @@ impl WorldState {
                 self.world_id = Some(world_id.clone());
                 self.instance = Some(instance.clone());
                 self.in_world = true;
+                self.arrived = false;
                 // Everyone in the new instance, the local player included, joins again.
                 self.players.clear();
                 self.avatars.clear();
@@ -95,10 +100,15 @@ impl WorldState {
             }
             LogEvent::LeftRoom => {
                 self.in_world = false;
+                self.arrived = false;
                 self.players.clear();
                 self.avatars.clear();
             }
-            LogEvent::LocalPlayer { name } => self.local_player = Some(name.clone()),
+            LogEvent::LocalPlayer { name } => {
+                self.local_player = Some(name.clone());
+                // Said for each instance joined: the local player is in this one now.
+                self.arrived = self.in_world && self.instance.is_some();
+            }
             LogEvent::PlayerJoined { name, user_id } => {
                 self.players.insert(player_key(name, user_id), name.clone());
             }
@@ -435,12 +445,34 @@ pub struct LogWatcher {
     only: Option<PathBuf>,
     /// Logs never followed (the bridge's side sessions'), when it picks the newest.
     skip: Option<SkipLog>,
+    /// Following one log only: the file it is (device, inode) as first opened. Another file at its path, or none that
+    /// opens, and the follower is lost for good: what it said is no longer that log's.
+    held: Option<(u64, u64)>,
+    lost: bool,
     pub state: WorldState,
 }
 
+#[cfg(unix)]
+fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
 impl LogWatcher {
+    /// The one log followed is gone for this follower: its state is forgotten, and it reads nothing more.
+    fn lose(&mut self) {
+        self.lost = true;
+        self.caught_up = false;
+        self.state = WorldState::default();
+    }
+
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, only: None, skip: None, state: WorldState::default() }
+        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, only: None, skip: None, held: None, lost: false, state: WorldState::default() }
     }
 
     /// A follower of one log file only, from its start.
@@ -456,7 +488,17 @@ impl LogWatcher {
 
     /// Whether everything the log holds was read: until then the state may be an hour old (a world left long ago).
     pub fn caught_up(&self) -> bool {
-        self.caught_up
+        self.caught_up && !self.lost
+    }
+
+    /// A follower of one log whose file could no longer be opened, or was replaced at its path: nothing it says counts.
+    pub fn lost(&self) -> bool {
+        self.lost
+    }
+
+    /// The file a follower of one log holds (device, inode), once it opened it.
+    pub fn held(&self) -> Option<(u64, u64)> {
+        self.held
     }
 
     /// Whether the last poll's events happen now: a join read back from the time before following began (when Orbiters
@@ -484,8 +526,35 @@ impl LogWatcher {
             (None, None) => newest_log(&dir),
         };
         let Some(newest) = newest else { return events };
-        let Ok(mut f) = File::open(&newest) else { return events };
-        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if self.lost {
+            return events;
+        }
+        let Ok(mut f) = File::open(&newest) else {
+            // Not readable now: what was read is no longer known to be the log as it is.
+            self.caught_up = false;
+            // Where a file's identity can be held (not on Windows, whose VRChat may hold its log a moment), a held log
+            // that does not open is lost.
+            if self.only.is_some() && cfg!(unix) {
+                self.lose();
+            }
+            return events;
+        };
+        let Ok(meta) = f.metadata() else {
+            self.caught_up = false;
+            return events;
+        };
+        if self.only.is_some() {
+            let identity = file_identity(&meta);
+            match self.held {
+                None => self.held = identity,
+                Some(held) if Some(held) != identity => {
+                    self.lose();
+                    return events;
+                }
+                Some(_) => {}
+            }
+        }
+        let len = meta.len();
         let mut live = was_caught_up;
         if self.file.as_ref() != Some(&newest) {
             // A new VRChat run, the previous world forgotten. One that began while another log was followed happens
@@ -496,7 +565,11 @@ impl LogWatcher {
             self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
             self.caught_up = false;
         } else if len < self.position {
-            // Truncated: read again from its start.
+            // Truncated: what it said is gone. Following one log, that log is lost; else read again from its start.
+            if self.held.is_some() {
+                self.lose();
+                return events;
+            }
             self.position = 0;
             self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
         }
@@ -785,6 +858,64 @@ mod tests {
         own.poll();
         assert_eq!(own.state.log_file.as_deref(), Some(side.as_path()));
         assert_eq!(own.state.world_id.as_deref(), Some(WORLD_B));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// B1: the instance is only being joined from its `Joining` line (loading, then spawning) until VRChat says who is
+    /// local in it: both intervals are no arrival, and a new join takes the arrival back.
+    #[test]
+    fn the_local_player_arrives_only_after_the_last_join() {
+        let mut state = WorldState::default();
+        let join = |instance: &str| parse_bytes(line(&format!("[Behaviour] Joining {WORLD_A}:{instance}")).as_bytes()).unwrap();
+        state.apply(&join("1~private(usr_a)~region(eu)"));
+        assert!(state.in_world && !state.arrived, "joining: loading");
+        state.apply(&LogEvent::JoinedRoom { name: "A".into() });
+        assert!(!state.arrived, "the room joined: spawning, not arrived");
+        state.apply(&LogEvent::LocalPlayer { name: "Me".into() });
+        assert!(state.arrived);
+        state.apply(&join("2~private(usr_a)~region(eu)"));
+        assert!(!state.arrived, "the next world: not arrived there");
+        state.apply(&LogEvent::LeftRoom);
+        state.apply(&LogEvent::LocalPlayer { name: "Me".into() });
+        assert!(!state.arrived, "out of any instance");
+    }
+
+    /// B1: a follower of one log holds the file it opened first; replaced at its path, cut shorter or unreadable, it is
+    /// lost for good and says nothing more (never the last private place it read).
+    #[cfg(unix)]
+    #[test]
+    fn a_held_log_replaced_cut_or_unreadable_is_lost_for_good() {
+        let dir = temp_dir("held");
+        let log = dir.join("output_log_2026-11-23_01-06-20.txt");
+        let joined = format!("{}\n{}\n", line(&format!("[Behaviour] Joining {WORLD_A}:1~private({ME})~region(eu)")), line("[Behaviour] Initialized PlayerAPI \"Me\" is local"));
+        for change in ["replaced", "cut", "unreadable"] {
+            std::fs::write(&log, &joined).unwrap();
+            let mut own = LogWatcher::of_file(log.clone());
+            own.poll();
+            assert!(own.caught_up() && own.state.arrived && own.held().is_some(), "{change}");
+            match change {
+                "replaced" => {
+                    let other = dir.join("other.txt");
+                    std::fs::write(&other, &joined).unwrap();
+                    std::fs::rename(&other, &log).unwrap();
+                }
+                "cut" => std::fs::write(&log, "x\n").unwrap(),
+                _ => {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+                }
+            }
+            own.poll();
+            assert!(own.lost() && !own.caught_up() && own.state.instance.is_none(), "{change}: {:?}", own.state);
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            std::fs::write(&log, &joined).unwrap();
+            own.poll();
+            assert!(own.lost() && !own.caught_up(), "{change}: never again");
+            std::fs::remove_file(&log).ok();
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 }

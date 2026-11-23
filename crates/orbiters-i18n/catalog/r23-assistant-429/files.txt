@@ -1,0 +1,2 @@
+# Request23 (stream r23-assistant-429, 2026-11-23): Retry on a failed turn of N4N0's assistant, on the chat and the Ask page.
+# The texts are in files of other areas (orbiters-n4n0's assistant.rs, the Ask page's panels.rs), translated here.

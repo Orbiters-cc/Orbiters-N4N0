@@ -82,22 +82,27 @@ mod mac {
     /// The key of this run: found once, and a refusal is kept as well (the keychain is not asked again and again),
     /// except a locked keychain's, which is not one.
     pub(super) fn key() -> anyhow::Result<[u8; KEY_LEN]> {
-        static KEY: std::sync::Mutex<Option<Result<[u8; KEY_LEN], String>>> = std::sync::Mutex::new(None);
+        /// A refusal is kept this long, then the keychain is asked again (a person who said no may say yes later).
+        const REFUSAL_KEPT: std::time::Duration = std::time::Duration::from_secs(300);
+        type Kept = Option<(Result<[u8; KEY_LEN], String>, std::time::Instant)>;
+        static KEY: std::sync::Mutex<Kept> = std::sync::Mutex::new(None);
         let mut kept = KEY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(found) = kept.as_ref() {
-            return found.clone().map_err(|e| anyhow::anyhow!(e));
+        match kept.as_ref() {
+            Some((Ok(key), _)) => return Ok(*key),
+            Some((Err(e), at)) if at.elapsed() < REFUSAL_KEPT => return Err(anyhow::anyhow!(e.clone())),
+            _ => {}
         }
         let file = crate::paths::config_dir().join(KEY_FILE);
         // A key file that could not be read or made now (another process writing it) is asked again at the next need.
         let found = if signed() { keychain_key_after(&file) } else { file_key(&file).map_err(|e| NoKey { message: format!("{e:#}"), again: true }) };
         match found {
             Ok(key) => {
-                *kept = Some(Ok(key));
+                *kept = Some((Ok(key), std::time::Instant::now()));
                 Ok(key)
             }
             Err(NoKey { message, again }) => {
                 if !again {
-                    *kept = Some(Err(message.clone()));
+                    *kept = Some((Err(message.clone()), std::time::Instant::now()));
                 }
                 Err(anyhow::anyhow!(message))
             }
@@ -139,11 +144,17 @@ mod mac {
     pub(super) fn file_key(file: &std::path::Path) -> anyhow::Result<[u8; KEY_LEN]> {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt as _;
-        if let Some(key) = read_key_file(file)? {
+        if let Some(Ok(key)) = read_whole(file) {
             return Ok(key);
         }
         if let Some(folder) = file.parent() {
             std::fs::create_dir_all(folder)?;
+        }
+        // Repair and first creation one process at a time (a lock beside it), every look made again under it: another
+        // process may have repaired or made it meanwhile.
+        let _held = lock(file)?;
+        if let Some(key) = read_key_file(file)? {
+            return Ok(key);
         }
         let mut key = [0u8; KEY_LEN];
         SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
@@ -162,6 +173,23 @@ mod mac {
         }
     }
 
+    /// Reads the key file whole: `None` when there is none, `Some(Err)` for one of another length (or unreadable).
+    fn read_whole(file: &std::path::Path) -> Option<Result<[u8; KEY_LEN], ()>> {
+        match std::fs::read(file) {
+            Ok(bytes) => Some(<[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| ())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => Some(Err(())),
+        }
+    }
+
+    /// The lock of the key file's repair and creation, held while the returned file is.
+    fn lock(file: &std::path::Path) -> anyhow::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(file.with_file_name(format!(".{KEY_FILE}.lock")))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
     /// A number for each key file this process makes.
     fn next_part() -> u64 {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -170,20 +198,25 @@ mod mac {
 
     /// The key file's key; `None` when there is none (or only damage, now set aside). A file of another length that changed
     /// in the last minute may be another process's being written: an error, asked again later.
+    /// Called with the repair lock held: the file set aside is the very one read (its identity checked again right before).
     fn read_key_file(file: &std::path::Path) -> anyhow::Result<Option<[u8; KEY_LEN]>> {
-        match std::fs::read(file) {
-            Ok(bytes) => match <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
-                Ok(key) => Ok(Some(key)),
-                Err(_) => {
-                    let age = std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
-                    anyhow::ensure!(age >= std::time::Duration::from_secs(60), "{}", tr("the key file is being written: try again"));
-                    std::fs::rename(file, file.with_file_name(format!("{KEY_FILE}.damaged")))?;
-                    Ok(None)
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+        use std::os::unix::fs::MetadataExt as _;
+        let identity = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec());
+        let before = match std::fs::metadata(file) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = std::fs::read(file)?;
+        if let Ok(key) = <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
+            return Ok(Some(key));
         }
+        let age = before.modified().ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+        anyhow::ensure!(age >= std::time::Duration::from_secs(60), "{}", tr("the key file is being written: try again"));
+        // Still the same file as read: a whole key put there since is never set aside.
+        anyhow::ensure!(std::fs::metadata(file).is_ok_and(|now| identity(&now) == identity(&before)), "{}", tr("the key file is being written: try again"));
+        std::fs::rename(file, file.with_file_name(format!("{KEY_FILE}.damaged")))?;
+        Ok(None)
     }
 
     /// What a signed build does with the keychain's answer and a key file an unsigned build may have left.
@@ -218,7 +251,7 @@ mod mac {
             Err(e) if e.code() == NOT_FOUND => None,
             Err(e) => return Err(refused(e)),
         };
-        let file_key = std::fs::read(file).ok().and_then(|bytes| <[u8; KEY_LEN]>::try_from(bytes.as_slice()).ok());
+        let file_key = migration_file(file)?;
         match plan(Ok(item.is_some()), file_key.is_some()) {
             Ok(Plan::Keychain) => <[u8; KEY_LEN]>::try_from(item.unwrap_or_default().as_slice())
                 .map_err(|_| NoKey { message: tr("the keychain holds a key of another length").to_string(), again: false }),
@@ -227,11 +260,23 @@ mod mac {
                 let kept = add_or_adopt(key, add_item, || get_generic_password(SERVICE, ACCOUNT).map_err(|e| e.code())).map_err(keychain_refused)?;
                 if kept == key {
                     let _ = delete_generic_password(SERVICE, FIRST_ACCOUNT);
-                    let _ = std::fs::remove_file(file);
                 }
+                // The file stays: an unsigned build run again keeps using it (removed, it would make another key and lose
+                // what it sealed), and this build opens what it sealed with it (`older_key`).
                 Ok(kept)
             }
             Ok(Plan::New) | Err(_) => keychain_key().map_err(keychain_refused),
+        }
+    }
+
+    /// The key file an unsigned build left, for a signed build's migration: none when there is none (or only damage); a
+    /// file that is there and cannot be read is not "none" (what it sealed may be needed): asked again later.
+    pub(super) fn migration_file(file: &std::path::Path) -> Result<Option<[u8; KEY_LEN]>, NoKey> {
+        match read_whole(file) {
+            None => Ok(None),
+            Some(Ok(key)) => Ok(Some(key)),
+            Some(Err(())) if std::fs::read(file).is_ok() => Ok(None),
+            Some(Err(())) => Err(NoKey { message: tr("the key file could not be read: try again").to_string(), again: true }),
         }
     }
 
@@ -351,6 +396,27 @@ mod mac {
         /// and both use the key in it.
         #[test]
         fn two_first_uses_at_once_end_with_one_key_for_both() {
+            // M10: two processes both find an old short file; one repairs it; the other never sets the repaired key aside.
+            for round in 0..10 {
+                let folder = std::env::temp_dir().join(format!("orbiters-key-repair-{}-{round}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&folder);
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = folder.join(KEY_FILE);
+                std::fs::write(&file, b"short").unwrap();
+                std::fs::File::options().write(true).open(&file).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
+                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
+                        if let Ok(key) = file_key(&file) {
+                            break key;
+                        }
+                    })).collect();
+                    racers.into_iter().map(|r| r.join().unwrap()).collect()
+                });
+                let on_disk = std::fs::read(&file).unwrap();
+                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one repaired key for all");
+                assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"short", "only the damage set aside");
+                let _ = std::fs::remove_dir_all(&folder);
+            }
             for round in 0..20 {
                 let folder = std::env::temp_dir().join(format!("orbiters-key-race-{}-{round}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&folder);
@@ -365,7 +431,7 @@ mod mac {
                 });
                 let on_disk = std::fs::read(&file).unwrap();
                 assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one key for all");
-                assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "nothing left beside it");
+                assert!(std::fs::read_dir(&folder).unwrap().flatten().all(|e| { let n = e.file_name(); let n = n.to_string_lossy(); n == KEY_FILE || n == ".session-key.lock" }), "nothing left beside it but its lock");
                 let _ = std::fs::remove_dir_all(&folder);
             }
         }
@@ -391,6 +457,24 @@ mod mac {
             assert_eq!(add_or_adopt([3; KEY_LEN], |_| Err(LOCKED), get), Err(LOCKED));
             assert!(keychain_refused(LOCKED).again, "locked while making it: asked again later");
             assert!(!keychain_refused(-25293).again);
+        }
+
+        /// M10: a key file that cannot be read now is no "none" for a migration: asked again, never replaced.
+        #[test]
+        fn an_unreadable_key_file_is_not_taken_for_none() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = std::env::temp_dir().join(format!("orbiters-key-migrate-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = folder.join(KEY_FILE);
+            assert!(matches!(migration_file(&file), Ok(None)));
+            std::fs::write(&file, [5u8; KEY_LEN]).unwrap();
+            assert!(matches!(migration_file(&file), Ok(Some(k)) if k == [5u8; KEY_LEN]));
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = migration_file(&file);
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(matches!(unreadable, Err(NoKey { again: true, .. })), "{unreadable:?}");
+            let _ = std::fs::remove_dir_all(&folder);
         }
 
         #[test]

@@ -171,6 +171,29 @@ pub fn session_games(library: &Path) -> Option<Vec<u32>> {
     Some(files.flatten().filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json")).filter_map(|f| std::fs::read_to_string(f.path()).ok()).filter_map(|text| session_game(&text)).collect())
 }
 
+/// A running game's process and, when its record says it, its birth (seconds, microseconds).
+pub type GameBorn = (u32, Option<(u64, u32)>);
+
+/// The VRChats the session records in `library` name as running, with the birth of each one's process when the record
+/// says it (obelisk-cli 0.1.5): `None` when the records could not be read at all (that is not "none runs").
+pub fn session_games_born(library: &Path) -> Option<Vec<GameBorn>> {
+    let files = match std::fs::read_dir(library.join("SteamSessions")) {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    Some(
+        files
+            .flatten()
+            .filter(|f| f.file_name().to_string_lossy().ends_with(".v2.json"))
+            .filter_map(|f| std::fs::read_to_string(f.path()).ok())
+            .filter_map(|text| session_record(&text))
+            .filter(|r| !r.over())
+            .filter_map(|r| Some((r.game?, r.game_birth)))
+            .collect(),
+    )
+}
+
 /// One of the engine's Game session records (`SteamSessions/<id>.v2.json`) as far as N4N0 reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRecord {
@@ -208,9 +231,19 @@ impl SessionRecord {
     /// The game ended before it was played: within [`EARLY_END`] of its start, or without a frame shown (a start whose
     /// graphics never came up runs on 100 s and more, measured 2026-11-22 19:54).
     pub fn ended_early(&self) -> bool {
-        self.over() && (self.seconds.is_some_and(|s| s < EARLY_END.as_secs()) || self.frames == Some(0))
+        self.over() && early(self.seconds, self.frames)
     }
 }
+
+/// Whether a game that ran `seconds` and showed `frames` (each `None` when not known) ended before it was played: within
+/// [`EARLY_END`], or without a frame shown within [`NO_FRAMES_FOR`] (a start whose graphics never came up runs on 100 s and
+/// more; a long game whose log reported no frame is no early end, whatever its count says: its log carried no timing).
+pub fn early(seconds: Option<u64>, frames: Option<u64>) -> bool {
+    seconds.is_some_and(|s| s < EARLY_END.as_secs()) || (frames == Some(0) && seconds.is_none_or(|s| s < NO_FRAMES_FOR.as_secs()))
+}
+
+/// How long a game without a frame shown still counts as one that did not start.
+pub const NO_FRAMES_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// A game that ends this soon after it started did not start for the person (the engine, or VRChat in it, crashed).
 pub const EARLY_END: std::time::Duration = std::time::Duration::from_secs(150);
@@ -274,34 +307,165 @@ pub fn session_record_of(library: &Path, id: &str) -> Result<Option<SessionRecor
     }
 }
 
-/// When the last start that ended early ended, from the records in `library`: `Err` when the records could not all be
-/// read (a folder that cannot be listed, a record that cannot be read or is not whole), which is not "none ended early".
-pub fn early_end_in_records(library: &Path) -> Result<Option<std::time::SystemTime>, Unreadable> {
-    let files = match std::fs::read_dir(library.join("SteamSessions")) {
+/// A moment on the clock since this Mac booted: the boot's own session UUID (`kern.bootsessionuuid`, which a wall clock
+/// set forward or back never changes) and the seconds since that boot, sleep included (`CLOCK_MONOTONIC` on macOS).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BootInstant {
+    pub boot: String,
+    pub seconds: f64,
+}
+
+/// What identifies one file's content as it is now: device, inode, length, last change in nanoseconds since 1970. Any
+/// write, a replacement or a rename onto it gives another one.
+pub type FileIdentity = (u64, u64, u64, i128);
+
+/// One of the engine's record files that cannot be read as a record: unreadable, not JSON, not whole, not the engine's
+/// own (another owner, open to others: the engine refuses those too).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Damaged {
+    pub path: PathBuf,
+    /// `None` when not even its metadata could be read.
+    pub identity: Option<FileIdentity>,
+    /// The pointer to the current session (`session.v2.json`) or the record it names: the engine itself refuses every
+    /// start past it (its supervisor reads it first), so it is no history to look past.
+    pub current: bool,
+}
+
+/// What the engine's records say for the start gate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecordScan {
+    /// Every VRChat start that ended early: when its record was last written (wall clock), and the boot-clock moment it
+    /// ended when the record says it (obelisk-cli 0.1.6 and later).
+    pub early_ends: Vec<(std::time::SystemTime, Option<BootInstant>)>,
+    pub damaged: Vec<Damaged>,
+}
+
+/// The folder of the engine's records could not be listed: nothing can be told of what ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unlistable(pub PathBuf);
+
+/// The engine's records folder in `library`.
+pub fn sessions_dir(library: &Path) -> PathBuf {
+    library.join("SteamSessions")
+}
+
+/// The name of the pointer to the current session among the records.
+pub const POINTER: &str = "session.v2.json";
+
+#[cfg(unix)]
+fn identity_of(meta: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino(), meta.len(), meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128)
+}
+
+#[cfg(not(unix))]
+fn identity_of(meta: &std::fs::Metadata) -> FileIdentity {
+    let modified = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+    (0, 0, meta.len(), modified)
+}
+
+/// The identity of the file at `path` now, `None` when it cannot be told (gone, unreadable).
+pub fn file_identity(path: &Path) -> Option<FileIdentity> {
+    std::fs::symlink_metadata(path).ok().map(|m| identity_of(&m))
+}
+
+/// Whether the engine would take this file as its own (`journal.rs` of the fork: a plain file, of the folder's owner,
+/// readable by nobody else, at most 64 KiB).
+#[cfg(unix)]
+fn engine_owned(meta: &std::fs::Metadata, folder: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    meta.file_type().is_file() && meta.uid() == folder.uid() && meta.permissions().mode() & 0o077 == 0 && meta.len() <= 64 * 1024
+}
+
+#[cfg(not(unix))]
+fn engine_owned(meta: &std::fs::Metadata, _folder: &std::fs::Metadata) -> bool {
+    meta.file_type().is_file() && meta.len() <= 64 * 1024
+}
+
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36 && id.bytes().enumerate().all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() })
+}
+
+/// Reads every record in `library` for the start gate. A record that cannot be read is no proof that nothing ended
+/// early, and no reason to refuse for ever either: it is listed in [`RecordScan::damaged`] with what identifies it, so
+/// that the caller tells live uncertainty (a file it has just seen) from historical damage (the same file, unchanged
+/// past the wait after an early end). Another game's record and the pointer to the current session are no VRChat start;
+/// a pointer that cannot be read, or that names a record that cannot, is damage the engine itself stops at.
+pub fn scan_records(library: &Path) -> Result<RecordScan, Unlistable> {
+    let folder = sessions_dir(library);
+    let files = match std::fs::read_dir(&folder) {
         Ok(files) => files,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Unreadable),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RecordScan::default()),
+        Err(_) => return Err(Unlistable(folder)),
     };
-    let mut last = None;
+    let folder_meta = std::fs::metadata(&folder).map_err(|_| Unlistable(folder.clone()))?;
+    let mut scan = RecordScan::default();
+    let mut current: Option<String> = None;
     for file in files {
-        let file = file.map_err(|_| Unreadable)?;
-        if !file.file_name().to_string_lossy().ends_with(".v2.json") {
+        let Ok(file) = file else { return Err(Unlistable(folder)) };
+        let name = file.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".v2.json") {
             continue;
         }
-        let written = file.metadata().and_then(|m| m.modified()).map_err(|_| Unreadable)?;
-        let text = std::fs::read_to_string(file.path()).map_err(|_| Unreadable)?;
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| Unreadable)?;
-        // The pointer to the last session (`session.v2.json`) and other games' records are no VRChat start.
-        if value.get("store").is_none() {
+        let path = file.path();
+        let meta = std::fs::symlink_metadata(&path);
+        let identity = meta.as_ref().ok().map(identity_of);
+        let damage = |scan: &mut RecordScan, current: bool| {
+            scan.damaged.push(Damaged { path: path.clone(), identity, current });
+        };
+        let Ok(meta) = meta else {
+            damage(&mut scan, name == POINTER);
+            continue;
+        };
+        let text = if engine_owned(&meta, &folder_meta) { std::fs::read_to_string(&path).ok() } else { None };
+        let Some(value) = text.as_deref().and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok()) else {
+            damage(&mut scan, name == POINTER);
+            continue;
+        };
+        if name == POINTER {
+            match value.get("id").and_then(serde_json::Value::as_str).filter(|id| is_uuid(id)) {
+                Some(id) => current = Some(id.to_string()),
+                None => damage(&mut scan, true),
+            }
             continue;
         }
-        if let Some(record) = session_record(&text) {
-            if record.ended_early() {
-                last = last.max(Some(written));
+        // Another game's record (its own store id, a number): no VRChat start. Without one it cannot be told whose.
+        match value.get("store").and_then(|s| s.get("app_id")).and_then(serde_json::Value::as_u64) {
+            Some(app) if app.to_string() != crate::vrchat_launch::STEAM_APP => continue,
+            Some(_) => {}
+            None => {
+                damage(&mut scan, false);
+                continue;
+            }
+        }
+        let stem = name.trim_end_matches(".v2.json");
+        match session_record(text.as_deref().unwrap_or_default()).filter(|r| r.id == stem) {
+            Some(record) => {
+                if record.ended_early() {
+                    let written = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    scan.early_ends.push((written, ended_at(&value)));
+                }
+            }
+            None => damage(&mut scan, false),
+        }
+    }
+    if let Some(current) = current {
+        let named = format!("{current}.v2.json");
+        for d in &mut scan.damaged {
+            if d.path.file_name().is_some_and(|n| n.to_string_lossy() == named) {
+                d.current = true;
             }
         }
     }
-    Ok(last)
+    Ok(scan)
+}
+
+/// When a record says its game ended on the boot clock (`played.ended`, obelisk-cli 0.1.6).
+fn ended_at(record: &serde_json::Value) -> Option<BootInstant> {
+    let ended = record.get("played")?.get("ended")?;
+    let boot = ended.get("boot")?.as_str().filter(|b| is_uuid(b))?;
+    let seconds = ended.get("seconds")?.as_f64().filter(|s| s.is_finite() && *s >= 0.0)?;
+    Some(BootInstant { boot: boot.to_ascii_uppercase(), seconds })
 }
 
 /// How long a start must still wait at `now`, after the last start that ended early at `ended` ([`AFTER_EARLY_END`]):
@@ -309,11 +473,6 @@ pub fn early_end_in_records(library: &Path) -> Result<Option<std::time::SystemTi
 pub fn start_wait(ended: Option<std::time::SystemTime>, now: std::time::SystemTime) -> Option<std::time::Duration> {
     let since = now.duration_since(ended?).unwrap_or_default();
     AFTER_EARLY_END.checked_sub(since).filter(|wait| !wait.is_zero())
-}
-
-/// When the last start that ended early ended, from the records in `library`.
-pub fn last_early_end(library: &Path) -> Option<std::time::SystemTime> {
-    session_records(library).into_iter().filter(|(r, _)| r.ended_early()).map(|(_, at)| at).max()
 }
 
 /// VRChat's own log folder in the engine's Wine prefix (its `crossover` user; the earlier lookup for Proton's `steamuser`
@@ -550,6 +709,20 @@ mod tests {
     }
 
     #[test]
+    fn the_running_games_come_with_their_recorded_birth() {
+        let temp = Temp::new("born");
+        assert_eq!(session_games_born(&temp.0), Some(Vec::new()));
+        let sessions = sessions_dir(&temp.0);
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("a.v2.json"), r#"{"id":"a","store":{"app_id":438100},"phase":"Running","game":{"pid":33466,"birth_seconds":1795387812,"birth_microseconds":431}}"#).unwrap();
+        std::fs::write(sessions.join("b.v2.json"), r#"{"id":"b","store":{"app_id":438100},"phase":"Running","game":{"pid":4242}}"#).unwrap();
+        std::fs::write(sessions.join("c.v2.json"), r#"{"id":"c","store":{"app_id":438100},"phase":"Finished","game":{"pid":5}}"#).unwrap();
+        let mut games = session_games_born(&temp.0).unwrap();
+        games.sort();
+        assert_eq!(games, [(4242, None), (33466, Some((1795387812, 431)))]);
+    }
+
+    #[test]
     fn a_record_says_its_session_and_whether_it_ended_early() {
         // As the engine wrote them on 2026-11-22: a start whose graphics never came up (100 s, 0 frames), one played, one running.
         let crashed = r#"{"version":2,"id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","store":{"app_id":438100,"host":"stopped"},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}},"game":null}"#;
@@ -579,6 +752,10 @@ mod tests {
         assert!(!unread.ended_early(), "900 s and an unknown count: played");
         let old = r#"{"version":2,"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":100,"frames":{"count":0}}}"#;
         assert!(session_record(old).unwrap().ended_early(), "an older record's 0 is a count");
+        // M8: an hour with a log that reported no frame is a game played, not an early end (no 80 s wait after it).
+        let long = r#"{"version":2,"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":3600,"frames":{"count":0,"measured":true}}}"#;
+        assert!(!session_record(long).unwrap().ended_early());
+        assert!(early(Some(599), Some(0)) && !early(Some(600), Some(0)) && early(Some(10), None) && !early(None, None));
     }
 
     #[test]
@@ -595,26 +772,75 @@ mod tests {
         assert_eq!(session_record_of(&temp.0, "../../etc/passwd"), Ok(None), "only a UUID names a record");
     }
 
-    #[test]
-    fn records_that_cannot_be_read_are_no_proof_that_nothing_ended_early() {
-        let temp = Temp::new("gate-unknown");
-        assert_eq!(early_end_in_records(&temp.0), Ok(None), "no folder: nothing ever ran");
-        let sessions = temp.0.join("SteamSessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(sessions.join("session.v2.json"), r#"{"version":2,"id":"x"}"#).unwrap();
-        std::fs::write(sessions.join("b.v2.json"), r#"{"id":"b","store":{"app_id":438100},"phase":"Finished","played":{"seconds":600,"frames":{"count":9000}}}"#).unwrap();
-        assert_eq!(early_end_in_records(&temp.0), Ok(None), "the pointer and a played game");
-        std::fs::write(sessions.join("c.v2.json"), r#"{"id":"c","store":"#).unwrap();
-        assert_eq!(early_end_in_records(&temp.0), Err(Unreadable), "a record being written");
-        std::fs::write(sessions.join("c.v2.json"), r#"{"id":"c","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#).unwrap();
-        assert!(early_end_in_records(&temp.0).unwrap().is_some());
+    /// Writes a record as the engine does: readable by its owner only.
+    fn record_file(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    /// B3: every file that cannot be read as a record is listed with what identifies it, the pointer to the current
+    /// session and the record it names marked as the engine's own stop; another game's record and a played game are
+    /// nothing; a record parseable but not whole (`{}`, no id, another id than its name) is damage, not "nothing".
+    #[test]
+    fn records_that_cannot_be_read_are_listed_as_damage_never_as_nothing() {
+        let temp = Temp::new("gate-unknown");
+        assert_eq!(scan_records(&temp.0), Ok(RecordScan::default()), "no folder: nothing ever ran");
+        let sessions = sessions_dir(&temp.0);
+        std::fs::create_dir_all(&sessions).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let current = "c29c0b3a-9cd4-4ca7-aeeb-e69195577759";
+        record_file(&sessions, POINTER, &format!(r#"{{"version":2,"id":"{current}"}}"#));
+        record_file(&sessions, "f790b579-a9d4-4aa7-bb99-f3d545473689.v2.json", r#"{"id":"f790b579-a9d4-4aa7-bb99-f3d545473689","store":{"app_id":438100},"phase":"Finished","played":{"seconds":600,"frames":{"count":9000}}}"#);
+        record_file(&sessions, "0e20b8b9-56f0-4736-8a72-602dbef7fbcd.v2.json", r#"{"id":"0e20b8b9-56f0-4736-8a72-602dbef7fbcd","store":{"app_id":252950},"phase":"Running"}"#);
+        record_file(&sessions, "owner.lock", "");
+        assert_eq!(scan_records(&temp.0), Ok(RecordScan::default()), "the pointer, a played game, another game's, a lock");
+        // An early end, then on the boot clock (0.1.6).
+        record_file(&sessions, "6da7c40d-9fd2-4f3b-8770-aadffa2d0088.v2.json", r#"{"id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96},"ended":{"boot":"11466e1d-bf8e-4060-a996-1c47be650634","seconds":5000.5}}}"#);
+        let ends = scan_records(&temp.0).unwrap().early_ends;
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].1, Some(BootInstant { boot: "11466E1D-BF8E-4060-A996-1C47BE650634".into(), seconds: 5000.5 }));
+        // Damage of every kind.
+        let broken = record_file(&sessions, "41596d78-6dc1-4715-b648-03836dc11ccc.v2.json", r#"{"id":"#);
+        let empty = record_file(&sessions, "46210637-b4ba-4c9b-bd9b-97e1cfde3b37.v2.json", "{}");
+        let renamed = record_file(&sessions, "47b08b35-0ae2-4bc5-8d01-6b2186eced87.v2.json", r#"{"id":"55731a97-1735-4171-ad06-0c5be2799b87","store":{"app_id":438100},"phase":"Finished"}"#);
+        let named = record_file(&sessions, &format!("{current}.v2.json"), "not json");
+        let scan = scan_records(&temp.0).unwrap();
+        let mut found: Vec<(PathBuf, bool)> = scan.damaged.iter().map(|d| (d.path.clone(), d.current)).collect();
+        found.sort();
+        let mut want = vec![(broken.clone(), false), (empty, false), (renamed, false), (named.clone(), true)];
+        want.sort();
+        assert_eq!(found, want);
+        assert!(scan.damaged.iter().all(|d| d.identity.is_some()));
+        // Its identity changes with its content.
+        let before = file_identity(&broken);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        record_file(&sessions, "41596d78-6dc1-4715-b648-03836dc11ccc.v2.json", r#"{"id":"x"#);
+        assert_ne!(file_identity(&broken), before);
+        // A pointer that is not one is the engine's stop too.
+        record_file(&sessions, POINTER, "garbage");
+        assert!(scan_records(&temp.0).unwrap().damaged.iter().any(|d| d.path.ends_with(POINTER) && d.current));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Open to others: the engine refuses it, so it is damage here too.
+            std::fs::remove_file(&named).unwrap();
+            let open = record_file(&sessions, "70c7a83d-c53a-4b76-8682-f36f83f4011e.v2.json", r#"{"id":"70c7a83d-c53a-4b76-8682-f36f83f4011e","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#);
+            std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(scan_records(&temp.0).unwrap().damaged.iter().any(|d| d.path == open));
             std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o000)).unwrap();
-            let unreadable = early_end_in_records(&temp.0);
-            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert_eq!(unreadable, Err(Unreadable), "a folder that cannot be listed");
+            let unreadable = scan_records(&temp.0);
+            std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(unreadable, Err(Unlistable(sessions.clone())), "a folder that cannot be listed");
         }
     }
 
@@ -635,8 +861,9 @@ mod tests {
         let sessions = temp.0.join("SteamSessions");
         std::fs::create_dir_all(&sessions).unwrap();
         assert_eq!(session_games(&temp.0), Some(Vec::new()));
-        std::fs::write(sessions.join("a.v2.json"), r#"{"id":"a","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#).unwrap();
-        let wait = start_wait(last_early_end(&temp.0), SystemTime::now()).expect("an early end just now");
+        record_file(&sessions, "6da7c40d-9fd2-4f3b-8770-aadffa2d0088.v2.json", r#"{"id":"6da7c40d-9fd2-4f3b-8770-aadffa2d0088","store":{"app_id":438100},"phase":"Finished","played":{"seconds":40,"frames":{"count":96}}}"#);
+        let written = scan_records(&temp.0).unwrap().early_ends[0].0;
+        let wait = start_wait(Some(written), SystemTime::now()).expect("an early end just now");
         assert!(wait > Duration::from_secs(70));
         assert_eq!(session_games(&temp.0.join("nothing-here")), Some(Vec::new()), "no folder: no game ever ran");
     }

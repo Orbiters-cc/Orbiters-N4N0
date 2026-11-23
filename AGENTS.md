@@ -14,9 +14,13 @@
   unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side
   effect. The Mac's game is `controller/bridge_mac.rs`: only its own launch (launch id, Game session UUID, launcher birth, the log
   whose `Arg:` lines name its link) is ever read, looked at or closed; Home's VRChat is the person's. It starts through the start
-  Home's Play shares (`obelisk_cli::Play`: one at a time, none within 80 s of an early end, by this run's exit, a boot-clock
-  deadline and the engine's records, an unreadable record refusing), only with obelisk-cli 0.1.5 or later (the record's `shown`
-  frames are its renderer evidence), closes with `steam quit --session` and never `--force`. VRChat's freeze about 5 s after the
+  Home's Play shares (`obelisk_cli::Play`: one at a time, reserved by the bridge before it makes an instance, none within 80 s
+  of an early end, by this run's exit, a deadline on the boot clock (`kern.bootsessionuuid`) and the engine's records; a record
+  that cannot be read holds starts 80 s from first sight, then is history, except the current session's, which Home names with a
+  **Set aside** button: never a lock for ever, never "nothing"), only with obelisk-cli 0.1.5 or later (the record's `shown` frames
+  are its renderer evidence), arrives only once the local player is in its own destination in its own held log, closes with
+  `steam quit --session` and never `--force`. A stall, a quit that does not finish or a lost renderer of any session the engine
+  runs is captured once (`controller/incident.rs`, `<logs>/incidents/`, Settings' Log says where): look there before guessing. VRChat's freeze about 5 s after the
   avatar loaded was Neptune's render server refusing an upload over 64 MiB: fixed in Orbiters-cc/neptune (branch `orbiters`) and
   shipped by obelisk-cli 0.1.4's engine patch (the fork's `docs/CLI.md`, Graphics); `renderer_lost`/`start_crashed` still report
   any other loss. Screenshots need macOS's Screen Recording for the tray service,

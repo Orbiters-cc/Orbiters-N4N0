@@ -91,6 +91,9 @@ pub struct State {
     /// Tests: the controls drawn last frame (their card's English title, their key, where).
     #[cfg(test)]
     pub(super) seen_controls: Vec<(&'static str, String, Rect)>,
+    /// Tests: the kind of each of those controls (toggle, slider, button…), in the same order.
+    #[cfg(test)]
+    pub(super) seen_kinds: Vec<&'static str>,
     /// Tests: each row drawn last frame: its label, the room it gave its control, the width left to its text.
     #[cfg(test)]
     pub(super) seen_fields: Vec<(String, Rect, f32)>,
@@ -385,16 +388,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
 
 /// Which of the registry's gates are open here.
 fn open_here(cx: &Cx) -> Open {
-    let status = &cx.snap.vrchat_login;
-    let orbiters = matches!(cx.snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
-    let adapter = cx.gpu.map(|g| &g.adapter).filter(|a| a.choice);
+    open_of(cx.snap, cx.gpu.map(|g| &g.adapter).filter(|a| a.choice).map(|a| a.integrated))
+}
+
+/// [`open_here`] for a snapshot, and whether the window's GPU can be chosen (and is the integrated one).
+fn open_of(snap: &Snapshot, gpu_integrated: Option<bool>) -> Open {
+    let status = &snap.vrchat_login;
+    let orbiters = matches!(snap.account.state, AccountState::SignedIn { .. } | AccountState::Checking { .. } | AccountState::Offline { .. });
     // As `vrchat_account` decides to draw its card (a saved session being restored shows too).
     let connecting = status.presence() == crate::controller::vrchat_login::Presence::Connecting && status.methods.is_empty();
     Open {
-        bridge: cx.snap.bridge.allowed,
+        bridge: snap.bridge.allowed,
         vrchat_login: (status.allowed || status.waiting || connecting) && orbiters,
-        gpu_choice: adapter.is_some(),
-        gpu_split: adapter.is_some_and(|a| !a.integrated),
+        gpu_choice: gpu_integrated.is_some(),
+        gpu_split: gpu_integrated == Some(false),
     }
 }
 
@@ -556,9 +563,9 @@ struct RowPick {
     pressed: bool,
 }
 
-/// What hides `entry` here, when it is hidden: the setting it needs, unmet.
-fn hidden_by(entry: &Entry, snap: &Snapshot) -> Option<registry::Needs> {
-    entry.needs.filter(|n| !(n.met)(snap))
+/// What hides `entry` here, when it is hidden: the setting it needs, and what is actually not so (in English).
+fn hidden_by(entry: &Entry, snap: &Snapshot) -> Option<(registry::Needs, &'static str)> {
+    entry.needs.and_then(|n| (n.unmet)(snap).map(|when| (n, when)))
 }
 
 /// The setting a result or a link brings into view: itself, or, while it is hidden, the setting that shows it (followed
@@ -566,7 +573,7 @@ fn hidden_by(entry: &Entry, snap: &Snapshot) -> Option<registry::Needs> {
 pub(super) fn target_of(entry: &'static Entry, snap: &Snapshot) -> &'static Entry {
     let mut at = entry;
     for _ in 0..4 {
-        match hidden_by(at, snap).and_then(|n| registry::entry(n.parent)) {
+        match hidden_by(at, snap).and_then(|(n, _)| registry::entry(n.parent)) {
             Some(parent) => at = parent,
             None => break,
         }
@@ -575,7 +582,7 @@ pub(super) fn target_of(entry: &'static Entry, snap: &Snapshot) -> &'static Entr
 }
 
 /// One result; where it is, whether it is hovered or pressed. A setting hidden until another allows it says so.
-fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Option<registry::Needs>) -> RowPick {
+fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Option<(registry::Needs, &'static str)>) -> RowPick {
     let e = f.entry;
     let width = ui.available_width();
     let text_w = width - 28.0 - 32.0;
@@ -586,7 +593,7 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Opt
     let about = (!e.about.is_empty()).then(|| ui.painter().layout_job(marked(tr(e.about), words, Txt::new("", 12.0).color(theme::FG_3).line_height(17.0), text_w, 2)));
     let related = (f.by_keyword && !e.keywords.is_empty())
         .then(|| ui.painter().layout_job(marked(&tr!("Related: {words}", words = tr(e.keywords)), words, Txt::new("", 11.5).color(theme::FG_4), text_w, 1)));
-    let hidden = needs.map(|n| ui.painter().layout_job(Txt::new(format!("↳ {}", tr(n.when)), 11.5).color(theme::WARN).job(text_w)));
+    let hidden = needs.map(|(_, when)| ui.painter().layout_job(Txt::new(format!("↳ {}", tr(when)), 11.5).color(theme::WARN).job(text_w)));
     let h = 12.0
         + crumb.size().y
         + 3.0
@@ -671,7 +678,7 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
         }
     }
     if let Some(entry) = state.found.and_then(registry::entry).filter(|e| e.group == group) {
-        let when = hidden_by(entry, cx.snap).map(|n| tr(n.when));
+        let when = hidden_by(entry, cx.snap).map(|(_, when)| tr(when));
         if found_banner(ui, entry, when) {
             state.found = None;
         }
@@ -684,6 +691,7 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
         state.seen_cards = cards.clone();
         state.seen_fields = rows.iter().map(|r| (r.label.clone(), r.control, r.text_width)).collect();
         state.seen_controls = controls.iter().filter(|c| c.rect.is_positive()).map(|c| (card_of(c.rect.center()), c.key.clone(), c.rect)).collect();
+        state.seen_kinds = controls.iter().filter(|c| c.rect.is_positive()).map(|c| c.kind).collect();
     }
     let _ = &card_of;
     light(ui, state, &cards, &rows, &controls, now);

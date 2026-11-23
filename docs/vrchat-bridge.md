@@ -287,6 +287,19 @@ The owner's own start from Home at 23:22 (full screen, home world) had died the 
 67108864`). With the fix, at 23:50: the avatar loaded at 23:50:56 and the game drew for 3 min 50 s, 4,594 frames, until the Mac's
 screen locked (frames presented on, none shown); no cap line, no lost context; quit by session in 7 s.
 
+**The bridge's real flow on 0.3.9-dev.23 with obelisk-cli 0.1.5 (2026-11-23 01:02 to 01:15, the owner's account, screen unlocked):**
+
+| Start | What happened |
+| --- | --- |
+| 01:02 `go_to_world` home world | Hung about 50 s in (01:02:58: VRChat's log, the engine's log and the frame count stopped together, every engine process at 0 % CPU, VRChat's last line a GC heap allocation): no cap line, no lost context. The bridge said `start_crashed` (frames stalled) at 01:03:15; `close_vrchat` was `close_timeout` (not forced); ended by the experimenter with `steam quit --session --force` (146 s, 829 frames). The same hang as Phase 0's 20:48 start: an engine fault of its own, not the cap. |
+| 01:05 `go_to_world` | `start_wait`, `retry_after_s` 40, no instance made (the gate before the API). |
+| 01:06 Autumn fragrance | Arrived in its private instance (`~private(<me>)`), the 64 MB avatar loaded at 01:07:08, still drawing at 01:09 with the avatar on screen; screenshots 1280 x 720 with `scale` 1.0. |
+| 01:09 `go_to_world` Sky Dream | Its first game was asked to quit (01:09:13), began closing (`OnDestroy`, "finished" at 01:09:15), then an `install.exe` failed to load (`mscoree.dll not found`) and one engine process spun at 100 % CPU for over 2 minutes: `close_timeout`, nothing started (no instance lost: made only once the start could go). Ended by the experimenter by session with `--force` (321 s, 1,991 frames). |
+| 01:11 Sky Dream again | Arrived, avatar loaded 01:13:22, drawing at 01:14:40, screenshot of its welcome screen; `close_vrchat` closed it gracefully in 18 s. |
+
+Not one cap line in these starts. What remains of the engine on this Mac: an occasional hang a minute in, and an occasional quit that
+does not finish; the bridge reports both and never forces.
+
 **Why the graphics went (2026-11-22 22:17 and 22:20, the same bytes both times):** one texture or buffer upload of 70,744,960 bytes
 is refused by the render server's D3D path, whose cap is 64 MiB (`resource_update: byte_size %u exceeds cap %u` in Voile's
 `linux/graphics/lib/libvirglrenderer.1.dylib`); the guest's command ring then fails for good. Both times it came seconds after the

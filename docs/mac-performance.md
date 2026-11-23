@@ -168,7 +168,7 @@ What it decides:
   dependencies, and stores nobody reads again. **Discard hints would give VRChat nothing**: DXMT logs "err: Not implemented" at the
   first call, the owned client made it do so, and neither kept VRChat log has that line.
 - **Needless stores and splits are several times cheaper than their nominal traffic**: five avoidable milliseconds of VRChat's
-  36 would need some ten to twenty-five needless full-size 2x splits a frame. No longer the presumed main cost; VRChat's own
+  36 would need some thirteen to twenty-five needless full-size 2x splits a frame, six if nothing of them compresses. No longer the presumed main cost; VRChat's own
   encoder list, which the timeline now prints, says.
 - **An attachment stored though the next frame clears it** (the exact case: `checkEncoderRelation` always makes a folded resolve
   `StoreAndMultisampleResolve`): DXMT cannot know inside the command buffer that the next one clears. Within one command buffer a

@@ -6,6 +6,7 @@
 //! The offline path ([`orbiters_n4n0_core::intents::quick`]) runs here too: the most common short commands, from the
 //! person's own sentence alone, at once and with no network.
 
+use crate::fence::{Fence, Ticket};
 use crate::runtime::Shared;
 use crate::status::{N4n0Who, NoticeKind};
 use orbiters_core::slice::Slice;
@@ -116,6 +117,8 @@ struct ShareNext {
     public: bool,
     recipients: Vec<orbiters_n4n0_core::captures::Friend>,
     asked: Instant,
+    /// The identity it was asked for: nobody else's.
+    epoch: u64,
 }
 
 /// The assistant's part of N4N0's state.
@@ -236,6 +239,35 @@ impl crate::N4n0 {
         facts
     }
 
+    /// A newer capture is ready: the share asked for "the next one" goes now (once), while the member who asked it is
+    /// signed in.
+    pub(crate) fn share_next_check(self: &Shared) {
+        let Some(epoch) = self.n4n0.lock().unwrap().assistant.share_next.as_ref().map(|n| n.epoch) else { return };
+        let Some(fence) = self.fence(&Ticket::input(epoch)) else { return };
+        let ask = {
+            let mut rt = fence.n4n0.lock().unwrap();
+            let Some(next) = rt.assistant.share_next.as_ref().filter(|n| n.epoch == epoch) else { return };
+            if next.asked.elapsed() > std::time::Duration::from_secs(30 * 60) {
+                rt.assistant.share_next = None;
+                return;
+            }
+            let latest = rt.captures.latest.clone();
+            match latest {
+                Some(row) if Some(&row.key) != next.after.as_ref() && matches!(row.phase, orbiters_n4n0_core::captures::CapturePhase::Ready) => {
+                    let next = rt.assistant.share_next.take().unwrap();
+                    orbiters_n4n0_core::captures::ShareAsk { key: row.key, public: next.public, recipients: next.recipients, acknowledge_explicit: false }
+                }
+                _ => return,
+            }
+        };
+        fence.share_capture(ask);
+        fence.add_line(N4n0Who::Note, tr("N4N0 shares the 3D capture you just took, as you said."));
+        fence.publish();
+    }
+}
+
+/// The assistant's actions: each is done for an input let in, and only a fence does one.
+impl Fence<'_> {
     /// One line of the action log, published.
     pub(crate) fn intent_log(&self, intent: &Intent, outcome: Outcome, why: Option<String>, via: Via) {
         self.log_line(intent.name(), intent.says(), intent.risk(), outcome, why, via);
@@ -259,7 +291,7 @@ impl crate::N4n0 {
 
     /// Runs `intent` (its gate said so, or the owner said yes): counted against the rate limits, said, logged, its undo
     /// kept. The result is for the model.
-    pub(crate) fn intent_run(self: &Shared, intent: Intent, via: Via) -> Result<Value, String> {
+    pub(crate) fn intent_run(&self, intent: Intent, via: Via) -> Result<Value, String> {
         let risk = intent.risk();
         let limited = self.n4n0.lock().unwrap().assistant.limiter.take(if risk == Risk::Confirm { Risk::Confirm } else { Risk::Act }, Instant::now());
         if let Err(why) = limited {
@@ -319,7 +351,7 @@ impl crate::N4n0 {
     }
 
     /// Does `intent`, by the same path its menu or page takes. Its result for the model, and what undoes it.
-    fn intent_do(self: &Shared, intent: &Intent) -> Result<(Value, Option<UndoStep>), String> {
+    fn intent_do(&self, intent: &Intent) -> Result<(Value, Option<UndoStep>), String> {
         let done = || json!({ "done": true });
         let settings = self.settings();
         let item = self.item(intent)?;
@@ -374,7 +406,7 @@ impl crate::N4n0 {
                 let key = match which {
                     Which::Next => {
                         self.n4n0.lock().unwrap().assistant.share_next =
-                            Some(ShareNext { after: view.latest.as_ref().map(|l| l.key.clone()), public: *public, recipients, asked: Instant::now() });
+                            Some(ShareNext { after: view.latest.as_ref().map(|l| l.key.clone()), public: *public, recipients, asked: Instant::now(), epoch: self.epoch() });
                         return Ok((json!({ "done": true, "note": "It is shared once the next 3D capture is ready (its 3D view made)." }), None)); // i18n: not shown
                     }
                     Which::Latest => view.latest.as_ref().or(view.history.first()).map(|r| r.key.clone()).ok_or("No 3D capture yet.")?, // i18n: not shown
@@ -576,8 +608,12 @@ impl crate::N4n0 {
             }
             Intent::AssistantOff => {
                 // Off at once, whatever was under way, this answer too: only the owner turns it on again.
-                let n = self.clone();
-                std::thread::spawn(move || n.screen_effects(vec![Effect::Assistant(false)]));
+                let later = self.later();
+                std::thread::spawn(move || {
+                    if let Some(fence) = later.fence() {
+                        fence.screen_effects(vec![Effect::Assistant(false)]);
+                    }
+                });
                 (done(), None)
             }
             Intent::Suggest { text } => {
@@ -653,7 +689,7 @@ impl crate::N4n0 {
     }
 
     /// An undo of one of the older tools' actions (the music, the light).
-    fn run_action_undo(self: &Shared, action: Action) -> Result<(), String> {
+    fn run_action_undo(&self, action: Action) -> Result<(), String> {
         self.run_action_for_assistant(action).map(|_| ())
     }
 
@@ -672,7 +708,7 @@ impl crate::N4n0 {
     }
 
     /// Asks the interfaces to open `page` (each opens a request once); the window's pages through the app as well.
-    pub(crate) fn open_page(self: &Shared, page: Page, world: Option<(String, String)>) {
+    pub(crate) fn open_page(&self, page: Page, world: Option<(String, String)>) {
         let mut rt = self.n4n0.lock().unwrap();
         let id = rt.assistant.view.open.as_ref().map_or(1, |o| o.id.wrapping_add(1));
         rt.assistant.view.open = Some(OpenAsk { id, page, world });
@@ -744,32 +780,9 @@ impl crate::N4n0 {
         Value::Object(out)
     }
 
-    /// A newer capture is ready: the share asked for "the next one" goes now (once).
-    pub(crate) fn share_next_check(self: &Shared) {
-        let ask = {
-            let mut rt = self.n4n0.lock().unwrap();
-            let Some(next) = rt.assistant.share_next.as_ref() else { return };
-            if next.asked.elapsed() > std::time::Duration::from_secs(30 * 60) {
-                rt.assistant.share_next = None;
-                return;
-            }
-            let latest = rt.captures.latest.clone();
-            match latest {
-                Some(row) if Some(&row.key) != next.after.as_ref() && matches!(row.phase, orbiters_n4n0_core::captures::CapturePhase::Ready) => {
-                    let next = rt.assistant.share_next.take().unwrap();
-                    orbiters_n4n0_core::captures::ShareAsk { key: row.key, public: next.public, recipients: next.recipients, acknowledge_explicit: false }
-                }
-                _ => return,
-            }
-        };
-        self.share_capture(ask);
-        self.add_line(N4n0Who::Note, tr("N4N0 shares the 3D capture you just took, as you said."));
-        self.publish();
-    }
-
     /// The offline path: the person's sentence `text` was a known command; `actions` run now, in order. Said in the
     /// conversation, on the avatar's panel, logged, and told to the model at its next turn.
-    pub(crate) fn quick(self: &Shared, text: &str, actions: Vec<Action>) {
+    pub(crate) fn quick(&self, text: &str, actions: Vec<Action>) {
         self.add_line(N4n0Who::You, text.to_string());
         let facts = self.assistant_facts();
         let (mut said, mut said_en, mut refused, mut panel) = (Vec::new(), Vec::new(), Vec::new(), Vec::<String>::new());

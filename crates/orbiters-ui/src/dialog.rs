@@ -172,7 +172,7 @@ impl<'a> Dialog<'a> {
         let solid = morph::shape_alpha_by(t, morph::HANDOVER_LATE);
         // egui fades new areas in: this one grows out of its origin instead. While it closes, the page under it takes
         // presses again (its button reopens it).
-        egui::Area::new(id.with("dialog-area")).order(self.order).fixed_pos(screen.min).fade_in(false).interactable(!closing).show(ctx, |ui| {
+        crate::front::area(ctx, id.with("dialog-area"), self.order, !closing).fixed_pos(screen.min).fade_in(false).interactable(!closing).show(ctx, |ui| {
             ui.set_min_size(screen.size());
             let scrim = ui.interact(screen, id.with("scrim"), Sense::click());
             ui.painter().rect_filled(screen, 0.0, theme::black(0.55 * morph::smoothstep(0.08, 0.5, t)));

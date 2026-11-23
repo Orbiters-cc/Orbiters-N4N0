@@ -49,7 +49,7 @@ pub fn show(ui: &mut Ui, page: Rect, told: bool) -> Option<Answer> {
     let base = Rect::from_min_size(pos2(page.left() + 24.0, page.bottom() - 24.0 - h), vec2(width, h));
     let rect = base.translate(vec2(0.0, 30.0 * (1.0 - enter)));
     let mut answer = None;
-    egui::Area::new(id).order(Order::Foreground).fixed_pos(rect.min).interactable(true).show(&ctx, |ui| {
+    orbiters_ui::front::area(&ctx, id, Order::Foreground, true).fixed_pos(rect.min).interactable(true).show(&ctx, |ui| {
         ui.multiply_opacity(enter.clamp(0.0, 1.0));
         // The card itself takes the pointer: nothing under it is pressed through it.
         ui.interact(rect, id.with("card"), Sense::click());

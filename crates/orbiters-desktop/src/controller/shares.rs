@@ -265,6 +265,21 @@ impl super::Controller {
         }
         self.capture_share_with(request, run_request);
     }
+    /// [`Self::capture_share`] of one item as `account` (none: nobody is signed in), whoever is saved by the time it runs.
+    pub(super) fn capture_share_as(self: &super::Shared, request: Request, account: Option<(Api, String)>) {
+        #[cfg(test)]
+        if test_work(&request.entry.key).is_some() {
+            return self.capture_share(request);
+        }
+        self.capture_share_with(request, move |request, report| match request.operation {
+            Operation::Share(r) if request.extra.is_empty() => {
+                let signed_out = || anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first."));
+                let account = account.filter(|(api, _)| api.url("") == Api::new(request.server).url("")).ok_or_else(signed_out);
+                share_as(account, request.server, request.entry, r, report).map(Outcome::Shared)
+            }
+            _ => run_request(request, report),
+        });
+    }
     pub(crate) fn capture_share_with(
         self: &super::Shared,
         request: Request,
@@ -1040,10 +1055,14 @@ impl Drop for Changing {
 /// capture whose splats were edited since: its files on Orbiters are replaced first ([`update_with`]), so what is shared
 /// is what its 3D view shows. How long each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
 pub fn share(server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
+    share_as(api(server), server, entry, request, report)
+}
+/// [`share`] as `account`.
+fn share_as(account: anyhow::Result<(Api, String)>, server: Server, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
     let started = Instant::now();
     let mut steps = Vec::new();
     let result =
-        api(server).and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps, &super::maps::web_preview));
+        account.and_then(|(api, token)| share_with(&api, &token, records_path(server), &entry, &request, report, &mut steps, &super::maps::web_preview));
     let whom = match (request.public, request.recipients.len()) {
         (true, 0) => "publicly".to_string(),
         (public, n) => format!("{}with {n} friend{}", if public { "publicly and " } else { "" }, if n == 1 { "" } else { "s" }), // i18n: not shown

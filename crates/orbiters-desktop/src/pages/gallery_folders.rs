@@ -203,7 +203,7 @@ impl State {
             if let Some(folders) = checked { self.folders = folders; }
         }
         let open = self.open;
-        let shown = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pop.rect.min).interactable(open).show(ui.ctx(), |ui| {
+        let shown = orbiters_ui::front::area(ui.ctx(), id, egui::Order::Foreground, open).fixed_pos(pop.rect.min).interactable(open).show(ui.ctx(), |ui| {
             ui.set_min_size(pop.rect.size());
             ui.multiply_opacity(pop.opacity);
             if !open {

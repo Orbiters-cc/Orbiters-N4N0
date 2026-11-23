@@ -568,7 +568,7 @@ impl Selection {
         let id = Id::unique("gallery-select-bar-area");
         let mut clear = false;
         let mut select_all = false;
-        egui::Area::new(id).order(if lone { Order::Tooltip } else { Order::Foreground }).fixed_pos(rect.min).fade_in(false).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, id, if lone { Order::Tooltip } else { Order::Foreground }, false).fixed_pos(rect.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(rect.size());
             ui.multiply_opacity(k.clamp(0.0, 1.0));
             let p = ui.painter().clone();

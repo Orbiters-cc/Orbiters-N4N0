@@ -82,10 +82,11 @@ impl crate::N4n0 {
     /// Shares a 3D capture as a menu asked (on a thread: the app may read its files first); how it goes comes back with
     /// [`crate::N4n0::set_captures`].
     pub(crate) fn share_capture(self: &Shared, ask: ShareAsk) {
-        let n = self.clone();
+        let later = self.later();
         std::thread::spawn(move || {
-            if let Err(e) = n.host.share_capture(ask) {
-                n.notify(NoticeKind::Warning, e);
+            let Some(fence) = later.fence() else { return };
+            if let Err(e) = fence.host.share_capture(ask) {
+                fence.notify(NoticeKind::Warning, e);
             }
         });
     }

@@ -285,7 +285,7 @@ pub(super) fn button(ui: &mut Ui, state: &mut State, right_center: Pos2) -> f32 
         .hint(tr("Every instance you were in: choose one to start VRChat there"));
     let w = b.desired_width(ui);
     let r = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 16.0), vec2(w, 32.0));
-    if widgets::activated(&b.show_at(ui, r)) {
+    if widgets::pressed_fresh(&b.show_at(ui, r)) {
         let clock = anim::time(ui.ctx());
         state.places.previous.open(clock);
     }
@@ -616,6 +616,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     follow(state, cx, clock);
 
     let layer = LayerId::new(Order::Foreground, Id::unique("where-previous-layer"));
+    orbiters_ui::front::layer(&ctx, layer, closing.is_none());
     let mut over = ui.new_child(UiBuilder::new().max_rect(page).layer_id(layer));
     let scrim = over.interact(page, Id::unique("where-previous-scrim"), Sense::click());
     over.painter().rect_filled(page, 0.0, theme::black(0.5 * t.clamp(0.0, 1.0)));
@@ -786,7 +787,7 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         let b = widgets::Button::new(tr("New instance of this world")).icon(icons::PLUS).variant(widgets::Variant::Secondary).size(widgets::Size::Sm).id_salt(("where-previous-new", v.location()));
         let bw = b.desired_width(ui);
         let br = Rect::from_min_size(pos2(right - bw, r.center().y + 2.0), vec2(bw, 28.0));
-        if widgets::activated(&b.show_at(ui, br)) {
+        if widgets::pressed_fresh(&b.show_at(ui, br)) {
             took_new = true;
         }
         kind_choice(ui, state, pos2(br.left() - 8.0, br.center().y), v);

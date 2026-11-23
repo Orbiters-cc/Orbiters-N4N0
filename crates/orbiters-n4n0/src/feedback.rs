@@ -25,7 +25,11 @@ impl crate::N4n0 {
     /// What a menu asked (read a world's feedback, like, label, comment), on a thread: the app answers with
     /// [`crate::N4n0::set_feedback`].
     pub(crate) fn feedback_ask(self: &Shared, ask: FeedbackAsk) {
-        let n = self.clone();
-        std::thread::spawn(move || n.host.world_feedback(ask));
+        let later = self.later();
+        std::thread::spawn(move || {
+            if let Some(fence) = later.fence() {
+                fence.host.world_feedback(ask);
+            }
+        });
     }
 }

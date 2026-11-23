@@ -988,7 +988,7 @@ impl Window {
         let mut close = false;
         let mut reopen = false;
         let width_now = f.rect.width();
-        egui::Area::new(wid.with("area")).order(Order::Foreground).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, wid.with("area"), Order::Foreground, !closing).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(catcher.size());
             let backdrop = ui.interact(catcher, wid.with("backdrop"), Sense::click());
             viewer::paint_backdrop(&ui.painter().with_clip_rect(window), window, &f);

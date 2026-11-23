@@ -960,7 +960,7 @@ impl PictureWindow {
             let window = ctx.content_rect();
             let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
             let mut open = true;
-            egui::Area::new(Id::unique("community-editor")).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+            orbiters_ui::front::area(&ctx, Id::unique("community-editor"), Order::Foreground, true).fixed_pos(rect.min).show(&ctx, |ui| {
                 ui.set_min_size(rect.size());
                 open = e.show(ui, rect);
             });
@@ -1006,7 +1006,7 @@ impl PictureWindow {
         let event =
             p.event.clone().or(self.event.clone()).map(|brief| gallery.as_ref().and_then(|g| g.event.clone()).filter(|e| e.id == brief.id).unwrap_or(brief));
         let development = cx.snap.settings.development;
-        egui::Area::new(wid.with("area")).order(order).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, wid.with("area"), order, !closing).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(catcher.size());
             let backdrop = ui.interact(catcher, wid.with("backdrop"), Sense::click());
             viewer::paint_backdrop(&ui.painter().with_clip_rect(window), window, &f);

@@ -631,13 +631,13 @@ fn a_question_is_answered_with_its_buttons() {
     let (yes, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes is drawn");
     assert!(on);
     w.press(yes.center());
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, question: 7 })), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, stamp: Some(Stamp { question: Some(7), .. }) })), "{:?}", w.backend.sent());
     // The next question: its own buttons.
     w.backend.set(|s| s.n4n0.confirmations = vec![N4n0Confirmation { approve_url: format!("{}8", orbiters_n4n0::status::LOCAL_APPROVAL), ..s.n4n0.confirmations[0].clone() }]);
     w.settle();
     let (no, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("No, leave it")).expect("No is drawn");
     w.press(no.center());
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: false, question: 8 })), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: false, stamp: Some(Stamp { question: Some(8), .. }) })), "{:?}", w.backend.sent());
 }
 
 #[test]
@@ -683,7 +683,7 @@ fn every_answer_from_the_chat_names_the_question_it_was_shown() {
     w.settle();
     let (yes, _) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes is drawn");
     w.press(yes.center());
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, question: 7 })), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, stamp: Some(Stamp { question: Some(7), .. }) })), "{:?}", w.backend.sent());
     w.settle();
     assert!(orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).is_none(), "the card says the answer went");
     let sent_before = w.backend.sent().len();
@@ -692,7 +692,7 @@ fn every_answer_from_the_chat_names_the_question_it_was_shown() {
     // A typed reply goes with the question shown.
     w.type_text("no");
     w.key(Key::Enter, Modifiers::NONE);
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, question: Some(7) }) if text == "no"), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, stamp: Some(Stamp { question: Some(7), .. }) }) if text == "no"), "{:?}", w.backend.sent());
 }
 
 /// Blocker 2: egui turns a held Enter's (or Space's) repeats into clicks of the focused button; an answer button takes
@@ -709,7 +709,7 @@ fn a_focused_answer_button_takes_no_held_keys_repeats() {
             if focus {
                 ui.memory_mut(|m| m.request_focus(resp.id));
             }
-            seen = (resp.clicked(), super::panel::fresh_activation(ui, &resp));
+            seen = (resp.clicked(), orbiters_ui::widgets::activated_fresh(&resp));
         });
         out.textures_delta.clear();
         seen
@@ -910,6 +910,216 @@ fn the_blur_gives_its_gpu_objects_back_when_the_chat_has_closed() {
     }
 }
 
+/// Verify2 B1 (typed): "yes" typed and Enter pressed in the same moment while question 7 shows; question 8 arrives
+/// before the next frame. What was sent is bound to the moment of the Enter: question 7, never 8.
+#[test]
+fn a_typed_reply_is_bound_to_the_question_shown_at_its_enter() {
+    let mut snap = ready();
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, "N4N0 will do this if you say yes: Boop \"Sam\".")];
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let enter = |pressed: bool| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    w.frame(vec![Event::Text("yes".into()), enter(true), enter(false)]);
+    w.backend.set(|s| s.n4n0.confirmations = vec![local_question(8, "N4N0 will do this if you say yes: Boop \"Mira\".")]);
+    w.frame(Vec::new());
+    w.frame(Vec::new());
+    let sent: Vec<Option<u64>> = w.backend.sent().iter().filter_map(|c| match c { N4n0Command::Ask { stamp, .. } => Some(stamp.and_then(|s| s.question)), _ => None }).collect();
+    assert_eq!(sent, vec![Some(7)], "{:?}", w.backend.sent());
+}
+
+/// What is typed after an Enter in the same frame is the next message's.
+#[test]
+fn letters_after_an_enter_in_the_same_frame_are_the_next_message_s() {
+    let mut w = Window::new(ready(), 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let enter = |pressed: bool| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    w.frame(vec![Event::Text("one".into()), enter(true), enter(false), Event::Text("two".into())]);
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::Ask { text, .. }) if text == "one"), "{:?}", w.backend.sent());
+    w.frame(Vec::new());
+    assert_eq!(w.chat().draft(), "two");
+}
+
+/// A question is presented only where its card is in view: not while the chat is the bar, nor in the log of what N4N0 did.
+#[test]
+fn a_question_not_in_view_is_never_answered() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 4;
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Boop Sam", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, "N4N0 will do this if you say yes: Boop \"Sam\".")];
+    let mut w = Window::new(snap, 1280.0);
+    let last = |w: &Window| w.backend.sent().into_iter().rev().find_map(|c| match c { N4n0Command::Ask { stamp, .. } => stamp, _ => None }).unwrap();
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    w.app.chat_mut().show_log(true);
+    w.settle();
+    w.type_text("yes");
+    w.key(Key::Enter, Modifiers::NONE);
+    assert_eq!((last(&w).question, last(&w).epoch), (None, 4), "what N4N0 did shows, not its question");
+    w.settle();
+    w.type_text("yes");
+    w.key(Key::Enter, Modifiers::NONE);
+    assert_eq!(last(&w).question, Some(7), "its card is back in view");
+    let stamps: Vec<u64> = w.backend.sent().iter().filter_map(|c| match c { N4n0Command::Ask { stamp, .. } => stamp.map(|s| s.seq), _ => None }).collect();
+    assert!(stamps.windows(2).all(|s| s[1] > s[0]), "each its own number: {stamps:?}");
+}
+
+/// Verify2 B3 (the window): letters and an Enter that come in the very frame another member's window state arrives were
+/// typed into the last one's: nothing of them is sent or kept.
+#[test]
+fn what_arrives_with_the_next_member_s_state_was_typed_for_the_last_one() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 4;
+    let mut w = Window::new(snap, 1280.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.type_text("A's words");
+    w.settle();
+    w.backend.set(|s| s.n4n0.account_epoch = 5);
+    let enter = |pressed: bool| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+    w.frame(vec![Event::Text(", and more".into()), enter(true), enter(false)]);
+    w.settle();
+    assert!(!w.backend.sent().iter().any(|c| matches!(c, N4n0Command::Ask { .. })), "{:?}", w.backend.sent());
+    assert_eq!(w.chat().draft(), "");
+}
+
+// --- The window and the real service (the controller and N4N0's runtime), only the model faked: it is never asked ---
+
+struct Real {
+    ctx: egui::Context,
+    app: App,
+    ctl: crate::controller::Shared,
+    time: f64,
+}
+
+impl Real {
+    fn new() -> Self {
+        let mut snap = ready();
+        // A VRChat account of the sample's: N4N0 asks before it sets a status.
+        snap.launcher = orbiters_core::launcher::sample().into();
+        let ctl = crate::controller::Controller::new(snap.settings.clone());
+        ctl.set_snapshot(snap);
+        ctl.sign_in_for_test("a");
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        orbiters_ui::widgets::watch_controls();
+        let backend: Ctl = Arc::new(crate::backend::Local::new(ctl.clone()));
+        let mut app = App::offline(backend);
+        app.skip_splash();
+        app.set_page(Page::N4n0, 0.0);
+        let mut r = Self { ctx, app, ctl, time: 0.0 };
+        r.settle();
+        r
+    }
+
+    fn frame(&mut self, events: Vec<Event>) {
+        self.time += 1.0 / 60.0;
+        let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(self.time), ..Default::default() };
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
+        input.events = events;
+        let app = &mut self.app;
+        let mut out = self.ctx.run_ui(input, |ui| {
+            app.logic_offline(ui.ctx());
+            app.draw(ui);
+        });
+        out.textures_delta.clear();
+    }
+
+    fn settle(&mut self) {
+        for _ in 0..60 {
+            self.frame(Vec::new());
+        }
+    }
+
+    fn open(&mut self) {
+        let j = |pressed| Event::Key { key: Key::J, physical_key: None, pressed, repeat: false, modifiers: Modifiers::COMMAND };
+        self.frame(vec![j(true), j(false)]);
+        self.settle();
+    }
+
+    fn type_and_enter(&mut self, text: &str) {
+        let enter = |pressed| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
+        self.frame(vec![Event::Text(text.into()), enter(true), enter(false)]);
+    }
+
+    /// Another surface (the overlay) says `text` to N4N0.
+    fn elsewhere(&self, text: &str) {
+        let stamp = Stamp { epoch: self.ctl.identity_epoch(), question: None, surface: Surface::Overlay, seq: orbiters_n4n0::next_input() };
+        self.ctl.n4n0_command(N4n0Command::Ask { text: text.into(), stamp: Some(stamp) });
+    }
+
+    fn question(&self) -> Option<u64> {
+        self.ctl.view().n4n0.confirmations.iter().rev().find_map(|c| c.local_question())
+    }
+
+    fn outcomes(&self) -> Vec<orbiters_n4n0_core::intents::Outcome> {
+        self.ctl.view().n4n0.assistant.log.iter().map(|e| e.outcome).collect()
+    }
+}
+
+/// Verify2 B1 through the window and the real service: yes typed and sent, or pressed, while question A shows, B asked
+/// before it arrives: nothing of B is done, and B still waits; a yes typed on B is B's.
+#[test]
+fn a_reply_to_a_never_answers_b_through_the_real_service() {
+    use orbiters_n4n0_core::intents::Outcome;
+    let mut r = Real::new();
+    r.elsewhere("put me in orange");
+    let a = r.question().expect("N4N0 asks before it sets a status");
+    r.open();
+    let (yes, _) = orbiters_ui::widgets::control(&r.ctx, orbiters_i18n::tr("Yes, do it")).expect("A's card is drawn");
+    // B is asked, and the window's next frame brings the yes typed at A.
+    r.elsewhere("put me in red");
+    let b = r.question().unwrap();
+    assert_ne!(a, b);
+    r.type_and_enter("yes");
+    assert_eq!(r.question(), Some(b), "B still waits");
+    assert!(!r.outcomes().iter().any(|o| matches!(o, Outcome::Done | Outcome::Failed)), "{:?}", r.outcomes());
+    assert!(r.ctl.view().n4n0.lines.iter().any(|l| l.text.contains("asked something else")), "{:?}", r.ctl.view().n4n0.lines);
+    // A press begun on A's card and let go on B's is neither's.
+    let button = |pressed| Event::PointerButton { pos: yes.center(), button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    r.settle();
+    let (yes_b, _) = orbiters_ui::widgets::control(&r.ctx, orbiters_i18n::tr("Yes, do it")).expect("B's card is drawn");
+    r.frame(vec![Event::PointerMoved(yes_b.center()), Event::PointerButton { pos: yes_b.center(), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+    r.elsewhere("put me in green");
+    let c = r.question().unwrap();
+    r.frame(vec![Event::PointerButton { pos: yes_b.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+    let _ = button;
+    assert_eq!(r.question(), Some(c), "C still waits");
+    assert!(!r.outcomes().iter().any(|o| matches!(o, Outcome::Done | Outcome::Failed)));
+    // No, on C, with C in view.
+    r.settle();
+    r.type_and_enter("no");
+    assert_eq!(r.question(), None);
+    assert_eq!(r.outcomes().last(), Some(&Outcome::Declined));
+}
+
+/// Verify2 B3 through the window and the real service: A's draft, sent as B takes over, does nothing as B; a command of
+/// A's that arrives late is refused by the service whatever the window saw.
+#[test]
+fn a_s_draft_does_nothing_as_b_through_the_real_service() {
+    let mut r = Real::new();
+    r.open();
+    r.frame(vec![Event::Text("turn on fast walk".into())]);
+    r.settle();
+    let epoch_a = r.ctl.identity_epoch();
+    r.ctl.sign_in_for_test("b");
+    assert_eq!(r.ctl.identity_epoch(), epoch_a + 1);
+    r.type_and_enter("");
+    r.settle();
+    assert!(r.outcomes().is_empty() && !r.ctl.view().settings.walk_boost.enabled, "A's sentence ran as B");
+    assert_eq!(r.app.chat().draft(), "");
+    // As if the window had not seen B yet.
+    let late = Stamp { epoch: epoch_a, question: None, surface: Surface::Window, seq: orbiters_n4n0::next_input() };
+    r.ctl.n4n0_command(N4n0Command::Ask { text: "turn on fast walk".into(), stamp: Some(late) });
+    assert!(r.outcomes().is_empty() && !r.ctl.view().settings.walk_boost.enabled);
+    let lines = r.ctl.view().n4n0.lines.clone();
+    assert!(lines.len() == 1 && !lines[0].text.contains("fast walk"), "a calm note, with nothing of A's: {lines:?}");
+    // B's own.
+    r.elsewhere("turn on fast walk");
+    assert!(r.ctl.view().settings.walk_boost.enabled);
+}
+
 // --- Request23: Retry on a failed turn ---
 
 fn failure(id: u64, at_ms: u64, retry_at_ms: u64, automatic: bool) -> orbiters_n4n0::TurnFailure {
@@ -964,7 +1174,7 @@ fn the_chats_retry_is_one_send_a_press_and_waits_for_its_moment() {
     w.press(rect.center());
     w.press(rect.center());
     assert_eq!(w.backend.sent().iter().filter(|c| matches!(c, N4n0Command::RetryTurn { .. })).count(), 1);
-    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::RetryTurn { id: 9 })), "{:?}", w.backend.sent());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::RetryTurn { id: 9, stamp: Some(_) })), "{:?}", w.backend.sent());
 }
 
 fn now() -> u64 {

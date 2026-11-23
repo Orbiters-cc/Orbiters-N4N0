@@ -345,7 +345,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     let id = Id::unique(("launcher-play", mode == LaunchMode::Vr, big));
     let resp = ui.interact(rect, id, if enabled { Sense::click() } else { Sense::hover() });
     widgets::note_control(&ctx, label, rect, enabled);
-    let pressed = enabled && widgets::activated(&resp);
+    let pressed = enabled && widgets::pressed_fresh(&resp);
     let hover = anim::toggle(&ctx, id.with("hover"), enabled && resp.hovered(), Spring::SNAPPY);
     let down = anim::toggle(&ctx, id.with("down"), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.02 * down));

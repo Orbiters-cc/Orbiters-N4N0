@@ -737,6 +737,8 @@ pub struct Facts {
     pub talk_question: Option<String>,
     /// Its number (what its Yes and No answer).
     pub talk_question_id: Option<u64>,
+    /// The Orbiters identity's epoch the page shows (`N4n0Status::account_epoch`).
+    pub talk_epoch: u64,
     /// The last turn failed and can be sent again: its turn's number, its button's words, and whether it may be pressed.
     pub talk_retry: Option<(u64, String, bool)>,
     /// What N4N0 is doing now.

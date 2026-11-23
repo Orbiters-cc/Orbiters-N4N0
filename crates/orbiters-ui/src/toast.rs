@@ -88,7 +88,7 @@ impl Toasts {
         }
         let screen = ctx.content_rect();
         let mut dismissed = Vec::new();
-        egui::Area::new(Id::unique("orbiters-toasts")).order(Order::Foreground).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
+        crate::front::area(ctx, Id::unique("orbiters-toasts"), Order::Foreground, false).fixed_pos(screen.min).interactable(true).show(ctx, |ui| {
             let mut bottom = screen.bottom() - 20.0;
             for t in self.items.iter().rev() {
                 let (glyph, color) = t.kind.icon();

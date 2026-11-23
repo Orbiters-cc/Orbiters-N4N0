@@ -23,9 +23,10 @@ use orbiters_ui::{
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Use the shared press activation, including the normal keyboard/accessibility click fallback.
+/// Use the shared press activation, with the keyboard's and the accessibility tools' clicks, never a held key's repeats
+/// (what this window presses makes public, shares and unshares).
 pub fn pressed(response: egui::Response) -> bool {
-    response.enabled() && widgets::activated(&response)
+    response.enabled() && widgets::pressed_fresh(&response)
 }
 
 /// Every opening gets springs of its own.
@@ -640,7 +641,7 @@ impl Dialog {
             let window = ctx.content_rect();
             let rect = Rect::from_min_max(pos2(window.left(), window.top() + crate::app::TITLE_H), window.max);
             let mut open = true;
-            egui::Area::new(Id::unique("gallery-editor")).order(Order::Foreground).fixed_pos(rect.min).show(&ctx, |ui| {
+            orbiters_ui::front::area(&ctx, Id::unique("gallery-editor"), Order::Foreground, true).fixed_pos(rect.min).show(&ctx, |ui| {
                 ui.set_min_size(rect.size());
                 open = e.show(ui, rect);
             });
@@ -658,7 +659,7 @@ impl Dialog {
         if let Some(v) = self.viewer.as_mut() {
             let rect = ui.max_rect();
             let mut open = true;
-            egui::Area::new(Id::unique("gallery-3d")).order(egui::Order::Tooltip).fixed_pos(rect.min).show(&ctx, |ui| {
+            orbiters_ui::front::area(&ctx, Id::unique("gallery-3d"), egui::Order::Tooltip, true).fixed_pos(rect.min).show(&ctx, |ui| {
                 ui.set_min_size(rect.size());
                 open = v.show(ui, rect, super::splats::on_integrated(cx));
             });
@@ -830,7 +831,7 @@ impl Dialog {
         let mut act: Option<Act> = None;
         let source = self.source.take();
         // Opaque from its first frame (egui fades new areas in): it grows out of its card instead.
-        egui::Area::new(wid.with("area")).order(Order::Foreground).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
+        orbiters_ui::front::area(&ctx, wid.with("area"), Order::Foreground, !closing).fixed_pos(catcher.min).fade_in(false).show(&ctx, |ui| {
             ui.set_min_size(catcher.size());
             let backdrop = ui.interact(catcher, wid.with("backdrop"), Sense::click());
             viewer::paint_backdrop(&ui.painter().with_clip_rect(window), window, &f);

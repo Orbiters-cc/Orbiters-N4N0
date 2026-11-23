@@ -49,6 +49,8 @@ pub struct OverlayUi {
     float: bool,
     /// The Talk button is held.
     talking: bool,
+    /// The Orbiters identity's epoch the last frame showed.
+    epoch: u64,
     /// "Hear yourself": the microphone played in the headset.
     hear: Option<orbiters_sound::MicMonitor>,
     /// Its devices opening, on a thread of their own (up to 3 s that the overlay's loop does not wait).
@@ -76,7 +78,7 @@ impl OverlayUi {
     /// button is let go, as the press's end will never come.
     pub fn release(&mut self, ctl: &Ctl) {
         if std::mem::take(&mut self.talking) {
-            ctl.n4n0(N4n0Command::Talk { down: false });
+            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
         }
     }
 
@@ -104,6 +106,11 @@ impl OverlayUi {
     /// The interface on `surface`: the same on both but for the tab's Float button, which opens the floating panel
     /// (VRChat keeps its controls while that shows; the dashboard takes them).
     pub fn show_in(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses, surface: Surface) {
+        self.show_page(ui, snap, ctl, poses, surface);
+        self.epoch = snap.n4n0.account_epoch;
+    }
+
+    fn show_page(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, poses: &mut dyn Poses, surface: Surface) {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), SIZE);
         let pill = header(ui, snap, rect);
         if surface == Surface::Dashboard {
@@ -131,7 +138,7 @@ impl OverlayUi {
             self.page = page;
             if self.talking {
                 self.talking = false;
-                ctl.n4n0(N4n0Command::Talk { down: false });
+                ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
             }
         }
         let left = Rect::from_min_size(pos2(24.0, 96.0), vec2(452.0, 520.0));
@@ -339,7 +346,10 @@ impl OverlayUi {
         let held = can_talk && resp.is_pointer_button_down_on();
         if held != self.talking {
             self.talking = held;
-            ctl.n4n0(N4n0Command::Talk { down: held });
+            // The tab shows no question N4N0 asks: what is said here answers none. The identity is the last frame's, the one the
+            // person saw as they pressed.
+            let stamp = orbiters_n4n0::Stamp { epoch: self.epoch, question: None, surface: orbiters_n4n0::Surface::Overlay, seq: orbiters_n4n0::next_input() };
+            ctl.n4n0(N4n0Command::Talk { down: held, stamp: held.then_some(stamp) });
         }
         let p = ui.painter().clone();
         let level = if n4n0.listening { n4n0.voice.level.clamp(0.0, 1.0) } else { 0.0 };

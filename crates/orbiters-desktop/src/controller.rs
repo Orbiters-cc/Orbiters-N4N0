@@ -128,6 +128,8 @@ enum CapturePurpose { CameraOverlay, Short, Avatar }
 /// - `kit_epoch` -> `publishing`, `kit_epoch` -> `osc_values`.
 /// - `reconstruction` -> `reconstruct_queue` -> `publishing`; a reconstruction worker is spawned under `reconstruction`.
 /// - `cleanup` -> `publishing`; `camera_scan` -> `publishing`, with VRChat's HTTP under `camera_scan`.
+/// - N4N0's effects gate -> `account_runtime` (`install_account`), and -> `snapshot` (what it forgets is published). Nothing
+///   takes it with `account_runtime` or `snapshot` held.
 /// - `account_runtime` is let go before the account is published; its generation is read under `snapshot` through
 ///   `account_generation` (C-7).
 pub struct Controller {
@@ -195,6 +197,8 @@ pub struct Controller {
     account_runtime: Mutex<account::AccountRuntime>,
     /// `account_runtime`'s generation, readable under the snapshot's lock (controller/account.rs, C-7).
     account_generation: AtomicU64,
+    /// The Orbiters identity's epoch, as `account_runtime` has it (controller/identity.rs): moved under its lock.
+    identity_epoch: AtomicU64,
     vrchat_login: Mutex<vrchat_login::Runtime>,
     /// Home's launcher: friends, invites, boops, Play (controller/launcher.rs).
     launcher: Mutex<launcher::Runtime>,
@@ -512,6 +516,7 @@ pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
 pub mod launcher;
 mod obelisk_cli;
+mod identity;
 mod incident;
 mod language;
 mod maps;
@@ -589,6 +594,7 @@ impl Controller {
             avatar_changed_at: Mutex::new(None),
             account_runtime: Mutex::new(account::AccountRuntime::default()),
             account_generation: AtomicU64::new(0),
+            identity_epoch: AtomicU64::new(orbiters_n4n0::FIRST_EPOCH),
             vrchat_login: Mutex::new(vrchat_login::Runtime::default()),
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),
@@ -686,6 +692,7 @@ impl Controller {
         explorer::spawn(self.clone());
         world_captures::spawn(self.clone());
         world_feedback::spawn(self.clone());
+        self.load_identity(&orbiters_core::paths::config_dir().join("identity.json"));
         self.start_account();
         crate::language::follow(&self.settings());
         self.start_language();

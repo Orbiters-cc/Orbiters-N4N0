@@ -700,7 +700,7 @@ fn every_answer_from_the_chat_names_the_question_it_was_shown() {
 #[test]
 fn a_focused_answer_button_takes_no_held_keys_repeats() {
     let ctx = egui::Context::default();
-    let mut run = |events: Vec<Event>, focus: bool| -> (bool, bool) {
+    let run = |events: Vec<Event>, focus: bool| -> (bool, bool) {
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() };
         input.events = events;
         let mut seen = (false, false);
@@ -800,7 +800,7 @@ fn under_a_modal_the_chat_takes_no_key() {
             Event::Text("x".into()),
         ]
     };
-    let mut run = |chat: &mut ChatBar, modal: bool| -> (bool, bool, bool) {
+    let run = |chat: &mut ChatBar, modal: bool| -> (bool, bool, bool) {
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))), ..Default::default() };
         input.events = keys();
         let mut seen = (false, false, false);

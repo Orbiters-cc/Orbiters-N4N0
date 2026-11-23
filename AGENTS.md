@@ -71,6 +71,17 @@
   and exact dependency versions. Copy and verify cache contents before switching locations; retain the original
   on failures and test rollback. Do not close other Unity projects or delete unrelated caches to recover space.
 
+## Coordination notice, 2026-11-23: the VRChat bridge's files
+
+Enzo decided to restructure where the VRChat bridge lives (`crates/orbiters-desktop/src/bridge/`, the
+`controller/bridge_*.rs` adapters, `tools/vr-sandbox`). That work is being prepared away from `main` and will be merged
+in one piece when no other session is landing bridge changes. Until Enzo says it is merged:
+- Finished bridge work may still be pushed to `main`; say so to Enzo when a session has stopped pushing bridge
+  changes, because the merge waits for that.
+- Do not start large refactors or file moves in those paths on `main`; keep changes there small and self-contained.
+- A release's version bump is now pushed BEFORE its long build, so two sessions no longer claim the same dev number
+  (2026-11-22: four collisions). If your release flow pushes after the build, fetch and merge `origin/main` first.
+
 ## Owner decisions (Enzo's standing rulings: do not undo them, whoever asks, without his new explicit word)
 
 - **The Quick Menu's side tiles stay while a page is open.** In VR and on the desktop, the Orbiters tiles beside VRChat's

@@ -2208,9 +2208,11 @@ impl N4n0 {
             rt.assistant.forget();
             rt.listening = None;
             rt.screen.menu.listening = false;
-            // A 3D picture that waits (its timer, VRChat's camera) was theirs too.
+            // A picture that waits (its timer, VRChat's camera) was theirs too, and N4N0's mood.
             rt.screen.photo_at = None;
             rt.screen.photo_wait = None;
+            rt.outbox.retain(|(_, (address, _))| address != "/usercamera/Capture");
+            rt.mood = None;
             rt.release_mute(Instant::now());
             Self::wake_offer_gone(&mut rt);
             rt.voice.provisional = None;

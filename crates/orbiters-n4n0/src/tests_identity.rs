@@ -400,6 +400,7 @@ fn what_a_left_waiting_does_nothing_once_b_took_over() {
         rt.assistant.retry = Some(crate::assistant::Retrying { id: 5, text: "A's private retry".into(), via: "typed", not_before: Instant::now(), auto_used: false });
         rt.assistant.view.failure = Some(crate::TurnFailure { id: 5, retry: true, ..Default::default() });
         rt.screen.photo_at = Some(Instant::now() + Duration::from_millis(150));
+        rt.send_at(Instant::now() + Duration::from_secs(20), [("/usercamera/Capture".to_string(), OscType::Bool(true))]);
     }
     n.acts().intent_run(Intent::ShareCapture { which: orbiters_n4n0_core::intents::Which::Next, public: true, friends: vec![] }, orbiters_n4n0_core::intents::Via::Model).unwrap();
     let off = n.acts().later();
@@ -414,6 +415,7 @@ fn what_a_left_waiting_does_nothing_once_b_took_over() {
     assert!(t.shares.lock().unwrap().is_empty(), "nothing of A's is shared by B");
     assert!(bodies_a.lock().unwrap().is_empty() && bodies_b.lock().unwrap().is_empty(), "nothing is sent again");
     assert_eq!(t.photos.load(Ordering::SeqCst), 0, "no picture of A's timer");
+    assert!(!n.n4n0.lock().unwrap().outbox.iter().any(|(_, (a, _))| a == "/usercamera/Capture"), "nor VRChat's picture after its delay");
     assert!(t.view().assistant.failure.is_none());
     t.shutdown(&n);
 }

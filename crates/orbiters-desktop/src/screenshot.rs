@@ -2622,7 +2622,13 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             sc.snapshot.settings.picture_folders = vec![out.join("unplugged")];
         }
         let path = out.join(format!("{}.png", sc.name));
-        missing.extend(render(gpu.as_mut(), &sc, scale, size, &path, frames)?);
+        // What only shows with a GPU is laid out with one: a project's 3D preview.
+        if layers.is_some() && sc.name == "projects-preview-open" && gpu.is_none() {
+            let mut gpu = Offscreen::new()?;
+            missing.extend(render(Some(&mut gpu), &sc, scale, size, &path, frames)?);
+        } else {
+            missing.extend(render(gpu.as_mut(), &sc, scale, size, &path, frames)?);
+        }
         println!("{}", path.display());
     }
     // Whatever shows over the page says so as it is shown (`orbiters_ui::front`).
@@ -3002,7 +3008,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             capture,
         )?;
         missing.extend(orbiters_ui::front::missing(&ctx).into_iter().map(|layer| format!("{} (frame {f}): {}", sc.name, layer.short_debug_format()))); // i18n: not shown
-        if gpu.is_none() && f + 1 == sc.frames {
+        if f + 1 == sc.frames {
             println!("scene {}: the foreground is held: {}", sc.name, orbiters_ui::front::held(&ctx)); // i18n: not shown
         }
         if let Some(image) = image {
@@ -4255,7 +4261,7 @@ mod dashboard_tests {
             "launcher-small-drawer", "launcher-modal", "launcher-mine-icons", "videos-picker", "gallery-folders", "gallery-folders-click", "projects-preview-open",
             "projects-preview-sheet", "projects-menu", "projects-new-covers", "gallery-open", "gallery-requests", "gallery-instance", "usage-notice",
         ];
-        let free = ["launcher-list", "projects-panel", "videos", "gallery-mixed", "gallery-select", "events", "settings"];
+        let free = ["launcher-list", "projects-detail", "videos", "gallery-mixed", "gallery-select", "events", "settings"];
         let wrong: Vec<String> = held.iter().map(|n| (n, true)).chain(free.iter().map(|n| (n, false))).filter_map(|(name, holds)| {
             let line = format!("scene {name}: the foreground is held: ");
             match said.lines().find_map(|l| l.strip_prefix(line.as_str())) {

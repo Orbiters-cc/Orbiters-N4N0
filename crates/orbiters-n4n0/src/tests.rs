@@ -878,7 +878,7 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     );
     let (base, bodies) = orbiters(vec![first, second]);
     t.sign_in(base, "orbit-test");
-    n.asked("N4N0, mets mon hoodie".into(), "typed");
+    n.asked("N4N0, mets mon sweat".into(), "typed");
     let sent = received(&vrchat, Duration::from_millis(4000));
     assert!(sent.contains(&(parameter("Hoodie"), OscType::Bool(true))), "{sent:?}");
     let mut cells: Page = [0; TEXT_LENGTH];
@@ -886,9 +886,8 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     assert_eq!(first_row(&cells), "Voilà, ton sweat. Va voir tes");
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0]["input"]["text"], "N4N0, mets mon hoodie");
-    // Named by the owner: by its number, with their own word (verify4-r21 P4).
-    assert!(bodies[0]["context"]["summary"].as_str().unwrap().contains("#1 \"hoodie\""), "{}", bodies[0]["context"]["summary"]);
+    assert_eq!(bodies[0]["input"]["text"], "N4N0, mets mon sweat");
+    assert!(bodies[0]["context"]["summary"].as_str().unwrap().contains("\"Hoodie\" (parameter"), "{}", bodies[0]["context"]["summary"]);
     assert_eq!(bodies[0]["context"]["display"]["columns"], 32);
     assert_eq!(bodies[0]["context"]["locale"], "en-GB", "the device's language");
     assert!(bodies[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "set_avatar_parameter"), "a bare avatar gets its parameters by name");

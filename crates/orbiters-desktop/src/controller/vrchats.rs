@@ -13,27 +13,41 @@ use crate::bridge::sessions::{self, Driver, VrchatRun};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-/// A log made up to this long before its process started is not its own (clock steps between them).
+/// VRChat makes its log within a minute of starting (measured 2 s: process 12:25:13, log 12:25:15). In nanoseconds, as the
+/// system keeps both times: a log of the same second may be from before the process, and then is not its own.
+const AFTER_START: u64 = 60_000_000_000;
+const SECOND: u64 = 1_000_000_000;
+/// A log made up to this long before its process started is shown as its own where it has none from after it (a clock set back, a
+/// coarse date), and proves nothing. In whole seconds.
 const BEFORE_START_S: u64 = 5;
-/// VRChat makes its log within a minute of starting (measured 2 s: process 12:25:13, log 12:25:15).
-const AFTER_START_S: u64 = 60;
 /// Read from a log per look at most.
 const CHUNK: u64 = 4 << 20;
+/// How many looks a log is read whole in at most.
+const WHOLE_LOOKS: usize = 64;
 
 /// What a VRChat's log said of it so far.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LogFacts {
     pub args: Option<Vec<String>>,
     pub read_to: u64,
+    /// Who it last said is signed in: a label while `sure` is not set.
     pub account: Option<(String, String)>,
+    /// Whether `account` is who is signed in now, for certain: it is the last thing the log says of a sign-in, and the log was
+    /// read to its end at the last look.
+    pub sure: bool,
     /// It asked for a sign-in, and nobody signed in since.
     pub signed_out: bool,
     pub world: Option<String>,
     pub query: Option<u16>,
     pub osc_in: Option<u16>,
     pub vr_disabled: bool,
+    /// It could not be read at the last look: read anew at the next.
+    pub unread: bool,
+    /// More of it is there than a look reads: what it says last is not known yet.
+    pub behind: bool,
 }
 
 impl LogFacts {
@@ -44,6 +58,9 @@ impl LogFacts {
         }
         if let Some(account) = sessions::signed_in(text) {
             self.account = Some(account);
+        }
+        if let Some(said) = orbiters_core::vrchat_log::sign_in(text) {
+            self.sure = said.is_some() && said == self.account;
         }
         self.signed_out = signed_out(text).unwrap_or(self.signed_out);
         if let Some(world) = text.lines().rev().find_map(|l| l.split_once("[Behaviour] Entering Room: ").map(|(_, w)| w.trim().to_string())) {
@@ -87,11 +104,29 @@ pub(crate) fn signed_out(text: &str) -> Option<bool> {
     (asked.is_some() || signed.is_some()).then(|| asked > signed)
 }
 
-/// Which log is which VRChat's: a process keeps the log it was matched with while both last; a new one takes the log made
-/// in the minute after it started (the closest), not another's. A process whose start Windows would not say (0) takes the
-/// one log left when it is the one process left.
+/// Whether a log made at `created` can be that of a VRChat started at `start` (Unix nanoseconds): made at its start or after it,
+/// within the minute. One made before it is another's, however little.
+pub(super) fn made_by(start: u64, created: u64) -> bool {
+    start > 0 && created >= start && created <= start + AFTER_START
+}
+
+/// Whether a log made at `created` may be shown as that of a VRChat started at `start`: a moment before it too.
+fn shown_by(start: u64, created: u64) -> bool {
+    let (start_s, created_s) = (start / SECOND, created / SECOND);
+    start > 0 && created_s + BEFORE_START_S >= start_s && created_s <= start_s + AFTER_START / SECOND
+}
+
+/// When the file was made (Unix nanoseconds), as precisely as the system says.
+pub(super) fn made_at(meta: &std::fs::Metadata) -> Option<u64> {
+    u64::try_from(meta.created().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos()).ok()
+}
+
+/// Which log is which VRChat's: a process keeps the log it was matched with while both last (and it is that process's: a number
+/// used again has none of the last one's); a new one takes the log made in the minute after it started (the closest), never one
+/// from before it. A process whose start Windows would not say (0) takes the one log left when it is the one process left.
 pub(crate) fn match_logs(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], prior: &HashMap<u32, PathBuf>) -> HashMap<u32, PathBuf> {
-    let mut matched: HashMap<u32, PathBuf> = prior.iter().filter(|(pid, log)| procs.iter().any(|(p, _)| p == *pid) && logs.iter().any(|(l, _)| l == *log)).map(|(p, l)| (*p, l.clone())).collect();
+    let kept = |pid: &u32, log: &PathBuf| procs.iter().any(|(p, start)| p == pid && logs.iter().any(|(l, created)| l == log && (*start == 0 || created >= start)));
+    let mut matched: HashMap<u32, PathBuf> = prior.iter().filter(|(pid, log)| kept(pid, log)).map(|(p, l)| (*p, l.clone())).collect();
     let mut order: Vec<&(u32, u64)> = procs.iter().filter(|(p, _)| !matched.contains_key(p)).collect();
     order.sort_by_key(|(pid, start)| (*start, *pid));
     for (pid, start) in order {
@@ -102,7 +137,7 @@ pub(crate) fn match_logs(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], prior: &
         let best = logs
             .iter()
             .filter(|(l, _)| !taken.contains(&l))
-            .filter(|(_, created)| *created + BEFORE_START_S >= *start && *created <= start + AFTER_START_S)
+            .filter(|(_, created)| made_by(*start, *created))
             .min_by_key(|(_, created)| created.abs_diff(*start))
             .map(|(l, _)| l.clone());
         if let Some(log) = best {
@@ -122,20 +157,139 @@ pub(crate) fn match_logs(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], prior: &
     matched
 }
 
+/// Which log each VRChat is followed and shown by: its own ([`match_logs`]); where it has none, the closest one left from a moment
+/// before it started ([`shown_by`]), kept until one comes that no other VRChat here could have made.
+pub(crate) fn follow_logs(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], prior: &HashMap<u32, PathBuf>) -> HashMap<u32, PathBuf> {
+    let others_too = |pid: u32, created: u64| procs.iter().any(|(other, start)| *other != pid && made_by(*start, created));
+    let kept = |pid: &u32, log: &PathBuf| {
+        let Some((_, start)) = procs.iter().find(|(p, _)| p == pid) else { return false };
+        logs.iter().any(|(l, created)| l == log && shown_by(*start, *created) && !made_by(*start, *created))
+            && !logs.iter().any(|(_, created)| made_by(*start, *created) && !others_too(*pid, *created))
+    };
+    let before: HashMap<u32, PathBuf> = prior.iter().filter(|(pid, log)| kept(pid, log)).map(|(pid, log)| (*pid, log.clone())).collect();
+    let procs_left: Vec<(u32, u64)> = procs.iter().filter(|(pid, _)| !before.contains_key(pid)).copied().collect();
+    let logs_left: Vec<(PathBuf, u64)> = logs.iter().filter(|(log, _)| !before.values().any(|l| l == log)).cloned().collect();
+    let mut matched = match_logs(&procs_left, &logs_left, prior);
+    matched.extend(before);
+    let mut order: Vec<(u32, u64)> = procs_left.into_iter().filter(|(pid, _)| !matched.contains_key(pid)).collect();
+    order.sort_by_key(|(pid, start)| (*start, *pid));
+    for (pid, start) in order {
+        let best = logs
+            .iter()
+            .filter(|(log, created)| shown_by(start, *created) && !matched.values().any(|l| l == log))
+            .min_by_key(|(_, created)| created.abs_diff(start))
+            .map(|(log, _)| log.clone());
+        matched.extend(best.map(|log| (pid, log)));
+    }
+    matched
+}
+
+/// A VRChat that runs, or ran beside one that does (Unix nanoseconds).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Life {
+    pid: u32,
+    /// 0 when the system would not say.
+    start: u64,
+    /// First seen, and when it was seen to be gone.
+    since: u64,
+    until: Option<u64>,
+}
+
+impl Life {
+    fn is(&self, pid: u32, start: u64) -> bool {
+        // A start the system says at one look and not at another is of the same process while it was not seen to be gone.
+        self.pid == pid && (self.start == start || (self.until.is_none() && (start == 0 || (self.start == 0 && start <= self.since))))
+    }
+
+    /// Whether it could have made a log of `created`.
+    fn made(&self, created: u64) -> bool {
+        made_by(self.start, created) && self.until.is_none_or(|until| created <= until)
+    }
+
+    /// Whether some log could be either's.
+    fn beside(&self, other: &Life) -> bool {
+        let from = self.start.max(other.start);
+        let to = |life: &Life| life.until.unwrap_or(u64::MAX).min(if life.start == 0 { u64::MAX } else { life.start.saturating_add(AFTER_START) });
+        from <= to(self).min(to(other))
+    }
+}
+
+/// The VRChats seen on this computer, those that ended while another that could have made their log runs on among them: a log that
+/// was in doubt between two of them is in doubt when one is gone. One for every look at them here ([`Roster::seeing`]).
+#[derive(Default)]
+pub struct Seen(Mutex<Vec<Life>>);
+
+impl Seen {
+    /// Takes in the VRChats that run at `now`; the ones that run, and the ended ones that count.
+    fn look(&self, procs: &[(u32, u64)], now: u64) -> Vec<Life> {
+        let mut lives = self.0.lock().unwrap();
+        let mut new: Vec<(u32, u64)> = procs.to_vec();
+        for life in lives.iter_mut() {
+            match new.iter().position(|(pid, start)| life.is(*pid, *start)) {
+                Some(i) => {
+                    let (_, start) = new.remove(i);
+                    life.start = life.start.max(start);
+                    life.until = None;
+                }
+                None => {
+                    life.until.get_or_insert(now);
+                }
+            }
+        }
+        lives.extend(new.into_iter().map(|(pid, start)| Life { pid, start, since: now, until: None }));
+        // (A look that found none may be one that failed: nothing is forgotten by it.)
+        if !procs.is_empty() {
+            let running: Vec<Life> = lives.iter().filter(|life| life.until.is_none()).copied().collect();
+            lives.retain(|life| life.until.is_none() || running.iter().any(|one| one.beside(life)));
+        }
+        lives.clone()
+    }
+}
+
+/// The logs that are a VRChat's own for certain (by its process and start): made at or after its start, and no other VRChat here,
+/// running or ended, or log could be taken for the other half of the pair. What a log says of whose a VRChat is counts for these
+/// alone.
+fn proven_logs(lives: &[Life], logs: &[(PathBuf, u64)]) -> HashMap<(u32, u64), PathBuf> {
+    // Pair by pair: whoever has one candidate left takes it from the others'. A VRChat whose start is not known could be any
+    // log's.
+    if lives.iter().any(|life| life.start == 0) {
+        return HashMap::new();
+    }
+    let mut left: Vec<(&Life, Vec<&PathBuf>)> = lives.iter().map(|life| (life, logs.iter().filter(|(_, created)| life.made(*created)).map(|(log, _)| log).collect())).collect();
+    let mut found = HashMap::new();
+    while let Some(i) = left.iter().position(|(_, candidates)| candidates.len() == 1 && left.iter().filter(|(_, other)| *other == *candidates).count() == 1) {
+        let (life, candidates) = left.remove(i);
+        for (_, others) in &mut left {
+            others.retain(|log| *log != candidates[0]);
+        }
+        found.insert((life.pid, life.start), candidates[0].clone());
+    }
+    found
+}
+
+/// The VRChats of `procs` (none other was there) whose matched log is their own for certain ([`proven_logs`]).
+#[cfg(test)]
+pub(crate) fn certain(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], matched: &HashMap<u32, PathBuf>) -> Vec<u32> {
+    let lives: Vec<Life> = procs.iter().map(|(pid, start)| Life { pid: *pid, start: *start, since: 0, until: None }).collect();
+    proven_logs(&lives, logs).into_iter().filter(|((pid, _), log)| matched.get(pid) == Some(log)).map(|((pid, _), _)| pid).collect()
+}
+
 /// One VRChat from what its log said (the driver the bridge's sessions know is put in by [`sessions::Sides::set_roster`]).
-pub(crate) fn run_of(pid: u32, started_s: u64, log: Option<&Path>, facts: Option<&LogFacts>) -> VrchatRun {
+pub(crate) fn run_of(pid: u32, started_ns: u64, log: Option<&Path>, facts: Option<&LogFacts>) -> VrchatRun {
     let empty = LogFacts::default();
     let facts = facts.unwrap_or(&empty);
     let (profile, osc, bridge) = facts.marks();
     VrchatRun {
         pid,
-        started_s,
+        started_ns,
         profile,
         profile_known: facts.args.is_some(),
         log: log.map(Path::to_path_buf),
         osc_in: osc.map(|o| o.0).or(facts.osc_in).unwrap_or(sessions::VRCHAT_OSC_IN),
         query: facts.query.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
         account: facts.account.clone(),
+        account_sure: facts.sure && !facts.behind,
+        log_sure: false,
         signed_out: facts.signed_out,
         one_profile: facts.args.as_deref().is_some_and(|args| orbiters_core::vrchat_launch::profile_told(args) == Some(profile)),
         world: facts.world.clone(),
@@ -150,19 +304,48 @@ pub(crate) fn run_of(pid: u32, started_s: u64, log: Option<&Path>, facts: Option
 pub(crate) struct Roster {
     facts: HashMap<PathBuf, LogFacts>,
     matched: HashMap<u32, PathBuf>,
+    /// The VRChats (process, start) whose log was once found to be theirs for certain: a later one changes nothing of that.
+    certain: Vec<(u32, u64)>,
+    /// What every look here saw run.
+    seen: Arc<Seen>,
 }
 
 impl Roster {
+    /// One that shares what `seen` saw (the looks at the VRChats here are several: the watcher's, and one right before a private
+    /// place is handed over).
+    pub(crate) fn seeing(seen: Arc<Seen>) -> Self {
+        Roster { seen, ..Roster::default() }
+    }
+
+    pub(crate) fn seen(&self) -> Arc<Seen> {
+        self.seen.clone()
+    }
+
+    /// [`Self::scan`] until every log is read up to its end, or it is too much to read now.
+    pub(crate) fn scan_whole(&mut self, procs: &[(u32, u64)], dir: Option<&Path>) -> Vec<VrchatRun> {
+        for _ in 0..WHOLE_LOOKS {
+            let runs = self.scan(procs, dir, |_| None);
+            if !self.facts.values().any(|facts| facts.behind) {
+                return runs;
+            }
+        }
+        self.scan(procs, dir, |_| None)
+    }
+
     /// Every VRChat in `procs` (process, start), with what its log in `dir` said. `camera` asks a VRChat's OSCQuery tree
     /// whether its camera is open (only asked with two VRChats or more: the picker's mark).
     pub(crate) fn scan(&mut self, procs: &[(u32, u64)], dir: Option<&Path>, camera: impl Fn(SocketAddr) -> Option<bool>) -> Vec<VrchatRun> {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let lives = self.seen.look(procs, now);
         if procs.is_empty() {
             self.matched.clear();
             self.facts.clear();
+            self.certain.clear();
             return Vec::new();
         }
         let earliest = procs.iter().map(|(_, s)| *s).filter(|s| *s > 0).min().unwrap_or(0);
-        let logs: Vec<(PathBuf, u64)> = dir
+        let earliest_seen = lives.iter().map(|life| life.start).filter(|s| *s > 0).min().unwrap_or(earliest);
+        let all: Vec<(PathBuf, u64)> = dir
             .and_then(|d| std::fs::read_dir(d).ok())
             .into_iter()
             .flatten()
@@ -174,25 +357,62 @@ impl Roster {
             })
             .filter_map(|e| {
                 let meta = e.metadata().ok()?;
-                let created = meta.created().or_else(|_| meta.modified()).ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
+                let created = made_at(&meta)?;
                 let fresh = meta.modified().ok()?.elapsed().is_ok_and(|d| d < Duration::from_secs(180));
-                (created + BEFORE_START_S >= earliest || (earliest == 0 && fresh)).then(|| (e.path(), created))
+                (created / SECOND + BEFORE_START_S >= earliest_seen / SECOND || (earliest == 0 && fresh)).then(|| (e.path(), created))
             })
             .collect();
-        self.matched = match_logs(procs, &logs, &self.matched);
+        let logs: Vec<(PathBuf, u64)> = all.iter().filter(|(_, created)| created / SECOND + BEFORE_START_S >= earliest / SECOND).cloned().collect();
+        let before = std::mem::take(&mut self.matched);
+        self.matched = follow_logs(procs, &logs, &before);
+        // Proven to be another one's than the closest: that one. What was certain stays.
+        let proven = proven_logs(&lives, &all);
+        for one in procs.iter().filter(|one| !self.certain.contains(one)) {
+            let Some(log) = proven.get(one) else { continue };
+            if self.matched.get(&one.0) == Some(log) || procs.iter().any(|other| self.certain.contains(other) && self.matched.get(&other.0) == Some(log)) {
+                continue;
+            }
+            self.matched.retain(|_, other| other != log);
+            self.matched.insert(one.0, log.clone());
+        }
+        self.certain.retain(|(pid, start)| procs.contains(&(*pid, *start)) && self.matched.contains_key(pid) && self.matched.get(pid) == before.get(pid));
+        for one in procs {
+            if !self.certain.contains(one) && proven.get(one).is_some_and(|log| self.matched.get(&one.0) == Some(log)) {
+                self.certain.push(*one);
+            }
+        }
         let used: Vec<PathBuf> = self.matched.values().cloned().collect();
         self.facts.retain(|l, _| used.contains(l));
         for log in &used {
             let facts = self.facts.entry(log.clone()).or_default();
-            let (text, consumed) = read_log_from(log, facts.read_to, CHUNK);
+            // Cut shorter, or not to be read: what it said before is not what it says now.
+            let len = std::fs::File::open(log).and_then(|f| f.metadata()).map(|m| m.len());
+            match len {
+                Ok(len) if len >= facts.read_to => {}
+                Ok(_) => *facts = LogFacts::default(),
+                Err(_) => {
+                    facts.sure = false;
+                    facts.unread = true;
+                    continue;
+                }
+            }
+            if std::mem::take(&mut facts.unread) {
+                *facts = LogFacts::default();
+            }
+            let from = facts.read_to;
+            let (text, consumed) = read_log_from(log, from, CHUNK);
             facts.read_to += consumed;
             facts.read(&text);
+            // Read up to its end: what is left is a line still being written.
+            facts.behind = len.is_ok_and(|len| len - from > CHUNK);
         }
         let mut runs: Vec<VrchatRun> = procs
             .iter()
             .map(|(pid, start)| {
                 let log = self.matched.get(pid);
-                run_of(*pid, *start, log.map(PathBuf::as_path), log.and_then(|l| self.facts.get(l)))
+                let mut run = run_of(*pid, *start, log.map(PathBuf::as_path), log.and_then(|l| self.facts.get(l)));
+                run.log_sure = self.certain.contains(&(*pid, *start));
+                run
             })
             .collect();
         if runs.len() > 1 {
@@ -200,7 +420,7 @@ impl Roster {
                 run.camera = run.query.and_then(&camera);
             }
         }
-        runs.sort_by_key(|r| (r.started_s, r.pid));
+        runs.sort_by_key(|r| (r.started_ns, r.pid));
         runs
     }
 }
@@ -247,7 +467,8 @@ pub(crate) fn shown(run: &VrchatRun, target: Option<u32>, chosen: Option<u32>) -
         profile: run.profile,
         profile_known: run.profile_known,
         account: run.account.as_ref().map(|(_, name)| name.clone()),
-        account_id: run.account.as_ref().filter(|_| run.profile_known && run.one_profile && !run.signed_out).map(|(id, _)| id.clone()),
+        account_id: run.account.as_ref().filter(|_| run.profile_known && run.one_profile && !run.signed_out && run.log_sure && run.account_sure).map(|(id, _)| id.clone()),
+        logged: run.profile_known && run.log_sure,
         signed_out: run.signed_out && run.profile_known && run.one_profile,
         world: run.world.clone(),
         desktop: run.desktop,
@@ -528,7 +749,9 @@ mod tests {
     #[test]
     fn an_account_is_proven_by_its_id_while_signed_in_on_one_profile() {
         let id = |f: &LogFacts| {
-            let shown = shown(&run_of(37076, 1_794_749_922, None, Some(f)), None, None);
+            let run = run_of(37076, 1_794_749_922, None, Some(f));
+            assert_eq!(shown(&run, None, None).account_id, None, "a log that is not its own for certain says nothing of whose it is");
+            let shown = shown(&VrchatRun { log_sure: true, ..run }, None, None);
             (shown.account_id, shown.signed_out)
         };
         let mine = Some("usr_1339e525-d75d-4832-9104-98dd89287681".to_string());
@@ -540,6 +763,13 @@ mod tests {
         assert_eq!(id(&f), (None, true));
         f.read("2026.11.15 14:02:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
         assert_eq!(id(&f), (Some("usr_2".into()), false));
+        // R5: a later sign-in whose line names nobody, and a script's, take the account with them (its name stays a label).
+        f.read("2026.11.15 14:03:00 Debug      -  [Authentication - x] Preforming post login checks for other\n");
+        assert_eq!((id(&f), f.account.as_ref().map(|a| a.1.as_str())), ((None, false), Some("other")));
+        f.read("2026.11.15 14:04:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
+        assert_eq!(id(&f), (Some("usr_2".into()), false));
+        f.read("2026.11.15 14:05:00 Debug      -  [World] post login checks for blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)\n");
+        assert_eq!(id(&f), (None, false));
         let several = facts(&OWN_LOG.replace("--watch-worlds", "--profile=1"));
         assert_eq!(id(&several), (None, false));
         assert_eq!(signed_out("No cached credentials found\npost login checks for a (usr_1)\nAuthSelectionPage OnPageShown\n"), Some(true));
@@ -560,6 +790,213 @@ mod tests {
         assert_eq!(m2.get(&99), None, "two logs left: none is taken");
         let m3 = match_logs(&[(99, 0)], &logs[1..2], &HashMap::new());
         assert_eq!(m3.get(&99), Some(&PathBuf::from("b-12-25-15")));
+    }
+
+    /// R5 (the verifier's synthetic check): a log made before a VRChat started is never its own, not even three seconds before
+    /// and the only one there; and whose a VRChat is counts only from a log that can be no other's.
+    #[test]
+    fn a_log_from_before_a_vrchat_started_says_nothing_of_it() {
+        let one = |created: u64| vec![(PathBuf::from("x"), created)];
+        let none = HashMap::new();
+        for created in [995, 997, 999] {
+            assert!(match_logs(&[(7, 1000)], &one(created), &none).is_empty(), "{created}");
+        }
+        for created in [1000, 1002, 1060] {
+            let m = match_logs(&[(7, 1000)], &one(created), &none);
+            assert_eq!((m.len(), certain(&[(7, 1000)], &one(created), &m)), (1, vec![7]), "{created}");
+        }
+        // A number used again has none of the last process's log.
+        assert!(match_logs(&[(7, 2000)], &one(1002), &HashMap::from([(7, PathBuf::from("x"))])).is_empty());
+        // Two VRChats, each with its own; and the earlier one's log of two that came in its minute, by elimination.
+        let logs = vec![(PathBuf::from("a"), 1002), (PathBuf::from("b"), 1032)];
+        let procs = [(1, 1000), (2, 1030)];
+        let m = match_logs(&procs, &logs, &none);
+        let mut sure = certain(&procs, &logs, &m);
+        sure.sort_unstable();
+        assert_eq!(sure, [1, 2]);
+        // One log two VRChats could have made, two logs one VRChat could have: followed as before, and proof of nothing.
+        let m = match_logs(&[(1, 1000), (2, 1010)], &logs[..0], &none);
+        assert!(m.is_empty());
+        let shared = vec![(PathBuf::from("c"), 1012)];
+        let procs = [(1, 1000), (2, 1010)];
+        assert!(certain(&procs, &shared, &match_logs(&procs, &shared, &none)).is_empty());
+        let two = vec![(PathBuf::from("c"), 1002), (PathBuf::from("d"), 1003)];
+        assert!(certain(&[(1, 1000)], &two, &match_logs(&[(1, 1000)], &two, &none)).is_empty());
+        // A start Windows would not say: the one log left is followed, and proves nothing of anyone.
+        let m = match_logs(&[(99, 0)], &one(1002), &none);
+        assert_eq!((m.len(), certain(&[(99, 0)], &one(1002), &m).len()), (1, 0));
+    }
+
+    /// The verifier's check: a log made 10.110 s into a minute is not that of a VRChat born at 10.880 s, the same second.
+    #[test]
+    fn a_log_of_the_same_second_from_before_a_vrchat_is_not_its_own() {
+        const SECOND: u64 = 1_000_000_000;
+        let (born, log) = (10 * SECOND + 880_000_000, |at: u64| vec![(PathBuf::from("x"), at)]);
+        let none = HashMap::new();
+        let before = log(10 * SECOND + 110_000_000);
+        let matched = match_logs(&[(7, born)], &before, &none);
+        assert!(matched.is_empty() && certain(&[(7, born)], &before, &matched).is_empty());
+        let after = log(10 * SECOND + 880_000_100);
+        let matched = match_logs(&[(7, born)], &after, &none);
+        assert_eq!(certain(&[(7, born)], &after, &matched), [7]);
+        // From the file itself: a process born a moment after it was made has none.
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        std::fs::write(&path, OWN_LOG).unwrap();
+        let made = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let proven = |born: u64| shown(&Roster::default().scan_whole(&[(7, born)], Some(&dir))[0], None, None).account_id.is_some();
+        assert!(proven(made) && proven(made - 2 * SECOND) && !proven(made + 100));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The verifier's probe: two VRChats overlap and one log comes that either could have made; its writer ends. The log is the
+    /// survivor's no more than before, whoever looks: the one that saw both, and one that starts looking only now.
+    #[test]
+    fn a_log_of_two_vrchats_is_no_proof_of_the_one_that_is_left() {
+        const SECOND: u64 = 1_000_000_000;
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        std::fs::write(&path, OWN_LOG).unwrap();
+        let made = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let (first, second) = ((1, made - SECOND), (2, made - SECOND / 2));
+        let mut roster = Roster::default();
+        let proven = |roster: &mut Roster, procs: &[(u32, u64)]| roster.scan(procs, Some(&dir), |_| None).iter().filter_map(|run| shown(run, None, None).account_id.map(|_| run.pid)).collect::<Vec<_>>();
+        assert!(proven(&mut roster, &[first, second]).is_empty(), "either's");
+        assert!(proven(&mut roster, &[second]).is_empty(), "still either's");
+        // (A look that found none, as one that failed would.)
+        assert!(proven(&mut roster, &[]).is_empty());
+        assert!(proven(&mut roster, &[second]).is_empty());
+        // One that looks only now, sharing what was seen (the look right before a place is handed over), and at the same time.
+        assert!(proven(&mut Roster::seeing(roster.seen()), &[second]).is_empty());
+        // Nothing else was there since: a log of the survivor's own, which the other could not have made, says which is whose.
+        let life = |(pid, start): (u32, u64), until: Option<u64>| Life { pid, start, since: start, until };
+        let gone = life(first, Some(made + SECOND));
+        let logs = vec![(path.clone(), made), (dir.join("own"), made + 2 * SECOND)];
+        assert!(proven_logs(&[gone, life(second, None)], &logs[..1]).is_empty());
+        assert_eq!(proven_logs(&[gone, life(second, None)], &logs), HashMap::from([(first, path.clone()), (second, dir.join("own"))]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A VRChat that ended is in the way of no other's proof than one it could have made the log of: one started again after it
+    /// (it goes as soon as it came, and another stays), one whose log is told apart by the ended one's own, still there.
+    #[test]
+    fn an_ended_vrchat_takes_no_later_ones_proof() {
+        const SECOND: u64 = 1_000_000_000;
+        // Started again: the ended one was seen to be gone before that one's log was made.
+        let seen = Seen::default();
+        seen.look(&[(1, 100 * SECOND)], 101 * SECOND);
+        let lives = seen.look(&[(2, 104 * SECOND)], 105 * SECOND);
+        let log = |name: &str, at: u64| (PathBuf::from(name), at * SECOND);
+        assert_eq!(proven_logs(&lives, &[log("b", 106)]), HashMap::from([((2, 104 * SECOND), PathBuf::from("b"))]));
+        // Its number used again, at once.
+        let seen = Seen::default();
+        seen.look(&[(1, 100 * SECOND)], 101 * SECOND);
+        let lives = seen.look(&[(1, 104 * SECOND)], 105 * SECOND);
+        assert_eq!(lives.iter().filter(|life| life.until.is_none()).map(|life| life.start).collect::<Vec<_>>(), [104 * SECOND]);
+        assert_eq!(proven_logs(&lives, &[log("b", 106)]), HashMap::from([((1, 104 * SECOND), PathBuf::from("b"))]));
+        // Two beside one another, each with its log: the one that ended keeps its own.
+        let seen = Seen::default();
+        seen.look(&[(1, 100 * SECOND), (2, 110 * SECOND)], 111 * SECOND);
+        let lives = seen.look(&[(2, 110 * SECOND)], 120 * SECOND);
+        assert_eq!(proven_logs(&lives, &[log("a", 102), log("b", 112)]).get(&(2, 110 * SECOND)), Some(&PathBuf::from("b")));
+        // Long over, or a start the system said at one look and not at another: nothing is left of it, and it is one process.
+        assert_eq!(seen.look(&[(3, 900 * SECOND)], 901 * SECOND).iter().map(|life| life.pid).collect::<Vec<_>>(), [3]);
+        let seen = Seen::default();
+        seen.look(&[(1, 0)], 101 * SECOND);
+        for start in [100 * SECOND, 0, 100 * SECOND] {
+            assert_eq!(seen.look(&[(1, start)], 102 * SECOND), [Life { pid: 1, start: 100 * SECOND, since: 101 * SECOND, until: None }]);
+        }
+    }
+
+    /// What is shown of two games stays each one's: a log from a moment before its game is not given up for another game's, only
+    /// for one that can be no other's.
+    #[test]
+    fn a_log_from_a_moment_before_stays_until_its_games_own_comes() {
+        const SECOND: u64 = 1_000_000_000;
+        let log = |name: &str, at: u64| (PathBuf::from(name), at * SECOND);
+        let (one, two) = ((1, 100 * SECOND + 1), (2, 130 * SECOND));
+        let early = log("early", 100);
+        let first = follow_logs(&[one], std::slice::from_ref(&early), &HashMap::new());
+        assert_eq!(first.get(&1), Some(&early.0));
+        let logs = [early.clone(), log("second", 131)];
+        let both = follow_logs(&[one, two], &logs, &first);
+        assert_eq!((both.get(&1), both.get(&2)), (Some(&logs[0].0), Some(&logs[1].0)));
+        let logs = [early, log("own", 102)];
+        assert_eq!(follow_logs(&[one], &logs, &first).get(&1), Some(&logs[1].0));
+    }
+
+    /// 0.3.9-dev.42's five seconds, for what is shown alone: a game whose log was made a moment before it started (a clock set
+    /// back, a coarse date) shows its account and its world, and is proof of nothing. Its own log, when one comes, takes over.
+    #[test]
+    fn a_log_from_a_moment_before_is_shown_and_proves_nothing() {
+        const SECOND: u64 = 1_000_000_000;
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        std::fs::write(&path, OWN_LOG).unwrap();
+        let made = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let look = |born: u64| shown(&Roster::default().scan_whole(&[(7, born)], Some(&dir))[0], None, None);
+        for after in [1, SECOND / 2, 3 * SECOND, 5 * SECOND - made % SECOND] {
+            let run = look(made + after);
+            assert_eq!((run.account.as_deref(), run.world.as_deref(), run.profile_known), (Some("blackorbit"), Some("FRONTLINE KIZUNA"), true), "{after}");
+            assert_eq!((run.account_id, run.logged), (None, false), "{after}");
+        }
+        let run = look(made + 7 * SECOND);
+        assert_eq!((run.account, run.profile_known), (None, false), "too long before");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A log longer than a look reads is read whole before whose it is counts: the sign-in at its end, not the one at its start.
+    #[test]
+    fn a_long_log_proves_nothing_before_its_end_is_read() {
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        let filler = format!("{}\n", "x".repeat(1023)).repeat((CHUNK / 1024) as usize);
+        std::fs::write(&path, [OWN_LOG, &filler, "2026.11.15 13:39:00 Debug      -  [Authentication - x] Preforming post login checks for Sample (usr_00000000-0000-4000-8000-00000000000b)\n"].concat()).unwrap();
+        let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let mut roster = Roster::default();
+        let mut look = |whole: bool| shown(&if whole { roster.scan_whole(&[(7, born)], Some(&dir)) } else { roster.scan(&[(7, born)], Some(&dir), |_| None) }[0], None, None).account_id;
+        assert_eq!(look(false), None, "not its end yet");
+        assert_eq!(look(true).as_deref(), Some("usr_00000000-0000-4000-8000-00000000000b"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R5: what a log said counts while it can be read, whole: one cut shorter is read anew, one that cannot be read says nothing.
+    #[test]
+    fn a_log_that_cannot_be_read_any_more_proves_nothing() {
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("output_log_2026-11-15_13-38-44.txt");
+        std::fs::write(&log, OWN_LOG).unwrap();
+        let start = std::fs::metadata(&log).unwrap().created().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64 - 1_000_000_000;
+        let mut roster = Roster::default();
+        let mut look = || {
+            let run = roster.scan(&[(37076, start)], Some(&dir), |_| None).remove(0);
+            let shown = shown(&run, None, None);
+            (shown.account_id, shown.logged)
+        };
+        let mine = Some("usr_1339e525-d75d-4832-9104-98dd89287681".to_string());
+        assert_eq!(look(), (mine.clone(), true));
+        assert_eq!(look(), (mine.clone(), true));
+        // Cut shorter: what it said is gone with it.
+        std::fs::write(&log, OWN_LOG.split_inclusive('\n').take(9).collect::<String>()).unwrap();
+        assert_eq!(look().0, None);
+        std::fs::write(&log, OWN_LOG).unwrap();
+        assert_eq!(look(), (mine.clone(), true));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(look().0, None, "not to be read");
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(look().0, mine, "read again, from its start");
+        }
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(look(), (None, false), "gone");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

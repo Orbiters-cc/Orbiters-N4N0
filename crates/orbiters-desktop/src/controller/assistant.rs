@@ -107,6 +107,15 @@ impl Controller {
         }
     }
 
+    /// Play with `place` of the previous instances: for the VRChat account on show while it is the one signed in. With nobody
+    /// signed in it goes as Play does, but on a computer with several profiles, where a private place goes for an account only
+    /// (`vrchat_launch::way`).
+    fn rejoin(&self, place: Place, mode: LaunchMode) -> Home {
+        let play = Home::Play { mode, destination: Some(place) };
+        let live = self.vrchat_session().is_some_and(|session| matches!(&self.view().launcher.source, Source::SignedIn { user_id, .. } if *user_id == session.by.user));
+        if live || self.launcher_several(self.launcher_machine_now().as_ref(), None) { self.as_shown(play) } else { play }
+    }
+
     /// VR when SteamVR runs and VRChat is not in desktop mode, as Play's own choice reads it.
     fn launch_mode(&self) -> LaunchMode {
         let s = self.view();
@@ -212,8 +221,7 @@ impl Controller {
                 let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
                 let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                 let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                // For the account on show: a private one goes to no other's game (`vrchat_launch::handing`).
-                self.launcher_action(self.as_shown(Home::Play { mode: self.launch_mode(), destination: Some(place) }));
+                self.launcher_action(self.rejoin(place, self.launch_mode()));
                 done()
             }
             // Home's Where: the places VRChat can start at, as its cards offer them (REQUEST20 2).
@@ -245,7 +253,7 @@ impl Controller {
                         let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
                         let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                         let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                        self.launcher_action(self.as_shown(Home::Play { mode, destination: Some(place) }));
+                        self.launcher_action(self.rejoin(place, mode));
                     }
                     (Some(_), "new") => {
                         let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();

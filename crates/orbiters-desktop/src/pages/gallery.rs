@@ -2284,7 +2284,7 @@ fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<Vec<usize>> 
 fn is_current(world: &WorldState, e: &Entry) -> bool {
     world.in_world && world.world_id.as_ref() == Some(&e.world_id) && e.instance.is_some() && world.instance == e.instance
 }
-fn join_available(current: bool, alive: Option<bool>) -> bool {
+pub(crate) fn join_available(current: bool, alive: Option<bool>) -> bool {
     alive.unwrap_or(current)
 }
 

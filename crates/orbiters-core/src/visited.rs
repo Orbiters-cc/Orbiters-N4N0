@@ -100,11 +100,16 @@ impl History {
                 return Self::default();
             }
         };
-        let (history, dropped) = crate::json_lenient::<Self>(&text);
+        let (mut history, dropped) = crate::json_lenient::<Self>(&text);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("visited worlds: {} left out of {}, the file kept as {aside:?}", dropped.join(", "), path.display());
         }
+        // (0.3.9-dev.46 and dev.47 kept an instance once for each account that joined it: the last join of it is the one kept.)
+        let mut seen = std::collections::HashSet::new();
+        history.instances.reverse();
+        history.instances.retain(|v| seen.insert(v.location()));
+        history.instances.reverse();
         history
     }
 
@@ -962,6 +967,24 @@ mod tests {
         assert_eq!(h.worlds[A].visits.len(), 2, "the earlier visit and the log's, each once");
         assert!(!h.read_logs(&dir), "read once");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// What 0.3.9-dev.46 and dev.47 kept (whose each visit is, an instance once for each account) is read whole: every instance is
+    /// listed, with and without an account, each once, its last join.
+    #[test]
+    fn a_history_that_kept_accounts_is_read_with_every_instance_once() {
+        let path = std::env::temp_dir().join(format!("orbiters-visits-dev47-{}.json", uuid::Uuid::new_v4()));
+        let row = |instance: &str, at: u64, account: Option<&str>| match account {
+            Some(account) => format!(r#"{{"world_id":"{A}","instance":"{instance}","at":{at},"account":"{account}"}}"#),
+            None => format!(r#"{{"world_id":"{A}","instance":"{instance}","at":{at}}}"#),
+        };
+        let rows = [row("1~private(usr_x)", 10, None), row("2~friends(usr_x)", 20, Some("usr_x")), row("3~region(eu)", 30, Some("usr_y")), row("2~friends(usr_x)", 40, Some("usr_y"))].join(",");
+        std::fs::write(&path, format!(r#"{{"worlds":{{"{A}":{{"name":"A","visits":[10,20,30,40],"by":{{"usr_x":[20]}}}}}},"logs":{{"x":9}},"last":null,"instances":[{rows}],"instances_read":true,"accounts_read":true,"accounts":{{"x":"usr_x"}}}}"#)).unwrap();
+        let h = History::load(&path);
+        assert_eq!(h.instances.iter().map(|v| (v.instance.as_str(), v.at)).collect::<Vec<_>>(), [("1~private(usr_x)", 10), ("3~region(eu)", 30), ("2~friends(usr_x)", 40)]);
+        assert_eq!(h.worlds[A].visits, [10, 20, 30, 40]);
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&*path.file_name().unwrap().to_string_lossy())).count(), 1, "nothing of it is damaged");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

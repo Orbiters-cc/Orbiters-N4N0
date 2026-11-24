@@ -300,10 +300,6 @@ pub struct GameProfile {
     pub profile: u32,
     /// The account last seen signed in on it (its VRChat log said so), when known.
     pub account: Option<String>,
-    /// That account's VRChat user id, when its own log said it (and has not said since that nobody is signed in): whose private
-    /// places the profile may be started into ([`crate::vrchat_launch::handing`]).
-    #[serde(default)]
-    pub account_id: Option<String>,
     /// A VRChat runs on it now, in this mode.
     pub running: Option<LaunchMode>,
     /// Started from here a moment ago and not yet seen running.
@@ -447,6 +443,12 @@ pub enum Action {
     RequestInvite { to: String },
     /// Boop; `emoji` from [`LauncherState::boop_emojis`], `None` for a plain boop.
     Boop { to: String, emoji: Option<String> },
+    /// Try again to go to the place that was not delivered ([`Joining`]).
+    JoinAgain,
+    /// Give that place up.
+    ForgetJoining,
+    /// Take a profile that does not run off Home's choice: what is remembered of it here goes (VRChat's own sign-in on it stays).
+    ForgetProfile { profile: u32 },
     /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
     /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play it on `profile`.
@@ -487,12 +489,11 @@ pub enum Notice {
 pub enum SentKind { Boop, RequestInvite, Launch, Join }
 
 /// Whom what VRChat said of an account was verified for: the Orbiters identity's epoch, the member (a digest of the
-/// environment and their id, when known) and the VRChat account.
+/// environment and their id: never anything else) and the VRChat account.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VerifiedFor {
     pub epoch: u64,
-    #[serde(default)]
-    pub member: Option<String>,
+    pub member: String,
     #[serde(default)]
     pub user: Option<String>,
 }
@@ -546,6 +547,70 @@ pub struct LauncherState {
     /// offers to set aside).
     #[serde(default)]
     pub start_trouble: Option<StartTrouble>,
+    /// This computer uses several VRChat profiles ([`crate::vrchat_launch::several`]): a private place goes to a VRChat in two
+    /// steps ([`crate::vrchat_launch::way`]).
+    #[serde(default)]
+    pub several_profiles: bool,
+    /// The place VRChat was started for without it, until it is delivered; or why it was not.
+    #[serde(default)]
+    pub joining: Option<Joining>,
+    /// VRChat ran and its log could not be read: whose a VRChat is cannot be told here.
+    #[serde(default)]
+    pub log_trouble: Option<LogTrouble>,
+}
+
+/// A private place on its way to a VRChat that was started without it ([`LauncherState::joining`]): its world's name alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Joining {
+    /// The world's name; empty when it is not known.
+    pub world: String,
+    pub step: JoinStep,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinStep {
+    /// VRChat is starting.
+    #[default]
+    Starting,
+    /// VRChat is up: until its log says who is signed in.
+    SigningIn,
+    /// It was not delivered. The place is kept: [`Action::JoinAgain`].
+    Failed(JoinFailure),
+}
+
+/// Why a place was not delivered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinFailure {
+    /// VRChat is signed in with another account.
+    OtherAccount,
+    /// VRChat did not say in time who is signed in.
+    NoProof,
+    /// VRChat's log cannot be read.
+    Log(LogTrouble),
+    /// VRChat did not come up, or closed before it could be.
+    Gone,
+    /// Another start came in its place, or VRChat came up on another profile.
+    Elsewhere,
+    /// It did not go, in the person's words.
+    NotSent(String),
+}
+
+impl JoinFailure {
+    /// Whose the VRChat is could not be told: the way left is the account's own invite to itself, which is nobody else's.
+    pub fn unproven(&self) -> bool {
+        matches!(self, JoinFailure::NoProof | JoinFailure::Log(_))
+    }
+}
+
+/// Why VRChat's log cannot be read ([`LauncherState::log_trouble`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogTrouble {
+    /// VRChat's folder is not there.
+    NoFolder,
+    /// It may not be read: this folder or file.
+    Denied(String),
+    /// VRChat runs and writes none.
+    NotWritten,
 }
 
 /// The engine's files no VRChat starts on, on a Mac ([`LauncherState::engine_trouble`]).
@@ -692,10 +757,6 @@ pub fn sample() -> LauncherState {
     LauncherState {
         verified_for: None,
         source: Source::SignedIn { user_id: me.id.clone(), name: me.name.clone() },
-        profiles: vec![
-            GameProfile { profile: 0, account: Some("Sample Me".into()), account_id: Some(me.id.clone()), ..GameProfile::default() },
-            GameProfile { profile: 1, account: Some("Sample Alt".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000a1".into()), ..GameProfile::default() },
-        ],
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },
         me: Some(me),
         friends,
@@ -708,10 +769,17 @@ pub fn sample() -> LauncherState {
         notice: None,
         loading: false,
         unresolved: 0,
+        profiles: vec![
+            GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
+            GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
+        ],
         engine_setup: None,
         picture_lost: None,
         engine_trouble: None,
         start_trouble: None,
+        several_profiles: true,
+        joining: None,
+        log_trouble: None,
         mine: Some(MyProfile {
             loaded: true,
             bio: "Made-up account for drawing the page.

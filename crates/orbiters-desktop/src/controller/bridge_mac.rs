@@ -769,7 +769,7 @@ impl Game for MacGame {
         let _started = ctl.launcher_started_lock();
         // What tells a drawing game from a frozen window is the program's (its records' `shown`): no start without it.
         cli_fit(mac)?;
-        own_account(&ctl, &machine)?;
+        one_profile(&ctl, &machine)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
         let at = SystemTime::now();
@@ -792,8 +792,8 @@ impl Game for MacGame {
         let Some(mac) = machine.as_mac() else { return Ok(()) };
         // The program must have what the bridge relies on before anything is made for a start.
         cli_fit(mac)?;
-        // Nor a private instance for a game that is not known to be its account's.
-        own_account(&ctl, &machine)?;
+        // Nor a private instance for a game it would not go to with its start.
+        one_profile(&ctl, &machine)?;
         self.release_start();
         let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
         // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
@@ -1065,16 +1065,17 @@ fn records_failure(trouble: &super::obelisk_cli::Trouble) -> Failure {
     }
 }
 
-/// The bridge's private instances are the account's signed in in the app: they go to a VRChat proven to be that account's only
-/// (the rule Home's starts are held to, `vrchat_launch::handing`).
-fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>) -> Result<(), Failure> {
-    if ctl.launcher_is_own(machine.as_ref(), 0) {
+/// The bridge's private instances go with a start (the rule Home's starts are held to, `vrchat_launch::way`), which needs a Mac with
+/// one VRChat profile. Where there are several, a private place is delivered after the start, as an invite a person takes in the
+/// game: there is nobody to take the bridge's.
+fn one_profile(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>) -> Result<(), Failure> {
+    if !ctl.launcher_several(machine.as_ref(), Some(0)) {
         return Ok(());
     }
     Err(Failure::new(
-        "game_account_unknown",
-        "VRChat's default profile on this Mac is not known to be signed in with the VRChat account signed in in Orbiters - N4N0, so no private instance goes to it.", // i18n: not shown (an AI client reads it)
-        "Ask the person to press Play on Home on profile 0, without a place, and to sign in there with that account once; then try again.", // i18n: not shown
+        "several_profiles",
+        "Several VRChat profiles are used on this Mac: a private instance goes to no VRChat that has not said whose account is signed in, so it goes with no start of the bridge's. Nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Tell the person: they can go to a private place from Orbiters - N4N0's Home, which starts VRChat first and invites them once it is proven to be their account's.", // i18n: not shown
     ))
 }
 
@@ -1117,10 +1118,24 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
+        assert!(version_at_least("0.1.13", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.12", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);
+    }
+
+    /// R6: no start of the bridge's carries its place where there are several profiles, refused before anything is made; with the
+    /// default profile alone, and again once the last other one is off Home's choice, it starts as it always did.
+    #[test]
+    fn the_bridge_starts_none_where_there_are_several_profiles() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let machine = ctl.launcher_machine_now();
+        let code = || one_profile(&ctl, &machine).err().map(|f| f.code);
+        assert_eq!(code(), None);
+        ctl.update_settings(|s| s.launch.profiles.extend([(0, "Sample Me".into()), (1, "Sample Alt".into())]));
+        assert_eq!(code(), Some("several_profiles"));
+        ctl.launcher_do(orbiters_core::launcher::Action::ForgetProfile { profile: 1 });
+        assert_eq!(code(), None);
     }
 
     /// The verifier's cases: the launcher is the record's only with its recorded birth (a reused process number is not),

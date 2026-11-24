@@ -173,8 +173,7 @@ impl Controller {
         let server = Server::current();
         self.account_runtime.lock().unwrap().starting = true;
         if let Ok(saved) = account::read_saved(server) {
-            self.vrchat_login.lock().unwrap().at_launch = saved.as_ref().map(|a| super::vrchat_login::Owner::of(server, a));
-            self.account_at_launch(server, saved.map(|a| a.username));
+            self.account_saved_at_launch(server, saved);
         }
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("account".into()).spawn(move || loop {
@@ -200,6 +199,12 @@ impl Controller {
             self.read_account(server, modified, !changed && refused_due);
         }
         self.assistant_access_refresh();
+    }
+
+    /// What the account's file says at launch, before the account thread installed it.
+    pub(super) fn account_saved_at_launch(&self, server: Server, saved: Option<Account>) {
+        self.vrchat_login.lock().unwrap().at_launch = super::vrchat_login::Owner::of(&super::identity::Identity::of(server, saved.as_ref()));
+        self.account_at_launch(server, saved.map(|a| a.username));
     }
 
     /// The account as its file says at launch (`Some(username)`: one is saved), while it is still `Unknown`.
@@ -1066,7 +1071,7 @@ mod tests {
 impl Controller {
     pub(super) fn test_account(&self) {
         self.account_runtime.lock().unwrap().read = Some((Server::current(), None));
-        self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+        self.account_runtime.lock().unwrap().account = Some(Account { token: "fake".into(), user: Some("1".into()), username: Some("tester".into()), avatar_url: None, features: None });
         self.update(|s| { s.account.state = AccountState::SignedIn { username: "tester".into() }; s.account.development = Server::current() == Server::Development; });
     }
 

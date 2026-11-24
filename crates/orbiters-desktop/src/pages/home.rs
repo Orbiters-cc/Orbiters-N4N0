@@ -2104,7 +2104,7 @@ mod tests {
         // VRChat runs on the profile chosen: Where stands aside (the Play part says it runs).
         let mut running = data.clone();
         running.game = Game::Running(LaunchMode::Vr);
-        running.profiles = vec![GameProfile { profile: 0, account: Some("Sample Me".into()), account_id: Some(me.clone()), running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        running.profiles = vec![GameProfile { profile: 0, account: Some("Sample Me".into()), running: Some(LaunchMode::Vr), starting: None, assistant: false }];
         stage(&mut h, &running, true);
         h.settle();
         assert!(orbiters_ui::widgets::control(&h.ctx, "Lantern Garden").is_none());
@@ -2630,7 +2630,7 @@ mod tests {
         let stage = |h: &mut Harness, data: &mut orbiters_core::launcher::LauncherState, game: Game, on: Option<u32>| {
             let mode = |p: u32, up: bool| (up && on == Some(p)).then_some(LaunchMode::Desktop);
             let (running, starting) = (matches!(game, Game::Running(_)), matches!(game, Game::Starting(_)));
-            let profile = |p: u32, account: &str| GameProfile { profile: p, account: Some(account.into()), account_id: Some(if p == 0 { me.clone() } else { format!("usr_alt_{p}") }), running: mode(p, running), starting: mode(p, starting), assistant: false };
+            let profile = |p: u32, account: &str| GameProfile { profile: p, account: Some(account.into()), running: mode(p, running), starting: mode(p, starting), assistant: false };
             data.profiles = vec![profile(0, &name), profile(1, "Sample Alt")];
             data.game = game;
             h.state.launcher_mut().set_data(Arc::new(data.clone()));
@@ -2668,24 +2668,26 @@ mod tests {
         assert!(orbiters_ui::widgets::control(&h.ctx, "Play in VR").is_none() && orbiters_ui::widgets::control(&h.ctx, "Play in Desktop").is_none());
     }
 
-    /// Tenth verification: a profile whose account is not known (one just added, one seen only by a name) is offered nothing
-    /// private, whatever the account signed in has been sent; Home says so, with a start that goes to no place. A public place
-    /// stays, and so do the private ones of a profile proven to be the account's own.
+    /// K2: where several profiles are used, an invite is offered on any profile not known to be another's (VRChat starts without it,
+    /// and it is delivered once its account is proven), and an event's private place too; on one known to be another's, as
+    /// before, not the invite. While VRChat's log cannot be read, nothing private is, and Home says that this is why and what to
+    /// do.
     #[test]
-    fn a_profile_whose_account_is_not_known_is_offered_nothing_private() {
+    fn a_private_place_is_offered_on_any_profile_not_known_to_be_another_s() {
         use crate::pages::launcher::destinations::EventSoon;
-        use orbiters_core::launcher::{Action, Game, GameProfile, InstanceAccess, Invite, InviteKind, Place, Source};
+        use orbiters_core::launcher::{Action, Game, GameProfile, InstanceAccess, Invite, InviteKind, LogTrouble, Place, Source};
         orbiters_ui::widgets::watch_controls();
         let play = if cfg!(target_os = "macos") { "Play VRChat" } else { "Play in Desktop" };
         let mut h = where_signed_in(Vec::new());
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
-        let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
+        let Source::SignedIn { name, .. } = data.source.clone() else { panic!("the sample is signed in") };
         data.game = Game::NotRunning;
+        data.several_profiles = true;
         data.profiles = vec![
-            GameProfile { profile: 0, account: Some(name.clone()), account_id: Some(me.clone()), ..Default::default() },
-            // Only a name was ever seen on it, the account's own: a label, no proof.
-            GameProfile { profile: 1, account: Some(name.clone()), ..Default::default() },
-            GameProfile { profile: 2, account: Some("Sample Alt".into()), account_id: Some("usr_alt".into()), ..Default::default() },
+            GameProfile { profile: 0, account: Some(name.clone()), ..Default::default() },
+            // Nobody was ever seen on it: whose it is, the VRChat started there will say.
+            GameProfile { profile: 1, ..Default::default() },
+            GameProfile { profile: 2, account: Some("Sample Alt".into()), ..Default::default() },
         ];
         data.invites = vec![Invite {
             id: "synthetic".into(),
@@ -2704,7 +2706,7 @@ mod tests {
                 region: "eu".into(),
             }),
         }];
-        h.state.launcher_mut().set_data(Arc::new(data));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
         let event = |id: &str, n: u32, title: &str, instance: &str| EventSoon { id: id.into(), title: title.into(), starts_at: 1_795_000_000, location: Some(format!("wrld_00000000-0000-4000-8000-00000000090{n}:{instance}")), ..Default::default() };
         let events = vec![event("a", 1, "Sample open meetup", "5~region(eu)"), event("b", 2, "Sample closed meetup", "6~group(grp_x)~groupAccessType(members)~region(eu)")];
         h.state.launcher_mut().places.stand_in(Some(crate::pages::launcher::destinations::HistoryView::default()), events, None, true);
@@ -2714,36 +2716,99 @@ mod tests {
         };
         let there = |h: &Harness, label: &str| orbiters_ui::widgets::control(&h.ctx, label).is_some();
         let own = format!("0 · {name}");
-        let labelled = format!("1 · {name}");
-        // Its own profile: the invite is accepted on it.
-        click(&mut h, &own);
-        assert!(there(&h, "Sample private room") && !there(&h, "Start without a place"));
-        click(&mut h, "Sample private room");
-        click(&mut h, play);
-        assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { invite, profile: 0, .. }] if invite == "synthetic"));
-        // Profiles whose account is not known.
-        for (chip, profile) in [(labelled.as_str(), 1), ("Another profile", 3)] {
-            click(&mut h, &own);
-            click(&mut h, "Sample private room");
+        for (chip, profile) in [(own.as_str(), 0), ("Profile 1", 1), ("Another profile", 3)] {
             click(&mut h, chip);
-            assert!(!there(&h, "Sample private room"), "{chip}: the invite is not offered");
-            assert!(there(&h, "Start without a place"), "{chip}");
+            click(&mut h, "Sample private room");
             click(&mut h, play);
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: p, .. }] if *p == profile), "{chip}: chosen before, it does not go");
-            click(&mut h, "Start without a place");
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: p, .. }] if *p == profile), "{chip}");
-            // An event's private instance neither (its invite arrives at home); a public one goes.
-            click(&mut h, "Sample closed meetup");
-            click(&mut h, play);
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { .. }]), "{chip}");
+            assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { invite, profile: p, .. }] if invite == "synthetic" && *p == profile), "{chip}");
             click(&mut h, "Sample open meetup");
             click(&mut h, play);
             assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, profile: p, .. }] if destination.instance_id == "5~region(eu)" && *p == profile), "{chip}");
             click(&mut h, "Home world");
         }
-        // Another account's: nothing private either, and nothing to sign in for.
+        // (Without the invite, its card fits.)
+        let invites = std::mem::take(&mut data.invites);
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        click(&mut h, "Profile 1");
+        click(&mut h, "Sample closed meetup");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, profile: 1, .. }] if destination.instance_id.starts_with("6~group")));
+        click(&mut h, "Home world");
+        data.invites = invites;
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        // Another account's: nothing private (an event's invite arrives at home).
         click(&mut h, "2 · Sample Alt");
-        assert!(!there(&h, "Sample private room") && !there(&h, "Start without a place"));
+        assert!(!there(&h, "Sample private room"));
+        click(&mut h, "Sample closed meetup");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: 2, .. }]));
+        // VRChat's log cannot be read: nothing private, on any profile; a public place and VRChat's own start stay.
+        click(&mut h, &own);
+        for trouble in [LogTrouble::NoFolder, LogTrouble::NotWritten, LogTrouble::Denied("/x/VRChat".into())] {
+            data.log_trouble = Some(trouble.clone());
+            h.state.launcher_mut().set_data(Arc::new(data.clone()));
+            h.settle();
+            assert!(!there(&h, "Sample private room"), "{trouble:?}");
+            click(&mut h, "Sample open meetup");
+            click(&mut h, play);
+            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, .. }] if destination.instance_id == "5~region(eu)"), "{trouble:?}");
+            click(&mut h, "Home world");
+            click(&mut h, play);
+            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: 0, .. }]), "{trouble:?}");
+            let said = crate::pages::launcher::destinations::log_words(&trouble);
+            assert!(said.contains("Private places need VRChat's log") && (said.contains("turn on Logging") || said.contains("allow Orbiters - N4N0 to read")), "why, and what to do: {said}");
+        }
+        // One profile alone: as it always was, whatever its log.
+        data.several_profiles = false;
+        data.profiles = vec![GameProfile::default()];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        click(&mut h, "Sample private room");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { profile: 0, .. }]));
+    }
+
+    /// R1: while a private place is on its way Home says both steps, then why it was not delivered, with another try; × gives it
+    /// up. Nothing of it is said where no place is.
+    #[test]
+    fn home_says_both_steps_of_a_private_place_and_why_it_was_not_delivered() {
+        use crate::pages::launcher::hero::joining_line;
+        use orbiters_core::launcher::{Action, Game, JoinFailure, JoinStep, Joining, LaunchMode, LogTrouble};
+        orbiters_ui::widgets::watch_controls();
+        let joining = |step: JoinStep| Joining { world: "Sample private room".into(), step };
+        assert!(joining_line(&joining(JoinStep::Starting)).starts_with("Starting VRChat, then joining Sample private room"));
+        assert!(joining_line(&joining(JoinStep::SigningIn)).contains("who is signed in"));
+        for (why, says) in [
+            (JoinFailure::OtherAccount, "another account"),
+            (JoinFailure::NoProof, "did not say in time"),
+            (JoinFailure::Gone, "closed too soon"),
+            (JoinFailure::Log(LogTrouble::NotWritten), "Logging"),
+            (JoinFailure::NotSent("no network".into()), "no network"),
+        ] {
+            let line = joining_line(&joining(JoinStep::Failed(why)));
+            assert!(line.starts_with("Sample private room was not joined") && line.contains(says), "{line}");
+        }
+        let mut h = where_signed_in(Vec::new());
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        let there = |h: &Harness, label: &str| orbiters_ui::widgets::control(&h.ctx, label).is_some();
+        let again = |h: &Harness| h.recorder.launcher.lock().unwrap().iter().map(|a| if let Action::As { action, .. } = a { (**action).clone() } else { a.clone() }).filter(|a| matches!(a, Action::JoinAgain | Action::ForgetJoining)).collect::<Vec<_>>();
+        data.game = Game::Starting(LaunchMode::Desktop);
+        data.joining = Some(joining(JoinStep::Starting));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        assert!(!there(&h, "Try again"), "on its way");
+        data.game = Game::Running(LaunchMode::Desktop);
+        data.joining = Some(joining(JoinStep::Failed(JoinFailure::OtherAccount)));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        click(&mut h, "Try again");
+        assert_eq!(again(&h), [Action::JoinAgain]);
+        data.joining = None;
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        assert!(!there(&h, "Try again"));
     }
 
     /// Tenth verification: Join into a game that runs asks for that game alone (none is started for it if it is gone by then):
@@ -2756,10 +2821,10 @@ mod tests {
         for starting in [false, true] {
             let mut h = where_signed_in(Vec::new());
             let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
-            let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!() };
+            let Source::SignedIn { name, .. } = data.source.clone() else { panic!() };
             let (running, start) = ((!starting).then_some(LaunchMode::Desktop), starting.then_some(LaunchMode::Desktop));
             data.game = if starting { Game::Starting(LaunchMode::Desktop) } else { Game::Running(LaunchMode::Desktop) };
-            data.profiles = vec![GameProfile { profile: 0, account: Some(name), account_id: Some(me), running, starting: start, assistant: false }, GameProfile { profile: 2, ..Default::default() }];
+            data.profiles = vec![GameProfile { profile: 0, account: Some(name), running, starting: start, assistant: false }, GameProfile { profile: 2, ..Default::default() }];
             h.state.launcher_mut().set_data(Arc::new(data));
             h.settle();
             let sent = |h: &Harness| h.recorder.launcher.lock().unwrap().iter().map(|a| if let Action::As { action, .. } = a { (**action).clone() } else { a.clone() }).collect::<Vec<_>>();
@@ -2771,6 +2836,56 @@ mod tests {
             click(&mut h, "Join");
             assert!(sent(&h).iter().any(|a| matches!(a, Action::JoinRunning { .. })) && !sent(&h).iter().any(|a| matches!(a, Action::Play { .. } | Action::PlayAt { .. })), "{:?}", sent(&h));
         }
+    }
+
+    /// R4: the × of the chip chosen takes a profile that does not run off Home's choice (the default one's, one VRChat runs on, and
+    /// one not chosen have none), also one only added here.
+    #[test]
+    fn a_profile_s_chip_can_be_taken_off_the_choice() {
+        use orbiters_core::launcher::{Action, Game, GameProfile, LaunchMode, Source};
+        orbiters_ui::widgets::watch_controls();
+        let mut h = where_signed_in(Vec::new());
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        let Source::SignedIn { name, .. } = data.source.clone() else { panic!("the sample is signed in") };
+        data.game = Game::NotRunning;
+        data.profiles = vec![GameProfile { profile: 0, account: Some(name.clone()), ..Default::default() }, GameProfile { profile: 1, account: Some("Sample Alt".into()), ..Default::default() }];
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        let x_of = |h: &mut Harness, label: &str| {
+            let (chip, _) = orbiters_ui::widgets::control(&h.ctx, label).unwrap_or_else(|| panic!("{label} is drawn"));
+            h.press(pos2(chip.right() - 14.0, chip.center().y));
+            h.release(pos2(chip.right() - 14.0, chip.center().y));
+            h.settle();
+        };
+        let forgot = |h: &mut Harness| -> Vec<u32> {
+            let sent: Vec<Action> = h.recorder.launcher.lock().unwrap().drain(..).map(|a| if let Action::As { action, .. } = a { *action } else { a }).collect();
+            sent.into_iter().filter_map(|a| if let Action::ForgetProfile { profile } = a { Some(profile) } else { None }).collect()
+        };
+        let own = format!("0 · {name}");
+        x_of(&mut h, &own);
+        x_of(&mut h, &own);
+        assert_eq!(forgot(&mut h), [0u32; 0], "the default one stays");
+        // The first press chooses it; its × then takes it off.
+        x_of(&mut h, "1 · Sample Alt");
+        assert_eq!(forgot(&mut h), [0u32; 0]);
+        x_of(&mut h, "1 · Sample Alt");
+        assert_eq!(forgot(&mut h), [1]);
+        // VRChat runs on it: no ×.
+        data.game = Game::Running(LaunchMode::Desktop);
+        data.profiles[1].running = Some(LaunchMode::Desktop);
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        x_of(&mut h, "1 · Sample Alt");
+        x_of(&mut h, "1 · Sample Alt");
+        assert_eq!(forgot(&mut h), [0u32; 0]);
+        // One added here and never started.
+        data.game = Game::NotRunning;
+        data.profiles.truncate(1);
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        click(&mut h, "Another profile");
+        x_of(&mut h, "Profile 1");
+        assert!(orbiters_ui::widgets::control(&h.ctx, "Profile 1").is_none(), "gone at once");
     }
 
     fn frames_until(h: &mut Harness, what: &str, done: impl Fn(&mut Harness) -> bool) {
@@ -3088,8 +3203,7 @@ mod tests {
         let visit = row_of(41, "Harbor Market");
         let mut h = chosen_and_aged(vec![visit.clone()]);
         let mut data = (*h.state.launcher_mut().data).clone();
-        let orbiters_core::launcher::Source::SignedIn { user_id: me, .. } = data.source.clone() else { panic!() };
-        let plain = |profile| GameProfile { profile, account: None, account_id: Some(me.clone()), running: None, starting: None, assistant: false };
+        let plain = |profile| GameProfile { profile, account: None, running: None, starting: None, assistant: false };
         data.profiles = vec![plain(0), plain(1)];
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
@@ -3118,8 +3232,6 @@ mod tests {
         let mut data = (*h.state.launcher_mut().data).clone();
         let Source::SignedIn { name, .. } = data.source.clone() else { panic!() };
         data.source = Source::SignedIn { user_id: other.into(), name: name.clone() };
-        // (the profile is that account's, by its own log)
-        data.profiles[0].account_id = Some(other.into());
         h.state.launcher_mut().set_data(Arc::new(data));
         h.snap.vrchat_login.user = Some(vrchat_user(other, &name));
         frames_until(&mut h, "chosen", |h| h.state.launcher_mut().places.chosen_key().is_some());
@@ -3139,7 +3251,7 @@ mod tests {
         let before = h.state.launcher_mut().data.clone();
         let mut data = (*before).clone();
         data.game = Game::Running(LaunchMode::Vr);
-        data.profiles = vec![GameProfile { profile: 0, account: None, account_id: None, running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        data.profiles = vec![GameProfile { profile: 0, account: None, running: Some(LaunchMode::Vr), starting: None, assistant: false }];
         h.state.launcher_mut().set_data(Arc::new(data));
         let_pass(&mut h, 700);
         h.state.launcher_mut().set_data(before);
@@ -3407,7 +3519,7 @@ mod tests {
         // Another account's profile chosen under Play: this account cannot start VRChat there, Request as before.
         let (mut h, _, _) = friends_in_instances(false);
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
-        data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000ee".into()), running: None, starting: None, assistant: false }];
+        data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), running: None, starting: None, assistant: false }];
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
         open_profile_of(&mut h, "Nova Sample");
@@ -3702,7 +3814,7 @@ mod tests {
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
         let Source::SignedIn { name, .. } = data.source.clone() else { unreachable!() };
         data.game = Game::Running(LaunchMode::Vr);
-        data.profiles = vec![GameProfile { profile: 0, account: Some(name), account_id: None, running: Some(LaunchMode::Vr), starting: None, assistant: false }];
+        data.profiles = vec![GameProfile { profile: 0, account: Some(name), running: Some(LaunchMode::Vr), starting: None, assistant: false }];
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
         open_profile_of(&mut h, "Nova Sample");

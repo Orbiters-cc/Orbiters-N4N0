@@ -202,7 +202,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
 /// ("launcher-where"; its second page; a card chosen; a new instance's kind changed and its list open; one being
 /// made), only places visited, nothing visited yet, the history still read, signed out of VRChat, no pictures
 /// (offline), a chosen card gone, an event waiting for its invite, and a profile of another account chosen.
-pub(super) const WHERE: [&str; 16] = [
+pub(super) const WHERE: [&str; 19] = [
     "launcher-where",
     "launcher-where-page-2",
     "launcher-where-selected",
@@ -218,6 +218,9 @@ pub(super) const WHERE: [&str; 16] = [
     "launcher-where-waiting",
     "launcher-where-other-profile",
     "launcher-where-unknown-profile",
+    "launcher-joining",
+    "launcher-joining-failed",
+    "launcher-where-no-log",
     "launcher-small-where",
 ];
 
@@ -519,11 +522,7 @@ fn data(name: &str) -> LauncherState {
         s.engine_setup = Some(orbiters_core::launcher::EngineSetup::Game { game: true, percent: Some(62) });
     }
     // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
-    let own = match &s.source {
-        orbiters_core::launcher::Source::SignedIn { user_id, .. } => user_id.clone(),
-        _ => String::new(),
-    };
-    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), account_id: Some(if profile == 0 { own.clone() } else { format!("usr_00000000-0000-4000-8000-0000000000a{profile}") }), running, starting, assistant: false };
+    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };
     // A Mac has the desktop game alone, one at a time: the same choice, none startable beside it.
     let mode = if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop };
     match name {
@@ -538,6 +537,18 @@ fn data(name: &str) -> LauncherState {
         "launcher-where-unknown-profile" => {
             s.profiles = vec![profile(0, "Sample Me", None, None), GameProfile { profile: 1, ..GameProfile::default() }];
         }
+        // A private place in two steps, and why it was not delivered; VRChat's log that cannot be read.
+        "launcher-joining" | "launcher-joining-failed" => {
+            use orbiters_core::launcher::{JoinFailure, JoinStep, Joining};
+            let failed = name == "launcher-joining-failed";
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", failed.then_some(mode), (!failed).then_some(mode))];
+            s.game = if failed { Game::Running(mode) } else { Game::Starting(mode) };
+            s.joining = Some(Joining { world: "Lantern Garden".into(), step: if failed { JoinStep::Failed(JoinFailure::OtherAccount) } else { JoinStep::Starting } });
+        }
+        "launcher-where-no-log" => {
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", None, None)];
+            s.log_trouble = Some(orbiters_core::launcher::LogTrouble::NotWritten);
+        }
         "launcher-profile-starting" if orbiters_core::vrchat_launch::SEVERAL_HERE => {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, Some(LaunchMode::Desktop))];
@@ -548,6 +559,7 @@ fn data(name: &str) -> LauncherState {
         }
         _ => {}
     }
+    s.several_profiles = s.profiles.len() > 1;
     // The account's own profile (REQUEST15 7b): pictures to choose among, what VRChat answered.
     if let Some(mine) = s.mine.as_mut() {
         mine.avatar_picture = "sample://icon/60".into();

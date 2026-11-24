@@ -1,24 +1,36 @@
 # Unity projects and avatar setup
 
-The **Unity projects** page, immediately after Capture, manages the VCC/ALCOM project list and VPM packages without
-requiring Creator Companion to run. **Capture → Add to my avatar** uses the same project and avatar inventory.
+The **Unity projects** page, immediately after Capture, manages Unity projects and VPM packages without requiring
+Creator Companion to run. **Capture → Add to my avatar** uses the same project and avatar inventory.
 
 `crates/orbiters-projects` owns discovery, Unity text-scene inspection, VPM operations, templates, thumbnails, the
 setup-request contract, projects' sizes (`size`), the hidden list (`hidden`) and Blender links (`blender`). The
 desktop's `pages/projects` holds the window's background jobs and their snapshots. Disk walks, file dialogs, Git,
 package resolution, copies, thumbnail decoding and HTTP requests run off the egui thread.
 
-## Shared storage
+## Storage: Orbiters' own, and theirs read
 
-VPM uses `vrc-get-vpm` 0.0.17 with `experimental-project-management`, including its pure Rust LiteDB implementation.
-Reads combine `VRChatCreatorCompanion/settings.json`'s `userProjects` and `vcc.liteDb`; registration/removal updates
-both through the library. Removing a project only removes registration. Discovery never migrates or saves that
-store, and never calls upstream's `UnityProject::load`, which can repair a project's manifest.
+**Nothing of Creator Companion's or ALCOM's is ever written, locked or repaired.** Their folder
+(`%LOCALAPPDATA%/VRChatCreatorCompanion`) is only read (`theirs`: shared with every other use, a file being written or
+damaged being an answer of its own), and `tests/no_write.rs` does every action of the page on every state their files can
+be in and compares the whole folder, bytes and times. `no_write_tests` reads all the app's code for a writer of the
+library's (vrc-get's settings and database connection). Until 0.3.8 the page registered projects in their files: that
+could cost other projects their entries, or another program its save.
 
-Repositories, optional headers and caches use the same VCC environment. Repository visibility uses ALCOM's
-`vrc-get/gui-config.json` `guiHiddenRepositories`; disabled packages are excluded from dependency resolution. VCC
-does not understand this ALCOM UI preference. Public suggestions come from `/vpm/known` and `/vpm/public`; a failed
-suggestion request leaves manual repository management available and offers Retry.
+- **The page's list** is `%LOCALAPPDATA%/Orbiters/unity-gallery.json` (`gallery`): what was added, duplicated or created
+  in Orbiters, and what was removed there (it stays off, whoever else lists it, until it is added there again). Written
+  whole or not at all, under a lock, with the copy before its last change beside it (`own`). It is put together with
+  `settings.json`'s `userProjects` and `vcc.liteDb`'s projects, as they are now; while those cannot be read, or are gone,
+  as they last were (`unity-gallery-shared.json`; before the first reading, the last scan of the page).
+- **Add to Creator Companion**, on a project they do not list: opens its folder and copies its path for their Add
+  Existing Project. Neither documents a way to be given a folder (VCC's `vcc://` links add repositories).
+- **VPM** (`vrc-get-vpm` 0.0.17: its resolver and installer) works in Orbiters' own environment, `%LOCALAPPDATA%/Orbiters/vpm`
+  (`repos`): settings made from theirs at each use and from what was added, removed, turned on and off in Orbiters
+  (`repositories.json`), the listings and the packages. What they downloaded already is copied rather than downloaded again.
+
+ALCOM's `vrc-get/gui-config.json` `guiHiddenRepositories` says which repositories are off, until one is turned on or off
+here; those turned off are excluded from dependency resolution. Public suggestions come from `/vpm/known` and
+`/vpm/public`; a failed suggestion request leaves manual repository management available and offers Retry.
 
 The page lists every repository version, filters pre-releases on request, installs/upgrades/downgrades/removes with
 the upstream resolver and restores missing locked packages. Conflicting changes are refused before application.
@@ -29,9 +41,7 @@ folder.
 
 ## Without Creator Companion
 
-Nothing on the page needs VCC, as with ALCOM. The VPM folder (`%LOCALAPPDATA%/VRChatCreatorCompanion`) starts empty;
-VPM creates what it needs in VCC's own format (`settings.json` and its vrc-get backup, `vcc.liteDb`, `Repos/`), so a
-VCC or ALCOM installed later lists the same projects and repositories. VRChat's official and curated repositories,
+Nothing on the page needs VCC, and nothing makes its folder. VRChat's official and curated repositories,
 never downloaded on a first start, are downloaded on the first look at the packages. The built-in templates come with
 the app (above). `ORBITERS_VCC_DIR` points the app at another VPM folder and `ORBITERS_VCC_APP_DIR` at another VCC
 installation (empty: none); tests use them with temporary folders (`tests/no_vcc.rs`; `cargo test -p
@@ -146,7 +156,7 @@ to begin with), Copy Library too (off: Unity imports everything again on the fir
 what Library takes, said with its size), about how much the copy takes against the room left on that disk (Duplicate
 is refused when it does not fit), and a note that the copy's scenes keep their blueprint IDs, so uploads from it update
 the same avatars and worlds unless the IDs are detached in the Pipeline Manager. The copy's progress shows in the
-dialog with Stop copying; then its packages are restored, it is registered in the list VCC and ALCOM share and it opens
+dialog with Stop copying; then its packages are restored, it is on the page's list and it opens
 in the panel.
 
 ## Size on disk

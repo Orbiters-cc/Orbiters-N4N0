@@ -35,7 +35,11 @@ pub struct Project {
     pub unity: String,
     pub kind: Kind,
     pub modified: u64,
+    /// On the page's list ([`crate::gallery`]), not only found on a disk.
     pub registered: bool,
+    /// Creator Companion or ALCOM list it.
+    #[serde(default)]
+    pub shared: bool,
     pub missing: bool,
     pub avatars: Vec<Avatar>,
     /// The worlds its scenes were uploaded as (`wrld_…` blueprint IDs), with My World's thumbnail when it keeps one.
@@ -50,6 +54,9 @@ pub struct Scan {
     pub full_scan_ms: u64,
     pub directories: u64,
     pub warnings: Vec<String>,
+    /// Creator Companion's or ALCOM's project list is on this computer.
+    #[serde(default)]
+    pub companion: bool,
     #[serde(skip)]
     pub status: String,
     #[serde(default)]
@@ -161,6 +168,7 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         kind,
         modified,
         registered,
+        shared: false,
         avatars,
         worlds: vec![],
     }
@@ -326,15 +334,11 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
         notify(scan);
     };
-    let shared = crate::runtime()?.block_on(crate::vpm::registered(&crate::vcc_dir()));
-    let registered = match shared {
-        Ok(p) => p,
-        Err(e) => {
-            scan.warnings = vec![e.to_string()];
-            scan.projects.iter().filter(|p| p.registered).map(|p| p.path.clone()).collect()
-        }
-    };
-    let known: HashSet<_> = registered.iter().map(|p| key(p)).collect();
+    let listed = crate::gallery::listed(&crate::vcc_dir());
+    scan.warnings = listed.warning.iter().cloned().collect();
+    scan.companion = listed.companion;
+    let registered = listed.projects;
+    let known = Known { listed: registered.iter().map(|p| key(p)).collect(), shared: listed.shared };
     let mut found: HashMap<String, PathBuf> = scan.projects.iter().map(|p| (key(&p.path), p.path.clone())).collect();
     for p in &registered {
         found.insert(key(p), p.clone());
@@ -421,15 +425,25 @@ fn in_dot_folder(path: &Path) -> bool {
     path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
 
-fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, registered: &HashSet<String>) {
+/// What is known of the projects from the lists, by [`key`].
+#[derive(Default)]
+struct Known {
+    /// On Orbiters' page ([`crate::gallery`]).
+    listed: HashSet<String>,
+    /// Creator Companion or ALCOM list it.
+    shared: HashSet<String>,
+}
+
+fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
     let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
     scan.projects = found
         .iter()
         // A project found earlier inside a dot-folder (a cache from before PROJECTS-9, a seed) is not proposed again;
         // one the person registered stays wherever it is.
-        .filter(|(k, p)| registered.contains(*k) || (is_project(p) && !in_dot_folder(p)))
+        .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && !in_dot_folder(p)))
         .map(|(k, p)| {
-            let mut project = describe(p.clone(), registered.contains(k), &mut scan.scenes);
+            let mut project = describe(p.clone(), known.listed.contains(k), &mut scan.scenes);
+            project.shared = known.shared.contains(k);
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
         })
@@ -640,25 +654,13 @@ fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
-    // Editors VCC or ALCOM found or were given (outside Unity Hub's lists).
-    // VCC's database can be held by VCC itself: a wait there must not hold up Open in Unity, whose answer is then "not
-    // installed" as for any version not in the lists above.
-    let version = version.to_string();
-    let vcc = vcc.to_path_buf();
-    crate::within(std::time::Duration::from_secs(5), move || {
-        crate::runtime().ok()?.block_on(async {
-            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(vcc.into());
-            let db = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await.ok()?;
-            let wanted = vrc_get_vpm::version::UnityVersion::parse(&version)?;
-            db.get_unity_installations()
-                .iter()
-                .filter(|u| u.version() == Some(wanted))
-                .filter_map(|u| u.path().map(PathBuf::from))
-                .map(|p| if cfg!(target_os = "macos") { editor_program(p) } else { p })
-                .find(|p| p.is_file())
-        })
-    })
-    .flatten()
+    // Editors VCC or ALCOM found or were given (outside Unity Hub's lists), as their database records them.
+    let wanted = vrc_get_vpm::version::UnityVersion::parse(version)?;
+    crate::theirs::editors(vcc)
+        .into_iter()
+        .filter(|(v, _)| vrc_get_vpm::version::UnityVersion::parse(v) == Some(wanted))
+        .map(|(_, p)| if cfg!(target_os = "macos") { editor_program(p) } else { p })
+        .find(|p| p.is_file())
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {
@@ -892,9 +894,9 @@ mod retained_lists {
         let mine = make(".hidden/Mine");
         let plain = make("Projects/Plain");
         let found: HashMap<String, PathBuf> = [&stand_in, &mine, &plain].into_iter().map(|p| (key(p), p.clone())).collect();
-        let registered: HashSet<String> = [key(&mine)].into_iter().collect();
+        let known = Known { listed: [key(&mine)].into_iter().collect(), ..Default::default() };
         let mut scan = Scan::default();
-        rebuild(&mut scan, &found, &registered);
+        rebuild(&mut scan, &found, &known);
         let mut kept: Vec<PathBuf> = scan.projects.iter().map(|p| p.path.clone()).collect();
         kept.sort();
         let mut wanted = vec![mine.clone(), plain.clone()];

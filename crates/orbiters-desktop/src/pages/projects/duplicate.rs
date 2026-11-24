@@ -202,7 +202,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
             tr("The copy's scenes keep their blueprint IDs: uploading from it updates the same avatars on VRChat. To upload new ones, detach the blueprint IDs in the scenes' Pipeline Manager first.")
         },
     );
-    note(ui, tr("Temp, Logs, UserSettings and Git history stay behind. Installed dependencies are included automatically, and VCC and ALCOM list the copy too."));
+    note(ui, tr("Temp, Logs, UserSettings and Git history stay behind. Installed dependencies are included automatically. The copy is listed in Orbiters; add its folder in VCC or ALCOM to see it there too."));
 }
 
 pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
@@ -235,7 +235,7 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
             // Ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
             let later = if keep.library { vec![] } else { templates::packages_only_in_library(&path) };
             if later.is_empty() {
-                Ok(Outcome::Added(path, tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+                Ok(Outcome::Added(path, tr!("{name} is ready, in Orbiters' list", name = name)))
             } else {
                 Ok(Outcome::Added(path, tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
             }

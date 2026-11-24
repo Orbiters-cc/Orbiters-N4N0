@@ -701,6 +701,7 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
         world_name: name,
         taken: controller::unix(p.posted_at.as_deref().unwrap_or_default()),
         instance: None,
+        owners: Vec::new(),
         source_key: None,
         people: if author.is_empty() { Vec::new() } else { vec![author] },
         local: None,

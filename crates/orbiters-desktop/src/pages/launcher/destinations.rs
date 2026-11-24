@@ -35,6 +35,7 @@ use super::{access_icon, access_name, cover_uv, region_tag, Cx, State};
 use crate::controller::vrchat_data::{Request, Response, Scope, WorldError};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
 use orbiters_core::launcher::{Action, GameProfile, InstanceAccess, Invite, InviteKind, LaunchMode, Place, Source};
+use orbiters_core::visited::Viewer;
 use orbiters_core::vrchat_api::{CreateAccess, InstanceRegion};
 use orbiters_i18n::{tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
@@ -203,12 +204,11 @@ pub struct HistoryView {
 }
 
 impl HistoryView {
-    /// What of `history` is shown where `acting` are the VRChat accounts acting: nothing of another's.
-    pub fn of(history: &orbiters_core::visited::History, now: u64, acting: &[String]) -> Self {
-        let mut frequent = frequent(history, now, acting);
+    /// Of `history`, as the one who looks is shown it (`History::seen_by`).
+    pub fn of(history: &orbiters_core::visited::History, now: u64) -> Self {
+        let mut frequent = frequent(history, now);
         frequent.truncate(FREQUENT_MAX + 4);
-        let last = history.instances.iter().rev().find(|v| orbiters_core::visited::shown_to(v.account.as_deref(), acting));
-        let last = last.filter(|v| orbiters_core::vrchat_launch::is_destination(&v.world_id, &v.instance)).map(|v| LastVisit {
+        let last = history.instances.iter().rev().find(|v| !v.instance.is_empty()).filter(|v| orbiters_core::vrchat_launch::is_destination(&v.world_id, &v.instance)).map(|v| LastVisit {
             world_id: v.world_id.clone(),
             instance: v.instance.clone(),
             name: history.worlds.get(&v.world_id).and_then(|w| w.name.clone()).unwrap_or_default(),
@@ -228,7 +228,7 @@ impl HistoryView {
 /// The worlds of `history` by how much they were visited lately: every visit of the last [`FREQUENT_DAYS`] days counts
 /// `0.5 ^ (age in days / HALF_LIFE_DAYS)`; the most first, then the one visited last, then by id. Worlds with no such
 /// visit, and what is not a world's id, are left out.
-pub fn frequent(history: &orbiters_core::visited::History, now: u64, acting: &[String]) -> Vec<Frequent> {
+pub fn frequent(history: &orbiters_core::visited::History, now: u64) -> Vec<Frequent> {
     let from = now.saturating_sub(FREQUENT_DAYS * DAY);
     let mut out: Vec<Frequent> = history
         .worlds
@@ -236,7 +236,7 @@ pub fn frequent(history: &orbiters_core::visited::History, now: u64, acting: &[S
         .filter(|(id, _)| orbiters_core::vrchat_log::is_world_id(id))
         .filter_map(|(id, w)| {
             // A clock set back leaves visits "in the future": they count as today's.
-            let counted: Vec<u64> = w.shown_to(acting).filter(|t| *t >= from).collect();
+            let counted: Vec<u64> = w.visits.iter().copied().filter(|t| *t >= from).collect();
             if counted.is_empty() {
                 return None;
             }
@@ -295,8 +295,8 @@ pub struct Inputs<'a> {
     pub selection: Option<(&'a Selection, &'a Asker)>,
     /// The one chosen before, still offered there while another card is chosen.
     pub offer: Option<&'a Offer>,
-    /// The VRChat accounts acting: what another one visited is not offered.
-    pub acting: &'a [String],
+    /// Who looks: what another account visited is not offered.
+    pub viewer: &'a Viewer,
 }
 
 /// The cards, in the order shown: Home, then the invites, the events, the last instance and the places visited most,
@@ -313,7 +313,7 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
         // Chosen before: chosen again, it is asked about again; signed out, a new one of its world.
         None => i.offer.map(|o| (&o.visit, &o.origin, i.me.is_some_and(|me| super::previous::may_rejoin(&o.visit, &o.origin, me)).then_some(false))),
     };
-    let shown = shown.filter(|(v, ..)| orbiters_core::visited::shown_to(v.account.as_deref(), i.acting));
+    let shown = shown.filter(|(v, ..)| i.viewer.lists(v.account.as_deref()));
     if let Some((v, origin, proven)) = shown {
         let place = orbiters_core::launcher_feed::place(&v.location(), &v.name);
         let own = v.region();
@@ -602,7 +602,7 @@ pub fn event_location(o: &orbiters_core::community::Overview) -> Option<String> 
 #[derive(Default)]
 pub struct Places {
     /// The history's, and whom it was read for (none said: handed in).
-    history: Shared<(Option<Vec<String>>, HistoryView)>,
+    history: Shared<(Option<Viewer>, HistoryView)>,
     events: Shared<Vec<EventSoon>>,
     /// Whether the last instance is open: its location, whom it was asked for, what VRChat said and when.
     open: Shared<(String, Asker, Option<bool>, Instant)>,
@@ -782,8 +782,9 @@ pub(super) struct Who {
     pub elsewhere: bool,
     /// Signed in, and VRChat's log cannot be read here: nothing private goes to a VRChat.
     pub log: Option<orbiters_core::launcher::LogTrouble>,
-    /// The VRChat accounts acting: the one signed in here (or on its way back), and the one last seen on the profile chosen.
-    pub acting: Vec<String>,
+    /// Who looks: as everywhere in the app ([`crate::state::Snapshot::viewer`]), and as the account last seen on the profile
+    /// chosen.
+    pub viewer: Viewer,
     /// The friends list is this account's own, read with its session (its invites can be offered).
     pub feed: bool,
 }
@@ -791,10 +792,11 @@ pub(super) struct Who {
 pub(super) fn who(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> Who {
     use crate::controller::vrchat_login::Presence;
     let login = &cx.snap.vrchat_login;
-    let several = state.data.several_profiles;
+    let several = !state.data.single_profile;
     // Whose the profile chosen is, as last seen: a label, which only spares a start on another's.
     let labelled = profile.and_then(|p| p.account_id.as_deref()).filter(|id| !id.is_empty());
-    let log = state.data.log_trouble.clone().filter(|_| several);
+    // (With the default profile alone to choose, whose its VRChat is may still be told by the account's own invite.)
+    let log = state.data.log_trouble.clone().filter(|_| several && state.data.profiles.len() > 1);
     let own = |id: &str| !several || labelled.is_none_or(|labelled| labelled == id);
     let presence = login.presence();
     let verified = login.user.as_ref().filter(|_| login.allowed);
@@ -812,16 +814,19 @@ pub(super) fn who(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> Who 
         Some(s) => s.signed_in && me.is_some(),
         None => me.is_some() && login.allowed,
     };
-    let acts = login.user.as_ref().or(login.known.as_ref()).map(|u| u.id.clone()).or(handed_in);
-    let mut acting: Vec<String> = acts.into_iter().chain(labelled.map(str::to_owned)).collect();
-    acting.dedup();
+    let mut viewer = Viewer { single: !several, ..cx.snap.viewer() };
+    if let Some(id) = handed_in {
+        viewer.acting = vec![id];
+    }
+    viewer.acting.extend(labelled.map(str::to_owned));
+    viewer.acting.dedup();
     let elsewhere = signed_in.as_deref().is_some_and(|id| !own(id));
-    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere, log: log.filter(|_| signed_in.is_some() && !elsewhere), acting, feed }
+    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere, log: log.filter(|_| signed_in.is_some() && !elsewhere), viewer, feed }
 }
 
 /// The cards now, after the reads have been started where due.
 fn cards(ui: &Ui, cx: &Cx, state: &mut State, who: &Who) -> (Vec<Suggestion>, bool) {
-    let (me, feed, acting) = (who.me.as_deref(), who.feed, &who.acting);
+    let (me, feed, viewer) = (who.me.as_deref(), who.feed, &who.viewer);
     let ctx = ui.ctx().clone();
     let now = state.now();
     // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
@@ -830,22 +835,22 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, who: &Who) -> (Vec<Suggestion>, bo
         {
             // Read for other accounts: read again now, and nothing of it is shown.
             let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
-            if s.value.as_ref().is_some_and(|(of, _)| of.as_ref().is_some_and(|of| of != acting)) {
+            if s.value.as_ref().is_some_and(|(of, _)| of.as_ref().is_some_and(|of| of != viewer)) {
                 s.at = None;
                 s.value = None;
             }
         }
-        let of = acting.clone();
+        let of = viewer.clone();
         refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", move || {
-            let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-            let view = HistoryView::of(&history, orbiters_core::visited::now(), &of);
+            let history = orbiters_core::visited::History::load_for(&orbiters_core::visited::history_file(), &of);
+            let view = HistoryView::of(&history, orbiters_core::visited::now());
             Some((Some(of), view))
         });
         let server = orbiters_core::account::Server::current();
         refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some(read_events(server, events_now())));
     }
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
-    let history = history.filter(|(of, _)| of.as_ref().is_none_or(|of| of == acting)).map(|(_, view)| view);
+    let history = history.filter(|(of, _)| of.as_ref().is_none_or(|of| of == viewer)).map(|(_, view)| view);
     let loading = match &state.places.staged {
         Some(s) => s.loading,
         None => history.is_none(),
@@ -883,7 +888,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, who: &Who) -> (Vec<Suggestion>, bo
     // Invites are the friends list's: offered only when it is this account's own, read with its session.
     let invites: &[Invite] = if feed { &state.data.invites } else { &[] };
     let desk = &state.places.desk;
-    let inputs = Inputs { now, invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer(), acting };
+    let inputs = Inputs { now, invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer(), viewer };
     (suggestions(&inputs), loading)
 }
 
@@ -930,7 +935,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     state.places.previous.can_create = can_create;
     state.places.previous.signed_in_elsewhere = who.elsewhere;
     state.places.previous.log = who.log.clone();
-    state.places.previous.acting = who.acting.clone();
+    state.places.previous.look_as(&who.viewer);
     state.places.previous.connecting = who.connecting;
     // The account and the profile chosen now first: an answer for another counts for nothing.
     state.places.desk.set_asker(Asker { account: me.clone(), profile });
@@ -1679,8 +1684,11 @@ mod tests {
         cards.iter().map(|c| c.key.clone()).collect()
     }
 
+    /// Nobody acts, on a computer with one profile: everything is listed.
+    static ANYONE: Viewer = Viewer { acting: Vec::new(), single: true };
+
     fn inputs<'a>(invites: &'a [Invite], events: &'a [EventSoon], history: Option<&'a HistoryView>, last_open: Option<bool>, me: Option<&'a str>) -> Inputs<'a> {
-        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me, selection: None, offer: None, acting: &[] }
+        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me, selection: None, offer: None, viewer: &ANYONE }
     }
 
     #[test]
@@ -1776,7 +1784,7 @@ mod tests {
         h.worlds.insert(world(3), WorldVisits { name: Some("C".into()), visits: days(&[33, 32, 31, 30, 29]), ..Default::default() });
         h.worlds.insert(world(4), WorldVisits { name: Some("D".into()), visits: days(&[1]), ..Default::default() });
         h.worlds.insert("not a world".into(), WorldVisits { name: Some("x".into()), visits: days(&[1, 1, 1, 1]), ..Default::default() });
-        let f = frequent(&h, now, &[]);
+        let f = frequent(&h, now);
         assert_eq!(f.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["B", "C", "D", "A"]);
         assert_eq!(f.iter().map(|f| f.visits).collect::<Vec<_>>(), [3, 5, 1, 1], "only the last 60 days count");
         // B: 0.5^(6/14) + 0.5^(3/14) + 0.5^(1/14)
@@ -1787,16 +1795,16 @@ mod tests {
         h.worlds.insert(world(1), WorldVisits { name: None, visits: vec![now - 3 * DAY], ..Default::default() });
         h.worlds.insert(world(2), WorldVisits { name: None, visits: vec![now - 3 * DAY], ..Default::default() });
         h.worlds.insert(world(3), WorldVisits { name: None, visits: vec![now - 61 * DAY], ..Default::default() });
-        let f = frequent(&h, now, &[]);
+        let f = frequent(&h, now);
         assert_eq!(f.len(), 2);
         assert_eq!(f[0].world_id, world(1), "same score and time: by id");
         // The view: the last instance joined, with its world's name.
         h.record_instance(&world(2), "5~hidden(usr_x)~region(jp)", now - 100);
         h.instances.push(InstanceVisit { world_id: "wrld_bad".into(), instance: "1".into(), at: 0, account: None });
-        let v = HistoryView::of(&h, now, &[]);
+        let v = HistoryView::of(&h, now);
         assert_eq!(v.last, None, "the last one is not VRChat's own: none");
         h.instances.pop();
-        let v = HistoryView::of(&h, now, &[]);
+        let v = HistoryView::of(&h, now);
         assert_eq!(v.last.as_ref().map(|l| l.instance.as_str()), Some("5~hidden(usr_x)~region(jp)"));
         assert_eq!(v.region(), "jp");
         assert_eq!(HistoryView::default().region(), "us");
@@ -1835,14 +1843,14 @@ mod tests {
         visit(&mut h, 2, "2~region(eu)", now - 300, Some(Y));
         visit(&mut h, 3, "3~friends(usr_z)~region(eu)", now - 200, Some(X));
         let names = |acting: &[&str]| {
-            let acting: Vec<String> = acting.iter().map(|a| a.to_string()).collect();
-            let view = HistoryView::of(&h, now, &acting);
+            let viewer = Viewer { acting: acting.iter().map(|a| a.to_string()).collect(), single: acting.is_empty() };
+            let view = HistoryView::of(&h.clone().seen_by(&viewer), now);
             (view.last.map(|l| l.world_id), view.frequent.iter().map(|f| f.world_id.clone()).collect::<Vec<_>>())
         };
         assert_eq!(names(&[X]), (Some(world(3)), vec![world(3), world(1)]));
         assert_eq!(names(&[Y]), (Some(world(2)), vec![world(2), world(1)]), "the newest is X's: not Y's to see");
-        assert_eq!(names(&[X, Y]), (Some(world(1)), vec![world(1)]), "one signed in here, the other on the profile chosen");
-        assert_eq!(names(&[]).0, Some(world(3)), "nobody acts: the worlds of this computer");
+        assert_eq!(names(&[X, Y]), (None, vec![world(1)]), "one signed in here, the other on the profile chosen: nobody's world, not its place");
+        assert_eq!(names(&[]).0, Some(world(3)), "nobody acts, and one profile alone: the worlds of this computer");
         // Rejoined only as whose it is; nobody's private one by nobody.
         assert!(rejoinable_as(Some(X), "3~friends(usr_z)", X) && !rejoinable_as(Some(X), "3~friends(usr_z)", Y) && !rejoinable_as(Some(X), "3~region(eu)", Y));
         assert!(!rejoinable_as(None, "1~friends(usr_z)", X) && rejoinable_as(None, "1~region(eu)", X));
@@ -1855,8 +1863,8 @@ mod tests {
         d.choose(Destination::Instance { key: v.key(), visit: v.clone() }, Origin::Previous);
         d.go_home();
         let offered = |acting: &str| {
-            let acting = [acting.to_string()];
-            let cards = suggestions(&Inputs { selection: Some((d.selection(), d.asker())), offer: d.offer(), acting: &acting, ..inputs(&[], &[], None, None, Some(acting[0].as_str())) });
+            let viewer = Viewer { acting: vec![acting.to_string()], single: false };
+            let cards = suggestions(&Inputs { selection: Some((d.selection(), d.asker())), offer: d.offer(), viewer: &viewer, ..inputs(&[], &[], None, None, Some(acting)) });
             cards.iter().any(|c| c.key == v.key())
         };
         assert!(offered(X) && !offered(Y));

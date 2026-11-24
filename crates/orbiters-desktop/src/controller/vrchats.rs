@@ -15,10 +15,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// VRChat makes its log within a minute of starting (measured 2 s: process 12:25:13, log 12:25:15).
-const AFTER_START_S: u64 = 60;
+/// VRChat makes its log within a minute of starting (measured 2 s: process 12:25:13, log 12:25:15). In nanoseconds, as the
+/// system keeps both times: a log of the same second may be from before the process, and then is not its own.
+const AFTER_START: u64 = 60_000_000_000;
 /// Read from a log per look at most.
 const CHUNK: u64 = 4 << 20;
+/// How many looks a log is read whole in at most.
+const WHOLE_LOOKS: usize = 64;
 
 /// What a VRChat's log said of it so far.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -96,10 +99,15 @@ pub(crate) fn signed_out(text: &str) -> Option<bool> {
     (asked.is_some() || signed.is_some()).then(|| asked > signed)
 }
 
-/// Whether a log made at `created` can be that of a VRChat started at `start` (Unix seconds): made at its start or after it,
+/// Whether a log made at `created` can be that of a VRChat started at `start` (Unix nanoseconds): made at its start or after it,
 /// within the minute. One made before it is another's, however little.
-fn made_by(start: u64, created: u64) -> bool {
-    start > 0 && created >= start && created <= start + AFTER_START_S
+pub(super) fn made_by(start: u64, created: u64) -> bool {
+    start > 0 && created >= start && created <= start + AFTER_START
+}
+
+/// When the file was made (Unix nanoseconds), as precisely as the system says.
+pub(super) fn made_at(meta: &std::fs::Metadata) -> Option<u64> {
+    u64::try_from(meta.created().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos()).ok()
 }
 
 /// Which log is which VRChat's: a process keeps the log it was matched with while both last (and it is that process's: a number
@@ -161,13 +169,13 @@ pub(crate) fn certain(procs: &[(u32, u64)], logs: &[(PathBuf, u64)], matched: &H
 }
 
 /// One VRChat from what its log said (the driver the bridge's sessions know is put in by [`sessions::Sides::set_roster`]).
-pub(crate) fn run_of(pid: u32, started_s: u64, log: Option<&Path>, facts: Option<&LogFacts>) -> VrchatRun {
+pub(crate) fn run_of(pid: u32, started_ns: u64, log: Option<&Path>, facts: Option<&LogFacts>) -> VrchatRun {
     let empty = LogFacts::default();
     let facts = facts.unwrap_or(&empty);
     let (profile, osc, bridge) = facts.marks();
     VrchatRun {
         pid,
-        started_s,
+        started_ns,
         profile,
         profile_known: facts.args.is_some(),
         log: log.map(Path::to_path_buf),
@@ -195,6 +203,17 @@ pub(crate) struct Roster {
 }
 
 impl Roster {
+    /// [`Self::scan`] until every log is read up to its end, or it is too much to read now.
+    pub(crate) fn scan_whole(&mut self, procs: &[(u32, u64)], dir: Option<&Path>) -> Vec<VrchatRun> {
+        for _ in 0..WHOLE_LOOKS {
+            let runs = self.scan(procs, dir, |_| None);
+            if !self.facts.values().any(|facts| facts.behind) {
+                return runs;
+            }
+        }
+        self.scan(procs, dir, |_| None)
+    }
+
     /// Every VRChat in `procs` (process, start), with what its log in `dir` said. `camera` asks a VRChat's OSCQuery tree
     /// whether its camera is open (only asked with two VRChats or more: the picker's mark).
     pub(crate) fn scan(&mut self, procs: &[(u32, u64)], dir: Option<&Path>, camera: impl Fn(SocketAddr) -> Option<bool>) -> Vec<VrchatRun> {
@@ -217,7 +236,7 @@ impl Roster {
             })
             .filter_map(|e| {
                 let meta = e.metadata().ok()?;
-                let created = meta.created().ok()?.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
+                let created = made_at(&meta)?;
                 let fresh = meta.modified().ok()?.elapsed().is_ok_and(|d| d < Duration::from_secs(180));
                 (created >= earliest || (earliest == 0 && fresh)).then(|| (e.path(), created))
             })
@@ -247,11 +266,12 @@ impl Roster {
             if std::mem::take(&mut facts.unread) {
                 *facts = LogFacts::default();
             }
-            let (text, consumed) = read_log_from(log, facts.read_to, CHUNK);
+            let from = facts.read_to;
+            let (text, consumed) = read_log_from(log, from, CHUNK);
             facts.read_to += consumed;
             facts.read(&text);
-            // (A line still being written is no more than this.)
-            facts.behind = len.is_ok_and(|len| len.saturating_sub(facts.read_to) > 64 << 10);
+            // Read up to its end: what is left is a line still being written.
+            facts.behind = len.is_ok_and(|len| len - from > CHUNK);
         }
         let mut runs: Vec<VrchatRun> = procs
             .iter()
@@ -267,7 +287,7 @@ impl Roster {
                 run.camera = run.query.and_then(&camera);
             }
         }
-        runs.sort_by_key(|r| (r.started_s, r.pid));
+        runs.sort_by_key(|r| (r.started_ns, r.pid));
         runs
     }
 }
@@ -674,6 +694,45 @@ mod tests {
         assert_eq!((m.len(), certain(&[(99, 0)], &one(1002), &m).len()), (1, 0));
     }
 
+    /// The verifier's check: a log made 10.110 s into a minute is not that of a VRChat born at 10.880 s, the same second.
+    #[test]
+    fn a_log_of_the_same_second_from_before_a_vrchat_is_not_its_own() {
+        const SECOND: u64 = 1_000_000_000;
+        let (born, log) = (10 * SECOND + 880_000_000, |at: u64| vec![(PathBuf::from("x"), at)]);
+        let none = HashMap::new();
+        let before = log(10 * SECOND + 110_000_000);
+        let matched = match_logs(&[(7, born)], &before, &none);
+        assert!(matched.is_empty() && certain(&[(7, born)], &before, &matched).is_empty());
+        let after = log(10 * SECOND + 880_000_100);
+        let matched = match_logs(&[(7, born)], &after, &none);
+        assert_eq!(certain(&[(7, born)], &after, &matched), [7]);
+        // From the file itself: a process born a moment after it was made has none.
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        std::fs::write(&path, OWN_LOG).unwrap();
+        let made = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let proven = |born: u64| shown(&Roster::default().scan_whole(&[(7, born)], Some(&dir))[0], None, None).account_id.is_some();
+        assert!(proven(made) && proven(made - 2 * SECOND) && !proven(made + 100));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A log longer than a look reads is read whole before whose it is counts: the sign-in at its end, not the one at its start.
+    #[test]
+    fn a_long_log_proves_nothing_before_its_end_is_read() {
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        let filler = format!("{}\n", "x".repeat(1023)).repeat((CHUNK / 1024) as usize);
+        std::fs::write(&path, [OWN_LOG, &filler, "2026.11.15 13:39:00 Debug      -  [Authentication - x] Preforming post login checks for Sample (usr_00000000-0000-4000-8000-00000000000b)\n"].concat()).unwrap();
+        let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let mut roster = Roster::default();
+        let mut look = |whole: bool| shown(&if whole { roster.scan_whole(&[(7, born)], Some(&dir)) } else { roster.scan(&[(7, born)], Some(&dir), |_| None) }[0], None, None).account_id;
+        assert_eq!(look(false), None, "not its end yet");
+        assert_eq!(look(true).as_deref(), Some("usr_00000000-0000-4000-8000-00000000000b"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// R5: what a log said counts while it can be read, whole: one cut shorter is read anew, one that cannot be read says nothing.
     #[test]
     fn a_log_that_cannot_be_read_any_more_proves_nothing() {
@@ -681,7 +740,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("output_log_2026-11-15_13-38-44.txt");
         std::fs::write(&log, OWN_LOG).unwrap();
-        let start = std::fs::metadata(&log).unwrap().created().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() - 1;
+        let start = std::fs::metadata(&log).unwrap().created().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64 - 1_000_000_000;
         let mut roster = Roster::default();
         let mut look = || {
             let run = roster.scan(&[(37076, start)], Some(&dir), |_| None).remove(0);

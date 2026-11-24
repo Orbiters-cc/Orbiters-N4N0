@@ -149,12 +149,7 @@ pub trait Host: Send + Sync + 'static {
     }
     /// The previous instances this computer's menus show: none of another VRChat account's than the one connected in the app.
     fn previous_instances(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
-        orbiters_n4n0_core::invites::read_rows()
-    }
-    /// Whether Orbiters may be asked to invite the member's VRChat account to the previous instance `location` (a private one
-    /// of another account's, or nobody's, is not sent to it).
-    fn may_ask_orbiters(&self, _location: &str) -> bool {
-        true
+        orbiters_n4n0_core::invites::read_rows(&orbiters_core::visited::Viewer::default())
     }
     /// The VRChat account [`Host::invite_self`] would send from now (its user id), when one is connected.
     fn invite_account(&self) -> Option<String> {

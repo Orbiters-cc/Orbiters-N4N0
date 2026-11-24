@@ -66,7 +66,7 @@ pub struct State {
     card_homes: HashMap<String, Rect>,
     /// Screenshots: the share window opens on a fixture state (made-up friends, a share running), never a real share.
     stage_share: Option<&'static str>,
-    loaded: Option<(u64, PathBuf, u64)>,
+    loaded: Option<(u64, PathBuf, u64, orbiters_core::visited::Viewer)>,
     list: Job<Vec<VisitedWorld>>,
     worlds: Option<Vec<Arc<VisitedWorld>>>,
     query: String,
@@ -76,6 +76,8 @@ pub struct State {
     pictures: Option<Pictures>,
     open: Option<Open>,
     serial: u64,
+    /// Who looks.
+    viewer: orbiters_core::visited::Viewer,
     /// Uploads seen finished.
     finished: HashSet<u64>,
 }
@@ -84,8 +86,9 @@ impl State {
     fn prepare_share(&mut self, ctx: &egui::Context, root: PathBuf, paths: Vec<PathBuf>, public: bool, server: Server, origin: Option<(Rect, f32)>) {
         self.share_public = public;
         self.share_origin = origin;
+        let viewer = self.viewer.clone();
         self.share_prepare = Job::spawn(ctx, move || {
-            crate::controller::shares::local_entries(&root, server)
+            crate::controller::shares::local_entries(&root, server, &viewer)
                 .into_iter()
                 .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
                 .collect()
@@ -277,12 +280,17 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let page = ui.max_rect();
 
     // Reload when the library changes, the folder changes, or the page is entered again.
-    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
+    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit, cx.snap.viewer());
     if state.loaded.as_ref() != Some(&key) {
         let entered = state.loaded.as_ref().is_none_or(|k| k.2 != key.2);
+        // Another VRChat account acts: what was listed for the last one goes at once.
+        if state.loaded.as_ref().is_some_and(|k| k.3 != key.3 && !(k.3.single && key.3.single)) {
+            (state.worlds, state.shown, state.list) = (None, None, Job::default());
+        }
+        state.viewer = key.3.clone();
         state.loaded = Some(key);
-        let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(&ctx, move || worlds::load(&dir));
+        let (dir, viewer) = (cx.snap.settings.sessions_dir.clone(), state.viewer.clone());
+        state.list = Job::spawn(&ctx, move || worlds::load(&dir, &viewer));
         if entered {
             cx.ctl.request_maps();
         }
@@ -1032,8 +1040,9 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         state.share_origin = Some((origin, 10.0));
         let root = cx.snap.settings.sessions_dir.clone();
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        let viewer = state.viewer.clone();
         state.share_prepare = Job::spawn(&ctx, move || {
-            crate::controller::shares::local_entries(&root, server).into_iter().filter(|e| e.local.as_ref().is_some_and(|l| l.path() == dir)).collect()
+            crate::controller::shares::local_entries(&root, server, &viewer).into_iter().filter(|e| e.local.as_ref().is_some_and(|l| l.path() == dir)).collect()
         });
     }
 
@@ -1044,8 +1053,9 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         state.share_public = false;
         let root = cx.snap.settings.sessions_dir.clone();
         let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+        let viewer = state.viewer.clone();
         state.share_prepare = Job::spawn(&ctx, move || {
-            crate::controller::shares::local_entries(&root, server)
+            crate::controller::shares::local_entries(&root, server, &viewer)
                 .into_iter()
                 .filter(|e| e.local.as_ref().is_some_and(|l| paths.iter().any(|p| p == l.path())))
                 .collect()

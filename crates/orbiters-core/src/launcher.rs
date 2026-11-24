@@ -550,10 +550,10 @@ pub struct LauncherState {
     /// offers to set aside).
     #[serde(default)]
     pub start_trouble: Option<StartTrouble>,
-    /// This computer uses several VRChat profiles, as far as its own records say: a private place goes to a VRChat in two
-    /// steps ([`crate::vrchat_launch::way`]).
+    /// This computer uses VRChat's default profile alone, by all of the evidence there is ([`crate::vrchat_launch::Profiles`]):
+    /// elsewhere, and until it is known, a private place goes to a VRChat in two steps ([`crate::vrchat_launch::way`]).
     #[serde(default)]
-    pub several_profiles: bool,
+    pub single_profile: bool,
     /// The place VRChat was started for without it, until it is delivered; or why it was not.
     #[serde(default)]
     pub joining: Option<Joining>,
@@ -592,8 +592,17 @@ pub enum JoinFailure {
     Log(LogTrouble),
     /// VRChat did not come up, or closed before it could be.
     Gone,
+    /// Another start came in its place, or VRChat came up on another profile.
+    Elsewhere,
     /// It did not go, in the person's words.
     NotSent(String),
+}
+
+impl JoinFailure {
+    /// Whose the VRChat is could not be told: the way left is the account's own invite to itself, which is nobody else's.
+    pub fn unproven(&self) -> bool {
+        matches!(self, JoinFailure::NoProof | JoinFailure::Log(_))
+    }
 }
 
 /// Why VRChat's log cannot be read ([`LauncherState::log_trouble`]).
@@ -771,7 +780,7 @@ pub fn sample() -> LauncherState {
         picture_lost: None,
         engine_trouble: None,
         start_trouble: None,
-        several_profiles: false,
+        single_profile: false,
         joining: None,
         log_trouble: None,
         mine: Some(MyProfile {

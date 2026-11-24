@@ -937,9 +937,6 @@ pub(crate) struct SignedIn {
     out: bool,
 }
 
-/// A line still being written is no longer than this.
-const PARTIAL_LINE: u64 = 64 << 10;
-
 impl SignedIn {
     /// Reads what the held `file` gained, up to [`SCAN_AT_MOST`] a look, the rest at the next ones. A file cut shorter is
     /// read anew, and what it said before is forgotten.
@@ -966,7 +963,8 @@ impl SignedIn {
             None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
             None => {}
         }
-        self.whole = len.saturating_sub(self.read) <= PARTIAL_LINE;
+        // Read up to its end: what is left is a line still being written.
+        self.whole = (bytes.len() as u64) < SCAN_AT_MOST;
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
@@ -1010,7 +1008,7 @@ pub(crate) fn game_arguments(command: &[String]) -> Option<Vec<String>> {
 }
 
 /// A process's birth as a time.
-fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
+pub(super) fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::new(seconds, micros.saturating_mul(1000))
 }
 

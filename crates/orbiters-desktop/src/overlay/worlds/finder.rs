@@ -256,24 +256,39 @@ pub type VisitedWorld = (String, String, u64, usize);
 #[derive(Clone, Default)]
 pub struct Visited {
     state: Arc<Mutex<(Option<Instant>, Vec<VisitedWorld>, bool, u64)>>,
+    /// Who they were read for.
+    viewer: Arc<Mutex<orbiters_core::visited::Viewer>>,
 }
 
 /// Visited worlds the panel lists at most.
 const VISITED_MAX: usize = 240;
 
 impl Visited {
-    pub fn refresh(&self) {
+    /// Read for `viewer`: what was read for another goes at once.
+    pub fn refresh(&self, viewer: &orbiters_core::visited::Viewer) {
+        let changed = {
+            let mut of = self.viewer.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = *of != *viewer;
+            *of = viewer.clone();
+            changed
+        };
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if changed {
+            (s.0, s.1, s.3) = (None, Vec::new(), s.3 + 1);
+        }
         if s.2 || s.0.is_some_and(|at| at.elapsed() < Duration::from_secs(30)) {
             return;
         }
         s.2 = true;
-        let state = self.state.clone();
+        let (state, viewer) = (self.state.clone(), self.viewer.clone());
         let started = std::thread::Builder::new().name("3d-worlds-visited".into()).spawn(move || {
-            let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
+            let of = viewer.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let history = orbiters_core::visited::History::load_for(&orbiters_core::visited::history_file(), &of);
             let worlds = visited_worlds(&history);
+            let still = *viewer.lock().unwrap_or_else(|p| p.into_inner()) == of;
             let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-            *s = (Some(Instant::now()), worlds, false, s.3 + 1);
+            // Read for another than who looks now: read again.
+            *s = if still { (Some(Instant::now()), worlds, false, s.3 + 1) } else { (None, Vec::new(), false, s.3 + 1) };
         });
         if started.is_err() {
             s.2 = false;
@@ -552,6 +567,23 @@ mod tests {
         assert_eq!(launch_link(HOME, "1&ref=evil"), None);
         assert_eq!(web_link(HOME).unwrap(), format!("https://vrchat.com/home/world/{HOME}"));
         assert!(open_launch("https://example.com").is_err());
+    }
+
+    /// The verifier's case: what X alone visited is not named as Y, here, in the window's worlds, nor counted.
+    #[test]
+    fn another_account_s_visits_are_not_listed() {
+        use orbiters_core::visited::{History, Viewer};
+        let mut history = History::default();
+        history.record_by(&id(1), 10, Some("usr_x"));
+        history.record_by(&id(2), 20, Some("usr_x"));
+        history.record_by(&id(2), 30, Some("usr_y"));
+        history.record_by(&id(3), 5, None);
+        let viewer = |acting: &str| Viewer { acting: vec![acting.into()], single: false };
+        let listed = |acting: &str| visited_worlds(&history.clone().seen_by(&viewer(acting))).into_iter().map(|w| (w.0, w.2, w.3)).collect::<Vec<_>>();
+        assert_eq!(listed("usr_y"), [(id(2), 30, 1), (id(3), 5, 1)]);
+        assert_eq!(listed("usr_x"), [(id(2), 20, 1), (id(1), 10, 1), (id(3), 5, 1)]);
+        let window = |acting: &str| crate::worlds::gallery_from(std::path::Path::new("/nowhere"), Default::default(), &history, &viewer(acting)).into_iter().map(|w| (w.id, w.visits)).collect::<Vec<_>>();
+        assert_eq!(window("usr_y"), [(id(2), 1), (id(3), 1)]);
     }
 
     fn orbiters_desktop_public(instance: &str) -> bool {

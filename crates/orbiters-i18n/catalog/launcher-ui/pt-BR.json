@@ -137,5 +137,6 @@
   "{name} was not joined: VRChat is signed in as another account.": "{name} não foi acessado: o VRChat está conectado com outra conta.",
   "{name} was not joined: VRChat did not say in time who is signed in.": "{name} não foi acessado: o VRChat não disse a tempo quem está conectado.",
   "{name} was not joined: VRChat did not start, or closed too soon.": "{name} não foi acessado: o VRChat não iniciou ou fechou antes.",
-  "{name} was not joined: {reason}": "{name} não foi acessado: {reason}"
+  "{name} was not joined: {reason}": "{name} não foi acessado: {reason}",
+  "{name} was not joined: another VRChat start came in its place.": "{name} não foi acessado: outra inicialização do VRChat veio no lugar."
 }

@@ -144,8 +144,7 @@ impl MenuHost {
 
     /// Keeps the menu's picture of what the service knows.
     pub fn follow(&mut self, snap: &Snapshot) {
-        let login = &snap.vrchat_login;
-        self.0.act_as(login.user.as_ref().or(login.known.as_ref()).map(|u| u.id.clone()).into_iter().collect());
+        self.0.seen_by(snap.viewer());
         self.0.follow(&snap.n4n0, &snap.settings);
     }
 

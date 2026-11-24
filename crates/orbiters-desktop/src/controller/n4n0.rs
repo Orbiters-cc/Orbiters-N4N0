@@ -116,14 +116,7 @@ impl Host for Link {
     }
 
     fn previous_instances(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
-        let acting = self.with(|c| c.vrchat_acting()).unwrap_or_default();
-        orbiters_n4n0_core::invites::shown(orbiters_n4n0_core::invites::read_rows(), &acting)
-    }
-
-    fn may_ask_orbiters(&self, location: &str) -> bool {
-        let several = self.with(|c| c.view().launcher.several_profiles).unwrap_or(true);
-        let public = location.split_once(':').is_some_and(|(_, instance)| orbiters_core::vrchat_launch::is_public_instance(instance));
-        public || (!several && orbiters_n4n0_core::invites::goes_to_orbiters(&orbiters_n4n0_core::invites::read_rows(), location))
+        orbiters_n4n0_core::invites::read_rows(&self.with(|c| c.view().viewer_in_game()).unwrap_or_default())
     }
 
     /// On the OSC action thread, in order with the record toggle.

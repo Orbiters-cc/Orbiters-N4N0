@@ -904,6 +904,31 @@ orbiters_core::parts!(Snapshot {
 });
 
 impl Snapshot {
+    /// Who looks at what this computer keeps: the VRChat account the app acts as (the one signed in, or on its way back; with
+    /// none, the one the VRChat that runs says it is), and whether VRChat's default profile alone is used here.
+    pub fn viewer(&self) -> orbiters_core::visited::Viewer {
+        let (login, single) = (&self.vrchat_login, self.launcher.single_profile);
+        let mut acting: Vec<String> = login.user.as_ref().or(login.known.as_ref()).map(|u| u.id.clone()).into_iter().collect();
+        if acting.is_empty() && !single {
+            acting = self.playing();
+        }
+        orbiters_core::visited::Viewer { acting, single }
+    }
+
+    /// The same for what is shown inside the game: its own account's alone, where there are several profiles.
+    pub fn viewer_in_game(&self) -> orbiters_core::visited::Viewer {
+        let mut viewer = self.viewer();
+        if !viewer.single {
+            viewer.acting.extend(self.playing());
+        }
+        viewer
+    }
+
+    /// The accounts of the VRChats that run here, as their own logs prove them.
+    fn playing(&self) -> Vec<String> {
+        self.launcher.profiles.iter().filter(|p| p.running.is_some()).filter_map(|p| p.account_id.clone()).collect()
+    }
+
     /// Live worker activity only; imports and the test pattern are excluded by their source flags.
     pub fn live_recording_running(&self) -> bool {
         matches!(self.capture.state, CaptureState::Starting | CaptureState::Recording | CaptureState::Paused)

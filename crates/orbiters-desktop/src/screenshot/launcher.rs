@@ -565,7 +565,7 @@ fn data(name: &str) -> LauncherState {
         }
         _ => {}
     }
-    s.several_profiles = s.profiles.len() > 1;
+    s.single_profile = s.profiles.len() <= 1;
     // The account's own profile (REQUEST15 7b): pictures to choose among, what VRChat answered.
     if let Some(mine) = s.mine.as_mut() {
         mine.avatar_picture = "sample://icon/60".into();

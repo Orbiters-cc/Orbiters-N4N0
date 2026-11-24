@@ -377,6 +377,10 @@ pub struct InstanceRow {
 impl InstanceRow {
     /// Who may join it, as VRChat names it: Public, Friends+, Friends, Invite+, Invite, Group, Group+, Group Public.
     pub fn kind(&self) -> &'static str {
+        // (Not shown: it is not known to be the account's.)
+        if self.location.ends_with(':') {
+            return mark("Private");
+        }
         let tags = self.location.split_once('~').map_or("", |(_, t)| t);
         let has = |tag: &str| tags.split('~').any(|t| t.starts_with(tag));
         if has("group(") {

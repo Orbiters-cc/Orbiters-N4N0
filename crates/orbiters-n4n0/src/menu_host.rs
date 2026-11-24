@@ -169,8 +169,8 @@ pub struct MenuHost<P: Pictures> {
     waker: Option<Waker>,
     /// Which menu this is, for the scanner and the friends it holds (MENU-13).
     holder: MenuHolder,
-    /// The VRChat accounts acting in the app: a previous instance of another one is not shown.
-    acting: Vec<String>,
+    /// Who looks at this computer's previous instances: another VRChat account's are not shown.
+    viewer: orbiters_core::visited::Viewer,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -204,15 +204,15 @@ impl<P: Pictures> MenuHost<P> {
             feedback_seen: Default::default(),
             waker: None,
             holder: MenuHolder::Any,
-            acting: Vec::new(),
+            viewer: Default::default(),
         }
     }
 
-    /// The VRChat accounts acting in the app now: what is another one's goes from the list at once.
-    pub fn act_as(&mut self, acting: Vec<String>) {
-        if self.acting != acting {
-            self.acting = acting;
-            let rows = orbiters_n4n0_core::invites::shown(self.menu.instances.clone(), &self.acting);
+    /// Who looks now: what was listed for another goes from the list at once.
+    pub fn seen_by(&mut self, viewer: orbiters_core::visited::Viewer) {
+        if self.viewer != viewer {
+            self.viewer = viewer;
+            let rows = orbiters_n4n0_core::invites::shown(self.menu.instances.clone(), &self.viewer);
             if rows != self.menu.instances {
                 let (ready, note) = (self.menu.instances_ready, self.menu.instances_note.clone());
                 self.menu.set_instances(rows, ready, &note);
@@ -704,7 +704,7 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),
                 Effect::SaveVideo => service.command(Command::SaveVideo),
                 // This computer's visits, read here (a small file): the service keeps it as VRChat's logs grow.
-                Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::shown(orbiters_n4n0_core::invites::read_rows(), &self.acting), true, ""),
+                Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::read_rows(&self.viewer), true, ""),
                 Effect::InviteMe { location } => service.command(Command::InviteMe { location, stamp: None }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),

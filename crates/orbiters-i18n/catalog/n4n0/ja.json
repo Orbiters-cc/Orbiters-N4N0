@@ -370,5 +370,6 @@
   "Sign in to Orbiters again to talk to N4N0.": "N4N0と話すには、Orbitersにもう一度ログインしてください。",
   "N4N0 needs a break: try again in a moment.": "N4N0は少し休憩が必要です。しばらくしてからもう一度お試しください。",
   "N4N0's assistant is not available right now ({status}).": "N4N0のアシスタントは現在利用できません（{status}）。",
-  "Connect your VRChat account here to be invited: this place is private, and is not known to be your account's.": "招待を受けるには、ここでVRChatアカウントを接続してください。この場所はプライベートで、あなたのアカウントのものか確認できません。"
+  "Connect your VRChat account here to be invited: this place is private, and is not known to be your account's.": "招待を受けるには、ここでVRChatアカウントを接続してください。この場所はプライベートで、あなたのアカウントのものか確認できません。",
+  "Private": "プライベート"
 }

@@ -60,7 +60,8 @@ type Exported = Vec<(Target, Result<(PathBuf, u64), String>)>;
 
 pub(crate) struct Studio {
     pub card: GroupCard,
-    account: String,
+    /// Whose crops these are (`Key::certain`'s folder); in memory only while that is not known.
+    owner: Option<String>,
     pub target: Target,
     saved: Saved,
     source: Option<Loaded>,
@@ -92,12 +93,12 @@ pub(crate) struct Studio {
 }
 
 impl Studio {
-    pub fn new(card: GroupCard, account: &str, source: Option<image::RgbaImage>) -> Self {
+    pub fn new(card: GroupCard, owner: Option<String>, source: Option<image::RgbaImage>) -> Self {
         let staged = source.is_some();
-        let saved = if staged { Saved::default() } else { art::load_saved(account, &card.id) };
+        let saved = owner.as_deref().filter(|_| !staged).map(|o| art::load_saved(o, &card.id)).unwrap_or_default();
         Self {
             card,
-            account: account.to_string(),
+            owner,
             target: Target::GroupBanner,
             saved,
             source: None,
@@ -123,7 +124,7 @@ impl Studio {
     }
     /// The screenshot review: the studio before any picture.
     pub fn staged_empty(card: GroupCard) -> Self {
-        let mut s = Self::new(card, "", Some(image::RgbaImage::new(1, 1)));
+        let mut s = Self::new(card, None, Some(image::RgbaImage::new(1, 1)));
         s.pending = None;
         s.asked_source = true;
         s
@@ -133,8 +134,8 @@ impl Studio {
         *self.saved.crop_mut(target) = crop;
     }
     fn remember(&self) {
-        if !self.staged {
-            art::store_saved(&self.account, &self.card.id, &self.saved);
+        if let Some(owner) = self.owner.as_deref().filter(|_| !self.staged) {
+            art::store_saved(owner, &self.card.id, &self.saved);
         }
     }
     pub(crate) fn answer(&mut self, kind: Kind, reply: Reply) {
@@ -196,7 +197,7 @@ impl Studio {
     /// A write of this group's that ended (what was uploaded is the ledger's to say).
     pub(crate) fn ended(&mut self, sealed: Option<&Sealed>, outcome: &Outcome) {
         use crate::controller::groups::Done;
-        if let (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group { group: g, .. })) = (sealed.map(|p| &p.write), outcome) {
+        if let (Some(Write::ApplyArt { slot: ArtSlot::Banner, .. }), Outcome::Done(Done::Group(g))) = (sealed.map(|p| &p.write), outcome) {
             self.applied = true;
             self.card.banner_url = g.banner_url.clone();
         }
@@ -986,7 +987,7 @@ fn act_on(ctx: &egui::Context, cx: &mut Cx, state: &mut State, act: Act) {
             }
             if let Some(up) = studio.uploaded.clone() {
                 let group = studio.card.id.clone();
-                state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot: ArtSlot::Banner, file: up.file }, origin);
+                state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot: ArtSlot::Banner, file: up.file, back: None }, origin);
             }
         }
         Act::Web => {
@@ -1004,7 +1005,7 @@ mod tests {
 
     fn studio() -> Studio {
         let card = GroupCard { id: "grp_00000000-0000-4000-8000-0000000000aa".into(), name: "Made-up".into(), ..Default::default() };
-        let mut s = Studio::new(card, "usr_00000000-0000-4000-8000-0000000000e1", Some(image::RgbaImage::new(64, 36)));
+        let mut s = Studio::new(card, None, Some(image::RgbaImage::new(64, 36)));
         s.saved.source = Some(Source::File("C:/made-up/a.png".into()));
         s
     }
@@ -1073,6 +1074,8 @@ mod tests {
         let mut s = studio();
         s.gallery = Some((Vec::new(), 0, true, true));
         let page = |n: usize, raw: usize| orbiters_core::vrchat_api::GroupInventory {
+            ids: Vec::new(),
+            whole: true,
             items: (0..n).map(|i| InventoryFile { id: format!("file_{i}"), url: format!("https://api.vrchat.cloud/api/1/file/file_{i}/1/file") }).collect(),
             raw,
             details: Vec::new(),
@@ -1155,7 +1158,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = State { scope: Some(crate::controller::vrchat_data::Scope::of(&snap)), ..Default::default() };
         let card = GroupCard { id: world::G.into(), permissions: vec!["*".into()], ..Default::default() };
-        let mut st = Studio::new(card, "usr_test", None);
+        let mut st = Studio::new(card, None, None);
         st.source = Some(Loaded::new(&ctx, image::RgbaImage::from_pixel(64, 36, image::Rgba([200, 10, 10, 255]))));
         state.studio = Some(st);
         let mut frames = |state: &mut State, done: &dyn Fn(&State) -> bool| {
@@ -1197,7 +1200,7 @@ mod tests {
         act!(Act::Apply(Rect::NOTHING));
         frames(&mut state, &|s| matches!(&s.flow, Some(super::super::Flow::Confirming { art: Some(_), .. })));
         let Some(super::super::Flow::Confirming { sealed, .. }) = &state.flow else { unreachable!() };
-        assert_eq!(sealed.write, Write::ApplyArt { group: world::G.into(), slot: ArtSlot::Banner, file: file_a.clone() });
+        assert_eq!(sealed.write, Write::ApplyArt { group: world::G.into(), slot: ArtSlot::Banner, file: file_a.clone(), back: None });
         let shows = sealed.art.clone().unwrap();
         assert_eq!((shows.file.as_deref(), shows.sha256), (Some(file_a.as_str()), crate::pages::groups::digest(&world::picture(&file_a))), "the confirmation shows the bytes VRChat serves for file A");
         assert_eq!(shown.lock().unwrap().files.len(), 3, "B never went up");

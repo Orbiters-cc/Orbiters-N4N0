@@ -2007,7 +2007,7 @@ impl Controller {
         self.test_vrchat_with(|gate| orbiters_core::vrchat_api::scripted_client(gate, replies))
     }
     fn test_vrchat_with(&self, make: impl FnOnce(Arc<orbiters_core::vrchat_api::Gate>) -> (Client, Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>>)) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
-        self.test_account();
+        self.test_account_with_user("1");
         let identity = self.vrchat_identity().unwrap();
         let mut rt = self.vrchat_login.lock().unwrap();
         assert!(rt.grant(Duration::from_secs(3600)));
@@ -2018,9 +2018,9 @@ impl Controller {
         let (client, sent) = make(rt.gate.clone());
         rt.client = Arc::new(Mutex::new(client));
         drop(rt);
-        let now = self.vrchat_now();
-        self.vrchat_login.lock().unwrap().status_for = now;
-        self.update(|s| { s.vrchat_login.allowed = true; s.vrchat_login.user = Some(User { id: "usr_test".into(), ..Default::default() }); });
+        // As a sign-in publishes it: verified for the member signed in, at this time of theirs.
+        let stamp = self.vrchat_now().unwrap();
+        assert!(self.publish_login(&stamp, |st, _| (st.allowed, st.user) = (true, Some(User { id: "usr_test".into(), ..Default::default() }))));
         sent
     }
     /// VRChat's session is this Orbiters member's grant and shows as signed in, as after a look.

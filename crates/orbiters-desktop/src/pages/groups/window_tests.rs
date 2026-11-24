@@ -273,7 +273,7 @@ fn leaving_a_view_ends_what_it_had_not_sent() {
         for while_preparing in [true, false] {
             let mut r = rig();
             let write = r.write(Wrote::ApplyBanner);
-            r.w.state.studio = Some(studio::Studio::new(card(), "usr_test", None));
+            r.w.state.studio = Some(studio::Studio::new(card(), None, None));
             r.w.prepare(write);
             if !while_preparing {
                 assert!(r.w.until(|s| matches!(s.flow, Some(Flow::Confirming { .. }))));
@@ -309,7 +309,7 @@ fn leaving_a_view_ends_what_it_had_not_sent() {
 #[test]
 fn whatever_the_window_becomes_the_wire_is_the_sealed_payload() {
     let changes: [(&str, fn(&mut Window)); 7] = [
-        ("the studio replaced", |w| w.state.studio = Some(studio::Studio::new(GroupCard { id: "grp_other".into(), ..card() }, "usr_test", None))),
+        ("the studio replaced", |w| w.state.studio = Some(studio::Studio::new(GroupCard { id: "grp_other".into(), ..card() }, None, None))),
         ("another group's page", |w| w.state.open = Some(page::Open::new(GroupCard { id: "grp_other".into(), name: "Other".into(), ..Default::default() }, &w.state.drafts))),
         ("the composer rewritten", |w| {
             let mut o = page::Open::new(card(), &w.state.drafts);
@@ -607,7 +607,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     let (ctl, snap) = local();
     let mut w = Window::new(ctl, snap);
     assert!(!w.state.holds());
-    w.state.studio = Some(studio::Studio::new(card(), "usr_test", None));
+    w.state.studio = Some(studio::Studio::new(card(), None, None));
     assert!(w.state.holds(), "the studio");
     w.state.studio = None;
     w.state.open = Some(page::Open::new(card(), &w.state.drafts));
@@ -619,7 +619,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     assert!(w.state.holds(), "a confirmation");
     let mut home = crate::pages::home::State::default();
     assert!(!home.modal_up());
-    home.groups_mut().studio = Some(studio::Studio::new(card(), "usr_test", None));
+    home.groups_mut().studio = Some(studio::Studio::new(card(), None, None));
     assert!(home.modal_up(), "Home says so to the chat");
     // The same through the one place every layer says it: the studio, the page's editors, the confirmation.
     let front = |w: &mut Window| {
@@ -639,7 +639,7 @@ fn groups_own_the_keyboard_while_they_are_up() {
     w.state.open.as_mut().unwrap().role_editor = Some(page::RoleEditor::new(Default::default()));
     assert!(front(&mut w), "the role editor");
     w.state.open.as_mut().unwrap().role_editor = None;
-    w.state.studio = Some(studio::Studio::new(card(), "usr_test", None));
+    w.state.studio = Some(studio::Studio::new(card(), None, None));
     assert!(front(&mut w), "the studio");
     w.state.studio = None;
     stage::confirming(&mut w.state, Sealed::made_up(Write::DeleteRole { group: G.into(), role: "grol_a".into() }, true), Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(80.0, 30.0)), None);
@@ -847,13 +847,235 @@ fn a_missing_record_is_no_leave_to_send_again() {
     assert!(r.w.until(|s| s.flow.is_none()));
     assert_eq!(r.w.state.said, Some(failure_text(Failure::RecordUnreadable)));
     assert_eq!(r.sent_writes(), 0, "the next program sends nothing by itself");
-    // The person looked, and goes on: kept aside, warned of.
+    // The person looked, and goes on: it stays as it is, warned of.
     let (ctx, scope) = (r.w.ctx.clone(), Scope::of(&r.w.snap));
     r.w.state.jobs.ask(&ctx, &ctl, &scope, Kind::SetAside, Request::SetAside);
     r.w.settle();
     assert_eq!(r.w.state.unreadable, 0);
     assert_eq!(r.w.confirm(write).warning, Some(Warning::RecordUnreadable));
-    assert!(path.with_extension("aside").exists());
+    assert!(path.exists());
+}
+
+/// verify4 F6: two windows that bring back the same new post: each one's words are kept, whoever changes, cancels or posts it
+/// first; one changed only in its notification is another revision too.
+#[test]
+fn two_windows_on_one_draft_lose_nothing() {
+    let r = rig();
+    let scope = Scope::of(&r.w.snap);
+    let id = "00000000-0000-4000-8000-00000000d0c1";
+    let draft = |text: &str| PostDraft { title: "Half".into(), text: text.into(), ..Default::default() };
+    let dir = art::drafts_dir(&scope).unwrap();
+    let texts = || -> Vec<String> {
+        let mut l: Vec<String> = Drafts::load(&scope).newest_all(G).iter().map(|k| k.draft.text.clone()).collect();
+        l.sort();
+        l
+    };
+    let both = || {
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = Drafts::load(&scope);
+        assert_eq!(a.keep(&scope, G, id, &draft("first")), None);
+        (a, Drafts::load(&scope))
+    };
+    // One goes on, then the other: both.
+    let (mut a, mut b) = both();
+    assert_eq!(a.keep(&scope, G, id, &draft("in A")), None, "the first to change it keeps it");
+    let forked = b.keep(&scope, G, id, &draft("in B")).unwrap();
+    assert_eq!(texts(), ["in A", "in B"]);
+    assert_eq!(b.keep(&scope, G, &forked, &draft("in B, more")), None, "its own from here on");
+    assert_eq!(texts(), ["in A", "in B, more"]);
+    a.drop(&scope, id);
+    assert_eq!(texts(), ["in B, more"], "cancelled or posted in A: B's stays");
+    // Posted or cancelled in one while the other has it as it was: gone; the other goes on: kept as another.
+    let (mut a, mut b) = both();
+    a.drop(&scope, id);
+    assert!(texts().is_empty());
+    assert!(b.keep(&scope, G, id, &draft("in B")).is_some());
+    assert_eq!(texts(), ["in B"]);
+    // Changed in one, cancelled in the other, which had the revision before: the changed one stays.
+    let (mut a, mut b) = both();
+    a.keep(&scope, G, id, &draft("in A"));
+    b.drop(&scope, id);
+    assert_eq!(texts(), ["in A"]);
+    // Through the page: the window's new post takes its new id, and only the very revision that is out is over.
+    let (mut a, _) = both();
+    let mut w = r.another();
+    w.state.drafts = Drafts::load(&scope);
+    w.state.open = Some(page::Open::new(card(), &w.state.drafts));
+    w.state.scope = Some(scope.clone());
+    a.keep(&scope, G, id, &draft("in A"));
+    w.state.open.as_mut().unwrap().composer.as_mut().unwrap().draft.send_notification = true;
+    w.state.keep_drafts();
+    let c = w.state.open.as_ref().unwrap().composer.as_ref().unwrap();
+    assert_ne!(c.id, id);
+    assert_eq!(texts(), ["first", "in A"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// verify4 F6: what was posted and what is being written differ by the notification alone: it stays.
+#[test]
+fn a_draft_changed_in_its_notification_stays() {
+    let mut r = rig();
+    let draft = PostDraft { title: "t".into(), text: "x".into(), send_notification: true, ..Default::default() };
+    let id = "00000000-0000-4000-8000-00000000d0c2";
+    r.w.confirm(Write::CreatePost { group: G.into(), draft: draft.clone(), of: id.into() });
+    r.w.send();
+    assert!(r.w.until(|s| s.flow.is_none()));
+    let mut left = |draft: PostDraft| {
+        let mut o = page::Open::new(card(), &Drafts::default());
+        o.composer = Some(page::Composer { id: id.into(), draft, restored: true });
+        r.w.state.open = Some(o);
+        r.w.state.ledger_due = true;
+        r.w.settle();
+        r.w.state.open.as_ref().unwrap().composer.is_some()
+    };
+    assert!(left(PostDraft { send_notification: false, ..draft.clone() }));
+    assert!(!left(draft));
+}
+
+/// verify4 F8: the new posts and the studio's pictures are the verified member's, by their id, in their environment, for that
+/// VRChat account: another member with the same name sees none of it, a renamed one all of it; of a member not known for
+/// certain, nothing is put on the disk.
+#[test]
+fn what_is_kept_is_the_verified_members() {
+    let r = rig();
+    let as_member = |member: Option<&str>, name: &str, epoch: u64| {
+        let v = orbiters_core::launcher::VerifiedFor { epoch, member: member.map(str::to_string), user: Some("usr_test".into()) };
+        r.service.ctl.update(|s| {
+            s.vrchat_login.verified_for = Some(v);
+            s.account.state = crate::state::AccountState::SignedIn { username: name.into() };
+        });
+        Scope::of(&r.service.ctl.view())
+    };
+    let a = as_member(Some("member-a"), "tester", 1);
+    let b = as_member(Some("member-b"), "tester", 2);
+    let renamed = as_member(Some("member-a"), "Renamed", 3);
+    assert_eq!((art::drafts_dir(&a), owner_of(&a)), (art::drafts_dir(&renamed), owner_of(&renamed)));
+    assert!(art::drafts_dir(&a) != art::drafts_dir(&b) && owner_of(&a) != owner_of(&b));
+    let id = "00000000-0000-4000-8000-00000000d0c3";
+    let draft = PostDraft { title: "Mine".into(), text: "words".into(), ..Default::default() };
+    Drafts::load(&a).keep(&a, G, id, &draft);
+    assert!(Drafts::load(&b).newest(G).is_none() && Drafts::load(&renamed).newest(G).is_some());
+    let saved = art::Saved { source: Some(art::Source::File("C:/made-up.png".into())), ..Default::default() };
+    art::store_saved(&owner_of(&a).unwrap(), G, &saved);
+    assert_eq!((art::load_saved(&owner_of(&b).unwrap(), G), art::load_saved(&owner_of(&renamed).unwrap(), G)), (art::Saved::default(), saved));
+    let _ = std::fs::remove_file(art::saved_file(&owner_of(&a).unwrap(), G).unwrap());
+    let _ = std::fs::remove_dir_all(art::drafts_dir(&a).unwrap());
+    // Not known for certain: in this window's memory, and said as not kept.
+    let unknown = as_member(None, "tester", 4);
+    assert_eq!((art::drafts_dir(&unknown), owner_of(&unknown)), (None, None));
+    let mut d = Drafts::load(&unknown);
+    d.keep(&unknown, G, id, &draft);
+    assert!(d.newest(G).is_some() && d.failed);
+    assert!(Drafts::load(&unknown).newest(G).is_none(), "not on the disk");
+}
+
+/// verify4 F9: a service too busy to take an upload's prepare in, and a link closed before it, leave no picture behind.
+#[test]
+fn a_prepare_not_taken_in_leaves_no_picture_behind() {
+    let r = rig();
+    let up = || {
+        let staged = stage_upload(b"\x89PNG\r\n\x1a\nx").unwrap();
+        (crate::controller::groups::staging_dir().join(&staged.name), Request::Prepare { write: Write::Upload { tag: FileTag::Gallery, group: G.into(), staged, art: None } })
+    };
+    let held: Vec<_> = (0..crate::controller::groups::ADMIT_MAX).map(|_| r.service.ctl.groups_admit().unwrap()).collect();
+    let (path, request) = up();
+    assert_eq!(r.w.ask()(request), Reply::Failed(Failure::Busy));
+    assert!(!path.exists());
+    drop(held);
+    r.between.hang_up();
+    let start = Instant::now();
+    loop {
+        let (path, request) = up();
+        match r.w.ask()(request) {
+            Reply::Failed(Failure::Offline) => {
+                assert!(!path.exists());
+                break;
+            }
+            _ => {
+                let _ = std::fs::remove_file(path);
+                assert!(start.elapsed() < Duration::from_secs(10), "the link is closed");
+            }
+        }
+    }
+}
+
+/// verify4 F10: two new posts lost in the same minute are told apart, by their title where this window wrote them and their
+/// operation's id everywhere; the buttons say which they decide.
+#[test]
+fn two_creations_lost_together_are_told_apart() {
+    let mut r = rig();
+    for title in ["One", "Two"] {
+        r.w.confirm(Write::CreatePost { group: G.into(), draft: PostDraft { title: title.into(), text: "x".into(), ..Default::default() }, of: title.into() });
+        r.world.lock().unwrap().fault = Some(Fault::Drop { done: false });
+        r.w.send();
+        r.w.settle();
+    }
+    let list = r.w.state.open_writes(G);
+    assert_eq!(list.len(), 2);
+    let said: Vec<String> = list.iter().map(|e| which(&r.w.state, e)).collect();
+    assert!(said.iter().any(|s| s.contains("One")) && said.iter().any(|s| s.contains("Two")), "{said:?}");
+    let mut other = r.another();
+    other.settle();
+    let theirs: Vec<String> = list.iter().map(|e| which(&other.state, e)).collect();
+    assert!(theirs[0] != theirs[1] && list.iter().zip(&theirs).all(|(e, s)| s.contains(&tail(&e.op))), "{theirs:?}");
+    for e in &list {
+        r.later();
+        r.w.check(&e.op);
+    }
+    let ctl = r.w.ctl.clone();
+    let text = words(&r.w.drawn(2, vec![], |ui, _, s| {
+        let ctx = ui.ctx().clone();
+        uncertain_panel(ui, &ctx, &ctl, s, G);
+    }));
+    for e in &list {
+        assert!(text.contains(&format!("{} ({})", tr("Drop it"), tail(&e.op))), "{text}");
+    }
+}
+
+/// What a sparse update moved beside it, on the window: said by name, with what can be put back and what cannot, whichever
+/// window looks; put back through the window's own confirmation; gone once it is, or once the person has seen to it.
+#[test]
+fn the_window_says_what_moved_and_puts_it_back() {
+    let mut r = rig();
+    {
+        let mut w = r.world.lock().unwrap();
+        (w.icon, w.words, w.clears) = (json!("file_someones"), json!({"nameplateId": "file_plate", "rules": "Be kind"}), true);
+    }
+    let write = r.write(Wrote::ApplyBanner);
+    r.w.confirm(write);
+    r.w.send();
+    r.w.settle();
+    let panel = |w: &mut Window| {
+        let ctl = w.ctl.clone();
+        words(&w.drawn(2, vec![], |ui, _, s| {
+            let ctx = ui.ctx().clone();
+            uncertain_panel(ui, &ctx, &ctl, s, G);
+        }))
+    };
+    let mut other = r.another();
+    other.settle();
+    for w in [&mut r.w, &mut other] {
+        let text = panel(w);
+        for want in [tr("Put the icon back…"), tr("I have seen to it"), tr("Open on vrchat.com"), tr("Group icon"), tr("Nameplate banner"), tr("Rules")] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        let there = orbiters_i18n::tr!("Not put back from here: {what}. Do it on vrchat.com.", what = format!("{}, {}", tr("Nameplate banner"), tr("Rules")));
+        assert!(text.contains(&there), "the nameplate is never sent: {text}");
+    }
+    r.world.lock().unwrap().clears = false;
+    let (_, back) = r.w.state.back[0].clone();
+    let sealed = r.w.confirm(back);
+    assert_eq!(confirm_words(&sealed).0, tr("Put the group's icon back?"));
+    r.w.send();
+    r.w.settle();
+    assert_eq!(r.world.lock().unwrap().icon, json!("file_someones"));
+    let text = panel(&mut r.w);
+    assert!(!text.contains(tr("Put the icon back…")) && !text.contains(tr("Group icon")) && text.contains(tr("Nameplate banner")), "{text}");
+    let op = r.w.state.ledger.iter().find(|e| e.beside.any()).unwrap().op.clone();
+    let (ctx, ctl, scope) = (r.w.ctx.clone(), r.w.ctl.clone(), Scope::of(&r.w.snap));
+    r.w.state.jobs.ask(&ctx, &ctl, &scope, Kind::SeenTo(op.clone()), Request::SeenTo { op });
+    r.w.settle();
+    assert!(!panel(&mut r.w).contains(tr("I have seen to it")));
 }
 
 /// verify3 Major 2: another Orbiters keeps the record: the window says so, and nothing is sent from here.
@@ -910,7 +1132,8 @@ fn again_is_a_new_confirmed_operation() {
         // After a restart of the window, from the record alone where its ids say it all.
         let next = r.another();
         let known = next.state.again(&r.entry(&op)).is_some();
-        assert_eq!(known, matches!(kind, Wrote::AssignRole | Wrote::UnassignRole | Wrote::DeleteRole | Wrote::ApplyBanner | Wrote::ApplyIcon), "{kind:?}");
+        // (A member's role needs the row of that very membership, which the page has once it is open: verify4 F1.)
+        assert_eq!(known, matches!(kind, Wrote::DeleteRole | Wrote::ApplyBanner | Wrote::ApplyIcon), "{kind:?}");
     }
 }
 

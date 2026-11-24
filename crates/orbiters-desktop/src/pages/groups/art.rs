@@ -423,18 +423,19 @@ impl Saved {
     }
 }
 
-/// The file of one account's crops for one group, under the local data folder.
-pub fn saved_file(account: &str, group: &str) -> Option<PathBuf> {
-    (orbiters_core::vrchat_accounts::is_user_id(account) && orbiters_core::groups::is_group_id(group))
-        .then(|| orbiters_core::paths::local_data_root().join("group-banners").join(account).join(format!("{group}.json")))
+/// The file of one account's crops for one group, under the local data folder. `owner`: whose ([`Key::certain`]'s folder:
+/// the environment, the Orbiters member by their id, the VRChat account; verify4 F8).
+pub fn saved_file(owner: &str, group: &str) -> Option<PathBuf> {
+    let plain = owner.len() == 32 && owner.bytes().all(|b| b.is_ascii_hexdigit());
+    (plain && orbiters_core::groups::is_group_id(group)).then(|| orbiters_core::paths::local_data_root().join("group-banners").join(owner).join(format!("{group}.json")))
 }
 
-pub fn load_saved(account: &str, group: &str) -> Saved {
-    saved_file(account, group).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+pub fn load_saved(owner: &str, group: &str) -> Saved {
+    saved_file(owner, group).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-pub fn store_saved(account: &str, group: &str, saved: &Saved) {
-    if let Some(file) = saved_file(account, group) {
+pub fn store_saved(owner: &str, group: &str, saved: &Saved) {
+    if let Some(file) = saved_file(owner, group) {
         if let (Some(dir), Ok(bytes)) = (file.parent(), serde_json::to_vec_pretty(saved)) {
             let _ = std::fs::create_dir_all(dir);
             let _ = orbiters_core::write_atomic_private(&file, &bytes);
@@ -442,10 +443,12 @@ pub fn store_saved(account: &str, group: &str, saved: &Saved) {
     }
 }
 
-/// The new posts the person is writing, a file for each, per account (the environment and Orbiters account too): their own
-/// words, who they are for and the notification, nothing read from VRChat but the ids of the roles they chose (verify2
+/// The new posts the person is writing, a file for each, per account (the environment, the Orbiters member by their id and
+/// the VRChat account; of a member not known for certain, in memory only: verify4 F8): their own words, who they are for and the notification, nothing read from VRChat but the ids of the roles they chose (verify2
 /// B-C). Each has an id of its own, so that two windows writing in one group keep both (J9), and so that only the very one
-/// that was posted is cleared (verify3 Major 6).
+/// that was posted is cleared (verify3 Major 6). Two windows that bring back the same one each go on from the revision they
+/// read: the first to change it keeps its file, the other's is kept as another, and neither takes the other's away (verify4
+/// F6).
 #[derive(Default)]
 pub struct Drafts {
     posts: Vec<Kept>,
@@ -462,6 +465,9 @@ pub struct Kept {
     /// Milliseconds since 1970 of its last change.
     #[serde(default)]
     pub at: i64,
+    /// Another at each change.
+    #[serde(default)]
+    pub rev: String,
 }
 
 /// Kept for one group at most: past this, the oldest goes.
@@ -478,9 +484,21 @@ fn drafts_root() -> PathBuf {
     root
 }
 
-/// The folder of one account's drafts.
+/// The folder of one account's drafts; none while whose they are is not known for certain.
 pub fn drafts_dir(scope: &Scope) -> Option<PathBuf> {
-    Key::of(scope).map(|k| drafts_root().join(k.folder()))
+    Key::certain(scope).map(|k| drafts_root().join(k.folder()))
+}
+
+/// What a draft's file holds now.
+fn kept_in(file: &std::path::Path) -> Option<Kept> {
+    std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Kept>(&b).ok())
+}
+
+/// The folder's drafts, for one program's thread at a time while this is held: a revision looked at is the one changed.
+fn held(dir: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dir).ok()?;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("drafts.lock")).ok()?;
+    file.lock().ok().map(|_| file)
 }
 
 impl Drafts {
@@ -494,7 +512,7 @@ impl Drafts {
         let mut posts: Vec<Kept> = Vec::new();
         if let Some(Ok(files)) = drafts_dir(scope).map(std::fs::read_dir) {
             for path in files.flatten().map(|f| f.path()) {
-                let kept = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Kept>(&b).ok());
+                let kept = kept_in(&path);
                 let named = |k: &Kept| path.file_stem().and_then(|s| s.to_str()) == Some(k.id.as_str()) && orbiters_core::groups::is_group_id(&k.group);
                 posts.extend(kept.filter(named));
             }
@@ -506,40 +524,73 @@ impl Drafts {
     pub fn newest(&self, group: &str) -> Option<&Kept> {
         self.posts.iter().find(|k| k.group == group)
     }
+    /// Every one being written in `group`.
+    #[cfg(test)]
+    pub fn newest_all(&self, group: &str) -> Vec<&Kept> {
+        self.posts.iter().filter(|k| k.group == group).collect()
+    }
     fn file(scope: &Scope, id: &str) -> Option<PathBuf> {
         let plain = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
         drafts_dir(scope).filter(|_| plain).map(|d| d.join(format!("{id}.json")))
     }
     /// The new post `id` being written in `group`, kept as it is now. One that could not be written is tried again at the
-    /// next change or frame.
-    pub fn keep(&mut self, scope: &Scope, group: &str, id: &str, draft: &PostDraft) {
+    /// next change or frame. Another window changed it, or it is over there, since it was read here: it is kept as another
+    /// new post, whose id is given back.
+    pub fn keep(&mut self, scope: &Scope, group: &str, id: &str, draft: &PostDraft) -> Option<String> {
         if draft.title.trim().is_empty() && draft.text.trim().is_empty() {
-            return self.drop(scope, id);
+            self.drop(scope, id);
+            return None;
         }
         if self.posts.iter().any(|k| k.id == id && k.draft == *draft) || !orbiters_core::groups::is_group_id(group) {
-            return;
+            return None;
         }
-        let Some(file) = Self::file(scope, id) else { return };
         let at = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        let kept = Kept { id: id.into(), group: group.into(), draft: draft.clone(), at };
-        let written = file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && serde_json::to_vec(&kept).is_ok_and(|b| orbiters_core::write_atomic_private(&file, &b).is_ok());
-        self.failed = !written;
-        if written {
+        let mut kept = Kept { id: id.into(), group: group.into(), draft: draft.clone(), at, rev: uuid::Uuid::new_v4().to_string() };
+        let Some(dir) = drafts_dir(scope) else {
+            // Whose it is is not known: in memory, for as long as this window has this sign-in.
             self.posts.retain(|k| k.id != id);
             self.posts.insert(0, kept);
-            let over: Vec<String> = self.posts.iter().filter(|k| k.group == group).skip(DRAFTS_MAX).map(|k| k.id.clone()).collect();
-            over.iter().for_each(|id| self.drop(scope, id));
+            self.failed = true;
+            return None;
+        };
+        let Some(_held) = held(&dir) else {
+            self.failed = true;
+            return None;
+        };
+        let file = Self::file(scope, id)?;
+        let (mine, there) = (self.posts.iter().find(|k| k.id == id).map(|k| k.rev.clone()), kept_in(&file).map(|k| k.rev));
+        if mine != there {
+            kept.id = uuid::Uuid::new_v4().to_string();
         }
+        let file = Self::file(scope, &kept.id)?;
+        self.failed = !serde_json::to_vec(&kept).is_ok_and(|b| orbiters_core::write_atomic_private(&file, &b).is_ok());
+        if self.failed {
+            return None;
+        }
+        let forked = (kept.id != id).then(|| kept.id.clone());
+        self.posts.retain(|k| k.id != id && k.id != kept.id);
+        self.posts.insert(0, kept);
+        let over: Vec<Kept> = self.posts.iter().filter(|k| k.group == group).skip(DRAFTS_MAX).cloned().collect();
+        over.iter().for_each(|k| self.remove(scope, k));
+        forked
     }
-    /// Posted, or cancelled.
+    /// Posted, or cancelled: the revision this window has. One another window changed since is that window's.
     pub fn drop(&mut self, scope: &Scope, id: &str) {
-        if !self.posts.iter().any(|k| k.id == id) {
-            return;
-        }
-        let gone = Self::file(scope, id).is_some_and(|f| std::fs::remove_file(&f).is_ok() || !f.exists());
+        let Some(kept) = self.posts.iter().find(|k| k.id == id).cloned() else { return };
+        let _held = drafts_dir(scope).and_then(|dir| held(&dir));
+        self.remove(scope, &kept);
+    }
+    fn remove(&mut self, scope: &Scope, kept: &Kept) {
+        let gone = match Self::file(scope, &kept.id) {
+            Some(f) => match kept_in(&f) {
+                Some(there) if there.rev != kept.rev => true,
+                _ => std::fs::remove_file(&f).is_ok() || !f.exists(),
+            },
+            None => true,
+        };
         self.failed = !gone;
         if gone {
-            self.posts.retain(|k| k.id != id);
+            self.posts.retain(|k| k.id != kept.id);
         }
     }
 }
@@ -670,7 +721,7 @@ mod tests {
 
     #[test]
     fn crops_are_kept_per_account_and_group() {
-        let me = "usr_00000000-0000-4000-8000-0000000000dd";
+        let me = "0123456789abcdef0123456789abcde5";
         let g = "grp_00000000-0000-4000-8000-0000000000ee";
         let file = saved_file(me, g).unwrap();
         assert!(file.starts_with(orbiters_core::paths::local_data_root()), "under the test folders");
@@ -679,6 +730,7 @@ mod tests {
         store_saved(me, g, &saved);
         assert_eq!(load_saved(me, g), saved);
         assert_eq!(load_saved(me, "grp_00000000-0000-4000-8000-0000000000ef"), Saved::default(), "another group: its own");
+        assert_eq!(load_saved("0123456789abcdef0123456789abcde6", g), Saved::default(), "another owner: theirs");
         assert!(saved_file("usr_x/../y", g).is_none());
         let _ = std::fs::remove_file(file);
     }

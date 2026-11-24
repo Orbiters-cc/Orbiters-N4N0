@@ -17,13 +17,14 @@
 //!   refused too: its person was told nothing of it (verify3 Blocker 3).
 //! - One owner at a time: the folder's lock is held for as long as this lives. Another program on it sends nothing
 //!   (verify3 Major 2). An entry that cannot be written refuses the write it is for; a record that cannot be read refuses
-//!   the writes it may be of, until the person sets it aside (verify3, deviation 7).
+//!   the writes it may be of, until the person looked and goes on (verify3, deviation 7), for their own account (verify4 F5).
 use super::vrchat_data::Scope;
-use orbiters_core::groups::{ArtSlot, FileTag, RoleField};
+use orbiters_core::groups::{ArtSlot, Beside, FileTag, Part, RoleField, Said};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 /// The form of an entry's file. A newer one is not read, not rewritten, not guessed at.
 pub const FORMAT: u32 = 3;
@@ -47,13 +48,20 @@ pub struct Key {
 }
 
 impl Key {
+    /// By the Orbiters member the scope was verified for (a name can be changed, or used again); while they have no id of
+    /// their own, by their name.
     pub fn of(scope: &Scope) -> Option<Self> {
         let (development, member, user) = scope.lasting()?;
         Some(Self {
             environment: if development { "development" } else { "production" }.into(), // i18n: not shown (a record's words)
-            orbiters: orbiters_core::groups::digest(&["orbiters", member.unwrap_or_default()]),
+            orbiters: scope.orbiters_member().map_or_else(|| orbiters_core::groups::digest(&["orbiters", member.unwrap_or_default()]), str::to_string),
             user: user.into(),
         })
+    }
+    /// The same, only of a member known for certain: what is the person's own on this computer's disk is kept by it
+    /// (verify4 F8).
+    pub fn certain(scope: &Scope) -> Option<Self> {
+        scope.orbiters_member().and_then(|_| Self::of(scope))
     }
     /// A folder's name for this account's own files.
     pub fn folder(&self) -> String {
@@ -149,9 +157,18 @@ pub struct Evidence {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub art: Option<u64>,
-    /// The new post being written it came from: only that one is cleared when it is done (verify3 Major 6).
+    /// The new post being written it came from, and which revision of it (the notification included): only that one is
+    /// cleared when it is done (verify3 Major 6, verify4 F6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// `before` is all there was: every entry gave its id, and the list was read to its end (verify4 F2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole: bool,
+    /// What the group or the role was before, part by part, hashed: what else moved is seen by it (verify4 F7).
+    #[serde(default, skip_serializing_if = "Said::is_empty")]
+    pub was: Said,
 }
 
 /// An id as kept among those there before: enough to know it again, not to say it.
@@ -233,6 +250,10 @@ pub struct Entry {
     pub looked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<Closing>,
+    /// What VRChat shows otherwise than it was, beside what was asked (VRChat's, or someone else's meanwhile), until the
+    /// person has seen to it (verify4, sparse PUTs).
+    #[serde(default, skip_serializing_if = "nothing")]
+    pub beside: Beside,
     /// Milliseconds since 1970.
     pub prepared_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +261,10 @@ pub struct Entry {
     /// When it ended or was closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
+}
+
+fn nothing(b: &Beside) -> bool {
+    !b.any()
 }
 
 impl Entry {
@@ -309,7 +334,7 @@ pub enum Warning {
     SameBefore,
     /// The same was done less than a day ago.
     AlreadyDone,
-    /// A record of an earlier write could not be read; the person set it aside.
+    /// A record of an earlier write could not be read; the person looked and went on.
     RecordUnreadable,
 }
 
@@ -342,8 +367,8 @@ struct Kept {
     loaded: bool,
     /// Records that could not be read, left as they are.
     unreadable: Vec<PathBuf>,
-    /// Set aside by the person: kept, and warned of for a while.
-    aside: bool,
+    /// Those an account looked into and goes on past, by that account: its word, and no other's (verify4 F5).
+    looked: HashMap<PathBuf, HashMap<String, SystemTime>>,
     /// Operations a thread of this program is sending now.
     active: HashSet<String>,
     /// The folder is this program's while this is held.
@@ -443,12 +468,21 @@ impl Ledger {
             };
             match path.extension().and_then(|x| x.to_str()) {
                 Some("json") => self.take(k, path),
-                Some("aside") => k.aside |= std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| (age.as_millis() as i64) < ENDED_FOR_MS),
+                Some("looked") => self.take_look(k, &path),
                 _ => {}
             }
         }
         k.entries.sort_by_key(|e| e.prepared_at);
         self.trim(k);
+    }
+    /// The mark an account's look at a record leaves: `<record>.<account's folder name>.looked`.
+    fn mark(path: &Path, key: &Key) -> PathBuf {
+        path.with_extension(format!("{}.looked", key.folder())) // i18n: not shown (a file's name)
+    }
+    fn take_look(&self, k: &mut Kept, path: &Path) {
+        let Some((stem, folder)) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.rsplit_once('.')) else { return };
+        let at = std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or_else(|_| SystemTime::now());
+        k.looked.entry(self.dir.join(format!("{stem}.json"))).or_default().insert(folder.into(), at);
     }
     fn take(&self, k: &mut Kept, path: PathBuf) {
         let Some(mut e) = Self::entry_of(&path) else {
@@ -481,18 +515,29 @@ impl Ledger {
         }
         k.entries.sort_by_key(|e| e.prepared_at);
     }
-    /// Whether a record that cannot be read may be of what `e` is about: what it says of itself where it can be read at
-    /// all, else it may be of anything.
+    /// Whether a record that cannot be read may be `key`'s (of `group`, when there is one): what it says of itself where it
+    /// can be read at all, else it may be of anything.
+    fn may_be(path: &Path, key: &Key, group: Option<&str>) -> bool {
+        let v: Option<serde_json::Value> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let Some(v) = v else { return true };
+        let theirs: Option<Key> = v.get("key").and_then(|k| serde_json::from_value(k.clone()).ok());
+        let of = v.get("group").and_then(|g| g.as_str());
+        let other_account = theirs.is_some_and(|t| t != *key);
+        let other_group = of.is_some_and(|of| group.is_some_and(|g| g != of));
+        !other_account && !other_group
+    }
+    /// The records that cannot be read, may be `key`'s, and that it has not looked into.
+    fn hiding<'a>(&'a self, k: &'a Kept, key: &'a Key, group: Option<&'a str>) -> impl Iterator<Item = &'a PathBuf> {
+        let folder = key.folder();
+        k.unreadable.iter().filter(move |path| !k.looked.get(*path).is_some_and(|l| l.contains_key(&folder)) && Self::may_be(path, key, group))
+    }
     fn hidden(&self, k: &Kept, key: &Key, group: Option<&str>) -> bool {
-        k.unreadable.iter().any(|path| {
-            let v: Option<serde_json::Value> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
-            let Some(v) = v else { return true };
-            let theirs: Option<Key> = v.get("key").and_then(|k| serde_json::from_value(k.clone()).ok());
-            let of = v.get("group").and_then(|g| g.as_str());
-            let other_account = theirs.is_some_and(|t| t != *key);
-            let other_group = of.is_some_and(|of| group.is_some_and(|g| g != of));
-            !other_account && !other_group
-        })
+        self.hiding(k, key, group).next().is_some()
+    }
+    /// `key` looked into one lately and goes on: it is warned of.
+    fn went_past(&self, k: &Kept, key: &Key) -> bool {
+        let folder = key.folder();
+        k.unreadable.iter().any(|path| k.looked.get(path).and_then(|l| l.get(&folder)).is_some_and(|at| at.elapsed().is_ok_and(|age| (age.as_millis() as i64) < ENDED_FOR_MS) || at.elapsed().is_err()))
     }
     fn trim(&self, k: &mut Kept) {
         let now = self.now();
@@ -531,28 +576,27 @@ impl Ledger {
     pub fn owned(&self) -> bool {
         self.with(|_| ()).is_ok()
     }
-    /// How many records cannot be read that may be this account's.
+    /// How many records cannot be read that may be this account's, and that it has not looked into.
     pub fn unreadable(&self, key: &Key) -> usize {
         self.with(|k| {
             self.read_again(k);
-            if self.hidden(k, key, None) { k.unreadable.len() } else { 0 }
+            self.hiding(k, key, None).count()
         })
         .unwrap_or(0)
     }
-    /// The person looked and goes on: the records that cannot be read are kept beside, under another name.
+    /// The person looked and goes on: for their account alone. The records stay as they are, and hold whoever else they may
+    /// be of (verify4 F5).
     pub fn set_aside(&self, key: &Key) -> Result<(), Not> {
         self.with(|k| {
             self.read_again(k);
-            if !self.hidden(k, key, None) {
-                return Ok(());
+            let mine: Vec<PathBuf> = self.hiding(k, key, None).cloned().collect();
+            for path in mine {
+                if path == self.dir || orbiters_core::write_atomic_private(&Self::mark(&path, key), b"").is_err() {
+                    return Err(Not::Read);
+                }
+                k.looked.entry(path).or_default().insert(key.folder(), SystemTime::now());
             }
-            let mut left = Vec::new();
-            for path in std::mem::take(&mut k.unreadable) {
-                let moved = path != self.dir && std::fs::rename(&path, path.with_extension("aside")).is_ok();
-                if moved { k.aside = true } else { left.push(path) }
-            }
-            k.unreadable = left;
-            if k.unreadable.is_empty() { Ok(()) } else { Err(Not::Read) }
+            Ok(())
         })?
     }
     /// Written as prepared, or the write is not offered.
@@ -574,7 +618,7 @@ impl Ledger {
     }
     fn conflicts_in(&self, k: &Kept, e: &Entry) -> (Option<Warning>, Vec<String>) {
         let now = self.now();
-        let (mut worst, mut ops) = (k.aside.then_some((Warning::RecordUnreadable, 0)), Vec::new());
+        let (mut worst, mut ops) = (self.went_past(k, &e.key).then_some((Warning::RecordUnreadable, 0)), Vec::new());
         for x in k.entries.iter().filter(|x| x.op != e.op) {
             let w = if x.open() && x.same_object(e) {
                 (Warning::AnotherMayHaveGone, 3)
@@ -623,12 +667,13 @@ impl Ledger {
     }
     /// How it ended, by VRChat's answer or before it. Kept in memory even when the disk refuses it: the disk then still
     /// says `Dispatched`, which the next program reads as unknown.
-    pub fn end(&self, op: &str, state: State, by: Option<By>, made: Option<String>) {
+    pub fn end(&self, op: &str, state: State, by: Option<By>, made: Option<String>, beside: Beside) {
         let now = self.now();
         let _ = self.with(|k| {
             k.active.remove(op);
             if let Some(e) = k.entries.iter_mut().find(|e| e.op == op) {
                 (e.state, e.by) = (state, by);
+                e.beside = beside;
                 e.made = made.or(e.made.take());
                 e.ended_at = matches!(state, State::Done | State::Refused).then_some(now);
                 if e.ended() {
@@ -639,6 +684,42 @@ impl Ledger {
             }
             self.trim(k);
         });
+    }
+    /// On the disk as sent, by a thread of this program that is at it, and not ended: what may go now, once.
+    pub fn going(&self, op: &str) -> bool {
+        self.with(|k| k.active.contains(op) && k.entries.iter().any(|e| e.op == op && e.state == State::Dispatched && e.closed.is_none())).unwrap_or(false)
+    }
+    /// What the group or the role was at the last read before the send, for a check of an answer lost.
+    pub fn was(&self, op: &str, was: &Said) {
+        let _ = self.with(|k| {
+            if let Some(e) = k.entries.iter_mut().find(|e| e.op == op) {
+                e.evidence.was = was.clone();
+            }
+        });
+    }
+    /// Parts that moved beside the write `op` are as they were again: nothing more is said of those.
+    pub fn put_back(&self, key: &Key, op: &str, parts: &[Part]) {
+        let _ = self.with(|k| {
+            if let Some(at) = k.entries.iter().position(|e| e.op == op && e.key == *key) {
+                let _ = self.change(k, at, |e| e.beside.moved.retain(|p| !parts.contains(p)));
+            }
+        });
+    }
+    /// What a check found moved beside what was asked.
+    pub fn beside(&self, op: &str, beside: Beside) {
+        let _ = self.with(|k| {
+            if let Some(at) = k.entries.iter().position(|e| e.op == op) {
+                let _ = self.change(k, at, |e| e.beside = beside);
+            }
+        });
+    }
+    /// The person saw to what moved beside it (put back, or left): nothing more is said of it.
+    pub fn seen_to(&self, key: &Key, op: &str) -> bool {
+        self.with(|k| match k.entries.iter().position(|e| e.op == op && e.key == *key) {
+            Some(at) => self.change(k, at, |e| e.beside = Beside::default()).is_ok(),
+            None => false,
+        })
+        .unwrap_or(false)
     }
     /// The entry of an unknown write that no thread is at.
     fn undecided(k: &Kept, op: &str) -> Option<usize> {
@@ -742,6 +823,7 @@ mod tests {
             answer: None,
             looked: false,
             closed: None,
+            beside: Beside::default(),
             prepared_at: l.now(),
             dispatched_at: None,
             ended_at: None,
@@ -762,7 +844,7 @@ mod tests {
     }
     fn lost(l: &Ledger, op: &str) {
         send(l, op);
-        l.end(op, State::Unknown, None, None);
+        l.end(op, State::Unknown, None, None, Beside::default());
     }
 
     /// Nothing a check compares with is another thing once it has been on the disk.
@@ -771,7 +853,8 @@ mod tests {
         let l = fresh();
         let mut e = entry(&l, "op-1", Kind::ApplyIcon, None, "p");
         e.target = Target { user: Some("usr_b".into()), membership: Some("m".into()), role: Some("grol_a".into()), post: Some("gpos_a".into()), file: Some("file_b".into()) };
-        e.evidence = Evidence { content: Some("c".into()), role_fields: RoleField::ALL.to_vec(), wanted: Some("w".into()), before: Some(vec![]), md5: Some("m".into()), size: Some(u64::MAX), art: Some(u64::MAX), draft: Some("d".into()) };
+        e.evidence = Evidence { content: Some("c".into()), role_fields: RoleField::ALL.to_vec(), wanted: Some("w".into()), before: Some(vec![]), md5: Some("m".into()), size: Some(u64::MAX), art: Some(u64::MAX), draft: Some("d".into()), revision: Some("r".into()), whole: true, was: [(orbiters_core::groups::Part::Rules, "x".to_string())].into() };
+        e.beside = Beside { moved: vec![orbiters_core::groups::Part::Icon], unread: vec![orbiters_core::groups::Part::Links] };
         (e.state, e.made, e.checked, e.answer, e.looked, e.dispatched_at) = (State::Unknown, Some("gpos_b".into()), true, Some(Answer::ShowsNot), true, Some(5));
         l.prepare(e.clone()).unwrap();
         assert_eq!(again(&l).get(&key(), &e.op), Some(e));
@@ -786,7 +869,7 @@ mod tests {
         }
         send(&l, "sent");
         send(&l, "done");
-        l.end("done", State::Done, Some(By::Answer), Some("gpos_1".into()));
+        l.end("done", State::Done, Some(By::Answer), Some("gpos_1".into()), Beside::default());
         let l2 = again(&l);
         let state = |op: &str| l2.get(&key(), op).map(|e| (e.state, e.by)).unwrap();
         assert_eq!(state("prepared"), (State::Refused, Some(By::NeverSent)));
@@ -819,7 +902,7 @@ mod tests {
             assert_eq!(l.conflicts(&get(op)), (Some(Warning::AnotherMayHaveGone), vec!["r1".into()]), "{op}");
         }
         l.dispatch("r2", &["r1".into()]).unwrap();
-        l.end("a", State::Unknown, None, None);
+        l.end("a", State::Unknown, None, None, Beside::default());
         for closing in [Closing::Shows, Closing::Again, Closing::Dropped] {
             assert!(!l.close("a", closing, true, None), "not before a look");
         }
@@ -852,7 +935,7 @@ mod tests {
                 }
                 l.dispatch("a", &[]).unwrap();
                 if let Some(state) = end {
-                    l.end("a", state, (state == State::Done).then_some(By::Answer), None);
+                    l.end("a", state, (state == State::Done).then_some(By::Answer), None, Beside::default());
                 }
                 let stop = if end == Some(State::Done) { Stop::Since } else { Stop::MaySent };
                 assert_eq!(l.dispatch("b", &[]), Err(stop), "{kind:?}, the first {what}");
@@ -862,13 +945,13 @@ mod tests {
         let l = fresh();
         l.prepare(entry(&l, "a", Kind::CreatePost, None, "p")).unwrap();
         send(&l, "a");
-        l.end("a", State::Done, Some(By::Answer), None);
+        l.end("a", State::Done, Some(By::Answer), None, Beside::default());
         let b = entry(&l, "b", Kind::CreatePost, None, "p");
         assert_eq!(l.conflicts(&b), (Some(Warning::AlreadyDone), vec!["a".into()]));
         l.prepare(b).unwrap();
         l.prepare(entry(&l, "c", Kind::CreatePost, None, "p")).unwrap();
         l.dispatch("b", &["a".into()]).unwrap();
-        l.end("b", State::Done, Some(By::Answer), None);
+        l.end("b", State::Done, Some(By::Answer), None, Beside::default());
         assert_eq!(l.dispatch("c", &["a".into()]), Err(Stop::Since), "warned of the first, not of the second");
         // One VRChat shows counts as done; one never sent as nothing.
         let l = fresh();
@@ -920,12 +1003,12 @@ mod tests {
         assert_eq!(l.get(&key(), "a").unwrap().state, State::Prepared);
         l.full.store(false, Ordering::Relaxed);
         l.dispatch("a", &[]).unwrap();
-        l.end("a", State::Unknown, None, None);
+        l.end("a", State::Unknown, None, None, Beside::default());
         l.looking("a");
         l.full.store(true, Ordering::Relaxed);
         assert!(!l.close("a", Closing::Dropped, true, None));
         assert!(l.get(&key(), "a").unwrap().open(), "still held");
-        l.end("a", State::Done, Some(By::Answer), None);
+        l.end("a", State::Done, Some(By::Answer), None, Beside::default());
         assert_eq!(again(&l).get(&key(), "a").unwrap().state, State::Unknown);
     }
 
@@ -940,7 +1023,7 @@ mod tests {
             e.evidence.before = Some(vec![known_id("gpos_1")]);
             l.prepare(e).unwrap();
             send(&l, &op);
-            l.end(&op, if i % 3 == 0 { State::Done } else { State::Unknown }, (i % 3 == 0).then_some(By::Answer), None);
+            l.end(&op, if i % 3 == 0 { State::Done } else { State::Unknown }, (i % 3 == 0).then_some(By::Answer), None, Beside::default());
             if i % 3 == 1 {
                 l.looking(&op);
                 assert!(l.close(&op, Closing::Dropped, true, None));
@@ -986,7 +1069,7 @@ mod tests {
     }
 
     /// verify3 Major 1, deviation 7: a record that cannot be read (cut short, of a newer form, holding what contradicts
-    /// itself) is left as it is and stops what it may be of, until the person sets it aside; it is warned of after that. One
+    /// itself) is left as it is and stops what it may be of, until the person looked and goes on; it is warned of after that. One
     /// plainly of another account or group stops nothing here.
     #[test]
     fn a_record_that_cannot_be_read_stops_what_it_may_be_of() {
@@ -1027,12 +1110,32 @@ mod tests {
             }
             assert_eq!(l.unreadable(&key()), 1, "{what}");
             l.set_aside(&key()).unwrap();
-            assert_eq!(std::fs::read_to_string(path.with_extension("aside")).unwrap(), bytes, "{what}: kept");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes, "{what}: still as it is");
             let e = entry(&l, "c", Kind::CreatePost, None, "p");
             assert_eq!((l.unreadable(&key()), l.conflicts(&e).0), (0, Some(Warning::RecordUnreadable)), "{what}: warned of");
             l.prepare(e).unwrap();
             assert_eq!(again(&l).conflicts(&entry(&l, "d", Kind::CreatePost, None, "p")).0, Some(Warning::RecordUnreadable), "{what}: by the next program too");
         }
+        // verify4 F5: an account's look is its own: another's records, and those no one can attribute, still hold it.
+        let l = fresh();
+        l.prepare(entry(&l, "sealed", Kind::CreatePost, None, "q")).unwrap();
+        l.let_go();
+        let other = Key { user: "usr_b".into(), ..key() };
+        for (name, k) in [("mine", &key()), ("theirs", &other)] {
+            std::fs::write(l.dir().join(format!("{name}.json")), serde_json::json!({"v": 99, "key": k, "group": "grp_1"}).to_string()).unwrap();
+        }
+        std::fs::write(l.dir().join("cut.json"), "{").unwrap();
+        let l = Ledger::at(l.dir());
+        assert_eq!((l.unreadable(&key()), l.unreadable(&other)), (2, 2), "each its own, and the one of anybody");
+        l.set_aside(&key()).unwrap();
+        let own = |l: &Ledger| {
+            assert_eq!((l.unreadable(&key()), l.unreadable(&other)), (0, 2), "the other decided nothing");
+            assert_eq!(l.prepare(Entry { key: other.clone(), ..entry(l, "theirs-now", Kind::CreatePost, None, "p") }), Err(Not::Read));
+            let warned = l.conflicts(&Entry { key: other.clone(), ..entry(l, "x", Kind::CreatePost, None, "p") }).0;
+            assert_eq!((warned, l.conflicts(&entry(l, "y", Kind::CreatePost, None, "p")).0), (None, Some(Warning::RecordUnreadable)));
+        };
+        own(&l);
+        own(&again(&l));
         // Found between the seal and the send: nothing goes.
         let l = fresh();
         l.prepare(entry(&l, "a", Kind::CreatePost, None, "p")).unwrap();

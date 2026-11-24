@@ -22,6 +22,15 @@ fn ok(v: Value) -> Scripted {
 fn ask(c: &Shared, r: Request) -> Reply {
     c.groups(LINK, scope(c), r)
 }
+fn of(c: &Shared, user: &str) -> Membership {
+    super::world::membership_of(user, &|r| ask(c, r))
+}
+fn own_membership(c: &Shared) -> Membership {
+    match ask(c, Request::Open { group: G.into() }) {
+        Reply::Opened(p) => p.group.my_member.unwrap().membership().unwrap(),
+        other => panic!("{other:?}"),
+    }
+}
 fn the(c: &Shared, kind: Kind) -> Write {
     write_of(kind, &|r| ask(c, r))
 }
@@ -158,7 +167,7 @@ fn a_check_says_what_vrchat_shows_now() {
             later(&c);
             let seen = if entry(&c, &op).open() { check(&c, &op) } else { soon.clone() };
             let shape = match &seen {
-                Observation::Candidates(l) => format!("{} shown, {} exactly it", l.len(), l.iter().filter(|c| c.same == Some(true)).count()),
+                Observation::Candidates(l) => format!("{} shown, {} exactly it", l.len(), l.iter().filter(|c| c.like == Likeness::Exactly).count()),
                 o => format!("{o:?}"),
             };
             let want = match (kind, done) {
@@ -181,7 +190,7 @@ fn a_check_says_what_vrchat_shows_now() {
             assert_eq!((e.state, e.answer, e.looked, e.closed), (State::Unknown, Some(answer), false, closed), "{kind:?}: what became of it stays unknown");
             assert_eq!(writes(&sent).len(), 1, "a check sends nothing");
             if want == "Shows" {
-                assert_eq!(check(&c, &op), Observation::Shows);
+                assert_eq!(check(&c, &op), Observation::Closed, "settled: not read again");
             }
         }
         // Every look-alike, the write in fact not carried out.
@@ -247,14 +256,14 @@ fn the_persons_decision_is_kept_as_theirs() {
     let (c, w, sent) = world();
     let op = lost(&c, &w, Kind::CreatePost, true);
     for choice in [Choice::Shows { made: None }, Choice::ShowsNot, Choice::Again, Choice::Drop] {
-        assert_eq!(decide(&c, &op, choice.clone()), Reply::Failed(Failure::NotKept), "not before a check: {choice:?}");
+        assert_eq!(decide(&c, &op, choice.clone()), Reply::Failed(Failure::LookNotKept), "not before a check: {choice:?}");
     }
     // The post is there with another audience (someone changed it): shown, not concluded.
     w.lock().unwrap().posts[0]["roleIds"] = json!([]);
     let Observation::Candidates(list) = check(&c, &op) else { panic!() };
-    assert_eq!((list.len(), list[0].same), (1, Some(false)));
+    assert_eq!((list.len(), list[0].like), (1, Likeness::NotExactly));
     assert_eq!(decide(&c, &op, Choice::Shows { made: Some("gpos_1".into()) }), Reply::Failed(Failure::Api(GroupFailure::Invalid)), "not one of those shown");
-    assert_eq!(decide(&c, &op, Choice::Again), Reply::Failed(Failure::NotKept), "a check that cannot tell is no ground for again");
+    assert_eq!(decide(&c, &op, Choice::Again), Reply::Failed(Failure::LookNotKept), "a check that cannot tell is no ground for again");
     assert_eq!(prepare(&c, the(&c, Kind::CreatePost)), Err(Reply::MaySent { op: op.clone() }), "the same does not go meanwhile");
     assert_eq!(decide(&c, &op, Choice::ShowsNot), Reply::Decided { op: op.clone() });
     let e = entry(&c, &op);
@@ -263,7 +272,7 @@ fn the_persons_decision_is_kept_as_theirs() {
     let again = prepare(&c, the(&c, Kind::CreatePost)).unwrap();
     assert_eq!((again.warning, again.confirm), (Some(Warning::SameBefore), true));
     assert_eq!(writes(&sent).len(), 1);
-    assert_eq!(decide(&c, &op, Choice::Drop), Reply::Failed(Failure::NotKept), "closed once");
+    assert_eq!(decide(&c, &op, Choice::Drop), Reply::Failed(Failure::LookNotKept), "closed once");
 
     let (c, w, _) = world();
     let op = lost(&c, &w, Kind::CreatePost, true);
@@ -302,8 +311,8 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
     }
     let (c, w, _) = world();
     lost(&c, &w, Kind::EditRole, false);
-    let Write::EditRole { group, baseline, edit } = the(&c, Kind::EditRole) else { panic!() };
-    let other = prepare(&c, Write::EditRole { group: group.clone(), baseline: baseline.clone(), edit: RoleEdit { name: "Another".into(), ..edit } }).unwrap();
+    let Write::EditRole { group, baseline, edit, .. } = the(&c, Kind::EditRole) else { panic!() };
+    let other = prepare(&c, Write::EditRole { group: group.clone(), baseline: baseline.clone(), edit: RoleEdit { name: "Another".into(), ..edit }, back: None }).unwrap();
     assert_eq!((other.warning, other.confirm), (Some(Warning::AnotherMayHaveGone), true));
     let gone = prepare(&c, Write::DeleteRole { group, role: baseline.id }).unwrap();
     assert_eq!(gone.warning, Some(Warning::AnotherMayHaveGone), "its deletion is of the same role");
@@ -314,7 +323,7 @@ fn what_may_have_gone_is_not_sent_again_unseen() {
     assert_eq!((twice.warning, twice.confirm), (Some(Warning::AlreadyDone), true));
     // A cosmetic role, given with no confirmation, is confirmed too while another change of that person may have gone.
     let (c, w, _) = world();
-    let plain = |role: &str| Write::MemberRole { group: G.into(), user: U.into(), role: role.into(), add: true };
+    let plain = |role: &str| Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: role.into(), add: true };
     assert!(!prepare(&c, plain("grol_artist")).unwrap().confirm, "a role with no rights");
     let s = prepare(&c, plain("grol_artist")).unwrap();
     w.lock().unwrap().fault = Some(Fault::Drop { done: false });
@@ -394,7 +403,7 @@ fn of_the_same_in_several_windows_one_goes() {
     }
     // Sealed before another change of the same person went out and may have been done: it was not told of it.
     let (c, w, sent) = world();
-    let plain = |role: &str| Write::MemberRole { group: G.into(), user: U.into(), role: role.into(), add: true };
+    let plain = |role: &str| Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: role.into(), add: true };
     let (one, two) = (seal(&c, 7, plain("grol_artist")), seal(&c, 8, plain("grol_events")));
     w.lock().unwrap().fault = Some(Fault::Drop { done: false });
     assert_eq!(go(&c, 7, &one), Outcome::Unknown);
@@ -414,21 +423,22 @@ fn a_role_change_is_for_one_membership() {
             let (c, w, sent) = world();
             let s = prepare(&c, the(&c, kind)).unwrap();
             let sealed = s.member.as_ref().unwrap().membership().unwrap();
-            assert_eq!((sealed.id.as_str(), sealed.joined_at.as_deref()), (format!("gmem_{}", &user[user.len() - 12..]).as_str(), Some("2025-05-05T05:05:05Z")), "sealed, and shown");
+            assert_eq!((sealed.id.as_str(), sealed.joined_at.as_str()), (format!("gmem_{}", &user[user.len() - 12..]).as_str(), "2025-05-05T05:05:05Z"), "sealed, and shown");
             change(w.lock().unwrap().members.get_mut(user).unwrap());
-            assert_eq!(commit(&c, &s), Outcome::Refused(Failure::Rejoined), "{kind:?}, {what}");
+            let said = what != "no time of joining any more";
+            assert_eq!(commit(&c, &s), Outcome::Refused(if said { Failure::Rejoined } else { Failure::NotRead(Missing::Member) }), "{kind:?}, {what}");
             assert!(writes(&sent).is_empty());
             let (c, w, _) = world();
             let op = lost(&c, &w, kind, true);
             change(w.lock().unwrap().members.get_mut(user).unwrap());
             later(&c);
-            assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::Rejoined), "{kind:?}, {what}");
+            assert_eq!(check(&c, &op), Observation::CannotTell(if said { Unclear::Rejoined } else { Unclear::NotRead }), "{kind:?}, {what}");
             assert!(entry(&c, &op).open());
         }
     }
     // One's own roles: the account's own membership.
-    let own = |add: bool| Write::MemberRole { group: G.into(), user: "usr_test".into(), role: "grol_artist".into(), add };
     let (c, w, sent) = world();
+    let own = |add: bool| Write::MemberRole { group: G.into(), user: "usr_test".into(), membership: own_membership(&c), role: "grol_artist".into(), add };
     let s = prepare(&c, own(true)).unwrap();
     let mut g = w.lock().unwrap().group();
     g["myMember"]["id"] = json!("gmem_me_again");
@@ -672,7 +682,7 @@ fn the_last_read_and_the_send_are_one_step() {
         let sent = c.test_vrchat_routed_paced(route(w.clone()));
         let s = prepare(&c, the(&c, kind)).unwrap();
         // A group write went out just now: the next one's pacing is still running.
-        let first = prepare(&c, Write::MemberRole { group: G.into(), user: U.into(), role: "grol_artist".into(), add: true }).unwrap();
+        let first = prepare(&c, Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: "grol_artist".into(), add: true }).unwrap();
         assert!(matches!(commit(&c, &first), Outcome::Done(_)));
         let s = match prepare(&c, s.write) {
             Ok(s) => s,
@@ -781,7 +791,7 @@ fn what_is_left_out_withholds_only_what_needs_it() {
         ("all my roles left out: a picture", Kind::ApplyBanner, mine(&["mRoleIds", "roleIds", "membershipStatus"])),
         ("my managed roles left out: a role change, by those given by hand", Kind::EditRole, mine(&["mRoleIds", "membershipStatus"])),
         ("my managed roles left out: a role given", Kind::AssignRole, mine(&["mRoleIds"])),
-        ("whether a role manages left out: deleted as a managing one", Kind::DeleteRole, role(3, "isManagementRole")),
+        ("whether a role manages left out: given as a managing one", Kind::AssignRole, role(1, "isManagementRole")),
         ("whether members may take it left out: given", Kind::AssignRole, role(1, "isSelfAssignable")),
     ];
     for (what, kind, change) in cases {
@@ -796,12 +806,13 @@ fn what_is_left_out_withholds_only_what_needs_it() {
     // Giving a cosmetic role whose management flag was left out is no longer "no confirmation".
     let (c, w, _) = world();
     role(2, "isManagementRole")(&mut w.lock().unwrap());
-    assert!(prepare(&c, Write::MemberRole { group: G.into(), user: U.into(), role: "grol_artist".into(), add: true }).unwrap().confirm);
+    assert!(prepare(&c, Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: "grol_artist".into(), add: true }).unwrap().confirm);
     // One's own roles need one's own record whole.
-    for gone in [&["mRoleIds"][..], &["roleIds"], &["id"]] {
+    for gone in [&["mRoleIds"][..], &["roleIds"], &["id"], &["joinedAt"]] {
         let (c, w, _) = world();
-        mine(if gone == ["mRoleIds"] { &["mRoleIds"] } else if gone == ["id"] { &["id"] } else { &["roleIds"] })(&mut w.lock().unwrap());
-        let r = prepare(&c, Write::MemberRole { group: G.into(), user: "usr_test".into(), role: "grol_artist".into(), add: true });
+        let membership = own_membership(&c);
+        mine(gone)(&mut w.lock().unwrap());
+        let r = prepare(&c, Write::MemberRole { group: G.into(), user: "usr_test".into(), membership, role: "grol_artist".into(), add: true });
         assert!(matches!(r, Err(Reply::Failed(Failure::NotRead(Missing::Member | Missing::Membership)))), "{gone:?}: {r:?}");
     }
 }
@@ -813,7 +824,7 @@ fn a_picture_applied_is_the_one_that_was_shown() {
     for by_id in [true, false] {
         let (c, w, _) = world();
         w.lock().unwrap().by_id = by_id;
-        let apply = |file: &str| Write::ApplyArt { group: G.into(), slot: ArtSlot::Banner, file: file.into() };
+        let apply = |file: &str| Write::ApplyArt { group: G.into(), slot: ArtSlot::Banner, file: file.into(), back: None };
         assert_eq!(prepare(&c, apply("file_nobodys")), failed(Failure::Withheld(Why::NotYourPicture)), "by id: {by_id}");
         let many: Vec<(String, Value)> = (0..260).map(|i| ("gallery".to_string(), super::world::file(&format!("file_m{i}"), "gallery", "usr_test", b"x"))).collect();
         w.lock().unwrap().files = many;
@@ -882,7 +893,6 @@ fn an_upload_is_its_new_file_not_its_bytes() {
         ("the very bytes", answered(&|b| file("file_up9", "gallery", "usr_test", b), false)),
         ("no time, all there was read", answered(&|b| without_time(file("file_up9", "gallery", "usr_test", b)), false)),
         ("another clock, all there was read", answered(&|b| old(file("file_up9", "gallery", "usr_test", b)), false)),
-        ("made since, more there than is read", answered(&|_| file("file_up9", "gallery", "usr_test", b"other bytes"), true)),
     ] {
         assert!(matches!(&outcome, Outcome::Done(Done::Uploaded(f)) if f.id == "file_up9"), "{what}: {outcome:?}");
     }
@@ -890,11 +900,50 @@ fn an_upload_is_its_new_file_not_its_bytes() {
         ("there before", answered(&|b| file("file_gal1", "gallery", "usr_test", b), false)),
         ("another's", answered(&|b| file("file_up9", "gallery", OTHERS_ID, b), false)),
         ("of another kind", answered(&|b| file("file_up9", "icon", "usr_test", b), false)),
+        // More there than is read: no id is known to be new, whatever time it says (verify4 F2).
+        ("made since, more there than is read", answered(&|_| file("file_up9", "gallery", "usr_test", b"other bytes"), true)),
+        ("one of those past what is read, its version new", answered(&|_| file("file_m250", "gallery", "usr_test", b"x"), true)),
         ("no time, more there than is read", answered(&|b| without_time(file("file_up9", "gallery", "usr_test", b)), true)),
         ("old, more there than is read", answered(&|b| old(file("file_up9", "gallery", "usr_test", b)), true)),
     ] {
         assert_eq!(outcome, Outcome::Unknown, "{what}");
     }
+}
+
+/// verify4 F2: an entry whose picture cannot be shown was there all the same: an answer naming it is no receipt, and it is no
+/// candidate; one that gives no id makes the list no list of all there was. A check says of each file how sure it is.
+#[test]
+fn every_entry_of_the_inventory_counts() {
+    let bare = |id: Value| ("gallery".to_string(), json!({"id": id, "ownerId": "usr_test", "tags": ["gallery"], "versions": []}));
+    let (c, w, _) = world();
+    w.lock().unwrap().files.push(bare(json!("file_bare")));
+    let s = prepare(&c, the(&c, Kind::UploadGallery)).unwrap();
+    w.lock().unwrap().fault = Some(Fault::Answer { done: false, status: 200, body: super::world::file("file_bare", "gallery", "usr_test", b"old") });
+    assert_eq!(commit(&c, &s), Outcome::Unknown);
+    w.lock().unwrap().files[1] = ("gallery".into(), super::world::file("file_bare", "gallery", "usr_test", b"old"));
+    assert_eq!(check(&c, &s.op), Observation::Candidates(vec![]), "its address is there now: it was there before");
+    // How sure: of the kind and new by a whole list; untagged, undated, or with no whole list before: not.
+    for (whole, want) in [(true, [Likeness::Since, Likeness::Uncertain]), (false, [Likeness::Uncertain, Likeness::Uncertain])] {
+        let (c, w, _) = world();
+        if !whole {
+            w.lock().unwrap().files.push(bare(Value::Null));
+        }
+        let op = lost(&c, &w, Kind::UploadGallery, false);
+        let mut untagged = super::world::file("file_untagged", "gallery", "usr_test", b"y");
+        untagged.as_object_mut().unwrap().remove("tags");
+        untagged["versions"][1].as_object_mut().unwrap().remove("created_at");
+        w.lock().unwrap().files.extend([("gallery".into(), super::world::file("file_new", "gallery", "usr_test", b"x")), ("gallery".into(), untagged)]);
+        let Observation::Candidates(list) = check(&c, &op) else { panic!() };
+        assert_eq!(list.iter().map(|c| c.like).collect::<Vec<_>>(), want, "{whole}");
+    }
+    // A clock that is wrong hides nothing that a whole list says is new.
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::UploadGallery, false);
+    let mut dated = super::world::file("file_dated", "gallery", "usr_test", b"x");
+    dated["versions"][1]["created_at"] = json!("2020-01-01T00:00:00Z");
+    w.lock().unwrap().files.push(("gallery".into(), dated));
+    let Observation::Candidates(list) = check(&c, &op) else { panic!() };
+    assert_eq!(list.iter().map(|c| (c.id.as_str(), c.like)).collect::<Vec<_>>(), [("file_dated", Likeness::Since)]);
 }
 
 /// An upload of which the answer was lost, kept by VRChat in bytes of its own: Check offers it, as added since.
@@ -905,7 +954,7 @@ fn a_lost_upload_is_found_re_encoded() {
         w.lock().unwrap().reencodes = true;
         let op = lost(&c, &w, tag, true);
         let Observation::Candidates(list) = check(&c, &op) else { panic!() };
-        assert_eq!(list.iter().map(|c| (c.id.as_str(), c.same)).collect::<Vec<_>>(), [("file_up1", None)], "{tag:?}");
+        assert_eq!(list.iter().map(|c| (c.id.as_str(), c.like)).collect::<Vec<_>>(), [("file_up1", Likeness::Since)], "{tag:?}");
         assert!(entry(&c, &op).open(), "only the person says which it is");
         assert_eq!(decide(&c, &op, Choice::Shows { made: Some("file_up1".into()) }), Reply::Decided { op: op.clone() });
         assert!(!entry(&c, &op).open());
@@ -918,7 +967,7 @@ fn a_lost_upload_is_found_re_encoded() {
 fn rights_of_an_existing_role_are_never_sent() {
     let (c, _, sent) = world();
     let s = prepare(&c, the(&c, Kind::EditRole)).unwrap();
-    assert!(matches!(commit(&c, &s), Outcome::Done(Done::Roles { beside, .. }) if !beside.any()));
+    assert!(matches!(commit(&c, &s), Outcome::Done(Done::Roles(_))));
     let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
     assert_eq!(bodies, [json!({"name": "Painters", "requiresTwoFactor": true})]);
     let (c, w, _) = world();
@@ -930,7 +979,7 @@ fn rights_of_an_existing_role_are_never_sent() {
     let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
     let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == id).unwrap();
     let edit = RoleEdit { name: "Painters".into(), ..RoleEdit::of(&baseline) };
-    assert_eq!(prepare(&c, Write::EditRole { group: G.into(), baseline, edit }), failed(Failure::Withheld(Why::FixedRole)));
+    assert_eq!(prepare(&c, Write::EditRole { group: G.into(), baseline, edit, back: None }), failed(Failure::Withheld(Why::FixedRole)));
 }
 
 /// Words the person left as they are, whatever VRChat let them be, are not sent back tidied or cut with a flag's change.
@@ -942,7 +991,7 @@ fn words_left_as_they_are_are_not_sent_back() {
     let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
     let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == "grol_artist").unwrap();
     let edit = RoleEdit { requires_two_factor: true, ..RoleEdit::of(&baseline) };
-    let s = prepare(&c, Write::EditRole { group: G.into(), baseline, edit }).unwrap();
+    let s = prepare(&c, Write::EditRole { group: G.into(), baseline, edit, back: None }).unwrap();
     commit(&c, &s);
     let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
     assert_eq!(bodies, [json!({"requiresTwoFactor": true})]);
@@ -959,8 +1008,8 @@ fn a_role_whose_rights_moved_under_a_rename_is_said() {
     roles[at]["requiresTwoFactor"] = json!(true);
     roles[at]["permissions"] = json!(["group-bans-manage"]);
     w.lock().unwrap().fault = Some(Fault::Answer { done: true, status: 200, body: json!(roles) });
-    let outcome = commit(&c, &s);
-    assert!(matches!(&outcome, Outcome::Done(Done::Roles { beside, .. }) if *beside == g::RoleParts { permissions: true, ..Default::default() }), "{outcome:?}");
+    assert!(matches!(commit(&c, &s), Outcome::Done(Done::Roles(_))));
+    assert_eq!(entry(&c, &s.op).beside, Beside { moved: vec![Part::Rights], unread: vec![] });
 }
 
 /// The same of a group's picture.
@@ -976,8 +1025,8 @@ fn another_picture_moved_under_an_apply_is_said() {
             body["iconId"] = Value::Null;
         }
         w.lock().unwrap().fault = Some(Fault::Answer { done: true, status: 200, body });
-        let outcome = commit(&c, &s);
-        assert!(matches!(&outcome, Outcome::Done(Done::Group { beside: p, .. }) if *p == g::GroupParts { icon: beside, ..Default::default() }), "{outcome:?}");
+        assert!(matches!(commit(&c, &s), Outcome::Done(Done::Group(_))));
+        assert_eq!(entry(&c, &s.op).beside, Beside { moved: if beside { vec![Part::Icon] } else { vec![] }, unread: vec![] });
         let bodies: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
         assert_eq!(bodies, [json!({"bannerId": "file_gal1"})], "only what the person chose");
     }
@@ -993,7 +1042,7 @@ fn fixed_flags_and_the_public_switch() {
     let edit = |f: fn(&mut RoleEdit)| {
         let mut d = RoleEdit::of(&owner);
         f(&mut d);
-        prepare(&c, Write::EditRole { group: G.into(), baseline: owner.clone(), edit: d })
+        prepare(&c, Write::EditRole { group: G.into(), baseline: owner.clone(), edit: d, back: None })
     };
     assert_eq!(edit(|d| d.requires_two_factor = true), failed(Failure::Withheld(Why::OwnerRole)));
     assert_eq!(edit(|d| d.added_on_join = true), failed(Failure::Withheld(Why::OwnerRole)));
@@ -1018,6 +1067,395 @@ fn a_deletion_whose_subject_changed_is_refused() {
     w.lock().unwrap().posts.clear();
     assert_eq!(prepare(&c, Write::DeletePost { group, post }), failed(Failure::NotRead(Missing::Post)), "one not found is not deleted blind");
     assert!(writes(&sent).is_empty());
+}
+
+/// What the last read before a write's request is of.
+fn last_read(kind: Kind) -> String {
+    match kind {
+        Kind::DeletePost => "/posts?".into(),
+        Kind::AssignRole | Kind::UnassignRole => "/members/".into(),
+        Kind::UploadGallery | Kind::UploadIcon => "/auth/user".into(),
+        _ => format!("/groups/{G}?"),
+    }
+}
+/// Another account is installed by the service, the way the account thread does, and not published yet (the caller holds the
+/// publishing); back once the epoch moved.
+fn install_another(c: &Shared) {
+    let (before, c2) = (c.identity_epoch(), c.clone());
+    std::thread::spawn(move || c2.sign_in_for_test("another"));
+    let start = Instant::now();
+    while c.identity_epoch() == before && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_ne!(c.identity_epoch(), before);
+}
+
+/// verify4 F13, for every write: the service installs another account (its publication still to come) before the commit, or
+/// while the last read is answered: nothing goes as the one before, and it is known that nothing went.
+#[test]
+fn nothing_goes_once_another_account_is_installed() {
+    for kind in Kind::ALL {
+        for during in [false, true] {
+            let (c, w, sent) = world();
+            let s = prepare(&c, the(&c, kind)).unwrap();
+            let (a, key) = (scope(&c), c.groups_key(&scope(&c)).unwrap());
+            let turn = c.publishing.lock().unwrap();
+            if during {
+                let cc = c.clone();
+                w.lock().unwrap().then.push((last_read(kind), Box::new(move |_| install_another(&cc))));
+            } else {
+                install_another(&c);
+            }
+            let reply = c.groups(LINK, a.clone(), Request::Commit { op: s.op.clone(), digest: s.digest() });
+            let private = c.groups(LINK, a, Request::Posts { group: G.into(), offset: 0 });
+            drop(turn);
+            let refused = [Reply::Failed(Failure::AccountChanged), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown }, Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::AccountChanged) }];
+            assert!(refused.contains(&reply), "{kind:?}, {during}: {reply:?}");
+            assert_eq!(private, Reply::Failed(Failure::AccountChanged), "nor is anything read for it");
+            assert!(writes(&sent).is_empty(), "{kind:?}, during the last read: {during}: {:?}", writes(&sent));
+            let e = c.groups_book().get(&key, &s.op).unwrap();
+            assert!(matches!((e.state, e.by), (State::Prepared, None) | (State::Refused, Some(By::BeforeSending | By::NeverSent))), "{kind:?}, {during}: {e:?}");
+        }
+    }
+}
+
+/// verify4 F13: what the network has is the account's it was sent by: another one is installed once it is answered, not
+/// before; it keeps its outcome for the account it was of.
+#[test]
+fn an_account_is_installed_after_what_is_under_way() {
+    let (c, w, sent) = world();
+    let s = prepare(&c, the(&c, Kind::DeletePost)).unwrap();
+    let (a, key, hold) = (scope(&c), c.groups_key(&scope(&c)).unwrap(), Arc::new(Hold::default()));
+    w.lock().unwrap().fault = Some(Fault::Held(hold.clone()));
+    let (c2, op, digest) = (c.clone(), s.op.clone(), s.digest());
+    let sending = std::thread::spawn(move || c2.groups(LINK, a, Request::Commit { op, digest }));
+    assert!(hold.until_reached());
+    let (before, c2) = (c.identity_epoch(), c.clone());
+    let installing = std::thread::spawn(move || c2.sign_in_for_test("another"));
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(c.identity_epoch(), before, "waits for its answer");
+    assert_eq!(writes(&sent).len(), 1);
+    hold.let_go();
+    installing.join().unwrap();
+    sending.join().unwrap();
+    assert_ne!(c.identity_epoch(), before);
+    assert_eq!(c.groups_book().get(&key, &s.op).unwrap().state, State::Done, "A's, done");
+}
+
+/// Every write, one precondition changed between its confirmation and its send, at each moment it can change: nothing
+/// leaves, and it is known that nothing did.
+#[test]
+fn one_precondition_changed_and_nothing_leaves() {
+    type Change = Arc<dyn Fn(&Shared, &Sealed, &mut World) + Send + Sync>;
+    let mut rows = 0;
+    for kind in Kind::ALL {
+        let member = match kind {
+            Kind::AssignRole => Some(U),
+            Kind::UnassignRole => Some(V),
+            _ => None,
+        };
+        // (what, when: before the commit, before the last read, during the last read)
+        let mut changes: Vec<(&str, [bool; 3], Change)> = vec![
+            ("another sign-in", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.revision += 1))),
+            ("another member verified", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.verified_for.as_mut().unwrap().member = Some("other".into())))),
+            ("the same member, another time of theirs", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.verified_for.as_mut().unwrap().epoch += 1))),
+            ("signed out of VRChat", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.user = None))),
+            ("cancelled", [true, false, false], Arc::new(|c, s, _| drop(ask(c, Request::Cancel { op: s.op.clone() })))),
+            ("its operation over", [false, false, true], Arc::new(|c, s, _| c.groups_book().end(&s.op, State::Refused, Some(By::BeforeSending), None, Beside::default()))),
+            ("the same already committed", [true, false, false], Arc::new(|c, s, _| c.groups.lock().unwrap().used.push_back(s.op.clone()))),
+            ("the rights lost", [true, false, false], Arc::new(|_, _, w| (w.rights, w.tags) = (vec!["group-instance-moderate".into()], vec![]))),
+        ];
+        if let Some(user) = member {
+            changes.push(("another membership", [true, true, false], Arc::new(move |_, _, w| w.members.get_mut(user).unwrap()["id"] = json!("gmem_rejoined"))));
+            changes.push(("joined again", [true, true, false], Arc::new(move |_, _, w| w.members.get_mut(user).unwrap()["joinedAt"] = json!("2026-11-23T10:00:00Z"))));
+            changes.push(("no time of joining", [true, true, false], Arc::new(move |_, _, w| drop(w.members.get_mut(user).unwrap().as_object_mut().unwrap().remove("joinedAt")))));
+            changes.push(("left", [true, true, false], Arc::new(move |_, _, w| drop(w.members.remove(user)))));
+        }
+        for (what, when, change) in changes {
+            for moment in (0..3).filter(|m| when[*m]) {
+                let (c, w, sent) = world();
+                let s = prepare(&c, the(&c, kind)).unwrap();
+                let key = c.groups_key(&scope(&c)).unwrap();
+                let used = what == "the same already committed";
+                if used {
+                    // Once, and again by a second press.
+                    w.lock().unwrap().fault = Some(Fault::Drop { done: false });
+                    commit(&c, &s);
+                }
+                let gone = writes(&sent).len();
+                match moment {
+                    0 => {
+                        let mut guard = w.lock().unwrap();
+                        let mut own = std::mem::take(&mut *guard);
+                        drop(guard);
+                        change(&c, &s, &mut own);
+                        *w.lock().unwrap() = own;
+                    }
+                    _ => {
+                        let (cc, ss, change) = (c.clone(), s.clone(), change.clone());
+                        let at = if moment == 1 { format!("/groups/{G}?") } else { last_read(kind) };
+                        w.lock().unwrap().then.push((at, Box::new(move |w| change(&cc, &ss, w))));
+                    }
+                }
+                let reply = ask(&c, Request::Commit { op: s.op.clone(), digest: s.digest() });
+                assert!(!matches!(&reply, Reply::Outcome { outcome: Outcome::Done(_), .. }), "{kind:?}, {what}, {moment}: {reply:?}");
+                assert_eq!(writes(&sent).len(), gone, "{kind:?}, {what}, {moment}: {:?}", writes(&sent));
+                if !used {
+                    let e = c.groups_book().get(&key, &s.op).unwrap();
+                    assert!(!e.open() && !e.stands(), "{kind:?}, {what}, {moment}: it is known that nothing went: {e:?}");
+                }
+                rows += 1;
+            }
+        }
+    }
+    assert!(rows >= 110, "{rows} rows");
+}
+
+/// verify4 F1: a press on a row is for that row's membership: the person left and joined again before it was prepared (both
+/// its parts another), or VRChat does not say when they joined: not even a confirmation comes of it.
+#[test]
+fn a_press_is_for_the_rows_own_membership() {
+    type Change = fn(&mut Value);
+    let changes: [(&str, Change, Failure); 4] = [
+        (
+            "left and joined again",
+            |m| {
+                m["id"] = json!("gmem_rejoined");
+                m["joinedAt"] = json!("2026-11-23T10:00:00Z");
+            },
+            Failure::Rejoined,
+        ),
+        ("another id", |m| m["id"] = json!("gmem_rejoined"), Failure::Rejoined),
+        ("another time", |m| m["joinedAt"] = json!("2026-11-23T10:00:00Z"), Failure::Rejoined),
+        ("no time", |m| drop(m.as_object_mut().unwrap().remove("joinedAt")), Failure::NotRead(Missing::Member)),
+    ];
+    for (what, change, want) in changes {
+        for (user, role, add) in [(U, "grol_artist", true), (U, "grol_mod", true), (V, "grol_mod", false)] {
+            let (c, w, sent) = world();
+            let press = Write::MemberRole { group: G.into(), user: user.into(), membership: of(&c, user), role: role.into(), add };
+            change(w.lock().unwrap().members.get_mut(user).unwrap());
+            assert_eq!(prepare(&c, press), failed(want), "{what}, {role}");
+            assert!(writes(&sent).is_empty());
+        }
+    }
+    // Looked at again, a new press is for the new one.
+    let (c, w, sent) = world();
+    w.lock().unwrap().members.get_mut(U).unwrap()["id"] = json!("gmem_rejoined");
+    let press = Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: "grol_artist".into(), add: true };
+    let s = prepare(&c, press).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    assert_eq!(writes(&sent).len(), 1);
+}
+
+/// verify4 F3: a role read without its name or a flag is not deleted; a list that is not the group's whole list certifies no
+/// deletion, neither as its answer nor at a check; the role still in it says it is there.
+#[test]
+fn a_deletion_is_certified_by_the_whole_list_only() {
+    for field in ["name", "description", "isManagementRole", "requiresTwoFactor"] {
+        let (c, w, sent) = world();
+        w.lock().unwrap().roles[3].as_object_mut().unwrap().remove(field);
+        assert_eq!(prepare(&c, Write::DeleteRole { group: G.into(), role: "grol_events".into() }), failed(Failure::NotRead(Missing::RoleDefinition)), "{field}");
+        assert!(writes(&sent).is_empty());
+    }
+    let full = World::default().roles;
+    let without = |ids: &[&str]| -> Vec<Value> { full.iter().filter(|r| !ids.contains(&r["id"].as_str().unwrap())).cloned().collect() };
+    let mut unranked = without(&["grol_events"]);
+    unranked[1].as_object_mut().unwrap().remove("order");
+    let lists = [
+        ("everyone's alone, bare", vec![json!({"id": "grol_everyone", "defaultRole": true})]),
+        ("everyone's alone", vec![full[4].clone()]),
+        ("no owner's", without(&["grol_owner", "grol_events"])),
+        ("no everyone's", without(&["grol_everyone", "grol_events"])),
+        ("another gone with it", without(&["grol_artist", "grol_events"])),
+        ("one not whole enough to rank", unranked),
+    ];
+    for (what, list) in lists {
+        let (c, w, _) = world();
+        let s = prepare(&c, the(&c, Kind::DeleteRole)).unwrap();
+        w.lock().unwrap().fault = Some(Fault::Answer { done: true, status: 200, body: json!(list) });
+        assert_eq!(commit(&c, &s), Outcome::Unknown, "{what}: as its answer");
+        let (c, w, _) = world();
+        let op = lost(&c, &w, Kind::DeleteRole, false);
+        later(&c);
+        let mut g = w.lock().unwrap().group();
+        g["roles"] = json!(list);
+        w.lock().unwrap().instead = vec![(format!("/groups/{G}?"), g)];
+        assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::NotRead), "{what}: at a check");
+        assert!(entry(&c, &op).open());
+    }
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::DeleteRole, false);
+    later(&c);
+    assert_eq!(check(&c, &op), Observation::ShowsNot, "still there");
+}
+
+/// verify4 F4: what was settled before is said as that, with nothing read; a check whose result cannot be kept says so, and
+/// what it is of stays as it was.
+#[test]
+fn a_settled_check_is_not_said_as_now() {
+    let (c, w, sent) = world();
+    let op = lost(&c, &w, Kind::AssignRole, true);
+    assert_eq!(check(&c, &op), Observation::Shows);
+    w.lock().unwrap().members.get_mut(U).unwrap()["roleIds"] = json!([]);
+    let reads = sent.lock().unwrap().len();
+    assert_eq!(check(&c, &op), Observation::Closed, "never as what VRChat shows now");
+    assert_eq!(sent.lock().unwrap().len(), reads);
+    let (c, w, _) = world();
+    let op = lost(&c, &w, Kind::AssignRole, true);
+    c.groups_book().full.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(ask(&c, Request::Check { op: op.clone() }), Reply::Failed(Failure::LookNotKept));
+    c.groups_book().full.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(entry(&c, &op).open(), "it may have been done, as before");
+    assert_eq!(check(&c, &op), Observation::Shows);
+}
+
+/// verify4 F12: the rights' catalogue failing, or null, blocks neither the page nor what needs none of it; a new role with
+/// rights needs it.
+#[test]
+fn the_catalogue_blocks_only_what_needs_it() {
+    for answer in [Value::Null, json!({"error": "x"})] {
+        let (c, w, _) = world();
+        w.lock().unwrap().instead = vec![("/permissions".into(), answer)];
+        let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
+        assert!(page.catalogue.is_none());
+        for kind in [Kind::EditRole, Kind::DeleteRole, Kind::AssignRole] {
+            assert!(prepare(&c, the(&c, kind)).is_ok(), "{kind:?}");
+        }
+        let write = the(&c, Kind::CreateRole);
+        assert_eq!(prepare(&c, write), failed(Failure::NotRead(Missing::Catalogue)));
+    }
+}
+
+/// What can be put back of `op`, and what the record says moved.
+fn aftermath(c: &Shared, op: &str) -> (Beside, Vec<Write>) {
+    match ask(c, Request::Ledger { also: vec![] }) {
+        Reply::Ledger { entries, back, .. } => (entries.iter().find(|e| e.op == op).map(|e| e.beside.clone()).unwrap_or_default(), back.into_iter().filter(|(o, _)| o == op).map(|(_, w)| w).collect()),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The sparse updates against a VRChat that clears what is left out: the banner goes in, the icon, the nameplate and the words
+/// go with it: said part by part, and the icon is put back as a write of its own, confirmed, with the picture that was there
+/// (whoever's it is); the nameplate is not (it is never sent), nor the words.
+#[test]
+fn what_a_sparse_update_cleared_is_said_and_put_back() {
+    let (c, w, sent) = world();
+    (w.lock().unwrap().icon, w.lock().unwrap().words) = (json!("file_someones"), json!({"nameplateId": "file_plate", "description": "Who we are", "rules": "Be kind", "links": ["https://example.org"]}));
+    w.lock().unwrap().clears = true;
+    let s = prepare(&c, the(&c, Kind::ApplyBanner)).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(Done::Group(_))));
+    let (beside, back) = aftermath(&c, &s.op);
+    assert_eq!(beside.moved, [Part::Icon, Part::Nameplate, Part::Description, Part::Rules, Part::Links]);
+    assert_eq!(back, [Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_someones".into(), back: Some(s.op.clone()) }]);
+    // Only what the service itself read there, for that slot, of that write.
+    for (slot, file, op) in [(ArtSlot::Icon, "file_elses", s.op.as_str()), (ArtSlot::Banner, "file_someones", s.op.as_str()), (ArtSlot::Icon, "file_someones", "another")] {
+        assert_eq!(prepare(&c, Write::ApplyArt { group: G.into(), slot, file: file.into(), back: Some(op.into()) }), failed(Failure::Expired));
+    }
+    let r = prepare(&c, back[0].clone()).unwrap();
+    assert!(r.confirm, "confirmed as any");
+    let Reply::Picture(shown) = ask(&c, Request::SealedArt { op: r.op.clone() }) else { panic!() };
+    assert_eq!((shown.as_slice(), r.art.as_ref().unwrap().sha256.as_str()), (super::world::picture("file_someones").as_slice(), sha256(&shown).as_str()), "the picture that was there");
+    // VRChat clears again: that is said too, with the banner to put back.
+    assert!(matches!(commit(&c, &r), Outcome::Done(Done::Group(_))));
+    let puts: Vec<Value> = sent.lock().unwrap().iter().filter(|r| r.method == "PUT").map(|r| serde_json::from_str(r.body.as_deref().unwrap()).unwrap()).collect();
+    assert_eq!(puts, [json!({"bannerId": "file_gal1"}), json!({"iconId": "file_someones"})], "each with its own id alone, and no nameplate ever");
+    let (first, _) = aftermath(&c, &s.op);
+    assert_eq!(first.moved, [Part::Nameplate, Part::Description, Part::Rules, Part::Links], "the icon is put back: the rest is still to be seen to");
+    let (second, again) = aftermath(&c, &r.op);
+    assert_eq!((second.moved, again.len()), (vec![Part::Banner], 1));
+    // One that does not clear: put back, nothing more to say.
+    w.lock().unwrap().clears = false;
+    let b = prepare(&c, again[0].clone()).unwrap();
+    assert!(matches!(commit(&c, &b), Outcome::Done(_)));
+    assert_eq!(aftermath(&c, &r.op), (Beside::default(), vec![]));
+    assert_eq!(w.lock().unwrap().banner, json!("file_gal1"));
+    // Seen to by the person.
+    assert_eq!(ask(&c, Request::SeenTo { op: s.op.clone() }), Reply::Decided { op: s.op.clone() });
+    assert_eq!(aftermath(&c, &s.op).0, Beside::default());
+}
+
+/// The same of a role: its rights went with a rename, and a flag and its words: the flag and the words are put back, with
+/// nothing else in the request; its rights are not (they are changed on vrchat.com).
+#[test]
+fn what_a_renames_update_cleared_of_a_role_is_said_and_put_back() {
+    for dropped in [false, true] {
+        let (c, w, sent) = world();
+        {
+            let mut w = w.lock().unwrap();
+            (w.roles[2]["permissions"], w.roles[2]["isSelfAssignable"], w.roles[2]["description"]) = (json!(["group-instance-join"]), json!(true), json!("They paint"));
+            w.clears = true;
+        }
+        let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
+        let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == "grol_artist").unwrap();
+        let edit = RoleEdit { name: "Painters".into(), ..RoleEdit::of(&baseline) };
+        let s = prepare(&c, Write::EditRole { group: G.into(), baseline, edit, back: None }).unwrap();
+        if dropped {
+            // Its answer lost: the check sees the same, and what was there is still held.
+            w.lock().unwrap().fault = Some(Fault::Drop { done: true });
+            assert_eq!(commit(&c, &s), Outcome::Unknown);
+            assert_eq!(check(&c, &s.op), Observation::Shows);
+        } else {
+            assert!(matches!(commit(&c, &s), Outcome::Done(Done::Roles(_))));
+        }
+        let (beside, back) = aftermath(&c, &s.op);
+        assert_eq!(beside.moved, [Part::Description, Part::Rights, Part::SelfAssignable], "{dropped}");
+        assert_eq!(back.len(), 1);
+        w.lock().unwrap().clears = false;
+        let r = prepare(&c, back[0].clone()).unwrap();
+        assert!(r.confirm);
+        assert!(matches!(commit(&c, &r), Outcome::Done(_)));
+        let last = sent.lock().unwrap().iter().rfind(|r| r.method == "PUT").map(|r| serde_json::from_str::<Value>(r.body.as_deref().unwrap()).unwrap());
+        assert_eq!(last, Some(json!({"description": "They paint", "isSelfAssignable": true})), "what can be put back from here, and nothing else");
+        assert_eq!(aftermath(&c, &s.op), (Beside { moved: vec![Part::Rights], unread: vec![] }, vec![]), "its rights are still to be seen to, on vrchat.com");
+    }
+}
+
+/// verify4 F7: each part is compared on its own, whatever the answer leaves out of the others; what it leaves out is read
+/// again; what that leaves out too is said as not known.
+#[test]
+fn what_an_answer_leaves_out_hides_nothing() {
+    let words = json!({"description": "Who we are", "rules": "Be kind", "links": ["https://example.org"], "joinState": "open"});
+    // What VRChat has changes with the write (right after the last read before it).
+    let apply = |change: fn(&mut Value, &mut Value)| {
+        let (c, w, _) = world();
+        w.lock().unwrap().words = words.clone();
+        let s = prepare(&c, the(&c, Kind::ApplyBanner)).unwrap();
+        let mut after = w.lock().unwrap().group();
+        after["bannerId"] = json!("file_gal1");
+        let mut there = words.clone();
+        change(&mut after, &mut there);
+        {
+            let mut w = w.lock().unwrap();
+            w.fault = Some(Fault::Answer { done: true, status: 200, body: after });
+            w.then.push((format!("/groups/{G}?"), Box::new(move |w| w.words = there)));
+        }
+        assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+        entry(&c, &s.op).beside
+    };
+    assert_eq!(apply(|_, _| {}), Beside::default());
+    let cleared = apply(|a, w| {
+        a["description"] = json!("");
+        a.as_object_mut().unwrap().remove("links");
+        w["description"] = json!("");
+    });
+    assert_eq!(cleared, Beside { moved: vec![Part::Description], unread: vec![] }, "the links read again: the same");
+    let answered = apply(|a, _| {
+        a["description"] = json!("");
+        a.as_object_mut().unwrap().remove("links");
+    });
+    assert_eq!(answered, Beside { moved: vec![Part::Description], unread: vec![] }, "its answer alone says so: said all the same");
+    let links = apply(|a, w| {
+        a.as_object_mut().unwrap().remove("links");
+        w["links"] = json!([]);
+    });
+    assert_eq!(links, Beside { moved: vec![Part::Links], unread: vec![] }, "gone, by the read");
+    let never = apply(|a, w| {
+        a.as_object_mut().unwrap().remove("rules");
+        w.as_object_mut().unwrap().remove("rules");
+        a["joinState"] = json!("closed");
+        w["joinState"] = json!("closed");
+    });
+    assert_eq!(never, Beside { moved: vec![Part::JoinState], unread: vec![Part::Rules] }, "not said is not known");
 }
 
 /// The record's entries are the scope's own Orbiters member's, by the id they were verified for: the same at another time
@@ -1178,9 +1616,9 @@ fn unknown_entry(c: &Shared, write: &Write, evidence: Evidence) -> String {
     if target.user.is_some() {
         target.membership = Some("m".into());
     }
-    book.prepare(Entry { v: FORMAT, op: op.clone(), key: c.groups_key(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target, payload: write.payload(), same: write.same(), evidence, state: State::Prepared, by: None, made: None, checked: false, answer: None, looked: false, closed: None, prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
+    book.prepare(Entry { v: FORMAT, op: op.clone(), key: c.groups_key(&scope(c)).unwrap(), group: write.group().into(), kind: write.kind(), target, payload: write.payload(), same: write.same(), evidence, state: State::Prepared, by: None, made: None, checked: false, answer: None, looked: false, closed: None, beside: Beside::default(), prepared_at: book.now(), dispatched_at: None, ended_at: None }).unwrap();
     book.dispatch(&op, &[]).unwrap();
-    book.end(&op, State::Unknown, None, None);
+    book.end(&op, State::Unknown, None, None, Beside::default());
     later(c);
     op
 }
@@ -1197,14 +1635,14 @@ fn verify2_duplicate_role_name_cannot_identify_a_creation() {
 fn verify2_absent_art_field_is_inconclusive() {
     let (c, w, _) = world();
     w.lock().unwrap().instead = vec![(format!("/groups/{G}?"), json!({"id": G, "name": "x"}))];
-    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into() }, Evidence::default());
+    let op = unknown_entry(&c, &Write::ApplyArt { group: G.into(), slot: ArtSlot::Icon, file: "file_new".into(), back: None }, Evidence::default());
     assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::NotRead));
 }
 #[test]
 fn verify2_disputed_member_must_be_the_requested_user() {
     let (c, w, _) = world();
     w.lock().unwrap().instead = vec![(format!("/members/{U}"), super::world::member(TWIN, &["grol_artist"]))];
-    let op = unknown_entry(&c, &Write::MemberRole { group: G.into(), user: U.into(), role: "grol_artist".into(), add: true }, Evidence::default());
+    let op = unknown_entry(&c, &Write::MemberRole { group: G.into(), user: U.into(), membership: of(&c, U), role: "grol_artist".into(), add: true }, Evidence::default());
     assert_eq!(check(&c, &op), Observation::CannotTell(Unclear::NotRead));
 }
 

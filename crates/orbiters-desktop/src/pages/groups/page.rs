@@ -40,8 +40,10 @@ pub(crate) struct MemberList {
     asked: String,
     typed_at: f64,
     pub items: Vec<Member>,
-    /// The user ids loaded, to keep each once without a scan per row (Major 9).
+    /// The memberships loaded (a person who left and came back is another row, verify4 F1), and where each person's row is,
+    /// to keep each once without a scan per row (Major 9).
     seen: HashSet<String>,
+    people: HashSet<String>,
     offset: usize,
     more: bool,
     loading: bool,
@@ -137,7 +139,7 @@ pub(crate) struct Open {
     pub posts: PostList,
     /// Heights of post cards measured when drawn: the others take their place unmeasured (Major 9).
     post_heights: HashMap<String, f32>,
-    /// The member whose roles are open under their row (their user id, captured at the press).
+    /// The row whose roles are open under it ([`row_of`]: the membership, captured at the press).
     pub member_roles: Option<String>,
     pub role_editor: Option<RoleEditor>,
     pub composer: Option<Composer>,
@@ -199,6 +201,14 @@ impl Open {
         self.members.items.iter().find(|m| m.user_id == user).and_then(|m| m.display_name.clone())
     }
 
+    /// The membership of `user` as the page has it.
+    pub(crate) fn membership_of(&self, user: &str) -> Option<g::Membership> {
+        if user == self.me_id {
+            return self.me().and_then(|m| m.membership());
+        }
+        self.members.items.iter().find(|m| m.user_id == user).and_then(Member::membership)
+    }
+
     /// Everything read again (after a check, or a refusal that says the page is out of date).
     pub fn reload(&mut self) {
         self.asked = false;
@@ -219,9 +229,14 @@ impl Open {
                 match reply {
                     Reply::Members(m) => {
                         for item in m.items {
-                            if self.members.items.len() < MEMBERS_MAX && self.members.seen.insert(item.user_id.clone()) {
-                                self.members.items.push(item);
+                            if self.members.items.len() >= MEMBERS_MAX || !self.members.seen.insert(row_of(&item)) {
+                                continue;
                             }
+                            // Their row of another membership goes: what VRChat gave later is who they are now.
+                            if !self.members.people.insert(item.user_id.clone()) {
+                                self.members.items.retain(|m| m.user_id != item.user_id);
+                            }
+                            self.members.items.push(item);
                         }
                         // Offsets advance by what VRChat gave, kept or not (M8).
                         self.members.offset += m.raw;
@@ -281,10 +296,16 @@ impl Open {
         match outcome {
             Outcome::Done(done) => match done {
                 Done::MemberRoles { user, role_ids } => {
-                    if let Some(m) = self.members.items.iter_mut().find(|m| m.user_id == user) {
+                    // Of the very membership it was for: another row says nothing of it.
+                    let of = match sealed.map(|s| &s.write) {
+                        Some(Write::MemberRole { membership, .. }) => Some(membership.clone()),
+                        _ => None,
+                    };
+                    let same = |m: Option<g::Membership>| of.is_none() || m == of;
+                    if let Some(m) = self.members.items.iter_mut().find(|m| m.user_id == user && same(m.membership())) {
                         m.role_ids = role_ids.clone();
                     }
-                    if let Some(me) = self.page.as_mut().and_then(|p| p.group.my_member.as_mut()).filter(|me| me.user_id == user) {
+                    if let Some(me) = self.page.as_mut().and_then(|p| p.group.my_member.as_mut()).filter(|me| me.user_id == user && same(me.membership())) {
                         me.role_ids = role_ids;
                     }
                 }
@@ -294,7 +315,7 @@ impl Open {
                     }
                     self.clear_role_editor(sealed, sent);
                 }
-                Done::Roles { roles, .. } => {
+                Done::Roles(roles) => {
                     if let Some(p) = self.page.as_mut() {
                         p.group.roles = Some(roles);
                     }
@@ -314,7 +335,7 @@ impl Open {
                 }
                 Done::PostDeleted { post } => self.posts.items.retain(|p| p.id != post),
                 Done::Uploaded(_) => {}
-                Done::Group { group, .. } => {
+                Done::Group(group) => {
                     if let Some(p) = self.page.as_mut() {
                         p.group.icon_id = group.icon_id.clone();
                         p.group.icon_url = group.icon_url.clone();
@@ -456,9 +477,10 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
                 }
             }
         }
-        Write::DeleteRole { .. } => {
+        Write::DeleteRole { role: id, .. } => {
             if let Some(role) = &sealed.role {
-                line(ui, tr("Role"), &g::label(&role.name, g::ROLE_NAME_MAX));
+                // The id with it: the very one, whatever others are called.
+                line(ui, tr("Role"), &format!("{} {}", g::label(&role.name, g::ROLE_NAME_MAX), id_tail(id)));
                 if !role.description.is_empty() {
                     line(ui, tr("Description"), &g::text(&role.description, 300));
                 }
@@ -476,6 +498,7 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
                 line(ui, tr("Restricted to"), &draft.role_ids.iter().map(|r| role_label(sealed, r)).collect::<Vec<_>>().join(", "));
             }
             line(ui, tr("Notification"), if draft.send_notification { tr("Yes: members who follow the group's announcements are notified") } else { tr("No") });
+            note(ui, tr("Another moderator, or another computer, can post the same meanwhile: Orbiters only sees what goes from this one."), theme::FG_3);
         }
         Write::DeletePost { post, .. } => {
             // The post exactly as read now (Blocker 7).
@@ -493,14 +516,19 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
                 line(ui, tr("File"), &orbiters_i18n::tr!("PNG, {size}", size = orbiters_ui::format::bytes(a.size as f64)));
             }
             note(ui, tr("Nothing about the group changes yet: applying it is the next step."), theme::FG_3);
+            note(ui, tr("VRChat says only when it is sent whether your inventory has room for it."), theme::FG_3);
         }
-        Write::ApplyArt { slot, file, .. } => {
+        Write::ApplyArt { slot, file, back, .. } => {
+            if back.is_some() {
+                note(ui, tr("The picture that was there before, as it was read then. What else moves with it is looked at again after it."), theme::FG_2);
+            }
             line(ui, tr("Picture"), if *slot == ArtSlot::Icon { tr("The group's icon") } else { tr("The group's banner") });
             line(ui, tr("File"), &id_tail(file));
             note(ui, tr("Everyone who looks at the group sees it."), theme::FG_3);
             note(ui, tr("VRChat takes the file, not this picture of it: it is read again just before, and not sent if it changed."), theme::FG_3);
         }
     }
+    note(ui, tr("It is all read again right before it goes. What someone else changes in the instant between is not seen: VRChat has no way to close it."), theme::FG_4);
 }
 
 /// What VRChat's answer left out, reading it again, and where it is done whatever VRChat leaves out here.
@@ -626,7 +654,7 @@ fn do_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, scope: &crate::co
         }
         Act::Studio(target) => {
             if let Some(o) = state.open.as_ref() {
-                let mut studio = super::studio::Studio::new(o.card.clone(), scope.vrchat_user().unwrap_or_default(), None);
+                let mut studio = super::studio::Studio::new(o.card.clone(), super::owner_of(scope), None);
                 if let Some(t) = target {
                     studio.target = t;
                 }
@@ -680,7 +708,7 @@ fn do_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, scope: &crate::co
         }
         Act::ApplyUploaded(slot, file, origin) => {
             let Some(group) = state.open.as_ref().map(|o| o.id.clone()) else { return };
-            state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot, file }, origin);
+            state.prepare(ctx, cx.ctl, Write::ApplyArt { group, slot, file, back: None }, origin);
         }
         Act::UploadIcon => {
             let Some(path) = rfd::FileDialog::new().set_title(tr("Choose a picture for the icon")).add_filter(tr("Pictures"), &["png", "jpg", "jpeg", "webp"]).pick_file() else { return };
@@ -842,7 +870,7 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
         }
     });
     if let Some((purpose @ Purpose::Art(slot), files, more, loading, failed)) = picker.clone() {
-        pictures_grid(ui, cx, state, scope, purpose, &files, more, loading, failed, acts, |file, rect| Act::Write(Write::ApplyArt { group: group.id.clone(), slot, file: file.id.clone() }, rect));
+        pictures_grid(ui, cx, state, scope, purpose, &files, more, loading, failed, acts, |file, rect| Act::Write(Write::ApplyArt { group: group.id.clone(), slot, file: file.id.clone(), back: None }, rect));
     }
     for up in uploaded {
         let (slot, file) = (up.slot, up.file.clone());
@@ -1033,10 +1061,10 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
         let Some(o) = state.open.as_mut() else { return };
         let id = match row {
-            None => me.as_ref().map(|me| me.user_id.as_str()),
-            Some(i) => o.members.items.get(i).map(|m| m.user_id.as_str()),
+            None => me.as_ref().map(|me| me.membership_id.clone()),
+            Some(i) => o.members.items.get(i).map(row_of),
         };
-        let open_now = id.is_some() && open_for.as_deref() == id;
+        let open_now = id.is_some() && open_for == id;
         if !ui.is_rect_visible(rect.expand(120.0)) && !open_now {
             continue;
         }
@@ -1051,10 +1079,12 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         let Some(m) = member else { continue };
         let mine = row.is_none();
         let roles: Vec<Role> = o.roles().to_vec();
-        // Roles can be given or taken back only on a whole record that says which membership it is (M8, Blocker 4, verify3
-        // Blocker 1), when some role allows it.
-        let may = roles.iter().any(|r| o.can(Action::AssignRole { role: &r.id, user: &m.user_id, add: !m.role_ids.contains(&r.id) }).allowed());
-        let whole = (m.complete() || mine) && m.roles_known && m.membership().is_some();
+        // Roles can be given or taken back only on a whole record that says which membership it is (its id and when it began:
+        // M8, Blocker 4, verify3 Blocker 1, verify4 F1), when some role allows it.
+        let membership = m.membership();
+        let asked = membership.clone().unwrap_or_else(|| g::Membership { id: String::new(), joined_at: String::new() });
+        let may = roles.iter().any(|r| o.can(Action::AssignRole { role: &r.id, user: &m.user_id, membership: &asked, add: !m.role_ids.contains(&r.id) }).allowed());
+        let whole = (m.complete() || mine) && m.roles_known && membership.is_some();
         let assignable = whole && may;
         withheld |= may && !whole;
         let p = ui.painter().clone();
@@ -1081,13 +1111,12 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         if assignable {
             let b = Rect::from_min_size(pos2(rect.right() - 108.0, rect.center().y - 16.0), vec2(96.0, 32.0));
             if widgets::Button::new(tr("Roles")).icon(if open_now { icons::CARET_UP } else { icons::CARET_DOWN }).size(widgets::Size::Sm).id_salt(("member-roles", m.user_id.as_str())).show_at(ui, b).clicked() {
-                let user = m.user_id.clone();
                 if let Some(o) = state.open.as_mut() {
-                    o.member_roles = if open_now { None } else { Some(user) };
+                    o.member_roles = if open_now { None } else { id };
                 }
             }
         }
-        if open_now {
+        if open_now && whole {
             if let Some(o) = state.open.as_ref() {
                 role_chooser(ui, o, &m, &roles, busy, acts);
             }
@@ -1107,12 +1136,20 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
     }
 }
 
+/// The row a member's record is: their membership (one who left and came back is another), or the record alone when it does
+/// not say which.
+fn row_of(m: &Member) -> String {
+    if m.membership_id.is_empty() { m.user_id.clone() } else { m.membership_id.clone() }
+}
+
+#[cfg(test)]
 fn allowed_assign(o: &Open, r: &Role, user: &str) -> bool {
-    o.can(Action::AssignRole { role: &r.id, user, add: true }).allowed()
+    o.can(Action::AssignRole { role: &r.id, user, membership: &g::Membership { id: "gmem_1".into(), joined_at: "2026-01-01T00:00:00Z".into() }, add: true }).allowed()
 }
 
 /// The roles a member can be given or have taken back, each a press of its own: ids taken at the press (M3).
 fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, acts: &mut Vec<Act>) {
+    let Some(membership) = m.membership() else { return };
     let w = ui.available_width();
     let candidates: Vec<&Role> = roles.iter().filter(|r| !r.default_role && !r.is_owner_role() && !r.requires_purchase).collect();
     let chips: Vec<(String, f32)> = candidates.iter().map(|r| {
@@ -1128,11 +1165,12 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
     widgets::text(&p, pos2(rect.left() + 16.0, rect.top() + 16.0), Align2::LEFT_CENTER, &Txt::new(tr("Press a role to give it or take it back. Each press asks VRChat once."), 12.0).color(theme::FG_3));
     for ((r, (label, cw)), at) in candidates.iter().zip(chips.iter()).zip(spots) {
         let has = m.role_ids.contains(&r.id);
-        let verdict = o.can(Action::AssignRole { role: &r.id, user: &m.user_id, add: !has });
+        let verdict = o.can(Action::AssignRole { role: &r.id, user: &m.user_id, membership: &membership, add: !has });
         let cr = Rect::from_min_size(rect.min + vec2(16.0, 32.0) + at, vec2(*cw, 30.0));
-        // Group, member, role and direction are the press's: a list read again under a press that would turn "give"
-        // into "take back" makes it another control, which that press is not on (Major 3).
-        let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), r.id.as_str(), has)), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
+        // Group, member, membership, role and direction are the press's: a list read again under a press that would turn
+        // "give" into "take back", or make it someone's new membership, makes it another control, which that press is not
+        // on (Major 3, verify4 F1).
+        let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), &membership, r.id.as_str(), has)), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
         let fill = if has { theme::alpha(theme::ACCENT, 0.2) } else { theme::INK_700 };
         p.rect_filled(cr, theme::radius(15.0), if resp.hovered() && verdict.allowed() { theme::mix(fill, theme::FG, 0.08) } else { fill });
         let color = if verdict.allowed() { if has { theme::ACCENT } else { theme::FG } } else { theme::FG_4 };
@@ -1143,7 +1181,7 @@ fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, a
         // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
         // alone (Major 3, Blocker 6).
         if verdict.allowed() && widgets::activated_fresh(&resp) {
-            acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), role: r.id.clone(), add: !has }, cr));
+            acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), membership: membership.clone(), role: r.id.clone(), add: !has }, cr));
         }
     }
 }
@@ -1352,7 +1390,7 @@ fn role_editor(ui: &mut Ui, o: &mut Open, catalogue: Option<&[g::PermissionInfo]
     } else if let Some(rect) = save {
         let ed = o.role_editor.as_ref().unwrap();
         let write = match &ed.form {
-            RoleForm::Of(b, edit) => Write::EditRole { group, baseline: (**b).clone(), edit: edit.clone() },
+            RoleForm::Of(b, edit) => Write::EditRole { group, baseline: (**b).clone(), edit: edit.clone(), back: None },
             RoleForm::New(draft) => Write::CreateRole { group, draft: draft.clone() },
         };
         acts.push(Act::Write(write, rect));
@@ -1797,6 +1835,59 @@ mod tests {
         assert!(allowed_assign(&owner, &owner.roles()[2].clone(), "usr_00000000-0000-4000-8000-000000000001"));
     }
 
+    /// verify4 F1: a row is a membership: its chips' presses carry it; a person who left and came back is another row, in the
+    /// place of the one before; a row that does not say which membership it is, or since when, has no chips.
+    #[test]
+    fn a_row_is_a_membership() {
+        let m = |id: &str, at: Option<&str>| Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), membership_id: id.into(), joined_at: at.map(str::to_string), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
+        let mut o = open_as(&["*"], &["grol_owner"]);
+        let page = |m: Member| orbiters_core::vrchat_api::Members { items: vec![m], raw: 50, total: None };
+        let answer = |o: &mut Open, offset: usize, m: Member| o.answer(Kind::Members { group: "grp_1".into(), query: String::new(), offset }, Reply::Members(page(m)));
+        answer(&mut o, 0, m("gmem_1", Some("2025-01-01T00:00:00Z")));
+        answer(&mut o, 50, m("gmem_2", Some("2026-01-01T00:00:00Z")));
+        assert_eq!(o.members.items.iter().map(|m| m.membership_id.as_str()).collect::<Vec<_>>(), ["gmem_2"]);
+        assert_eq!(o.membership_of("usr_00000000-0000-4000-8000-000000000001").unwrap().id, "gmem_2");
+        // What is done for one says nothing of the other.
+        let sealed = Sealed::made_up(Write::MemberRole { group: "grp_1".into(), user: m("", None).user_id, membership: m("gmem_1", Some("2025-01-01T00:00:00Z")).membership().unwrap(), role: "grol_mod".into(), add: true }, true);
+        o.ended(Some(&sealed), Outcome::Done(Done::MemberRoles { user: m("", None).user_id, role_ids: vec!["grol_mod".into()] }));
+        assert!(o.members.items[0].role_ids.is_empty());
+        let chips = |m: &Member| {
+            let o = open_as(&["*"], &["grol_owner"]);
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| role_chooser(ui, &o, m, &o.roles().to_vec(), false, &mut Vec::new()));
+            out.textures_delta.clear();
+            !words(&out).is_empty()
+        };
+        assert!(chips(&m("gmem_1", Some("2025-01-01T00:00:00Z"))));
+        for part in [m("", Some("2025-01-01T00:00:00Z")), m("gmem_1", None), m("gmem_1", Some("a while ago"))] {
+            assert!(!chips(&part));
+        }
+    }
+
+    /// verify4 F11: what cannot be closed is said where it is decided: another device's same post, the inventory's room, the
+    /// instant between the last read and the send.
+    #[test]
+    fn the_limits_are_said_at_the_decision() {
+        let said = |write: Write| {
+            let s = Sealed::made_up(write, true);
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(520.0, 900.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| confirm_body(ui, &s, None));
+            out.textures_delta.clear();
+            words(&out).replace('\n', " ")
+        };
+        let group = || "grp_1".to_string();
+        let post = said(Write::CreatePost { group: group(), draft: PostDraft { title: "t".into(), text: "x".into(), ..Default::default() }, of: String::new() });
+        assert!(post.contains(tr("Another moderator, or another computer, can post the same meanwhile: Orbiters only sees what goes from this one.")), "{post}");
+        let up = said(Write::Upload { tag: FileTag::Gallery, group: group(), staged: crate::controller::groups::Staged { name: String::new(), size: 1, sha256: String::new() }, art: None });
+        assert!(up.contains(tr("VRChat says only when it is sent whether your inventory has room for it.")), "{up}");
+        let last = tr("It is all read again right before it goes. What someone else changes in the instant between is not seen: VRChat has no way to close it.");
+        for s in [post, up, said(Write::ApplyArt { group: group(), slot: ArtSlot::Icon, file: "file_a".into(), back: None }), said(Write::DeleteRole { group: group(), role: "grol_a".into() })] {
+            assert!(s.contains(last), "{s}");
+        }
+    }
+
     /// M8: a search's answers are keyed by their query and offset: an obsolete one is dropped; duplicates once.
     #[test]
     fn member_pages_are_keyed_and_deduplicated() {
@@ -1817,7 +1908,7 @@ mod tests {
     #[test]
     fn a_role_chip_acts_only_on_a_release_on_it() {
         let o = open_as(&["*"], &["grol_owner"]);
-        let m = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
+        let m = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), membership_id: "gmem_1".into(), joined_at: Some("2026-01-01T00:00:00Z".into()), roles_known: true, ..Default::default() };
         let roles = o.roles().to_vec();
         let ctx = egui::Context::default();
         let mut chip = Rect::NOTHING;
@@ -1848,8 +1939,8 @@ mod tests {
     #[test]
     fn a_role_chip_never_turns_round_under_a_press() {
         let o = open_as(&["*"], &["grol_owner"]);
-        let without = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
-        let first = o.roles().iter().find(|r| o.can(Action::AssignRole { role: &r.id, user: &without.user_id, add: true }).allowed()).unwrap().id.clone();
+        let without = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), display_name: Some("Sam".into()), membership_id: "gmem_1".into(), joined_at: Some("2026-01-01T00:00:00Z".into()), roles_known: true, ..Default::default() };
+        let first = o.roles().iter().find(|r| o.can(Action::AssignRole { role: &r.id, user: &without.user_id, membership: &without.membership().unwrap(), add: true }).allowed()).unwrap().id.clone();
         let with = Member { role_ids: vec![first], ..without.clone() };
         let roles = o.roles().to_vec();
         let run = |ctx: &egui::Context, m: &Member, events: Vec<egui::Event>, t: f64, at: &mut egui::Pos2| {
@@ -1921,7 +2012,7 @@ mod tests {
     fn a_confirmation_tells_namesakes_apart() {
         let (a, b) = ("usr_00000000-0000-4000-8000-00000000aaaa", "usr_00000000-0000-4000-8000-00000000bbbb");
         let said = |user: &str| {
-            let mut s = sealed(Write::MemberRole { group: "grp_1".into(), user: user.into(), role: "grol_mod".into(), add: true });
+            let mut s = sealed(Write::MemberRole { group: "grp_1".into(), user: user.into(), membership: g::Membership { id: "gmem_1".into(), joined_at: "2026-01-01T00:00:00Z".into() }, role: "grol_mod".into(), add: true });
             s.member = Some(Member { user_id: user.into(), display_name: Some("Sam".into()), ..Default::default() });
             confirmed(&s)
         };
@@ -1932,7 +2023,7 @@ mod tests {
     /// verify2 B-F: every confirmation names the sealed group, by its name and id; an apply, its file; a warning is shown.
     #[test]
     fn a_confirmation_names_its_group_and_file() {
-        let write = Write::ApplyArt { group: "grp_00000000-0000-4000-8000-0000000000aa".into(), slot: ArtSlot::Banner, file: "file_00000000-0000-4000-8000-00000000abcd".into() };
+        let write = Write::ApplyArt { group: "grp_00000000-0000-4000-8000-0000000000aa".into(), slot: ArtSlot::Banner, file: "file_00000000-0000-4000-8000-00000000abcd".into(), back: None };
         let said = confirmed(&sealed(write.clone()));
         assert!(said.contains("Made-up Makers") && said.contains("0000aa") && said.contains("00abcd"), "{said}");
         let mut s = sealed(write);

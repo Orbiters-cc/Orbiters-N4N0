@@ -550,6 +550,13 @@ struct Request {
     /// A `multipart/form-data` body (`/file/image`), sent with the session's cookie.
     form: Option<Form>,
 }
+/// What lets one write out: asked once, when its request is made and about to be handed to the network, with nothing left to
+/// wait for; what it gives is held until VRChat answered (or the connection ended). `None`: it does not go (verify4 F13).
+pub type Leave<'a> = Box<dyn FnOnce() -> Option<Box<dyn Held + 'a>> + 'a>;
+/// Something held for as long as a request is under way.
+pub trait Held {}
+impl<T> Held for T {}
+
 /// A form of text fields and one file, as `POST /file/image` takes it.
 struct Form {
     fields: Vec<(&'static str, String)>,
@@ -1104,10 +1111,10 @@ impl Client {
         body: Option<String>,
         accept: &[u16],
     ) -> Result<Response> {
-        self.request_with(family, method, url, basic, body, None, accept)
+        self.request_with(family, method, url, basic, body, None, accept, None)
     }
     /// [`Self::request`], an answer with a status of `accept` returned as it is (a request that tells those apart), and
-    /// a form instead of a JSON body when one is given.
+    /// a form instead of a JSON body when one is given; sent only with `leave`, when there is one.
     #[allow(clippy::too_many_arguments)]
     fn request_with(
         &mut self,
@@ -1118,6 +1125,7 @@ impl Client {
         body: Option<String>,
         form: Option<Form>,
         accept: &[u16],
+        leave: Option<Leave>,
     ) -> Result<Response> {
         self.pace(family)?;
         let verifying = family == "auth" && url.contains("/twofactorauth/") && url.ends_with("/verify");
@@ -1130,7 +1138,15 @@ impl Client {
         let unknown = ambiguous(method, family);
         // The groups' own policy (verify-r22 Major 2): an invite or an instance VRChat rate-limits says so, as before.
         let group_write = method != "GET" && family == groups::WRITES;
-        let response = self.transport.send(Request { method, url, cookie, basic, body, upload: None, form }).map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
+        let request = Request { method, url, cookie, basic, body, upload: None, form };
+        // The last thing before it is the network's: nothing is waited for between, and what is given is held meanwhile.
+        let held = match leave {
+            Some(leave) => Some(leave().ok_or(Error::Disabled)?),
+            None => None,
+        };
+        let sent = self.transport.send(request);
+        drop(held);
+        let response = sent.map_err(|e| if unknown { Error::OutcomeUnknown } else { e })?;
         // Backoff survives a revoked grant. No response data or cookies do. A 429 that came back to a group write that went out
         // proves nothing about what the server did with it: unknown, the back-off kept (verify-r22 Major 2).
         if response.status == 429 {
@@ -1161,7 +1177,7 @@ impl Client {
                 Ok(true) => match again {
                     Some((url, body)) => {
                         self.retrying = true;
-                        let r = self.request_with(family, method, url, None, body, None, accept);
+                        let r = self.request_with(family, method, url, None, body, None, accept, None);
                         self.retrying = false;
                         r
                     }

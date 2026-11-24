@@ -12,7 +12,7 @@ use egui::{pos2, vec2, Color32, ColorImage, Rect};
 use orbiters_core::groups::*;
 use orbiters_core::vrchat_api::User;
 
-pub(super) const NAMES: [&str; 40] = [
+pub(super) const NAMES: [&str; 42] = [
     "groups-home-several",
     "groups-home-one",
     "groups-home-none",
@@ -50,15 +50,18 @@ pub(super) const NAMES: [&str; 40] = [
     "groups-outcome-unknown",
     "groups-outcome-not-shown",
     "groups-outcome-unreadable",
+    "groups-outcome-moved",
+    "groups-confirm-put-back",
     "groups-home-several-fr",
     "groups-studio-anchored-ja",
     "groups-confirm-post-ja",
 ];
 /// Also in French or Japanese (the name and a language).
-const TRANSLATED: [(&str, &str, &str); 8] = [
+const TRANSLATED: [(&str, &str, &str); 9] = [
     ("groups-look-fr", "groups-look", "fr"),
     ("groups-outcome-unknown-fr", "groups-outcome-unknown", "fr"),
     ("groups-outcome-not-shown-ja", "groups-outcome-not-shown", "ja"),
+    ("groups-outcome-moved-fr", "groups-outcome-moved", "fr"),
     ("groups-posts-fr", "groups-posts", "fr"),
     ("groups-roles-edit-fr", "groups-roles-edit", "fr"),
     ("groups-members-roles-ja", "groups-members-roles", "ja"),
@@ -300,6 +303,7 @@ fn entry(scope: &Scope, op: &str, kind: Kind, state: Stands, made: Option<&str>)
         answer: None,
         looked: false,
         closed: None,
+        beside: Default::default(),
         prepared_at: 0,
         dispatched_at: Some(1_795_286_400_000),
         ended_at: None,
@@ -330,7 +334,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
         "groups-home-none" => stage::groups(state, vec![]),
         "groups-home-failed" => stage::failed(state),
         n if n.starts_with("groups-studio") => {
-            let studio = stage::studio(state, cards()[0].clone(), ME, landscape(2400, 1350, 0));
+            let studio = stage::studio(state, cards()[0].clone(), landscape(2400, 1350, 0));
             studio.target = match n {
                 "groups-studio-anchored" => Target::Anchored,
                 "groups-studio-centered" => Target::Centered,
@@ -363,7 +367,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 _ => tab::Look,
             };
             match n {
-                "groups-members-roles" => open.member_roles = Some(members()[1].user_id.clone()),
+                "groups-members-roles" => open.member_roles = Some(members()[1].membership_id.clone()),
                 "groups-members-search" => {
                     open.members.query = "Sa".into();
                 }
@@ -384,18 +388,19 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             let origin = Rect::from_min_size(pos2(700.0, 500.0), vec2(160.0, 36.0));
             let r = roles();
             let confirm = match n {
-                "groups-confirm-give-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[0].user_id.clone(), role: "grol_mod".into(), add: true }, Some(r[2].clone()))),
-                "groups-confirm-take-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[1].user_id.clone(), role: "grol_artist".into(), add: false }, Some(r[3].clone()))),
+                "groups-confirm-give-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[0].user_id.clone(), membership: members()[0].membership().unwrap(), role: "grol_mod".into(), add: true }, Some(r[2].clone()))),
+                "groups-confirm-take-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[1].user_id.clone(), membership: members()[1].membership().unwrap(), role: "grol_artist".into(), add: false }, Some(r[3].clone()))),
                 "groups-confirm-new-role" => Some(prepared(Write::CreateRole { group: G1.into(), draft: RoleDraft { name: "Greeters".into(), description: "Welcome new members.".into(), permissions: s(&["group-instance-join"]), self_assignable: true, ..Default::default() } }, None)),
                 "groups-confirm-edit-role" => {
                     let edit = RoleEdit { name: "Featured artists".into(), requires_two_factor: true, ..RoleEdit::of(&r[3]) };
-                    Some(prepared(Write::EditRole { group: G1.into(), baseline: r[3].clone(), edit }, Some(r[3].clone())))
+                    Some(prepared(Write::EditRole { group: G1.into(), baseline: r[3].clone(), edit, back: None }, Some(r[3].clone())))
                 }
                 "groups-confirm-delete-role" => Some(prepared(Write::DeleteRole { group: G1.into(), role: "grol_events".into() }, Some(r[4].clone()))),
                 "groups-confirm-post" => Some(prepared(Write::CreatePost { group: G1.into(), draft: PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week. We start at 20:00 in the gallery world.".into(), role_ids: s(&["grol_artist", "grol_events"]), send_notification: true, ..Default::default() }, of: String::new() }, None)),
                 "groups-confirm-delete-post" => Some(prepared(Write::DeletePost { group: G1.into(), post: posts()[2].clone() }, None)),
                 "groups-confirm-upload" => Some(prepared(Write::Upload { tag: FileTag::Gallery, group: G1.into(), staged: crate::controller::groups::Staged { name: "00000000-0000-4000-8000-000000000000.png".into(), size: 2_811_204, sha256: String::new() }, art: None }, None)),
-                "groups-confirm-apply" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Banner, file: "file_up".into() }, None)),
+                "groups-confirm-put-back" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Icon, file: "file_00000000-0000-4000-8000-0000000a11ce".into(), back: Some("op-moved".into()) }, None)),
+                "groups-confirm-apply" => Some(prepared(Write::ApplyArt { group: G1.into(), slot: ArtSlot::Banner, file: "file_up".into(), back: None }, None)),
                 _ => None,
             };
             stage::named(state, "Desktop Tester");
@@ -403,7 +408,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             match n {
                 "groups-outcome-unknown" => {
                     if let Some(e) = entry(&Scope::of(snapshot), "op-unknown", Kind::CreatePost, Stands::Unknown, None) {
-                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), url: String::new(), at: Some("2026-11-21T19:00:00Z".into()), same: Some(false) }];
+                        let list = vec![crate::controller::groups::Candidate { id: "gpos_1".into(), label: "Saturday showcase".into(), url: String::new(), at: Some("2026-11-21T19:00:00Z".into()), like: crate::controller::groups::Likeness::NotExactly }];
                         stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
                     }
                 }
@@ -413,8 +418,15 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     }
                     if let Some(e) = entry(&Scope::of(snapshot), "op-up", Kind::UploadGallery, Stands::Unknown, None) {
                         stage::picture(ctx, state, "https://api.vrchat.cloud/api/1/file/file_up/1/file", color_image(&landscape(480, 270, 1)));
-                        let list = vec![crate::controller::groups::Candidate { id: "file_00000000-0000-4000-8000-0000000a11ce".into(), label: String::new(), url: "https://api.vrchat.cloud/api/1/file/file_up/1/file".into(), at: Some("2026-11-21T19:00:00Z".into()), same: None }];
+                        let list = vec![crate::controller::groups::Candidate { id: "file_00000000-0000-4000-8000-0000000a11ce".into(), label: String::new(), url: "https://api.vrchat.cloud/api/1/file/file_up/1/file".into(), at: Some("2026-11-21T19:00:00Z".into()), like: crate::controller::groups::Likeness::Since }];
                         stage::entry(state, e, Some(crate::controller::groups::Observation::Candidates(list)));
+                    }
+                }
+                "groups-outcome-moved" => {
+                    if let Some(mut e) = entry(&Scope::of(snapshot), "op-moved", Kind::ApplyBanner, Stands::Done, None) {
+                        e.beside = Beside { moved: vec![Part::Icon, Part::Nameplate, Part::Rules], unread: vec![Part::Links] };
+                        stage::entry(state, e, None);
+                        stage::back(state, "op-moved", Write::ApplyArt { group: G1.into(), slot: ArtSlot::Icon, file: "file_icon".into(), back: Some("op-moved".into()) });
                     }
                 }
                 "groups-outcome-unreadable" => {

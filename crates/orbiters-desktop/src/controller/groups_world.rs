@@ -80,6 +80,10 @@ pub(crate) struct World {
     pub refuses: bool,
     /// VRChat keeps other bytes of a picture than those it was given (its own encoding of it).
     pub reencodes: bool,
+    /// VRChat clears what an update leaves out (it may: nothing says it does not).
+    pub clears: bool,
+    /// The group's other fields.
+    pub words: Value,
     made: u32,
 }
 
@@ -134,6 +138,8 @@ impl Default for World {
             by_id: true,
             refuses: false,
             reencodes: false,
+            clears: false,
+            words: json!({}),
             made: 0,
         }
     }
@@ -141,9 +147,14 @@ impl Default for World {
 
 impl World {
     pub(crate) fn group(&self) -> Value {
-        json!({"id": G, "name": "Made-up Makers", "shortCode": "MAKE", "discriminator": "0001", "ownerId": "usr_test", "memberCount": 120, "bannerId": self.banner, "iconId": self.icon,
+        let url = |v: &Value| v.as_str().map(|id| format!("https://api.vrchat.cloud/api/1/file/{id}/1/file"));
+        let mut g = json!({"id": G, "name": "Made-up Makers", "bannerUrl": url(&self.banner), "iconUrl": url(&self.icon), "shortCode": "MAKE", "discriminator": "0001", "ownerId": "usr_test", "memberCount": 120, "bannerId": self.banner, "iconId": self.icon,
             "myMember": {"id": "gmem_me", "groupId": G, "userId": "usr_test", "roleIds": ["grol_owner"], "mRoleIds": [], "permissions": self.rights, "membershipStatus": "member", "joinedAt": "2025-01-01T00:00:00Z"},
-            "roles": self.roles})
+            "roles": self.roles});
+        for (k, v) in self.words.as_object().unwrap() {
+            g[k.as_str()] = v.clone();
+        }
+        g
     }
     fn read(&mut self, path: &str) -> Routed {
         if let Some((_, v)) = self.instead.iter().find(|(k, _)| path.contains(k.as_str())) {
@@ -210,7 +221,11 @@ impl World {
                 v
             }
             ("PUT", ["", "groups", _, "roles", id]) => {
+                let clears = self.clears;
                 let found = self.roles.iter_mut().find(|r| r["id"] == *id).unwrap();
+                if clears {
+                    (found["permissions"], found["isSelfAssignable"], found["description"]) = (json!([]), json!(false), json!(""));
+                }
                 for (k, x) in body.as_object().unwrap() {
                     found[k.as_str()] = x.clone();
                 }
@@ -232,6 +247,12 @@ impl World {
                 json!({"success": {"message": "Group Post was deleted!", "status_code": 200}})
             }
             ("PUT", ["", "groups", _]) => {
+                if self.clears {
+                    (self.banner, self.icon) = (Value::Null, Value::Null);
+                    for (_, v) in self.words.as_object_mut().unwrap() {
+                        *v = Value::Null;
+                    }
+                }
                 if let Some(b) = body.get("bannerId") {
                     self.banner = b.clone();
                 }
@@ -326,6 +347,14 @@ pub(crate) fn writes(sent: &Arc<Mutex<Vec<Sent>>>) -> Vec<String> {
     calls(sent).into_iter().filter(|c| !c.starts_with("GET")).collect()
 }
 
+/// The membership of `user` on the row the window shows.
+pub(crate) fn membership_of(user: &str, ask: &dyn Fn(Request) -> Reply) -> Membership {
+    match ask(Request::Members { group: G.into(), query: String::new(), offset: 0 }) {
+        Reply::Members(m) => m.items.iter().find(|m| m.user_id == user).and_then(Member::membership).unwrap(),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Each kind's write, as the window would ask for it, from what `ask` reads.
 pub(crate) fn write_of(kind: Kind, ask: &dyn Fn(Request) -> Reply) -> Write {
     let group = G.to_string();
@@ -338,20 +367,21 @@ pub(crate) fn write_of(kind: Kind, ask: &dyn Fn(Request) -> Reply) -> Write {
         other => panic!("{other:?}"),
     };
     let upload = |tag: FileTag| Write::Upload { tag, group: G.into(), staged: crate::pages::groups::stage_upload(&picture(&uuid::Uuid::new_v4().to_string())).unwrap(), art: (tag == FileTag::Gallery).then_some(42) };
+    let of = |user: &str| membership_of(user, ask);
     match kind {
-        Kind::AssignRole => Write::MemberRole { group, user: U.into(), role: "grol_mod".into(), add: true },
-        Kind::UnassignRole => Write::MemberRole { group, user: V.into(), role: "grol_mod".into(), add: false },
+        Kind::AssignRole => Write::MemberRole { group, user: U.into(), membership: of(U), role: "grol_mod".into(), add: true },
+        Kind::UnassignRole => Write::MemberRole { group, user: V.into(), membership: of(V), role: "grol_mod".into(), add: false },
         Kind::CreateRole => Write::CreateRole { group, draft: RoleDraft { name: "Greeters".into(), description: "Say hello".into(), permissions: vec!["group-instance-join".into()], ..Default::default() } },
         Kind::EditRole => {
             let baseline = role("grol_artist");
             let edit = RoleEdit { name: "Painters".into(), requires_two_factor: true, ..RoleEdit::of(&baseline) };
-            Write::EditRole { group, baseline, edit }
+            Write::EditRole { group, baseline, edit, back: None }
         }
         Kind::DeleteRole => Write::DeleteRole { group, role: "grol_events".into() },
         Kind::CreatePost => Write::CreatePost { group, draft: PostDraft { title: "Saturday".into(), text: "Bring your art".into(), role_ids: vec!["grol_artist".into()], send_notification: true, ..Default::default() }, of: "00000000-0000-4000-8000-00000000d0c0".into() },
         Kind::DeletePost => Write::DeletePost { group, post: post("gpos_2") },
-        Kind::ApplyBanner => Write::ApplyArt { group, slot: ArtSlot::Banner, file: "file_gal1".into() },
-        Kind::ApplyIcon => Write::ApplyArt { group, slot: ArtSlot::Icon, file: "file_ico1".into() },
+        Kind::ApplyBanner => Write::ApplyArt { group, slot: ArtSlot::Banner, file: "file_gal1".into(), back: None },
+        Kind::ApplyIcon => Write::ApplyArt { group, slot: ArtSlot::Icon, file: "file_ico1".into(), back: None },
         Kind::UploadGallery => upload(FileTag::Gallery),
         Kind::UploadIcon => upload(FileTag::Icon),
     }

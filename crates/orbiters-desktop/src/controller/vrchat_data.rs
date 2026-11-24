@@ -41,6 +41,14 @@ impl Scope {
     pub(crate) fn orbiters_member(&self) -> Option<&str> {
         self.verified_for.as_ref()?.member.as_deref()
     }
+    /// The identity's epoch it was verified in (controller/identity.rs).
+    pub(crate) fn epoch(&self) -> Option<u64> {
+        self.verified_for.as_ref().map(|v| v.epoch)
+    }
+    /// Verified for the Orbiters member signed in by `now`, at the same time of theirs.
+    pub(super) fn verified_by(&self, now: &super::vrchat_scope::Stamp) -> bool {
+        self.verified_for.as_ref().is_some_and(|v| v.epoch == now.epoch && v.member == now.owner.member && v.user == self.user)
+    }
     /// The signed-in VRChat account this scope was taken under.
     pub fn vrchat_user(&self) -> Option<&str> {
         self.user.as_deref()

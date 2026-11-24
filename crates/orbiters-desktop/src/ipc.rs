@@ -976,6 +976,7 @@ impl Client {
         // it all the same: lost, not "not asked".
         if self.state.lock().unwrap().closed {
             self.groups.lock().unwrap().remove(&id);
+            crate::controller::groups::not_taken_in(&request);
             return Reply::Failed(Failure::Offline);
         }
         if !self.try_send(&ToService::Groups { id: id.clone(), scope, request }) {

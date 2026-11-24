@@ -547,6 +547,7 @@ impl Service {
                 if let Some(mailbox) = mailbox {
                     use crate::controller::groups::{Failure, Reply};
                     if !crate::controller::groups::allowed_from(role) {
+                        crate::controller::groups::not_taken_in(&request);
                         mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::NotHere) });
                     } else if let Some(admitted) = ctl.groups_admit() {
                         // Taken in before its thread starts: a few at once, the rest told to wait (verify-r22 Major 9).
@@ -557,6 +558,7 @@ impl Service {
                             mailbox.post(ToClient::Groups { id, reply });
                         });
                     } else {
+                        crate::controller::groups::not_taken_in(&request);
                         mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::Busy) });
                     }
                 }

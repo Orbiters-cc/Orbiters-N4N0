@@ -133,20 +133,22 @@ impl MyMember {
 }
 
 /// One membership: a person who leaves and joins again has another (verify3 Blocker 1). What is decided for one is not
-/// done to the other.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// done to the other. Both its id and when it began are needed to know it again: a record without one of them is of no
+/// membership that can be acted on (verify4 F1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Membership {
     pub id: String,
-    pub joined_at: Option<String>,
+    pub joined_at: String,
 }
 
 impl Membership {
     fn of(id: &str, joined_at: &Option<String>) -> Option<Self> {
-        (!id.is_empty() && id.len() <= 64).then(|| Self { id: id.into(), joined_at: joined_at.clone() })
+        let joined_at = joined_at.as_deref().and_then(time)?;
+        (!id.is_empty() && id.len() <= 64).then(|| Self { id: id.into(), joined_at })
     }
     /// The same membership, as one comparable value (for the record: no id kept).
     pub fn digest(&self) -> String {
-        digest(&["membership", &self.id, self.joined_at.as_deref().unwrap_or("-")])
+        digest(&["membership", &self.id, &self.joined_at])
     }
 }
 
@@ -169,14 +171,10 @@ pub struct Group {
     pub icon_known: bool,
     #[serde(default)]
     pub banner_known: bool,
-    /// The nameplate banner's file, read only to see that an apply left it as it was: this version never sends it (B4).
+    /// What VRChat's answer said of each of its parts, as comparable values (no words kept): what an apply is compared
+    /// with. A part that is not here was not in the answer, which says nothing of it (verify4 F7).
     #[serde(default)]
-    pub nameplate_id: Option<String>,
-    #[serde(default)]
-    pub nameplate_known: bool,
-    /// Its name, description, rules and links were all in the answer.
-    #[serde(default)]
-    pub words_known: bool,
+    pub said: Said,
     /// `None` when VRChat did not give it: never shown as zero (N1).
     pub member_count: Option<u32>,
     pub online_count: Option<u32>,
@@ -187,38 +185,96 @@ pub struct Group {
     pub roles: Option<Vec<Role>>,
 }
 
-/// The parts of a group that moved with a picture's change, beside the slot asked.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupParts {
-    pub banner: bool,
-    pub icon: bool,
-    pub nameplate: bool,
-    pub name: bool,
-    pub description: bool,
-    pub rules: bool,
-    pub links: bool,
+/// A part of a group or of a role, to say which moved (never what it holds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Banner,
+    Icon,
+    Nameplate,
+    NameplateMode,
+    Name,
+    ShortCode,
+    Description,
+    Rules,
+    Links,
+    Languages,
+    JoinState,
+    Privacy,
+    JoinPrompt,
+    Rights,
+    SelfAssignable,
+    AddedOnJoin,
+    TwoFactor,
+    Standing,
 }
 
-impl GroupParts {
+impl Part {
+    /// A group's parts by VRChat's names for them (how its nameplate shows has no name in the spec: every `nameplate…` field
+    /// but the picture's id and address).
+    pub const GROUP: [(Part, &'static str); 12] = [
+        (Part::Banner, "bannerId"),
+        (Part::Icon, "iconId"),
+        (Part::Nameplate, "nameplateId"),
+        (Part::Name, "name"),
+        (Part::ShortCode, "shortCode"),
+        (Part::Description, "description"),
+        (Part::Rules, "rules"),
+        (Part::Links, "links"),
+        (Part::Languages, "languages"),
+        (Part::JoinState, "joinState"),
+        (Part::Privacy, "privacy"),
+        (Part::JoinPrompt, "allowGroupJoinPrompt"),
+    ];
+}
+
+/// What is not the same beside what was asked: the parts that moved, and those of which nothing says they did not.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Beside {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moved: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<Part>,
+}
+
+impl Beside {
     pub fn any(&self) -> bool {
-        *self != Self::default()
+        !self.moved.is_empty() || !self.unread.is_empty()
+    }
+}
+
+/// Parts as comparable values (no words kept).
+pub type Said = std::collections::BTreeMap<Part, String>;
+
+impl Beside {
+    /// What is not the same in `now` of what was said `then`, but for the parts `asked`: each on its own, whatever the
+    /// answer leaves out of the others.
+    pub fn between(then: &Said, now: &Said, asked: &[Part]) -> Self {
+        let mut out = Beside::default();
+        for (part, then) in then.iter().filter(|(p, _)| !asked.contains(p)) {
+            match now.get(part) {
+                Some(now) if now != then => out.moved.push(*part),
+                Some(_) => {}
+                None => out.unread.push(*part),
+            }
+        }
+        out
+    }
+}
+
+impl ArtSlot {
+    pub fn part(self) -> Part {
+        match self {
+            ArtSlot::Banner => Part::Banner,
+            ArtSlot::Icon => Part::Icon,
+        }
     }
 }
 
 impl Group {
-    /// What is not the same in `now`, the same group in the answer to a change of `slot`: every part both say.
-    pub fn moved_beside(&self, slot: ArtSlot, now: &Group) -> GroupParts {
-        let picture = |known: (bool, bool), a: &Option<String>, b: &Option<String>| known.0 && known.1 && a != b;
-        let words = self.words_known && now.words_known;
-        GroupParts {
-            banner: slot != ArtSlot::Banner && picture((self.banner_known, now.banner_known), &self.banner_id, &now.banner_id),
-            icon: slot != ArtSlot::Icon && picture((self.icon_known, now.icon_known), &self.icon_id, &now.icon_id),
-            nameplate: picture((self.nameplate_known, now.nameplate_known), &self.nameplate_id, &now.nameplate_id),
-            name: words && self.name != now.name,
-            description: words && self.description != now.description,
-            rules: words && self.rules != now.rules,
-            links: words && self.links != now.links,
-        }
+    /// What is not the same in `now`, the same group after a change of `slot`.
+    pub fn moved_beside(&self, slot: ArtSlot, now: &Group) -> Beside {
+        Beside::between(&self.said, &now.said, &[slot.part()])
     }
     /// The file in a slot: `Some(None)` for none, `None` when VRChat's answer did not say.
     pub fn art(&self, slot: ArtSlot) -> Option<Option<&str>> {
@@ -465,6 +521,20 @@ impl Role {
         let parts: Vec<String> = RoleField::ALL.iter().filter(|f| fields.contains(f)).flat_map(|f| [format!("{f:?}"), self.part(*f)]).collect();
         digest(&parts.iter().map(String::as_str).collect::<Vec<_>>())
     }
+    /// Its parts as comparable values: of a role read whole.
+    pub fn said(&self) -> Said {
+        let standing = format!("{:?} {} {} {} {}", self.order, self.default_role, self.management, self.requires_purchase, self.known);
+        let parts = [
+            (Part::Name, self.name.clone()),
+            (Part::Description, self.description.clone()),
+            (Part::Rights, joined(&self.permissions)),
+            (Part::SelfAssignable, self.self_assignable.to_string()),
+            (Part::AddedOnJoin, self.added_on_join.to_string()),
+            (Part::TwoFactor, self.requires_two_factor.to_string()),
+            (Part::Standing, standing),
+        ];
+        parts.into_iter().map(|(p, v)| (p, digest(&[&v]))).collect()
+    }
     /// The role as it would be with `change` made on it.
     pub fn with(&self, change: &RoleChange) -> Role {
         let mut r = self.clone();
@@ -499,6 +569,20 @@ impl Role {
 impl RoleParts {
     pub fn any(&self) -> bool {
         *self != Self::default()
+    }
+}
+
+/// Whether `roles` are the group's roles, all of them: those no group is without (its owner's, Everyone's) and every one
+/// there was before (`known`, whether an id was), each read well enough to be told apart. Only of such a list does a role's
+/// absence say anything (verify4 F3).
+pub fn whole_list(roles: &[Role], before: usize, known: impl Fn(&str) -> bool) -> bool {
+    roles.iter().all(|r| r.known) && roles.iter().any(|r| r.default_role) && roles.iter().any(Role::is_owner_role) && roles.iter().filter(|r| known(&r.id)).count() >= before
+}
+
+impl PostDraft {
+    /// This very revision of it, the notification included: only this one is over when it is out (verify4 F6).
+    pub fn revision(&self) -> String {
+        digest(&["revision", &self.content(), if self.send_notification { "told" } else { "quiet" }])
     }
 }
 
@@ -622,6 +706,35 @@ pub struct RoleChange {
     pub self_assignable: Option<bool>,
     pub added_on_join: Option<bool>,
     pub requires_two_factor: Option<bool>,
+}
+
+impl RoleField {
+    pub fn part(self) -> Part {
+        match self {
+            RoleField::Name => Part::Name,
+            RoleField::Description => Part::Description,
+            RoleField::Permissions => Part::Rights,
+            RoleField::SelfAssignable => Part::SelfAssignable,
+            RoleField::AddedOnJoin => Part::AddedOnJoin,
+            RoleField::TwoFactor => Part::TwoFactor,
+        }
+    }
+}
+
+impl RoleEdit {
+    /// `now` with the parts of `moved` as they were in `before`: what can be put back from here (not its rights, nor its
+    /// place among the roles). `None` when there is none of those.
+    pub fn back(before: &Role, now: &Role, moved: &[Part]) -> Option<Self> {
+        let on = |p: Part| moved.contains(&p);
+        let edit = Self {
+            name: if on(Part::Name) { before.name.clone() } else { now.name.clone() },
+            description: if on(Part::Description) { before.description.clone() } else { now.description.clone() },
+            self_assignable: if on(Part::SelfAssignable) { before.self_assignable } else { now.self_assignable },
+            added_on_join: if on(Part::AddedOnJoin) { before.added_on_join } else { now.added_on_join },
+            requires_two_factor: if on(Part::TwoFactor) { before.requires_two_factor } else { now.requires_two_factor },
+        };
+        (!RoleChange::between(now, &edit).is_empty()).then_some(edit)
+    }
 }
 
 impl RoleChange {
@@ -837,8 +950,8 @@ pub struct Catalogue<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Action<'a> {
-    /// Give (`add`) or take back a role from the member `user`.
-    AssignRole { role: &'a str, user: &'a str, add: bool },
+    /// Give (`add`) or take back a role from the member `user`, for that very membership of theirs.
+    AssignRole { role: &'a str, user: &'a str, membership: &'a Membership, add: bool },
     CreateRole { draft: &'a RoleDraft },
     EditRole { role: &'a str, change: &'a RoleChange },
     DeleteRole { role: &'a str },
@@ -852,7 +965,7 @@ impl Action<'_> {
     /// What a permit for it is for, whole: another role, person, direction or payload is another subject.
     pub fn subject(&self) -> String {
         match self {
-            Action::AssignRole { role, user, add } => digest(&["assign", role, user, if *add { "add" } else { "remove" }]),
+            Action::AssignRole { role, user, membership, add } => digest(&["assign", role, user, &membership.digest(), if *add { "add" } else { "remove" }]),
             Action::CreateRole { draft } => digest(&["create-role", &draft.as_role().digest_of(&RoleField::ALL)]),
             Action::EditRole { role, change } => digest(&["edit-role", role, &format!("{:?}", change.fields()), &Role::default().with(change).digest_of(&change.fields())]),
             Action::DeleteRole { role } => digest(&["delete-role", role]),
@@ -1031,6 +1144,10 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
             if role.default_role || role.is_owner_role() {
                 return Err(Why::FixedRole.into());
             }
+            // One whose name or flags were left out is not one a person can confirm deleting (verify4 F3).
+            if !role.whole {
+                return Err(Missing::RoleDefinition.into());
+            }
             right(ROLES_MANAGE)?;
             below(actor, roles, role)?;
             Ok(true)
@@ -1125,7 +1242,10 @@ mod tests {
         v.iter().map(|x| x.to_string()).collect()
     }
     fn role(id: &str, order: i64, perms: &[&str]) -> Role {
-        Role { id: id.into(), name: id.into(), order: Some(order), permissions: s(perms), known: true, ..Default::default() }
+        Role { id: id.into(), name: id.into(), order: Some(order), permissions: s(perms), known: true, whole: true, ..Default::default() }
+    }
+    fn membership() -> Membership {
+        Membership { id: "gmem_1".into(), joined_at: "2026-01-01T00:00:00Z".into() }
     }
     fn roles() -> Vec<Role> {
         vec![
@@ -1183,7 +1303,8 @@ mod tests {
         let rich_admin = Actor { permissions: &rich_perms, ..admin };
         let open_up = RoleChange { self_assignable: Some(true), ..Default::default() };
         let other = "usr_00000000-0000-4000-8000-000000000001";
-        let assign = |role| Action::AssignRole { role, user: other, add: true };
+        let gmem = membership();
+        let assign = |role| Action::AssignRole { role, user: other, membership: &gmem, add: true };
         let rename = RoleChange { name: Some("New".into()), ..Default::default() };
         let made = |rights: &[&str]| RoleDraft { permissions: s(rights), ..Default::default() };
         use Got::*;
@@ -1196,8 +1317,8 @@ mod tests {
             ("admin cannot assign own rank", can(assign("grol_admin"), &admin, &cat), Withheld(Why::RoleAtOrAbove)),
             ("assign without member data", can(assign("grol_mod"), &assigner, &cat), Withheld(Why::NoPermission)),
             ("moderator cannot assign", can(assign("grol_artist"), &moderator, &cat), Withheld(Why::NoPermission)),
-            ("moderator takes a self role", can(Action::AssignRole { role: "grol_pronouns", user: "usr_mod", add: true }, &moderator, &cat), Allowed),
-            ("moderator cannot self-take another", can(Action::AssignRole { role: "grol_artist", user: "usr_mod", add: true }, &moderator, &cat), Withheld(Why::NotSelfAssignable)),
+            ("moderator takes a self role", can(Action::AssignRole { role: "grol_pronouns", user: "usr_mod", membership: &gmem, add: true }, &moderator, &cat), Allowed),
+            ("moderator cannot self-take another", can(Action::AssignRole { role: "grol_artist", user: "usr_mod", membership: &gmem, add: true }, &moderator, &cat), Withheld(Why::NotSelfAssignable)),
             ("unknown role", can(assign("grol_gone"), &owner, &cat), Unknown(Missing::RoleDefinition)),
             ("admin renames below", can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Allowed),
             ("admin cannot rename own", can(Action::EditRole { role: "grol_admin", change: &rename }, &admin, &cat), Withheld(Why::RoleAtOrAbove)),
@@ -1237,7 +1358,7 @@ mod tests {
         roles[3].known = false; // "grol_artist" arrived without its permission list
         let cat = Catalogue { roles: Some(&roles), permissions: None };
         assert!(roles[3].privileged(), "unknown means privileged");
-        assert_eq!(can(Action::AssignRole { role: "grol_artist", user: "usr_x", add: true }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
+        assert_eq!(can(Action::AssignRole { role: "grol_artist", user: "usr_x", membership: &membership(), add: true }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
     }
 
@@ -1269,7 +1390,8 @@ mod tests {
         assert_eq!(super::can(delete, Actor::of(&none, "usr_me"), &cat), Authority::Unknown(Missing::Membership));
         let lower = group(Some(MyMember { role_ids: s(&["grol_artist"]), managed_known: false, ..me }));
         assert_eq!(super::can(delete, Actor::of(&lower, "usr_me"), &cat), Authority::Refused(Why::RoleAtOrAbove), "a rank read low refuses more, never less");
-        let mine = Action::AssignRole { role: "grol_pronouns", user: "usr_me", add: true };
+        let gmem = membership();
+        let mine = Action::AssignRole { role: "grol_pronouns", user: "usr_me", membership: &gmem, add: true };
         assert_eq!(super::can(mine, Actor::of(&part, "usr_me"), &cat), Authority::Unknown(Missing::Membership), "taking a role oneself needs the status");
     }
 
@@ -1283,7 +1405,9 @@ mod tests {
         assert_eq!(digest(&one), digest(&one.clone()));
         assert_ne!(digest(&one), digest(&m("gmem_2", Some("2026-01-01T00:00:00Z"))));
         assert_ne!(digest(&one), digest(&m("gmem_1", Some("2026-02-01T00:00:00Z"))), "the same id, joined at another time");
-        assert_ne!(digest(&one), digest(&m("gmem_1", None)));
+        for part in [m("gmem_1", None), m("gmem_1", Some("yesterday")), m("", Some("2026-01-01T00:00:00Z"))] {
+            assert!(part.membership().is_none() && !part.is_of("grp_1", "usr_a"), "without its id and when it began, it is of none that can be known again (verify4 F1)");
+        }
     }
 
     /// A permit is for one action, one account, one group; confirmation follows the role's own rights.
@@ -1292,7 +1416,9 @@ mod tests {
         let (rights, ids, roles) = (s(&["*"]), s(&["grol_owner"]), roles());
         let actor = Actor { group: "grp_1", user_id: "usr_owner", permissions: &rights, role_ids: Some(&ids), status: Some("member") };
         let cat = Catalogue { roles: Some(&roles), permissions: None };
-        let give = |role: &'static str| Action::AssignRole { role, user: "usr_x", add: true };
+        let gmem = membership();
+        let another = Membership { joined_at: "2026-02-02T00:00:00Z".into(), ..membership() };
+        let give = |role: &'static str| Action::AssignRole { role, user: "usr_x", membership: &gmem, add: true };
         let Authority::Allowed(p) = super::can(give("grol_artist"), Ok(actor), &cat) else { panic!() };
         assert!(!p.needs_confirmation(), "a role with no rights");
         assert!(p.covers("usr_owner", "grp_1", &give("grol_artist").subject()));
@@ -1300,8 +1426,9 @@ mod tests {
             ("usr_other", "grp_1", give("grol_artist").subject()),
             ("usr_owner", "grp_2", give("grol_artist").subject()),
             ("usr_owner", "grp_1", give("grol_mod").subject()),
-            ("usr_owner", "grp_1", Action::AssignRole { role: "grol_artist", user: "usr_y", add: true }.subject()),
-            ("usr_owner", "grp_1", Action::AssignRole { role: "grol_artist", user: "usr_x", add: false }.subject()),
+            ("usr_owner", "grp_1", Action::AssignRole { role: "grol_artist", user: "usr_y", membership: &gmem, add: true }.subject()),
+            ("usr_owner", "grp_1", Action::AssignRole { role: "grol_artist", user: "usr_x", membership: &gmem, add: false }.subject()),
+            ("usr_owner", "grp_1", Action::AssignRole { role: "grol_artist", user: "usr_x", membership: &another, add: true }.subject()),
             ("usr_owner", "grp_1", Action::Post.subject()),
         ] {
             assert!(!p.covers(who, group, &subject));
@@ -1441,14 +1568,27 @@ mod tests {
         assert!(!a.differs(&Role { permissions: s(&["b", "a"]), ..a.clone() }).any(), "an order is no change");
         assert_eq!(a.differs(&Role { permissions: s(&["a"]), ..a.clone() }), RoleParts { permissions: true, ..Default::default() });
         assert_eq!(a.differs(&Role { order: Some(9), ..a.clone() }), RoleParts { standing: true, ..Default::default() });
-        let g = Group { banner_id: Some("file_b".into()), icon_id: Some("file_i".into()), nameplate_id: Some("file_n".into()), banner_known: true, icon_known: true, nameplate_known: true, words_known: true, description: "d".into(), ..Default::default() };
-        let after = Group { banner_id: Some("file_new".into()), ..g.clone() };
-        assert!(!g.moved_beside(ArtSlot::Banner, &after).any(), "the slot asked");
-        assert_eq!(g.moved_beside(ArtSlot::Icon, &after), GroupParts { banner: true, ..Default::default() });
-        assert_eq!(g.moved_beside(ArtSlot::Banner, &Group { icon_id: None, nameplate_id: None, ..after.clone() }), GroupParts { icon: true, nameplate: true, ..Default::default() });
-        assert!(!g.moved_beside(ArtSlot::Banner, &Group { icon_id: None, icon_known: false, ..after.clone() }).any(), "not said is not gone");
-        assert!(!g.moved_beside(ArtSlot::Banner, &Group { words_known: false, description: String::new(), ..after.clone() }).any());
-        assert!(g.moved_beside(ArtSlot::Banner, &Group { description: String::new(), ..after }).description);
+        let said = |parts: &[(Part, &str)]| Group { said: parts.iter().map(|(p, v)| (*p, v.to_string())).collect(), ..Default::default() };
+        let g = said(&[(Part::Banner, "b"), (Part::Icon, "i"), (Part::Nameplate, "n"), (Part::Description, "d"), (Part::Links, "l")]);
+        let after = |parts: &[(Part, &str)]| g.moved_beside(ArtSlot::Banner, &said(parts));
+        assert_eq!(after(&[(Part::Banner, "new"), (Part::Icon, "i"), (Part::Nameplate, "n"), (Part::Description, "d"), (Part::Links, "l")]), Beside::default(), "the slot asked");
+        assert_eq!(after(&[(Part::Banner, "new"), (Part::Icon, "-"), (Part::Nameplate, "n"), (Part::Description, "-")]), Beside { moved: vec![Part::Icon, Part::Description], unread: vec![Part::Links] }, "each on its own");
+        assert_eq!(g.moved_beside(ArtSlot::Icon, &said(&[(Part::Icon, "x")])).unread, [Part::Banner, Part::Nameplate, Part::Description, Part::Links], "not said is not gone, nor the same");
+        assert!(!said(&[]).moved_beside(ArtSlot::Banner, &g).any(), "nothing was known before");
+    }
+
+    /// verify4 F3: a role's absence says something in the whole list only.
+    #[test]
+    fn a_whole_list_has_its_fixed_roles_and_every_one_there_was() {
+        let list = || vec![Role { permissions: s(&["*"]), ..role("grol_owner", 0, &["*"]) }, Role { default_role: true, ..role("grol_everyone", 9, &[]) }, role("grol_a", 3, &[])];
+        let whole = |l: &[Role], before: &[&str]| whole_list(l, before.len(), |id| before.contains(&id));
+        assert!(whole(&list(), &["grol_owner", "grol_everyone", "grol_a"]));
+        assert!(whole(&list(), &[]), "nothing was known before");
+        assert!(!whole(&list(), &["grol_owner", "grol_everyone", "grol_b"]), "one there was is not");
+        assert!(!whole(&list()[1..], &[]) && !whole(&list()[..1], &[]), "a fixed one is not");
+        let mut part = list();
+        part[2].known = false;
+        assert!(!whole(&part, &[]), "one read in part");
     }
 
     #[test]

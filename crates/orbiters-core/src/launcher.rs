@@ -300,10 +300,6 @@ pub struct GameProfile {
     pub profile: u32,
     /// The account last seen signed in on it (its VRChat log said so), when known.
     pub account: Option<String>,
-    /// That account's VRChat user id, when its own log said it (and has not said since that nobody is signed in): a label, like
-    /// its name.
-    #[serde(default)]
-    pub account_id: Option<String>,
     /// A VRChat runs on it now, in this mode.
     pub running: Option<LaunchMode>,
     /// Started from here a moment ago and not yet seen running.
@@ -451,6 +447,8 @@ pub enum Action {
     JoinAgain,
     /// Give that place up.
     ForgetJoining,
+    /// Take a profile that does not run off Home's choice: what is remembered of it here goes (VRChat's own sign-in on it stays).
+    ForgetProfile { profile: u32 },
     /// On a Mac where the game is started by hand in another app: open that app.
     OpenEngine,
     /// On a Mac where VRChat is not set up: get what runs it, sign in to Steam, download VRChat, then play it on `profile`.
@@ -550,7 +548,7 @@ pub struct LauncherState {
     /// offers to set aside).
     #[serde(default)]
     pub start_trouble: Option<StartTrouble>,
-    /// This computer uses several VRChat profiles, as far as its own records say: a private place goes to a VRChat in two
+    /// This computer uses several VRChat profiles ([`crate::vrchat_launch::several`]): a private place goes to a VRChat in two
     /// steps ([`crate::vrchat_launch::way`]).
     #[serde(default)]
     pub several_profiles: bool,
@@ -592,8 +590,17 @@ pub enum JoinFailure {
     Log(LogTrouble),
     /// VRChat did not come up, or closed before it could be.
     Gone,
+    /// Another start came in its place, or VRChat came up on another profile.
+    Elsewhere,
     /// It did not go, in the person's words.
     NotSent(String),
+}
+
+impl JoinFailure {
+    /// Whose the VRChat is could not be told: the way left is the account's own invite to itself, which is nobody else's.
+    pub fn unproven(&self) -> bool {
+        matches!(self, JoinFailure::NoProof | JoinFailure::Log(_))
+    }
 }
 
 /// Why VRChat's log cannot be read ([`LauncherState::log_trouble`]).
@@ -751,10 +758,6 @@ pub fn sample() -> LauncherState {
     LauncherState {
         verified_for: None,
         source: Source::SignedIn { user_id: me.id.clone(), name: me.name.clone() },
-        profiles: vec![
-            GameProfile { profile: 0, account: Some("Sample Me".into()), account_id: Some(me.id.clone()), ..GameProfile::default() },
-            GameProfile { profile: 1, account: Some("Sample Alt".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000a1".into()), ..GameProfile::default() },
-        ],
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },
         me: Some(me),
         friends,
@@ -767,11 +770,15 @@ pub fn sample() -> LauncherState {
         notice: None,
         loading: false,
         unresolved: 0,
+        profiles: vec![
+            GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
+            GameProfile { profile: 1, account: Some("Sample Alt".into()), ..GameProfile::default() },
+        ],
         engine_setup: None,
         picture_lost: None,
         engine_trouble: None,
         start_trouble: None,
-        several_profiles: false,
+        several_profiles: true,
         joining: None,
         log_trouble: None,
         mine: Some(MyProfile {

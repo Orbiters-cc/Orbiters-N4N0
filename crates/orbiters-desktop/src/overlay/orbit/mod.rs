@@ -5382,7 +5382,7 @@ mod tests {
     #[test]
     fn where_the_person_was_is_a_row_for_each_world_the_last_time_first() {
         use orbiters_n4n0_core::menu::InstanceRow;
-        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at, account: None };
+        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at };
         let now = 100_000;
         let rows = [row("Rain", "a", "1", now - 300), row("Sky", "b", "2", now - 600), row("Rain", "a", "3", now - 1320), row("", "c", "4", now - 7200)];
         let worlds = visited_worlds(&rows, now, &HashMap::new(), None);

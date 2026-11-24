@@ -77,6 +77,7 @@ pub(crate) fn joining_line(joining: &Joining) -> String {
         JoinStep::Failed(JoinFailure::OtherAccount) => tr!("{name} was not joined: VRChat is signed in as another account.", name = name),
         JoinStep::Failed(JoinFailure::NoProof) => tr!("{name} was not joined: VRChat did not say in time who is signed in.", name = name),
         JoinStep::Failed(JoinFailure::Gone) => tr!("{name} was not joined: VRChat did not start, or closed too soon.", name = name),
+        JoinStep::Failed(JoinFailure::Elsewhere) => tr!("{name} was not joined: another VRChat start came in its place.", name = name),
         JoinStep::Failed(JoinFailure::Log(trouble)) => tr!("{name} was not joined: {reason}", name = name, reason = super::destinations::log_words(trouble)),
         JoinStep::Failed(JoinFailure::NotSent(words)) => tr!("{name} was not joined: {reason}", name = name, reason = words),
     }
@@ -87,7 +88,9 @@ fn joining(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, joining: &Joinin
     let failed = matches!(joining.step, JoinStep::Failed(_));
     let line = joining_line(joining);
     let close = Rect::from_center_size(pos2(rect.right() - 26.0, rect.center().y), vec2(30.0, 30.0));
-    let button = failed.then(|| widgets::Button::new(tr("Try again")).variant(widgets::Variant::Primary).id_salt("launcher-join-again"));
+    // Whose the VRChat is cannot be told: the account's own invite is what is left.
+    let again = if matches!(&joining.step, JoinStep::Failed(why) if why.unproven()) { tr("Invite me") } else { tr("Try again") };
+    let button = failed.then(|| widgets::Button::new(again).variant(widgets::Variant::Primary).id_salt("launcher-join-again"));
     let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
     let at = Rect::from_min_size(pos2(close.left() - 8.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let p = ui.painter().clone();
@@ -270,6 +273,12 @@ fn chip_hint(p: &GameProfile, busy: Option<&'static str>) -> String {
     if whose.is_empty() { state.to_string() } else { format!("{state} {whose}") }
 }
 
+/// Whether the chip of `p`, the one chosen, has an × that takes it off the choice: any but the default one's, while no VRChat runs
+/// or starts on it.
+fn chip_goes(p: &GameProfile, next: u32) -> bool {
+    p.profile != 0 && p.profile == next && p.running.is_none() && p.starting.is_none()
+}
+
 /// Where one VRChat runs at a time (a Mac): why no other profile starts now, while one runs or starts.
 fn one_at_a_time(game: &Game) -> Option<&'static str> {
     match game {
@@ -362,12 +371,21 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) -> (
                 Some(p) => {
                     let label = chip_label(p);
                     let (glyph, tone) = chip_icon(p);
-                    let chip = widgets::Chip::new(&label).icon(glyph).tone(tone).selected(p.profile == next).id_salt(("launcher-profile", p.profile));
+                    let chip = widgets::Chip::new(&label).icon(glyph).tone(tone).selected(p.profile == next).removable(chip_goes(p, next)).id_salt(("launcher-profile", p.profile));
                     let got = chip.show_at(ui, r);
                     if got.pressed {
                         state.chosen_profile = Some(p.profile);
                     }
-                    got.response.on_hover_text(chip_hint(p, busy));
+                    if got.removed {
+                        state.added_profile = state.added_profile.filter(|added| *added != p.profile);
+                        state.chosen_profile = None;
+                        state.act(cx, clock, Action::ForgetProfile { profile: p.profile });
+                    }
+                    let mut hint = chip_hint(p, busy);
+                    if chip_goes(p, next) {
+                        hint = format!("{hint} {}", tr("× takes it off this list: VRChat keeps its sign-in."));
+                    }
+                    got.response.on_hover_text(hint);
                 }
                 None => {
                     let got = widgets::Chip::new(new_label).icon(icons::PLUS).id_salt("launcher-profile-new").show_at(ui, r);

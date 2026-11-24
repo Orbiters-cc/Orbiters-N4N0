@@ -591,7 +591,7 @@ impl Fence<'_> {
             }
             Intent::WhereAmI => {
                 let world = self.host.world();
-                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0, account: None }.kind());
+                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0 }.kind());
                 (
                     intents::untrusted(json!({
                         "in_world": world.in_world,

@@ -137,5 +137,7 @@
   "{name} was not joined: VRChat is signed in as another account.": "{name} n’a pas été rejoint : VRChat est connecté avec un autre compte.",
   "{name} was not joined: VRChat did not say in time who is signed in.": "{name} n’a pas été rejoint : VRChat n’a pas dit à temps qui est connecté.",
   "{name} was not joined: VRChat did not start, or closed too soon.": "{name} n’a pas été rejoint : VRChat n’a pas démarré, ou s’est fermé avant.",
-  "{name} was not joined: {reason}": "{name} n’a pas été rejoint : {reason}"
+  "{name} was not joined: {reason}": "{name} n’a pas été rejoint : {reason}",
+  "{name} was not joined: another VRChat start came in its place.": "{name} n’a pas été rejoint : un autre démarrage de VRChat a pris sa place.",
+  "× takes it off this list: VRChat keeps its sign-in.": "× le retire de cette liste : VRChat garde sa connexion."
 }

@@ -9,7 +9,8 @@
   Home's carries it, a restart included, with no argument saved in the engine; an account is learnt only from that launch's own log;
   on a computer with several profiles, here or on Windows, no start carries a private place, an invite or an instance made for an
   account: VRChat starts without it, and it is delivered once that very VRChat's own log proves the account, `vrchat_launch::way`,
-  the one rule of every start and delivery; with one profile it goes with the start as it always did; `docs/vrchat-bridge.md`),
+  the one rule of every start and delivery; with one profile it goes as it always did, and no log is asked; "Several VRChat accounts
+  on one computer" below; `docs/vrchat-bridge.md`),
   started by N4N0 through
   Obelisk's engine without its window: `obelisk-cli`, built
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
@@ -104,6 +105,26 @@
   size, and hold the Unity project lock before changing cache paths. Preserve Assets, Packages, ProjectSettings
   and exact dependency versions. Copy and verify cache contents before switching locations; retain the original
   on failures and test rollback. Do not close other Unity projects or delete unrelated caches to recover space.
+
+## Several VRChat accounts on one computer
+
+What is kept apart, and what is not (the architect's ruling, 2026-11-24, after the thirteenth verification). **How far this goes is
+Enzo's decision, not taken yet: do not widen it without his word**; three rounds that did took working ways away from ordinary players.
+- **A computer of one profile behaves as before VRChat's profiles existed** (0.3.9-dev.42), on Windows and on a Mac: a private place
+  goes with the start, or straight into the game that runs; no game log is asked, and nothing is hidden, refused or withheld.
+- **Several profiles** is plain evidence that can be taken back, and nothing else: a nonzero profile on Home's choice
+  (`LaunchSettings::profiles`; its × takes it off), or one that runs or starts now, Home's or the bridge's
+  (`vrchat_launch::several`, `Controller::launcher_several`). Never guess it from VRChat's folder, its logs or its saved values, nor
+  from settings that could not be read, and never remember it for good.
+- **Protected, on a computer of several profiles: the launch hand-off of a private place** (anything but a public instance, an invite,
+  an instance made here for an account). It rides with no cold start: the profile chosen starts without it, that very VRChat's own log
+  proves who is signed in (made at or after its process, at full precision, and no other's), and it is delivered on a match alone (a
+  PC: the link into that very game, proven again right before; else the account's own invite to itself; a Mac: that invite). Otherwise
+  nothing is sent, Home says why and keeps it for **Try again**. The one rule is `vrchat_launch::way`. The Mac's bridge, which cannot do
+  the second step with nobody there, refuses its own starts (`several_profiles`).
+- **Deliberately not kept apart today**: what this computer stores (the visit history and every list of it, captures and their
+  places), whether a capture's instance is still open, the background presence and uploads to Orbiters, Orbiters' own account's invites,
+  and the Windows bridge's main session. They act as the app's accounts did before profiles.
 
 ## Coordination notice, 2026-11-23: the VRChat bridge's files
 

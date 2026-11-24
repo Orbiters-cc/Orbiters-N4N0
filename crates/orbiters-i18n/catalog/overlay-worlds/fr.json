@@ -276,5 +276,6 @@
   "Taking you there…": "En route…",
   "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "Le pont IA d’Orbiters utilise VRChat avec ton compte sur cet ordinateur : vas-y une fois qu’il a fini.",
   "VRChat could not be started there: {error}": "VRChat n’a pas pu y démarrer : {error}",
-  "The instance could not be made: {e}": "L’instance n’a pas pu être créée : {e}"
+  "The instance could not be made: {e}": "L’instance n’a pas pu être créée : {e}",
+  "The VRChat on this computer is not known to be yours: its log cannot be read.": "Rien ne dit que le VRChat de cet ordinateur est le tien : son journal ne peut pas être lu."
 }

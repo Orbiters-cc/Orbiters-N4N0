@@ -33,34 +33,11 @@ pub struct WorldVisits {
     pub name: Option<String>,
     /// Unix times in seconds, oldest first.
     pub visits: Vec<u64>,
-    /// Those of them whose account the log said, by its VRChat user id; the others are nobody's.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub by: BTreeMap<String, Vec<u64>>,
 }
 
 impl WorldVisits {
     pub fn last(&self) -> Option<u64> {
         self.visits.last().copied()
-    }
-
-    /// The visits that may be shown where `acting` are the accounts acting ([`shown_to`]).
-    pub fn shown_to<'a>(&'a self, acting: &'a [String]) -> impl Iterator<Item = u64> + 'a {
-        self.visits.iter().copied().filter(move |at| self.by.iter().find(|(_, theirs)| theirs.contains(at)).is_none_or(|(account, _)| shown_to(Some(account), acting)))
-    }
-}
-
-/// Whether what `account` produced (`None`: nobody's) may be shown where `acting` are the VRChat accounts acting (the one
-/// signed in in the app, the one of the profile chosen): never under another one.
-pub fn shown_to(account: Option<&str>, acting: &[String]) -> bool {
-    account.is_none_or(|account| acting.iter().all(|acts| acts == account))
-}
-
-/// Whether the place `instance`, which `account` produced, may be sent anywhere for the VRChat account `me`: its own, or
-/// nobody's and public. A private place that is nobody's goes nowhere.
-pub fn goes_for(account: Option<&str>, instance: &str, me: &str) -> bool {
-    match account {
-        Some(account) => account == me,
-        None => crate::vrchat_launch::is_public_instance(instance),
     }
 }
 
@@ -72,9 +49,6 @@ pub struct InstanceVisit {
     pub instance: String,
     /// Unix seconds.
     pub at: u64,
-    /// The VRChat account (its user id) that joined it, as that log said; `None`: not known, nobody's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
 }
 
 impl InstanceVisit {
@@ -101,12 +75,6 @@ pub struct History {
     /// no visit twice).
     #[serde(default)]
     instances_read: bool,
-    /// The same for the accounts that made the visits.
-    #[serde(default)]
-    accounts_read: bool,
-    /// Who each log last said is signed in (file name → VRChat user id); none where nobody is, or it is not known.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    accounts: BTreeMap<String, String>,
     /// The name of the world being joined ("Entering Room" comes right before the join).
     #[serde(skip)]
     entering: Option<String>,
@@ -132,11 +100,16 @@ impl History {
                 return Self::default();
             }
         };
-        let (history, dropped) = crate::json_lenient::<Self>(&text);
+        let (mut history, dropped) = crate::json_lenient::<Self>(&text);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("visited worlds: {} left out of {}, the file kept as {aside:?}", dropped.join(", "), path.display());
         }
+        // (0.3.9-dev.46 and dev.47 kept an instance once for each account that joined it: the last join of it is the one kept.)
+        let mut seen = std::collections::HashSet::new();
+        history.instances.reverse();
+        history.instances.retain(|v| seen.insert(v.location()));
+        history.instances.reverse();
         history
     }
 
@@ -163,30 +136,15 @@ impl History {
 
     /// Adds a visit (the same world at the same second counts once); returns whether it was new.
     pub fn record(&mut self, world_id: &str, at: u64) -> bool {
-        self.record_by(world_id, at, None)
-    }
-
-    /// [`Self::record`] by the VRChat account `account`, when it is known.
-    pub fn record_by(&mut self, world_id: &str, at: u64, account: Option<&str>) -> bool {
         self.last = Some(world_id.to_string());
         let w = self.worlds.entry(world_id.to_string()).or_default();
-        let known = w.by.values().any(|theirs| theirs.contains(&at));
-        let mut changed = false;
-        if let (Some(account), false) = (account, known) {
-            w.by.entry(account.to_string()).or_default().push(at);
-            changed = true;
-        }
         if w.visits.contains(&at) {
-            return changed;
+            return false;
         }
         let i = w.visits.partition_point(|v| *v < at);
         w.visits.insert(i, at);
         if w.visits.len() > MAX_VISITS {
-            let gone = w.visits.remove(0);
-            w.by.retain(|_, theirs| {
-                theirs.retain(|t| *t != gone);
-                !theirs.is_empty()
-            });
+            w.visits.remove(0);
         }
         if self.worlds.len() > MAX_WORLDS {
             let oldest = self.worlds.iter().filter(|(id, _)| id.as_str() != world_id).min_by_key(|(_, w)| w.last()).map(|(id, _)| id.clone());
@@ -197,33 +155,19 @@ impl History {
         true
     }
 
-    /// Adds a join of `world_id:instance` at `at` (one entry per instance and account: joining it again moves it to the end);
+    /// Adds a join of `world_id:instance` at `at` (one entry per instance: joining it again moves it to the end);
     /// returns whether it changed anything.
     pub fn record_instance(&mut self, world_id: &str, instance: &str, at: u64) -> bool {
-        self.record_instance_by(world_id, instance, at, None)
-    }
-
-    /// [`Self::record_instance`] by the VRChat account `account`, when it is known. An entry of nobody's becomes the account's
-    /// that made that very join, or a later one.
-    pub fn record_instance_by(&mut self, world_id: &str, instance: &str, at: u64, account: Option<&str>) -> bool {
         if instance.is_empty() {
             return false;
         }
-        let same = |v: &InstanceVisit| v.world_id == world_id && v.instance == instance;
-        if account.is_none() && self.instances.iter().any(|v| same(v) && v.at == at) {
-            return false;
-        }
-        let own = self.instances.iter().position(|v| same(v) && v.account.as_deref() == account);
-        if let Some(i) = own {
+        if let Some(i) = self.instances.iter().position(|v| v.world_id == world_id && v.instance == instance) {
             if self.instances[i].at >= at {
                 return false;
             }
             self.instances.remove(i);
         }
-        if account.is_some() {
-            self.instances.retain(|v| !(same(v) && v.account.is_none() && v.at <= at));
-        }
-        let visit = InstanceVisit { world_id: world_id.to_string(), instance: instance.to_string(), at, account: account.map(str::to_owned) };
+        let visit = InstanceVisit { world_id: world_id.to_string(), instance: instance.to_string(), at };
         let i = self.instances.partition_point(|v| v.at <= at);
         self.instances.insert(i, visit);
         if self.instances.len() > MAX_INSTANCES {
@@ -271,13 +215,6 @@ impl History {
             self.logs.clear();
             self.checkpoint.unsaved = true;
         }
-        // Nor of whose they were.
-        if !self.accounts_read {
-            self.accounts_read = true;
-            self.logs.clear();
-            self.accounts.clear();
-            self.checkpoint.unsaved = true;
-        }
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
@@ -285,9 +222,6 @@ impl History {
             let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
             // A log shorter than what was read of it was replaced: read again.
             let from = self.logs.get(name).copied().filter(|&from| from <= len).unwrap_or(0);
-            if from == 0 {
-                self.accounts.remove(name);
-            }
             let end = match following {
                 Some((followed, at)) if followed == name.as_str() => at.min(len),
                 _ => len,
@@ -296,17 +230,17 @@ impl History {
                 continue;
             }
             let mut events = Vec::new();
-            // Only joins, room names and sign-ins count here: other lines are let go after a look at their first bytes.
+            // Only joins and room names count here: other lines are let go after a look at their first bytes.
             let (read, _) = crate::vrchat_log::read_lines(&mut file, from, end, budget, |line| {
                 let joins =
-                    crate::vrchat_log::message(line).is_some_and(|m| m.starts_with(b"[Behaviour] Joining ") || m.starts_with(b"[Behaviour] Entering Room: ") || crate::vrchat_log::says_sign_in(m));
+                    crate::vrchat_log::message(line).is_some_and(|m| m.starts_with(b"[Behaviour] Joining ") || m.starts_with(b"[Behaviour] Entering Room: "));
                 if let Some(e) = joins.then(|| crate::vrchat_log::parse_bytes(line)).flatten() {
                     events.push(e);
                 }
             });
             budget = budget.saturating_sub(read - from);
             for e in &events {
-                changed |= self.observe(name, e);
+                changed |= self.observe(e);
             }
             if self.logs.get(name) != Some(&read) {
                 self.logs.insert(name.clone(), read);
@@ -316,7 +250,6 @@ impl History {
         // Forget the logs VRChat deleted.
         let before = self.logs.len();
         self.logs.retain(|name, _| logs.iter().any(|(n, _)| n == name));
-        self.accounts.retain(|name, _| logs.iter().any(|(n, _)| n == name));
         changed | (self.logs.len() != before)
     }
 
@@ -327,10 +260,10 @@ impl History {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for (id, world) in &self.worlds {
-            (id, &world.name, &world.visits, &world.by).hash(&mut hasher);
+            (id, &world.name, &world.visits).hash(&mut hasher);
         }
         for visit in &self.instances {
-            (&visit.world_id, &visit.instance, visit.at, &visit.account).hash(&mut hasher);
+            (&visit.world_id, &visit.instance, visit.at).hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -343,33 +276,24 @@ impl History {
             return false;
         }
         for e in events {
-            self.observe(name, e);
+            self.observe(e);
         }
         self.logs.insert(name.to_string(), to);
         true
     }
 
     // A join reads "Entering Room: <name>", "Joining wrld_…:<instance>", then "Joining or Creating Room: <name>".
-    // Who is signed in is said before it, in the same log.
-    fn observe(&mut self, log: &str, event: &LogEvent) -> bool {
-        let changed = self.observe_event(log, event);
+    fn observe(&mut self, event: &LogEvent) -> bool {
+        let changed = self.observe_event(event);
         self.checkpoint.unsaved |= changed;
         changed
     }
 
-    fn observe_event(&mut self, log: &str, event: &LogEvent) -> bool {
+    fn observe_event(&mut self, event: &LogEvent) -> bool {
         match event {
-            LogEvent::SignIn { user_id } => {
-                match user_id {
-                    Some(id) => drop(self.accounts.insert(log.to_string(), id.clone())),
-                    None => drop(self.accounts.remove(log)),
-                }
-                false
-            }
             LogEvent::Joining { world_id, instance, at: Some(at) } => {
-                let account = self.accounts.get(log).cloned();
-                let mut changed = self.record_by(world_id, *at, account.as_deref());
-                changed |= self.record_instance_by(world_id, instance, *at, account.as_deref());
+                let mut changed = self.record(world_id, *at);
+                changed |= self.record_instance(world_id, instance, *at);
                 if let Some(name) = self.entering.take() {
                     changed |= self.name_last(&name);
                 }
@@ -1045,60 +969,22 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// R3: a visit is its account's, as the same log said before it; nobody's where the log says nobody is signed in, or names
-    /// none for certain. A history from before accounts reads what logs there are again once, for them.
+    /// What 0.3.9-dev.46 and dev.47 kept (whose each visit is, an instance once for each account) is read whole: every instance is
+    /// listed, with and without an account, each once, its last join.
     #[test]
-    fn a_visit_is_of_the_account_its_own_log_said() {
-        const X: &str = "usr_00000000-0000-4000-8000-00000000000a";
-        const Y: &str = "usr_00000000-0000-4000-8000-00000000000b";
-        let dir = std::env::temp_dir().join(format!("orbiters-visits-accounts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let at = |minute: u32, what: &str| format!("2026.10.18 20:{minute:02}:00 Debug      -  {what}\n");
-        let login = |minute: u32, id: &str| at(minute, &format!("[Authentication - x] Preforming post login checks for Sample ({id})"));
-        let join = |minute: u32, instance: &str| at(minute, &format!("[Behaviour] Joining {A}:{instance}"));
-        // Before any sign-in, as X, at the sign-in page, as Y, and a script's line that names X.
-        let first = [join(1, "1~friends(usr_x)"), login(2, X), join(3, "2~friends(usr_x)"), at(4, "AuthSelectionPage OnPageShown"), join(5, "3~friends(usr_x)")].concat();
-        let second = [login(6, Y), join(7, "2~friends(usr_x)"), at(8, &format!("[World] post login checks for Sample ({X})")), join(9, "4~friends(usr_x)")].concat();
-        std::fs::write(dir.join("output_log_2026-10-18_20-00-00.txt"), first).unwrap();
-        std::fs::write(dir.join("output_log_2026-10-18_20-06-00.txt"), second).unwrap();
-        // A history from before accounts, its logs read to their ends.
-        let mut read = History::default();
-        read.read_logs(&dir);
-        let mut kept = serde_json::to_value(&read).unwrap();
-        kept.as_object_mut().unwrap().retain(|key, _| !matches!(key.as_str(), "accounts_read" | "accounts"));
-        for visit in kept["instances"].as_array_mut().unwrap() {
-            visit.as_object_mut().unwrap().remove("account");
-        }
-        kept["worlds"][A].as_object_mut().unwrap().remove("by");
-        for mut history in [serde_json::from_value::<History>(kept).unwrap(), History::default()] {
-            assert!(history.read_logs(&dir));
-            let of = |instance: &str| history.instances.iter().filter(|v| v.instance.starts_with(instance)).map(|v| v.account.as_deref()).collect::<Vec<_>>();
-            assert_eq!((of("1"), of("3"), of("4")), (vec![None], vec![None], vec![None]), "nobody's: not signed in, signed out, not for certain");
-            assert_eq!(of("2"), [Some(X), Some(Y)], "the same room, each account's own");
-            assert_eq!(history.worlds[A].visits.len(), 5, "each once");
-            assert_eq!((history.worlds[A].by[X].len(), history.worlds[A].by[Y].len()), (1, 1));
-            assert_eq!(history.worlds[A].shown_to(&[X.into()]).count(), 4, "all but Y's");
-            assert_eq!(history.worlds[A].shown_to(&[]).count(), 5);
-            assert_eq!(history.worlds[A].shown_to(&[X.into(), Y.into()]).count(), 3);
-            assert!(!history.read_logs(&dir), "read once");
-            // Kept, and read on from there: who is signed in is the log's own.
-            let mut again: History = serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
-            assert!(!again.read_logs(&dir));
-            assert_eq!(again.instances, history.instances);
-            // As nobody in a later join of the same log that the follower read.
-            let name = "output_log_2026-10-18_20-00-00.txt";
-            let from = again.logs[name];
-            let joining = LogEvent::Joining { world_id: A.into(), instance: "9~friends(usr_x)".into(), at: Some(99) };
-            assert!(again.follow(name, from, from + 10, &[LogEvent::SignIn { user_id: Some(X.into()) }, joining]));
-            assert_eq!(again.instances.iter().find(|v| v.instance.starts_with('9')).unwrap().account.as_deref(), Some(X));
-        }
-        // What may be shown, and sent.
-        let (mine, other) = (vec![X.to_string()], vec![X.to_string(), Y.to_string()]);
-        assert!(shown_to(Some(X), &mine) && !shown_to(Some(X), &other) && !shown_to(Some(Y), &mine) && shown_to(None, &other) && shown_to(Some(Y), &[]));
-        assert!(goes_for(Some(X), "1~friends(usr_x)", X) && !goes_for(Some(X), "1~region(eu)", Y));
-        assert!(goes_for(None, "1~region(eu)", X) && !goes_for(None, "1~friends(usr_x)", X));
-        std::fs::remove_dir_all(dir).ok();
+    fn a_history_that_kept_accounts_is_read_with_every_instance_once() {
+        let path = std::env::temp_dir().join(format!("orbiters-visits-dev47-{}.json", uuid::Uuid::new_v4()));
+        let row = |instance: &str, at: u64, account: Option<&str>| match account {
+            Some(account) => format!(r#"{{"world_id":"{A}","instance":"{instance}","at":{at},"account":"{account}"}}"#),
+            None => format!(r#"{{"world_id":"{A}","instance":"{instance}","at":{at}}}"#),
+        };
+        let rows = [row("1~private(usr_x)", 10, None), row("2~friends(usr_x)", 20, Some("usr_x")), row("3~region(eu)", 30, Some("usr_y")), row("2~friends(usr_x)", 40, Some("usr_y"))].join(",");
+        std::fs::write(&path, format!(r#"{{"worlds":{{"{A}":{{"name":"A","visits":[10,20,30,40],"by":{{"usr_x":[20]}}}}}},"logs":{{"x":9}},"last":null,"instances":[{rows}],"instances_read":true,"accounts_read":true,"accounts":{{"x":"usr_x"}}}}"#)).unwrap();
+        let h = History::load(&path);
+        assert_eq!(h.instances.iter().map(|v| (v.instance.as_str(), v.at)).collect::<Vec<_>>(), [("1~private(usr_x)", 10), ("3~region(eu)", 30), ("2~friends(usr_x)", 40)]);
+        assert_eq!(h.worlds[A].visits, [10, 20, 30, 40]);
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&*path.file_name().unwrap().to_string_lossy())).count(), 1, "nothing of it is damaged");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

@@ -3368,12 +3368,7 @@ fn spawn_watchers(ctl: Shared) {
                             .map(|p| p.pid().as_u32())
                     };
                     // The person's VRChat (or the main session's), never one the bridge runs beside it, unless lent to it.
-                    let started: Vec<(u32, u64)> = system
-                        .processes()
-                        .values()
-                        .filter(|p| matches!(p.name().to_string_lossy().to_lowercase().as_str(), "vrchat.exe" | "vrchat"))
-                        .map(|p| (p.pid().as_u32(), p.start_time()))
-                        .collect();
+                    let started = bridge_side::vrchat_births(&system);
                     let vrchats: Vec<u32> = started.iter().map(|(p, _)| *p).collect();
                     if orbiters_core::osc::VRCHAT_RUNS_HERE {
                         let dir = orbiters_core::paths::vrchat_log_dir();
@@ -4215,7 +4210,7 @@ mod tests {
     fn vrchat_run(pid: u32, profile: u32, osc_in: u16, driver: crate::bridge::sessions::Driver, account: &str, world: &str) -> crate::bridge::sessions::VrchatRun {
         crate::bridge::sessions::VrchatRun {
             pid,
-            started_s: u64::from(pid),
+            started_ns: u64::from(pid),
             profile,
             profile_known: true,
             log: None,

@@ -2288,7 +2288,7 @@ fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<Vec<usize>> 
 fn is_current(world: &WorldState, e: &Entry) -> bool {
     world.in_world && world.world_id.as_ref() == Some(&e.world_id) && e.instance.is_some() && world.instance == e.instance
 }
-fn join_available(current: bool, alive: Option<bool>) -> bool {
+pub(crate) fn join_available(current: bool, alive: Option<bool>) -> bool {
     alive.unwrap_or(current)
 }
 
@@ -2435,7 +2435,7 @@ mod tests {
 
         // From outside: a capture's folder goes, the history learns where the other was taken, its upload is recorded.
         std::fs::remove_dir_all(&one).unwrap();
-        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "77~private".into(), at: controller::unix("2026-11-10T19:30:00Z"), account: None });
+        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "77~private".into(), at: controller::unix("2026-11-10T19:30:00Z") });
         history.save(&history_file).unwrap();
         let item = orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Capture, id: 9, mine: true, ..Default::default() };
         controller::write_record_for_test(&records_file, &two, item);

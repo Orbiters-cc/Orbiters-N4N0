@@ -437,6 +437,8 @@ impl Fence<'_> {
                 t.world = Some(self.here()?);
                 t.says = self.host.world().world_name.as_deref().and_then(name);
             }
+            // Sent from the VRChat account connected now, or not at all.
+            Intent::InviteMe { .. } => t.app = json!({ "vrchat": self.host.invite_account() }),
             Intent::Call { friend } => {
                 let calls = self.host.calls();
                 let (id, full) = pick_person(friend, calls.contacts.iter().map(|c| (c.id.as_str(), c.name.as_str())))?;
@@ -589,7 +591,7 @@ impl Fence<'_> {
             }
             Intent::WhereAmI => {
                 let world = self.host.world();
-                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0 }.kind());
+                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0, account: None }.kind());
                 (
                     intents::untrusted(json!({
                         "in_world": world.in_world,
@@ -670,6 +672,9 @@ impl Fence<'_> {
             Intent::InviteMe { .. } => {
                 let item = item.ok_or("No such instance in the last list.")?; // i18n: not shown
                 let location = field(&item, "ref").ok_or("No location for that instance.")?.to_string(); // i18n: not shown
+                if target.app.get("vrchat").and_then(Value::as_str) != self.host.invite_account().as_deref() {
+                    return Err(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+                }
                 self.invite_send(location, false);
                 (json!({ "done": true, "note": "The invite's answer shows on Previous instances." }), None) // i18n: not shown
             }

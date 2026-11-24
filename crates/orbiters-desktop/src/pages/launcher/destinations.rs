@@ -10,7 +10,9 @@
 //!    withdrawn, `GET community-events/{id}/invites/me`) that are on now or start within [`EVENT_AHEAD`]: the event's
 //!    live instance when Orbiters gives one; else VRChat starts at home, where the event's invite arrives.
 //! 3. **The last instance** of this computer's history (`visited-worlds.json`, kept by the tray service from VRChat's
-//!    logs): rejoined while VRChat says it is open and its kind lets the account in, else a new instance of its world.
+//!    logs): rejoined while VRChat says it is open and its kind lets the account in, else a new instance of its world. The
+//!    history is each account's own (`visited::shown_to`): another's is neither shown nor asked about, and a private
+//!    instance that is nobody's goes nowhere.
 //! 4. **The [`FREQUENT_MAX`] places visited most** in that history: each visit of the last [`FREQUENT_DAYS`] days counts,
 //!    halved for every [`HALF_LIFE_DAYS`] days of age (a world of last week outweighs one of two months ago); a new
 //!    instance of each, Friends+ unless the card's kind says otherwise.
@@ -189,6 +191,8 @@ pub struct LastVisit {
     pub name: String,
     pub at: u64,
     pub picture: Option<String>,
+    /// The VRChat account that joined it, when its log said.
+    pub account: Option<String>,
 }
 
 /// What the history gives Where.
@@ -199,15 +203,18 @@ pub struct HistoryView {
 }
 
 impl HistoryView {
-    pub fn of(history: &orbiters_core::visited::History, now: u64) -> Self {
-        let mut frequent = frequent(history, now);
+    /// What of `history` is shown where `acting` are the VRChat accounts acting: nothing of another's.
+    pub fn of(history: &orbiters_core::visited::History, now: u64, acting: &[String]) -> Self {
+        let mut frequent = frequent(history, now, acting);
         frequent.truncate(FREQUENT_MAX + 4);
-        let last = history.instances.last().filter(|v| orbiters_core::vrchat_launch::is_destination(&v.world_id, &v.instance)).map(|v| LastVisit {
+        let last = history.instances.iter().rev().find(|v| orbiters_core::visited::shown_to(v.account.as_deref(), acting));
+        let last = last.filter(|v| orbiters_core::vrchat_launch::is_destination(&v.world_id, &v.instance)).map(|v| LastVisit {
             world_id: v.world_id.clone(),
             instance: v.instance.clone(),
             name: history.worlds.get(&v.world_id).and_then(|w| w.name.clone()).unwrap_or_default(),
             at: v.at,
             picture: None,
+            account: v.account.clone(),
         });
         Self { frequent, last }
     }
@@ -221,7 +228,7 @@ impl HistoryView {
 /// The worlds of `history` by how much they were visited lately: every visit of the last [`FREQUENT_DAYS`] days counts
 /// `0.5 ^ (age in days / HALF_LIFE_DAYS)`; the most first, then the one visited last, then by id. Worlds with no such
 /// visit, and what is not a world's id, are left out.
-pub fn frequent(history: &orbiters_core::visited::History, now: u64) -> Vec<Frequent> {
+pub fn frequent(history: &orbiters_core::visited::History, now: u64, acting: &[String]) -> Vec<Frequent> {
     let from = now.saturating_sub(FREQUENT_DAYS * DAY);
     let mut out: Vec<Frequent> = history
         .worlds
@@ -229,12 +236,12 @@ pub fn frequent(history: &orbiters_core::visited::History, now: u64) -> Vec<Freq
         .filter(|(id, _)| orbiters_core::vrchat_log::is_world_id(id))
         .filter_map(|(id, w)| {
             // A clock set back leaves visits "in the future": they count as today's.
-            let counted: Vec<u64> = w.visits.iter().copied().filter(|t| *t >= from).collect();
+            let counted: Vec<u64> = w.shown_to(acting).filter(|t| *t >= from).collect();
             if counted.is_empty() {
                 return None;
             }
             let score = counted.iter().map(|t| 0.5f64.powf(now.saturating_sub(*t) as f64 / (HALF_LIFE_DAYS * DAY as f64))).sum();
-            Some(Frequent { world_id: id.clone(), name: w.name.clone().unwrap_or_default(), visits: counted.len() as u32, score, last: w.last().unwrap_or(0), picture: None })
+            Some(Frequent { world_id: id.clone(), name: w.name.clone().unwrap_or_default(), visits: counted.len() as u32, score, last: counted.last().copied().unwrap_or(0), picture: None })
         })
         .collect();
     out.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.last.cmp(&a.last)).then_with(|| a.world_id.cmp(&b.world_id)));
@@ -246,6 +253,12 @@ pub fn frequent(history: &orbiters_core::visited::History, now: u64) -> Vec<Freq
 pub fn rejoinable(instance: &str, me: &str) -> bool {
     // An instance of the history was joined: its friends-only owner was this account or a friend then.
     joinable_without_asking(instance, me, &|_| true)
+}
+
+/// Whether the account `me` can rejoin `instance` of the history, which `account` joined: its own (or nobody's, and public), and
+/// one its link alone lets in.
+pub fn rejoinable_as(account: Option<&str>, instance: &str, me: &str) -> bool {
+    orbiters_core::visited::goes_for(account, instance, me) && rejoinable(instance, me)
 }
 
 /// Whether the account `me` can go into `instance` by its link alone, without asking anyone (REQUEST23: Select instead
@@ -282,6 +295,8 @@ pub struct Inputs<'a> {
     pub selection: Option<(&'a Selection, &'a Asker)>,
     /// The one chosen before, still offered there while another card is chosen.
     pub offer: Option<&'a Offer>,
+    /// The VRChat accounts acting: what another one visited is not offered.
+    pub acting: &'a [String],
 }
 
 /// The cards, in the order shown: Home, then the invites, the events, the last instance and the places visited most,
@@ -296,8 +311,9 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
     let shown = match chosen {
         Some((s, asker)) => s.destination().visit().map(|v| (v, s.origin(), s.instance().is_some().then(|| s.proven(asker)))),
         // Chosen before: chosen again, it is asked about again; signed out, a new one of its world.
-        None => i.offer.map(|o| (&o.visit, &o.origin, i.me.is_some_and(|me| rejoinable(&o.visit.instance, me)).then_some(false))),
+        None => i.offer.map(|o| (&o.visit, &o.origin, i.me.is_some_and(|me| super::previous::may_rejoin(&o.visit, &o.origin, me)).then_some(false))),
     };
+    let shown = shown.filter(|(v, ..)| orbiters_core::visited::shown_to(v.account.as_deref(), i.acting));
     if let Some((v, origin, proven)) = shown {
         let place = orbiters_core::launcher_feed::place(&v.location(), &v.name);
         let own = v.region();
@@ -356,7 +372,7 @@ pub fn suggestions(i: &Inputs) -> Vec<Suggestion> {
     }
     if let Some(last) = i.history.and_then(|h| h.last.as_ref()) {
         if !taken(&out, &last.world_id) {
-            let rejoin = i.me.is_some_and(|me| i.last_open == Some(true) && rejoinable(&last.instance, me));
+            let rejoin = i.me.is_some_and(|me| i.last_open == Some(true) && rejoinable_as(last.account.as_deref(), &last.instance, me));
             let place = orbiters_core::launcher_feed::place(&format!("{}:{}", last.world_id, last.instance), &last.name);
             let (go, region) = match place {
                 Some(p) if rejoin => {
@@ -585,7 +601,8 @@ pub fn event_location(o: &orbiters_core::community::Overview) -> Option<String> 
 /// Where's own state on Home's launcher.
 #[derive(Default)]
 pub struct Places {
-    history: Shared<HistoryView>,
+    /// The history's, and whom it was read for (none said: handed in).
+    history: Shared<(Option<Vec<String>>, HistoryView)>,
     events: Shared<Vec<EventSoon>>,
     /// Whether the last instance is open: its location, whom it was asked for, what VRChat said and when.
     open: Shared<(String, Asker, Option<bool>, Instant)>,
@@ -627,9 +644,9 @@ impl Places {
     pub fn stand_in(&mut self, history: Option<HistoryView>, events: Vec<EventSoon>, last_open: Option<bool>, signed_in: bool) {
         let loading = history.is_none();
         let at = Some(Instant::now());
-        *self.history.lock().unwrap() = Read { value: history, at, busy: false };
+        *self.history.lock().unwrap() = Read { value: history.map(|history| (None, history)), at, busy: false };
         *self.events.lock().unwrap() = Read { value: Some(events), at, busy: false };
-        let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
+        let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.1.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
         *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
     }
@@ -721,7 +738,7 @@ impl Places {
         let s = self.desk.selection();
         s.instance().filter(|_| self.showing)?;
         match s.verified() {
-            Verified::Unverified | Verified::Unknown if self.previous.unproven => Some(tr("Its account is not known yet")),
+            Verified::Unverified | Verified::Unknown if self.previous.log.is_some() => Some(tr("VRChat's log cannot be read")),
             Verified::Closed => Some(tr("Closed now")),
             Verified::Unverified if self.previous.connecting => Some(tr("Connecting to VRChat…")),
             Verified::Unverified | Verified::Unknown if self.desk.asker().account.is_none() => Some(tr("Not signed in")),
@@ -734,8 +751,18 @@ impl Places {
     }
 }
 
-/// The account whose places are offered: the one signed in and on show, when the profile chosen is proven to be its own; and
-/// whether VRChat can make instances for it.
+/// Why private places are unavailable while VRChat's log cannot be read, and what to do.
+pub(crate) fn log_words(trouble: &orbiters_core::launcher::LogTrouble) -> String {
+    use orbiters_core::launcher::LogTrouble;
+    match trouble {
+        LogTrouble::NoFolder => tr("Private places need VRChat's log, not found: turn on Logging in VRChat's settings.").into(),
+        LogTrouble::Denied(path) => orbiters_i18n::tr!("Private places need VRChat's log: allow Orbiters - N4N0 to read {path}", path = path),
+        LogTrouble::NotWritten => tr("Private places need VRChat's log, which is off: turn on Logging in VRChat's settings.").into(),
+    }
+}
+
+/// The account whose places are offered: the one signed in and on show, when the profile chosen is not known to be another's;
+/// and whether VRChat can make instances for it.
 fn account(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> (Option<String>, bool) {
     let who = who(state, cx, profile);
     (who.me, who.can_create)
@@ -744,7 +771,8 @@ fn account(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> (Option<Str
 /// Who Where's places are for (verify-r21 Major 1).
 pub(super) struct Who {
     /// The VRChat account VRChat verified as signed in here (the sign-in's own `user`, not the friends list, which comes
-    /// seconds later), when the profile chosen under Play is proven to be its own ([`orbiters_core::vrchat_launch::handing`]).
+    /// seconds later). Where this computer uses several VRChat profiles, none while the one chosen under Play is known to be
+    /// another account's, nor while VRChat's log cannot be read (a private place waits for what it says).
     pub me: Option<String>,
     /// Whether VRChat makes instances for it.
     pub can_create: bool,
@@ -752,58 +780,66 @@ pub(super) struct Who {
     pub connecting: bool,
     /// Signed in, but the profile chosen is another account's.
     pub elsewhere: bool,
-    /// Signed in, but whose the profile chosen is is not known: nothing private goes to it.
-    pub unproven: bool,
+    /// Signed in, and VRChat's log cannot be read here: nothing private goes to a VRChat.
+    pub log: Option<orbiters_core::launcher::LogTrouble>,
+    /// The VRChat accounts acting: the one signed in here (or on its way back), and the one last seen on the profile chosen.
+    pub acting: Vec<String>,
     /// The friends list is this account's own, read with its session (its invites can be offered).
     pub feed: bool,
 }
 
 pub(super) fn who(state: &State, cx: &Cx, profile: Option<&GameProfile>) -> Who {
     use crate::controller::vrchat_login::Presence;
-    use orbiters_core::vrchat_launch::{handing, Handing};
     let login = &cx.snap.vrchat_login;
-    let game = profile.and_then(|p| p.account_id.as_deref());
-    let own = |id: &str| handing(true, Some(id), game) == Handing::Allowed;
+    let several = state.data.several_profiles;
+    // Whose the profile chosen is, as last seen: a label, which only spares a start on another's.
+    let labelled = profile.and_then(|p| p.account_id.as_deref()).filter(|id| !id.is_empty());
+    let log = state.data.log_trouble.clone().filter(|_| several);
+    let own = |id: &str| !several || labelled.is_none_or(|labelled| labelled == id);
     let presence = login.presence();
     let verified = login.user.as_ref().filter(|_| login.allowed);
     let feed_of = |id: &str| matches!(&state.data.source, Source::SignedIn { user_id, .. } if user_id == id) && !state.stale();
     let staged = state.places.staged.as_ref();
-    let (me, feed) = match (verified, presence, staged) {
-        (Some(u), _, _) if own(&u.id) => (Some(u.id.clone()), feed_of(&u.id)),
-        (Some(_), _, _) => (None, false),
-        // Pictures of the page and tests that hand the friends list in alone (no sign-in in their snapshot): its account.
-        (None, Presence::SignedOut, Some(_)) => match (&state.data.source, state.stale()) {
-            (Source::SignedIn { user_id, .. }, false) if !user_id.is_empty() && own(user_id) => (Some(user_id.clone()), true),
-            _ => (None, false),
-        },
-        _ => (None, false),
+    // Pictures of the page and tests that hand the friends list in alone (no sign-in in their snapshot): its account.
+    let handed_in = match (&state.data.source, state.stale()) {
+        (Source::SignedIn { user_id, .. }, false) if staged.is_some() && presence == Presence::SignedOut && !user_id.is_empty() => Some(user_id.clone()),
+        _ => None,
     };
+    let signed_in = verified.map(|u| u.id.clone()).or_else(|| handed_in.clone());
+    let me = signed_in.clone().filter(|id| own(id) && log.is_none());
+    let feed = me.as_deref().is_some_and(|id| verified.is_none() || feed_of(id));
     let can_create = match staged {
         Some(s) => s.signed_in && me.is_some(),
         None => me.is_some() && login.allowed,
     };
-    let signed_in = match (verified, &state.data.source) {
-        (Some(u), _) => Some(u.display_name.as_str()),
-        (None, Source::SignedIn { name, .. }) if staged.is_some() && presence == Presence::SignedOut && !state.stale() => Some(name.as_str()),
-        _ => None,
-    };
-    // Another's: by its id, or where only a name was ever seen on it, by that label.
-    let label = profile.and_then(|p| p.account.as_deref()).filter(|a| !a.is_empty());
-    let others = game.is_some() || label.is_some_and(|label| signed_in.is_some_and(|name| !name.is_empty() && name != label));
-    let without = me.is_none() && signed_in.is_some();
-    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere: without && others, unproven: without && !others, feed }
+    let acts = login.user.as_ref().or(login.known.as_ref()).map(|u| u.id.clone()).or(handed_in);
+    let mut acting: Vec<String> = acts.into_iter().chain(labelled.map(str::to_owned)).collect();
+    acting.dedup();
+    let elsewhere = signed_in.as_deref().is_some_and(|id| !own(id));
+    Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere, log: log.filter(|_| signed_in.is_some() && !elsewhere), acting, feed }
 }
 
 /// The cards now, after the reads have been started where due.
-fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (Vec<Suggestion>, bool) {
+fn cards(ui: &Ui, cx: &Cx, state: &mut State, who: &Who) -> (Vec<Suggestion>, bool) {
+    let (me, feed, acting) = (who.me.as_deref(), who.feed, &who.acting);
     let ctx = ui.ctx().clone();
     let now = state.now();
     // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
     let reads = state.places.staged.is_none() && !cfg!(test);
     if reads {
-        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", || {
+        {
+            // Read for other accounts: read again now, and nothing of it is shown.
+            let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
+            if s.value.as_ref().is_some_and(|(of, _)| of.as_ref().is_some_and(|of| of != acting)) {
+                s.at = None;
+                s.value = None;
+            }
+        }
+        let of = acting.clone();
+        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", move || {
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-            Some(HistoryView::of(&history, orbiters_core::visited::now()))
+            let view = HistoryView::of(&history, orbiters_core::visited::now(), &of);
+            Some((Some(of), view))
         });
         let server = orbiters_core::account::Server::current();
         refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", {
@@ -812,6 +848,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
         });
     }
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
+    let history = history.filter(|(of, _)| of.as_ref().is_none_or(|of| of == acting)).map(|(_, view)| view);
     let loading = match &state.places.staged {
         Some(s) => s.loading,
         None => history.is_none(),
@@ -822,7 +859,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     let location = last.as_ref().map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
     let mut last_open = None;
     if let (Some(last), Some(me)) = (&last, me) {
-        if rejoinable(&last.instance, me) {
+        if rejoinable_as(last.account.as_deref(), &last.instance, me) {
             let known = state.places.open.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
             if reads {
                 if known.as_ref().is_some_and(|k| k.0 != location || k.1 != *state.places.desk.asker()) {
@@ -849,7 +886,7 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     // Invites are the friends list's: offered only when it is this account's own, read with its session.
     let invites: &[Invite] = if feed { &state.data.invites } else { &[] };
     let desk = &state.places.desk;
-    let inputs = Inputs { now, invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer() };
+    let inputs = Inputs { now, invites, dismissed: &dismissed, events: &events, history: history.as_ref(), last_open, me, selection: Some((desk.selection(), desk.asker())), offer: desk.offer(), acting };
     (suggestions(&inputs), loading)
 }
 
@@ -895,13 +932,14 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     // or that it is still connecting (verify-r21 Major 1).
     state.places.previous.can_create = can_create;
     state.places.previous.signed_in_elsewhere = who.elsewhere;
-    state.places.previous.unproven = who.unproven;
+    state.places.previous.log = who.log.clone();
+    state.places.previous.acting = who.acting.clone();
     state.places.previous.connecting = who.connecting;
     // The account and the profile chosen now first: an answer for another counts for nothing.
     state.places.desk.set_asker(Asker { account: me.clone(), profile });
     state.places.desk.drawn(ctx.cumulative_pass_nr());
     super::previous::follow(state, cx, clock);
-    let (cards, loading) = cards(ui, cx, state, me.as_deref(), who.feed);
+    let (cards, loading) = cards(ui, cx, state, &who);
     if let Some(name) = settle(state.places.desk.selection(), &cards) {
         state.places.desk.go_home();
         state.places.notice = Some((orbiters_i18n::tr!("{name} is no longer available: Play starts VRChat at home.", name = name), clock));
@@ -923,9 +961,6 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     // r21: a saved session being restored says so; only a certain "signed out" offers the sign-in.
     let signed_out = cx.snap.vrchat_login.presence() == crate::controller::vrchat_login::Presence::SignedOut;
     let hint = hint(state, &cards, &who, clock, !signed_out);
-    // Whose the profile chosen is is not known: the way to know, a start without a place, at the line's end.
-    let offer_plain = who.unproven && play == PlayState::Ready;
-    let mut start_plain = false;
     // Signed out of VRChat: the way to sign in, at the line's end.
     let offer_sign_in = signed_out && !matches!(state.data.source, Source::SignedIn { .. }) && state.places.notice.is_none() && state.places.making().is_none() && state.places.held().is_none();
     let mut sign_in = false;
@@ -1003,14 +1038,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                 }
                 room -= bw + 8.0;
             }
-            if offer_plain {
-                let b = widgets::Button::new(tr("Start without a place")).icon(icons::PLAY).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("where-start-plain");
-                let bw = b.desired_width(ui);
-                if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
-                    start_plain = true;
-                }
-                room -= bw + 8.0;
-            } else if offer_new {
+            if offer_new {
                 let b = widgets::Button::new(tr("New instance of this world")).icon(icons::PLUS).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt("where-new-instead");
                 let bw = b.desired_width(ui);
                 if widgets::pressed_fresh(&b.show_at(ui, Rect::from_min_size(pos2(rect.right() - bw, y - 14.0), vec2(bw, 28.0)))) {
@@ -1019,6 +1047,10 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                 room -= bw + 8.0;
             }
             widgets::text_truncated(&p, pos2(rect.left() + 22.0, y), Align2::LEFT_CENTER, &Txt::new(text.as_str(), 12.5).color(theme::FG_2), room);
+            if *tone == Tone::Warn {
+                // The whole of it on hover (a path may be long).
+                ui.interact(Rect::from_min_size(pos2(rect.left() + 22.0, y - HINT_H * 0.5), vec2(room, HINT_H)), Id::unique("where-hint"), Sense::hover()).on_hover_text(text.as_str());
+            }
         }
         // The Play heading, under the row, over the buttons.
         let py = rect.bottom() - PLAY_HEAD_H * 0.5 - 2.0;
@@ -1029,13 +1061,6 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     }
     if take_new {
         super::previous::take_new_of_chosen(state);
-    }
-    if start_plain {
-        // VRChat's own start, on the profile chosen: its account is known once it was signed in there.
-        state.chosen_profile = Some(next);
-        state.places.desk.go_home();
-        let mode = if orbiters_core::vrchat_launch::VR_HERE { cx.snap.settings.launch.last_mode } else { LaunchMode::Desktop };
-        state.act(cx, clock, Action::PlayOn { mode, profile: next });
     }
     if state.places.notice.as_ref().is_some_and(|(_, at)| clock - at < NOTICE_FOR) {
         super::super::frame_in(&ctx, NOTICE_FOR - (clock - state.places.notice.as_ref().map_or(clock, |n| n.1)));
@@ -1053,9 +1078,9 @@ pub(super) enum Tone {
 /// that could not be made (for a while), an event that waits for its invite, why invites and Friends+ are missing.
 fn hint(state: &mut State, cards: &[Suggestion], who: &Who, clock: f64, connecting: bool) -> Option<(String, Tone)> {
     let (signed_in, can_create) = (who.me.is_some(), who.can_create);
-    // First of all: nothing private goes to a profile whose account is not known.
-    if who.unproven && !state.stale() {
-        return Some((tr("Sign in on this profile first: its VRChat account is not known yet.").into(), Tone::Warn));
+    // First of all: why private places are unavailable.
+    if let Some(trouble) = who.log.as_ref().filter(|_| !state.stale()) {
+        return Some((log_words(trouble), Tone::Warn));
     }
     if let Some((text, at)) = &state.places.notice {
         if clock - at < NOTICE_FOR {
@@ -1506,7 +1531,7 @@ fn choose(state: &mut State, cx: &Cx, card: &Suggestion) {
 
 /// The last instance's card: what VRChat said of it lately, when that was for this account, else it is asked about.
 fn choose_last(state: &mut State, card: &Suggestion, place: &Place) {
-    let visit = super::previous::Visit { world_id: place.world_id.clone(), instance: place.instance_id.clone(), name: card.name.clone(), at: state.now().max(0) as u64 };
+    let visit = super::previous::Visit { world_id: place.world_id.clone(), instance: place.instance_id.clone(), name: card.name.clone(), at: state.now().max(0) as u64, account: state.places.desk.asker().account.clone() };
     let asker = state.places.desk.asker().clone();
     let staged = state.places.staged.is_some();
     let said = {
@@ -1649,7 +1674,7 @@ mod tests {
     fn view(last: Option<(u32, &str)>, frequent: &[u32]) -> HistoryView {
         HistoryView {
             frequent: frequent.iter().map(|n| often(*n, 10 - *n)).collect(),
-            last: last.map(|(n, instance)| LastVisit { world_id: world(n), instance: instance.into(), name: format!("World {n}"), at: 0, picture: None }),
+            last: last.map(|(n, instance)| LastVisit { world_id: world(n), instance: instance.into(), name: format!("World {n}"), at: 0, picture: None, account: Some(ME.into()) }),
         }
     }
 
@@ -1658,7 +1683,7 @@ mod tests {
     }
 
     fn inputs<'a>(invites: &'a [Invite], events: &'a [EventSoon], history: Option<&'a HistoryView>, last_open: Option<bool>, me: Option<&'a str>) -> Inputs<'a> {
-        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me, selection: None, offer: None }
+        Inputs { now: NOW, invites, dismissed: &|_| false, events, history, last_open, me, selection: None, offer: None, acting: &[] }
     }
 
     #[test]
@@ -1749,12 +1774,12 @@ mod tests {
         let mut h = History::default();
         let days = |d: &[u64]| d.iter().map(|d| now - d * DAY).collect::<Vec<_>>();
         // A: 6 visits two months ago and older; B: 3 visits this week; C: 5 visits a month ago; D: one yesterday.
-        h.worlds.insert(world(1), WorldVisits { name: Some("A".into()), visits: days(&[90, 80, 70, 65, 62, 59]) });
-        h.worlds.insert(world(2), WorldVisits { name: Some("B".into()), visits: days(&[6, 3, 1]) });
-        h.worlds.insert(world(3), WorldVisits { name: Some("C".into()), visits: days(&[33, 32, 31, 30, 29]) });
-        h.worlds.insert(world(4), WorldVisits { name: Some("D".into()), visits: days(&[1]) });
-        h.worlds.insert("not a world".into(), WorldVisits { name: Some("x".into()), visits: days(&[1, 1, 1, 1]) });
-        let f = frequent(&h, now);
+        h.worlds.insert(world(1), WorldVisits { name: Some("A".into()), visits: days(&[90, 80, 70, 65, 62, 59]), ..Default::default() });
+        h.worlds.insert(world(2), WorldVisits { name: Some("B".into()), visits: days(&[6, 3, 1]), ..Default::default() });
+        h.worlds.insert(world(3), WorldVisits { name: Some("C".into()), visits: days(&[33, 32, 31, 30, 29]), ..Default::default() });
+        h.worlds.insert(world(4), WorldVisits { name: Some("D".into()), visits: days(&[1]), ..Default::default() });
+        h.worlds.insert("not a world".into(), WorldVisits { name: Some("x".into()), visits: days(&[1, 1, 1, 1]), ..Default::default() });
+        let f = frequent(&h, now, &[]);
         assert_eq!(f.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["B", "C", "D", "A"]);
         assert_eq!(f.iter().map(|f| f.visits).collect::<Vec<_>>(), [3, 5, 1, 1], "only the last 60 days count");
         // B: 0.5^(6/14) + 0.5^(3/14) + 0.5^(1/14)
@@ -1762,19 +1787,19 @@ mod tests {
         assert!((f[0].score - b).abs() < 1e-9);
         // Nothing in the window: none; a tie goes to the one visited last.
         let mut h = History::default();
-        h.worlds.insert(world(1), WorldVisits { name: None, visits: vec![now - 3 * DAY] });
-        h.worlds.insert(world(2), WorldVisits { name: None, visits: vec![now - 3 * DAY] });
-        h.worlds.insert(world(3), WorldVisits { name: None, visits: vec![now - 61 * DAY] });
-        let f = frequent(&h, now);
+        h.worlds.insert(world(1), WorldVisits { name: None, visits: vec![now - 3 * DAY], ..Default::default() });
+        h.worlds.insert(world(2), WorldVisits { name: None, visits: vec![now - 3 * DAY], ..Default::default() });
+        h.worlds.insert(world(3), WorldVisits { name: None, visits: vec![now - 61 * DAY], ..Default::default() });
+        let f = frequent(&h, now, &[]);
         assert_eq!(f.len(), 2);
         assert_eq!(f[0].world_id, world(1), "same score and time: by id");
         // The view: the last instance joined, with its world's name.
         h.record_instance(&world(2), "5~hidden(usr_x)~region(jp)", now - 100);
-        h.instances.push(InstanceVisit { world_id: "wrld_bad".into(), instance: "1".into(), at: 0 });
-        let v = HistoryView::of(&h, now);
+        h.instances.push(InstanceVisit { world_id: "wrld_bad".into(), instance: "1".into(), at: 0, account: None });
+        let v = HistoryView::of(&h, now, &[]);
         assert_eq!(v.last, None, "the last one is not VRChat's own: none");
         h.instances.pop();
-        let v = HistoryView::of(&h, now);
+        let v = HistoryView::of(&h, now, &[]);
         assert_eq!(v.last.as_ref().map(|l| l.instance.as_str()), Some("5~hidden(usr_x)~region(jp)"));
         assert_eq!(v.region(), "jp");
         assert_eq!(HistoryView::default().region(), "us");
@@ -1797,6 +1822,51 @@ mod tests {
         assert!(!rejoinable("1~group(grp_x)~groupAccessType(members)", ME));
     }
 
+    /// R3 (the verifier's case): what X visited is neither offered nor asked about as Y, whether Y is the account signed in here
+    /// or the one of the profile chosen; a private place that is nobody's is a world's alone, and goes nowhere.
+    #[test]
+    fn nothing_of_another_account_s_history_is_offered() {
+        const X: &str = "usr_00000000-0000-4000-8000-00000000000a";
+        const Y: &str = "usr_00000000-0000-4000-8000-00000000000b";
+        let now = NOW as u64;
+        let mut h = History::default();
+        let visit = |h: &mut History, n: u32, instance: &str, at: u64, account: Option<&str>| {
+            h.record_by(&world(n), at, account);
+            h.record_instance_by(&world(n), instance, at, account);
+        };
+        visit(&mut h, 1, "1~friends(usr_z)~region(eu)", now - 400, None);
+        visit(&mut h, 2, "2~region(eu)", now - 300, Some(Y));
+        visit(&mut h, 3, "3~friends(usr_z)~region(eu)", now - 200, Some(X));
+        let names = |acting: &[&str]| {
+            let acting: Vec<String> = acting.iter().map(|a| a.to_string()).collect();
+            let view = HistoryView::of(&h, now, &acting);
+            (view.last.map(|l| l.world_id), view.frequent.iter().map(|f| f.world_id.clone()).collect::<Vec<_>>())
+        };
+        assert_eq!(names(&[X]), (Some(world(3)), vec![world(3), world(1)]));
+        assert_eq!(names(&[Y]), (Some(world(2)), vec![world(2), world(1)]), "the newest is X's: not Y's to see");
+        assert_eq!(names(&[X, Y]), (Some(world(1)), vec![world(1)]), "one signed in here, the other on the profile chosen");
+        assert_eq!(names(&[]).0, Some(world(3)), "nobody acts: the worlds of this computer");
+        // Rejoined only as whose it is; nobody's private one by nobody.
+        assert!(rejoinable_as(Some(X), "3~friends(usr_z)", X) && !rejoinable_as(Some(X), "3~friends(usr_z)", Y) && !rejoinable_as(Some(X), "3~region(eu)", Y));
+        assert!(!rejoinable_as(None, "1~friends(usr_z)", X) && rejoinable_as(None, "1~region(eu)", X));
+        let old = HistoryView { last: Some(LastVisit { world_id: world(1), instance: "1~friends(usr_z)~region(eu)".into(), ..Default::default() }), ..Default::default() };
+        let cards = suggestions(&inputs(&[], &[], Some(&old), Some(true), Some(X)));
+        assert_eq!(cards[1].go, Go::New, "a world, and a new instance of it");
+        // Chosen as X before: not even its card, as Y.
+        let v = super::super::previous::Visit { world_id: world(3), instance: "3~friends(usr_z)~region(eu)".into(), name: "World 3".into(), at: 0, account: Some(X.into()) };
+        let mut d = Desk::default();
+        d.choose(Destination::Instance { key: v.key(), visit: v.clone() }, Origin::Previous);
+        d.go_home();
+        let offered = |acting: &str| {
+            let acting = [acting.to_string()];
+            let cards = suggestions(&Inputs { selection: Some((d.selection(), d.asker())), offer: d.offer(), acting: &acting, ..inputs(&[], &[], None, None, Some(acting[0].as_str())) });
+            cards.iter().any(|c| c.key == v.key())
+        };
+        assert!(offered(X) && !offered(Y));
+        let origin = Origin::Friend { id: "usr_f".into(), name: "Sample Friend".into(), picture: None };
+        assert!(super::super::previous::may_rejoin(&v, &origin, X) && !super::super::previous::may_rejoin(&v, &origin, Y), "a friend's, as whose friend it was chosen");
+    }
+
     #[test]
     fn a_card_that_goes_gives_the_choice_back_to_home_and_says_so() {
         let invites = [invite("not_1", 1, NOW - 60)];
@@ -1816,7 +1886,7 @@ mod tests {
         // The last instance closed: its card stays (a new one of its world) but the choice was for that instance.
         let mut last = Desk::default();
         last.choose(
-            Destination::Instance { key: format!("recent:{}", world(3)), visit: super::super::previous::Visit { world_id: world(3), instance: "9~region(eu)".into(), name: "World 3".into(), at: 0 } },
+            Destination::Instance { key: format!("recent:{}", world(3)), visit: super::super::previous::Visit { world_id: world(3), instance: "9~region(eu)".into(), name: "World 3".into(), at: 0, account: Some(ME.into()) } },
             Origin::Recent,
         );
         assert_eq!(settled(&last, &cards), None);
@@ -1883,7 +1953,7 @@ mod tests {
     fn a_previous_instance_chosen_starts_vrchat_in_it_while_open_else_in_a_new_one() {
         use super::super::previous::Visit;
         let instance = "48213~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)~nonce(0a1b2c3d-0000-4000-8000-000000000000)";
-        let v = Visit { world_id: world(3), instance: instance.into(), name: "World 3".into(), at: NOW as u64 - 86_400 };
+        let v = Visit { world_id: world(3), instance: instance.into(), name: "World 3".into(), at: NOW as u64 - 86_400, account: Some(ME.into()) };
         let history = view(Some((3, "9~region(use)")), &[3, 4]);
         let mode = LaunchMode::Vr;
         let chosen = |v: &Visit, verified: Verified, new: bool| {

@@ -87,6 +87,8 @@ pub(crate) struct TestHost {
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
     invited_self: Mutex<Vec<String>>,
+    /// Orbiters may not be asked about a previous instance.
+    withheld: std::sync::atomic::AtomicBool,
     /// The VRChat account connected, when one is.
     vrchat_account: Mutex<String>,
     /// World feedback the menus asked.
@@ -310,6 +312,10 @@ impl Host for TestHost {
 
     fn world_feedback(&self, ask: orbiters_n4n0_core::feedback::FeedbackAsk) {
         self.feedback.lock().unwrap().push(format!("{ask:?}"));
+    }
+
+    fn may_ask_orbiters(&self, _location: &str) -> bool {
+        !self.withheld.load(Ordering::SeqCst)
     }
 
     fn invite_self(&self, location: &str, account: &str) -> Option<orbiters_n4n0_core::menu::InviteAnswer> {
@@ -3870,5 +3876,12 @@ fn invite_me_takes_the_connected_vrchat_account_else_orbiters_and_then_says_to_c
     assert!(message.contains("VRChat refused this invite") && message.contains("Connect your VRChat account"), "{message}");
     *host.server.lock().unwrap() = None;
     assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
+    // A private one that is not known to be the account's: not sent to Orbiters' either.
+    let host = TestHost::default();
+    *host.server.lock().unwrap() = Some((base, "orbit-test".into()));
+    host.withheld.store(true, Ordering::SeqCst);
+    let before = asked.load(Ordering::SeqCst);
+    assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, None, location), InviteAnswer::NeedsVrchat { message } if message.contains("not known to be")));
+    assert_eq!(asked.load(Ordering::SeqCst), before);
     assert!(host.invited_self.lock().unwrap().is_empty());
 }

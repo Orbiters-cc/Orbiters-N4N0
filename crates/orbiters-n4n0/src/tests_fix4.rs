@@ -452,6 +452,24 @@ fn a_yes_is_for_the_item_it_was_shown() {
     t.shutdown(&n);
 }
 
+/// Another VRChat account connected since, and the invite is not sent from it.
+#[test]
+fn a_yes_is_for_the_vrchat_account_it_was_asked_with() {
+    let (t, n, _device) = ready();
+    *t.vrchat_invite.lock().unwrap() = Some(InviteAnswer::Sent);
+    *t.vrchat_account.lock().unwrap() = "usr_a".into();
+    t.app_answers.lock().unwrap().insert("instances", json!({ "items": [{ "ref": "wrld_a:1", "world": "First place" }] }));
+    turn(&t, &n, "my previous instances, invite me to the first", instances());
+    let question = question_shown(&t);
+    assert!(question.is_some());
+    *t.vrchat_account.lock().unwrap() = "usr_b".into();
+    press_answer(&n, true, question, shown_epoch(&t));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(t.invited_self.lock().unwrap().is_empty());
+    assert!(t.view().lines.iter().any(|l| l.text.contains("VRChat account changed")), "{:?}", t.view().lines);
+    t.shutdown(&n);
+}
+
 /// A newer capture since, and the yes is still for the one that was the latest; the app's own target goes with its action.
 #[test]
 fn a_yes_is_for_the_capture_and_the_person_it_was_shown() {

@@ -1624,7 +1624,7 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
     person.press(Action::Page(Target::Instances));
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
-    let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600 }).collect();
+    let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600, account: None }).collect();
     for capture in [false, true] {
         // These instances, whatever this computer's history has (opening Instances reads it).
         person.panels.stage.host.menu.set_instances(rows.clone(), true, "");

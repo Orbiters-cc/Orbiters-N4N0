@@ -202,7 +202,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
 /// ("launcher-where"; its second page; a card chosen; a new instance's kind changed and its list open; one being
 /// made), only places visited, nothing visited yet, the history still read, signed out of VRChat, no pictures
 /// (offline), a chosen card gone, an event waiting for its invite, and a profile of another account chosen.
-pub(super) const WHERE: [&str; 16] = [
+pub(super) const WHERE: [&str; 19] = [
     "launcher-where",
     "launcher-where-page-2",
     "launcher-where-selected",
@@ -218,6 +218,9 @@ pub(super) const WHERE: [&str; 16] = [
     "launcher-where-waiting",
     "launcher-where-other-profile",
     "launcher-where-unknown-profile",
+    "launcher-joining",
+    "launcher-joining-failed",
+    "launcher-where-no-log",
     "launcher-small-where",
 ];
 
@@ -258,6 +261,7 @@ fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
             instance: format!("{}{}~region({})", 10_000 + n * 37, kinds[n as usize % kinds.len()], regions[n as usize % regions.len()]),
             name: NAMES[n as usize % NAMES.len()].into(),
             at: NOW as u64 - 1_800 - n * 5 * 3_600,
+            account: None,
         })
         .collect()
 }
@@ -314,6 +318,7 @@ fn stage_where(ctx: &egui::Context, state: &mut crate::pages::launcher::State, n
             name: "Boat Valley".into(),
             at: now - 3 * 3600,
             picture: pic(3),
+            account: None,
         }),
     };
     let event = |location: bool| EventSoon {
@@ -538,6 +543,18 @@ fn data(name: &str) -> LauncherState {
         "launcher-where-unknown-profile" => {
             s.profiles = vec![profile(0, "Sample Me", None, None), GameProfile { profile: 1, ..GameProfile::default() }];
         }
+        // A private place in two steps, and why it was not delivered; VRChat's log that cannot be read.
+        "launcher-joining" | "launcher-joining-failed" => {
+            use orbiters_core::launcher::{JoinFailure, JoinStep, Joining};
+            let failed = name == "launcher-joining-failed";
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", failed.then_some(mode), (!failed).then_some(mode))];
+            s.game = if failed { Game::Running(mode) } else { Game::Starting(mode) };
+            s.joining = Some(Joining { world: "Lantern Garden".into(), step: if failed { JoinStep::Failed(JoinFailure::OtherAccount) } else { JoinStep::Starting } });
+        }
+        "launcher-where-no-log" => {
+            s.profiles = vec![profile(0, "Sample Me", None, None), profile(1, "Sample Alt", None, None)];
+            s.log_trouble = Some(orbiters_core::launcher::LogTrouble::NotWritten);
+        }
         "launcher-profile-starting" if orbiters_core::vrchat_launch::SEVERAL_HERE => {
             s.game = Game::Running(LaunchMode::Vr);
             s.profiles = vec![profile(0, "Sample Me", Some(LaunchMode::Vr), None), profile(1, "Sample Alt", None, Some(LaunchMode::Desktop))];
@@ -548,6 +565,7 @@ fn data(name: &str) -> LauncherState {
         }
         _ => {}
     }
+    s.several_profiles = s.profiles.len() > 1;
     // The account's own profile (REQUEST15 7b): pictures to choose among, what VRChat answered.
     if let Some(mine) = s.mine.as_mut() {
         mine.avatar_picture = "sample://icon/60".into();
@@ -814,7 +832,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             let friend = data(name).friend(nova).cloned();
             if let Some((friend, Whereabouts::World(place))) = friend.map(|f| (f.name.clone(), f.whereabouts)) {
                 let picture = (!place.world_picture.is_empty()).then_some(place.world_picture);
-                let visit = Visit { world_id: place.world_id, instance: place.instance_id, name: place.world_name, at: NOW as u64 };
+                let visit = Visit { world_id: place.world_id, instance: place.instance_id, name: place.world_name, at: NOW as u64, account: None };
                 let verified = match name {
                     "launcher-select-asking" => Verified::Checking { generation: 0, since: std::time::Instant::now() },
                     "launcher-select-closed" => Verified::Closed,

@@ -4222,6 +4222,8 @@ mod tests {
             osc_in,
             query: None,
             account: Some((format!("usr_{account}"), account.to_string())),
+            account_sure: true,
+            log_sure: true,
             signed_out: false,
             one_profile: true,
             world: Some(world.to_string()),

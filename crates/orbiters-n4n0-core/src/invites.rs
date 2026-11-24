@@ -19,8 +19,35 @@ pub fn rows(history: &History) -> Vec<InstanceRow> {
     history
         .recent_instances()
         .into_iter()
-        .map(|(visit, name)| InstanceRow { location: visit.location(), world: name.unwrap_or_default(), at: visit.at })
+        .map(|(visit, name)| InstanceRow { location: visit.location(), world: name.unwrap_or_default(), at: visit.at, account: visit.account })
         .collect()
+}
+
+/// Those of `rows` that may be shown where `acting` are the VRChat accounts acting (`orbiters_core::visited::shown_to`).
+pub fn shown(rows: Vec<InstanceRow>, acting: &[String]) -> Vec<InstanceRow> {
+    rows.into_iter().filter(|row| orbiters_core::visited::shown_to(row.account.as_deref(), acting)).collect()
+}
+
+/// Whether the place `location` of `rows` may be sent anywhere for the VRChat account `me` (`orbiters_core::visited::goes_for`).
+pub fn goes_for(rows: &[InstanceRow], location: &str, me: &str) -> bool {
+    let instance = location.split_once(':').map_or("", |(_, instance)| instance);
+    rows.iter().any(|row| row.location == location && orbiters_core::visited::goes_for(row.account.as_deref(), instance, me))
+}
+
+/// Whether the place `location` of `rows` may be sent to Orbiters for its VRChat account to invite a member's, whose it is not
+/// known here: a public one; a private one only where every visit kept is one account's, its own.
+pub fn goes_to_orbiters(rows: &[InstanceRow], location: &str) -> bool {
+    let instance = location.split_once(':').map_or("", |(_, instance)| instance);
+    if orbiters_core::vrchat_launch::is_public_instance(instance) {
+        return true;
+    }
+    let mut accounts: Vec<&str> = rows.iter().filter_map(|row| row.account.as_deref()).collect();
+    accounts.sort_unstable();
+    accounts.dedup();
+    match accounts[..] {
+        [one] => rows.iter().any(|row| row.location == location && row.account.as_deref() == Some(one)),
+        _ => false,
+    }
 }
 
 /// The instances kept in this computer's `visited-worlds.json` (the tray service writes it as VRChat's logs grow).
@@ -121,5 +148,31 @@ mod tests {
         assert_eq!(rows[0].location, "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:2~hidden(usr_x)");
         assert_eq!((rows[0].kind(), rows[0].region()), ("Friends+", None));
         assert_eq!((rows[1].kind(), rows[1].region(), rows[1].at), ("Public", Some("EU"), 100));
+    }
+
+    /// R3: a previous instance is its account's: shown under no other, sent for no other, and to Orbiters' account only where
+    /// nobody else's could be meant. A private one that is nobody's goes nowhere.
+    #[test]
+    fn a_previous_instance_goes_for_the_account_it_came_from_alone() {
+        const WORLD: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+        let mut history = History::default();
+        history.record_instance_by(WORLD, "1~friends(usr_z)", 1, Some("usr_x"));
+        history.record_instance_by(WORLD, "2~region(eu)", 2, Some("usr_x"));
+        history.record_instance_by(WORLD, "3~friends(usr_z)", 3, None);
+        history.record_instance_by(WORLD, "4~region(eu)", 4, None);
+        let rows = rows(&history);
+        let at = |instance: &str| format!("{WORLD}:{instance}");
+        let shown_as = |acting: &[&str]| shown(rows.clone(), &acting.iter().map(|a| a.to_string()).collect::<Vec<_>>()).iter().map(|r| r.at).collect::<Vec<_>>();
+        assert_eq!(shown_as(&["usr_x"]), [4, 3, 2, 1]);
+        assert_eq!(shown_as(&["usr_y"]), [4, 3]);
+        assert_eq!(shown_as(&["usr_x", "usr_y"]), [4, 3]);
+        assert_eq!(shown_as(&[]), [4, 3, 2, 1]);
+        for (instance, x, y) in [("1~friends(usr_z)", true, false), ("2~region(eu)", true, false), ("3~friends(usr_z)", false, false), ("4~region(eu)", true, true), ("5~region(eu)", false, false)] {
+            assert_eq!((goes_for(&rows, &at(instance), "usr_x"), goes_for(&rows, &at(instance), "usr_y")), (x, y), "{instance}");
+        }
+        let orbiters = |rows: &[InstanceRow]| ["1~friends(usr_z)", "3~friends(usr_z)", "4~region(eu)"].map(|instance| goes_to_orbiters(rows, &at(instance)));
+        assert_eq!(orbiters(&rows), [true, false, true], "one account's computer");
+        history.record_instance_by(WORLD, "6~friends(usr_z)", 6, Some("usr_y"));
+        assert_eq!(orbiters(&super::rows(&history)), [false, false, true], "two accounts': whose is asked for is not known");
     }
 }

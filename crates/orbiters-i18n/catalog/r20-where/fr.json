@@ -24,5 +24,9 @@
   "{name} · new {kind} instance": "{name} · nouvelle instance {kind}",
   "Last visited": "Dernière visite",
   "Often visited": "Souvent visité",
-  "New · {kind}": "Nouvelle · {kind}"
+  "New · {kind}": "Nouvelle · {kind}",
+  "VRChat's log cannot be read": "Le journal de VRChat est illisible",
+  "Private places need VRChat's log, not found: turn on Logging in VRChat's settings.": "Les endroits privés ont besoin du journal de VRChat, introuvable : active Logging dans VRChat.",
+  "Private places need VRChat's log: allow Orbiters - N4N0 to read {path}": "Les endroits privés ont besoin du journal de VRChat : autorise Orbiters - N4N0 à lire {path}",
+  "Private places need VRChat's log, which is off: turn on Logging in VRChat's settings.": "Les endroits privés ont besoin du journal de VRChat, désactivé : active Logging dans VRChat."
 }

@@ -214,10 +214,12 @@ impl N4n0 {
         self.publish();
     }
 
-    pub(crate) fn ask_talk(self: &Shared, down: bool, stamp: Option<Stamp>) {
+    pub(crate) fn ask_talk(self: &Shared, down: bool, stamp: Option<Stamp>, press: Option<u64>) {
         let _lifecycle = self.voice_lifecycle.lock();
-        // A press that is not let in changes nothing of what the page listens to (verify3-r21 M6).
+        // A press that is not let in changes nothing of what the page listens to (verify3-r21 M6), nor does a release of
+        // another press than the one held (verify4-r21 P9).
         if !self.n4n0.lock().unwrap().voice.ask_open { return; }
+        if !down && !self.n4n0.lock().unwrap().held(Source::Overlay, press) { return; }
         let mut admitted = None;
         if down {
             admitted = self.let_in(stamp);
@@ -392,7 +394,11 @@ impl N4n0 {
         rt.next_listen += 1;
         let id = rt.next_listen;
         rt.current = Some((id, stamp));
-        self.n4n0.lock().unwrap().listening = Some((source, Instant::now()));
+        {
+            let mut n = self.n4n0.lock().unwrap();
+            n.listening = Some((source, Instant::now()));
+            n.voice.press = matches!(source, Source::Window | Source::Overlay).then_some(stamp.seq);
+        }
         if let Some(handle) = rt.handle.as_mut() {
             // The sentence as it is spoken shows on the Ask page only: elsewhere, no work for it.
             if let Err(e) = handle.inner.send(&VoiceCommand::Listen { hold, id, live: ask }) {

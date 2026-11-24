@@ -930,7 +930,11 @@ impl eframe::App for App {
         }
         // Asked from the menus around VRChat: My Avatar, to add the capture kit, is on Projects.
         if let Some(page) = self.ctl.take_show_page() {
-            if page == "projects" {
+            if page == "chat" {
+                // SteamVR's dashboard, where a question N4N0 asks cannot be answered.
+                self.chat.open();
+                bring_to_front(ctx);
+            } else if page == "projects" {
                 self.set_page(Page::Projects, anim::time(ctx));
             } else if page == "vrchat-account" {
                 // Previous instances' Connect VRChat in the menus around VRChat (REQUEST20 4): where Home's Sign in to VRChat leads.

@@ -850,6 +850,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     let server = Server::find();
     let client = Client::connect(&endpoint, Role::Overlay)?;
     let backend: Ctl = Arc::new(Remote(client.clone()));
+    crate::member::through(backend.clone());
     crate::usage::forward(backend.clone());
     let mut startup_seen = backend.view().settings.startup.clone();
     let mut settling = crate::backend::Settling::default();

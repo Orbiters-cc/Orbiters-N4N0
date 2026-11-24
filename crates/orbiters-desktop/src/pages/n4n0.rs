@@ -124,18 +124,20 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
                     widgets::field(ui, &title, Some(&line), 260.0, |ui| {
                         let ringing = call.incoming && call.phase == CallPhase::Ringing;
                         let end = if ringing { tr("Decline") } else { tr("Hang up") };
-                        if Button::new(end).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).confirm(ui) {
-                            cx.ctl.n4n0(N4n0Command::EndCall);
+                        // Each for the call it shows: another one's button is another button.
+                        let number = Some(call.number);
+                        if Button::new(end).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).id_salt(("n4n0-call-end", number)).confirm(ui) {
+                            cx.ctl.n4n0(N4n0Command::EndCall { call: number, stamp: None });
                         }
                         ui.add_space(8.0);
                         if ringing {
-                            if Button::new(tr("Answer")).icon(icons::MICROPHONE).variant(Variant::Primary).size(Size::Sm).confirm(ui) {
-                                cx.ctl.n4n0(N4n0Command::AnswerCall { stamp: None });
+                            if Button::new(tr("Answer")).icon(icons::MICROPHONE).variant(Variant::Primary).size(Size::Sm).id_salt(("n4n0-call-answer", number)).confirm(ui) {
+                                cx.ctl.n4n0(N4n0Command::AnswerCall { call: number, stamp: None });
                             }
                         } else {
                             let label = if call.muted { tr_ctx("call", "Unmute") } else { tr_ctx("call", "Mute") };
-                            if Button::new(label).icon(icons::MICROPHONE).size(Size::Sm).show(ui).clicked() {
-                                cx.ctl.n4n0(N4n0Command::MuteCall { on: !call.muted });
+                            if Button::new(label).icon(icons::MICROPHONE).size(Size::Sm).id_salt(("n4n0-call-mute", number, call.muted)).show(ui).clicked() {
+                                cx.ctl.n4n0(N4n0Command::MuteCall { on: !call.muted, call: number, stamp: None });
                             }
                         }
                     });

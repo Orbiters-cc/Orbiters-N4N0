@@ -1842,15 +1842,23 @@ impl N4n0 {
                 }
                 Effect::Answer => {
                     let later = self.later();
+                    let call = self.n4n0.lock().unwrap().screen.menu.call_number;
                     std::thread::spawn(move || {
                         if let Some(fence) = later.fence() {
-                            fence.host.call(CallRequest::Answer);
+                            if let Some(call) = call {
+                                fence.host.call(CallRequest::Answer(call));
+                            }
                         }
                     });
                 }
                 Effect::HangUp => {
-                    let n = self.clone();
-                    std::thread::spawn(move || n.host.call(CallRequest::End));
+                    let later = self.later();
+                    let call = self.n4n0.lock().unwrap().screen.menu.call_number;
+                    std::thread::spawn(move || {
+                        if let (Some(fence), Some(call)) = (later.fence(), call) {
+                            fence.host.call(CallRequest::End(call));
+                        }
+                    });
                 }
                 Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
@@ -1990,7 +1998,9 @@ pub(crate) fn tick(
         if let Some(text) = rt.sender.as_mut().filter(|s| s.busy() && !s.sticky()).and_then(TextSender::take_text) {
             rt.screen.answer = answer_pieces(&text, rt.screen.menu.pages).into();
             rt.screen.answer_next = Some(now);
-            rt.screen.answer_question = rt.take_panel_question();
+            // A word longer than a line is cut: what is not whole there is not presented there (verify4-r21 P6).
+            let whole = rt.screen.answer.iter().flat_map(|l| l.split_whitespace()).eq(text.split_whitespace());
+            rt.screen.answer_question = rt.take_panel_question().filter(|_| whole);
         }
     } else if !rt.screen.answer.is_empty() {
         // The menu closed before N4N0's answer was read: the rest goes on the panel.
@@ -2104,6 +2114,7 @@ pub(crate) fn tick(
     if s.menu.contacts != contacts || s.menu.calls_ready != ready || s.menu.call_note != note {
         s.menu.set_contacts(contacts, ready, note);
     }
+    s.menu.call_number = calls.call.as_ref().map(|c| c.number);
     let call = calls.menu_call(crate::unix_ms());
     if s.menu.call != call {
         s.menu.set_call(call);

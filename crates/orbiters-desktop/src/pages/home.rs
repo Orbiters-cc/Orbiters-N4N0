@@ -1145,14 +1145,14 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
             let mut x = row.left();
             if ringing {
-                let answer = Button::new(tr("Answer")).icon(icons::PHONE).variant(Variant::Primary);
+                let answer = Button::new(tr("Answer")).icon(icons::PHONE).variant(Variant::Primary).id_salt(("orbiters-home-answer", menu.call_number));
                 let w = answer.desired_width(ui);
                 if answer.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                     acts.push(Act::Press(Target::Answer));
                 }
                 x += w + 8.0;
             }
-            let end = Button::new(if ringing { tr("Decline") } else { tr("Hang up") }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt("orbiters-home-hang-up");
+            let end = Button::new(if ringing { tr("Decline") } else { tr("Hang up") }).icon(icons::PHONE_X).variant(Variant::Danger).id_salt(("orbiters-home-hang-up", menu.call_number));
             let w = end.desired_width(ui);
             if end.confirm_at(ui, Rect::from_min_size(pos2(x, row.top()), vec2(w, 40.0))) {
                 acts.push(Act::Press(Target::HangUp));

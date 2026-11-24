@@ -356,11 +356,8 @@ impl Controls {
     pub fn summary(&self, latest: &HashMap<String, OscValue>, max_chars: usize) -> String {
         let mut out = String::new();
         let mut left = 0;
-        for c in self.controls.iter().filter(|c| offered(&c.tags, c.parameter.as_ref(), &c.sub_parameters)) {
-            let state = self.state(c, latest).map(|s| format!(", {s}")).unwrap_or_default();
-            let words: Vec<&str> = c.tags.iter().filter(|t| **t != Tag::Other).map(tag_word).collect();
-            let tags = if words.is_empty() { String::new() } else { format!(" [{}]", words.join(", ")) };
-            let line = format!("{} ({}{state}){tags}\n", crate::context::quoted(&c.path_text(), crate::context::PATH_CHARS), c.kind.word());
+        for c in self.offered() {
+            let line = format!("{} {}\n", crate::context::quoted(&c.path_text(), crate::context::PATH_CHARS), self.standing(c, latest));
             if out.len() + line.len() > max_chars {
                 left += 1;
                 continue;
@@ -371,6 +368,21 @@ impl Controls {
             out.push_str(&format!("… and {left} more (find_avatar_controls searches them)\n")); // i18n: not shown
         }
         out
+    }
+}
+
+impl Controls {
+    /// Those the assistant is offered, in their order.
+    pub fn offered(&self) -> impl Iterator<Item = &Control> {
+        self.controls.iter().filter(|c| offered(&c.tags, c.parameter.as_ref(), &c.sub_parameters))
+    }
+
+    /// A control's kind, state and tags, in this app's words only: "(toggle, off) [nsfw]".
+    pub fn standing(&self, c: &Control, latest: &HashMap<String, OscValue>) -> String {
+        let state = self.state(c, latest).map(|s| format!(", {s}")).unwrap_or_default();
+        let words: Vec<&str> = c.tags.iter().filter(|t| **t != Tag::Other).map(tag_word).collect();
+        let tags = if words.is_empty() { String::new() } else { format!(" [{}]", words.join(", ")) };
+        format!("({}{state}){tags}", c.kind.word())
     }
 }
 

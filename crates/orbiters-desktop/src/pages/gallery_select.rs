@@ -1127,16 +1127,15 @@ fn fetch(from: &Remote, stem: &Path) -> anyhow::Result<PathBuf> {
     let part = with_ext(stem, "part");
     let bytes = match from {
         Remote::Shared { server, id } => {
-            let (api, token) = crate::controller::shares::api(*server)?;
+            let (api, token) = crate::member::reading(*server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
             let result = api.capture_file(&token, Kind::Picture, *id, &part);
             let bytes = result.and_then(|_| Ok(std::fs::read(&part)?));
             let _ = std::fs::remove_file(&part);
             bytes?
         }
         Remote::Gallery { server, asset, id, url } => {
-            let account = orbiters_core::account::read(*server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
-            let api = Api::new(*server);
-            let renewed = api.picture_source(&account.token, *asset, *id, false).ok().unwrap_or_default();
+            let (api, token) = crate::member::reading(*server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
+            let renewed = api.picture_source(&token, *asset, *id, false).ok().unwrap_or_default();
             let links: Vec<String> = [renewed.full_url, renewed.src, Some(url.clone())].into_iter().flatten().filter(|u| u.starts_with("https://")).collect();
             let mut last = anyhow::anyhow!("{}", tr("Orbiters has no link for this picture"));
             let mut got = None;

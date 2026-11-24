@@ -191,15 +191,23 @@ pub fn unreachable(e: &anyhow::Error) -> bool {
 }
 
 /// Sends one request of a turn and reads its answer: `on_event` gets the text and progress as they come; the result
-/// is the `done` payload. `cancel` stops reading at the next event.
-pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, mut on_event: impl FnMut(Event)) -> anyhow::Result<Done> {
+/// is the `done` payload. `cancel` stops reading at the next event. `submitted` is told once the request is with Orbiters
+/// (it answered: its event stream opens before the model does anything) or was not: until then what admitted the request
+/// is kept (verify4-r21 P10), and never while the answer is read.
+pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, submitted: impl FnOnce(), mut on_event: impl FnMut(Event)) -> anyhow::Result<Done> {
     let response = api
         .agent()
         .post(&api.url("n4n0/assistant/turns"))
+        // Its admission is held meanwhile: a server that does not answer does not hold a sign-out for long.
+        .config()
+        .timeout_connect(Some(std::time::Duration::from_secs(10)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(20)))
+        .build()
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "text/event-stream")
-        .send_json(request)
-        .with_context(|| tr("Orbiters could not be reached"))?;
+        .send_json(request);
+    submitted();
+    let response = response.with_context(|| tr("Orbiters could not be reached"))?;
     let status = response.status().as_u16();
     let header_retry = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u32>().ok());
     let json = response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
@@ -365,7 +373,7 @@ mod tests {
         let api = Api::at("http://127.0.0.1:9/");
         let context = Context { summary: String::new(), locale: "en".into(), time: String::new(), display: None };
         let request = Request { client: "test", messages: &[], input: None, tool_results: Vec::new(), tools: &[], context };
-        let err = send(&api, "token", &request, &AtomicBool::new(false), |_| {}).unwrap_err();
+        let err = send(&api, "token", &request, &AtomicBool::new(false), || {}, |_| {}).unwrap_err();
         assert!(unreachable(&err), "{err:#}");
         assert!(!unreachable(&anyhow::Error::new(error_from(503, "{}"))));
         assert!(!unreachable(&anyhow::anyhow!("unexpected answer from Orbiters")));

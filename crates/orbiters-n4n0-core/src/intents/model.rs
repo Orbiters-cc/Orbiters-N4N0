@@ -14,7 +14,7 @@ fn about(name: &str) -> &'static str {
         "walk_boost" => "walk_boost(strength 0-1 | step up/down): how strong Fast walk is.", // i18n: not shown
         "picture_3d" => "picture_3d(of people|world, in_seconds): a 3D picture where VRChat's camera stands (the camera must be open), after a timer.", // i18n: not shown
         "picture_length" => "picture_length(length quick|standard|full): how long the next 3D pictures fly the camera (1, 4 or 8 s).", // i18n: not shown
-        "stop_recording" => "stop_recording: stops a recording under way. Recordings only start from Record beside VRChat's camera, never by voice.", // i18n: not shown
+        "stop_recording" => "stop_recording: stops a recording under way. Waits for the owner's yes. Recordings only start from Record beside VRChat's camera, never by voice.", // i18n: not shown
         "camera_qr" => "camera_qr(on): looks for a QR code through VRChat's camera, or stops.", // i18n: not shown
         "captures" => "captures: the owner's 3D captures, newest first (numbered).", // i18n: not shown
         "share_capture" => "share_capture(which latest|next|<index>, public, friends [names]): shares a 3D capture publicly on Orbiters or with VRChat friends. which=next: the 3D picture being taken now, once it is ready (for \"take a picture then share it\"). Waits for the owner's yes.", // i18n: not shown
@@ -25,7 +25,7 @@ fn about(name: &str) -> &'static str {
         "video_history" => "video_history: the videos the worlds' players played lately (numbered).", // i18n: not shown
         "history_copy" => "history_copy(index): a played video's link to the clipboard.", // i18n: not shown
         "history_drop" => "history_drop(index): a played video dropped in the world as a card. Waits for the owner's yes.", // i18n: not shown
-        "take_back_card" => "take_back_card: takes the link card in the world back.", // i18n: not shown
+        "take_back_card" => "take_back_card: takes the link card in the world back. Waits for the owner's yes.", // i18n: not shown
         "where_am_i" => "where_am_i: the world and instance the owner is in, how many people.", // i18n: not shown
         "world_search" => "world_search(query): searches VRChat worlds (numbered results).", // i18n: not shown
         "world_page" => "world_page(index?): opens a world's page on the Worlds sheet: index of the last world search, none for the world the owner is in.", // i18n: not shown
@@ -52,14 +52,14 @@ fn about(name: &str) -> &'static str {
         "my_status" => "my_status: the owner's VRChat status and status line.", // i18n: not shown
         "call" => "call(friend): calls a friend (Orbiters calls). Waits for the owner's yes.", // i18n: not shown
         "answer_call" => "answer_call: answers the ringing call. Waits for the owner's yes.", // i18n: not shown
-        "end_call" => "end_call: hangs up or declines.", // i18n: not shown
-        "mute_call" => "mute_call(on): mutes or unmutes the owner in the call.", // i18n: not shown
+        "end_call" => "end_call: hangs up or declines. Waits for the owner's yes.", // i18n: not shown
+        "mute_call" => "mute_call(on): mutes the owner in the call; unmuting waits for their yes.", // i18n: not shown
         "translation" => "translation(on): live translation of what people say, on or off.", // i18n: not shown
         "translate_into" => "translate_into(language): the language translations are shown in.", // i18n: not shown
         "show_n4n0" => "show_n4n0(on): shows or hides N4N0 on the avatar.", // i18n: not shown
         "n4n0_menu" => "n4n0_menu(open): opens or closes N4N0's menu.", // i18n: not shown
         "save_state" => "save_state(name): saves how the avatar is now as a state.", // i18n: not shown
-        "apply_state" => "apply_state(name): puts the avatar back as a saved state (by its name).", // i18n: not shown
+        "apply_state" => "apply_state(name): puts the avatar back as a saved state (by its name). Waits for the owner's yes.", // i18n: not shown
         "smoothing" => "smoothing(on?, strength 0-1?): SteamVR tracking smoothing.", // i18n: not shown
         "stay_here" => "stay_here(on): N4N0's screen stays where it is, or follows the owner again.", // i18n: not shown
         "assistant_off" => "assistant_off: switches this assistant off (only the owner can switch it on again).", // i18n: not shown

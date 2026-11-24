@@ -61,6 +61,14 @@ impl Actor {
     }
 }
 
+/// Tests: what is done as a turn's request is about to go.
+#[cfg(test)]
+impl Actor {
+    pub(crate) fn before_send(&self) -> Option<Box<dyn FnOnce() + Send>> {
+        self.shared.before_send.lock().unwrap().take()
+    }
+}
+
 /// Proof that `ticket`'s work may act, for as long as it lives: an identity handover waits until it is dropped.
 pub(crate) struct Fence<'a> {
     shared: &'a Arc<N4n0>,
@@ -90,10 +98,10 @@ pub(crate) struct Permit(());
 
 impl Fence<'_> {
     /// The one taint rule, for every tool (verify3-r21 B4): `action` may be done at once, on a turn that read other people's
-    /// text (`tainted`) only when it changes nothing; what is sent from an account never is.
+    /// text (`tainted`) only when it changes nothing; what is sent from an account, or asked about every time, never is.
     pub(crate) fn permit(&self, action: &Action, tainted: bool) -> Option<Permit> {
         let effect = action.effect();
-        (!(tainted && effect.changes) && !effect.from_account).then_some(Permit(()))
+        (!(tainted && effect.changes) && !effect.from_account && !effect.asks).then_some(Permit(()))
     }
 
     /// The owner said yes to `action`: the account's actions still need their switch now.
@@ -103,7 +111,8 @@ impl Fence<'_> {
 
     /// The person's own sentence asked for `action` (the offline path): what is sent from an account is asked about first.
     pub(crate) fn permit_said(&self, action: &Action) -> Option<Permit> {
-        (!action.effect().from_account).then_some(Permit(()))
+        let effect = action.effect();
+        (!effect.from_account && !effect.asks).then_some(Permit(()))
     }
 
     /// Whether the account's actions are on for this member, when `action` is one.
@@ -305,9 +314,23 @@ pub struct Paused<'a> {
 }
 
 impl Paused<'_> {
+    /// Who is signed in is not known any more (its epoch is now `epoch`): as [`Paused::forget_account`], and what the member
+    /// before (`member`, when one was known) had said is put aside, out of everyone's reach, for them alone
+    /// ([`Paused::establish_account`]).
+    pub fn park_account(&self, epoch: u64, member: Option<&str>) {
+        self.n4n0.park_account(epoch, member);
+    }
+
+    /// `member` is signed in (its epoch is `epoch`): as [`Paused::forget_account`]; what was put aside goes on when it was
+    /// theirs, and is gone when it was not.
+    pub fn establish_account(&self, epoch: u64, member: &str) {
+        self.n4n0.establish_account(epoch, member);
+    }
+
     /// The member signed in changed (its epoch is now `epoch`): nothing of N4N0's conversation, its lines, what it
     /// asked, its action log, the turn under way or the sentence being listened to belongs to the next one.
     pub fn forget_account(&self, epoch: u64) {
+        self.n4n0.drop_parked();
         self.n4n0.forget_account(epoch);
     }
 

@@ -49,6 +49,8 @@ pub struct OverlayUi {
     float: bool,
     /// The Talk button is held.
     talking: bool,
+    /// The press held, by its stamp's number: what letting go names.
+    press: Option<u64>,
     /// The Orbiters identity's epoch the last frame showed.
     epoch: u64,
     /// "Hear yourself": the microphone played in the headset.
@@ -78,7 +80,7 @@ impl OverlayUi {
     /// button is let go, as the press's end will never come.
     pub fn release(&mut self, ctl: &Ctl) {
         if std::mem::take(&mut self.talking) {
-            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
+            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None, press: self.press.take() });
         }
     }
 
@@ -138,7 +140,7 @@ impl OverlayUi {
             self.page = page;
             if self.talking {
                 self.talking = false;
-                ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
+                ctl.n4n0(N4n0Command::Talk { down: false, stamp: None, press: self.press.take() });
             }
         }
         let left = Rect::from_min_size(pos2(24.0, 96.0), vec2(452.0, 520.0));
@@ -349,7 +351,12 @@ impl OverlayUi {
             // The tab shows no question N4N0 asks: what is said here answers none. The identity is the last frame's, the one the
             // person saw as they pressed.
             let stamp = orbiters_n4n0::Stamp { epoch: self.epoch, question: None, surface: orbiters_n4n0::Surface::Overlay, seq: orbiters_n4n0::next_input() };
-            ctl.n4n0(N4n0Command::Talk { down: held, stamp: held.then_some(stamp) });
+            // Let go: that press, and no other sentence (verify4-r21 P9).
+            let press = if held { None } else { self.press.take() };
+            if held {
+                self.press = Some(stamp.seq);
+            }
+            ctl.n4n0(N4n0Command::Talk { down: held, stamp: held.then_some(stamp), press });
         }
         let p = ui.painter().clone();
         let level = if n4n0.listening { n4n0.voice.level.clamp(0.0, 1.0) } else { 0.0 };
@@ -451,6 +458,21 @@ impl OverlayUi {
             yy += h + 14.0;
         }
 
+        // A question N4N0 asks cannot be answered on this tab, which does not show it whole: where it can (verify4-r21 P6).
+        if n4n0.confirmations.iter().any(|c| c.is_local()) {
+            let strip = Rect::from_min_max(pos2(said.left() + 14.0, said.bottom() - 70.0), pos2(said.right() - 14.0, said.bottom() - 14.0));
+            p.rect_filled(strip, theme::radius(14.0), theme::INK_750);
+            widgets::icon(&p, pos2(strip.left() + 24.0, strip.center().y), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
+            let open = Button::new(tr("Open its chat")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt("overlay-n4n0-question");
+            let w = open.desired_width(ui);
+            let at = Rect::from_min_size(pos2(strip.right() - 12.0 - w, strip.center().y - 17.0), vec2(w, 34.0));
+            let words = p.layout_job(Txt::new(tr("N4N0 asks you something: read and answer it in the chat of Orbiters' window."), 13.0).color(theme::FG_2).line_height(17.0).job(at.left() - strip.left() - 56.0));
+            p.galley(pos2(strip.left() + 44.0, strip.center().y - words.size().y / 2.0), words, theme::FG_2);
+            if open.show_at(ui, at).clicked() {
+                ctl.show_page("chat");
+            }
+        }
+
         // Quick actions.
         let quick = Rect::from_min_max(pos2(right.left(), said.bottom() + 16.0), right.max);
         widgets::card(ui.painter(), quick, theme::CARD_RADIUS);
@@ -510,21 +532,24 @@ impl OverlayUi {
         let call = snap.n4n0.calls.call.as_ref();
         if let Some(call) = call {
             let ringing = call.incoming && call.phase == crate::state::CallPhase::Ringing;
-            let (first, first_cmd) = if ringing { (tr("Answer"), N4n0Command::AnswerCall { stamp: None }) } else { (tr("Hang up"), N4n0Command::EndCall) };
-            let b = Button::new(first).icon(if ringing { icons::MICROPHONE } else { icons::X }).variant(if ringing {
+            // Each for the call it shows: another one's button is another button.
+            let number = Some(call.number);
+            let end = || N4n0Command::EndCall { call: number, stamp: None };
+            let (first, first_cmd) = if ringing { (tr("Answer"), N4n0Command::AnswerCall { call: number, stamp: None }) } else { (tr("Hang up"), end()) };
+            let b = Button::new(first).id_salt(("overlay-call", number, ringing)).icon(if ringing { icons::MICROPHONE } else { icons::X }).variant(if ringing {
                 Variant::Primary
             } else {
                 Variant::Secondary
             });
             let w1 = b.desired_width(ui).max(150.0);
-            if b.width(w1).show_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w1, 40.0))).clicked() {
+            if b.width(w1).confirm_at(ui, Rect::from_min_size(pos2(r2.left(), r2.top() + 2.0), vec2(w1, 40.0))) {
                 ctl.n4n0(first_cmd);
             }
             if ringing {
-                let d = Button::new(tr_ctx("a call", "Decline")).icon(icons::X).variant(Variant::Ghost);
+                let d = Button::new(tr_ctx("a call", "Decline")).icon(icons::X).variant(Variant::Ghost).id_salt(("overlay-call-decline", number));
                 let w2 = d.desired_width(ui).max(120.0);
-                if d.width(w2).show_at(ui, Rect::from_min_size(pos2(r2.left() + w1 + 12.0, r2.top() + 2.0), vec2(w2, 40.0))).clicked() {
-                    ctl.n4n0(N4n0Command::EndCall);
+                if d.width(w2).confirm_at(ui, Rect::from_min_size(pos2(r2.left() + w1 + 12.0, r2.top() + 2.0), vec2(w2, 40.0))) {
+                    ctl.n4n0(end());
                 }
             }
             return;

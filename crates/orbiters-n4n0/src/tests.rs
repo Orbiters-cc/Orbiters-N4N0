@@ -80,6 +80,9 @@ pub(crate) struct TestHost {
     pub(crate) app_facts: Mutex<Option<orbiters_n4n0_core::intents::Facts>>,
     pub(crate) app_intents: Mutex<Vec<orbiters_n4n0_core::intents::Intent>>,
     pub(crate) app_answers: Mutex<HashMap<&'static str, Value>>,
+    /// What the stand-in app says an intent is for, and the (item, target) it was asked to do each for.
+    pub(crate) app_target: Mutex<Value>,
+    pub(crate) app_done: Mutex<Vec<(Value, Value)>>,
     /// The person's own VRChat account in the stand-in app: what its invite to oneself answers (`None`: none connected),
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
@@ -328,6 +331,7 @@ impl Host for TestHost {
 
     fn calls(&self) -> CallsStatus {
         let call = self.in_call.lock().unwrap().then(|| CallView {
+            number: 7,
             name: "Kira".into(), // i18n: not shown
             phase: CallPhase::Connected,
             incoming: false,
@@ -405,7 +409,12 @@ impl Host for TestHost {
         json!({ "explorer_points": { "points": 42, "title": "Wanderer" } })
     }
 
-    fn assistant_intent(&self, intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&Value>) -> Result<Value, String> {
+    fn assistant_target(&self, _intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&Value>) -> Result<Value, String> {
+        Ok(self.app_target.lock().unwrap().clone())
+    }
+
+    fn assistant_intent(&self, intent: &orbiters_n4n0_core::intents::Intent, item: Option<&Value>, target: &Value) -> Result<Value, String> {
+        self.app_done.lock().unwrap().push((item.cloned().unwrap_or_default(), target.clone()));
         self.app_intents.lock().unwrap().push(intent.clone());
         Ok(self.app_answers.lock().unwrap().get(intent.name()).cloned().unwrap_or_else(|| json!({ "done": true })))
     }
@@ -469,6 +478,10 @@ impl Clipboard for FakeClipboard {
     fn copy(&self, text: &str) -> Result<(), String> {
         CLIPBOARD.lock().unwrap().push(text.to_string());
         Ok(())
+    }
+
+    fn paste(&self) -> Option<String> {
+        Some("what was there before".into()) // i18n: not shown
     }
 }
 
@@ -865,7 +878,7 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     );
     let (base, bodies) = orbiters(vec![first, second]);
     t.sign_in(base, "orbit-test");
-    n.asked("N4N0, mets mon sweat".into(), "typed");
+    n.asked("N4N0, mets mon hoodie".into(), "typed");
     let sent = received(&vrchat, Duration::from_millis(4000));
     assert!(sent.contains(&(parameter("Hoodie"), OscType::Bool(true))), "{sent:?}");
     let mut cells: Page = [0; TEXT_LENGTH];
@@ -873,8 +886,9 @@ fn a_turn_runs_the_tools_it_asks_for_and_answers_on_the_panel() {
     assert_eq!(first_row(&cells), "Voilà, ton sweat. Va voir tes");
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
-    assert_eq!(bodies[0]["input"]["text"], "N4N0, mets mon sweat");
-    assert!(bodies[0]["context"]["summary"].as_str().unwrap().contains("\"Hoodie\" (parameter"), "{}", bodies[0]["context"]["summary"]);
+    assert_eq!(bodies[0]["input"]["text"], "N4N0, mets mon hoodie");
+    // Named by the owner: by its number, with their own word (verify4-r21 P4).
+    assert!(bodies[0]["context"]["summary"].as_str().unwrap().contains("#1 \"hoodie\""), "{}", bodies[0]["context"]["summary"]);
     assert_eq!(bodies[0]["context"]["display"]["columns"], 32);
     assert_eq!(bodies[0]["context"]["locale"], "en-GB", "the device's language");
     assert!(bodies[0]["tools"].as_array().unwrap().iter().any(|t| t["name"] == "set_avatar_parameter"), "a bare avatar gets its parameters by name");
@@ -1125,6 +1139,12 @@ fn the_wake_word_starts_a_turn_and_other_sentences_stay_here() {
     assert!(bodies[0]["context"]["display"].is_null(), "no N4N0 prop: no panel limits");
 }
 
+/// The app's Talk let go: the press held, as its surface names it.
+pub(crate) fn let_go(n: &Shared) {
+    let press = n.n4n0.lock().unwrap().voice.press;
+    n.app_talk(false, false, None, press);
+}
+
 #[test]
 fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
     let (t, n, device) = n4n0_on(Settings::default(), Arc::new(Watcher::new(|| Box::new(NoMedia))));
@@ -1134,9 +1154,9 @@ fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
     t.sign_in(base, "orbit-test");
     n.n4n0.lock().unwrap().voice.installed = true;
     // Pressed, then let go: the worker transcribes only now, so its sentence arrives after the button is up.
-    n.app_talk(true, false, n.stamped());
+    n.app_talk(true, false, n.stamped(), None);
     assert!(n.n4n0.lock().unwrap().listening.is_some());
-    n.app_talk(false, false, None);
+    let_go(&n);
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     let heard = |text: &str, listen: u64| VoiceEvent::Heard { text: text.into(), for_n4n0: true, seconds: 1.2, decode_ms: 90, listen };
     n.on_voice_event(heard("mets mon sweat", 1));
@@ -1147,7 +1167,7 @@ fn a_held_sentence_reaches_n4n0_after_the_button_is_let_go() {
     assert_eq!(bodies.lock().unwrap().len(), 1, "the held sentence went to N4N0");
     assert_eq!(bodies.lock().unwrap()[0]["input"]["text"], "mets mon sweat");
     // The overlay goes away while its Talk is held: nothing it heard goes anywhere, even if the worker answers.
-    n.app_talk(true, true, n.stamped());
+    n.app_talk(true, true, n.stamped(), None);
     n.link_closed(true);
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     n.on_voice_event(heard("this stays here", 2));
@@ -1204,7 +1224,7 @@ fn a_failed_round_leaves_the_conversation_as_it_was() {
     let failed = format!("event: error\ndata: {}\n\n", json!({ "code": "quota_exhausted", "message": "Free quota used up until midnight." }));
     let (base, bodies) = orbiters(vec![first, failed, done(json!([{ "role": "user", "content": "et alors ?" }]), json!([]))]);
     t.sign_in(base, "orbit-test");
-    n.asked("mets mon sweat".into(), "typed");
+    n.asked("mets mon hoodie".into(), "typed");
     turn_ended(&n, &bodies, 2);
     assert_eq!(n.n4n0.lock().unwrap().conversation, before, "no call without its result stays in the conversation");
     assert_eq!(t.view().lines.last().map(|l| (l.who, l.text.clone())), Some((N4n0Who::Error, "Free quota used up until midnight.".into())));
@@ -1254,7 +1274,7 @@ fn what_lasts_waits_for_the_owner_s_yes_and_n4n0_s_own_parameters_are_never_reac
     assert_eq!((settings.afk_message.as_str(), settings.afk_message_enabled), ("brb, tea", true));
     assert_eq!(bodies.lock().unwrap().len(), 2, "the yes never went to the server");
     assert!(t.view().confirmations.is_empty());
-    assert!(n.n4n0.lock().unwrap().notes.iter().any(|n| n.contains("said yes")), "the assistant hears of it next time");
+    assert!(n.n4n0.lock().unwrap().notes.iter().any(|n| n.text.contains("said yes")), "the assistant hears of it next time");
     t.shutdown(&n);
 }
 
@@ -1382,15 +1402,15 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
     // N4N0-3: let go before VRChat's MuteSelf echo, N4N0 forgot it had muted, and VRChat then muted the owner.
     let (_t, n) = n4n0_ready_to_listen();
     // Let go before the press's pulses even left: they are called off.
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     assert_eq!(voice_pulses(&n), vec![1, 0]);
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "VRChat never hears of it");
     assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none());
     // Let go after the pulses left, before the echo: the toggle back waits for VRChat's word, then goes once.
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     dispatched(&n);
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     assert_eq!(voice_pulses(&n), Vec::<i32>::new(), "no blind toggle");
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
@@ -1400,26 +1420,26 @@ fn a_quick_talk_tap_never_leaves_the_owner_muted() {
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(false));
     // No echo at all: nothing is sent, and the wait ends.
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     dispatched(&n);
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     n.n4n0.lock().unwrap().unmute_step(Instant::now() + Duration::from_secs(5));
     assert!(n.n4n0.lock().unwrap().unmute_when_muted.is_none() && voice_pulses(&n).is_empty());
     // Pressed again before the echo: that mute is the new press's, no second toggle.
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     dispatched(&n);
-    n.talk(false, Source::Menu, None);
-    n.talk(true, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
+    n.talk(true, Source::Menu, None, None);
     assert!(voice_pulses(&n).is_empty(), "no second toggle");
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
     assert!(voice_pulses(&n).is_empty(), "still held: stays muted");
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     assert_eq!(voice_pulses(&n), vec![1, 0], "let go: toggled back");
     dispatched(&n);
     // Muted by the owner before: Talk mutes nothing, unmutes nothing.
-    n.talk(true, Source::Menu, None);
-    n.talk(false, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
+    n.talk(false, Source::Menu, None, None);
     assert!(voice_pulses(&n).is_empty());
 }
 
@@ -1429,10 +1449,10 @@ fn a_toggle_back_never_starts_before_the_press_s_own_release_left() {
     // verify-n4n0 (8): the press's first edge had left, its release had not, and VRChat said muted: the toggle back's press
     // was queued at once, two presses with no release between.
     let (_t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     // Only the press's first edge left.
     n.n4n0.lock().unwrap().outbox.retain(|(_, (a, v))| !(a == "/input/Voice" && *v == OscType::Int(1)));
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.n4n0.lock().unwrap().unmute_step(Instant::now());
     assert_eq!(voice_pulses(&n), vec![0], "only the press's own release waits");
@@ -1446,7 +1466,7 @@ fn switching_off_in_settings_puts_back_a_mute_talk_made() {
     use crate::runtime::Source;
     // verify-n4n0 (8): with only a menu mute owned (the listen over), turning the assistant off in Settings never restored it.
     let (t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.voice_cancel();
@@ -1478,12 +1498,12 @@ fn switching_the_assistant_off_during_talk_puts_the_owner_s_microphone_back() {
     use crate::runtime::Source;
     // N4N0-15: off during a held Talk, the release no longer reached N4N0 and the owner stayed muted.
     let (_t, n) = n4n0_ready_to_listen();
-    n.talk(true, Source::Menu, None);
+    n.talk(true, Source::Menu, None, None);
     dispatched(&n);
     n.on_parameter("MuteSelf", &OscValue::Bool(true));
     n.command(Command::Assistant { on: false });
     assert_eq!(voice_pulses(&n), vec![1, 0], "toggled back once");
-    n.talk(false, Source::Menu, None);
+    n.talk(false, Source::Menu, None, None);
     assert_eq!(voice_pulses(&n), vec![1, 0], "and not again at the release");
 }
 
@@ -2907,9 +2927,9 @@ fn the_ears_start_with_vrchat_listen_and_stop_and_a_crash_is_told() {
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::WakeWord { on: true, .. })));
     assert_eq!(device.ears.workers.lock().unwrap().len(), 1);
     // Talk: a held listen, then its end.
-    n.app_talk(true, false, n.stamped());
+    n.app_talk(true, false, n.stamped(), None);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, id: 1, .. })));
-    n.app_talk(false, false, None);
+    let_go(&n);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Finish)));
     // It stops on its own: N4N0 says so and the next start waits.
     worker.crash(3, "something went wrong");
@@ -2994,12 +3014,13 @@ fn the_avatar_s_triggers_go_to_the_app_s_own_features_in_order() {
     assert_eq!(t.motion.lock().unwrap().last(), Some(&None));
     // The interfaces' call buttons, and a touch while a call rings: answered.
     n.command(Command::Call { contact: "c1".into(), stamp: n.stamped() });
-    n.command(Command::MuteCall { on: true });
+    *t.in_call.lock().unwrap() = true;
+    n.command(Command::MuteCall { on: true, call: Some(7), stamp: n.stamped() });
     *t.ringing.lock().unwrap() = true;
     n.n4n0.lock().unwrap().params.insert(params::TOUCH.to_string());
     n.on_parameter(params::TOUCH, &OscValue::Bool(true));
-    assert!(soon(|| t.calls.lock().unwrap().last() == Some(&CallRequest::Answer)));
-    assert_eq!(&t.calls.lock().unwrap()[3..5], &[CallRequest::Contact("c1".into()), CallRequest::Mute(true)]);
+    assert!(soon(|| t.calls.lock().unwrap().last() == Some(&CallRequest::Answer(7))));
+    assert_eq!(&t.calls.lock().unwrap()[3..5], &[CallRequest::Contact("c1".into()), CallRequest::Mute { call: 7, on: true }]);
     // A picture with VRChat's camera waits for no recording.
     *t.capturing.lock().unwrap() = true;
     n.command(Command::Photo { delay_seconds: 0 });
@@ -3321,7 +3342,7 @@ fn ask_preflight_blocks_capture_and_reports_each_reason() {
     *d.ears.allowed.lock().unwrap() = true;
     n.ask_page(true);
     assert_eq!(t.view().voice.readiness, VoiceReadiness::SignIn);
-    n.app_talk(true, true, n.stamped());
+    n.app_talk(true, true, n.stamped(), None);
     assert!(d.ears.workers.lock().unwrap().is_empty());
     t.sign_in("http://127.0.0.1:1/".into(), "test");
     n.publish();
@@ -3381,7 +3402,7 @@ fn review_lifecycle_serializes_arm_manual_and_final_with_exit() {
             started.send(()).unwrap();
             match operation % 3 {
                 0 => other.ask_follow(),
-                1 => { let stamp = other.stamped(); other.ask_talk(true, stamp) }
+                1 => { let stamp = other.stamped(); other.ask_talk(true, stamp, None) }
                 _ => other.on_voice_event(VoiceEvent::Heard { listen, text: "discarded".into(), for_n4n0: true, seconds: 1.0, decode_ms: 1 }),
             }
             done.send(()).unwrap();
@@ -3409,7 +3430,7 @@ fn review_wake_followup_is_admitted_only_outside_pause_gates() {
       settings.n4n0.menu.wake_word = false;
     }
     n.n4n0.lock().unwrap().voice.installed = true;
-    n.app_talk(true, true, n.stamped());
+    n.app_talk(true, true, n.stamped(), None);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
     n.voice_cancel();
     n.n4n0.lock().unwrap().listening = None;
@@ -3434,13 +3455,13 @@ fn only_the_ask_page_s_listens_ask_for_the_sentence_as_it_is_spoken() {
     *d.ears.allowed.lock().unwrap() = true;
     t.sign_in("http://127.0.0.1:1/".into(), "test");
     n.n4n0.lock().unwrap().voice.installed = true;
-    n.app_talk(true, false, n.stamped());
+    n.app_talk(true, false, n.stamped(), None);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { live: false, .. })), "the window's Talk: {:?}", worker.commands());
-    n.app_talk(false, false, None);
+    let_go(&n);
     n.ask_page(true);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: false, live: true, .. })), "the Ask page: {:?}", worker.commands());
-    n.ask_talk(true, n.stamped());
+    n.ask_talk(true, n.stamped(), None);
     assert!(matches!(worker.commands().last(), Some(VoiceCommand::Listen { hold: true, live: true, .. })), "Talk on the Ask page");
     t.shutdown(&n);
 }
@@ -3572,7 +3593,7 @@ fn closing_ask_keeps_a_sentence_the_window_holds_now() {
     n.n4n0.lock().unwrap().voice.installed = true;
     n.ask_page(true);
     let worker = d.ears.workers.lock().unwrap()[0].clone();
-    n.app_talk(true, false, n.stamped());
+    n.app_talk(true, false, n.stamped(), None);
     assert!(matches!(n.n4n0.lock().unwrap().listening, Some((Source::Window, _))), "the window has the microphone");
     let before = worker.commands().len();
     n.ask_page(false);
@@ -3620,12 +3641,13 @@ fn ask_auto_final_stream_pause_rearm_manual_exit_and_stale_words() {
     assert_eq!(bodies.lock().unwrap().len(), 1);
     assert_eq!(t.view().lines.iter().filter(|l| l.who == N4n0Who::You).count(), 1);
     worker.say(VoiceEvent::Provisional { listen: 2, text: "cancel this".into() });
-    n.ask_talk(true, n.stamped());
+    n.ask_talk(true, n.stamped(), None);
     assert!(t.view().voice.provisional.is_none());
     assert!(worker.commands().contains(&VoiceCommand::Cancel));
     assert!(worker.commands().iter().any(|c| matches!(c, VoiceCommand::Listen { hold: true, id: 3, .. })));
     assert!(!t.view().voice.automatic);
-    n.ask_talk(false, n.stamped());
+    let press = n.n4n0.lock().unwrap().voice.press;
+    n.ask_talk(false, None, press);
     assert_eq!(worker.commands().last(), Some(&VoiceCommand::Finish));
     n.ask_page(false);
     worker.say(VoiceEvent::Provisional { listen: 3, text: "late".into() });
@@ -3747,7 +3769,7 @@ fn switching_the_assistant_off_stops_all_of_it_at_once() {
     // Nothing brings it back: a hand on N4N0, Talk, the menu's listening, a question.
     n.touch();
     n.menu_listen();
-    n.command(Command::Talk { down: true, stamp: n.stamped() });
+    n.command(Command::Talk { down: true, stamp: n.stamped(), press: None });
     n.voice_follow();
     assert!(n.n4n0.lock().unwrap().listening.is_none());
     assert_eq!(d.ears.workers.lock().unwrap().len(), 1, "no microphone taken again");

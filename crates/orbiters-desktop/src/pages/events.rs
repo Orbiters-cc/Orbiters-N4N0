@@ -747,13 +747,19 @@ impl Window {
     fn load(&mut self, ctx: &egui::Context) {
         let (server, id) = (self.server, self.id.clone());
         self.error = None;
-        self.page_job = Job::spawn(ctx, move || {
-            let token = orbiters_core::account::read(server).map(|a| a.token);
-            Api::new(server).event(token.as_deref(), &id)
+        // As the member on show: the whole of this visit is theirs (`crate::member`).
+        let member = crate::member::reading(server);
+        let as_member = member.clone();
+        self.page_job = Job::spawn(ctx, move || match as_member.map(|m| m.api()) {
+            Some((api, token)) => api.event(Some(&token), &id),
+            None => Api::new(server).event(None, &id),
         });
-        if let Some(account) = orbiters_core::account::read(server) {
+        if let Some(member) = member {
             let id = self.id.clone();
-            self.invites_job = Job::spawn(ctx, move || Api::new(server).my_invites(&account.token, &id));
+            self.invites_job = Job::spawn(ctx, move || {
+                let (api, token) = member.api();
+                api.my_invites(&token, &id)
+            });
         }
     }
 
@@ -863,17 +869,17 @@ impl Window {
         }
         // The event's pictures: its gallery among the member's, then the gallery's newest.
         if !self.fixture && self.show_pictures && !self.pictures_asked && self.page.is_some() {
-            if let Some(account) = orbiters_core::account::read(self.server) {
+            if let Some(member) = crate::member::reading(self.server) {
                 self.pictures_asked = true;
-                let (server, id, known) = (self.server, self.id.clone(), self.gallery);
+                let (id, known) = (self.id.clone(), self.gallery);
                 self.gallery_job = Job::spawn(ctx, move || {
-                    let api = Api::new(server);
+                    let (api, token) = member.api();
                     let gallery = match known {
                         Some(g) => Some(g),
-                        None => api.galleries(&account.token)?.all().find(|g| g.event.as_ref().is_some_and(|e| e.id == id)).map(|g| g.id),
+                        None => api.galleries(&token)?.all().find(|g| g.event.as_ref().is_some_and(|e| e.id == id)).map(|g| g.id),
                     };
                     let pictures = match gallery {
-                        Some(g) => api.gallery_pictures(&account.token, Some(g), None, 12)?.items,
+                        Some(g) => api.gallery_pictures(&token, Some(g), None, 12)?.items,
                         None => Vec::new(),
                     };
                     Ok((gallery, pictures))
@@ -888,7 +894,8 @@ impl Window {
 
     fn act(&mut self, ctx: &egui::Context, cx: &mut Cx, act: Act) {
         let server = self.server;
-        let token = || orbiters_core::account::read(server).map(|a| a.token);
+        // As the member this page shows, or not at all.
+        let member = || crate::member::now(server);
         match act {
             Act::Url(url) => {
                 let r = crate::controller::open_url(&url);
@@ -901,27 +908,28 @@ impl Window {
             }
             Act::Ask(step) => {
                 self.focus = Some(step.clone());
-                let Some(token) = token() else {
+                let Some(member) = member() else {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
                 self.asks.insert(step.clone(), Ask::Busy(mark("Signing you up…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
-                    let r = Api::new(server).invite_me(&token, &id, &step);
+                    let (api, token) = member.api();
+                    let r = api.invite_me(&token, &id, &step);
                     (step, Outcome::Signed(r))
                 });
             }
             Act::Check(step) => {
                 self.focus = Some(step.clone());
-                let Some(token) = token() else {
+                let Some(member) = member() else {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
                 self.asks.insert(step.clone(), Ask::Busy(mark("Checking with VRChat…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
-                    let api = Api::new(server);
+                    let (api, token) = member.api();
                     let ask = match api.invite_eligibility(&token, &id, &step, true) {
                         Ok(e) if !e.linked => Ask::Link,
                         Ok(e) if !e.allowed => Ask::Group,
@@ -936,23 +944,25 @@ impl Window {
             }
             Act::Withdraw(step) => {
                 self.focus = Some(step.clone());
-                let Some(token) = token() else { return };
+                let Some(member) = member() else { return };
                 self.asks.insert(step.clone(), Ask::Busy(mark("Cancelling…")));
                 let id = self.id.clone();
                 self.action = Job::spawn(ctx, move || {
-                    let r = Api::new(server).withdraw_invite(&token, &id, &step);
+                    let (api, token) = member.api();
+                    let r = api.withdraw_invite(&token, &id, &step);
                     (step, Outcome::Withdrawn(r))
                 });
             }
             Act::N4n0(step, location) => {
                 self.focus = Some(step.clone());
-                let Some(token) = token() else {
+                let Some(member) = member() else {
                     self.asks.insert(step, Ask::SignIn);
                     return;
                 };
                 self.asks.insert(step.clone(), Ask::Busy(mark("Asking VRChat…")));
                 self.action = Job::spawn(ctx, move || {
-                    let answer = orbiters_n4n0_core::invites::send(&Api::new(server), &token, &location);
+                    let (api, token) = member.api();
+                    let answer = orbiters_n4n0_core::invites::send(&api, &token, &location);
                     (step, Outcome::N4n0(answer))
                 });
             }
@@ -962,7 +972,7 @@ impl Window {
     /// Draws the window over the page (`page`: the page's rect); true once it closed back into its card.
     pub fn show(&mut self, ui: &mut Ui, cx: &mut Cx, pictures: &mut Pictures, covers: &Covers) -> bool {
         let ctx = ui.ctx().clone();
-        if self.account.see(&cx.snap.account.state, cx.snap.settings.development).changed && !self.fixture {
+        if self.account.see(&cx.snap.account, cx.snap.settings.development).changed && !self.fixture {
             self.forget_account(&ctx);
         }
         self.poll(&ctx);

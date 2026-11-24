@@ -741,6 +741,8 @@ pub struct Facts {
     pub talk_conversation: u64,
     /// The Orbiters identity's epoch the page shows (`N4n0Status::account_epoch`).
     pub talk_epoch: u64,
+    /// The press N4N0 listens to (`VoiceStatus::press`).
+    pub talk_press: Option<u64>,
     /// The last turn failed and can be sent again: its turn's number, its button's words, and whether it may be pressed.
     pub talk_retry: Option<(u64, String, bool)>,
     /// What N4N0 is doing now.
@@ -1701,7 +1703,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
                 out.push(Item { action: Action::TalkActions, rect: r(right - 160.0, 10.0, 160.0, 40.0), look: Look::TalkActions });
             }
             // Its question, answered with a press as well as by voice.
-            if facts.talk_question.is_some() {
+            if facts.talk_question.is_some() && facts.talk_question_id.is_some() {
                 let card = talk_question_card(facts);
                 out.push(Item { action: Action::AskAnswer(true), rect: r(card.right() - 16.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(true) });
                 out.push(Item { action: Action::AskAnswer(false), rect: r(card.right() - 16.0 - 170.0 - 12.0 - 170.0, card.bottom() - 14.0 - 44.0, 170.0, 44.0), look: Look::AskAnswer(false) });
@@ -2032,15 +2034,68 @@ const TALK_DOING_HEIGHT: f32 = 40.0;
 /// A row of the action log.
 const TALK_LOG_ROW: f32 = 64.0;
 
-/// The question card at the foot of Ask N4N0's page: as tall as its question needs, up to five lines (it says what will be
-/// done, never more than that).
+/// The most room the words of a question have on Ask N4N0's page, its head (48) and its foot with Yes and No (72) aside.
+const TALK_QUESTION_ROOM: f32 = 576.0 - 12.0 - TALK_TOP - 48.0 - 72.0;
+/// The fonts a question is written in, and a line's height in each: the first it fits in.
+const TALK_QUESTION_FONTS: [(f32, f32); 3] = [(17.0, 23.0), (14.0, 19.0), (12.0, 16.5)];
+
+/// How wide `c` is at most, against the font's size (there is no painter to measure with, and it must not be wider).
+fn at_most_wide(c: char) -> f32 {
+    match c {
+        ' ' => 0.5,
+        'i' | 'j' | 'l' | 't' | 'f' | 'r' | 'I' | '.' | ',' | ':' | ';' | '\'' | '"' | '!' | '|' | '(' | ')' | '[' | ']' | '-' | '/' => 0.55,
+        'm' | 'w' | 'M' | 'W' | '@' | '%' => 1.0,
+        '!'..='~' => if c.is_ascii_uppercase() { 0.85 } else { 0.66 },
+        '\u{A0}'..='\u{52F}' => if c.is_lowercase() { 0.85 } else { 1.05 },
+        // CJK, kana, hangul and full-width forms are a square.
+        '\u{1100}'..='\u{11FF}' | '\u{2E80}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF00}'..='\u{FFEF}' => 1.05,
+        '\u{2010}'..='\u{2027}' => 1.05,
+        // Anything else may be as wide as several.
+        _ => 3.0,
+    }
+}
+
+/// The lines `text` takes at most in `width` at font `size`, broken between words.
+fn lines_at_most(text: &str, width: f32, size: f32) -> f32 {
+    let mut lines = 0.0;
+    for paragraph in text.split('\n') {
+        let (mut at, mut rows) = (0.0f32, 1.0f32);
+        for word in paragraph.split_inclusive(' ') {
+            let w: f32 = word.chars().map(at_most_wide).sum::<f32>() * size;
+            if at > 0.0 && at + w > width {
+                rows += 1.0;
+                at = 0.0;
+            }
+            if w > width {
+                // Broken where it does not fit: a little over.
+                rows += (w / width * 1.1).ceil();
+                at = width;
+            } else {
+                at += w;
+            }
+        }
+        lines += rows;
+    }
+    lines
+}
+
+/// The font a question is written in whole on Ask N4N0's page and the height its words take; `None` when it does not fit.
+fn talk_question_font(question: &str) -> Option<(f32, f32)> {
+    TALK_QUESTION_FONTS.into_iter().find_map(|(size, line)| {
+        let height = lines_at_most(question, TALK_WIDTH - 36.0, size) * line;
+        (height <= TALK_QUESTION_ROOM).then_some((size, height))
+    })
+}
+
+/// Whether Ask N4N0's page shows all of `question`: what it does not show whole is not answered there (verify4-r21 P6).
+pub fn talk_question_fits(question: &str) -> bool {
+    talk_question_font(question).is_some()
+}
+
+/// The question card at the foot of Ask N4N0's page: as tall as its question needs.
 fn talk_question_card(facts: &Facts) -> Rect {
-    // Its text's width in half-glyphs (a CJK glyph is two), against a line's at the card's 17 px font; a little over.
-    let units: f32 = facts.talk_question.as_deref().map_or(0.0, |q| q.chars().map(|c| if (c as u32) >= 0x2E80 { 2.0 } else { 1.0 }).sum());
-    let per_line = ((TALK_WIDTH - 36.0) / 8.8).max(20.0);
-    let lines = (units / per_line + 0.15).ceil().clamp(1.0, 5.0);
-    // Its head (48), the lines, the foot with Yes and No (72).
-    let height = 48.0 + lines * 23.0 + 72.0;
+    let words = facts.talk_question.as_deref().map_or(23.0, |q| talk_question_font(q).map_or(TALK_QUESTION_ROOM, |(_, h)| h));
+    let height = 48.0 + words + 72.0;
     Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 12.0 - height), vec2(TALK_WIDTH, height))
 }
 
@@ -3142,12 +3197,19 @@ fn draw_talk_foot(p: &Painter, facts: &Facts) {
         p.rect_stroke(card, look::radius(look::TILE_RADIUS + 4.0), Stroke::new(1.5, theme::alpha(look::accent(), 0.55)), egui::StrokeKind::Inside);
         widgets::icon(p, pos2(card.left() + 28.0, card.top() + 28.0), icons::CHAT_TEARDROP_TEXT, 24.0, look::accent());
         text(p, pos2(card.left() + 50.0, card.top() + 28.0), Align2::LEFT_CENTER, tr("N4N0 asks"), 18.0, weight::BOLD, look::LABEL);
-        let font = look::font(17.0, weight::MEDIUM);
-        let galley = p.layout(question.clone(), font, look::LABEL, card.width() - 36.0);
+        // As large as it fits; were a glyph wider than said, smaller rather than cut.
+        let room = card.height() - 48.0 - 66.0;
+        let mut size = talk_question_font(question).map_or(12.0, |(size, _)| size);
+        let mut galley = p.layout(question.clone(), look::font(size, weight::MEDIUM), look::LABEL, card.width() - 36.0);
+        while galley.size().y > room && size > 8.0 {
+            size -= 1.0;
+            galley = p.layout(question.clone(), look::font(size, weight::MEDIUM), look::LABEL, card.width() - 36.0);
+        }
         let shown = p.with_clip_rect(Rect::from_min_max(card.min + vec2(18.0, 44.0), pos2(card.right() - 18.0, card.bottom() - 66.0)));
         shown.galley(card.min + vec2(18.0, 46.0), galley, look::LABEL);
         let hint = look::font(15.0, weight::MEDIUM);
-        p.text(pos2(card.left() + 18.0, card.bottom() - 36.0), Align2::LEFT_CENTER, fit(p, tr("Or say yes or no"), &hint, card.width() - 36.0 - 2.0 * 170.0 - 12.0 - 12.0), hint, look::MUTED);
+        let words = if facts.talk_question_id.is_some() { tr("Or say yes or no") } else { "" };
+        p.text(pos2(card.left() + 18.0, card.bottom() - 36.0), Align2::LEFT_CENTER, fit(p, words, &hint, card.width() - 36.0 - 2.0 * 170.0 - 12.0 - 12.0), hint, look::MUTED);
     } else if let Some(doing) = &facts.talk_doing {
         let strip = Rect::from_min_size(pos2(TALK_LEFT, 576.0 - 8.0 - TALK_DOING_HEIGHT), vec2(TALK_WIDTH, TALK_DOING_HEIGHT));
         p.rect_filled(strip, look::radius(strip.height() / 2.0), look::TILE);
@@ -6257,7 +6319,7 @@ mod tests {
     /// REQUEST20 6: what N4N0 asks is answered with a press as well as by voice, and what it did is a press away.
     #[test]
     fn the_ask_page_answers_and_lists_what_n4n0_did() {
-        let asked = Facts { talk_question: Some("N4N0 will do this if you say yes: Boop \"Sam\". Say yes to do it.".into()), ..facts() };
+        let asked = Facts { talk_question: Some("N4N0 will do this if you say yes: Boop \"Sam\". Say yes to do it.".into()), talk_question_id: Some(1), ..facts() };
         let items = sheet_items(Sheet::Talk, &asked);
         let rect = |a: Action| items.iter().find(|i| i.action == a).map(|i| i.rect).unwrap_or_else(|| panic!("{a:?}"));
         let (yes, no) = (rect(Action::AskAnswer(true)), rect(Action::AskAnswer(false)));
@@ -6265,6 +6327,20 @@ mod tests {
         let talk = rect(Action::TalkToggle);
         assert!(!yes.intersects(talk) && !no.intersects(talk) && yes.bottom() <= 576.0, "on the conversation's side, on the page");
         assert!(talk_question_card(&asked).contains_rect(yes) && talk_question_card(&asked).contains_rect(no));
+        // Verify4-r21 P6: what does not fit whole is not answered there; a bio does, in any of its letters.
+        let unanswered = Facts { talk_question_id: None, ..asked.clone() };
+        assert!(!sheet_items(Sheet::Talk, &unanswered).iter().any(|i| matches!(i.action, Action::AskAnswer(_))));
+        for bio in ["word ".repeat(102), "W".repeat(512), "字".repeat(512), "é".repeat(512)] {
+            assert!(talk_question_fits(&format!("N4N0 will do this if you say yes: Set your VRChat bio to \"{bio}\". Say yes to do it.")), "{bio}");
+        }
+        assert!(!talk_question_fits(&"many words ".repeat(400)));
+        // And all of it is painted inside its card.
+        for question in ["W".repeat(512), "wide WORDS and narrow ones ".repeat(22), "字".repeat(512), "a-b ".repeat(128)] {
+            let facts = Facts { sheet: Some(Sheet::Talk), talk_question: Some(question.clone()), talk_question_id: Some(1), ..facts() };
+            let card = talk_question_card(&facts);
+            let (_, height) = talk_question_font(&question).unwrap();
+            assert!(card.top() >= TALK_TOP - 0.5 && height <= TALK_QUESTION_ROOM, "{question}");
+        }
         // A long question has room: its card grows, its buttons stay on the page.
         let long = Facts { talk_question: Some("N4N0 will do this if you say yes: Boop \"Sam\"; Set your VRChat status to Busy; Set your VRChat status text to \"brb, food\". Say yes to do them.".into()), ..facts() };
         assert!(talk_question_card(&long).height() > talk_question_card(&asked).height());

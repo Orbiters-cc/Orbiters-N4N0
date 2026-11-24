@@ -33,6 +33,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     crate::mac::stay_awake();
     let backend: Ctl = Arc::new(Remote(Client::connect(&endpoint, Role::Window)?));
+    crate::member::through(backend.clone());
     crate::usage::forward(backend.clone());
     let viewport = egui::ViewportBuilder::default()
         .with_title("Orbiters - N4N0")

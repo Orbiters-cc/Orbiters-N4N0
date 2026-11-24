@@ -105,6 +105,10 @@ pub trait Backend: Send + Sync {
     fn take_locomotion(&self) -> Vec<(std::time::Instant, String, f32)> {
         Vec::new()
     }
+    /// A request of Orbiters as the member of `epoch`, whom the surface showed (blocking: call it from a thread of its own).
+    fn member_request(&self, _epoch: u64, _request: crate::member::MemberRequest) -> Result<crate::member::MemberAnswer, String> {
+        Err(tr("Orbiters could not be reached").into())
+    }
     /// Lines translated by Orbiters' service (blocking: call it from a thread of its own).
     fn translate(&self, _batch: orbiters_translate::provider::Batch) -> controller::translate::Answer {
         Err(controller::translate::Refused::SignedOut)
@@ -230,6 +234,9 @@ pub type Ctl = Arc<dyn Backend>;
 pub struct Remote(pub Arc<Client>);
 
 impl Backend for Remote {
+    fn member_request(&self, epoch: u64, request: crate::member::MemberRequest) -> Result<crate::member::MemberAnswer, String> {
+        self.0.member_request(epoch, request)
+    }
     fn shown(&self, epoch: u64, surface: Surface) {
         self.0.shown.set(epoch, surface);
     }
@@ -515,6 +522,9 @@ impl Local {
 }
 
 impl Backend for Local {
+    fn member_request(&self, epoch: u64, request: crate::member::MemberRequest) -> Result<crate::member::MemberAnswer, String> {
+        self.ctl.member_request(epoch, request)
+    }
     fn shown(&self, epoch: u64, surface: Surface) {
         self.shown.set(epoch, surface);
     }
@@ -752,8 +762,8 @@ mod shown_tests {
     fn what_is_sent_carries_what_is_shown() {
         let shown = Shown::default();
         shown.set(7, Surface::Overlay);
-        let sent = shown.stamp(N4n0Command::AnswerCall { stamp: None }, shown.epoch());
-        assert!(matches!(sent, N4n0Command::AnswerCall { stamp: Some(Stamp { epoch: 7, question: None, surface: Surface::Overlay, .. }) }), "{sent:?}");
+        let sent = shown.stamp(N4n0Command::AnswerCall { call: Some(3), stamp: None }, shown.epoch());
+        assert!(matches!(sent, N4n0Command::AnswerCall { call: Some(3), stamp: Some(Stamp { epoch: 7, question: None, surface: Surface::Overlay, .. }) }), "{sent:?}");
         let own = Stamp { epoch: 3, question: Some(2), surface: Surface::Window, seq: 1 };
         assert_eq!(shown.stamp(N4n0Command::AskAnswer { yes: true, stamp: Some(own) }, 7), N4n0Command::AskAnswer { yes: true, stamp: Some(own) });
         assert_eq!(shown.stamp(N4n0Command::TakeBack, 7), N4n0Command::TakeBack);

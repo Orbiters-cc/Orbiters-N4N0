@@ -3772,7 +3772,9 @@ fn an_ordinary_player_s_presses(mac: bool) {
         if !signed_in {
             on.c.update(|s| s.launcher.source = Source::Nothing);
         }
-        let went = on.c.assistant_intent(&orbiters_n4n0_core::intents::Intent::GoToInstance { index: 0 }, Some(&json!({ "ref": location })));
+        let (go, item) = (orbiters_n4n0_core::intents::Intent::GoToInstance { index: 0 }, json!({ "ref": location }));
+        let target = on.c.assistant_target(&go, Some(&item)).unwrap();
+        let went = on.c.assistant_intent(&go, Some(&item), &target);
         assert!(went.is_ok(), "{went:?}");
         eventually_so(|| !on.starts().is_empty());
         in_one_step(&on, there);

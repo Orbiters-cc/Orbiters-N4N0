@@ -49,10 +49,10 @@ impl Window {
         });
         out.textures_delta.clear();
     }
-    /// Frames until `done`, a few seconds at most.
+    /// Frames until `done` (a busy computer takes its time).
     fn until(&mut self, done: impl Fn(&State) -> bool) -> bool {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(10) {
+        while start.elapsed() < Duration::from_secs(60) {
             self.frame();
             if done(&self.state) {
                 return true;

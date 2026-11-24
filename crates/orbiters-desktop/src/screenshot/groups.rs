@@ -232,7 +232,7 @@ fn page(owner: bool) -> GroupPage {
             online_count: c.online_count,
             owner_id: if owner { ME.into() } else { "usr_00000000-0000-4000-8000-00000000e0ff".into() },
             privacy: "default".into(),
-            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into(), membership_id: "gmem_me".into(), rights_known: true, roles_known: true, managed_known: true, ..Default::default() }),
+            my_member: Some(MyMember { user_id: ME.into(), role_ids: mine, permissions: rights, status: "member".into(), membership_id: "gmem_me".into(), joined_at: Some("2024-06-12T18:00:00Z".into()), rights_known: true, roles_known: true, managed_known: true, ..Default::default() }),
             roles: Some(roles()),
             ..Default::default()
         },

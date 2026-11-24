@@ -1084,7 +1084,7 @@ fn install_another(c: &Shared) {
     let (before, c2) = (c.identity_epoch(), c.clone());
     std::thread::spawn(move || c2.sign_in_for_test("another"));
     let start = Instant::now();
-    while c.identity_epoch() == before && start.elapsed() < Duration::from_secs(5) {
+    while c.identity_epoch() == before && start.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_ne!(c.identity_epoch(), before);

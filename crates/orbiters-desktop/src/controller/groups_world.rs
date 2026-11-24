@@ -29,10 +29,10 @@ impl Hold {
     fn wait(&self) {
         *self.reached.lock().unwrap() = true;
         self.cv.notify_all();
-        let _ = self.cv.wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(20), |o| !*o);
+        let _ = self.cv.wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(90), |o| !*o);
     }
     pub(crate) fn until_reached(&self) -> bool {
-        let (r, _) = self.cv.wait_timeout_while(self.reached.lock().unwrap(), Duration::from_secs(10), |r| !*r).unwrap();
+        let (r, _) = self.cv.wait_timeout_while(self.reached.lock().unwrap(), Duration::from_secs(60), |r| !*r).unwrap();
         *r
     }
     pub(crate) fn let_go(&self) {

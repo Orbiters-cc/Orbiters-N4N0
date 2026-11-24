@@ -525,10 +525,12 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
             line(ui, tr("Picture"), if *slot == ArtSlot::Icon { tr("The group's icon") } else { tr("The group's banner") });
             line(ui, tr("File"), &id_tail(file));
             note(ui, tr("Everyone who looks at the group sees it."), theme::FG_3);
-            note(ui, tr("VRChat takes the file, not this picture of it: it is read again just before, and not sent if it changed."), theme::FG_3);
+            if back.is_none() {
+                note(ui, tr("VRChat takes the file, not this picture of it: it is read again just before, and not sent if it changed."), theme::FG_3);
+            }
         }
     }
-    note(ui, tr("It is all read again right before it goes. What someone else changes in the instant between is not seen: VRChat has no way to close it."), theme::FG_4);
+    note(ui, tr("It is all read again right before it goes. What someone else changes in the instant between is not seen: VRChat has no way to close it."), theme::FG_3);
 }
 
 /// What VRChat's answer left out, reading it again, and where it is done whatever VRChat leaves out here.

@@ -106,42 +106,6 @@ pub struct Settings {
     pub mismatch: MismatchSettings,
     /// How Home's Play buttons start VRChat (the launcher's performance launch options).
     pub launch: crate::vrchat_launch::LaunchSettings,
-    /// The avatar gun (contracts `Docs/avatar-gun.md`): who may change this player's avatar with one, and the avatar this
-    /// player's own gun is loaded with.
-    pub avatar_gun: AvatarGunSettings,
-}
-
-/// Who may change this player's avatar with an avatar gun (contracts `Docs/avatar-gun.md`, `avatar_gun.allow`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvatarGunAllow {
-    /// Nobody: hits are not even reported.
-    Nobody,
-    /// Everyone is asked for first ("{name} wants to change your avatar to {avatar}", Allow or Not now).
-    #[default]
-    AskFirst,
-    /// VRChat friends at once (a shooter whose VRChat account Orbiters verified), everyone else asked for first.
-    Friends,
-    /// Anyone, at once.
-    Anyone,
-}
-
-/// The avatar a gun is loaded with: kept between runs.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LoadedAvatar {
-    pub id: String,
-    pub name: String,
-    pub thumbnail: String,
-}
-
-/// The avatar gun's settings.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AvatarGunSettings {
-    pub allow: AvatarGunAllow,
-    /// What this player's gun shoots; none chosen yet.
-    pub loaded: Option<LoadedAvatar>,
 }
 
 /// The beta's menu mismatch buttons (`orbiters-desktop`'s `mismatch`): three buttons always in view that say N4N0's menus do not match
@@ -926,7 +890,6 @@ impl Default for Settings {
             usage: UsageSettings::default(),
             mismatch: MismatchSettings::default(),
             launch: crate::vrchat_launch::LaunchSettings::default(),
-            avatar_gun: AvatarGunSettings::default(),
         }
     }
 }
@@ -1237,23 +1200,6 @@ fn earlier_render_default(launch: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The avatar gun asks first unless the person chose otherwise, and has no avatar until one is chosen; what was chosen
-    /// is read back as saved.
-    #[test]
-    fn the_avatar_gun_asks_first_by_default() {
-        let d = Settings::default();
-        assert_eq!((d.avatar_gun.allow, d.avatar_gun.loaded.as_ref()), (AvatarGunAllow::AskFirst, None));
-        let saved: Settings = serde_json::from_value(serde_json::json!({ "avatar_gun": { "allow": "friends", "loaded": { "id": "avtr_x", "name": "Robot" } } })).unwrap();
-        assert_eq!(saved.avatar_gun.allow, AvatarGunAllow::Friends);
-        assert_eq!(saved.avatar_gun.loaded, Some(LoadedAvatar { id: "avtr_x".into(), name: "Robot".into(), thumbnail: String::new() }));
-        for (allow, word) in [(AvatarGunAllow::Nobody, "nobody"), (AvatarGunAllow::AskFirst, "ask_first"), (AvatarGunAllow::Anyone, "anyone")] {
-            assert_eq!(serde_json::to_value(allow).unwrap(), serde_json::json!(word));
-        }
-        let (patched, left_out) = d.patched(&serde_json::json!({ "avatar_gun": { "allow": "nobody" } }));
-        assert!(left_out.is_empty(), "{left_out:?}");
-        assert_eq!(patched.avatar_gun.allow, AvatarGunAllow::Nobody);
-    }
 
     /// Finding VRChat's camera by its picture is an option, off by default, and off for settings saved before it existed (Enzo, 2026-11-13).
     #[test]

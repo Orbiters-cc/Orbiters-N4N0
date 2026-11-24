@@ -257,16 +257,15 @@ impl crate::bridge::game::Publish for RealPublish {
     fn publish(&self, session: &Path, world_id: &str, world_name: &str, public: bool) -> Result<(), Failure> {
         let ctl = self.ctl()?;
         let server = self.server();
-        let Some(mut entry) = super::shares::session_entry(session, server, &ctl.viewer()) else {
+        let Some(mut entry) = super::shares::session_entry(session, server) else {
             return Err(Failure::new("not_a_picture", "Its folder is not a session this app can read.", "Leave it."));
         };
         if entry.world_id.is_empty() {
             entry.world_id = world_id.to_string();
             entry.world_name = world_name.to_string();
         }
-        let whose = super::shares::Whose::saved(server).ok().map(|whose| whose.seen_by(&ctl));
         drop(ctl);
-        self.pacer.add(Job { dir: session.to_path_buf(), server, entry, public, whose });
+        self.pacer.add(Job { dir: session.to_path_buf(), server, entry, public, whose: super::shares::Whose::saved(server).ok() });
         Ok(())
     }
 

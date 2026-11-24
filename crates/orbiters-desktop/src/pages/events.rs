@@ -245,7 +245,7 @@ impl Covers {
     /// This computer's VRChat pictures and captures as stand-in covers (screenshots).
     pub fn stand_ins(sessions_dir: &std::path::Path) -> Vec<Picture> {
         let mut found: Vec<Picture> = Vec::new();
-        for w in crate::worlds::load(sessions_dir, &orbiters_core::visited::Viewer { single: true, ..Default::default() }) {
+        for w in crate::worlds::load(sessions_dir) {
             found.extend(w.shots.iter().take(2).map(|s| Picture::Shot { path: s.path.clone(), size: s.size, width: 1280 }));
             if found.len() >= 12 {
                 return found;

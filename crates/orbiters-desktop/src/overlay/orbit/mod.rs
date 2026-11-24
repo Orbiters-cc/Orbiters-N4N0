@@ -436,8 +436,6 @@ struct Recents {
     big: Option<(crate::worlds::Picture, Option<ColorImage>)>,
     /// What lists them instead of [`list_pictures`]: the headless bench's own pictures ([`paint_bench`]), so that what it measures and compares is not this computer's library.
     lister: Option<fn(&std::path::Path, &[PathBuf]) -> Vec<LoadedRecent>>,
-    /// Who looks: another VRChat account's captures are not listed.
-    viewer: orbiters_core::visited::Viewer,
 }
 
 type PicturesAsked = std::sync::Arc<(std::sync::Mutex<Vec<crate::worlds::Picture>>, std::sync::Condvar)>;
@@ -518,11 +516,11 @@ impl LoadedRecent {
     }
 }
 
-/// All the pictures and captures on this computer, as the app's Photos & captures lists them for `viewer`, newest first.
-fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf], viewer: &orbiters_core::visited::Viewer) -> Vec<LoadedRecent> {
+/// All the pictures and captures on this computer, as the app's Photos & captures lists them, newest first.
+fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf]) -> Vec<LoadedRecent> {
     use crate::worlds::Picture;
     let mut list = Vec::new();
-    for world in crate::worlds::load_gallery(sessions, folders, viewer) {
+    for world in crate::worlds::load_gallery(sessions, folders) {
         // Kept as the English key, and put in the language where it is drawn (`shown_title`): the list is made once.
         let title = if world.name.is_empty() { mark("A VRChat world").to_string() } else { world.name.clone() };
         for s in &world.sessions {
@@ -567,18 +565,6 @@ fn list_pictures(sessions: &std::path::Path, folders: &[PathBuf], viewer: &orbit
 }
 
 impl Recents {
-    /// Who looks now: what was listed for another VRChat account goes, and is listed again.
-    fn seen_by(&mut self, viewer: orbiters_core::visited::Viewer) {
-        if self.viewer == viewer {
-            return;
-        }
-        let same = self.viewer.single && viewer.single;
-        self.viewer = viewer;
-        if !same {
-            (self.loaded, self.asked, self.seen, self.listed, self.rx, self.arranged) = (Vec::new(), Vec::new(), None, None, None, None);
-        }
-    }
-
     /// Takes a new list when one is ready, and asks for one when `version` says there is news. Says whether it changed.
     fn follow(&mut self, version: (u64, u64), sessions: PathBuf, folders: Vec<PathBuf>) -> bool {
         let mut changed = false;
@@ -619,12 +605,9 @@ impl Recents {
             self.listed = Some(Instant::now());
             let (tx, rx) = mpsc::channel();
             self.rx = Some(rx);
-            let (lister, viewer) = (self.lister, self.viewer.clone());
+            let list = self.lister.unwrap_or(list_pictures);
             let _ = std::thread::Builder::new().name("orbit-recent".into()).spawn(move || {
-                let _ = tx.send(match lister {
-                    Some(list) => list(&sessions, &folders),
-                    None => list_pictures(&sessions, &folders, &viewer),
-                });
+                let _ = tx.send(list(&sessions, &folders));
             });
         }
         changed
@@ -2327,7 +2310,6 @@ impl Panels {
         // All tools shows the newest of them too.
         let in_gallery = matches!(self.facts.sheet, Some(Sheet::Pictures | Sheet::All));
         let gallery_navigation_changed = self.recents.arranged.as_ref().is_some_and(|(filter, _, _, set)| *filter != self.facts.gallery_filter || set != &self.recents.set);
-        self.recents.seen_by(snap.viewer());
         let listed = in_gallery && self.recents.follow((library, crate::worlds::picture_revision()), snap.settings.sessions_dir.clone(), snap.settings.picture_folders.clone());
         // An open set's heading follows its place's name, when the list read again has another for it.
         if listed && self.facts.gallery_set.is_some() {
@@ -5378,7 +5360,7 @@ mod tests {
     #[test]
     fn where_the_person_was_is_a_row_for_each_world_the_last_time_first() {
         use orbiters_n4n0_core::menu::InstanceRow;
-        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at, account: None };
+        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at };
         let now = 100_000;
         let rows = [row("Rain", "a", "1", now - 300), row("Sky", "b", "2", now - 600), row("Rain", "a", "3", now - 1320), row("", "c", "4", now - 7200)];
         let worlds = visited_worlds(&rows, now, &HashMap::new(), None);

@@ -261,7 +261,6 @@ fn previous_rows() -> Vec<crate::pages::launcher::previous::Visit> {
             instance: format!("{}{}~region({})", 10_000 + n * 37, kinds[n as usize % kinds.len()], regions[n as usize % regions.len()]),
             name: NAMES[n as usize % NAMES.len()].into(),
             at: NOW as u64 - 1_800 - n * 5 * 3_600,
-            account: None,
         })
         .collect()
 }
@@ -318,7 +317,6 @@ fn stage_where(ctx: &egui::Context, state: &mut crate::pages::launcher::State, n
             name: "Boat Valley".into(),
             at: now - 3 * 3600,
             picture: pic(3),
-            account: None,
         }),
     };
     let event = |location: bool| EventSoon {
@@ -524,11 +522,7 @@ fn data(name: &str) -> LauncherState {
         s.engine_setup = Some(orbiters_core::launcher::EngineSetup::Game { game: true, percent: Some(62) });
     }
     // VRChat's profiles (REQUEST15 7a): one running, or a second account beside it.
-    let own = match &s.source {
-        orbiters_core::launcher::Source::SignedIn { user_id, .. } => user_id.clone(),
-        _ => String::new(),
-    };
-    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), account_id: Some(if profile == 0 { own.clone() } else { format!("usr_00000000-0000-4000-8000-0000000000a{profile}") }), running, starting, assistant: false };
+    let profile = |profile: u32, account: &str, running: Option<LaunchMode>, starting: Option<LaunchMode>| GameProfile { profile, account: Some(account.into()), running, starting, assistant: false };
     // A Mac has the desktop game alone, one at a time: the same choice, none startable beside it.
     let mode = if orbiters_core::vrchat_launch::VR_HERE { LaunchMode::Vr } else { LaunchMode::Desktop };
     match name {
@@ -565,7 +559,7 @@ fn data(name: &str) -> LauncherState {
         }
         _ => {}
     }
-    s.single_profile = s.profiles.len() <= 1;
+    s.several_profiles = s.profiles.len() > 1;
     // The account's own profile (REQUEST15 7b): pictures to choose among, what VRChat answered.
     if let Some(mine) = s.mine.as_mut() {
         mine.avatar_picture = "sample://icon/60".into();
@@ -832,7 +826,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32, fram
             let friend = data(name).friend(nova).cloned();
             if let Some((friend, Whereabouts::World(place))) = friend.map(|f| (f.name.clone(), f.whereabouts)) {
                 let picture = (!place.world_picture.is_empty()).then_some(place.world_picture);
-                let visit = Visit { world_id: place.world_id, instance: place.instance_id, name: place.world_name, at: NOW as u64, account: None };
+                let visit = Visit { world_id: place.world_id, instance: place.instance_id, name: place.world_name, at: NOW as u64 };
                 let verified = match name {
                     "launcher-select-asking" => Verified::Checking { generation: 0, since: std::time::Instant::now() },
                     "launcher-select-closed" => Verified::Closed,

@@ -196,7 +196,7 @@ impl Game for RealGame {
         let ctl = self.ctl()?;
         let list = match find {
             Find::Visited => {
-                let history = orbiters_core::visited::History::load_for(&orbiters_core::visited::history_file(), &ctl.viewer());
+                let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
                 let mut worlds: Vec<(&String, &orbiters_core::visited::WorldVisits)> = history.worlds.iter().collect();
                 worlds.sort_by_key(|(_, w)| std::cmp::Reverse(w.last()));
                 let more = worlds.len() > (page + 1) * WORLDS_A_PAGE;
@@ -401,7 +401,7 @@ impl crate::bridge::projects::Host for RealProjectsHost {
     fn world_here(&self, world_id: &str) -> serde_json::Value {
         let Ok(ctl) = self.ctl() else { return serde_json::Value::Null };
         let sessions_dir = ctl.with_settings(|s| s.sessions_dir.clone());
-        let Some(world) = crate::worlds::load(&sessions_dir, &ctl.viewer()).into_iter().find(|w| w.id == world_id) else {
+        let Some(world) = crate::worlds::load(&sessions_dir).into_iter().find(|w| w.id == world_id) else {
             return serde_json::json!({ "name": null, "captures": [], "pictures": 0 });
         };
         serde_json::json!({

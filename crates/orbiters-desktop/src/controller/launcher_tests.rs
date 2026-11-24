@@ -2342,16 +2342,22 @@ fn verify4_a_place_on_its_way_is_its_own_members_alone() {
         assert_eq!(on.step(), Some(JoinStep::Starting));
         on
     };
-    let late = |on: &Computer| {
-        let errand = Errand::plain(LaunchMode::Desktop, Some(0)).to(Some(private_place("friends(usr_x)")), Some("usr_test"));
+    let late = |on: &Computer, errand: Errand| {
         on.c.launcher_join_failed(errand.clone(), JoinFailure::Gone);
         let failed = on.joining();
         on.c.launcher_join_after(on.machine().as_ref(), errand, Vec::new());
         failed.or(on.joining())
     };
     type Change = fn(&Controller);
-    let changes: [(&str, Change); 5] = [
+    let changes: [(&str, Change); 6] = [
         ("another member", |c| c.sign_in_for_test("2")),
+        ("another member, granted the same VRChat account", |c| {
+            c.sign_in_for_test("2");
+            c.update(|_| {});
+            c.test_signed_in();
+            c.update(|s| (s.vrchat_login.allowed, s.vrchat_login.user) = (true, Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), ..Default::default() })));
+            assert!(c.vrchat_now().is_some());
+        }),
         ("an account with no id", |c| c.install_account(|rt| if let Some(a) = rt.account.as_mut() { a.user = None })),
         ("an account that cannot be read", |c| c.install_account(|rt| rt.unknown = true)),
         ("nobody", |c| c.update(|s| s.account.state = AccountState::SignedOut)),
@@ -2360,12 +2366,13 @@ fn verify4_a_place_on_its_way_is_its_own_members_alone() {
     let mut wrong = Vec::new();
     for (what, change) in changes {
         let on = waiting();
+        let errand = on.pending().unwrap().errand;
         change(&on.c);
         on.c.update(|_| {});
         if on.joining().is_some() {
             wrong.push(format!("{what}: still on show, {:?}", on.joining()));
         }
-        if let Some(late) = late(&on) {
+        if let Some(late) = late(&on, errand) {
             wrong.push(format!("{what}: shown late, {late:?}"));
         }
     }
@@ -2375,7 +2382,7 @@ fn verify4_a_place_on_its_way_is_its_own_members_alone() {
         wrong.push(format!("its own member, Orbiters out of reach: {:?}", on.joining()));
     }
     on.c.update(|s| s.account.state = signed("tester"));
-    on.c.launcher_join_failed(Errand::plain(LaunchMode::Desktop, Some(0)).to(Some(private_place("friends(usr_x)")), Some("usr_test")), JoinFailure::Gone);
+    on.c.launcher_join_failed(on.pending().unwrap().errand, JoinFailure::Gone);
     if on.step() != Some(JoinStep::Failed(JoinFailure::Gone)) {
         wrong.push(format!("its own member, not delivered: {:?}", on.joining()));
     }

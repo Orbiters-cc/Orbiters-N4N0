@@ -19,7 +19,7 @@ use super::vrchat_login::{Grounds, Runtime, Status};
 use super::Controller;
 use crate::state::{AccountState, AccountStatus, Snapshot};
 use orbiters_core::account::{Api, Server};
-use orbiters_core::launcher::{EngineSetup, EngineTrouble, Game, GameProfile, LauncherState, Notice, Source, StartTrouble, VerifiedFor};
+use orbiters_core::launcher::{EngineSetup, EngineTrouble, Game, GameProfile, JoinStep, Joining, LauncherState, Notice, Source, StartTrouble, VerifiedFor};
 use orbiters_core::vrchat_api::Client;
 use std::sync::{Arc, Mutex};
 
@@ -96,7 +96,6 @@ pub(super) struct MachineParts {
     pub(super) engine_trouble: Option<EngineTrouble>,
     pub(super) engine_setup: Option<EngineSetup>,
     pub(super) several_profiles: bool,
-    pub(super) joining: Option<orbiters_core::launcher::Joining>,
     pub(super) log_trouble: Option<orbiters_core::launcher::LogTrouble>,
 }
 
@@ -112,7 +111,6 @@ impl MachineParts {
             engine_trouble: l.engine_trouble.clone(),
             engine_setup: l.engine_setup.clone(),
             several_profiles: l.several_profiles,
-            joining: l.joining.clone(),
             log_trouble: l.log_trouble.clone(),
         }
     }
@@ -127,15 +125,21 @@ impl MachineParts {
         l.engine_trouble = self.engine_trouble;
         l.engine_setup = self.engine_setup;
         l.several_profiles = self.several_profiles;
-        l.joining = self.joining;
         l.log_trouble = self.log_trouble;
     }
 }
 
-/// A launcher with nobody's list: what this computer says, and nothing of an account.
+/// What no list changes, from `l` into `to`: what this computer says, and the place on its way to a VRChat (an account's, with
+/// an owner of its own: [`Controller::publish_joining`]).
+fn carry(l: &LauncherState, to: &mut LauncherState) {
+    MachineParts::of(l).into(to);
+    to.joining = l.joining.clone();
+}
+
+/// A launcher with nobody's list: what this computer says, and nothing of an account's list.
 fn blank(l: &LauncherState) -> LauncherState {
     let mut out = LauncherState { loading: matches!(l.source, Source::SignedIn { .. }), ..LauncherState::default() };
-    MachineParts::of(l).into(&mut out);
+    carry(l, &mut out);
     out
 }
 
@@ -192,6 +196,18 @@ pub(super) fn enforce(s: &mut Snapshot, rt: &mut Runtime, now: Option<&Stamp>) {
             let blank = blank(&s.launcher);
             *s.launcher = blank;
             rt.list_for = None;
+        }
+    }
+    if s.launcher.joining.is_some() {
+        let login = &s.vrchat_login;
+        // (Put there by hand, in tests only, it is nobody's.)
+        let theirs = match &rt.joining_for {
+            Some(by) => same(Some(&by.stamp), now) && login.user.as_ref().map_or(login.waiting || login.restoring, |u| u.id == by.user),
+            None => cfg!(test),
+        };
+        if !theirs {
+            s.launcher.joining = None;
+            rt.joining_for = None;
         }
     }
 }
@@ -312,7 +328,7 @@ impl Controller {
             let mut rt = self.vrchat_login.lock().unwrap();
             let mut state = (*s.launcher).clone();
             f(&mut state);
-            MachineParts::of(&s.launcher).into(&mut state);
+            carry(&s.launcher, &mut state);
             // Onto that account's list, or as it: what a session says is in no other.
             if !matches!(&state.source, Source::SignedIn { user_id, .. } if *user_id == by.user) {
                 return false;
@@ -338,7 +354,7 @@ impl Controller {
             }
             let mut state = (*s.launcher).clone();
             f(&mut state);
-            MachineParts::of(&s.launcher).into(&mut state);
+            carry(&s.launcher, &mut state);
             if matches!(state.source, Source::SignedIn { .. }) && state.source != s.launcher.source {
                 return false;
             }
@@ -381,6 +397,39 @@ impl Controller {
             *s.launcher = blank;
             true
         })
+    }
+
+    /// The private place on its way to a VRChat that was started without it, put on show for whom it is of (`by`: the member
+    /// who asked for it, and the VRChat account): only while that account is signed in, for that member still. Whether it was.
+    pub(super) fn publish_joining(&self, by: &By, joining: Joining) -> bool {
+        let mut shown = false;
+        self.update_if(|s| {
+            let now = self.vrchat_stamp_of(&s.account);
+            if !same(now.as_ref(), Some(&by.stamp)) || s.vrchat_login.user.as_ref().is_none_or(|u| u.id != by.user) {
+                return false;
+            }
+            self.vrchat_login.lock().unwrap().joining_for = Some(by.clone());
+            shown = true;
+            let joining = Some(joining);
+            let changed = s.launcher.joining != joining;
+            if changed {
+                s.launcher.joining = joining;
+            }
+            changed
+        });
+        shown
+    }
+
+    /// The place on its way on show, if any, as it goes: its step, or (`None`) no longer on its way.
+    pub(super) fn joining_goes(&self, step: Option<JoinStep>) {
+        self.update_if(|s| {
+            let next = step.and_then(|step| s.launcher.joining.clone().map(|j| Joining { step, ..j }));
+            let changed = s.launcher.joining != next;
+            if changed {
+                s.launcher.joining = next;
+            }
+            changed
+        });
     }
 
     /// What this computer says on Home's launcher; whether it changed.

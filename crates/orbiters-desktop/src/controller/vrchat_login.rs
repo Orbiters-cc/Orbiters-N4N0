@@ -191,6 +191,8 @@ pub(super) struct Runtime {
     /// the list on Home is: shown to that one only ([`super::vrchat_scope::enforce`]).
     pub(super) status_for: Option<Stamp>,
     pub(super) list_for: Option<Stamp>,
+    /// Whose the place on its way to a VRChat is ([`super::vrchat_scope`]'s `publish_joining`).
+    pub(super) joining_for: Option<super::vrchat_scope::By>,
     /// VRChat could not be told of the last sign-out (why): said again after a cleanup that has nothing to tell it with
     /// (verify3-r21 M4), until a new sign-in.
     untold: Option<String>,
@@ -263,7 +265,7 @@ impl Default for Runtime {
         let ask: Asker = Arc::new(|_: &Api, _: &str| Err(anyhow::anyhow!("tests never reach Orbiters")));
         #[cfg(not(test))]
         let ask: Asker = Arc::new(|api: &Api, token: &str| api.vrchat_login_feature(token));
-        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, status_for: None, list_for: None, untold: None, at_launch: None, cache_path: account_cache_path(), cache_generation: 0, #[cfg(test)] presences: Vec::new(), #[cfg(test)] pairs: Vec::new(), #[cfg(test)] between: None }
+        Self { client: Arc::new(Mutex::new(client)), gate, identity: None, grants: HashMap::new(), generation: 0, busy: false, restored: false, saved: None, ask, restore_again: None, restoring_now: false, bell: Arc::default(), signed_bell: Arc::default(), seen_account: None, status_for: None, list_for: None, joining_for: None, untold: None, at_launch: None, cache_path: account_cache_path(), cache_generation: 0, #[cfg(test)] presences: Vec::new(), #[cfg(test)] pairs: Vec::new(), #[cfg(test)] between: None }
     }
 }
 impl Runtime {
@@ -914,7 +916,7 @@ pub(super) fn follow_orbiters_and_record(s: &mut crate::state::Snapshot, rt: &mu
             member: now.map(|n| n.owner.member.clone()),
             epoch: now.map_or(0, |n| n.epoch),
             status: login.user.is_some() || login.known.is_some() || login.picture.is_some() || login.upload.is_some(),
-            list: signed || (list.me.is_some() || list.profile.is_some() || list.mine.is_some()) && !matches!(list.source, orbiters_core::launcher::Source::Database { .. }),
+            list: signed || list.joining.is_some() || (list.me.is_some() || list.profile.is_some() || list.mine.is_some()) && !matches!(list.source, orbiters_core::launcher::Source::Database { .. }),
             foreign: [&login.verified_for, &list.verified_for]
                 .into_iter()
                 .flatten()
@@ -1824,7 +1826,7 @@ mod tests {
                 }));
             }
             for _ in 0..120 {
-                let roll = dice.lock().unwrap().roll(13);
+                let roll = dice.lock().unwrap().roll(14);
                 match roll {
                     0..=2 => change(&c),
                     3 | 4 => c.vrchat_feature_tick(),
@@ -1835,7 +1837,7 @@ mod tests {
                         c.forget_login(|st| *st = Status { allowed: st.allowed, ..Status::default() });
                     }
                     // Read with the session there was; what else there is of its account is written some changes later.
-                    8..=11 => {
+                    8..=12 => {
                         let Some(session) = c.vrchat_session() else { continue };
                         let changes = dice.lock().unwrap().roll(3);
                         for _ in 0..changes {
@@ -1845,6 +1847,7 @@ mod tests {
                         match roll {
                             8 => drop(c.publish_launcher(&session.by, |l| l.profile = Some(orbiters_core::launcher::Profile { friend: mine.friends[0].clone(), ..Default::default() }))),
                             9 => drop(c.publish_launcher(&session.by, |l| (l.me, l.mine) = (mine.me, mine.mine))),
+                            12 => drop(c.publish_joining(&session.by, orbiters_core::launcher::Joining::default())),
                             10 => drop(c.publish_login(&session.by.stamp, |st, _| st.upload = Some(PictureUpload { serial: 1, id: "avtr_theirs".into(), step: None, outcome: None }))),
                             _ => drop(c.publish_login(&session.by.stamp, |st, _| st.known = Some(User { id: "usr_test".into(), ..Default::default() }))),
                         }

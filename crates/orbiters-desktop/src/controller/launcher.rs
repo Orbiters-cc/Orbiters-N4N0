@@ -105,6 +105,10 @@ pub trait Machine: Send + Sync {
     fn roster_now(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
         self.roster()
     }
+    /// What its looks at the VRChats saw, for whoever else looks at them here ([`super::vrchats::Roster::seeing`]).
+    fn vrchats_seen(&self) -> Option<Arc<super::vrchats::Seen>> {
+        None
+    }
     /// What a start needs that may take long (a program to download), done before anything is decided or held.
     fn make_ready(&self) -> Result<(), String> {
         Ok(())
@@ -281,8 +285,21 @@ pub struct HomeLaunch {
     account: Option<String>,
     /// Its destination is that account's alone, whatever its instance is.
     bound: bool,
-    /// The destination it was started without, to be delivered after it.
-    after: Option<Place>,
+    /// The place it was asked for, whether it rode with it (its link is among `args`) or comes after it: a start of it again is
+    /// made from this, as the profiles are by then.
+    destination: Option<Place>,
+}
+
+impl HomeLaunch {
+    fn place(&self) -> Option<Place> {
+        let with_it = || orbiters_core::vrchat_launch::destination_of(&self.args).and_then(|(world, instance)| launcher_feed::place(&format!("{world}:{instance}"), ""));
+        self.destination.clone().or_else(with_it)
+    }
+
+    /// Its arguments without a place.
+    fn without_place(&self) -> Vec<String> {
+        self.args.iter().filter(|arg| !arg.starts_with("vrchat://")).cloned().collect()
+    }
 }
 
 /// How many of Home's starts are kept.
@@ -433,7 +450,7 @@ impl MacMachine {
             // start made meanwhile (which the one start refuses).
             let args = self.same_accounts(&launch, steam, &program, may)?;
             // Said to the program too, which checks it against the session it starts with: no other account between the two.
-            match self.start_home(HomeLaunch { args, ..launch.clone() }, steam) {
+            match self.start_home(HomeLaunch { args, destination: launch.place(), ..launch.clone() }, steam) {
                 Ok(()) => return Ok(()),
                 Err(super::obelisk_cli::Refused::Wait(wait)) if wait <= Duration::from_secs(100) => std::thread::sleep(wait + Duration::from_secs(1)),
                 Err(refused) => return Err(refused.words()),
@@ -566,8 +583,7 @@ impl Machine for MacMachine {
     }
 
     fn start_for(&self, args: &[String], errand: &Errand) -> Result<(), String> {
-        let with_it = orbiters_core::vrchat_launch::destination_of(args).is_some();
-        let launch = HomeLaunch { id: 0, args: args.to_vec(), account: errand.owner().map(str::to_owned), bound: errand.bound, after: errand.destination.clone().filter(|_| !with_it) };
+        let launch = HomeLaunch { id: 0, args: args.to_vec(), account: errand.owner().map(str::to_owned), bound: errand.bound, destination: errand.destination.clone() };
         self.start_home(launch, None).map_err(|refused| refused.words())
     }
 
@@ -744,7 +760,8 @@ impl CmdLines {
 
 /// The VRChats running (process, Desktop mode, profile): the profile as their own log said it once the roster read its
 /// arguments, else as their command line says it, else unknown (`None`): a VRChat whose log has not said its arguments
-/// yet is never taken for profile 0 (REQUEST15 fix B5).
+/// yet is never taken for profile 0 (REQUEST15 fix B5). (Whether there are several profiles goes by both:
+/// [`Controller::launcher_several`].)
 fn runs_with_profiles(machine: &dyn Machine, roster: &[crate::state::VrchatRunShown]) -> Vec<(u32, bool, Option<u32>)> {
     machine
         .running_profiles()
@@ -1033,6 +1050,10 @@ impl Machine for RealMachine {
         let vrchats = super::bridge_side::vrchats_now();
         let runs = self.roster.lock().unwrap().scan_whole(&vrchats, self.log_dir().as_deref());
         Some(runs.iter().map(|run| super::vrchats::shown(run, None, None)).collect())
+    }
+
+    fn vrchats_seen(&self) -> Option<Arc<super::vrchats::Seen>> {
+        Some(self.roster.lock().unwrap().seen())
     }
 
     fn log_problem(&self) -> Option<LogTrouble> {
@@ -1710,15 +1731,11 @@ impl Controller {
             for pid in &unread {
                 rt.unlogged.entry(*pid).or_insert_with(Instant::now);
             }
-            if runs.len() > unread.len() {
-                rt.log_trouble = None;
-            }
             runs.len() == unread.len() && rt.unlogged.values().any(|since| since.elapsed() > LOG_WITHIN)
         };
-        if late {
-            let trouble = machine.log_problem();
-            self.launcher.lock().unwrap().log_trouble = trouble;
-        }
+        // Said of the games that run: with the last one it was said of, it is over.
+        let trouble = late.then(|| machine.log_problem()).flatten();
+        self.launcher.lock().unwrap().log_trouble = trouble;
     }
 
     /// The destination that waits for a VRChat coming up: delivered once that one is up (as an invite to oneself, which VRChat
@@ -1798,6 +1815,51 @@ impl Controller {
         }
     }
 
+    /// Whether the game that runs on this Mac is positively another account's than `account` (each one's own log says so), where
+    /// there are several profiles: the account's own invite to itself would reach no game here.
+    fn launcher_game_is_anothers(&self, machine: &dyn Machine, account: Option<&str>) -> bool {
+        let Some(account) = account.filter(|_| machine.by_hand() && self.launcher_several(machine, None)) else { return false };
+        let roster = machine.roster_now().unwrap_or_default();
+        let runs = machine.running();
+        let anothers = |pid: u32| roster.iter().any(|r| r.pid == pid && r.account_id.as_deref().is_some_and(|id| id != account));
+        !runs.is_empty() && runs.iter().all(|run| anothers(run.0))
+    }
+
+    /// The place of `errand` does not go to the game that runs, which is another account's: said, and kept for another try.
+    fn launcher_not_this_game(&self, errand: Errand) -> Notice {
+        // (One that waited for that game to say whose it is has its answer too.)
+        let waited = {
+            let mut rt = self.launcher.lock().unwrap();
+            let waits = rt.pending.as_ref().is_some_and(|pending| pending.proof);
+            waits.then(|| rt.pending.take()).flatten()
+        };
+        if let Some(waited) = waited {
+            self.launcher_join_failed(waited.errand, JoinFailure::OtherAccount);
+        }
+        self.launcher_join_failed(errand, JoinFailure::OtherAccount);
+        Notice::Error(tr("VRChat is running as another account: switch accounts there, then press Try again.").into())
+    }
+
+    /// `place` went with a start made again: what waited for it, or kept it, is over.
+    fn launcher_went_with_it(&self, place: &Place) {
+        let over = {
+            let mut rt = self.launcher.lock().unwrap();
+            let same = |errand: &Errand| errand.destination.as_ref().is_some_and(|d| (&d.world_id, &d.instance_id) == (&place.world_id, &place.instance_id));
+            let waited = rt.pending.as_ref().is_some_and(|pending| pending.proof && same(&pending.errand));
+            let kept = rt.kept.as_ref().is_some_and(same);
+            if waited {
+                rt.pending = None;
+            }
+            if kept {
+                rt.kept = None;
+            }
+            waited || kept
+        };
+        if over {
+            self.joining_goes(None);
+        }
+    }
+
     /// Go there's start for a private place that does not go with one, of the VRChat account `account`: on the default profile,
     /// the place after it.
     pub(super) fn launcher_start_there(self: &Shared, world: &str, instance: &str, bound: bool, account: &str) -> Result<(), String> {
@@ -1825,6 +1887,9 @@ impl Controller {
         let on = errand.profile.unwrap_or(0);
         let unproven = matches!(view.launcher.joining.as_ref().map(|j| &j.step), Some(JoinStep::Failed(why)) if why.unproven());
         if unproven && runs.iter().any(|run| run.2.is_none_or(|profile| profile == on)) {
+            if self.launcher_game_is_anothers(machine, errand.account.as_deref()) {
+                return Some(self.launcher_not_this_game(errand.clone()));
+            }
             let notice = errand.destination.as_ref().map(|place| self.launcher_invite_self(place, errand.account.as_deref()))?;
             if !matches!(notice, Notice::Error(_)) {
                 self.launcher_forget_joining();
@@ -1927,12 +1992,12 @@ impl Controller {
     }
 
     /// Whether this computer uses several VRChat profiles: one other than the default one is on Home's choice, or runs or starts now
-    /// (Home's or the bridge's), the one a start is about to be made on (`starting`) among them. Nothing else says so.
+    /// (Home's or the bridge's), the one a start is about to be made on (`starting`) among them. Nothing else says so. What runs is
+    /// what its command line says and what its log does: one that says the default profile takes nothing from the other.
     pub(super) fn launcher_several(&self, machine: &dyn Machine, starting: Option<u32>) -> bool {
         let view = self.view();
         let roster = machine.roster().unwrap_or_else(|| view.vrchat.runs.clone());
-        let runs = runs_with_profiles(machine, &roster);
-        let mut now: Vec<u32> = runs.iter().filter_map(|run| run.2).chain(roster.iter().filter(|r| r.profile_known).map(|r| r.profile)).chain(starting).collect();
+        let mut now: Vec<u32> = machine.running_profiles().into_iter().filter_map(|run| run.2).chain(roster.iter().filter(|r| r.profile_known).map(|r| r.profile)).chain(starting).collect();
         {
             let rt = self.launcher.lock().unwrap();
             now.extend(rt.starting.iter().filter(|claim| claim.holds()).map(|claim| claim.profile));
@@ -1948,12 +2013,18 @@ impl Controller {
     /// VRChat's).
     fn launcher_forget_profile(self: &Shared, profile: u32) -> Option<Notice> {
         let machine = self.launcher.lock().unwrap().machine.clone();
-        let shown = self.view().launcher.profiles.iter().any(|p| p.profile == profile && (p.running.is_some() || p.starting.is_some()));
-        let roster = machine.roster().unwrap_or_else(|| self.view().vrchat.runs.clone());
-        if shown || self.launcher_claimed(profile) || runs_with_profiles(machine.as_ref(), &roster).iter().any(|run| run.2 == Some(profile)) {
-            return Some(Notice::Error(tr("VRChat is already running.").into()));
+        {
+            // No start is decided meanwhile: one just decided on this profile counts, and one decided after counts without it.
+            let _started = self.launcher_started.lock().unwrap();
+            let shown = self.view().launcher.profiles.iter().any(|p| p.profile == profile && (p.running.is_some() || p.starting.is_some()));
+            let roster = machine.roster().unwrap_or_else(|| self.view().vrchat.runs.clone());
+            let starts = self.launcher_claimed(profile) || (machine.starting() && machine.newest_profile() == Some(profile));
+            let runs = || runs_with_profiles(machine.as_ref(), &roster).iter().any(|run| run.2 == Some(profile));
+            if shown || starts || runs() {
+                return Some(Notice::Error(tr("VRChat is already running.").into()));
+            }
+            self.update_settings(|s| drop(s.launch.profiles.remove(&profile)));
         }
-        self.update_settings(|s| drop(s.launch.profiles.remove(&profile)));
         // Home's choice as it is now.
         self.launcher_game(machine.as_ref());
         None
@@ -2410,24 +2481,28 @@ impl Controller {
                 let ctl = self.clone();
                 let asked = self.vrchat_now();
                 let _ = std::thread::Builder::new().name("launcher-restart-lost".into()).spawn(move || {
-                    // Its account is the one signed in, its destination still one that goes with a start (one that does not is
-                    // delivered after it).
-                    let after = Mutex::new(None);
+                    // Its account is the one signed in; its place goes with the start or is delivered after it, by the profiles there
+                    // are now, however it went the first time.
+                    let (after, with_it) = (Mutex::new(None), Mutex::new(None));
                     let may = |launch: &HomeLaunch| {
                         if launch.account.as_deref().is_some_and(|account| !ctl.launcher_live(Some(account))) {
                             return Err(tr("The account VRChat was started with is no longer the one signed in: press Play to start it on this one.").to_string());
                         }
                         *after.lock().unwrap() = None;
-                        let with_it = orbiters_core::vrchat_launch::destination_of(&launch.args).and_then(|(world, instance)| launcher_feed::place(&format!("{world}:{instance}"), ""));
-                        let Some(place) = with_it.or_else(|| launch.after.clone()) else { return Ok(launch.args.clone()) };
+                        *with_it.lock().unwrap() = None;
+                        let Some(place) = launch.place() else { return Ok(launch.args.clone()) };
                         let profile = orbiters_core::vrchat_launch::profile_of(&launch.args);
-                        let errand = Errand { bound: launch.bound, asked: asked.clone(), ..Errand::plain(LaunchMode::Desktop, Some(profile)).to(Some(place), launch.account.as_deref()) };
+                        let errand = Errand { bound: launch.bound, asked: asked.clone(), ..Errand::plain(LaunchMode::Desktop, Some(profile)).to(Some(place.clone()), launch.account.as_deref()) };
+                        let mut args = launch.without_place();
                         match ctl.launcher_start_way(machine.as_ref(), &errand, profile) {
-                            Way::Direct => Ok(launch.args.clone()),
+                            Way::Direct => {
+                                args.push(orbiters_core::vrchat_launch::link(&place.world_id, &place.instance_id));
+                                *with_it.lock().unwrap() = Some(place);
+                                Ok(args)
+                            }
                             Way::AfterProof => {
-                                let without = launch.args.iter().filter(|arg| !arg.starts_with("vrchat://")).cloned().collect();
                                 *after.lock().unwrap() = Some(errand);
-                                Ok(without)
+                                Ok(args)
                             }
                             _ => Err(tr("This place is private: sign in to VRChat in Settings to go there.").to_string()),
                         }
@@ -2436,6 +2511,9 @@ impl Controller {
                         Ok(()) => {
                             if let Some(errand) = after.lock().unwrap().take() {
                                 ctl.launcher_join_after(machine.as_ref(), errand, Vec::new());
+                            }
+                            if let Some(place) = with_it.lock().unwrap().take() {
+                                ctl.launcher_went_with_it(&place);
                             }
                             *ctl.launcher_started.lock().unwrap() = Some(Instant::now());
                             let profile = machine.newest_profile().unwrap_or(0);
@@ -2615,6 +2693,9 @@ impl Controller {
             let Some(place) = destination else { return Notice::Error(tr("VRChat is already running.").into()) };
             if machine.by_hand() {
                 drop(started);
+                if self.launcher_game_is_anothers(machine.as_ref(), account) {
+                    return self.launcher_not_this_game(Errand { destination: Some(place), ..errand });
+                }
                 return self.launcher_invite_self(&place, account);
             }
             let travel: Arc<dyn super::travel::Travel> = self.travel.lock().unwrap().clone().unwrap_or_else(|| Arc::new(super::travel::Real));
@@ -3209,10 +3290,10 @@ impl Controller {
         }
     }
 
-    /// Whether `account` is the one signed in right now (the session, not the list on show).
+    /// Whether `account` is the one signed in right now (the session, not the list on show). Never waits for what VRChat is being
+    /// asked: it is looked at while a start is held.
     fn launcher_live(&self, account: Option<&str>) -> bool {
-        let live = self.launcher_client().map(|s| s.by.user);
-        account.is_some() && live.as_deref() == account
+        account.is_some() && self.vrchat_signed_in_now().as_deref() == account
     }
 
     fn launcher_send(&self, boop: bool, to: &str, emoji: Option<&str>, account: Option<&str>) -> Notice {

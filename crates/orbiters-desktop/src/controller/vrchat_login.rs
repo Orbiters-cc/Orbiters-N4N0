@@ -827,6 +827,13 @@ impl Controller {
         let rt = self.vrchat_login.lock().unwrap();
         rt.allowed_for(&(api.url(""), token)).then(|| (rt.client.clone(), stamp))
     }
+    /// Who the session granted to the Orbiters member signed in now is signed in as, without waiting for the client (which is
+    /// held while VRChat answers).
+    pub(super) fn vrchat_signed_in_now(&self) -> Option<String> {
+        let (api, token, _) = self.vrchat_ready()?;
+        let rt = self.vrchat_login.lock().unwrap();
+        rt.allowed_for(&(api.url(""), token)).then(|| rt.gate.signed_in_user_id()).flatten()
+    }
     /// Tests: whatever `between` does, at the point `at` of a producer (nothing of it locked).
     #[cfg(test)]
     pub(super) fn test_point(self: &Shared, at: &'static str) {

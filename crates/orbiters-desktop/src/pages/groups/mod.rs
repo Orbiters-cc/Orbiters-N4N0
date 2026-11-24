@@ -1371,7 +1371,7 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let line = format!("{} {}", tr("Your groups could not be loaded."), failure_text(f));
             widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 190.0);
             let b = Rect::from_min_size(pos2(rect.right() - 132.0, rect.center().y - 17.0), vec2(116.0, 34.0));
-            if widgets::Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(widgets::Size::Sm).id_salt("groups-retry").show_at(ui, b).clicked() {
+            if widgets::Button::new(tr("Read again")).icon(icons::ARROW_CLOCKWISE).size(widgets::Size::Sm).id_salt("groups-retry").show_at(ui, b).clicked() {
                 state.discovery = Discovery::Loading;
                 state.jobs.ask(&ctx, cx.ctl, &scope, Kind::Discover, Request::Discover);
             }

@@ -79,6 +79,11 @@ pub struct Service {
 }
 
 impl Service {
+    /// Where a test's second link connects.
+    #[cfg(test)]
+    pub(crate) fn endpoint_for_tests(&self) -> Endpoint {
+        self.endpoint.clone()
+    }
     /// A service around `ctl`, which clients find at `endpoint` and which starts its processes from `exe`: as [`run`]
     /// makes it. `--link-smoke` and the tests make one around a controller that is never started.
     pub(crate) fn around(ctl: controller::Shared, endpoint: Endpoint, exe: PathBuf) -> Arc<Self> {
@@ -536,6 +541,28 @@ impl Service {
                     });
                 }
             }
+            // VRChat groups: the window's alone (M10), answered to its link alone (M9).
+            ToService::Groups { id, scope, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    use crate::controller::groups::{Failure, Reply};
+                    if !crate::controller::groups::allowed_from(role) {
+                        crate::controller::groups::not_taken_in(&request);
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::NotHere) });
+                    } else if let Some(admitted) = ctl.groups_admit() {
+                        // Taken in before its thread starts: a few at once, the rest told to wait (verify-r22 Major 9).
+                        let ctl = ctl.clone();
+                        std::thread::spawn(move || {
+                            let _admitted = admitted;
+                            let reply = ctl.groups(link, scope, request);
+                            mailbox.post(ToClient::Groups { id, reply });
+                        });
+                    } else {
+                        crate::controller::groups::not_taken_in(&request);
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::Busy) });
+                    }
+                }
+            }
             ToService::Member { id, epoch, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
@@ -747,6 +774,9 @@ impl Service {
         self.usage.collecting(self.ctl.usage_stamp());
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
+        if role == Role::Window {
+            self.ctl.groups_link_closed(id);
+        }
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
         if role == Role::Window && !still_there {
             // Its offer to close went with it.

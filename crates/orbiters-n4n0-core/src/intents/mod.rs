@@ -207,12 +207,13 @@ pub enum Page {
     AppCaptures,
     AppWorlds,
     AppEvents,
+    AppGroups,
     AppVideos,
     AppSettings,
 }
 
 impl Page {
-    pub const ALL: [Page; 28] = [
+    pub const ALL: [Page; 29] = [
         Page::AllTools,
         Page::Pictures,
         Page::Worlds,
@@ -239,6 +240,7 @@ impl Page {
         Page::AppCaptures,
         Page::AppWorlds,
         Page::AppEvents,
+        Page::AppGroups,
         Page::AppVideos,
         Page::AppSettings,
     ];
@@ -272,6 +274,7 @@ impl Page {
             Page::AppCaptures => "app_captures",
             Page::AppWorlds => "app_worlds",
             Page::AppEvents => "app_events",
+            Page::AppGroups => "app_groups",
             Page::AppVideos => "app_videos",
             Page::AppSettings => "app_settings",
         }
@@ -283,7 +286,7 @@ impl Page {
 
     /// A page of the Orbiters window (the others are the sheets beside VRChat's menus).
     pub fn on_window(self) -> bool {
-        matches!(self, Page::AppHome | Page::AppCapture | Page::AppProjects | Page::AppN4n0 | Page::AppCaptures | Page::AppWorlds | Page::AppEvents | Page::AppVideos | Page::AppSettings)
+        matches!(self, Page::AppHome | Page::AppCapture | Page::AppProjects | Page::AppN4n0 | Page::AppCaptures | Page::AppWorlds | Page::AppEvents | Page::AppGroups | Page::AppVideos | Page::AppSettings)
     }
 
     /// The window's own name for it (its `Page`'s `Debug`), for a window page.
@@ -296,6 +299,8 @@ impl Page {
             Page::AppCaptures => "Sessions", // i18n: not shown (the window's own page names)
             Page::AppWorlds => "Worlds", // i18n: not shown (the window's own page names)
             Page::AppEvents => "Events", // i18n: not shown (the window's own page names)
+            // Home's Groups section (REQUEST22 1): it opens, nothing more (no group, no write).
+            Page::AppGroups => "Groups", // i18n: not shown (the window's own page names)
             Page::AppVideos => "Videos", // i18n: not shown (the window's own page names)
             Page::AppSettings => "Settings", // i18n: not shown (the window's own page names)
             _ => return None,
@@ -331,6 +336,7 @@ impl Page {
             Page::AppCaptures => tr("Photos & captures"),
             Page::AppWorlds => tr("Worlds"),
             Page::AppEvents => tr("Events"),
+            Page::AppGroups => tr("Your groups"),
             Page::AppVideos => tr("Video history"),
             Page::AppSettings => tr("Settings"),
         }

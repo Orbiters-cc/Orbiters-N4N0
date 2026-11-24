@@ -164,6 +164,10 @@ pub trait Backend: Send + Sync {
     /// Uploads the picture file at `path` as the VRChat picture of `id`, an avatar or world of the signed-in VRChat
     /// account. Its step and outcome come in the snapshot's `vrchat_login.upload`, the outcome as a notice too.
     fn vrchat_picture(&self, _scope: controller::vrchat_data::Scope, _id: String, _path: PathBuf) {}
+    /// A VRChat groups request (`controller::groups`). Blocking: call on a thread of its own.
+    fn groups(&self, _scope: controller::vrchat_data::Scope, _request: controller::groups::Request) -> controller::groups::Reply {
+        controller::groups::Reply::Failed(controller::groups::Failure::NotHere)
+    }
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -274,6 +278,9 @@ impl Backend for Remote {
     }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)
+    }
+    fn groups(&self, scope: controller::vrchat_data::Scope, request: controller::groups::Request) -> controller::groups::Reply {
+        self.0.groups(scope, request)
     }
     fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
         self.0.send(&ToService::VrchatPicture { scope, id, path });
@@ -550,6 +557,9 @@ impl Backend for Local {
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)
+    }
+    fn groups(&self, scope: controller::vrchat_data::Scope, request: controller::groups::Request) -> controller::groups::Reply {
+        self.ctl.groups(controller::groups::LOCAL_LINK, scope, request)
     }
     fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
         self.ctl.vrchat_picture(scope, id, path);

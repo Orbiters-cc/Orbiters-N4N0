@@ -182,7 +182,7 @@ impl Client {
         list(&r.body)
     }
 
-    fn own_id(&self) -> Result<String> {
+    pub(super) fn own_id(&self) -> Result<String> {
         // The signed-in account's own id, as VRChat gave it at the sign-in (the path is encoded all the same).
         self.user.as_ref().map(|u| u.id.clone()).filter(|id| id.starts_with("usr_")).ok_or(Error::Unauthorized)
     }

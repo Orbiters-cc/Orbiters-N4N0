@@ -194,6 +194,11 @@ impl App {
             self.open_capture(pages::capture::Part::Actions, now);
             return true;
         }
+        if name == GROUPS_SECTION {
+            self.set_page(Page::Home, now);
+            self.home_mut().open_groups();
+            return true;
+        }
         match page_named(name) {
             Some(page) => {
                 self.set_page(page, now);
@@ -1213,6 +1218,9 @@ impl PartialEq for Told {
 /// place in Photos & captures (REQUEST21 5).
 const CAPTURE_PAGE: &str = "Capture"; // i18n: not shown (the window's own page names)
 
+/// Home's Groups section, as N4N0's assistant names it (REQUEST22 1): Home opens on it.
+const GROUPS_SECTION: &str = "Groups"; // i18n: not shown (the window's own page names)
+
 /// The page of a name [`App::follow_rest`] saved (its `Debug` name).
 fn page_named(name: &str) -> Option<Page> {
     PAGES.into_iter().find(|p| format!("{p:?}") == name)
@@ -1303,6 +1311,25 @@ mod tests {
         assert_eq!(app.page, Page::Videos);
         assert!(!app.capture.is_open());
         assert!(!app.go_named("Nowhere", 1.0));
+    }
+
+    /// verify-r22 Minor 4: N4N0's assistant's "open my groups" opens Home on its Groups section, and nothing more: the
+    /// page's name carries no group and no write.
+    #[test]
+    fn the_assistant_opens_the_groups_section_and_nothing_more() {
+        use orbiters_n4n0_core::intents::Page as AssistantPage;
+        assert!(AssistantPage::AppGroups.on_window());
+        assert_eq!(AssistantPage::of_key("app_groups"), Some(AssistantPage::AppGroups));
+        let page = format!("page:{}", AssistantPage::AppGroups.window_name().unwrap());
+        assert_eq!(crate::controller::assistant::window_page(&page), Some(GROUPS_SECTION));
+        let ctl: Ctl = Arc::new(pages::capture::tests::Recorder::default());
+        let mut app = App::offline(ctl);
+        app.set_page(Page::Videos, 0.5);
+        assert!(app.go_named(GROUPS_SECTION, 1.0));
+        assert_eq!(app.page, Page::Home);
+        let groups = app.home_mut().groups_mut();
+        assert!(groups.reveal, "the section comes into view");
+        assert!(groups.open.is_none() && groups.studio.is_none() && groups.flow.is_none(), "no group, no write");
     }
 }
 

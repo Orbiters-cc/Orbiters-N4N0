@@ -259,6 +259,10 @@ pub struct Controller {
     lend_gate: Mutex<()>,
     /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
     instance_permits: Mutex<vrchat_data::InstancePermits>,
+    /// VRChat groups' prepared writes and what is being written (REQUEST22; never in the snapshot).
+    groups: Mutex<groups::Runtime>,
+    /// Groups requests the service is running now (admitted before their thread starts, verify-r22 Major 9).
+    groups_admitted: Arc<std::sync::atomic::AtomicUsize>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
     settings_writer: Mutex<SettingsWriter>,
     /// The highest settings revision written to disk, by the writing thread or after it closed (CTL-1).
@@ -518,6 +522,8 @@ mod calls_access;
 mod event_stream;
 mod cleanup;
 mod dolly;
+pub mod groups;
+mod groups_ledger;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
@@ -645,6 +651,8 @@ impl Controller {
             #[cfg(test)]
             test_settings_failing: Arc::default(),
             instance_permits: Mutex::default(),
+            groups: Mutex::default(),
+            groups_admitted: Arc::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),

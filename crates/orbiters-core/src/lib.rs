@@ -13,6 +13,7 @@ pub mod explorer;
 pub mod picture;
 pub mod features;
 pub mod gallery_talk;
+pub mod groups;
 pub mod keyframes;
 pub mod lan;
 pub mod launcher;

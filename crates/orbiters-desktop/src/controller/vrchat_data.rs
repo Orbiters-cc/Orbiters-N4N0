@@ -32,6 +32,27 @@ impl Scope {
             revision: s.vrchat_login.revision,
         }
     }
+    /// Who it is for good (the environment, the Orbiters account, the VRChat account): not the sign-in's revision, which
+    /// changes while the account does not.
+    pub(crate) fn lasting(&self) -> Option<(bool, Option<&str>, &str)> {
+        Some((self.development, self.member.as_deref(), self.user.as_deref()?))
+    }
+    /// The Orbiters member the VRChat account is verified for, by the id Orbiters gives them (hashed), when it is known.
+    pub(crate) fn orbiters_member(&self) -> Option<&str> {
+        self.verified_for.as_ref().map(|v| v.member.as_str()).filter(|m| !m.is_empty())
+    }
+    /// The identity's epoch it was verified in (controller/identity.rs).
+    pub(crate) fn epoch(&self) -> Option<u64> {
+        self.verified_for.as_ref().map(|v| v.epoch)
+    }
+    /// Verified for the Orbiters member signed in by `now`, at the same time of theirs.
+    pub(super) fn verified_by(&self, now: &super::vrchat_scope::Stamp) -> bool {
+        self.verified_for.as_ref().is_some_and(|v| v.epoch == now.epoch && v.member == now.owner.member && v.user == self.user)
+    }
+    /// The signed-in VRChat account this scope was taken under.
+    pub fn vrchat_user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
 
     /// Whether a VRChat account is signed in and may be used: what is asked with it can be answered.
     pub fn signed_in(&self) -> bool {

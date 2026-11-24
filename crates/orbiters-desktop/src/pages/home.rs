@@ -135,6 +135,8 @@ pub struct State {
     music: super::Watch<bool, Music>,
     /// The VRChat launcher on Home itself: the friends list, Play, invites, profiles (REQUEST10).
     launcher: super::launcher::State,
+    /// The groups the account runs, at Home's bottom, and a group's page in Home's place (REQUEST22).
+    groups: super::groups::State,
 }
 
 impl State {
@@ -152,15 +154,22 @@ impl State {
     /// A sheet or dialog of Home's is up over it (a profile, Previous instances, an edit of one's own card): it owns the
     /// keyboard and the pointer (N4N0's chat stands aside, verify-r21 major 7).
     pub fn modal_up(&self) -> bool {
-        self.launcher.holds()
+        self.launcher.holds() || self.groups.holds()
     }
 
     /// Back to Home itself (the sidebar's Home pressed on a feature's page, or on All tools).
     pub fn back_home(&mut self) {
+        self.groups.close();
         self.all_tools = false;
         if let Some(host) = self.host.as_mut() {
             self.pending.extend(go_home(host));
         }
+    }
+
+    /// Home itself, its Groups section in view (N4N0's assistant: "open my groups"; REQUEST22 1).
+    pub fn open_groups(&mut self) {
+        self.back_home();
+        self.groups.reveal();
     }
 
     /// All tools shows, every feature of N4N0's menu (screenshots, tests).
@@ -172,6 +181,8 @@ impl State {
     /// Share to … holds are forgotten, now (MENU-13: nothing reads the camera for a page nobody sees); shown again, its
     /// page takes them up again.
     pub fn left(&mut self, backend: &crate::backend::Ctl) {
+        // A group's write not sent yet is over with its view (B-F).
+        self.groups.end_flow();
         if let Some(host) = self.host.as_mut() {
             host.let_go(backend);
             self.pending.extend(host.menu.take_up());
@@ -186,6 +197,11 @@ impl State {
     /// The launcher on Home (the controller hands it what it knows; the screenshot review stages it).
     pub fn launcher_mut(&mut self) -> &mut super::launcher::State {
         &mut self.launcher
+    }
+
+    /// The Groups section and a group's page (the screenshot review stages them).
+    pub fn groups_mut(&mut self) -> &mut super::groups::State {
+        &mut self.groups
     }
 
     /// The States page (the screenshot review opens an avatar's states).
@@ -215,9 +231,13 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
 }
 
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    // A group's page (or the banner studio) takes Home's place (REQUEST22).
+    if state.groups.page_open() {
+        return super::groups::show_page(ui, cx, &mut state.groups);
+    }
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let State { host, shown, since, opened, focus, copied, states, pending, network, all_tools, music: music_watch, launcher } = state;
+    let State { host, shown, since, opened, focus, copied, states, pending, network, all_tools, music: music_watch, launcher, groups } = state;
     launcher.wire(&ctx, cx);
     let host = host.get_or_insert_with(|| {
         // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
@@ -304,7 +324,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     if *all_tools {
                         tools(ui, cx, menu, copied_id, &mut acts)
                     } else {
-                        home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts)
+                        home(ui, cx, menu, &idle, copied_id, network, launcher, &mut acts);
+                        super::groups::home_section(ui, cx, groups);
                     }
                 }
                 Page::Instances | Page::AddFriend => instances(ui, cx, menu, snap.vrchat_login.user.is_some(), &mut acts),

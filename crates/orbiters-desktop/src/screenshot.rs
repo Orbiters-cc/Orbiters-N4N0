@@ -48,6 +48,7 @@ mod pause_resume;
 mod language_live;
 mod vrchat_login;
 mod launcher;
+mod groups;
 mod launcher_real;
 mod vr_audio;
 mod vrchat_bridge;
@@ -2547,6 +2548,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vr_audio::append(&mut scenarios);
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
+    groups::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
     // REQUEST21 2: Settings in sub-tabs, with its search.
     settings_r21::append(&mut scenarios);
@@ -2603,6 +2605,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "r21" && sc.name.starts_with("r21-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "groups" && sc.name.starts_with("groups-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
                 && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
@@ -2788,6 +2791,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             }
         }
         launcher::stage(&ctx, &mut app, sc.name, f, sc.frames, t);
+        groups::stage(&ctx, &mut app, sc.name, &sc.snapshot, f);
         launcher_real::stage(&ctx, &mut app, sc.name, f);
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {

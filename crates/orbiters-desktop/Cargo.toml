@@ -39,6 +39,8 @@ egui = { workspace = true }
 eframe = { workspace = true }
 png = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# The banner studio turns ICC-tagged pictures into sRGB (verify-r22 Major 10): the crate image already builds on.
+moxcms = "0.8"
 rosc = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
 rfd = "0.17"

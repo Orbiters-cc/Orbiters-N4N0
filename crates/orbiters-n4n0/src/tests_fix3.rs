@@ -620,7 +620,13 @@ fn every_acting_command_passes_the_gate_and_nothing_resolves_whoever_is_signed_i
     }
     for (file, source) in &all {
         let calls = |what: &str| source.matches(what).count();
-        assert_eq!(calls(".invite_account("), (*file == "screen.rs") as usize, "{file}: the VRChat account is resolved as an invite is accepted");
+        let may = match *file {
+            "screen.rs" => 1,
+            // As the person is asked, and the same one as they say yes.
+            "assistant.rs" => 2,
+            _ => 0,
+        };
+        assert_eq!(calls(".invite_account("), may, "{file}: the VRChat account is resolved as an invite is accepted");
         assert_eq!(calls(".invite_self("), (*file == "screen.rs") as usize, "{file}: and nowhere but in invite_route is it used");
     }
     let _ = Permit::for_test;

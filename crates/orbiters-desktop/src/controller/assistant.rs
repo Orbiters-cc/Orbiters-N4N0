@@ -460,6 +460,8 @@ mod tests {
         let of = |acting: &[&str]| previous_rows(&rows, &acting.iter().map(|a| a.to_string()).collect::<Vec<_>>()).iter().map(|r| r.at).collect::<Vec<_>>();
         assert_eq!((of(&["usr_x"]), of(&["usr_y"])), (vec![1, 2, 4], vec![4, 5]));
         assert_eq!(of(&[]), [2, 4], "nobody signed in: public ones");
+    }
+
     /// A yes is for the friend and the VRChat account it was asked about: the list changing since changes nobody, another VRChat account
     /// refuses.
     #[test]

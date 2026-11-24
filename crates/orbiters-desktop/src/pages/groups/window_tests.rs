@@ -678,7 +678,8 @@ fn a_key_held_from_the_opener_confirms_nothing() {
         // Down, and held from here on.
         r.w.drawn(1, vec![key(k, true, false)], show_page);
         let mut confirming = false;
-        for _ in 0..400 {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(60) {
             r.w.drawn(1, vec![key(k, true, true)], show_page);
             confirming = matches!(r.w.state.flow, Some(Flow::Confirming { .. }));
             if confirming {

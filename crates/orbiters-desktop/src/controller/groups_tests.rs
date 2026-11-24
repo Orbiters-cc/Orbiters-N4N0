@@ -1340,7 +1340,8 @@ fn aftermath(c: &Shared, op: &str) -> (Beside, Vec<Write>) {
 #[test]
 fn what_a_sparse_update_cleared_is_said_and_put_back() {
     let (c, w, sent) = world();
-    (w.lock().unwrap().icon, w.lock().unwrap().words) = (json!("file_someones"), json!({"nameplateId": "file_plate", "description": "Who we are", "rules": "Be kind", "links": ["https://example.org"]}));
+    w.lock().unwrap().icon = json!("file_someones");
+    w.lock().unwrap().words = json!({"nameplateId": "file_plate", "description": "Who we are", "rules": "Be kind", "links": ["https://example.org"]});
     w.lock().unwrap().clears = true;
     let s = prepare(&c, the(&c, Kind::ApplyBanner)).unwrap();
     assert!(matches!(commit(&c, &s), Outcome::Done(Done::Group(_))));
@@ -1408,6 +1409,29 @@ fn what_a_renames_update_cleared_of_a_role_is_said_and_put_back() {
         assert_eq!(last, Some(json!({"description": "They paint", "isSelfAssignable": true})), "what can be put back from here, and nothing else");
         assert_eq!(aftermath(&c, &s.op), (Beside { moved: vec![Part::Rights], unread: vec![] }, vec![]), "its rights are still to be seen to, on vrchat.com");
     }
+}
+
+/// Put back is confirmed whatever it is of: the words alone of a role with no rights, which change with no confirmation when
+/// they are the person's own edit.
+#[test]
+fn a_put_back_is_always_confirmed() {
+    let (c, w, _) = world();
+    {
+        let mut w = w.lock().unwrap();
+        (w.roles[2]["description"], w.clears) = (json!("They paint"), true);
+    }
+    let edit_of = |name: &str| {
+        let Reply::Opened(page) = ask(&c, Request::Open { group: G.into() }) else { panic!() };
+        let baseline = page.group.roles.unwrap().into_iter().find(|r| r.id == "grol_artist").unwrap();
+        let edit = RoleEdit { name: name.into(), ..RoleEdit::of(&baseline) };
+        prepare(&c, Write::EditRole { group: G.into(), baseline, edit, back: None }).unwrap()
+    };
+    let s = edit_of("Painters");
+    assert!(!s.confirm, "the person's own edit of its name");
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    let (beside, back) = aftermath(&c, &s.op);
+    assert_eq!((beside.moved, back.len()), (vec![Part::Description], 1));
+    assert!(prepare(&c, back[0].clone()).unwrap().confirm);
 }
 
 /// verify4 F7: each part is compared on its own, whatever the answer leaves out of the others; what it leaves out is read

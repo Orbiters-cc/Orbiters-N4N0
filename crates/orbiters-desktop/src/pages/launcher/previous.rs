@@ -47,6 +47,8 @@ pub struct Visit {
     pub name: String,
     /// When it was joined last (Unix seconds).
     pub at: u64,
+    /// The VRChat account that joined it, as its log said; of a friend's instance, the one whose friend it is.
+    pub account: Option<String>,
 }
 
 impl Visit {
@@ -76,7 +78,7 @@ pub fn visits(history: &orbiters_core::visited::History) -> Vec<Visit> {
         .recent_instances()
         .into_iter()
         .filter(|(v, _)| orbiters_core::vrchat_launch::is_destination(&v.world_id, &v.instance))
-        .map(|(v, name)| Visit { world_id: v.world_id, instance: v.instance, name: name.unwrap_or_default(), at: v.at })
+        .map(|(v, name)| Visit { world_id: v.world_id, instance: v.instance, name: name.unwrap_or_default(), at: v.at, account: v.account })
         .collect()
 }
 
@@ -104,8 +106,10 @@ pub struct Previous {
     /// the selection's own asker).
     pub(super) can_create: bool,
     pub(super) signed_in_elsewhere: bool,
-    /// Whose the profile chosen is is not known: nothing private goes to it.
-    pub(super) unproven: bool,
+    /// VRChat's log cannot be read here: nothing private goes to a VRChat.
+    pub(super) log: Option<orbiters_core::launcher::LogTrouble>,
+    /// The VRChat accounts acting (Where's row says): another's instances are not shown.
+    pub(super) acting: Vec<String>,
     /// VRChat's saved session is being restored: who is signed in is not known yet (Major 1).
     pub(super) connecting: bool,
 }
@@ -226,9 +230,18 @@ fn joins(state: &State, visit: &Visit, origin: &Origin, me: &str) -> bool {
     match origin {
         Origin::Friend { .. } => {
             let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-            joinable_without_asking(&visit.instance, me, &|id| friends.contains(id))
+            may_rejoin(visit, origin, me) && joinable_without_asking(&visit.instance, me, &|id| friends.contains(id))
         }
-        _ => rejoinable(&visit.instance, me),
+        _ => may_rejoin(visit, origin, me),
+    }
+}
+
+/// Whether `visit` is one to go to as `me`: of the history, its own (or nobody's, and public) and one its link lets in; a
+/// friend's, the one it was chosen as.
+pub(super) fn may_rejoin(visit: &Visit, origin: &Origin, me: &str) -> bool {
+    match origin {
+        Origin::Friend { .. } => visit.account.as_deref().is_none_or(|account| account == me) && rejoinable(&visit.instance, me),
+        _ => super::destinations::rejoinable_as(visit.account.as_deref(), &visit.instance, me),
     }
 }
 
@@ -443,7 +456,7 @@ pub(super) fn select_friend(state: &mut State, cx: &Cx, friend_id: &str, friend_
     if !orbiters_core::vrchat_launch::is_destination(&place.world_id, &place.instance_id) {
         return;
     }
-    let visit = Visit { world_id: place.world_id.clone(), instance: place.instance_id.clone(), name: place.world_name.clone(), at: state.now().max(0) as u64 };
+    let visit = Visit { world_id: place.world_id.clone(), instance: place.instance_id.clone(), name: place.world_name.clone(), at: state.now().max(0) as u64, account: state.places.desk.asker().account.clone() };
     let picture = (!place.world_picture.is_empty()).then(|| place.world_picture.clone());
     let origin = Origin::Friend { id: friend_id.to_string(), name: friend_name.to_string(), picture };
     // Not joinable any more (the list changed under the press): nothing is chosen.
@@ -523,7 +536,11 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     // The head: its name, what it is, and close.
     let p = panel.painter().clone();
     widgets::text(&p, pos2(inner.left(), inner.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(tr("Previous instances"), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
-    let rows = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+    let mut rows = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner()).rows.clone();
+    // Another account's are not shown.
+    if let Some(rows) = &mut rows {
+        rows.retain(|visit| orbiters_core::visited::shown_to(visit.account.as_deref(), &state.places.previous.acting));
+    }
     let sub = match &rows {
         Some(rows) if !rows.is_empty() => tr_n("{count} instance you were in, newest first", "{count} instances you were in, newest first", rows.len() as u64),
         _ => tr("Instances you were in").into(),
@@ -544,7 +561,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         // A saved session being restored: no sign-in offered; what is picked is asked once it is known (Major 1).
         Some(tr("Connecting to VRChat…"))
     } else if me.is_none() {
-        Some(if state.places.previous.signed_in_elsewhere || state.places.previous.unproven {
+        Some(if state.places.previous.signed_in_elsewhere || state.places.previous.log.is_some() {
             tr("These are this computer's: on this profile, Play opens a new public instance of the world chosen.")
         } else {
             tr("Sign in to VRChat to rejoin an instance: without it, Play opens a new public instance of its world.")

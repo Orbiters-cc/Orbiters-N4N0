@@ -95,6 +95,9 @@ pub(super) struct MachineParts {
     pub(super) picture_lost: Option<String>,
     pub(super) engine_trouble: Option<EngineTrouble>,
     pub(super) engine_setup: Option<EngineSetup>,
+    pub(super) several_profiles: bool,
+    pub(super) joining: Option<orbiters_core::launcher::Joining>,
+    pub(super) log_trouble: Option<orbiters_core::launcher::LogTrouble>,
 }
 
 impl MachineParts {
@@ -108,6 +111,9 @@ impl MachineParts {
             picture_lost: l.picture_lost.clone(),
             engine_trouble: l.engine_trouble.clone(),
             engine_setup: l.engine_setup.clone(),
+            several_profiles: l.several_profiles,
+            joining: l.joining.clone(),
+            log_trouble: l.log_trouble.clone(),
         }
     }
 
@@ -120,6 +126,9 @@ impl MachineParts {
         l.picture_lost = self.picture_lost;
         l.engine_trouble = self.engine_trouble;
         l.engine_setup = self.engine_setup;
+        l.several_profiles = self.several_profiles;
+        l.joining = self.joining;
+        l.log_trouble = self.log_trouble;
     }
 }
 

@@ -168,7 +168,7 @@ impl Travel for Real {
                             .ok()
                             .and_then(|m| m.created().ok())
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .is_some_and(|t| t.as_secs() + 5 >= start && t.as_secs() <= start + 60)
+                            .is_some_and(|t| t.as_secs() >= start && t.as_secs() <= start + 60)
                     })
                     .map(|e| e.path())
                     .collect()

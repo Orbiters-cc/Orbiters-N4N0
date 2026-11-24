@@ -8,7 +8,7 @@
 //! ([`State::wanted_pictures`]).
 
 pub mod destinations;
-mod hero;
+pub(crate) mod hero;
 pub mod list;
 pub mod mine;
 mod modal;

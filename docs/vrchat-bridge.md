@@ -207,20 +207,44 @@ last known account is shown, or none. While a game starts or runs, whoever start
 as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
 `get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
-**A private place goes only to the game proven to be its account's** (2026-11-23, tenth verification), by one rule for every computer
-and every way there is (`vrchat_launch::handing`): anything but a public instance (`is_public_instance`: public, a group's public; a
-kind not known here is private), an invite whatever its instance, an instance made for the account signed in. Proven is by the user
-id the game's own log says (`VrchatRunShown::account_id`, never a name; nobody's while it is at its sign-in page or while its command
-line names several profiles), of the game that runs, else as that profile's own log last said (`LaunchSettings::profile_ids`,
-forgotten when it says nobody is signed in, and when a start asked for on it turns out to be on another: a saved flag). Not known is
-not eligible: Home says **Sign in on this profile first** with a start that goes to no place, and offers it no invite, no private
-event, no new instance of the account's. It is asked again at the hand-off, of the arguments launched (`launcher_may_start`: the
-link's instance, the profile they name), of the very process that takes a link on Windows (`launcher_may_hand`, else the account's
-own invite goes), at a restart after a lost picture, and before the bridge makes a private instance on a Mac (`game_account_unknown`;
-Windows' bridge is as it was). A press is one `Errand` (mode, profile, destination, account) through the set-up, a start under way and
-the hand-off; one whose account cannot be proven by then is dropped and said. Join into a game that runs (`JoinRunning`,
-`AcceptInviteRunning`) starts none. A saved `--profile` in the engine's `LaunchSettings` cannot be read before a start (the CLI has no
-command for it): it is only seen after, as above.
+**A private place rides with no start where VRChat has several profiles** (2026-11-24, the architect's rulings after the eleventh
+verification), by one rule for every computer and every way there is (`vrchat_launch::way`). Private is anything but a public
+instance (`is_public_instance`: public, a group's public; a kind not known here is private), an invite whatever its instance, an
+instance made here for an account (`InstancePermits::owners`: that account's for as long as N4N0 runs, whatever a listing says
+since and whoever signs in; its own history keeps it after that).
+- **One profile** (none but the default one known, remembered, running or starting in N4N0's own records, Home's and the bridge's:
+  `launcher_several`): the link goes with the start, as it did before there were profiles. Nothing is asked of a log.
+- **Several**: VRChat starts on the profile chosen without any place, and the place waits (`Pending`) for **this** VRChat (on a Mac
+  the very launch, on a PC the process that came on that profile since) to prove, by the user id its own log says, that the account
+  signed in on it is the one it is for. Then it is delivered: by the link pipe on a PC (asked again of the process that takes it;
+  else an invite to oneself), as an invite to oneself on a Mac, sent as the account, which can arrive in no other's game. Another
+  account, no word within 5 minutes of its coming up, a VRChat that closed, a log that cannot be read (`log_trouble`: no folder, not
+  allowed, none written): nothing is delivered, Home says which in one line (`LauncherState::joining`), and the place is kept
+  (**Try again**). An invite's card comes back.
+- **To a VRChat that runs**, on any computer: its link only while its own log proves the account; else the account's own invite.
+- A restart after a lost picture, Go there, the first start after the set-up and a start beside the assistant's are the same rule.
+  Join into a game that runs (`JoinRunning`, `AcceptInviteRunning`) starts none and claims none.
+
+**Evidence** is a log made at or after its process's start and no other's, read to its end: none of two that could be, one from
+before, one cut shorter, one that cannot be read, a later sign-in line that names nobody or that VRChat did not write itself, a look
+that is over 15 s old, are "not known". What an earlier run said (`LaunchSettings::profile_ids`) is a label: it only tells Home not to
+offer an account's places on a profile last seen as another's. **History** is each account's: a visit (`visited-worlds.json`) carries
+the account its log said, Where, the menus' Previous instances and the assistant show and send none of another's, and a private
+place that is nobody's (from before accounts were kept, in a log that is gone) goes nowhere; whether an instance is open is asked with
+the session of the account it is asked as, on the hold that sends it.
+
+**On a Mac every start is made with exactly its own arguments** (`steam play --no-saved-arguments`, obelisk-cli 0.1.13): a
+`--profile` saved in the engine's launch settings reaches no game of N4N0's. **The bridge's start on a Mac** carries its private
+instance, so it needs a Mac with one profile (`several_profiles` is its refusal otherwise, before anything is made: the second step
+would be an invite a person takes in the game). Its instance is made with the session of the account the start was admitted for, and
+launched for that one, a resumed one too (`account_changed`).
+
+**Known limit, the bridge on Windows.** Its main session is as it was, a standing decision: `go_to_world` makes the private
+instance with the app's VRChat account and starts VRChat on the profile asked for (the default one when none is) with the
+instance's link among its arguments, whatever account is signed in there, so on a computer with several profiles the link of an
+instance of X can reach a VRChat signed in as Y (its arguments, its log); the owner of the instance is checked against the app's
+account, never against the one of the VRChat that takes it, and the rules above hold Home, not it. A side session makes an instance
+of its own account, and travels only from it.
 
 How it is one verified game (`controller/bridge_mac.rs`):
 
@@ -254,10 +278,10 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `start_wait` with `retry_after_s`, and the instance already made is **kept** (`Run::kept`, 15 minutes) with any failure before
   the launch (a `close_timeout`, a refused start): the next `go_to_world` to the same world and region resumes it instead of making
   another. Each start has a launch id; its outcome is kept by that id for whoever made it. The bridge starts nothing with an
-  obelisk-cli older than 0.1.12 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
+  obelisk-cli older than 0.1.13 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
   complete set of engine files from 0.1.9, from 0.1.10 no file of them replaced while anything of the engine runs and `steam
-  play --steam-id`, from 0.1.11 one lock for the whole library and a repair compared with its archive, and from 0.1.12 a lock file that cannot be
-  written held like any other and a release that lost its Wine named); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
+  play --steam-id`, from 0.1.11 one lock for the whole library and a repair compared with its archive, from 0.1.12 a lock file that cannot be
+  written held like any other and a release that lost its Wine named, and from 0.1.13 `--no-saved-arguments`); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
   slot is a lock beside the gate's file, held from before a start is decided (the gate read again from its file, added to what this
   run knows) until how its game ended is known and kept there, so that two N4N0s (a cold start of both) never both reserve, neither
   creates an instance for a start the other makes, and neither decides on a gate the other has since closed. A launch whose program

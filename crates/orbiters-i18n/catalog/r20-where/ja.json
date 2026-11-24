@@ -24,5 +24,9 @@
   "{name} · new {kind} instance": "{name}・新しい{kind}インスタンス",
   "Last visited": "前回の場所",
   "Often visited": "よく行く場所",
-  "New · {kind}": "新規・{kind}"
+  "New · {kind}": "新規・{kind}",
+  "VRChat's log cannot be read": "VRChatのログを読み取れません",
+  "Private places need VRChat's log, not found: turn on Logging in VRChat's settings.": "プライベートな場所に必要なVRChatのログがありません。VRChatの設定でLoggingをオンにしてください。",
+  "Private places need VRChat's log: allow Orbiters - N4N0 to read {path}": "プライベートな場所にはVRChatのログが必要です。Orbiters - N4N0に読み取りを許可してください：{path}",
+  "Private places need VRChat's log, which is off: turn on Logging in VRChat's settings.": "プライベートな場所に必要なVRChatのログがオフです。VRChatの設定でLoggingをオンにしてください。"
 }

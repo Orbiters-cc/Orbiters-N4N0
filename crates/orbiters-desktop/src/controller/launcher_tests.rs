@@ -76,8 +76,22 @@ fn proven(c: &Shared, profiles: &[u32]) {
 }
 
 /// What a restart may be made for, by the account of its launch.
-fn of_account(live: impl Fn(&str) -> bool) -> impl Fn(&HomeLaunch) -> Result<(), String> {
-    move |launch| if launch.account.as_deref().is_none_or(&live) { Ok(()) } else { Err("another account".into()) }
+fn of_account(live: impl Fn(&str) -> bool) -> impl Fn(&HomeLaunch) -> Result<Vec<String>, String> {
+    move |launch| if launch.account.as_deref().is_none_or(&live) { Ok(launch.args.clone()) } else { Err("another account".into()) }
+}
+
+/// A press of `account`'s, as a start keeps it.
+#[cfg(target_os = "macos")]
+fn errand_of(account: &str) -> Errand {
+    Errand::plain(LaunchMode::Desktop, None).to(Some(place()), Some(account))
+}
+
+/// One look of the game, as the launcher makes it every few seconds, whatever computer this test runs on.
+fn look(c: &Shared, machine: &dyn Machine) {
+    let roster = machine.roster().unwrap_or_else(|| c.view().vrchat.runs.clone());
+    let runs = runs_with_profiles(machine, &roster);
+    c.launcher_look_for_logs(machine, &runs, &roster);
+    c.launcher_go_pending(machine, &runs, &roster);
 }
 
 /// A VRChat runs as `pid` on `profile`, signed in as `account` by its own log.
@@ -540,8 +554,11 @@ struct PretendMac {
     lost: Mutex<Option<String>>,
     restarts: Mutex<Vec<String>>,
     refused: Mutex<u32>,
-    /// The launch a restart is of.
+    /// The launch a restart is of, and what it was made with.
     restarted: Mutex<Option<HomeLaunch>>,
+    restarted_with: Mutex<Vec<Vec<String>>>,
+    /// Why VRChat's log cannot be read here.
+    log_problem: Mutex<Option<LogTrouble>>,
     diverted: Mutex<Option<u32>>,
     /// The engine's files no game starts on, and the repairs asked for.
     engine: Mutex<Option<orbiters_core::obelisk::EngineProblem>>,
@@ -567,13 +584,14 @@ impl Machine for PretendMac {
         *self.engine.lock().unwrap() = None;
         Ok(())
     }
-    fn restart_lost(&self, session: &str, may: &dyn Fn(&HomeLaunch) -> Result<(), String>) -> Result<(), String> {
+    fn restart_lost(&self, session: &str, may: &dyn Fn(&HomeLaunch) -> Result<Vec<String>, String>) -> Result<(), String> {
         if self.picture_lost().as_deref() != Some(session) {
             return Err("checked again: not lost".into());
         }
         let launch = self.restarted.lock().unwrap().clone().unwrap_or(HomeLaunch { account: Some("usr_of_the_start".into()), ..Default::default() });
-        if may(&launch).is_err() {
-            *self.refused.lock().unwrap() += 1;
+        match may(&launch) {
+            Ok(args) => self.restarted_with.lock().unwrap().push(args),
+            Err(_) => *self.refused.lock().unwrap() += 1,
         }
         self.restarts.lock().unwrap().push(session.to_owned());
         Ok(())
@@ -589,6 +607,13 @@ impl Machine for PretendMac {
     }
     fn newest_profile(&self) -> Option<u32> {
         self.starts.lock().unwrap().last().map(|args| orbiters_core::vrchat_launch::profile_of(args))
+    }
+    fn newest_launch(&self) -> Option<(u64, Option<u32>)> {
+        let starts = self.starts.lock().unwrap().len() as u64;
+        (starts > 0).then(|| (starts, self.running.lock().unwrap().first().map(|run| run.0)))
+    }
+    fn log_problem(&self) -> Option<LogTrouble> {
+        self.log_problem.lock().unwrap().clone()
     }
     fn installed(&self) -> bool {
         !self.engine_missing() && (self.vrchat || self.got_vrchat.load(Ordering::Relaxed))
@@ -767,7 +792,8 @@ fn a_destination_that_waited_too_long_is_forgotten() {
     let c = mac(machine.clone());
     let (_, calls) = c.test_vrchat(vec![(200, json!({}))]);
     let long_ago = Instant::now().checked_sub(PENDING_FOR + Duration::from_secs(1)).expect("a clock that started more than ten minutes ago");
-    c.launcher.lock().unwrap().pending = Some((Errand::plain(LaunchMode::Desktop, None).to(Some(place()), Some("usr_test")), long_ago));
+    let errand = Errand::plain(LaunchMode::Desktop, None).to(Some(place()), Some("usr_test"));
+    c.launcher.lock().unwrap().pending = Some(Pending { errand, since: long_ago, proof: false, before: Vec::new(), launch: None, seen: None });
     machine.running.lock().unwrap().push((42, true));
     c.launcher_game(machine.as_ref());
     std::thread::sleep(Duration::from_millis(150));
@@ -908,7 +934,7 @@ fn a_second_play_on_a_mac_keeps_the_first_destination_and_an_account_change_drop
     c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(place()) }));
     // A plain Play pressed again while the person is still to press Play in Obelisk.
     c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: None });
-    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|(e, _)| e.destination.as_ref().is_some_and(|p| p.world_id == W) && e.account.as_deref() == Some("usr_test")), "the first destination stays, bound to its account");
+    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|p| p.errand.destination.as_ref().is_some_and(|p| p.world_id == W) && p.errand.account.as_deref() == Some("usr_test")), "the first destination stays, bound to its account");
     // Another account signs in before the game is up: the destination is not sent to it.
     let (_, _calls) = c.test_vrchat(vec![(503, json!({}))]);
     c.launcher.lock().unwrap().loaded_for = Some(Some("usr_aaaa".into()));
@@ -1665,8 +1691,9 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     );
     let started = machine.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
-    let n = started[0].len();
-    assert_eq!(&started[0][n - 2..], ["--profile=2".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={W}:{fresh}")]);
+    // (R1: on another profile than the default one, a private place never goes with the start: it is delivered after it.)
+    assert_eq!(started[0].last().unwrap(), "--profile=2");
+    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|p| p.proof && p.errand.destination.as_ref() == Some(&place)));
     assert_eq!(started[0][0], "--no-vr");
     // Profile 0 is VRChat's own start: the link alone after the options.
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
@@ -1687,8 +1714,8 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     signed(&c, 1);
     assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 1, destination: place.clone() })), Some(Notice::Sent { .. })));
     let beside = machine.beside.lock().unwrap().clone();
-    assert_eq!(beside[0].last().unwrap(), &format!("vrchat://launch?ref=orbiters.cc&id={W}:{fresh}"));
-    assert!(beside[0].contains(&"--profile=1".to_string()));
+    assert_eq!(beside[0].last().unwrap(), "--profile=1", "its private place after it (R1)");
+    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|p| p.proof && p.before == [10]));
     // Only VRChat's own instance ids: nothing starts at all for another (not even a start at home).
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
     let c = controller(machine.clone());
@@ -1727,8 +1754,8 @@ fn where_accepts_an_invite_on_the_chosen_profile() {
     });
     assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile: 3 })), Some(Notice::Sent { .. })));
     let args = machine.started.lock().unwrap()[0].clone();
-    let n = args.len();
-    assert_eq!(&args[n - 2..], ["--profile=3".to_string(), format!("vrchat://launch?ref=orbiters.cc&id={W}:777~friends({A})~region(jp)")]);
+    assert_eq!(args.last().unwrap(), "--profile=3", "its own instance after it (R1)");
+    assert!(c.launcher.lock().unwrap().pending.as_ref().is_some_and(|p| p.proof && p.errand.invite.as_deref() == Some("not_1")));
     assert!(c.view().launcher.invites.is_empty(), "the card goes");
     assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Vr, profile: 3 })), Some(Notice::Error(_))), "one accept per invite");
     assert!(calls.lock().unwrap().is_empty(), "nothing asked of VRChat at the press: {:?}", calls.lock().unwrap());
@@ -2018,12 +2045,12 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
     assert!(c.view().launcher.engine_trouble.as_ref().is_some_and(|t| !t.repairing));
 }
 
-/// A program in `root` that answers as obelisk-cli 0.1.12 does: `steam play` runs a game until `stop` is written, its session
+/// A program in `root` that answers as obelisk-cli 0.1.13 does: `steam play` runs a game until `stop` is written, its session
 /// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
 #[cfg(target_os = "macos")]
 fn pretend_program(root: &std::path::Path) -> MacMachine {
     use std::os::unix::fs::PermissionsExt;
-    let folder = root.join("tools/obelisk-cli-0.1.12-arm64");
+    let folder = root.join("tools/obelisk-cli-0.1.13-arm64");
     std::fs::create_dir_all(folder.join("SteamNative")).unwrap();
     std::fs::create_dir_all(root.join("library/SteamSessions")).unwrap();
     std::fs::write(folder.join("SteamNative/obelisk-steam-host"), "").unwrap();
@@ -2103,11 +2130,11 @@ fn a_restart_is_of_its_own_session_its_own_arguments_and_its_own_accounts() {
     let runs = |n: u32| machine.home_session_running(&session(n));
 
     // One start, ended by itself; then another, of another destination and account.
-    machine.start_for(&args("vrchat://a"), Some("usr_a"), false).unwrap();
+    machine.start_for(&args("vrchat://a"), &errand_of("usr_a")).unwrap();
     eventually(|| runs(1));
     std::fs::write(root.join(format!("stop-{}", session(1))), "").unwrap();
     eventually(|| !runs(1) && !machine.play.starting() && machine.play.attached().is_none());
-    machine.start_for(&args("vrchat://b"), Some("usr_b"), false).unwrap();
+    machine.start_for(&args("vrchat://b"), &errand_of("usr_b")).unwrap();
     eventually(|| runs(2));
 
     // Not lost; lost but of another session; of the first one, long gone: nothing is asked.
@@ -2155,7 +2182,7 @@ fn a_restart_never_starts_on_an_account_that_changed_at_the_last_moment() {
     let machine = pretend_program(&root);
     let session = |n: u32| format!("5e551011-0000-4000-8000-00000000000{n}");
     let asked = || std::fs::read_to_string(root.join("asked")).unwrap_or_default();
-    machine.start_for(&[], Some("test-person"), false).unwrap();
+    machine.start_for(&[], &errand_of("test-person")).unwrap();
     eventually(|| machine.home_session_running(&session(1)));
     picture::publish(Some((session(1), picture::Picture::Lost)));
     std::fs::write(root.join("switch"), "").unwrap();
@@ -2248,7 +2275,7 @@ fn a_program_too_old_starts_no_vrchat() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let machine = pretend_program(&root);
-    std::fs::rename(root.join("tools/obelisk-cli-0.1.12-arm64"), root.join("tools/obelisk-cli-0.1.11-arm64")).unwrap();
+    std::fs::rename(root.join("tools/obelisk-cli-0.1.13-arm64"), root.join("tools/obelisk-cli-0.1.12-arm64")).unwrap();
     assert!(machine.start(&[]).is_err());
     assert!(!root.join("asked").exists());
     let _ = std::fs::remove_dir_all(&root);
@@ -2332,15 +2359,20 @@ fn every_start_on_a_mac_is_on_the_profile_chosen() {
         // Play.
         let args = started(&|_, c| assert_eq!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile }), Some(Notice::Sent { to: String::new(), action: SentKind::Launch })));
         assert_eq!(args[4..], own);
-        // A destination: the profile, then its link, last.
+        // A destination: the profile, then its link, last; on another profile than the default one (R1), a private one's after it.
+        let link = |there: Place| (profile == 0).then(|| orbiters_core::vrchat_launch::link(W, &there.instance_id)).into_iter().collect::<Vec<_>>();
         let args = started(&|_, c| {
             let (_, _) = c.test_vrchat(vec![]);
             signed_in_list(c);
             proven(c, &[profile]);
             assert_eq!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile, destination: place() })), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }));
             assert_eq!(choice(c).iter().filter(|p| p.3).map(|p| p.0).collect::<Vec<_>>(), [profile], "shown at once");
+            assert_eq!(c.launcher.lock().unwrap().pending.is_some(), profile != 0);
         });
-        assert_eq!(args[4..], [own.clone(), vec![orbiters_core::vrchat_launch::link(W, &place().instance_id)]].concat());
+        assert_eq!(args[4..], [own.clone(), link(place())].concat());
+        // A public one: with the start, whichever the profile.
+        let args = started(&|_, c| assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile, destination: open_place() }), Some(Notice::Sent { .. }))));
+        assert_eq!(args[4..], [own.clone(), vec![orbiters_core::vrchat_launch::link(W, &open_place().instance_id)]].concat());
         // An invite, accepted on it.
         let args = started(&|_, c| {
             let (_, _) = c.test_vrchat(vec![(200, json!({}))]);
@@ -2349,7 +2381,7 @@ fn every_start_on_a_mac_is_on_the_profile_chosen() {
             c.update(|s| s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Sample".into(), from_icon: String::new(), place: Some(place()), message: String::new(), received_at: 1 }]);
             assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile })), Some(Notice::Sent { .. })));
         });
-        assert_eq!(args[4..], [own.clone(), vec![orbiters_core::vrchat_launch::link(W, &place().instance_id)]].concat());
+        assert_eq!(args[4..], [own.clone(), link(place())].concat());
         // Install & play, and Play before the set-up: the start that follows it.
         for install in [true, false] {
             let machine = Arc::new(PretendMac { direct: true, ..Default::default() });
@@ -2516,14 +2548,14 @@ fn a_restart_is_on_the_profile_its_launch_was_made_on() {
     for (account, profile) in [("usr_a", 2), ("usr_b", 0)] {
         let account: &'static str = account;
         live[0] = (account, profile);
-        machine.start_for(&args(profile, "vrchat://x"), Some(account), false).unwrap();
+        machine.start_for(&args(profile, "vrchat://x"), &errand_of(account)).unwrap();
         started += 1;
         eventually(|| machine.home_session_running(&session(started)));
         let launch = machine.play.newest().unwrap();
         assert_eq!((launch.profile, machine.newest_profile()), (profile, Some(profile)));
         assert_eq!(machine.running_profiles(), [(launch.launcher.unwrap(), true, Some(profile))], "the running state's profile");
         // Another profile over it: the one start refuses it, and nothing is asked of the program.
-        assert!(machine.start_for(&args(profile + 1, "vrchat://y"), Some(account), false).is_err());
+        assert!(machine.start_for(&args(profile + 1, "vrchat://y"), &errand_of(account)).is_err());
         assert_eq!(plays().len() as u32, started);
         // Lost and restarted: the same profile, the same destination; not for another account.
         picture::publish(Some((session(started), picture::Picture::Lost)));
@@ -2542,73 +2574,522 @@ fn a_restart_is_on_the_profile_its_launch_was_made_on() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// --- Tenth verification: a private destination never reaches a game that is not proven to be its account's ---
+// --- R1 (eleventh verification, the architect's rulings): a private destination never rides with a start where this computer uses
+// several VRChat profiles; it is delivered after it, to that very VRChat, once that one's own log proves its account. ---
 
-/// The verifier's case and its kin: whatever way a private place comes (a room, an invite, one made for the account), it is
-/// handed to no profile whose account is not known by its id, or is another's; the press says so and nothing starts. A public
-/// one goes to any. The rule is asked again of what is launched: the account learnt or lost since counts.
-#[test]
-fn a_private_place_is_handed_to_no_profile_but_its_accounts_own() {
-    let private = |of: &str| {
-        let instance_id = format!("7~{of}~region(eu)");
-        Place { access: launcher_feed::access(&instance_id).0, instance_id, ..place() }
-    };
-    let unknown = "Sign in on this profile first: its VRChat account is not known yet.";
-    for mac in [true, false] {
+const PRIVATE: [&str; 6] = ["private(usr_test)", "private(usr_test)~canRequestInvite", "friends(usr_x)", "hidden(usr_x)", "group(grp_x)~groupAccessType(members)", "group(grp_x)~groupAccessType(plus)"];
+
+fn private_place(of: &str) -> Place {
+    let instance_id = format!("7~{of}~region(eu)");
+    Place { access: launcher_feed::access(&instance_id).0, instance_id, world_name: "Sample room".into(), ..place() }
+}
+
+fn invited_to(c: &Shared, place: Place) {
+    c.update(|s| s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 }]);
+}
+
+/// A PC or a Mac that can start VRChat, signed in as `usr_test` with VRChat answering `replies`.
+struct Computer {
+    mac: bool,
+    pc: Arc<Pretend>,
+    apple: Arc<PretendMac>,
+    c: Shared,
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Computer {
+    fn new(mac: bool) -> Self {
         let pc = Arc::new(Pretend { installed: true, ..Default::default() });
-        let mac_machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
+        let apple = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
+        let c = Controller::new(Settings::default());
+        c.launcher_machine(if mac { apple.clone() as Arc<dyn Machine> } else { pc.clone() });
+        c.update(|s| s.launcher.possible.play = true);
+        let (_, calls) = c.test_vrchat(vec![(200, json!({})); 4]);
+        signed_in_list(&c);
+        Computer { mac, pc, apple, c, calls }
+    }
+
+    fn machine(&self) -> Arc<dyn Machine> {
+        if self.mac { self.apple.clone() as Arc<dyn Machine> } else { self.pc.clone() }
+    }
+
+    fn starts(&self) -> Vec<Vec<String>> {
+        if self.mac { self.apple.starts.lock().unwrap().clone() } else { [self.pc.started.lock().unwrap().clone(), self.pc.beside.lock().unwrap().clone()].concat() }
+    }
+
+    /// Remembered profiles, and whose each was last seen as.
+    fn remembers(&self, profiles: &[(u32, Option<&str>)]) {
+        self.c.update_settings(|s| {
+            for (profile, account) in profiles {
+                s.launch.profiles.insert(*profile, "Sample Name".into());
+                if let Some(account) = account {
+                    s.launch.profile_ids.insert(*profile, account.to_string());
+                }
+            }
+        });
+    }
+
+    /// These VRChats run: process, profile, whose its own log says, and whether its log is read at all.
+    fn runs(&self, runs: &[(u32, u32, Option<&str>, bool)]) {
+        let shown: Vec<_> = runs
+            .iter()
+            .map(|(pid, profile, account, logged)| crate::state::VrchatRunShown { pid: *pid, profile: *profile, profile_known: *logged, account_id: account.map(str::to_owned), logged: *logged, desktop: Some(true), ..Default::default() })
+            .collect();
+        let pids: Vec<(u32, bool)> = runs.iter().map(|run| (run.0, true)).collect();
+        if self.mac {
+            *self.apple.running.lock().unwrap() = pids;
+            *self.apple.players.lock().unwrap() = shown;
+        } else {
+            *self.pc.running.lock().unwrap() = pids.clone();
+            *self.pc.profiles.lock().unwrap() = runs.iter().map(|run| (run.0, run.1)).collect();
+            self.c.update(|s| s.vrchat.runs = shown.clone());
+            let fake = super::super::travel::tests::Fake { running: pids.iter().map(|p| p.0).collect(), server: pids.last().map(|p| p.0), ..Default::default() };
+            *self.c.travel.lock().unwrap() = Some(Arc::new(fake) as Arc<dyn super::super::travel::Travel>);
+        }
+    }
+
+    fn look(&self) {
+        look(&self.c, self.machine().as_ref());
+    }
+
+    fn joining(&self) -> Option<Joining> {
+        self.c.view().launcher.joining.clone()
+    }
+
+    fn step(&self) -> Option<JoinStep> {
+        self.joining().map(|j| j.step)
+    }
+
+    fn pending(&self) -> Option<Pending> {
+        self.c.launcher.lock().unwrap().pending.clone()
+    }
+
+    fn at(&self, profile: u32, destination: Place) -> Option<Notice> {
+        self.c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile, destination }))
+    }
+
+    fn invites_sent(&self) -> usize {
+        self.calls.lock().unwrap().iter().filter(|(_, url)| url.contains("/invite/myself/to/")).count()
+    }
+}
+
+/// The verifier's case and its kin: whatever way a private place comes (a room, an invite, one made for the account) and whatever
+/// is remembered of the profile chosen (its very account's, another's, nobody's), no start carries it, on a PC or a Mac: VRChat
+/// starts without any place, Home says both steps, and nothing is sent until that VRChat says whose it is. A public one goes with
+/// the start. One that is nobody's is refused. (It was: one whose account was proven by an earlier run went with the start, any
+/// other was refused.)
+#[test]
+fn no_start_carries_a_private_place_where_there_are_several_profiles() {
+    for mac in [true, false] {
         let fresh = || {
-            let c = Controller::new(Settings::default());
-            pc.started.lock().unwrap().clear();
-            mac_machine.starts.lock().unwrap().clear();
-            if mac {
-                c.launcher_machine(mac_machine.clone());
-            } else {
-                c.launcher_machine(pc.clone());
-            }
-            c.update(|s| s.launcher.possible.play = true);
-            let (_, _) = c.test_vrchat(vec![]);
-            signed_in_list(&c);
-            // Seen by a name only: the account's own, and another's.
-            c.update_settings(|s| {
-                s.launch.profiles.insert(2, "Alternate".into());
-                s.launch.profiles.insert(3, "Sample Me".into());
-                s.launch.profile_ids.insert(4, "usr_other".into());
-                s.launch.profile_ids.insert(5, "usr_test".into());
-            });
-            c
+            let on = Computer::new(mac);
+            on.remembers(&[(0, Some("usr_test")), (2, None), (4, Some("usr_other")), (5, Some("usr_test"))]);
+            on
         };
-        let starts = || if mac { mac_machine.starts.lock().unwrap().clone() } else { pc.started.lock().unwrap().clone() };
-        let invite = |c: &Shared, place: Place| c.update(|s| s.launcher.invites = vec![Invite { id: "not_1".into(), kind: InviteKind::Invite, from_id: A.into(), from_name: "Nova".into(), from_icon: String::new(), place: Some(place.clone()), message: String::new(), received_at: 0 }]);
-        let at = |profile: u32, destination: Place| Action::PlayAt { mode: LaunchMode::Desktop, profile, destination };
-        for kind in ["private(usr_test)", "private(usr_test)~canRequestInvite", "friends(usr_x)", "hidden(usr_x)", "group(grp_x)~groupAccessType(members)", "group(grp_x)~groupAccessType(plus)"] {
-            for profile in [0, 1, 2, 3, 4] {
-                let c = fresh();
-                let refused = c.launcher_do(mine(at(profile, private(kind))));
-                let want = if profile == 4 { "This profile's VRChat account is not the one this place is for: choose its profile." } else { unknown };
-                assert_eq!(refused, Some(Notice::Error(want.into())), "{kind} on {profile}");
-                invite(&c, private(kind));
-                let refused = c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile }));
-                assert!(matches!(refused, Some(Notice::Error(_))));
-                assert_eq!(c.view().launcher.invites.len(), 1, "its card stays");
-                // Nobody's list: nobody it is known to be for.
-                assert!(matches!(c.launcher_do(at(profile, private(kind))), Some(Notice::Error(_))));
-                assert!(starts().is_empty(), "{kind} on {profile}: {:?}", starts());
+        let sent = Some(Notice::Sent { to: W.into(), action: SentKind::Launch });
+        for kind in PRIVATE {
+            for profile in [0, 1, 2, 4, 5] {
+                let on = fresh();
+                assert_eq!(on.at(profile, private_place(kind)), sent, "{kind} on {profile}");
+                let accepted = fresh();
+                invited_to(&accepted.c, private_place(kind));
+                assert_eq!(accepted.c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile })), sent);
+                for on in [on, accepted] {
+                    let starts = on.starts();
+                    assert_eq!(starts.len(), 1);
+                    assert!(!starts[0].iter().any(|arg| arg.contains("vrchat://") || arg.contains(W)), "{kind} on {profile}: {:?}", starts[0]);
+                    assert_eq!(orbiters_core::vrchat_launch::profile_told(&starts[0]), Some(profile));
+                    assert_eq!(on.joining(), Some(Joining { world: "Sample room".into(), step: JoinStep::Starting }));
+                    assert!(on.pending().is_some_and(|p| p.proof && p.errand.profile == Some(profile)));
+                    on.look();
+                    assert!(on.calls.lock().unwrap().is_empty(), "nothing is sent before it says whose it is");
+                }
             }
-            let c = fresh();
-            assert!(matches!(c.launcher_do(mine(at(5, private(kind)))), Some(Notice::Sent { .. })), "its own: {kind}");
-            assert_eq!(starts()[0].last(), Some(&orbiters_core::vrchat_launch::link(W, &private(kind).instance_id)));
+            // Nobody's list: nobody it is known to be for.
+            let on = fresh();
+            assert!(matches!(on.c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: private_place(kind) }), Some(Notice::Error(words)) if words.contains("sign in to VRChat")));
+            assert!(on.starts().is_empty());
         }
-        // An invite into a public room is the account's all the same; the room itself is anyone's.
+        // An invite into a public room is the account's all the same; the room itself is anyone's, and goes with the start.
         for profile in [0, 2, 4] {
-            let c = fresh();
-            invite(&c, open_place());
-            assert!(matches!(c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile })), Some(Notice::Error(_))));
-            assert!(matches!(c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Desktop })), Some(Notice::Error(_))), "no profile named: the default one's");
-            assert!(starts().is_empty());
-            assert!(matches!(c.launcher_do(mine(at(profile, open_place()))), Some(Notice::Sent { .. })));
-            assert_eq!(starts().len(), 1);
+            let on = fresh();
+            invited_to(&on.c, open_place());
+            assert_eq!(on.c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile })), sent);
+            assert!(!on.starts()[0].iter().any(|arg| arg.contains("vrchat://")));
+            let on = fresh();
+            assert_eq!(on.at(profile, open_place()), sent);
+            assert_eq!(on.starts()[0].last(), Some(&orbiters_core::vrchat_launch::link(W, &open_place().instance_id)));
+            assert!(on.joining().is_none() && on.pending().is_none());
         }
+        // Without a profile named, the default one's.
+        let on = fresh();
+        assert_eq!(on.c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(private_place("friends(usr_x)")) })), sent);
+        assert!(!on.starts()[0].iter().any(|arg| arg.contains("vrchat://")) && on.pending().is_some_and(|p| p.errand.profile.unwrap_or(0) == 0));
+    }
+}
+
+/// Where VRChat has one profile, as far as N4N0's records say, a private place goes with the start as it did before there were
+/// several, whatever is known of its account (the long-standing behaviour): nothing is asked of a log, nothing said of two steps.
+#[test]
+fn where_there_is_one_profile_a_private_place_goes_with_the_start() {
+    for mac in [true, false] {
+        for known in [None, Some(None), Some(Some("usr_test")), Some(Some("usr_other"))] {
+            for kind in PRIVATE {
+                let on = Computer::new(mac);
+                if let Some(account) = known {
+                    on.remembers(&[(0, account)]);
+                }
+                assert_eq!(on.at(0, private_place(kind)), Some(Notice::Sent { to: W.into(), action: SentKind::Launch }), "{known:?}");
+                assert_eq!(on.starts()[0].last(), Some(&orbiters_core::vrchat_launch::link(W, &private_place(kind).instance_id)));
+                assert!(on.joining().is_none() && on.pending().is_none() && !on.c.view().launcher.several_profiles);
+                let on = Computer::new(mac);
+                invited_to(&on.c, private_place(kind));
+                on.c.launcher_do(mine(Action::AcceptInvite { invite: "not_1".into(), mode: LaunchMode::Desktop }));
+                assert!(on.starts()[0].last().is_some_and(|arg| arg.starts_with("vrchat://")));
+                // (Not even an account to be for: as before.)
+                let on = Computer::new(mac);
+                on.c.launcher_do(Action::Play { mode: LaunchMode::Desktop, destination: Some(private_place(kind)) });
+                assert!(on.starts()[0].last().is_some_and(|arg| arg.starts_with("vrchat://")));
+            }
+        }
+    }
+}
+
+/// What makes a computer one of several profiles: any other than the default one that is known, remembered, running, starting or
+/// about to be started on, Home's or the bridge's; a VRChat that runs and has not said its profile, for a start beside it.
+#[test]
+fn several_profiles_are_those_recorded_here() {
+    let several = |with: &dyn Fn(&Computer)| {
+        let on = Computer::new(false);
+        with(&on);
+        (on.c.launcher_several(on.machine().as_ref(), None), on.c.launcher_several(on.machine().as_ref(), Some(0)))
+    };
+    assert_eq!(several(&|_| {}), (false, false));
+    assert_eq!(several(&|on| on.remembers(&[(0, Some("usr_test"))])), (false, false));
+    assert_eq!(several(&|on| on.runs(&[(10, 0, Some("usr_test"), true)])), (false, false));
+    assert_eq!(several(&|on| on.remembers(&[(1, None)])), (true, true));
+    assert_eq!(several(&|on| on.c.update_settings(|s| drop(s.launch.profile_ids.insert(3, "usr_x".into())))), (true, true));
+    assert_eq!(several(&|on| on.runs(&[(10, 2, None, true)])), (true, true));
+    assert_eq!(several(&|on| drop(on.c.launcher_claim(1, LaunchMode::Desktop).unwrap())), (true, true));
+    assert_eq!(several(&|on| on.c.sides.put(crate::bridge::sessions::SideMark { session: "p20-0123456789ab".into(), profile: 20, osc_in: 9200, osc_out: 9201, pid: None, log: None, query: None })), (true, true));
+    assert_eq!(several(&|on| { on.runs(&[(10, 0, None, false)]); on.pc.unread.lock().unwrap().push(10); }), (false, true), "it could be on any");
+    let on = Computer::new(false);
+    assert!(on.c.launcher_several(on.machine().as_ref(), Some(1)), "about to be started on");
+}
+
+/// The second step: this very VRChat's own log proves the account, and only then is the place delivered, once: by its link on a
+/// PC (an invite to oneself where the link would go to another's VRChat), as an invite to oneself on a Mac. Another VRChat's
+/// proof, one from before the start, its sign-in page, count for nothing.
+#[test]
+fn a_private_place_is_delivered_once_this_very_vrchat_proves_its_account() {
+    for mac in [true, false] {
+        let on = Computer::new(mac);
+        on.remembers(&[(0, Some("usr_other")), (2, None)]);
+        // A PC: the person's other VRChat runs already, as that very account's (it is another profile's all the same).
+        let before: &[(u32, u32, Option<&str>, bool)] = if mac { &[] } else { &[(10, 0, Some("usr_test"), true)] };
+        on.runs(before);
+        assert!(matches!(on.at(2, private_place("friends(usr_x)")), Some(Notice::Sent { .. })));
+        assert_eq!(on.pending().unwrap().before, before.iter().map(|run| run.0).collect::<Vec<_>>());
+        let with = |run: (u32, u32, Option<&'static str>, bool)| [before.to_vec(), vec![run]].concat();
+        let quiet = |step: JoinStep, why: &str| {
+            on.look();
+            std::thread::sleep(Duration::from_millis(30));
+            assert_eq!((on.step(), on.calls.lock().unwrap().len()), (Some(step), 0), "{why}");
+        };
+        quiet(JoinStep::Starting, "it did not come up yet");
+        on.runs(&with((42, 2, None, false)));
+        quiet(if mac { JoinStep::SigningIn } else { JoinStep::SigningIn }, "up, its log not there yet");
+        on.runs(&with((42, 2, None, true)));
+        quiet(JoinStep::SigningIn, "nobody signed in yet");
+        on.runs(&with((42, 2, Some("usr_test"), true)));
+        on.look();
+        eventually_so(|| on.joining().is_none());
+        let written = || on.c.travel.lock().unwrap().is_some();
+        if mac {
+            assert_eq!(on.invites_sent(), 1);
+            assert!(on.calls.lock().unwrap()[0].1.contains(&format!("{W}:7~friends(usr_x)")));
+        } else {
+            assert!(written());
+            assert_eq!(on.invites_sent(), 0, "by its link");
+        }
+        on.look();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(on.pending().is_none() && on.invites_sent() == usize::from(mac), "once");
+        assert_eq!(on.starts().len(), 1);
+    }
+    // A PC whose link pipe is the other VRChat's (it was started first): the invite to oneself, never that one's link.
+    let on = Computer::new(false);
+    on.remembers(&[(0, Some("usr_other")), (2, None)]);
+    on.runs(&[(10, 0, Some("usr_other"), true)]);
+    on.at(2, private_place("friends(usr_x)"));
+    on.runs(&[(10, 0, Some("usr_other"), true), (42, 2, Some("usr_test"), true)]);
+    let fake = Arc::new(super::super::travel::tests::Fake { running: vec![10, 42], server: Some(10), ..Default::default() });
+    *on.c.travel.lock().unwrap() = Some(fake.clone() as Arc<dyn super::super::travel::Travel>);
+    on.look();
+    eventually_so(|| on.invites_sent() == 1);
+    assert!(fake.written.lock().unwrap().is_empty());
+    // And its own: the link, once.
+    let on = Computer::new(false);
+    on.remembers(&[(2, None)]);
+    on.at(2, private_place("friends(usr_x)"));
+    on.runs(&[(42, 2, Some("usr_test"), true)]);
+    let fake = Arc::new(super::super::travel::tests::Fake { running: vec![42], server: Some(42), ..Default::default() });
+    *on.c.travel.lock().unwrap() = Some(fake.clone() as Arc<dyn super::super::travel::Travel>);
+    on.look();
+    eventually_so(|| on.joining().is_none());
+    assert_eq!(*fake.written.lock().unwrap(), [orbiters_core::vrchat_launch::link(W, "7~friends(usr_x)~region(eu)")]);
+    assert_eq!(on.invites_sent(), 0);
+}
+
+/// Another account's VRChat, one that does not say in time, one that is gone, one whose log cannot be read: nothing is delivered,
+/// Home says which, and the place is kept: pressed again once that VRChat is the account's, it goes; given up, it is gone. A
+/// remembered account never helps.
+#[test]
+fn a_private_place_that_is_not_proven_goes_nowhere_and_is_kept() {
+    for mac in [true, false] {
+        let begun = || {
+            let on = Computer::new(mac);
+            on.remembers(&[(0, Some("usr_test")), (2, Some("usr_test"))]);
+            on.at(2, private_place("friends(usr_x)"));
+            on
+        };
+        let failed = |on: &Computer, why: JoinFailure| {
+            assert_eq!(on.joining(), Some(Joining { world: "Sample room".into(), step: JoinStep::Failed(why) }));
+            assert!(on.pending().is_none());
+            std::thread::sleep(Duration::from_millis(30));
+            assert!(on.calls.lock().unwrap().is_empty(), "{:?}", on.calls.lock().unwrap());
+        };
+        // Another account's.
+        let on = begun();
+        on.runs(&[(42, 2, Some("usr_other"), true)]);
+        on.look();
+        failed(&on, JoinFailure::OtherAccount);
+        // Again, still another's; then the account signs in there: it goes, and no other VRChat was started for it.
+        assert!(matches!(on.c.launcher_do(Action::JoinAgain), Some(Notice::Sent { .. })));
+        on.look();
+        failed(&on, JoinFailure::OtherAccount);
+        on.runs(&[(42, 2, None, true)]);
+        assert!(matches!(on.c.launcher_do(Action::JoinAgain), Some(Notice::Sent { .. })));
+        assert_eq!(on.step(), Some(JoinStep::SigningIn));
+        on.runs(&[(42, 2, Some("usr_test"), true)]);
+        on.look();
+        eventually_so(|| on.joining().is_none());
+        assert_eq!((on.starts().len(), on.invites_sent()), (1, usize::from(mac)));
+        assert_eq!(on.c.launcher_do(Action::JoinAgain), None, "nothing is kept any more");
+        // It does not say in time.
+        let on = begun();
+        on.runs(&[(42, 2, None, true)]);
+        on.look();
+        assert_eq!(on.step(), Some(JoinStep::SigningIn));
+        on.c.launcher.lock().unwrap().pending.as_mut().unwrap().seen = Some((42, Instant::now().checked_sub(PROOF_WITHIN + Duration::from_secs(1)).unwrap()));
+        on.look();
+        failed(&on, JoinFailure::NoProof);
+        assert_eq!(on.c.launcher_do(Action::ForgetJoining), None);
+        assert!(on.joining().is_none() && on.c.launcher.lock().unwrap().kept.is_none());
+        // It closes before; it never comes.
+        let on = begun();
+        on.runs(&[(42, 2, None, true)]);
+        on.look();
+        if !mac {
+            // (One that goes as soon as it came may be followed by the one that stays: that one is it, for a minute.)
+            on.runs(&[]);
+            on.look();
+            assert_eq!(on.step(), Some(JoinStep::Starting));
+            on.runs(&[(43, 2, None, true)]);
+            on.look();
+            assert_eq!((on.step(), on.pending().unwrap().seen.map(|s| s.0)), (Some(JoinStep::SigningIn), Some(43)));
+            on.c.launcher.lock().unwrap().pending.as_mut().unwrap().seen = Some((43, Instant::now().checked_sub(AGAIN_WITHIN + Duration::from_secs(1)).unwrap()));
+        }
+        on.runs(&[]);
+        on.look();
+        failed(&on, JoinFailure::Gone);
+        // (Started anew: again in two steps.)
+        *on.c.launcher_started.lock().unwrap() = None;
+        on.c.launcher.lock().unwrap().starting.clear();
+        assert!(matches!(on.c.launcher_do(Action::JoinAgain), Some(Notice::Sent { .. })));
+        assert_eq!(on.starts().len(), 2);
+        assert!(!on.starts()[1].iter().any(|arg| arg.contains("vrchat://")));
+        assert_eq!(on.step(), Some(JoinStep::Starting));
+        on.c.launcher.lock().unwrap().pending.as_mut().unwrap().since = Instant::now().checked_sub(PENDING_FOR + Duration::from_secs(1)).unwrap();
+        on.look();
+        failed(&on, JoinFailure::Gone);
+        // Given up while it waits: nothing goes.
+        let on = begun();
+        on.c.launcher_do(Action::ForgetJoining);
+        on.runs(&[(42, 2, Some("usr_test"), true)]);
+        on.look();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(on.joining().is_none() && on.calls.lock().unwrap().is_empty());
+        // Another place joined meanwhile: the one that waited is over.
+        let on = begun();
+        on.runs(&[(42, 2, Some("usr_test"), true)]);
+        assert!(matches!(on.c.launcher_do(mine(Action::JoinRunning { mode: LaunchMode::Desktop, destination: open_place() })), Some(Notice::Sent { .. })));
+        let sent = on.calls.lock().unwrap().len();
+        on.look();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(on.pending().is_none() && on.joining().is_none() && on.calls.lock().unwrap().len() == sent);
+        // The account goes meanwhile: nothing of it goes to another one's session.
+        let on = begun();
+        on.runs(&[(42, 2, Some("usr_test"), true)]);
+        on.c.launcher.lock().unwrap().pending.as_mut().unwrap().errand.account = Some("usr_gone".into());
+        on.look();
+        failed(&on, JoinFailure::OtherAccount);
+    }
+}
+
+/// A Mac: the proof is of the very start it was asked with: another start since (the bridge's), or a VRChat on another profile, is
+/// not it.
+#[test]
+fn another_start_on_a_mac_is_not_the_one_a_private_place_waits_for() {
+    let on = Computer::new(true);
+    on.remembers(&[(0, Some("usr_test")), (2, None)]);
+    on.at(2, private_place("friends(usr_x)"));
+    // The bridge's start, on the very profile and account.
+    on.apple.starts.lock().unwrap().push(vec!["--profile=2".into()]);
+    on.runs(&[(42, 2, Some("usr_test"), true)]);
+    on.look();
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(on.calls.lock().unwrap().is_empty() && on.pending().is_none() && on.joining().is_none());
+    // What came up runs on another profile.
+    let on = Computer::new(true);
+    on.remembers(&[(2, None)]);
+    on.at(2, private_place("friends(usr_x)"));
+    on.runs(&[(42, 0, Some("usr_test"), true)]);
+    on.look();
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(on.calls.lock().unwrap().is_empty() && on.pending().is_none());
+}
+
+/// The invite a two-step start was for: its card comes back when it was not delivered, and pressed again it is accepted from it.
+#[test]
+fn an_invite_that_was_not_delivered_has_its_card_back() {
+    let on = Computer::new(true);
+    on.remembers(&[(2, None)]);
+    let place = private_place("private(usr_x)");
+    invited_to(&on.c, place.clone());
+    assert!(matches!(on.c.launcher_do(mine(Action::AcceptInviteOn { invite: "not_1".into(), mode: LaunchMode::Desktop, profile: 2 })), Some(Notice::Sent { .. })));
+    assert!(on.c.view().launcher.invites.is_empty());
+    on.runs(&[(42, 2, Some("usr_other"), true)]);
+    on.look();
+    assert_eq!(on.step(), Some(JoinStep::Failed(JoinFailure::OtherAccount)));
+    on.c.launcher_settle_accepted(None, Some(&by(&on.c)));
+    assert_eq!(on.c.view().launcher.invites.len(), 1, "its card is back");
+    on.runs(&[(42, 2, Some("usr_test"), true)]);
+    assert!(matches!(on.c.launcher_do(mine(Action::JoinAgain)), Some(Notice::Sent { .. })));
+    assert!(on.c.view().launcher.invites.is_empty() && on.c.launcher.lock().unwrap().accepted.len() == 1);
+    on.look();
+    eventually_so(|| on.invites_sent() == 1);
+}
+
+/// R6: VRChat runs and its log cannot be read: Home is told why once it has had the time to make one, a place that waits for it
+/// says so, and it is said no more once a log is read. A VRChat that was not up long enough says nothing.
+#[test]
+fn a_log_that_cannot_be_read_is_said_and_not_an_unknown_account() {
+    for trouble in [LogTrouble::NoFolder, LogTrouble::NotWritten, LogTrouble::Denied("/x".into())] {
+        let on = Computer::new(true);
+        on.remembers(&[(2, None)]);
+        *on.apple.log_problem.lock().unwrap() = Some(trouble.clone());
+        on.at(2, private_place("friends(usr_x)"));
+        on.runs(&[(42, 2, None, false)]);
+        // (A Mac knows the profile by its own start's command line, whatever its log.)
+        on.apple.players.lock().unwrap()[0].profile_known = true;
+        on.look();
+        assert_eq!((on.step(), on.c.launcher.lock().unwrap().log_trouble.clone()), (Some(JoinStep::SigningIn), None), "not yet");
+        let long_ago = Instant::now().checked_sub(LOG_WITHIN + Duration::from_secs(1)).unwrap();
+        on.c.launcher.lock().unwrap().unlogged.insert(42, long_ago);
+        on.c.launcher.lock().unwrap().pending.as_mut().unwrap().seen = Some((42, long_ago));
+        on.look();
+        assert_eq!(on.step(), Some(JoinStep::Failed(JoinFailure::Log(trouble.clone()))));
+        assert_eq!(on.c.launcher.lock().unwrap().log_trouble, Some(trouble.clone()));
+        on.c.launcher_game(on.machine().as_ref());
+        assert_eq!(on.c.view().launcher.log_trouble, Some(trouble), "Home's, also once it was quit");
+        on.runs(&[(42, 2, None, true)]);
+        on.c.launcher_game(on.machine().as_ref());
+        assert_eq!(on.c.view().launcher.log_trouble, None, "read again");
+        assert!(on.calls.lock().unwrap().is_empty());
+    }
+    // What the folder says.
+    let dir = std::env::temp_dir().join(format!("orbiters-log-trouble-{}", uuid::Uuid::new_v4()));
+    assert_eq!(log_trouble(&dir), Some(LogTrouble::NoFolder));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(log_trouble(&dir), Some(LogTrouble::NotWritten));
+    let log = dir.join("output_log_2026-11-24_00-00-00.txt");
+    std::fs::write(&log, "x").unwrap();
+    assert_eq!(log_trouble(&dir), None);
+    let old = std::time::SystemTime::now() - LOG_STILL - Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&log).unwrap().set_modified(old).unwrap();
+    assert_eq!(log_trouble(&dir), Some(LogTrouble::NotWritten), "an earlier run's");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&log, "x").unwrap();
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(log_trouble(&dir), Some(LogTrouble::Denied(log.display().to_string())));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(log_trouble(&dir), Some(LogTrouble::Denied(dir.display().to_string())));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// R6 (the verifier's race): Join, or an invite accepted into the running game, whose game goes between the two looks at the
+/// processes, or of which only the assistant's remain: nothing is claimed and nothing started, the place public or private.
+#[test]
+fn a_join_whose_game_goes_between_two_looks_starts_nothing() {
+    for destination in [open_place(), private_place("friends(usr_x)")] {
+        for sides in [false, true] {
+            let on = Computer::new(false);
+            on.runs(&[(10, 0, Some("usr_test"), true)]);
+            if sides {
+                on.c.sides.put(crate::bridge::sessions::SideMark { session: "p1-0123456789ab".into(), profile: 1, osc_in: 9010, osc_out: 9011, pid: Some(10), log: None, query: None });
+            } else {
+                let fake = super::super::travel::tests::Fake::default();
+                *on.c.travel.lock().unwrap() = Some(Arc::new(fake) as Arc<dyn super::super::travel::Travel>);
+            }
+            let gone = Some(no_longer_running());
+            assert_eq!(on.c.launcher_do(mine(Action::JoinRunning { mode: LaunchMode::Desktop, destination: destination.clone() })), gone);
+            invited_to(&on.c, destination.clone());
+            assert_eq!(on.c.launcher_do(mine(Action::AcceptInviteRunning { invite: "not_1".into(), mode: LaunchMode::Desktop })), gone);
+            assert_eq!(on.c.view().launcher.invites.len(), 1, "its card stays");
+            assert!(on.starts().is_empty() && on.c.launcher.lock().unwrap().starting.is_empty() && on.pending().is_none(), "sides: {sides}");
+            assert!(on.calls.lock().unwrap().is_empty());
+        }
+    }
+}
+
+/// Beside the assistant's VRChats alone, a private place is started for in two steps too: on the default profile, the place after.
+#[test]
+fn beside_the_assistant_s_vrchats_a_private_place_comes_after_the_start() {
+    let on = Computer::new(false);
+    on.runs(&[(10, 1, Some("usr_side"), true)]);
+    on.c.sides.put(crate::bridge::sessions::SideMark { session: "p1-0123456789ab".into(), profile: 1, osc_in: 9010, osc_out: 9011, pid: Some(10), log: None, query: None });
+    assert!(matches!(on.c.launcher_do(mine(Action::Play { mode: LaunchMode::Desktop, destination: Some(private_place("friends(usr_x)")) })), Some(Notice::Sent { .. })));
+    let starts = on.starts();
+    assert_eq!((starts.len(), starts[0].iter().any(|arg| arg.contains("vrchat://"))), (1, false), "{starts:?}");
+    assert!(on.pending().is_some_and(|p| p.before == [10] && p.errand.profile == Some(0)));
+}
+
+/// R4 (the verifier's case): a public instance made for X stays X's, however long ago, whatever was listed since and whoever is
+/// signed in: pressed as Y it is refused; pressed as X it is private.
+#[test]
+fn an_instance_made_for_an_account_stays_its_own() {
+    for mac in [true, false] {
+        let on = Computer::new(mac);
+        on.remembers(&[(2, None)]);
+        on.c.made_for_tests(W, &open_place().instance_id, "usr_test");
+        on.c.made_for_tests(W, "5~region(eu)", "usr_other");
+        assert!(matches!(on.at(2, open_place()), Some(Notice::Sent { .. })));
+        assert!(!on.starts()[0].iter().any(|arg| arg.contains("vrchat://")), "its own alone: not with the start");
+        assert!(on.pending().is_some_and(|p| p.errand.bound));
+        let theirs = Place { instance_id: "5~region(eu)".into(), ..open_place() };
+        for action in [
+            Action::PlayAt { mode: LaunchMode::Desktop, profile: 2, destination: theirs.clone() },
+            Action::Play { mode: LaunchMode::Desktop, destination: Some(theirs.clone()) },
+            Action::JoinRunning { mode: LaunchMode::Desktop, destination: theirs.clone() },
+        ] {
+            assert_eq!(on.c.launcher_do(mine(action)), Some(made_for_another()));
+        }
+        assert_eq!(on.starts().len(), 1);
     }
 }
 
@@ -2717,13 +3198,20 @@ fn a_join_for_a_game_that_is_gone_starts_nothing() {
             if !installed {
                 continue;
             }
-            // It starts on profile 2 (whose account is not known): the invite to oneself goes to the account once it is up.
+            // It starts on profile 2: a public place's invite to oneself goes once it is up, a private one's once that very
+            // VRChat proves whose it is (R1).
             assert!(matches!(c.launcher_do(Action::PlayOn { mode: LaunchMode::Desktop, profile: 2 }), Some(Notice::Sent { .. })));
             assert!(matches!(c.launcher_do(mine(join.clone())), Some(Notice::Sent { .. })));
             assert_eq!(machine.starts.lock().unwrap().len(), 1);
             assert!(calls.lock().unwrap().is_empty());
             plays(&machine, Some(2), None);
             c.launcher_game(machine.as_ref());
+            if private {
+                std::thread::sleep(Duration::from_millis(60));
+                assert!(calls.lock().unwrap().is_empty(), "whose it is, it has not said");
+                machine.players.lock().unwrap()[0].account_id = Some("usr_test".into());
+                c.launcher_game(machine.as_ref());
+            }
             eventually_so(|| calls.lock().unwrap().len() == 1);
             assert!(calls.lock().unwrap()[0].1.contains("/invite/myself/to/"));
         }
@@ -2738,9 +3226,8 @@ fn eventually_so(done: impl Fn() -> bool) {
     }
 }
 
-/// The verifier's case: a destination asked for before VRChat is set up goes with the start that follows, on its profile, once.
-/// One whose account can no longer be proven by then (another signed in here, or on that profile) is dropped and said: nothing
-/// starts.
+/// The verifier's case: a destination asked for before VRChat is set up goes with the start that follows, on its profile, once
+/// (a private one after it: R1). One whose account is no longer the one signed in by then is dropped and said: nothing starts.
 #[test]
 fn a_destination_asked_for_before_the_set_up_goes_whole_or_not_at_all() {
     let queued = |destination: Place, between: &dyn Fn(&Shared)| {
@@ -2768,8 +3255,11 @@ fn a_destination_asked_for_before_the_set_up_goes_whole_or_not_at_all() {
         eventually_so(|| !machine.starts.lock().unwrap().is_empty());
         let starts = machine.starts.lock().unwrap().clone();
         assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0][4..], ["--profile=2".to_string(), orbiters_core::vrchat_launch::link(W, &destination.instance_id)]);
-        assert!(c.launcher.lock().unwrap().queued.is_none() && c.launcher.lock().unwrap().pending.is_none(), "used once");
+        let private = destination == place();
+        let link = (!private).then(|| orbiters_core::vrchat_launch::link(W, &destination.instance_id));
+        assert_eq!(starts[0][4..], ["--profile=2".to_string()].into_iter().chain(link).collect::<Vec<_>>());
+        eventually_so(|| c.launcher.lock().unwrap().pending.is_some() == private);
+        assert!(c.launcher.lock().unwrap().queued.is_none(), "used once");
     }
     let dropped = |destination: Place, between: &dyn Fn(&Shared)| {
         let (machine, c) = queued(destination, between);
@@ -2777,66 +3267,78 @@ fn a_destination_asked_for_before_the_set_up_goes_whole_or_not_at_all() {
         assert!(machine.starts.lock().unwrap().is_empty() && c.launcher.lock().unwrap().queued.is_none());
         c.view().launcher.notice.clone()
     };
-    assert_eq!(dropped(place(), &|c| c.update_settings(|s| drop(s.launch.profile_ids.remove(&2)))), Some(Notice::Error("Sign in on this profile first: its VRChat account is not known yet.".into())));
     for to in [place(), open_place()] {
         // The account it was asked for is no longer the one signed in.
         let gone = dropped(to, &|c| c.launcher.lock().unwrap().queued.as_mut().unwrap().0.account = Some("usr_gone".into()));
         assert_eq!(gone, Some(changed_account()));
     }
-    // One that is not eligible waits for nothing.
+    // One that is nobody's waits for nothing.
     let machine = Arc::new(PretendMac { direct: true, obelisk: true, ..Default::default() });
     let c = mac(machine.clone());
     let (_, _) = c.test_vrchat(vec![]);
     signed_in_list(&c);
     c.launcher_game(machine.as_ref());
-    assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 2, destination: place() })), Some(Notice::Error(_))));
+    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 2, destination: place() }), Some(Notice::Error(_))));
     std::thread::sleep(Duration::from_millis(50));
     assert!(c.launcher.lock().unwrap().queued.is_none() && *machine.installs.lock().unwrap() == 0);
 }
 
-/// A restart after a lost picture is held to the rule too: not into a private place once its profile is no longer proven to be
-/// its account's.
+/// A restart after a lost picture is held to the rule too: with its private place where there is one profile; where there are
+/// several, without it, and the place after it.
 #[test]
-fn a_restart_goes_into_no_private_place_its_profile_is_not_proven_for() {
+fn a_restart_carries_no_private_place_where_there_are_several_profiles() {
     let machine = Arc::new(PretendMac { obelisk: true, vrchat: true, direct: true, ..Default::default() });
     *machine.running.lock().unwrap() = vec![(42, true)];
     *machine.lost.lock().unwrap() = Some("s".into());
     let c = mac(machine.clone());
     let (_, _) = c.test_vrchat(vec![]);
     signed_in_list(&c);
+    plays(&machine, Some(0), None);
     c.launcher_game(machine.as_ref());
-    let launch = |place: &Place, bound: bool| HomeLaunch {
-        args: vec!["--profile=2".into(), orbiters_core::vrchat_launch::link(W, &place.instance_id)],
+    let launch = |profile: u32, place: &Place, bound: bool| HomeLaunch {
+        args: orbiters_core::vrchat_launch::profile_arg(profile).into_iter().chain([orbiters_core::vrchat_launch::link(W, &place.instance_id)]).collect(),
         account: Some("usr_test".into()),
         bound,
         ..Default::default()
     };
+    // What it is made with again, and whether its place comes after it; `None`: refused.
     let asked = |launch: HomeLaunch| {
+        c.launcher.lock().unwrap().pending = None;
         *machine.restarted.lock().unwrap() = Some(launch);
-        let (before, refused) = (machine.restarts.lock().unwrap().len(), *machine.refused.lock().unwrap());
+        let (before, made) = (machine.restarts.lock().unwrap().len(), machine.restarted_with.lock().unwrap().len());
         assert_eq!(c.launcher_do(Action::RestartLostGame { session: "s".into() }), None);
         eventually_so(|| machine.restarts.lock().unwrap().len() > before);
-        *machine.refused.lock().unwrap() == refused
+        let with = machine.restarted_with.lock().unwrap().get(made).cloned()?;
+        let private = !with.iter().any(|arg| arg.starts_with("vrchat://"));
+        if private {
+            eventually_so(|| c.launcher.lock().unwrap().pending.as_ref().is_some_and(|p| p.proof));
+        }
+        Some((with, private))
     };
-    assert!(!asked(launch(&place(), false)), "not known");
-    assert!(asked(launch(&open_place(), false)), "a public place");
-    assert!(!asked(launch(&open_place(), true)), "an invite's");
+    let link = |place: &Place| orbiters_core::vrchat_launch::link(W, &place.instance_id);
+    assert_eq!(asked(launch(0, &place(), false)), Some((vec![link(&place())], false)), "one profile: as it was");
+    assert_eq!(asked(launch(2, &open_place(), false)), Some((vec!["--profile=2".into(), link(&open_place())], false)), "a public place");
+    assert_eq!(asked(launch(2, &place(), false)), Some((vec!["--profile=2".into()], true)));
+    assert_eq!(asked(launch(2, &open_place(), true)), Some((vec!["--profile=2".into()], true)), "an invite's");
     proven(&c, &[2]);
-    assert!(asked(launch(&place(), false)) && asked(launch(&open_place(), true)));
-    c.update_settings(|s| drop(s.launch.profile_ids.insert(2, "usr_other".into())));
-    assert!(!asked(launch(&place(), false)));
+    assert_eq!(asked(launch(0, &place(), false)), Some((vec![], true)), "remembered or not");
+    // Started in two steps: its place comes after it again.
+    let after = HomeLaunch { args: vec!["--profile=2".into()], account: Some("usr_test".into()), after: Some(place()), ..Default::default() };
+    assert_eq!(asked(after.clone()), Some((vec!["--profile=2".into()], true)));
+    // Another account's by now, or nobody's: refused.
+    assert_eq!(asked(HomeLaunch { account: Some("usr_gone".into()), ..after }), None);
+    assert_eq!(asked(HomeLaunch { account: None, ..launch(2, &place(), false) }), None);
 }
 
-/// The bridge's private instances are held to the same rule (its start on a Mac is on the default profile).
+/// The bridge's private instances on a Mac are held to the same rule (its start is on the default profile): with its start where
+/// there is one profile, and with none where there are several.
 #[test]
-fn the_bridge_s_own_start_needs_the_accounts_own_profile() {
+fn the_bridge_s_own_start_needs_one_profile() {
     let (machine, c) = ready_mac();
-    let own = || c.launcher_is_own(machine.as_ref(), 0);
-    assert!(!own(), "nobody signed in");
-    let (_, _) = c.test_vrchat(vec![]);
-    assert!(!own(), "not known");
+    let way = || c.launcher_bridge_way(machine.as_ref(), "usr_test");
+    assert_eq!(way(), Way::Direct, "one profile, whatever is known of it");
     proven(&c, &[0]);
-    assert!(own());
-    c.update_settings(|s| drop(s.launch.profile_ids.insert(0, "usr_other".into())));
-    assert!(!own());
+    assert_eq!(way(), Way::Direct);
+    c.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
+    assert_eq!(way(), Way::AfterProof);
 }

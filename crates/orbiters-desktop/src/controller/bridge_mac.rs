@@ -380,13 +380,16 @@ pub(super) struct MacGame {
     mine: Mutex<Mine>,
     /// The shared start reserved by [`Game::admit_start`] for the next launch, until it is made or given back.
     reserved: Mutex<Option<u64>>,
+    /// The VRChat account (its user id) that start was admitted for: its instance is made with that one's session, and launched
+    /// for that one, or not at all.
+    owner: Mutex<Option<String>>,
     /// Another's VRChat as it was last looked for, and when.
     others: Mutex<Option<(Instant, Option<u32>)>>,
 }
 
 impl MacGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), others: Mutex::default() }
+        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), owner: Mutex::default(), others: Mutex::default() }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -751,8 +754,17 @@ impl Game for MacGame {
         None
     }
 
+    /// Made with the session of the account the start was admitted for, checked on the hold that asks: another's by then makes
+    /// nothing.
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {
-        self.real.create_private_instance(world, region)
+        let ctl = self.ctl()?;
+        let owner = self.owner.lock().unwrap().clone().ok_or_else(account_changed)?;
+        let source = ctl.vrchat_source();
+        // (Whose session it is, is checked by `personal` on the hold that asks.)
+        source.personal(&owner, || true, |c| c.create_private_instance(world, region)).map_err(|e| match e {
+            orbiters_core::vrchat_api::Error::Unauthorized if signed_in(&ctl).as_deref() != Some(owner.as_str()) => account_changed(),
+            e => super::bridge_game::api_failure(e.into(), "making the instance"), // i18n: not shown (an AI client reads it)
+        })
     }
 
     fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure> {
@@ -769,7 +781,9 @@ impl Game for MacGame {
         let _started = ctl.launcher_started_lock();
         // What tells a drawing game from a frozen window is the program's (its records' `shown`): no start without it.
         cli_fit(mac)?;
-        own_account(&ctl, &machine)?;
+        // The account its instance is of: the one it was made for (a resumed one's too), still the one signed in.
+        let owner = owner_of(&plan.instance).ok_or_else(account_changed)?;
+        own_account(&ctl, &machine, &owner)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
         let at = SystemTime::now();
@@ -792,14 +806,17 @@ impl Game for MacGame {
         let Some(mac) = machine.as_mac() else { return Ok(()) };
         // The program must have what the bridge relies on before anything is made for a start.
         cli_fit(mac)?;
-        // Nor a private instance for a game that is not known to be its account's.
-        own_account(&ctl, &machine)?;
+        // Nor a private instance for nobody's account, nor for a game it would not go to with its start.
+        *self.owner.lock().unwrap() = None;
+        let owner = signed_in(&ctl).ok_or_else(account_changed)?;
+        own_account(&ctl, &machine, &owner)?;
         self.release_start();
         let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
         // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
         match mac.play().reserve(mac.library(), own) {
             Ok(token) => {
                 *self.reserved.lock().unwrap() = Some(token);
+                *self.owner.lock().unwrap() = Some(owner);
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Busy) => Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start), so no instance was made.", "Wait a minute, then call get_state.")), // i18n: not shown (an AI client reads it)
@@ -1065,16 +1082,39 @@ fn records_failure(trouble: &super::obelisk_cli::Trouble) -> Failure {
     }
 }
 
-/// The bridge's private instances are the account's signed in in the app: they go to a VRChat proven to be that account's only
-/// (the rule Home's starts are held to, `vrchat_launch::handing`).
-fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>) -> Result<(), Failure> {
-    if ctl.launcher_is_own(machine.as_ref(), 0) {
+/// The VRChat account signed in in the app (its user id).
+fn signed_in(ctl: &super::Controller) -> Option<String> {
+    ctl.vrchat_session().map(|session| session.by.user)
+}
+
+/// The VRChat account a private instance of the bridge's is of, as its id says.
+fn owner_of(instance: &str) -> Option<String> {
+    let owner = instance.split('~').find_map(|tag| tag.strip_prefix("private(")?.strip_suffix(')'))?;
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn account_changed() -> Failure {
+    Failure::new(
+        "account_changed",
+        "The VRChat account signed in in Orbiters - N4N0 is not the one this private instance is made for, so nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Call get_state, then go_to_world again.", // i18n: not shown
+    )
+}
+
+/// The bridge's private instances are the account's signed in in the app: they go with a start (the rule Home's starts are held
+/// to, `vrchat_launch::way`), which needs a Mac with one VRChat profile. Where there are several, a private place is delivered
+/// after the start, as an invite a person takes in the game: there is nobody to take the bridge's.
+fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>, owner: &str) -> Result<(), Failure> {
+    if signed_in(ctl).as_deref() != Some(owner) {
+        return Err(account_changed());
+    }
+    if ctl.launcher_bridge_way(machine.as_ref(), owner) == orbiters_core::vrchat_launch::Way::Direct {
         return Ok(());
     }
     Err(Failure::new(
-        "game_account_unknown",
-        "VRChat's default profile on this Mac is not known to be signed in with the VRChat account signed in in Orbiters - N4N0, so no private instance goes to it.", // i18n: not shown (an AI client reads it)
-        "Ask the person to press Play on Home on profile 0, without a place, and to sign in there with that account once; then try again.", // i18n: not shown
+        "several_profiles",
+        "Several VRChat profiles are used on this Mac: a private instance goes to no VRChat that has not said whose account is signed in, so it goes with no start of the bridge's. Nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Tell the person: they can go to a private place from Orbiters - N4N0's Home, which starts VRChat first and invites them once it is proven to be their account's.", // i18n: not shown
     ))
 }
 
@@ -1117,10 +1157,38 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
+        assert!(version_at_least("0.1.13", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.12", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);
+    }
+
+    /// R4 and R1 (the verifier's case): the account a start was admitted for is the one its instance is made with and launched for,
+    /// and no other: with another signed in by then, nothing is made and nothing starts; nor for a resumed instance of another's.
+    /// Where there are several profiles no start of the bridge's carries its place at all.
+    #[test]
+    fn a_bridge_s_instance_is_of_the_account_it_was_admitted_for() {
+        assert_eq!(owner_of("11~private(usr_x)~region(eu)~nonce(a)").as_deref(), Some("usr_x"));
+        assert_eq!((owner_of("11~region(eu)"), owner_of("11~friends(usr_x)"), owner_of("11~private()")), (None, None, None));
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let machine = ctl.launcher_machine_now();
+        let code = |owner: &str| own_account(&ctl, &machine, owner).err().map(|f| f.code);
+        assert_eq!(code("usr_test"), Some("account_changed"), "nobody signed in");
+        let created = |owner: &str| serde_json::json!({"worldId": WORLD, "instanceId": format!("11~private({owner})~region(eu)~nonce(a)"), "type": "private", "ownerId": owner, "region": "eu"});
+        const WORLD: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+        let (_, calls) = ctl.test_vrchat(vec![(200, created("usr_test")), (200, created("usr_test"))]);
+        assert_eq!((code("usr_test"), code("usr_x")), (None, Some("account_changed")));
+        // Admitted for X; by now the one signed in is another: nothing is asked of VRChat.
+        let game = MacGame::new(std::sync::Arc::downgrade(&ctl), PathBuf::new());
+        assert_eq!(game.create_private_instance(WORLD, "eu").unwrap_err().code, "account_changed", "admitted for nobody");
+        *game.owner.lock().unwrap() = Some("usr_x".into());
+        assert_eq!(game.create_private_instance(WORLD, "eu").unwrap_err().code, "account_changed");
+        assert!(calls.lock().unwrap().is_empty());
+        *game.owner.lock().unwrap() = Some("usr_test".into());
+        let _ = game.create_private_instance(WORLD, "eu");
+        assert_eq!(calls.lock().unwrap().iter().filter(|(method, _)| method == "POST").count(), 1);
+        ctl.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
+        assert_eq!((code("usr_test"), code("usr_x")), (Some("several_profiles"), Some("account_changed")));
     }
 
     /// The verifier's cases: the launcher is the record's only with its recorded birth (a reused process number is not),

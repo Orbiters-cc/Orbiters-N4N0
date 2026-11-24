@@ -127,6 +127,9 @@ pub struct VrchatRunShown {
     /// Its log says nobody is signed in (its sign-in page).
     #[serde(default)]
     pub signed_out: bool,
+    /// Its own log is read: what it says of whose this VRChat is counts.
+    #[serde(default)]
+    pub logged: bool,
     pub world: Option<String>,
     /// Desktop or VR, once known.
     pub desktop: Option<bool>,

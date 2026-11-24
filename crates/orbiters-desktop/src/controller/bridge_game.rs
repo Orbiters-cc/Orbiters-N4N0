@@ -457,6 +457,9 @@ impl Controller {
     /// Starts the bridge's keeper (the tray service: never the window's process, nor tests). Nothing listens until the
     /// server says yes for the account and Settings has it on.
     pub fn start_bridge(self: &Shared) {
+        if !orbiters_core::here::HERE.bridge {
+            return;
+        }
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {

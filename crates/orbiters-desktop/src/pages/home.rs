@@ -75,11 +75,16 @@ fn home_tiles() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
     HOME_ONLY.into_iter().filter_map(|target| features().find(|t| t.0 == target))
 }
 
-/// Whether a feature can work here. Where VRChat does not run on this computer, these need it on the same computer:
-/// fast walk moves SteamVR's play space, Tracking smooths SteamVR's devices, and a 3D picture and the QR code scanner read
-/// VRChat's camera over Spout. Everything else goes over OSC or the web.
+/// Whether a feature can work here: fast walk moves SteamVR's play space, Tracking smooths SteamVR's devices through its
+/// driver, and a 3D picture and the QR code scanner read VRChat's camera over Spout. Everything else goes over OSC or the web.
 fn available(target: Target) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE || !matches!(target, Target::FastWalk | Target::Photo | Target::Tracking | Target::Qr)
+    use orbiters_core::here::HERE;
+    match target {
+        Target::FastWalk => HERE.steam_vr,
+        Target::Tracking => HERE.driver,
+        Target::Photo | Target::Qr => HERE.camera_frames,
+        _ => true,
+    }
 }
 
 /// What a press asks of the menu, done once the page is drawn.

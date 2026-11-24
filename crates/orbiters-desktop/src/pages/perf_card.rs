@@ -82,7 +82,9 @@ fn show_file(path: &std::path::Path) {
     {
         let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{}", path.display())).spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    let _ = crate::linux::open::reveal(path);
+    #[cfg(target_os = "macos")]
     {
         if let Some(dir) = path.parent() {
             let _ = crate::controller::open_path(dir);

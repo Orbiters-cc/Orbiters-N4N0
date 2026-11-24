@@ -541,7 +541,13 @@ fn card_acts(world: &VisitedWorld, sharable: bool) -> Vec<(orbiters_ui::popup::I
         acts.push((Item::new(tr("Share publicly")).icon(icons::GLOBE), CardAct::Share(true)));
     }
     if !world.shots.is_empty() {
-        let show_pictures = if cfg!(target_os = "macos") { tr("Show its pictures in Finder") } else { tr("Show its pictures in Explorer") };
+        let show_pictures = if cfg!(target_os = "macos") {
+            tr("Show its pictures in Finder")
+        } else if orbiters_core::here::LINUX {
+            tr("Show its pictures in the file manager")
+        } else {
+            tr("Show its pictures in Explorer")
+        };
         acts.push((Item::new(show_pictures).icon(icons::FOLDER_OPEN), CardAct::Pictures));
     }
     acts

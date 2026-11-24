@@ -33,9 +33,9 @@ tar = { version = "0.4", optional = true }
 # The start with Windows (the person's registry): `windows_start`.
 windows = { workspace = true }
 
-# TLS for `net`: Windows' own on the desktop, rustls with ring on Android (as `orbiters_core::http_tls`).
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# TLS for `net`: the system's own on Windows and the Mac, rustls with ring on Linux and Android (as `orbiters_core::http_tls`).
+[target.'cfg(not(any(target_os = "android", target_os = "linux")))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"], optional = true }
 
-[target.'cfg(target_os = "android")'.dependencies]
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }

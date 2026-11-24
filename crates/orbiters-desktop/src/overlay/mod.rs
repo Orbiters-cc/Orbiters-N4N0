@@ -844,7 +844,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
     // SteamVR first: an overlay that finds it gone leaves before the app ever counts it connected.
     let Some(steamvr) = connect_steamvr()? else { return Ok(Ended::Retry) };
     // Before anything else: what an overlay that died left in SteamVR's settings comes back.
-    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+    if orbiters_core::here::HERE.steam_vr {
         booster::recover_first(&steamvr);
     }
     let server = Server::find();
@@ -1073,7 +1073,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 backend.frames(chunk);
             }
         }
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.steam_vr {
             let panel_3d = t.menu.worlds.view.active();
             let wants = t.booster.update(&steamvr, &backend, &snap, frames.fresh(), vrchat_scene, dashboard, panel_3d);
             t.menu.worlds.view.set_light_for_booster(wants.panels_light);

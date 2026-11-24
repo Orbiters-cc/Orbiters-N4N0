@@ -428,7 +428,7 @@ fn goes(p: &Painter, rect: Rect, glyph: &str, label: &str, detail: &str, bytes: 
 
 /// The note every confirmation ends with, in the language now (read where it is drawn).
 fn note_text() -> &'static str {
-    tr(if cfg!(target_os = "macos") {
+    tr(if cfg!(not(windows)) {
         mark("Deleted for good: not moved to the Trash, which would free nothing. This cannot be undone.")
     } else {
         mark("Deleted for good: not moved to the recycle bin, which would free nothing. This cannot be undone.")

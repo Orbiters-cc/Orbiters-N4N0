@@ -204,13 +204,21 @@ impl Travel for Real {
     }
 
     fn connect(&self) -> std::io::Result<(Box<dyn LinkPipe>, Option<u32>)> {
+        // (A Wine pipe lives in wineserver: nothing outside reaches it.)
+        if !orbiters_core::here::HERE.link_pipe {
+            return Err(std::io::ErrorKind::Unsupported.into());
+        }
         let file = std::fs::OpenOptions::new().read(true).write(true).open(PIPE)?;
         let server = pipe_server(&file);
         Ok((Box::new(Pipe(file)), server))
     }
 
     fn start(&self, link: &str) -> Result<(), String> {
-        crate::bridge::win::start_vrchat_beside(&[link.to_string(), "--profile=0".to_string()]).map_err(|f| f.message)
+        let args = [link.to_string(), "--profile=0".to_string()];
+        #[cfg(target_os = "linux")]
+        return super::linux_vrchat::start(&args);
+        #[cfg(not(target_os = "linux"))]
+        crate::bridge::win::start_vrchat_beside(&args).map_err(|f| f.message)
     }
 }
 

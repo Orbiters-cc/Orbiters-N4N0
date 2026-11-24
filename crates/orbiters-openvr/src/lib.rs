@@ -211,9 +211,10 @@ pub struct Pose {
     pub device_is_connected: bool,
 }
 
-/// `VREvent_t` (64 bytes on Windows: the data union is 8-aligned).
+/// `VREvent_t` (64 bytes on Windows: the data union is 8-aligned; 60 on Linux, where Valve's header packs it to 4).
 #[derive(Clone, Copy, Debug)]
-#[repr(C)]
+#[cfg_attr(not(target_os = "linux"), repr(C))]
+#[cfg_attr(target_os = "linux", repr(C, packed(4)))]
 pub struct Event {
     pub event_type: u32,
     pub device: u32,
@@ -255,7 +256,9 @@ impl Event {
 
     fn words(&self) -> [u32; 12] {
         let mut out = [0u32; 12];
-        for (i, d) in self.data.iter().enumerate() {
+        // (A copy: Linux packs the event to 4 bytes.)
+        let data = self.data;
+        for (i, d) in data.iter().enumerate() {
             out[i * 2] = *d as u32;
             out[i * 2 + 1] = (*d >> 32) as u32;
         }
@@ -347,7 +350,11 @@ pub fn server_running() -> bool {
             server_from_list(found, step.err().is_none_or(|e| e.code() == no_more))
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        platform::server_running()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         true
     }
@@ -403,7 +410,11 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod platform;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod platform {
     use std::path::Path;
 
@@ -471,7 +482,7 @@ unsafe impl Send for SettingsHandle {}
 
 impl SettingsHandle {
     pub fn get_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<bool, i32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> bool;
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32) -> bool;
         let mut error = 0;
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 5 is GetBool; NUL-terminated names.
@@ -484,7 +495,7 @@ impl SettingsHandle {
     }
 
     pub fn get_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<f32, i32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> f32;
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32) -> f32;
         let mut error = 0;
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 7 is GetFloat; NUL-terminated names.
@@ -497,7 +508,7 @@ impl SettingsHandle {
     }
 
     pub fn set_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> Result<(), i32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, bool, *mut i32);
         let mut error = 0;
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 1 is SetBool; NUL-terminated names.
@@ -510,7 +521,7 @@ impl SettingsHandle {
     }
 
     pub fn set_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: f32) -> Result<(), i32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, f32, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, f32, *mut i32);
         let mut error = 0;
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 3 is SetFloat; NUL-terminated names.
@@ -523,7 +534,7 @@ impl SettingsHandle {
     }
 
     pub fn remove(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Result<(), i32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32);
         let mut error = 0;
         let _serial = settings_lock();
         // SAFETY: IVRSettings_003 entry 10 is RemoveKeyInSection; NUL-terminated names.
@@ -642,7 +653,7 @@ impl Client {
 
     /// A SteamVR setting's value, `None` when it could not be read.
     pub fn setting_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<bool> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> bool;
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32) -> bool;
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
         let _serial = settings_lock();
@@ -660,7 +671,7 @@ impl Client {
 
     /// A SteamVR setting's float: `None` when it could not be read, as an unset key with no default is not 0.
     pub fn setting_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<f32> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32) -> f32;
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32) -> f32;
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
         let _serial = settings_lock();
@@ -671,7 +682,7 @@ impl Client {
 
     /// Sets a SteamVR setting's float; whether it took.
     pub fn set_setting_float(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: f32) -> bool {
-        type F = unsafe extern "system" fn(*const i8, *const i8, f32, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, f32, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
         let _serial = settings_lock();
@@ -682,7 +693,7 @@ impl Client {
 
     /// A SteamVR setting's text: `None` when it has none.
     pub fn setting_string(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> Option<String> {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut std::ffi::c_char, u32, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut std::ffi::c_char, u32, *mut i32);
         let table = self.table(&self.settings_table, "IVRSettings_003").ok()?;
         let mut error = 0;
         let mut text = [0 as std::ffi::c_char; 2048];
@@ -699,7 +710,7 @@ impl Client {
 
     /// Sets a SteamVR setting's text; whether it took.
     pub fn set_setting_string(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: &std::ffi::CStr) -> bool {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *const i8, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *const c_char, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
         let _serial = settings_lock();
@@ -710,7 +721,7 @@ impl Client {
 
     /// Takes a SteamVR setting away; whether that worked.
     pub fn remove_setting(&self, section: &std::ffi::CStr, key: &std::ffi::CStr) -> bool {
-        type F = unsafe extern "system" fn(*const i8, *const i8, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
         let _serial = settings_lock();
@@ -721,7 +732,7 @@ impl Client {
 
     /// Sets a SteamVR setting; whether it took.
     pub fn set_setting_bool(&self, section: &std::ffi::CStr, key: &std::ffi::CStr, value: bool) -> bool {
-        type F = unsafe extern "system" fn(*const i8, *const i8, bool, *mut i32);
+        type F = unsafe extern "system" fn(*const c_char, *const c_char, bool, *mut i32);
         let Ok(table) = self.table(&self.settings_table, "IVRSettings_003") else { return false };
         let mut error = 0;
         let _serial = settings_lock();
@@ -1271,8 +1282,9 @@ mod tests {
     fn layouts_match_openvr() {
         assert_eq!(std::mem::size_of::<Pose>(), 80);
         assert_eq!(std::mem::size_of::<Matrix34>(), 48);
-        assert_eq!(std::mem::size_of::<Event>(), 64);
-        assert_eq!(std::mem::offset_of!(Event, data), 16);
+        // Linux's, from a program compiled there with Valve's openvr.h (2026-11-24: GCC 12, aarch64; LP64 as x86_64).
+        let (size, data) = if cfg!(target_os = "linux") { (60, 12) } else { (64, 16) };
+        assert_eq!((std::mem::size_of::<Event>(), std::mem::offset_of!(Event, data)), (size, data));
         assert_eq!(std::mem::offset_of!(Pose, tracking_result), 72);
         assert_eq!(std::mem::offset_of!(Pose, pose_is_valid), 76);
     }
@@ -1286,7 +1298,7 @@ mod tests {
         // One made for an overlay this process points at reads back as SteamVR's would.
         let made = Event::mouse_event(event::MOUSE_BUTTON_DOWN, 512.5, 3.0, 1);
         assert_eq!((made.event_type, made.mouse()), (event::MOUSE_BUTTON_DOWN, (512.5, 3.0, 1)));
-        assert_eq!(made.data, Event { data: [(512.5f32.to_bits() as u64) | ((3.0f32.to_bits() as u64) << 32), 1, 0, 0, 0, 0], ..Default::default() }.data);
+        assert_eq!({ made.data }, { Event { data: [(512.5f32.to_bits() as u64) | ((3.0f32.to_bits() as u64) << 32), 1, 0, 0, 0, 0], ..Default::default() }.data });
     }
 
     #[test]

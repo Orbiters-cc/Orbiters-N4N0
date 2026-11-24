@@ -512,8 +512,9 @@ pub struct LanVrchat {
 pub const VRCHAT_OSC_PORT: u16 = 9000;
 
 /// Whether VRChat can run on this computer. It has no Mac version: there the app talks with VRChat on another device of
-/// the network ([`crate::lan`]), and what needs VRChat on the same computer (Spout, SteamVR, its log) has nothing to read.
-pub const VRCHAT_RUNS_HERE: bool = !cfg!(target_os = "macos");
+/// the network ([`crate::lan`]), and what needs VRChat on the same computer (Spout, SteamVR, its log) has nothing to read. That
+/// VRChat runs here says nothing of Spout or SteamVR: those have names of their own ([`crate::here`]).
+pub const VRCHAT_RUNS_HERE: bool = crate::here::HERE.vrchat_runs;
 
 /// How a service and VRChat find each other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

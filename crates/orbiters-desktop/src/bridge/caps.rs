@@ -19,6 +19,7 @@ use serde_json::Value;
 pub enum Platform {
     Windows,
     Macos,
+    Linux,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,10 +82,16 @@ impl Capabilities {
         screenshot_needs_arrival: true,
     };
 
+    /// Linux: nothing, and the bridge is not offered there (`orbiters_core::here::Here::bridge`, the owner's decision): what still
+    /// asks is refused.
+    pub const LINUX: Self = Self { platform: Platform::Linux, ..Self::MAC };
+
     /// This computer's.
     pub fn here() -> Self {
         if cfg!(target_os = "macos") {
             Self::MAC
+        } else if cfg!(target_os = "linux") {
+            Self::LINUX
         } else {
             Self::WINDOWS
         }
@@ -98,6 +105,7 @@ impl Capabilities {
     /// out; one that only some arguments make impossible stays, and [`Capabilities::refusal`] answers those.
     pub fn offers(&self, name: &str) -> bool {
         match name {
+            _ if self.platform == Platform::Linux => false,
             "walk" | "turn" | "wear_avatar" | "aim_camera" => self.osc_input,
             "mouse" | "focus_game" => self.keys_and_mouse,
             "press" => self.osc_input || self.keys_and_mouse,
@@ -111,6 +119,13 @@ impl Capabilities {
 
     /// Why `name` with `args` cannot be done on this computer, before anything is done; `None` when it can.
     pub fn refusal(&self, name: &str, args: &Value) -> Option<Failure> {
+        if self.platform == Platform::Linux {
+            return Some(Failure::new(
+                "not_on_this_computer",
+                "The VRChat bridge is not available on Linux, so nothing was done.", // i18n: not shown (an AI client reads it in the tool's answer)
+                "Tell the person that the bridge works on Windows, and in part on a Mac.", // i18n: not shown (an AI client reads it in the tool's answer)
+            ));
+        }
         let missing: Option<&str> = match name {
             _ if !self.offers(name) => Some(match name {
                 "walk" | "turn" | "wear_avatar" | "aim_camera" => "OSC input into the game",
@@ -159,10 +174,10 @@ impl Capabilities {
     }
 
     fn platform_name(&self) -> &'static str {
-        if self.platform == Platform::Macos {
-            "VRChat on a Mac, under Obelisk's engine" // i18n: not shown (an AI client reads it)
-        } else {
-            "VRChat on Windows" // i18n: not shown (an AI client reads it)
+        match self.platform {
+            Platform::Macos => "VRChat on a Mac, under Obelisk's engine", // i18n: not shown (an AI client reads it)
+            Platform::Windows => "VRChat on Windows",                     // i18n: not shown (an AI client reads it)
+            Platform::Linux => "VRChat on Linux",                         // i18n: not shown (an AI client reads it)
         }
     }
 
@@ -188,6 +203,20 @@ impl Capabilities {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Off on Linux (the owner's decision): no tool is offered, and any call is refused before anything happens.
+    #[test]
+    fn linux_offers_nothing_and_refuses_everything() {
+        let linux = Capabilities::LINUX;
+        for name in ["get_state", "find_worlds", "go_to_world", "screenshot", "walk", "press", "close_vrchat", "unity_list_projects", "anything"] {
+            assert!(!linux.offers(name), "{name}");
+            assert_eq!(linux.refusal(name, &json!({})).map(|f| f.code), Some("not_on_this_computer"), "{name}");
+        }
+        assert!(!orbiters_core::here::Here::LINUX.bridge);
+        if cfg!(target_os = "linux") {
+            assert_eq!(Capabilities::here(), linux);
+        }
+    }
 
     #[test]
     fn windows_has_everything_and_refuses_nothing() {

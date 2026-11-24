@@ -193,7 +193,7 @@ impl super::Controller {
 
     /// Starts the thread, once what an earlier run left is back: nothing new is applied before that.
     pub(crate) fn start_booster(self: &Shared) {
-        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if !orbiters_core::here::HERE.steam_vr {
             return;
         }
         let ctl = self.clone();
@@ -415,6 +415,8 @@ fn open_folder(path: &std::path::Path) {
     let _ = std::process::Command::new("explorer").arg(path).spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = crate::linux::open::path(path);
 }
 
 /// A test build's small program using four busy threads and no GPU, under an allowlisted name so that step 1 has something to

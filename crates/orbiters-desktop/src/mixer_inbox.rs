@@ -198,7 +198,7 @@ pub fn send_splats(endpoint: &Endpoint, session: &Path, title: &str) -> anyhow::
 pub fn process_alive(pid: u32) -> bool {
     let mut system = sysinfo::System::new();
     let pid = sysinfo::Pid::from_u32(pid);
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, sysinfo::ProcessRefreshKind::nothing());
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, sysinfo::ProcessRefreshKind::nothing().without_tasks());
     system.process(pid).is_some()
 }
 

@@ -1,0 +1,11 @@
+{
+  "Sound is not recorded on Linux yet.": "O som ainda não é gravado no Linux.",
+  "Sound devices are not used on Linux yet.": "Os dispositivos de som ainda não são usados no Linux.",
+  "Nothing shows over VRChat on Linux yet.": "Nada aparece ainda sobre o VRChat no Linux.",
+  "Starting with your session is not there yet on Linux.": "Iniciar com a sua sessão ainda não está disponível no Linux.",
+  "Orbiters - N4N0 cannot start VRChat on Linux yet: start it from Steam.": "O Orbiters - N4N0 ainda não consegue iniciar o VRChat no Linux: inicie-o pela Steam.",
+  "Not there yet on Linux": "Ainda não disponível no Linux",
+  "Orbiters - N4N0 cannot read VRChat's camera on Linux yet. The test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures.": "O Orbiters - N4N0 ainda não consegue ler a câmera do VRChat no Linux. O padrão de teste grava uma imagem gerada pelo processo de captura, para testar todo o caminho. Ele aparece em Liberar espaço, não entre suas fotos.",
+  "One VRChat runs at a time here: quit it to start on another profile.": "Aqui só funciona um VRChat por vez: feche-o para iniciar em outro perfil.",
+  "Show its pictures in the file manager": "Mostrar as imagens dele no gerenciador de arquivos"
+}

@@ -71,9 +71,19 @@ const AGAIN_WITHIN: Duration = Duration::from_secs(60);
 const LOG_WITHIN: Duration = Duration::from_secs(90);
 /// A log nobody wrote in for this long is not that of a VRChat that runs.
 const LOG_STILL: Duration = Duration::from_secs(10 * 60);
+/// Why Home starts no VRChat where the app cannot ([`orbiters_core::here::Here::starts_vrchat`]).
+#[cfg(target_os = "linux")]
+pub const CANNOT_START: &str = super::linux_vrchat::NOT_YET;
+#[cfg(not(target_os = "linux"))]
+pub const CANNOT_START: &str = "";
+
 /// Why another profile does not start while VRChat runs on a Mac ([`orbiters_core::vrchat_launch::SEVERAL_HERE`]): Home says
 /// it under its Play button, and a press that comes anyway is told it.
-pub const ONE_GAME: &str = orbiters_i18n::mark("One VRChat runs at a time on a Mac: quit it to start on another profile.");
+pub const ONE_GAME: &str = if orbiters_core::here::LINUX {
+    orbiters_i18n::mark("One VRChat runs at a time here: quit it to start on another profile.")
+} else {
+    orbiters_i18n::mark("One VRChat runs at a time on a Mac: quit it to start on another profile.")
+};
 /// How long a Play asked for before VRChat was in Obelisk waits for it (its sign-in to Steam, then gigabytes to download).
 const PLAY_WHEN_READY_FOR: Duration = Duration::from_secs(60 * 60);
 
@@ -238,6 +248,12 @@ impl RealMachine {
         self.folder.clone().or_else(orbiters_core::paths::vrchat_log_dir)
     }
 
+    #[cfg(target_os = "linux")]
+    fn route_now() -> Route {
+        route(super::linux_vrchat::installed(), false)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn route_now() -> Route {
         let steam_has_vrchat = crate::bridge::win::steam_exe().and_then(|exe| exe.parent().map(|d| d.to_path_buf())).and_then(|steam| orbiters_core::vrchat_launch::vrchat_dir(&steam)).is_some();
         route(steam_has_vrchat, crate::bridge::win::vrchat_launcher().is_some())
@@ -705,7 +721,7 @@ fn still_born(pid: u32, birth: Option<(u64, u32)>) -> bool {
     {
         let _ = birth;
         let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]), true, sysinfo::ProcessRefreshKind::nothing());
+        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]), true, sysinfo::ProcessRefreshKind::nothing().without_tasks());
         system.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 }
@@ -995,6 +1011,23 @@ impl Machine for RealMachine {
         self.running_profiles().into_iter().map(|(pid, desktop, _)| (pid, desktop)).collect()
     }
 
+    #[cfg(target_os = "linux")]
+    fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        let vrchats = super::linux_vrchat::running();
+        let alive: Vec<(u32, u64)> = vrchats.iter().map(|p| (p.pid, p.started_s())).collect();
+        let mut lines = self.desktop.lock().unwrap();
+        let now = Instant::now();
+        let due = lines.due(&alive, now);
+        for p in vrchats.iter().filter(|p| due.contains(&p.pid)) {
+            lines.record(p.pid, p.started_s(), &p.args, now);
+        }
+        alive.iter().map(|(pid, _)| {
+            let (no_vr, profile) = lines.get(*pid);
+            (*pid, no_vr, profile)
+        }).collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
         // Names and start times only (no process is opened for them); the command line is read for VRChat's processes
         // alone: once each, and again a few times while Windows would not give it.
@@ -1031,14 +1064,22 @@ impl Machine for RealMachine {
         // Through Steam as a person does when Steam has VRChat; else VRChat's own launcher with the link first (as it
         // registers itself), the options after: never reordered, `-screen-fullscreen 0` stays a pair.
         match self.route(true) {
+            #[cfg(target_os = "linux")]
+            _ => super::linux_vrchat::start(args),
+            #[cfg(not(target_os = "linux"))]
             Route::Steam => crate::bridge::win::start_vrchat(args).map_err(|f| f.message),
+            #[cfg(not(target_os = "linux"))]
             Route::Launcher => crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message),
+            #[cfg(not(target_os = "linux"))]
             Route::NotInstalled => Err(tr("VRChat was not found on this computer. Install it from Steam, or start it once.").into()),
         }
     }
 
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
         // VRChat's own launch.exe with `--profile`: a process of its own every time (measured 2026-11-15, bridge).
+        #[cfg(target_os = "linux")]
+        return super::linux_vrchat::start_beside(args);
+        #[cfg(not(target_os = "linux"))]
         crate::bridge::win::start_vrchat_beside(args).map_err(|f| f.message)
     }
 
@@ -1083,7 +1124,12 @@ fn saved_window() -> Option<SavedWindow> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn saved_window() -> Option<SavedWindow> {
+    super::linux_vrchat::saved_window()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn saved_window() -> Option<SavedWindow> {
     None
 }

@@ -42,7 +42,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # The banner studio turns ICC-tagged pictures into sRGB (verify-r22 Major 10): the crate image already builds on.
 moxcms = "0.8"
 rosc = { workspace = true }
-ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
+# Its TLS is orbiters-core's, per platform (`orbiters_core::http_tls`).
+ureq = { version = "3", default-features = false, features = ["json", "gzip"] }
 rfd = "0.17"
 sysinfo = "0.37"
 regex = "1.13"
@@ -58,10 +59,13 @@ windows = { workspace = true, features = ["Win32_Graphics_Dwm", "Win32_Graphics_
 raw-window-handle = "0.6"
 tray-icon = "0.26"
 
+# Waiting on a pipe (controller/obelisk_cli.rs); on the Mac, statfs's MNT_LOCAL: whether a folder is on a disk of this Mac
+# (bridge/projects.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.26"
-# statfs's MNT_LOCAL: whether a folder is on a disk of this Mac (bridge/projects.rs).
-libc = "0.2"
 # eframe's: the window process's activation policy (window.rs).
 winit = { version = "0.30", default-features = false }
 # eframe's: the window itself, to ask macOS of it (mac_cover.rs).

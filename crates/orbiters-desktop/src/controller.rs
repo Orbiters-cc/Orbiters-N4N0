@@ -527,6 +527,8 @@ mod groups_ledger;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
+#[cfg(target_os = "linux")]
+mod linux_vrchat;
 pub mod launcher;
 mod obelisk_cli;
 mod identity;
@@ -3160,14 +3162,19 @@ fn move_to_bin(dir: &Path) -> Result<(), trash::Error> {
 
 /// Opens a folder in the platform's file manager.
 pub fn open_path(dir: &Path) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    let mut cmd = std::process::Command::new("explorer");
     #[cfg(target_os = "linux")]
-    let mut cmd = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    cmd.arg(dir).spawn()?;
-    Ok(())
+    {
+        crate::linux::open::path(dir)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        let mut cmd = std::process::Command::new("explorer");
+        #[cfg(target_os = "macos")]
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(dir).spawn()?;
+        Ok(())
+    }
 }
 
 fn inside(root: &Path, dir: &Path) -> bool {
@@ -3253,20 +3260,11 @@ fn refresh_storage(ctl: &Shared) {
     });
 }
 
-/// Free bytes on the disk that holds `dir`: one question to Windows for that folder, not a list of every volume
-/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, another system).
+/// Free bytes on the disk that holds `dir`: one question to the system for that folder, not a list of every volume
+/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, a Mac).
 fn free_space(dir: &Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
-        }
-        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
-        let mut available = 0u64;
-        // SAFETY: a NUL-terminated path and one out-parameter; the totals are not asked for.
-        if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
+    if cfg!(not(target_os = "macos")) {
+        if let Some(available) = orbiters_core::disk::free_space(dir) {
             return Some(available);
         }
     }
@@ -3358,6 +3356,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
+            #[cfg(not(target_os = "linux"))]
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut storage_sweep = StorageSweep::default();
@@ -3372,9 +3371,16 @@ fn spawn_watchers(ctl: Shared) {
                     // Names only: the default refresh also reads every process's command line and environment. On a Mac
                     // nothing of VRChat or SteamVR runs under those names (its VRChat is the engine's, known by its
                     // records): a look now and then.
+                    // On Linux from /proc: Wine's threads have VRChat's name too, and sysinfo counts threads.
+                    #[cfg(target_os = "linux")]
+                    let system = orbiters_core::processes::all();
+                    #[cfg(target_os = "linux")]
+                    let named = |names: &[&str]| system.iter().find(|p| names.iter().any(|n| p.is(n))).map(|p| p.pid);
+                    #[cfg(not(target_os = "linux"))]
                     if orbiters_core::osc::VRCHAT_RUNS_HERE || tick.is_multiple_of(30) {
                         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
                     }
+                    #[cfg(not(target_os = "linux"))]
                     let named = |names: &[&str]| {
                         system
                             .processes()

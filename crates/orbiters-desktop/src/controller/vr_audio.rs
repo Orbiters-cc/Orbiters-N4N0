@@ -410,7 +410,7 @@ impl Controller {
 
 /// The service's thread: a turn every second while it watches the defaults closely, every two otherwise.
 pub fn run(ctl: Shared) {
-    if cfg!(target_os = "macos") {
+    if !orbiters_core::here::HERE.steam_vr || !orbiters_core::here::HERE.sound {
         return;
     }
     let path = saved_file();

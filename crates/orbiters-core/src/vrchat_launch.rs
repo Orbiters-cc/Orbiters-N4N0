@@ -13,11 +13,11 @@ pub use crate::launcher::LaunchMode;
 
 /// Whether this computer can play in VR. A Mac has no SteamVR: VRChat there (through Obelisk, [`crate::obelisk`]) is
 /// the desktop game, and the Play buttons are one.
-pub const VR_HERE: bool = !cfg!(target_os = "macos");
+pub const VR_HERE: bool = crate::here::HERE.play_vr;
 
 /// Whether VRChats run side by side on this computer, each on its own profile. On a Mac the engine runs one game at a
 /// time: the profile is chosen for that one, and the others wait until it was quit.
-pub const SEVERAL_HERE: bool = !cfg!(target_os = "macos");
+pub const SEVERAL_HERE: bool = crate::here::HERE.several_games;
 
 /// Steam's id of VRChat.
 pub const STEAM_APP: &str = "438100";
@@ -319,6 +319,16 @@ pub fn profile_of(args: &[String]) -> u32 {
 
 /// The Steam library folders that hold VRChat, from Steam's `steamapps/libraryfolders.vdf`.
 pub fn libraries_with_vrchat(vdf: &str) -> Vec<PathBuf> {
+    read_libraries(vdf).into_iter().filter(|(_, has_vrchat)| *has_vrchat).map(|(path, _)| path).collect()
+}
+
+/// Every Steam library folder `libraryfolders.vdf` names.
+pub fn libraries(vdf: &str) -> Vec<PathBuf> {
+    read_libraries(vdf).into_iter().map(|(path, _)| path).collect()
+}
+
+/// Every library of the file, and whether it holds VRChat.
+fn read_libraries(vdf: &str) -> Vec<(PathBuf, bool)> {
     // The file is nested `"key" "value"` pairs and `"key" { … }` blocks; a library is a block with a "path" and an
     // "apps" block whose keys are app ids.
     let tokens: Vec<String> = {
@@ -360,8 +370,8 @@ pub fn libraries_with_vrchat(vdf: &str) -> Vec<PathBuf> {
                     in_apps = false;
                 }
                 if depth == 2 {
-                    if let (Some(p), true) = (path.take(), has_vrchat) {
-                        found.push(PathBuf::from(p));
+                    if let Some(p) = path.take() {
+                        found.push((PathBuf::from(p), has_vrchat));
                     }
                     has_vrchat = false;
                 }

@@ -1243,10 +1243,10 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     // No QR code here (REQUEST15 item 2): reading one needs VRChat's camera open already, so it is a tile beside the camera, and only there.
     small.push((Action::Page(Target::Suggest), icons::CHAT_TEARDROP_TEXT, tr("Suggest")));
     // What the headset shows, or VRChat's window on the desktop (REQUEST15 item 2), is read on this computer.
-    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+    if orbiters_core::here::HERE.reads() {
         small.push((Action::Translate, icons::GLOBE, tr("Translation")));
     }
-    if orbiters_core::osc::VRCHAT_RUNS_HERE {
+    if orbiters_core::here::HERE.steam_vr {
         small.push((Action::Booster, icons::GAUGE, tr("FPS booster")));
     }
     // Only while the worn avatar has the gun: no page that could do nothing.
@@ -5797,7 +5797,7 @@ mod tests {
             let call = sheet_items(Sheet::All, &soon).into_iter().find(|i| i.action == Action::Page(Target::Call));
             // Beside it, REQUEST15 item 2 stays as merged: Translation on the desktop too, no QR code tile.
             let names: Vec<Action> = sheet_items(Sheet::All, &soon).into_iter().map(|i| i.action).collect();
-            assert_eq!(names.contains(&Action::Translate), orbiters_core::osc::VRCHAT_RUNS_HERE, "desktop {desktop}");
+            assert_eq!(names.contains(&Action::Translate), orbiters_core::here::HERE.reads(), "desktop {desktop}");
             assert!(!names.contains(&Action::Page(Target::Qr)), "desktop {desktop}");
             assert!(matches!(call.map(|i| i.look), Some(Look::Small { label: "Call", .. })), "desktop {desktop}");
             assert_eq!(tile_line(Action::Page(Target::Call), &soon).as_deref(), Some("Coming soon"));
@@ -5855,7 +5855,7 @@ mod tests {
         let actions = |f: &Facts| sheet_items(Sheet::All, f).iter().map(|i| i.action).collect::<Vec<_>>();
         for desktop in [true, false] {
             let got = actions(&Facts { desktop, sheet: Some(Sheet::All), ..facts() });
-            assert_eq!(got.contains(&Action::Translate), orbiters_core::osc::VRCHAT_RUNS_HERE, "desktop {desktop}");
+            assert_eq!(got.contains(&Action::Translate), orbiters_core::here::HERE.reads(), "desktop {desktop}");
             assert!(!got.contains(&Action::Page(Target::Qr)), "desktop {desktop}");
         }
         let camera: Vec<Action> = items(Zone::CameraQr, Zone::CameraQr.units().size(), &facts()).into_iter().map(|i| i.action).collect();

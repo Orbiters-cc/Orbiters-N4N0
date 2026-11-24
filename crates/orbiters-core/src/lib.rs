@@ -7,6 +7,7 @@ pub mod call;
 pub mod cleanup;
 pub mod clock;
 pub mod community;
+pub mod disk;
 mod dpapi;
 pub mod explicit;
 pub mod explorer;
@@ -14,6 +15,7 @@ pub mod picture;
 pub mod features;
 pub mod gallery_talk;
 pub mod groups;
+pub mod here;
 pub mod keyframes;
 pub mod lan;
 pub mod launcher;
@@ -33,7 +35,9 @@ pub mod panic_log;
 pub mod paths;
 pub mod png_meta;
 pub mod pose;
+pub mod processes;
 pub mod protocol;
+pub mod proton;
 pub mod reconstruction;
 pub mod search;
 pub mod settings;
@@ -54,9 +58,10 @@ pub use orbiters_contracts as contracts;
 
 /// Ends this worker when the service that started it goes, even killed or crashed. On Windows the service's job object
 /// does this; the Mac has no such thing, so a worker watches for it: its
-/// parent changes when the service is gone. A worker left behind would keep the GPU or the microphone.
+/// parent changes when the service is gone. A worker left behind would keep the GPU or the microphone. (Linux has `PR_SET_PDEATHSIG`,
+/// which also ends a worker when the *thread* that started it ends, as the service's short ones do: it watches too.)
 pub fn leave_with_parent() {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         extern "C" {
             fn getppid() -> i32;
@@ -77,9 +82,9 @@ pub fn leave_with_parent() {
 /// program at start (`orbiters_version::set(env!("ORBITERS_VERSION"))`), not compiled in here: see `orbiters-version`.
 pub use orbiters_version::get as app_version;
 
-/// The TLS the HTTP clients use: on the desktop, ureq's native TLS (Windows' SChannel, certificates checked against
-/// Windows' store); on Android, rustls with ring (native TLS would mean OpenSSL there), checked against Mozilla's roots
-/// (webpki-roots: the platform's verifier would need the app's Java context). Each build carries its own platform's
+/// The TLS the HTTP clients use: on Windows and the Mac, ureq's native TLS (Windows' SChannel, certificates checked against
+/// Windows' store); on Linux and Android, rustls with ring (native TLS would mean OpenSSL there, another one on each
+/// distribution), checked against Mozilla's roots (webpki-roots: Android's verifier would need the app's Java context). Each build carries its own platform's
 /// alone: an agent left on another provider panics at its first `https` request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TlsStack {
@@ -88,7 +93,7 @@ pub enum TlsStack {
 }
 
 /// This platform's TLS.
-pub const TLS_STACK: TlsStack = if cfg!(target_os = "android") { TlsStack::Rustls } else { TlsStack::Native };
+pub const TLS_STACK: TlsStack = if cfg!(any(target_os = "android", target_os = "linux")) { TlsStack::Rustls } else { TlsStack::Native };
 
 /// The TLS configuration of `stack`.
 pub fn tls_config(stack: TlsStack) -> ureq::tls::TlsConfig {
@@ -445,7 +450,7 @@ mod tests {
     #[test]
     fn each_platform_has_its_own_tls() {
         use ureq::tls::{RootCerts, TlsProvider};
-        assert_eq!(TLS_STACK, if cfg!(target_os = "android") { TlsStack::Rustls } else { TlsStack::Native });
+        assert_eq!(TLS_STACK, if cfg!(any(target_os = "android", target_os = "linux")) { TlsStack::Rustls } else { TlsStack::Native });
         let native = tls_config(TlsStack::Native);
         assert_eq!(native.provider(), TlsProvider::NativeTls);
         assert!(matches!(native.root_certs(), RootCerts::PlatformVerifier));

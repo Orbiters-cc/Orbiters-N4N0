@@ -24,6 +24,8 @@ mod idle_frames;
 mod ipc;
 mod keys;
 mod language;
+#[cfg(target_os = "linux")]
+mod linux;
 mod link_between;
 mod link_smoke;
 #[cfg(target_os = "macos")]

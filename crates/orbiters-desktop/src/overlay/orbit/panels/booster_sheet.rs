@@ -534,7 +534,7 @@ mod tests {
     fn it_has_a_tile_in_all_tools_before_settings() {
         let tiles = accessories(&Facts::default());
         let at = |action: Action| tiles.iter().position(|t| t.0 == action);
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.steam_vr {
             assert_eq!(at(Action::Booster).unwrap() + 1, at(Action::Settings).unwrap());
         }
         let items = sheet_items(Sheet::All, &Facts { sheet: Some(Sheet::All), ..Facts::default() });

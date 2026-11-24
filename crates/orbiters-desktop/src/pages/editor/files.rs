@@ -493,9 +493,9 @@ pub fn reveal(path: &Path) -> anyhow::Result<()> {
         std::process::Command::new("open").arg("-R").arg(path).spawn()?;
         Ok(())
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
-        crate::controller::open_path(path.parent().unwrap_or(path))
+        crate::linux::open::reveal(path)
     }
 }
 

@@ -227,17 +227,20 @@ since and whoever signs in).
   place, or a VRChat on another profile, keeps it too. An invite's card comes back.
 - **To a VRChat that runs**, with several profiles: its link only while its own log proves the account at that moment (read anew, to
   its end, once the pipe is open and its process known), and only to the process it was proven for; else the account's own invite.
-  A VRChat that cannot be told from the assistant's (`travel::Side::Unknown`) takes that invite too.
+  A VRChat that cannot be told from the assistant's (`travel::Side::Unknown`) takes that invite too. On a Mac, whose only way to a
+  game is that invite, nothing is sent into one whose own log says another account (the invite would reach no game here): Home says so
+  and the place is kept (**Try again**); where whose it is is not known, the invite goes.
 - A restart after a lost picture, Go there, the first start after the set-up and a start beside the assistant's are the same rule.
   Join into a game that runs (`JoinRunning`, `AcceptInviteRunning`) starts none and claims none.
 
 **Evidence** is a log made at or after its process's start (both as precisely as the system keeps them: a log of the same second may
-be from before) and no other's, read to its end: none of two that could be, one from
-before, one cut shorter, one that cannot be read, a later sign-in line that names nobody or that VRChat did not write itself, a look
-that is over 15 s old, are "not known". **Not kept apart by account** (deliberately; widening
-it is the owner's decision): the visit history and every list of it, captures and their places, whether a capture's instance is still
-open, the background presence, uploads, and Orbiters' own account's invites are as they were before profiles. A place taken from them
-goes to VRChat by the rule above, for the account that presses it.
+be from before) and no other's, of those that run or were seen here to run beside it (`vrchats::Seen`: a log in doubt between two
+stays so when one of them ends), read to its end: none of two that could be, one from before, one cut shorter, one that cannot be
+read, a later sign-in line that names nobody or that VRChat did not write itself, a look that is over 15 s old, are "not known".
+(What is only shown of a VRChat, its account's name and its world, may come from a log made up to five seconds before it.) **Not
+kept apart by account** (deliberately; widening it is the owner's decision): the visit history and every list of it, captures and
+their places, whether a capture's instance is still open, the background presence, uploads, and Orbiters' own account's invites are
+as they were before profiles. A place taken from them goes to VRChat by the rule above, for the account that presses it.
 
 **On a Mac every start is made with exactly its own arguments** (`steam play --no-saved-arguments`, obelisk-cli 0.1.13): a
 `--profile` saved in the engine's launch settings reaches no game of N4N0's. **The bridge's start on a Mac** carries its private

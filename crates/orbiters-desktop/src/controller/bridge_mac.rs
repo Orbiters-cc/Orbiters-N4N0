@@ -24,7 +24,7 @@ use orbiters_core::vrchat_log::LogWatcher;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// How much of the engine's log is read at one look, at most: the rest is read at the next looks, never skipped.
 const ENGINE_LOG_LOOK: usize = 8 << 20;
@@ -224,22 +224,33 @@ fn file_key(meta: &std::fs::Metadata) -> (u64, u64) {
     (meta.dev(), meta.ino())
 }
 
-/// The log VRChat began after `since` whose own argument list holds `link`: this start's, and no other VRChat's.
-pub(crate) fn log_of_launch(dir: &Path, since: SystemTime, link: &str) -> Option<(PathBuf, Vec<String>)> {
-    let mut logs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-        .filter(|(modified, _)| *modified + Duration::from_secs(2) >= since)
-        .collect();
-    logs.sort();
-    logs.into_iter().rev().find_map(|(_, path)| {
-        let mut head = String::new();
-        std::fs::File::open(&path).ok()?.take(256 * 1024).read_to_string(&mut head).ok();
-        let args = crate::bridge::sessions::complete_args(&head)?;
-        args.iter().any(|a| a == link).then_some((path, args))
-    })
+/// A start's own VRChat log, held to be the very file it was found as.
+#[derive(Debug)]
+pub(crate) struct LaunchLog {
+    pub path: PathBuf,
+    pub args: Vec<String>,
+    pub key: (u64, u64),
+    pub len: u64,
+}
+
+/// The one log VRChat made at or after the birth of its launcher (seconds, microseconds) whose own argument list holds `link`:
+/// this start's. One from before it is another start's, however lately it was written in; of two, neither is known to be it.
+pub(crate) fn log_of_launch(dir: &Path, birth: (u64, u32), link: &str) -> Option<LaunchLog> {
+    let born = super::incident::born_at(birth);
+    let mut found = std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("output_log_")).filter_map(|e| {
+        let path = e.path();
+        let mut file = std::fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        if meta.created().ok()? < born {
+            return None;
+        }
+        let mut head = Vec::new();
+        (&mut file).take(256 * 1024).read_to_end(&mut head).ok()?;
+        let args = crate::bridge::sessions::complete_args(&String::from_utf8_lossy(&head))?;
+        args.iter().any(|a| a == link).then(|| LaunchLog { path, args, key: file_key(&meta), len: meta.len() })
+    });
+    let one = found.next()?;
+    found.next().is_none().then_some(one)
 }
 
 /// Whether the log's world state says the local player arrived in the destination of the launch link `link` (its world
@@ -319,7 +330,6 @@ pub(crate) fn drawing(continuous: Option<bool>, shown_grew: Option<Instant>, pre
 struct Mine {
     /// The shared start's launch id of the bridge's start, when it was asked, and its launch link.
     launch: Option<u64>,
-    at: Option<SystemTime>,
     link: Option<String>,
     /// The engine's log file at the launch (the previous start's): the one found after it is this start's.
     engine_before: Option<(u64, u64)>,
@@ -380,13 +390,16 @@ pub(super) struct MacGame {
     mine: Mutex<Mine>,
     /// The shared start reserved by [`Game::admit_start`] for the next launch, until it is made or given back.
     reserved: Mutex<Option<u64>>,
+    /// The VRChat account (its user id) that start was admitted for: its instance is made with that one's session, and launched
+    /// for that one, or not at all.
+    owner: Mutex<Option<String>>,
     /// Another's VRChat as it was last looked for, and when.
     others: Mutex<Option<(Instant, Option<u32>)>>,
 }
 
 impl MacGame {
     pub(super) fn new(ctl: Weak<Controller>, exe: PathBuf) -> Self {
-        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), others: Mutex::default() }
+        Self { real: RealGame::new(ctl.clone(), exe), ctl, mine: Mutex::default(), reserved: Mutex::default(), owner: Mutex::default(), others: Mutex::default() }
     }
 
     fn ctl(&self) -> Result<Shared, Failure> {
@@ -476,15 +489,13 @@ impl MacGame {
                 (Some(key), Some(now)) if log_continues(key, mine.log_len, now) => mine.log_len = now.1,
                 _ => mine.lose_log(),
             }
-        } else if let (Some(at), Some(link)) = (mine.at, mine.link.clone()) {
-            if let Some((log, args)) = log_of_launch(&obelisk::vrchat_log_dir(library), at, &link) {
-                if let Ok(meta) = std::fs::metadata(&log) {
-                    mine.watcher = Some(LogWatcher::of_file(log.clone()));
-                    mine.log_key = Some(file_key(&meta));
-                    mine.log_len = meta.len();
-                    mine.log = Some(log);
-                    mine.args = Some(args);
-                }
+        } else if let (Some(birth), Some(link)) = (mine.ident.as_ref().filter(|i| i.launcher == launcher).map(|i| i.birth), mine.link.clone()) {
+            if let Some(log) = log_of_launch(&obelisk::vrchat_log_dir(library), birth, &link) {
+                mine.watcher = Some(LogWatcher::of_file(log.path.clone()));
+                mine.log_key = Some(log.key);
+                mine.log_len = log.len;
+                mine.log = Some(log.path);
+                mine.args = Some(log.args);
             }
         }
         if let Some(watcher) = mine.watcher.as_mut() {
@@ -751,8 +762,17 @@ impl Game for MacGame {
         None
     }
 
+    /// Made with the session of the account the start was admitted for, checked on the hold that asks: another's by then makes
+    /// nothing.
     fn create_private_instance(&self, world: &str, region: &str) -> Result<String, Failure> {
-        self.real.create_private_instance(world, region)
+        let ctl = self.ctl()?;
+        let owner = self.owner.lock().unwrap().clone().ok_or_else(account_changed)?;
+        let source = ctl.vrchat_source();
+        // (Whose session it is, is checked by `personal` on the hold that asks.)
+        source.personal(&owner, || true, |c| c.create_private_instance(world, region)).map_err(|e| match e {
+            orbiters_core::vrchat_api::Error::Unauthorized if signed_in(&ctl).as_deref() != Some(owner.as_str()) => account_changed(),
+            e => super::bridge_game::api_failure(e.into(), "making the instance"), // i18n: not shown (an AI client reads it)
+        })
     }
 
     fn find_worlds(&self, find: &Find, page: usize) -> Result<WorldPage, Failure> {
@@ -769,14 +789,15 @@ impl Game for MacGame {
         let _started = ctl.launcher_started_lock();
         // What tells a drawing game from a frozen window is the program's (its records' `shown`): no start without it.
         cli_fit(mac)?;
-        own_account(&ctl, &machine)?;
+        // The account its instance is of: the one it was made for (a resumed one's too), still the one signed in.
+        let owner = owner_of(&plan.instance).ok_or_else(account_changed)?;
+        own_account(&ctl, &machine, &owner)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
-        let at = SystemTime::now();
         let token = self.reserved.lock().unwrap().take();
         match mac.start_launch_reserved(&plan.args(), token) {
             Ok(id) => {
-                *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_before, ..Default::default() };
+                *self.mine.lock().unwrap() = Mine { launch: Some(id), link: Some(link), engine_before, ..Default::default() };
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Wait(wait)) => Err(start_wait_failure(wait)),
@@ -792,14 +813,17 @@ impl Game for MacGame {
         let Some(mac) = machine.as_mac() else { return Ok(()) };
         // The program must have what the bridge relies on before anything is made for a start.
         cli_fit(mac)?;
-        // Nor a private instance for a game that is not known to be its account's.
-        own_account(&ctl, &machine)?;
+        // Nor a private instance for nobody's account, nor for a game it would not go to with its start.
+        *self.owner.lock().unwrap() = None;
+        let owner = signed_in(&ctl).ok_or_else(account_changed)?;
+        own_account(&ctl, &machine, &owner)?;
         self.release_start();
         let own = self.mine.lock().unwrap().launch.filter(|_| own_running);
         // Reserved, not only looked at: from here no other start (Home's) is made until this one is or is given back.
         match mac.play().reserve(mac.library(), own) {
             Ok(token) => {
                 *self.reserved.lock().unwrap() = Some(token);
+                *self.owner.lock().unwrap() = Some(owner);
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Busy) => Err(Failure::new("vrchat_starting", "A VRChat is starting already on this Mac (from Orbiters' Home, or another start), so no instance was made.", "Wait a minute, then call get_state.")), // i18n: not shown (an AI client reads it)
@@ -1065,16 +1089,39 @@ fn records_failure(trouble: &super::obelisk_cli::Trouble) -> Failure {
     }
 }
 
-/// The bridge's private instances are the account's signed in in the app: they go to a VRChat proven to be that account's only
-/// (the rule Home's starts are held to, `vrchat_launch::handing`).
-fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>) -> Result<(), Failure> {
-    if ctl.launcher_is_own(machine.as_ref(), 0) {
+/// The VRChat account signed in in the app (its user id).
+fn signed_in(ctl: &super::Controller) -> Option<String> {
+    ctl.vrchat_session().map(|session| session.by.user)
+}
+
+/// The VRChat account a private instance of the bridge's is of, as its id says.
+fn owner_of(instance: &str) -> Option<String> {
+    let owner = instance.split('~').find_map(|tag| tag.strip_prefix("private(")?.strip_suffix(')'))?;
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn account_changed() -> Failure {
+    Failure::new(
+        "account_changed",
+        "The VRChat account signed in in Orbiters - N4N0 is not the one this private instance is made for, so nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Call get_state, then go_to_world again.", // i18n: not shown
+    )
+}
+
+/// The bridge's private instances are the account's signed in in the app: they go with a start (the rule Home's starts are held
+/// to, `vrchat_launch::way`), which needs a Mac with one VRChat profile. Where there are several, a private place is delivered
+/// after the start, as an invite a person takes in the game: there is nobody to take the bridge's.
+fn own_account(ctl: &super::Controller, machine: &std::sync::Arc<dyn super::launcher::Machine>, owner: &str) -> Result<(), Failure> {
+    if signed_in(ctl).as_deref() != Some(owner) {
+        return Err(account_changed());
+    }
+    if ctl.launcher_bridge_way(machine.as_ref(), owner) == orbiters_core::vrchat_launch::Way::Direct {
         return Ok(());
     }
     Err(Failure::new(
-        "game_account_unknown",
-        "VRChat's default profile on this Mac is not known to be signed in with the VRChat account signed in in Orbiters - N4N0, so no private instance goes to it.", // i18n: not shown (an AI client reads it)
-        "Ask the person to press Play on Home on profile 0, without a place, and to sign in there with that account once; then try again.", // i18n: not shown
+        "several_profiles",
+        "Several VRChat profiles are used on this Mac: a private instance goes to no VRChat that has not said whose account is signed in, so it goes with no start of the bridge's. Nothing was made or started.", // i18n: not shown (an AI client reads it)
+        "Tell the person: they can go to a private place from Orbiters - N4N0's Home, which starts VRChat first and invites them once it is proven to be their account's.", // i18n: not shown
     ))
 }
 
@@ -1086,13 +1133,15 @@ fn not_here() -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     #[test]
     fn the_start_s_own_log_is_the_one_that_names_its_link() {
         let dir = std::env::temp_dir().join(format!("orbiters-mac-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let since = SystemTime::now() - Duration::from_secs(1);
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let (born, later) = (((now.as_secs() - 1), 0), (now.as_secs() + 60, 0));
         let link = "vrchat://launch?ref=orbiters.cc&id=wrld_1:2~private(usr_1)~region(eu)~nonce(n)";
         let head = |args: &[&str]| {
             let mut text = format!("2026.11.22 20:45:07 Debug      -  Launching with args: {}\n", args.len());
@@ -1104,11 +1153,20 @@ mod tests {
         // As VRChat under the engine wrote it on 2026-11-22: the exe, Steam's --no-vr, then ours in order.
         std::fs::write(dir.join("output_log_2026-11-22_20-45-03.txt"), head(&["Z:\\opt\\game\\VRChat.exe", "--no-vr", "-screen-fullscreen", "0", link])).unwrap();
         std::fs::write(dir.join("output_log_2026-11-22_20-50-00.txt"), head(&["Z:\\opt\\game\\VRChat.exe", "--no-vr"])).unwrap();
-        let (log, args) = log_of_launch(&dir, since, link).expect("its own log");
-        assert!(log.ends_with("output_log_2026-11-22_20-45-03.txt"));
-        assert_eq!(args.last().map(String::as_str), Some(link));
-        assert_eq!(log_of_launch(&dir, since, "vrchat://launch?ref=orbiters.cc&id=wrld_1:3"), None, "a log naming another instance is not this start's");
-        assert_eq!(log_of_launch(&dir, SystemTime::now() + Duration::from_secs(60), link), None, "a log from before the start is not this start's");
+        let log = log_of_launch(&dir, born, link).expect("its own log");
+        assert!(log.path.ends_with("output_log_2026-11-22_20-45-03.txt"));
+        assert_eq!(log.args.last().map(String::as_str), Some(link));
+        assert!(log_of_launch(&dir, born, "vrchat://launch?ref=orbiters.cc&id=wrld_1:3").is_none(), "a log naming another instance is not this start's");
+        // A resumed link: an earlier start's log that names it, written in just now, was made before this launcher was born.
+        let own = log.path.clone();
+        std::fs::File::options().append(true).open(&own).unwrap().set_modified(SystemTime::now() + Duration::from_secs(120)).unwrap();
+        assert!(log_of_launch(&dir, later, link).is_none(), "a log from before the start is not this start's");
+        // Two that name it: neither is known to be this start's.
+        let second = dir.join("output_log_2026-11-22_20-55-00.txt");
+        std::fs::write(&second, head(&["Z:\\opt\\game\\VRChat.exe", link])).unwrap();
+        assert!(log_of_launch(&dir, born, link).is_none());
+        std::fs::remove_file(&second).unwrap();
+        assert!(log_of_launch(&dir, born, link).is_some());
         let _ = std::fs::remove_dir_all(&dir);
         // An older program is never asked to quit without the session (it would quit whatever game runs).
         assert_eq!(quit_command(Some("0.1.5"), "6da7c40d").unwrap(), ["steam", "quit", "438100", "--session", "6da7c40d"]);
@@ -1117,10 +1175,38 @@ mod tests {
         assert_eq!(quit_command(None, "6da7c40d").unwrap_err().code, "close_failed");
         assert!(version_at_least("0.1.3", CLI_SESSION_QUIT) && version_at_least("0.2.0", CLI_SESSION_QUIT));
         assert!(!version_at_least("0.1.1", CLI_SESSION_QUIT) && !version_at_least("x", CLI_SESSION_QUIT) && !version_at_least("0.1.x", CLI_SESSION_QUIT));
-        assert!(version_at_least("0.1.12", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.11", CLI_LEAST));
+        assert!(version_at_least("0.1.13", CLI_LEAST) && version_at_least("0.2.0", CLI_LEAST) && !version_at_least("0.1.12", CLI_LEAST));
         assert!(version_at_least("0.1.5", CLI_SHOWN_FRAMES) && !version_at_least("0.1.4", CLI_SHOWN_FRAMES));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/obelisk-cli-0.1.5-arm64/obelisk-cli")).as_deref(), Some("0.1.5"));
         assert_eq!(program_version(Path::new("/T/obelisk-cli/other/obelisk-cli")), None);
+    }
+
+    /// R4 and R1 (the verifier's case): the account a start was admitted for is the one its instance is made with and launched for,
+    /// and no other: with another signed in by then, nothing is made and nothing starts; nor for a resumed instance of another's.
+    /// Where there are several profiles no start of the bridge's carries its place at all.
+    #[test]
+    fn a_bridge_s_instance_is_of_the_account_it_was_admitted_for() {
+        assert_eq!(owner_of("11~private(usr_x)~region(eu)~nonce(a)").as_deref(), Some("usr_x"));
+        assert_eq!((owner_of("11~region(eu)"), owner_of("11~friends(usr_x)"), owner_of("11~private()")), (None, None, None));
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let machine = ctl.launcher_machine_now();
+        let code = |owner: &str| own_account(&ctl, &machine, owner).err().map(|f| f.code);
+        assert_eq!(code("usr_test"), Some("account_changed"), "nobody signed in");
+        let created = |owner: &str| serde_json::json!({"worldId": WORLD, "instanceId": format!("11~private({owner})~region(eu)~nonce(a)"), "type": "private", "ownerId": owner, "region": "eu"});
+        const WORLD: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
+        let (_, calls) = ctl.test_vrchat(vec![(200, created("usr_test")), (200, created("usr_test"))]);
+        assert_eq!((code("usr_test"), code("usr_x")), (None, Some("account_changed")));
+        // Admitted for X; by now the one signed in is another: nothing is asked of VRChat.
+        let game = MacGame::new(std::sync::Arc::downgrade(&ctl), PathBuf::new());
+        assert_eq!(game.create_private_instance(WORLD, "eu").unwrap_err().code, "account_changed", "admitted for nobody");
+        *game.owner.lock().unwrap() = Some("usr_x".into());
+        assert_eq!(game.create_private_instance(WORLD, "eu").unwrap_err().code, "account_changed");
+        assert!(calls.lock().unwrap().is_empty());
+        *game.owner.lock().unwrap() = Some("usr_test".into());
+        let _ = game.create_private_instance(WORLD, "eu");
+        assert_eq!(calls.lock().unwrap().iter().filter(|(method, _)| method == "POST").count(), 1);
+        ctl.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
+        assert_eq!((code("usr_test"), code("usr_x")), (Some("several_profiles"), Some("account_changed")));
     }
 
     /// The verifier's cases: the launcher is the record's only with its recorded birth (a reused process number is not),

@@ -101,8 +101,8 @@ pub enum Driver {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VrchatRun {
     pub pid: u32,
-    /// When its process started (Unix seconds; 0 when Windows would not say).
-    pub started_s: u64,
+    /// When its process started (Unix nanoseconds; 0 when Windows would not say).
+    pub started_ns: u64,
     /// VRChat's `--profile` (0 without one).
     pub profile: u32,
     /// Whether `profile` is known: its log said its arguments, or the bridge started it on that profile.
@@ -114,6 +114,10 @@ pub struct VrchatRun {
     pub query: Option<SocketAddr>,
     /// The account signed in (id, display name).
     pub account: Option<(String, String)>,
+    /// Whether that is who is signed in now, for certain (the last its log says, read to its end).
+    pub account_sure: bool,
+    /// Whether `log` is its own for certain: made at or after its start, and no other VRChat's.
+    pub log_sure: bool,
     /// Its log says nobody is signed in now.
     pub signed_out: bool,
     /// Its command line names exactly one profile (or none: the default one).
@@ -134,7 +138,7 @@ pub const VRCHAT_OSC_IN: u16 = 9000;
 pub fn default_target(runs: &[VrchatRun]) -> Option<&VrchatRun> {
     runs.iter()
         .filter(|r| r.driver == Driver::Person)
-        .min_by_key(|r| (r.osc_in != VRCHAT_OSC_IN, std::cmp::Reverse(r.started_s), r.pid))
+        .min_by_key(|r| (r.osc_in != VRCHAT_OSC_IN, std::cmp::Reverse(r.started_ns), r.pid))
         .or_else(|| runs.iter().find(|r| r.driver == Driver::Main))
 }
 
@@ -287,13 +291,15 @@ impl Sides {
             return run.or_else(|| {
                 mark.pid.map(|pid| VrchatRun {
                     pid,
-                    started_s: 0,
+                    started_ns: 0,
                     profile: mark.profile,
                     profile_known: true,
                     log: mark.log.clone(),
                     osc_in: mark.osc_in,
                     query: mark.query,
                     account: None,
+                    account_sure: false,
+                    log_sure: false,
                     signed_out: false,
                     one_profile: true,
                     world: None,

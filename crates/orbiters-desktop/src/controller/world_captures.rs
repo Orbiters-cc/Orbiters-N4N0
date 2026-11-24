@@ -293,7 +293,9 @@ fn session_entry(s: &SessionSummary, world: &str, world_name: &str, remote: Opti
         world_id: world.to_string(),
         world_name: s.manifest.world.as_ref().and_then(|w| w.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| world_name.to_string()),
         taken: shares::unix(&s.manifest.created_utc),
+        // (Whose it is is not looked for here: its upload tells no private place.)
         instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()),
+        owners: Vec::new(),
         source_key: s.dir.file_name().map(|n| n.to_string_lossy().into_owned()),
         people: Vec::new(),
         local: Some(Local::Session(s.dir.clone())),

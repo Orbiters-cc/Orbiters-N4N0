@@ -131,5 +131,12 @@
   "Repairing what runs VRChat…": "Reparando lo que ejecuta VRChat…",
   "What runs VRChat on this Mac is not whole, so it was not started.": "Lo que ejecuta VRChat en este Mac no está completo, así que no se inició.",
   "Downloads what runs VRChat again and puts it in place once it is whole: your games, sign-in and settings stay.": "Vuelve a descargar lo que ejecuta VRChat y lo instala cuando está completo: tus juegos, tu sesión y tus ajustes se conservan.",
-  "Repair": "Reparar"
+  "Repair": "Reparar",
+  "Starting VRChat, then joining {name}…": "Iniciando VRChat y luego entrando en {name}…",
+  "VRChat is up: joining {name} once it says who is signed in…": "VRChat está abierto: entrará en {name} en cuanto diga quién ha iniciado sesión…",
+  "{name} was not joined: VRChat is signed in as another account.": "No se entró en {name}: VRChat tiene otra cuenta iniciada.",
+  "{name} was not joined: VRChat did not say in time who is signed in.": "No se entró en {name}: VRChat no dijo a tiempo quién ha iniciado sesión.",
+  "{name} was not joined: VRChat did not start, or closed too soon.": "No se entró en {name}: VRChat no se inició, o se cerró antes.",
+  "{name} was not joined: {reason}": "No se entró en {name}: {reason}",
+  "{name} was not joined: another VRChat start came in its place.": "No se entró en {name}: otro inicio de VRChat ocupó su lugar."
 }

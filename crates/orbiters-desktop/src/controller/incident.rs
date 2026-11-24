@@ -900,6 +900,20 @@ pub(crate) struct Player {
     pub account_id: Option<String>,
     /// Its own log says nobody is signed in (its sign-in page).
     pub signed_out: bool,
+    /// Its own log is found and read.
+    pub logged: bool,
+    /// When it was looked at.
+    pub at: std::time::Instant,
+}
+
+/// What a look said of who is signed in is said no more after this (a record that cannot be read ends the looks).
+const PLAYER_FOR: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl Player {
+    /// The account signed in now, while the looks go on.
+    pub(crate) fn proven(&self) -> Option<&str> {
+        self.account_id.as_deref().filter(|_| self.profile.is_some() && self.at.elapsed() < PLAYER_FOR)
+    }
 }
 
 static PLAYER: std::sync::Mutex<Option<Player>> = std::sync::Mutex::new(None);
@@ -913,8 +927,12 @@ pub(crate) fn player() -> Option<Player> {
 #[derive(Debug, Default)]
 pub(crate) struct SignedIn {
     read: u64,
-    /// The account last signed in: its id, its name.
+    /// The account last signed in: its id, its name. A label while `sure` is not set.
     who: Option<(String, String)>,
+    /// `who` is the last thing the log says of a sign-in, for certain.
+    sure: bool,
+    /// It was read to its end at the last look.
+    whole: bool,
     /// It asked for a sign-in since, and nobody signed in.
     out: bool,
 }
@@ -923,11 +941,12 @@ impl SignedIn {
     /// Reads what the held `file` gained, up to [`SCAN_AT_MOST`] a look, the rest at the next ones. A file cut shorter is
     /// read anew, and what it said before is forgotten.
     pub(crate) fn read(&mut self, file: &std::fs::File) {
-        let Ok(len) = file.metadata().map(|m| m.len()) else { return };
+        // Not to be read now: what it said before is not what it says now, and it is read anew.
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return *self = SignedIn::default() };
         if len < self.read {
             *self = SignedIn::default();
         }
-        let Ok(bytes) = read_at(file, self.read, SCAN_AT_MOST) else { return };
+        let Ok(bytes) = read_at(file, self.read, SCAN_AT_MOST) else { return *self = SignedIn::default() };
         match bytes.iter().rposition(|b| *b == b'\n') {
             Some(end) => {
                 self.read += end as u64 + 1;
@@ -935,21 +954,26 @@ impl SignedIn {
                 if let Some(who) = crate::bridge::sessions::signed_in(&text) {
                     self.who = Some(who);
                 }
+                if let Some(said) = orbiters_core::vrchat_log::sign_in(&text) {
+                    self.sure = said.is_some() && said == self.who;
+                }
                 self.out = super::vrchats::signed_out(&text).unwrap_or(self.out);
             }
             // One line longer than a look: no line looked for.
             None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
             None => {}
         }
+        // Read up to its end: what is left is a line still being written.
+        self.whole = (bytes.len() as u64) < SCAN_AT_MOST;
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
         self.who.as_ref().map(|(_, name)| name.as_str())
     }
 
-    /// The id of the account that is signed in now; `None` where it is not known, or nobody is.
+    /// The id of the account that is signed in now; `None` where it is not known for certain, or nobody is.
     pub(crate) fn id(&self) -> Option<&str> {
-        self.who.as_ref().filter(|_| !self.out).map(|(id, _)| id.as_str())
+        self.who.as_ref().filter(|_| !self.out && self.sure && self.whole).map(|(id, _)| id.as_str())
     }
 
     pub(crate) fn signed_out(&self) -> bool {
@@ -984,7 +1008,7 @@ pub(crate) fn game_arguments(command: &[String]) -> Option<Vec<String>> {
 }
 
 /// A process's birth as a time.
-fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
+pub(super) fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::new(seconds, micros.saturating_mul(1000))
 }
 
@@ -1050,7 +1074,7 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
         let profile = followed.arguments.as_deref().and_then(orbiters_core::vrchat_launch::profile_told);
         let several = followed.arguments.is_some() && profile.is_none();
         let (account, account_id) = (signed_in.name().map(str::to_owned), signed_in.id().map(str::to_owned));
-        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, several, account, account_id, signed_out: signed_in.signed_out() });
+        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, several, account, account_id, signed_out: signed_in.signed_out(), logged: followed.vrchat.is_some(), at: std::time::Instant::now() });
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();
@@ -1930,6 +1954,33 @@ mod tests {
         log.write_all(b"2026.11.23 18:30:40 Debug      -  [Authentication - x] AuthSelectionPage OnPageShown\r\n").unwrap();
         signed_in.read(&file);
         assert_eq!((signed_in.name(), signed_in.id(), signed_in.signed_out()), (Some("Sample Third"), None, true));
+        // R5: a later sign-in whose line names nobody, and a script's line, take the account with them (its name is a label).
+        let mut later = SignedIn::default();
+        for (line, id) in [
+            (login("Sample Third", 3), Some("usr_00000000-0000-4000-8000-000000000003")),
+            (login("Sample Third", 3).replace(" (usr_00000000-0000-4000-8000-000000000003)", ""), None),
+            (login("Sample Third", 3), Some("usr_00000000-0000-4000-8000-000000000003")),
+            ("2026.11.23 18:30:50 Debug      -  [World] post login checks for Sample Third (usr_00000000-0000-4000-8000-000000000003)\r\n".to_string(), None),
+            (login("Sample Third", 3), Some("usr_00000000-0000-4000-8000-000000000003")),
+        ] {
+            log.write_all(line.as_bytes()).unwrap();
+            later.read(&file);
+            assert_eq!((later.id(), later.name()), (id, Some("Sample Third")), "{line}");
+        }
+        // More of it than a look reads: what it says last is not known until it is read to its end.
+        log.write_all("2026.11.23 18:30:55 Debug      -  [World] a line of a world\r\n".repeat((SCAN_AT_MOST / 40) as usize).as_bytes()).unwrap();
+        later.read(&file);
+        assert_eq!(later.id(), None, "behind");
+        for _ in 0..8 {
+            later.read(&file);
+        }
+        assert_eq!(later.id(), Some("usr_00000000-0000-4000-8000-000000000003"));
+        // Nor while the looks have stopped.
+        let seen = |at| Player { launcher: 1, birth, profile: Some(2), several: false, account: None, account_id: Some("usr_x".into()), signed_out: false, logged: true, at };
+        let now = std::time::Instant::now();
+        assert_eq!(seen(now).proven(), Some("usr_x"));
+        assert_eq!(seen(now - PLAYER_FOR).proven(), None, "stale");
+        assert_eq!(Player { profile: None, ..seen(now) }.proven(), None, "several profiles in its command line");
         // Words that only look like it, of another line, name nobody.
         write("14", 0, "2026.11.23 18:31:00 Debug      -  post login checks for Sample Fake (not an id)\r\n");
         assert_eq!(who(0), None);

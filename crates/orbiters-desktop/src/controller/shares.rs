@@ -25,14 +25,7 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
         let mut failed = false;
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let snapshot = ctl.view();
-            let world = &snapshot.vrchat.world;
-            let location = world
-                .world_id
-                .as_ref()
-                .zip(world.instance.as_ref())
-                .zip(world.local_player.as_ref())
-                .filter(|_| snapshot.vrchat.running && world.in_world)
-                .map(|((w, i), n)| (snapshot.settings.development, w.clone(), i.clone(), n.clone(), format!("{:?}", snapshot.account.state)));
+            let location = presence_of(&snapshot, ctl.vrchat_signed_in_as().as_deref(), snapshot.launcher.single_profile);
             if let Some(ref location) = location {
                 if (last.as_ref() != Some(location) || sent.elapsed().as_secs() >= 300) && (!failed || attempted.elapsed().as_secs() >= 60) {
                     attempted = std::time::Instant::now();
@@ -54,6 +47,21 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
     if let Err(e) = presence {
         eprintln!("capture presence: {e}");
     }
+}
+
+/// Where the member's presence is told to be, and as whom, with the VRChat account `acting` signed in with it: the environment, the
+/// world, the instance, the player and the Orbiters account. Nowhere in a private place that is not known to be that account's.
+fn presence_of(snapshot: &crate::state::Snapshot, acting: Option<&str>, single: bool) -> Option<(bool, String, String, String, String)> {
+    let world = &snapshot.vrchat.world;
+    let (w, i, n) = (world.world_id.as_ref()?, world.instance.as_ref()?, world.local_player.as_ref()?);
+    let owner: Vec<String> = followed_account(snapshot).into_iter().collect();
+    let told = snapshot.vrchat.running && world.in_world && visited::may_be_told(&owner, i, acting, single);
+    told.then(|| (snapshot.settings.development, w.clone(), i.clone(), n.clone(), format!("{:?}", snapshot.account.state)))
+}
+
+/// The account of the VRChat the app follows, as its own log proves it.
+fn followed_account(snapshot: &crate::state::Snapshot) -> Option<String> {
+    snapshot.vrchat.runs.iter().find(|run| run.target)?.account_id.clone()
 }
 
 /// `since` before now, or the clock's start when the computer started less recently than that (`Instant - Duration`
@@ -81,7 +89,11 @@ pub struct Entry {
     pub world_id: String,
     pub world_name: String,
     pub taken: u64,
+    /// The instance it was taken in: where it was made for a page, only when the page's account may see it.
     pub instance: Option<String>,
+    /// The VRChat accounts it is of, when that is certain ([`visited::History::owners_at`]): its private instance is theirs alone.
+    #[serde(default)]
+    pub owners: Vec<String>,
     pub source_key: Option<String>,
     pub people: Vec<String>,
     pub local: Option<Local>,
@@ -218,6 +230,10 @@ pub struct Whose {
     api: Api,
     token: String,
     user: Option<String>,
+    /// The VRChat account signed in with them (none: not known), and whether one VRChat profile alone is used here: a private
+    /// instance is told to Orbiters for its own account alone.
+    vrchat: Option<String>,
+    single: bool,
 }
 
 impl Whose {
@@ -225,7 +241,18 @@ impl Whose {
     fn of(ctl: &super::Controller, epoch: u64, server: Server) -> anyhow::Result<Self> {
         let (on, account) = ctl.member_of(epoch).ok_or_else(signed_out)?;
         anyhow::ensure!(on == server, "{}", tr("Sign in to Orbiters in Settings first."));
-        Ok(Self::with(server, account))
+        Ok(Self::with(server, account).seen_by(ctl))
+    }
+
+    /// With the VRChat account signed in in the app now.
+    pub(super) fn seen_by(self, ctl: &super::Controller) -> Self {
+        Self { vrchat: ctl.vrchat_signed_in_as(), single: ctl.viewer().single, ..self }
+    }
+
+    /// `entry` as it may be told to Orbiters: a private instance of another account's, or of nobody known, is left out.
+    fn told(&self, mut entry: Entry) -> Entry {
+        entry.instance = entry.instance.filter(|instance| visited::may_be_told(&entry.owners, instance, self.vrchat.as_deref(), self.single));
+        entry
     }
 
     /// The account saved for `server`, read once (what has no window behind it: the bridge, a developer's command).
@@ -234,7 +261,7 @@ impl Whose {
     }
 
     fn with(server: Server, account: account::Account) -> Self {
-        Self { server, api: Api::new(server), token: account.token, user: account.user }
+        Self { server, api: Api::new(server), token: account.token, user: account.user, vrchat: None, single: false }
     }
 
     /// Their API and credential.
@@ -575,28 +602,36 @@ impl LocalRevision {
     }
 }
 
-pub fn local_entries(root: &Path, server: Server) -> Vec<Entry> {
-    local_entries_with_folders(root, server, &orbiters_core::settings::Settings::load().picture_folders)
+pub fn local_entries(root: &Path, server: Server, viewer: &visited::Viewer) -> Vec<Entry> {
+    local_entries_with_folders(root, server, &orbiters_core::settings::Settings::load().picture_folders, viewer)
 }
-pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBuf]) -> Vec<Entry> {
-    let worlds = crate::worlds::load_gallery(root, folders);
+pub fn local_entries_with_folders(root: &Path, server: Server, folders: &[PathBuf], viewer: &visited::Viewer) -> Vec<Entry> {
+    let worlds = crate::worlds::load_gallery(root, folders, viewer);
     let history = visited::History::load(&visited::history_file());
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
-    entries_of(worlds, &history, &records)
+    entries_of(worlds, &history, &records, viewer)
 }
 
 /// [`local_entries_with_folders`] from what is handed over, not read from where the app keeps it: the captures under
 /// `root`, these pictures, the visit history in the file `history` and the upload records in the file `records`. What
 /// the page's tests make their lists from, so that none reads the member's own.
-pub fn local_entries_at(root: &Path, index: visited::ShotIndex, history: &Path, records: Option<&Path>) -> Vec<Entry> {
+pub fn local_entries_at(root: &Path, index: visited::ShotIndex, history: &Path, records: Option<&Path>, viewer: &visited::Viewer) -> Vec<Entry> {
     let history = visited::History::load(history);
-    let worlds = crate::worlds::gallery_from(root, index, &history);
-    entries_of(worlds, &history, &records.map(read_records).unwrap_or_default())
+    let worlds = crate::worlds::gallery_from(root, index, &history, viewer);
+    entries_of(worlds, &history, &records.map(read_records).unwrap_or_default(), viewer)
+}
+
+/// Whose a capture taken at `taken` in `world` is, and the instance it was taken in as `viewer` is shown it.
+fn place_for(history: &visited::History, world: &str, instance: Option<String>, taken: u64, viewer: &visited::Viewer) -> (Vec<String>, Option<String>) {
+    let instance = instance.or_else(|| instance_at(history, world, taken));
+    let owners = history.owners_at(world, instance.as_deref(), taken);
+    let instance = instance.filter(|instance| viewer.sees(&owners, instance));
+    (owners, instance)
 }
 
 /// The list's entries: each world's captures and pictures, the instance a picture was taken in from the visit history
 /// where its own record does not say, and what was uploaded of each from the upload records.
-fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::History, records: &[Record]) -> Vec<Entry> {
+fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::History, records: &[Record], viewer: &visited::Viewer) -> Vec<Entry> {
     let mut entries = Vec::new();
     for w in worlds {
         for s in &w.sessions {
@@ -610,12 +645,14 @@ fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::Histo
                 .as_ref()
                 .map(|_| orbiters_reconstruct::edit::generation(&orbiters_core::reconstruction::result_dir(&s.dir)).map_err(|e| e.to_string()));
             let uploaded_edits = record.map(|r| r.edits.clone().unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into()));
+            let (owners, instance) = place_for(history, &w.id, s.manifest.world.as_ref().and_then(|w| w.instance.clone()), taken, viewer);
             entries.push(Entry {
                 key: s.dir.to_string_lossy().into(),
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken,
-                instance: s.manifest.world.as_ref().and_then(|w| w.instance.clone()).or_else(|| instance_at(history, &w.id, taken)),
+                instance,
+                owners,
                 source_key: s.dir.file_name().map(|s| s.to_string_lossy().into_owned()),
                 people: Vec::new(),
                 local: Some(local),
@@ -653,12 +690,14 @@ fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::Histo
                 Some(l) if l.transparent() => l.picture(560),
                 _ => crate::worlds::Picture::Shot { path: shot.path.clone(), size: shot.size, width: 560 },
             };
+            let (owners, instance) = place_for(history, &w.id, shot.info.instance.clone(), shot.info.taken, viewer);
             entries.push(Entry {
                 key: shot.path.to_string_lossy().into(),
                 world_id: w.id.clone(),
                 world_name: w.name.clone(),
                 taken: shot.info.taken,
-                instance: shot.info.instance.clone().or_else(|| instance_at(history, &w.id, shot.info.taken)),
+                instance,
+                owners,
                 source_key: shot.sha256.clone(),
                 people: Vec::new(),
                 local: Some(Local::Picture(shot.path.clone())),
@@ -684,19 +723,22 @@ fn entries_of(worlds: Vec<crate::worlds::VisitedWorld>, history: &visited::Histo
 }
 /// The entry of one session folder of this computer, as Photos & captures lists it ([`entries_of`]), for the bridge's
 /// publishing of the 3D pictures it took (controller/bridge_publish.rs); `None` for a folder without a readable manifest.
-pub fn session_entry(dir: &Path, server: Server) -> Option<Entry> {
+pub fn session_entry(dir: &Path, server: Server, viewer: &visited::Viewer) -> Option<Entry> {
     let manifest = orbiters_core::bundle::read_manifest(dir).ok()?;
     let world = manifest.world.clone().unwrap_or_default();
     let records = records_path(server).ok().map(|p| read_records(&p)).unwrap_or_default();
     let record = records.iter().find(|r| r.path == dir);
     let reconstructed = orbiters_core::reconstruction::read_report(dir).is_some();
     let taken = unix(&manifest.created_utc);
+    let history = visited::History::load(&visited::history_file());
+    let owners = history.owners_at(world.id.as_deref().unwrap_or_default(), world.instance.as_deref(), taken);
     Some(Entry {
         key: dir.to_string_lossy().into(),
         world_id: world.id.clone().unwrap_or_default(),
         world_name: world.name.clone().unwrap_or_default(),
         taken,
-        instance: world.instance.clone(),
+        instance: world.instance.clone().filter(|instance| viewer.sees(&owners, instance)),
+        owners,
         source_key: dir.file_name().map(|s| s.to_string_lossy().into_owned()),
         people: Vec::new(),
         local: Some(Local::Session(dir.to_path_buf())),
@@ -715,6 +757,7 @@ pub fn session_entry(dir: &Path, server: Server) -> Option<Entry> {
         uploaded_edits: record.map(|r| r.edits.clone().unwrap_or_else(|| orbiters_reconstruct::edit::UNEDITED.into())),
     })
 }
+/// The entry of `item` on Orbiters: whose its place is is not known here.
 pub fn remote_entry(item: Item) -> Entry {
     let picture = item.picture.as_ref().and_then(|p| {
         p.thumbnail_url.starts_with("https://").then(|| crate::worlds::Picture::Remote {
@@ -729,6 +772,7 @@ pub fn remote_entry(item: Item) -> Entry {
         world_name: item.world.name.clone(),
         taken: unix(item.date()),
         instance: item.instance_id.clone(),
+        owners: Vec::new(),
         source_key: item.source_key.clone(),
         people: Vec::new(),
         local: None,
@@ -1101,6 +1145,7 @@ impl Drop for Changing {
 /// capture whose splats were edited since: its files on Orbiters are replaced first ([`update_with`]), so what is shared
 /// is what its 3D view shows. How long each step took goes to `%LOCALAPPDATA%/Orbiters/logs/shares.log`.
 pub(super) fn share_as(whose: &Whose, entry: Entry, request: shares::Share, report: Report) -> anyhow::Result<shares::Shared> {
+    let entry = whose.told(entry);
     let started = Instant::now();
     let mut steps = Vec::new();
     let result = share_with(&whose.api, &whose.token, whose.records(), &entry, &request, report, &mut steps, &super::maps::web_preview);
@@ -1561,8 +1606,8 @@ pub(crate) mod tests {
     fn grouping_never_assigns_another_world_or_a_future_join() {
         let mut h = visited::History::default();
         h.instances = vec![
-            visited::InstanceVisit { world_id: "a".into(), instance: "one".into(), at: 10 },
-            visited::InstanceVisit { world_id: "b".into(), instance: "two".into(), at: 20 },
+            visited::InstanceVisit { world_id: "a".into(), instance: "one".into(), at: 10, account: None },
+            visited::InstanceVisit { world_id: "b".into(), instance: "two".into(), at: 20, account: None },
         ];
         assert_eq!(instance_at(&h, "a", 15), Some("one".into()));
         assert_eq!(instance_at(&h, "a", 21), None);
@@ -2752,13 +2797,92 @@ pub(crate) mod tests {
         Some(body[start..end].to_vec())
     }
 
+    /// The verifier's cases: what X left here is told to Orbiters as X alone: the presence of X's game while Y, or nobody known, is
+    /// signed in with the member, and the upload of X's capture, carry no private place. On a computer of one profile what is not
+    /// known goes as it did.
+    #[test]
+    fn a_private_place_is_told_to_orbiters_as_its_own_account_alone() {
+        use crate::state::{Snapshot, VrchatRunShown};
+        let private = "77~private(usr_x)~region(eu)";
+        let follows = |account: Option<&str>, instance: &str| {
+            let mut s = Snapshot::new(Default::default());
+            s.vrchat.running = true;
+            s.vrchat.runs = vec![VrchatRunShown { pid: 1, target: true, account_id: account.map(str::to_owned), ..Default::default() }, VrchatRunShown { pid: 2, account_id: Some("usr_y".into()), ..Default::default() }];
+            s.vrchat.world.set(orbiters_core::vrchat_log::WorldState { world_id: Some("wrld_a".into()), instance: Some(instance.into()), local_player: Some("Sample".into()), in_world: true, ..Default::default() });
+            s
+        };
+        let told = |account: Option<&str>, acting: Option<&str>, single: bool| presence_of(&follows(account, private), acting, single).is_some();
+        for single in [false, true] {
+            assert!(told(Some("usr_x"), Some("usr_x"), single) && !told(Some("usr_x"), Some("usr_y"), single), "single {single}");
+            assert_eq!((told(None, Some("usr_x"), single), told(Some("usr_x"), None, single), told(None, None, single)), (single, single, single));
+            assert!(presence_of(&follows(Some("usr_x"), "77~region(eu)"), Some("usr_y"), single).is_some(), "a public one");
+        }
+        // The upload.
+        let root = std::env::temp_dir().join(format!("orbiters-told-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("VRChat_2026-11-24_00-00-00.000_2x2.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255])).save(&file).unwrap();
+        let sent = |owners: &[&str], vrchat: Option<&str>, single: bool| {
+            let (api, seen) = stand_in(vec![("POST /", 200, r#"{"added":[{"type":"picture","id":9,"visibility":"private"}]}"#.into()), ("GET /", 200, "{}".into())]);
+            let whose = Whose { server: Server::Development, api: api.clone(), token: "token".into(), user: None, vrchat: vrchat.map(str::to_owned), single };
+            let entry = Entry { local: Some(Local::Picture(file.clone())), instance: Some(private.into()), owners: owners.iter().map(|o| o.to_string()).collect(), source_key: Some("key".into()), world_id: "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b".into(), ..remote_entry(Item::default()) };
+            let entry = Entry { remote: None, ..entry };
+            let _ = share_with(&api, "token", Ok(root.join("records.json")), &whose.told(entry), &shares::Share::default(), &|_| {}, &mut Vec::new(), &prepared);
+            let _ = std::fs::remove_file(root.join("records.json"));
+            let seen = seen.lock().unwrap();
+            let (_, body) = seen.iter().find(|(line, _)| line.ends_with("/pictures")).expect("the picture is sent whoever's it is");
+            let has = body.windows(private.len()).any(|w| w == private.as_bytes());
+            has
+        };
+        assert_eq!((sent(&["usr_x"], Some("usr_x"), false), sent(&["usr_x"], Some("usr_y"), false), sent(&["usr_x"], Some("usr_y"), true)), (true, false, false));
+        assert_eq!((sent(&[], Some("usr_x"), false), sent(&["usr_x"], None, false), sent(&[], None, true)), (false, false, true));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The verifier's case: X's capture, its visit fallen out of the hundred instances kept, in the gallery: not listed as Y, listed
+    /// with its place as X, with its world only where whose it is is not known; and as it always was on a computer of one profile.
+    #[test]
+    fn a_capture_is_listed_and_placed_by_whose_it_is() {
+        use orbiters_core::contracts::manifest::{SessionManifest, WorldInfo, MANIFEST_FILE, MANIFEST_FORMAT};
+        let root = std::env::temp_dir().join(format!("orbiters-owned-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("Sessions").join("one");
+        std::fs::create_dir_all(&dir).unwrap();
+        let private = "77~private(usr_x)~region(eu)";
+        let world = WorldInfo { id: Some("wrld_a".into()), name: Some("World A".into()), instance: Some(private.into()), ..Default::default() };
+        let manifest = SessionManifest { format: MANIFEST_FORMAT.into(), created_utc: "2026-11-09T20:00:00Z".into(), world: Some(world), ..Default::default() };
+        std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let file = root.join("visited-worlds.json");
+        let history = |account: Option<&str>| {
+            let mut h = visited::History::default();
+            let taken = unix("2026-11-09T20:00:00Z");
+            h.record_by("wrld_a", taken - 600, account);
+            for n in 0..visited::MAX_INSTANCES as u64 {
+                h.record_instance_by("wrld_b", &format!("{n}~region(eu)"), taken + n, Some("usr_y"));
+            }
+            h.save(&file).unwrap();
+        };
+        let seen = |acting: &[&str], single: bool| {
+            let viewer = visited::Viewer { acting: acting.iter().map(|a| a.to_string()).collect(), single };
+            local_entries_at(&root.join("Sessions"), Default::default(), &file, None, &viewer).into_iter().find(|e| e.world_id == "wrld_a").map(|e| (e.instance, e.owners))
+        };
+        let place = Some(private.to_string());
+        history(Some("usr_x"));
+        assert_eq!(seen(&["usr_x"], false), Some((place.clone(), vec!["usr_x".into()])));
+        assert_eq!(seen(&["usr_y"], false), None, "another account acts");
+        assert_eq!(seen(&[], false), Some((None, vec!["usr_x".into()])), "nobody does: its world only");
+        assert_eq!(seen(&["usr_y"], true), Some((place.clone(), vec!["usr_x".into()])), "one profile: as before");
+        history(None);
+        assert_eq!((seen(&["usr_y"], false), seen(&["usr_y"], true)), (Some((None, Vec::new())), Some((place, Vec::new()))));
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// The bridge's `publish_3d_picture` (its entry: `session_entry`) uploads exactly the picture Photos & captures' own
     /// share (its entry: the library's) uploads with a capture, private and public alike.
     #[test]
     fn the_bridges_publish_sends_the_picture_a_persons_share_sends() {
         let (root, session) = pictured_session("bridge");
-        let bridge = session_entry(&session, Server::Development).unwrap();
-        let person = local_entries_at(&root, Default::default(), &root.join("no-history.json"), None)
+        let bridge = session_entry(&session, Server::Development, &Default::default()).unwrap();
+        let person = local_entries_at(&root, Default::default(), &root.join("no-history.json"), None, &Default::default())
             .into_iter()
             .find(|e| e.local.as_ref().is_some_and(|l| l.path() == session))
             .expect("listed by the library");
@@ -2789,7 +2913,7 @@ pub(crate) mod tests {
     #[test]
     fn a_capture_without_its_picture_gets_it_private_or_before_its_folder_goes() {
         let (root, session) = pictured_session("give");
-        let mut entry = session_entry(&session, Server::Development).unwrap();
+        let mut entry = session_entry(&session, Server::Development, &Default::default()).unwrap();
         entry.world_id = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd".into();
         let private = shares::Share { public: false, ..Default::default() };
         let without = serde_json::json!({ "item": capture_item(5, false, false) }).to_string();

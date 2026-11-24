@@ -36,6 +36,29 @@ pub enum LogEvent {
     /// the line's time (Unix seconds): `message` is the whole message, marker included. Any world can write one; what is
     /// done with it depends on the world the log joined.
     WorldLine { message: String, at: Option<u64> },
+    /// `… Preforming post login checks for <name> (usr_…)` (VRChat's spelling): the account signed in, when the line names
+    /// one; a sign-in page (`No cached credentials found`, `AuthSelectionPage OnPageShown`), or a sign-in whose line names
+    /// none: not known.
+    SignIn { user_id: Option<String> },
+}
+
+/// What VRChat's log says of a sign-in, in `text`: the last thing it says (the account signed in, `None` where nobody is or
+/// the line names none for certain); `None` where it says nothing of one. Only VRChat's own line names an account: a script's
+/// message that says the same names none.
+pub fn sign_in(text: &str) -> Option<Option<(String, String)>> {
+    text.lines().rev().find_map(|line| sign_in_message(message(line.as_bytes()).and_then(|m| std::str::from_utf8(m).ok()).unwrap_or(line)))
+}
+
+/// [`sign_in`] of one message.
+fn sign_in_message(message: &str) -> Option<Option<(String, String)>> {
+    const ASKED: [&str; 2] = ["No cached credentials found", "AuthSelectionPage OnPageShown"]; // i18n: not shown (VRChat's log lines)
+    match message.split_once("post login checks for ") {
+        Some((before, rest)) => Some(rest.trim_end().rsplit_once(" (").filter(|_| before.starts_with("[Authentication")).and_then(|(name, id)| {
+            let id = id.strip_suffix(')').filter(|id| id.starts_with("usr_"))?;
+            Some((id.to_string(), name.to_string()))
+        })),
+        None => ASKED.iter().any(|said| message.contains(said)).then_some(None),
+    }
 }
 
 /// A video a video player of the world played.
@@ -124,7 +147,7 @@ impl WorldState {
                 self.avatars.insert(player, avatar);
             }
             LogEvent::Video { url, at } => self.last_video = Some(VideoSeen { url: url.clone(), at: *at }),
-            LogEvent::WorldLine { .. } => {}
+            LogEvent::WorldLine { .. } | LogEvent::SignIn { .. } => {}
         }
     }
 
@@ -235,6 +258,12 @@ const BEHAVIOUR: &[u8] = b"[Behaviour] ";
 const VIDEO: &[u8] = b"[Video Playback] Attempting to resolve URL '";
 const WORLD_LINE: &[u8] = orbiters_contracts::world_feedback::MARKER.as_bytes();
 
+/// Whether a message says something of a sign-in ([`sign_in`]), near its start.
+pub(crate) fn says_sign_in(message: &[u8]) -> bool {
+    let head = &message[..message.len().min(160)];
+    ["post login checks for ", "No cached credentials found", "AuthSelectionPage OnPageShown"].iter().any(|said| memchr::memmem::find(head, said.as_bytes()).is_some()) // i18n: not shown (VRChat's log lines)
+}
+
 /// The message of a line in VRChat's own shape ([`message_start`]).
 pub(crate) fn message(line: &[u8]) -> Option<&[u8]> {
     message_start(line).map(|start| &line[start..])
@@ -250,7 +279,7 @@ pub fn parse_line(line: &str) -> Option<LogEvent> {
 pub(crate) fn parse_bytes(line: &[u8]) -> Option<LogEvent> {
     let start = message_start(line)?;
     let message = &line[start..];
-    if !message.starts_with(BEHAVIOUR) && !message.starts_with(VIDEO) && !message.starts_with(WORLD_LINE) {
+    if !message.starts_with(BEHAVIOUR) && !message.starts_with(VIDEO) && !message.starts_with(WORLD_LINE) && !says_sign_in(message) {
         return None;
     }
     // The part before the message is ASCII: the offsets stay where they were.
@@ -267,6 +296,9 @@ fn parse_message(message: &str, stamp: &str) -> Option<LogEvent> {
     if let Some(url) = message.strip_prefix("[Video Playback] Attempting to resolve URL '") {
         let url = url.strip_suffix('\'')?;
         return (!url.is_empty()).then(|| LogEvent::Video { url: url.to_string(), at: crate::visited::log_time(stamp) });
+    }
+    if says_sign_in(message.as_bytes()) {
+        return Some(LogEvent::SignIn { user_id: sign_in_message(message).flatten().map(|(id, _)| id) });
     }
     let rest = message.strip_prefix("[Behaviour] ")?;
     if let Some(name) = rest.strip_prefix("Joining or Creating Room: ") {
@@ -859,6 +891,26 @@ mod tests {
         assert_eq!(own.state.log_file.as_deref(), Some(side.as_path()));
         assert_eq!(own.state.world_id.as_deref(), Some(WORLD_B));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Who is signed in is the last thing the log says of it, for certain or not at all: a later line that names nobody takes
+    /// the earlier account with it, and a script's line names none.
+    #[test]
+    fn who_is_signed_in_is_the_last_thing_the_log_says_of_it() {
+        let login = |who: &str| line(&format!("[Authentication - x] Preforming post login checks for {who}"));
+        let (a, b) = (Some(("usr_a".to_string(), "Sample A".to_string())), Some(("usr_b".to_string(), "Sample (B)".to_string())));
+        assert_eq!(sign_in("nothing"), None);
+        assert_eq!(sign_in(&login("Sample A (usr_a)")), Some(a.clone()));
+        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample (B) (usr_b)")].join("\n")), Some(b));
+        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample B (not an id)")].join("\n")), Some(None), "names nobody: not known");
+        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample B")].join("\r\n")), Some(None));
+        assert_eq!(sign_in(&[login("Sample A (usr_a)"), line("VP AuthSelectionPage OnPageShown()")].join("\n")), Some(None));
+        assert_eq!(sign_in(&[line("[Authentication - x] No cached credentials found"), login("Sample A (usr_a)")].join("\n")), Some(a));
+        for fake in [line("[World] post login checks for Sample A (usr_a)"), line("post login checks for Sample A (usr_a)"), "Preforming post login checks for Sample A (usr_a)".into()] {
+            assert_eq!(sign_in(&fake), Some(None), "{fake}");
+        }
+        assert_eq!(parse_bytes(login("Sample A (usr_a)").as_bytes()), Some(LogEvent::SignIn { user_id: Some("usr_a".into()) }));
+        assert_eq!(parse_bytes(line("[World] post login checks for Sample A (usr_a)").as_bytes()), Some(LogEvent::SignIn { user_id: None }));
     }
 
     /// B1: the instance is only being joined from its `Joining` line (loading, then spawning) until VRChat says who is

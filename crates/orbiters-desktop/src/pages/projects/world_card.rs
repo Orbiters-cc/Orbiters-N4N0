@@ -49,8 +49,8 @@ pub(super) struct Capture {
 
 /// The worlds this computer has captures or pictures of ([`crate::worlds::load`]), by ID. Reads the library and the
 /// screenshots' index: call on a worker.
-pub(super) fn load(sessions_dir: &Path) -> HashMap<String, Here> {
-    crate::worlds::load(sessions_dir)
+pub(super) fn load(sessions_dir: &Path, viewer: &orbiters_core::visited::Viewer) -> HashMap<String, Here> {
+    crate::worlds::load(sessions_dir, viewer)
         .into_iter()
         .map(|w| {
             let captures = w
@@ -93,11 +93,16 @@ fn refresh(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
     if state.fixture {
         return;
     }
-    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
+    let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit, cx.snap.viewer());
     if state.here_key.as_ref() != Some(&key) && !state.here_job.running() {
+        let viewer = key.3.clone();
+        // Another VRChat account acts: what was listed for the last one goes at once.
+        if state.here_key.as_ref().is_some_and(|k| k.3 != viewer && !(k.3.single && viewer.single)) {
+            state.here.clear();
+        }
         state.here_key = Some(key);
         let dir = cx.snap.settings.sessions_dir.clone();
-        state.here_job = Job::spawn(ctx, move || load(&dir));
+        state.here_job = Job::spawn(ctx, move || load(&dir, &viewer));
     }
     if state.maps_visit != Some(cx.visit) {
         state.maps_visit = Some(cx.visit);

@@ -69,14 +69,9 @@
   "One VRChat runs at a time on a Mac: quit it to start on another profile.": "Macで動くVRChatは一度に1つです。別のプロフィールで起動するには、今のVRChatを終了してください。",
   "Quit the VRChat running now first": "先に今動いているVRChatを終了してください",
   "This place is private: sign in to VRChat in Settings to go there.": "ここはプライベートです。行くには設定でVRChatにサインインしてください。",
-  "This profile's VRChat account is not the one this place is for: choose its profile.": "このプロフィールのVRChatアカウントは、この場所のアカウントではありません。そのアカウントのプロフィールを選んでください。",
-  "Sign in on this profile first: its VRChat account is not known yet.": "まずこのプロフィールでサインインしてください。VRChatアカウントがまだわかりません。",
   "VRChat is no longer running: choose a profile and press Play to start it there.": "VRChatはもう動いていません。プロフィールを選び、「プレイ」を押すとそこで起動します。",
-  "VRChat was not started into the place asked for: choose it again.": "VRChatは指定した場所で起動しませんでした。もう一度選んでください。",
   "This place is private, and the VRChat on this computer is not known to be signed in with your account.": "ここはプライベートで、このパソコンのVRChatがあなたのアカウントでサインインしているか確認できません。",
   "{file} cannot be written, and it keeps two VRChats from starting at once: give yourself permission to write it, then press Play again.": "{file}に書き込めません。VRChatが同時に2つ起動するのを防ぐファイルです。書き込みを許可してから、もう一度「プレイ」を押してください。",
   "{file} cannot be written: the disk is full. Free some space, then press Play again.": "{file}に書き込めません。ディスクがいっぱいです。空き容量を増やしてから、もう一度「プレイ」を押してください。",
-  "{file} cannot be written ({reason}): check its permissions and the free space on its disk, then press Play again.": "{file}に書き込めません（{reason}）。アクセス権とディスクの空き容量を確認してから、もう一度「プレイ」を押してください。",
-  "Start without a place": "行き先なしで起動",
-  "Its account is not known yet": "アカウントがまだわかりません"
+  "{file} cannot be written ({reason}): check its permissions and the free space on its disk, then press Play again.": "{file}に書き込めません（{reason}）。アクセス権とディスクの空き容量を確認してから、もう一度「プレイ」を押してください。"
 }

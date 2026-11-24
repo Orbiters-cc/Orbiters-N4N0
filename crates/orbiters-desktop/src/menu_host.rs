@@ -144,6 +144,7 @@ impl MenuHost {
 
     /// Keeps the menu's picture of what the service knows.
     pub fn follow(&mut self, snap: &Snapshot) {
+        self.0.seen_by(snap.viewer());
         self.0.follow(&snap.n4n0, &snap.settings);
     }
 

@@ -13,6 +13,16 @@ use orbiters_n4n0_core::menu::{InstanceRow, InviteAnswer};
 use std::sync::Mutex;
 
 impl Controller {
+    /// Who looks at what this computer keeps.
+    pub(crate) fn viewer(&self) -> orbiters_core::visited::Viewer {
+        self.view().viewer()
+    }
+
+    /// The VRChat account signed in here now (its user id): what is told to VRChat or Orbiters is told as that one.
+    pub(super) fn vrchat_signed_in_as(&self) -> Option<String> {
+        self.vrchat_session().map(|session| session.by.user)
+    }
+
     /// The VRChat account Invite me would go from now (its user id), when one is connected.
     pub(super) fn previous_instance_account(&self) -> Option<String> {
         let client = self.vrchat_signed_client()?;
@@ -27,7 +37,8 @@ impl Controller {
         if client.lock().unwrap().signed_in_user_id() != Some(account) {
             return None;
         }
-        Some(invite_self(&client, account, &orbiters_n4n0_core::invites::read_rows(), location))
+        let viewer = orbiters_core::visited::Viewer { acting: vec![account.to_owned()], single: self.viewer().single };
+        Some(invite_self(&client, account, &orbiters_n4n0_core::invites::read_rows(&viewer), location))
     }
 }
 
@@ -44,10 +55,22 @@ pub fn location_parts(location: &str) -> Option<(&str, &str)> {
 /// Each request goes only while the session is `account`'s, checked on the same hold that sends it.
 pub fn invite_self(client: &Mutex<Client>, account: &str, known: &[InstanceRow], location: &str) -> InviteAnswer {
     let failed = |message: String| InviteAnswer::Failed { message };
+    // One of this account's own (or nobody's, and public): another's is not sent to VRChat as this one, not even to look at it.
+    let own = orbiters_n4n0_core::invites::goes_for(known, location, account);
     let changed = || failed(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+    // (Listed without its private part.)
+    if location.ends_with(':') {
+        return failed(tr("This private instance is not known to be your VRChat account's: nothing was sent.").into());
+    }
     let Some((world, instance)) = location_parts(location).filter(|_| known.iter().any(|row| row.location == location)) else {
         return failed(tr("Only an instance of your Previous instances can be invited to from here.").into());
     };
+    if client.lock().unwrap().signed_in_user_id() != Some(account) {
+        return changed();
+    }
+    if !own {
+        return failed(tr("This private instance is not known to be your VRChat account's: nothing was sent.").into());
+    }
     // Each request on its own hold of the session: a sign-out meanwhile stops the next.
     let looked = {
         let mut client = client.lock().unwrap();
@@ -99,7 +122,7 @@ mod tests {
     }
 
     fn known() -> Vec<InstanceRow> {
-        vec![InstanceRow { location: location(), world: "Sample Lounge".into(), at: 100 }]
+        vec![InstanceRow { location: location(), world: "Sample Lounge".into(), at: 100, account: Some("usr_test".into()) }]
     }
 
     fn instance() -> serde_json::Value {
@@ -166,6 +189,20 @@ mod tests {
             assert!(matches!(a, InviteAnswer::Failed { .. }) && calls.is_empty(), "{bad}: {a:?} {calls:?}");
         }
         assert_eq!(location_parts(&location()), Some((WORLD, ID)));
+    }
+
+    /// R3 (the verifier's case): an instance X visited is never sent to VRChat with Y's session, not even looked at; nor a private
+    /// one that is nobody's.
+    #[test]
+    fn an_instance_of_another_account_s_is_never_asked_about_with_this_one_s_session() {
+        for account in [Some("usr_x"), None] {
+            let ctl = Controller::new(orbiters_core::settings::Settings::default());
+            let (client, calls) = ctl.test_vrchat(vec![(200, instance()), (200, serde_json::json!({}))]);
+            let rows = [InstanceRow { account: account.map(str::to_owned), ..known().remove(0) }];
+            let answer = invite_self(&client, "usr_test", &rows, &location());
+            assert!(matches!(&answer, InviteAnswer::Failed { message } if message.contains("not known to be")), "{answer:?}");
+            assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock().unwrap());
+        }
     }
 
     #[test]

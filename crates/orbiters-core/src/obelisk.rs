@@ -570,11 +570,12 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
-/// The first obelisk-cli N4N0 starts VRChat with (0.1.12: a lock file that cannot be written is held all the same, a release that
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.13: `steam play --no-saved-arguments`, which every start is made with: the
+/// profile it names is the only one the game is given; 0.1.12: a lock file that cannot be written is held all the same, a release that
 /// lost its Wine says so; 0.1.11: one lock for the whole library between every launch and every change
 /// of its runtimes, a look at what runs that takes no failure for nothing, a repair compared with its archive byte for byte, and
 /// every file a start needs looked at; 0.1.10: `steam play --steam-id`, the session named in `starting`).
-pub const LEAST: (u32, u32, u32) = (0, 1, 12);
+pub const LEAST: (u32, u32, u32) = (0, 1, 13);
 
 /// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
 /// release is not known to be.
@@ -717,9 +718,13 @@ pub fn game_arguments(desktop: Vec<String>) -> Vec<String> {
     whole_screen.into_iter().chain(desktop.into_iter().filter(|a| a.starts_with("vrchat://") || crate::vrchat_launch::is_profile_arg(a))).collect()
 }
 
-/// The render scale of Home's Play on a Mac when the person chose none: 58 % per side, a third of the pixels the Mac
-/// draws (the owner's choice, 2026-11-23). The bridge's own starts take none (`render_percent`).
-pub const DEFAULT_RENDER_PERCENT: u32 = 58;
+/// The render scale of Home's Play on a Mac when the person chose none: 45 % per side, a fifth of the pixels the Mac
+/// draws (the owner's choice, 2026-11-23: about 39 frames a second in VRChat Home on an M3 Air, 31 at 58 %, 19 at 100 %). The
+/// bridge's own starts take none (`render_percent`).
+pub const DEFAULT_RENDER_PERCENT: u32 = 45;
+/// The default of before (0.3.9-dev.30 to dev.44), which the settings saved as any other value: one of those saved then is
+/// [`DEFAULT_RENDER_PERCENT`], once (`settings::migrated`).
+pub const EARLIER_RENDER_PERCENT: u32 = 58;
 /// The range Settings offers.
 pub const RENDER_PERCENTS: std::ops::RangeInclusive<u32> = 25..=100;
 
@@ -770,6 +775,9 @@ mod tests {
         let (backing, panel) = ((2940, 1912), (2560, 1664));
         assert_eq!(render_percent(58, backing.0, panel.0), 58);
         assert_eq!(render_size(58, backing, panel), (1705, 1109));
+        let (w, h) = render_size(DEFAULT_RENDER_PERCENT, backing, panel);
+        assert_eq!((DEFAULT_RENDER_PERCENT, render_percent(DEFAULT_RENDER_PERCENT, backing.0, panel.0), w, h), (45, 45, 1323, 860));
+        assert_eq!((w * h * 100 + 50 * 2940 * 1912 / 100) / (2940 * 1912), 20, "a fifth of the pixels");
         assert_eq!(render_percent(100, backing.0, panel.0), 87);
         assert_eq!(render_size(100, backing, panel), (2558, 1663));
         assert_eq!(render_percent(90, backing.0, panel.0), 87, "above the panel is the panel");
@@ -791,10 +799,10 @@ mod tests {
     #[test]
     fn an_obelisk_cli_older_than_the_least_starts_no_vrchat() {
         let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
-        for old in ["obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+        for old in ["obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
             assert!(too_old(&at(old)), "{old}");
         }
-        for fit in ["obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.13-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+        for fit in ["obelisk-cli-0.1.13-arm64", "obelisk-cli-0.1.14-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
             assert!(!too_old(&at(fit)), "{fit}");
         }
     }

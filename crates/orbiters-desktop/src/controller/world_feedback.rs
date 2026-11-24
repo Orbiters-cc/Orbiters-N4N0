@@ -61,6 +61,8 @@ pub(super) struct WorldFeedbackRuntime {
     /// Worlds a menu asked about (read, liked, labelled, commented), newest first, since when.
     asked: Vec<(String, Instant)>,
     instances: (Vec<orbiters_n4n0_core::menu::InstanceRow>, Option<Instant>),
+    /// Whom they were read for.
+    viewer: orbiters_core::visited::Viewer,
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
     sent: Option<FeedbackView>,
@@ -87,6 +89,7 @@ impl Default for WorldFeedbackRuntime {
             menu_errors: HashMap::new(),
             asked: Vec::new(),
             instances: (Vec::new(), None),
+            viewer: Default::default(),
             port_note: None,
             sent: None,
             scope: 0,
@@ -237,9 +240,10 @@ impl WorldFeedbackRuntime {
     }
 
     /// The worlds N4N0's menus give feedback on, and what they show of each.
-    fn view(&mut self, here: Option<(String, String)>, signed_in: bool) -> FeedbackView {
-        if self.instances.1.is_none_or(|at| at.elapsed() > INSTANCES_EVERY) {
-            self.instances = (orbiters_n4n0_core::invites::read_rows(), Some(Instant::now()));
+    fn view(&mut self, here: Option<(String, String)>, signed_in: bool, viewer: &orbiters_core::visited::Viewer) -> FeedbackView {
+        if self.viewer != *viewer || self.instances.1.is_none_or(|at| at.elapsed() > INSTANCES_EVERY) {
+            self.viewer = viewer.clone();
+            self.instances = (orbiters_n4n0_core::invites::read_rows(viewer), Some(Instant::now()));
         }
         let mut subjects: Vec<Subject> = Vec::new();
         let add = |subjects: &mut Vec<Subject>, world: &str, name: &str, why: Why| {
@@ -524,9 +528,10 @@ impl super::Controller {
     fn feedback_publish(self: &Shared) {
         let here = self.feedback_here();
         let signed_in = self.feedback_api().is_some();
+        let viewer = self.view().viewer_in_game();
         let view = {
             let mut rt = self.world_feedback.lock().unwrap();
-            let view = rt.view(here, signed_in);
+            let view = rt.view(here, signed_in, &viewer);
             if rt.sent.as_ref() == Some(&view) {
                 return;
             }
@@ -911,20 +916,20 @@ mod tests {
             ..Default::default()
         };
         rt.asked("not a world");
-        assert!(rt.view(None, true).worlds.is_empty());
+        assert!(rt.view(None, true, &Default::default()).worlds.is_empty());
         rt.asked(WORLD);
         rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
-        let view = rt.view(None, true);
+        let view = rt.view(None, true, &Default::default());
         assert!(view.subjects.is_empty(), "asked, not a subject");
         assert_eq!(view.worlds.iter().map(|w| (w.world.as_str(), w.liked, w.likes, w.pending)).collect::<Vec<_>>(), [(WORLD, true, 1, 1)]);
         // The world the player is in and asked about: once.
-        let view = rt.view(Some((WORLD.to_uppercase().replace("WRLD", "wrld"), "Home".into())), true);
+        let view = rt.view(Some((WORLD.to_uppercase().replace("WRLD", "wrld"), "Home".into())), true, &Default::default());
         assert_eq!((view.subjects.len(), view.worlds.len()), (1, 1));
         // The newest few only.
         for i in 0..ASKED_MAX + 2 {
             rt.asked(&format!("wrld_4432ea9b-729c-46e3-8eaf-{i:012x}"));
         }
-        let view = rt.view(None, true);
+        let view = rt.view(None, true, &Default::default());
         assert_eq!(view.worlds.len(), ASKED_MAX);
         assert_eq!(view.worlds[0].world, format!("wrld_4432ea9b-729c-46e3-8eaf-{:012x}", ASKED_MAX + 1));
         let _ = std::fs::remove_file(&rt.queue_path);
@@ -1041,11 +1046,11 @@ mod tests {
         rt.asked(WORLD);
         let read = Call::Read { world: WORLD.into() };
         rt.answered(&read, Err(Failure::Later("500".into())));
-        let unread = rt.view(None, true).worlds[0].clone();
+        let unread = rt.view(None, true, &Default::default()).worlds[0].clone();
         assert!(unread.loading, "nothing read");
         assert!(unread.error.is_some(), "and that is said");
         rt.answered(&read, Ok(Some(orbiters_core::world_feedback::ServerView::default())));
-        let read_now = rt.view(None, true).worlds[0].clone();
+        let read_now = rt.view(None, true, &Default::default()).worlds[0].clone();
         assert!(!read_now.loading && read_now.error.is_none(), "{read_now:?}");
         let _ = std::fs::remove_file(&rt.queue_path);
     }

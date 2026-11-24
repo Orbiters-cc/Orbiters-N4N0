@@ -131,5 +131,12 @@
   "Repairing what runs VRChat…": "VRChat を動かすファイルを修復中…",
   "What runs VRChat on this Mac is not whole, so it was not started.": "この Mac で VRChat を動かすファイルが揃っていないため、起動しませんでした。",
   "Downloads what runs VRChat again and puts it in place once it is whole: your games, sign-in and settings stay.": "VRChat を動かすファイルを再ダウンロードし、揃ってから置き換えます。ゲーム、サインイン、設定はそのまま残ります。",
-  "Repair": "修復"
+  "Repair": "修復",
+  "Starting VRChat, then joining {name}…": "VRChatを起動し、そのあと{name}に参加します…",
+  "VRChat is up: joining {name} once it says who is signed in…": "VRChatが起動しました。サインイン中のアカウントがわかり次第、{name}に参加します…",
+  "{name} was not joined: VRChat is signed in as another account.": "{name}に参加しませんでした。VRChatは別のアカウントでサインインしています。",
+  "{name} was not joined: VRChat did not say in time who is signed in.": "{name}に参加しませんでした。サインイン中のアカウントをVRChatが時間内に示しませんでした。",
+  "{name} was not joined: VRChat did not start, or closed too soon.": "{name}に参加しませんでした。VRChatが起動しなかったか、その前に終了しました。",
+  "{name} was not joined: {reason}": "{name}に参加しませんでした。{reason}",
+  "{name} was not joined: another VRChat start came in its place.": "{name}に参加しませんでした。代わりに別のVRChatが起動しました。"
 }

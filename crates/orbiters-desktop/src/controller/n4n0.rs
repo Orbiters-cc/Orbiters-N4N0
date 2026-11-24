@@ -115,6 +115,10 @@ impl Host for Link {
         self.with(|c| c.previous_instance_account()).flatten()
     }
 
+    fn previous_instances(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
+        orbiters_n4n0_core::invites::read_rows(&self.with(|c| c.view().viewer_in_game()).unwrap_or_default())
+    }
+
     /// On the OSC action thread, in order with the record toggle.
     fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool {
         self.with(|c| c.osc_action(move |_| action())).unwrap_or(false)

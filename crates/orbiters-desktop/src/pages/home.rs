@@ -2380,8 +2380,8 @@ mod tests {
         let Source::SignedIn { user_id: me, .. } = data.source.clone() else { panic!("the sample is signed in") };
         let world = |n: u32| format!("wrld_00000000-0000-4000-8000-{:012}", 500 + n);
         let rows = vec![
-            Visit { world_id: world(1), instance: "31337~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000 },
-            Visit { world_id: world(2), instance: "4242~friends(usr_00000000-0000-4000-8000-000000000005)~region(jp)".into(), name: "Snowy Cabin".into(), at: 1_794_900_000 },
+            Visit { world_id: world(1), instance: "31337~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000, account: Some(sample_me()) },
+            Visit { world_id: world(2), instance: "4242~friends(usr_00000000-0000-4000-8000-000000000005)~region(jp)".into(), name: "Snowy Cabin".into(), at: 1_794_900_000, account: Some(sample_me()) },
         ];
         let stage = |h: &mut Harness, data: &orbiters_core::launcher::LauncherState| {
             let l = h.state.launcher_mut();
@@ -2474,6 +2474,14 @@ mod tests {
         assert!(crate::controller::vrchat_data::public_instance(&destination.instance_id) && destination.instance_id.ends_with("~region(eu)"), "{}", destination.instance_id);
     }
 
+    /// The account of the sample's list: the one whose previous instances these tests hand in.
+    fn sample_me() -> String {
+        match orbiters_core::launcher::sample().source {
+            orbiters_core::launcher::Source::SignedIn { user_id, .. } => user_id,
+            _ => panic!("the sample is signed in"),
+        }
+    }
+
     /// The account Where's previous instances are for, as the VRChat sign-in says (made-up): `user` signed in, or
     /// connecting with its last known name.
     fn vrchat_user(id: &str, name: &str) -> orbiters_core::vrchat_api::User {
@@ -2497,7 +2505,7 @@ mod tests {
         data.source = Source::Nothing;
         let world = "wrld_00000000-0000-4000-8000-000000000601".to_string();
         let instance = "31337~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".to_string();
-        let rows = vec![Visit { world_id: world.clone(), instance: instance.clone(), name: "Harbor Market".into(), at: 1_794_990_000 }];
+        let rows = vec![Visit { world_id: world.clone(), instance: instance.clone(), name: "Harbor Market".into(), at: 1_794_990_000, account: Some(sample_me()) }];
         {
             let l = h.state.launcher_mut();
             l.set_data(Arc::new(data.clone()));
@@ -2563,8 +2571,8 @@ mod tests {
         let data = orbiters_core::launcher::sample();
         let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
         let world = |n: u32| format!("wrld_00000000-0000-4000-8000-{:012}", 700 + n);
-        let a = Visit { world_id: world(1), instance: "111~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000 };
-        let b = Visit { world_id: world(2), instance: "222~friends(usr_00000000-0000-4000-8000-000000000005)~region(jp)".into(), name: "Snowy Cabin".into(), at: 1_794_900_000 };
+        let a = Visit { world_id: world(1), instance: "111~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000, account: Some(sample_me()) };
+        let b = Visit { world_id: world(2), instance: "222~friends(usr_00000000-0000-4000-8000-000000000005)~region(jp)".into(), name: "Snowy Cabin".into(), at: 1_794_900_000, account: Some(sample_me()) };
         {
             let l = h.state.launcher_mut();
             l.set_data(Arc::new(data.clone()));
@@ -2689,23 +2697,25 @@ mod tests {
         assert!(orbiters_ui::widgets::control(&h.ctx, "Play in VR").is_none() && orbiters_ui::widgets::control(&h.ctx, "Play in Desktop").is_none());
     }
 
-    /// Tenth verification: a profile whose account is not known (one just added, one seen only by a name) is offered nothing
-    /// private, whatever the account signed in has been sent; Home says so, with a start that goes to no place. A public place
-    /// stays, and so do the private ones of a profile proven to be the account's own.
+    /// R1 (it was: nothing private offered on a profile whose account is not known): where several profiles are used, an invite is
+    /// offered on any profile not known to be another's (VRChat starts without it, and it is delivered once its account is
+    /// proven), and an event's private place too; on one known to be another's, as before, neither. R6: while VRChat's log
+    /// cannot be read, nothing private is, and Home says that this is why and what to do.
     #[test]
-    fn a_profile_whose_account_is_not_known_is_offered_nothing_private() {
+    fn a_private_place_is_offered_on_any_profile_not_known_to_be_another_s() {
         use crate::pages::launcher::destinations::EventSoon;
-        use orbiters_core::launcher::{Action, Game, GameProfile, InstanceAccess, Invite, InviteKind, Place, Source};
+        use orbiters_core::launcher::{Action, Game, GameProfile, InstanceAccess, Invite, InviteKind, LogTrouble, Place, Source};
         orbiters_ui::widgets::watch_controls();
         let play = if cfg!(target_os = "macos") { "Play VRChat" } else { "Play in Desktop" };
         let mut h = where_signed_in(Vec::new());
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
         let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
         data.game = Game::NotRunning;
+        data.single_profile = false;
         data.profiles = vec![
             GameProfile { profile: 0, account: Some(name.clone()), account_id: Some(me.clone()), ..Default::default() },
-            // Only a name was ever seen on it, the account's own: a label, no proof.
-            GameProfile { profile: 1, account: Some(name.clone()), ..Default::default() },
+            // Only a name was ever seen on it: whose it is, the VRChat started there will say.
+            GameProfile { profile: 1, account: Some("Sample Earlier Name".into()), ..Default::default() },
             GameProfile { profile: 2, account: Some("Sample Alt".into()), account_id: Some("usr_alt".into()), ..Default::default() },
         ];
         data.invites = vec![Invite {
@@ -2725,7 +2735,7 @@ mod tests {
                 region: "eu".into(),
             }),
         }];
-        h.state.launcher_mut().set_data(Arc::new(data));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
         let event = |id: &str, n: u32, title: &str, instance: &str| EventSoon { id: id.into(), title: title.into(), starts_at: 1_795_000_000, location: Some(format!("wrld_00000000-0000-4000-8000-00000000090{n}:{instance}")), ..Default::default() };
         let events = vec![event("a", 1, "Sample open meetup", "5~region(eu)"), event("b", 2, "Sample closed meetup", "6~group(grp_x)~groupAccessType(members)~region(eu)")];
         h.state.launcher_mut().places.stand_in(Some(crate::pages::launcher::destinations::HistoryView::default()), events, None, true);
@@ -2735,36 +2745,99 @@ mod tests {
         };
         let there = |h: &Harness, label: &str| orbiters_ui::widgets::control(&h.ctx, label).is_some();
         let own = format!("0 · {name}");
-        let labelled = format!("1 · {name}");
-        // Its own profile: the invite is accepted on it.
-        click(&mut h, &own);
-        assert!(there(&h, "Sample private room") && !there(&h, "Start without a place"));
-        click(&mut h, "Sample private room");
-        click(&mut h, play);
-        assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { invite, profile: 0, .. }] if invite == "synthetic"));
-        // Profiles whose account is not known.
-        for (chip, profile) in [(labelled.as_str(), 1), ("Another profile", 3)] {
-            click(&mut h, &own);
-            click(&mut h, "Sample private room");
+        for (chip, profile) in [(own.as_str(), 0), ("1 · Sample Earlier Name", 1), ("Another profile", 3)] {
             click(&mut h, chip);
-            assert!(!there(&h, "Sample private room"), "{chip}: the invite is not offered");
-            assert!(there(&h, "Start without a place"), "{chip}");
+            click(&mut h, "Sample private room");
             click(&mut h, play);
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: p, .. }] if *p == profile), "{chip}: chosen before, it does not go");
-            click(&mut h, "Start without a place");
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: p, .. }] if *p == profile), "{chip}");
-            // An event's private instance neither (its invite arrives at home); a public one goes.
-            click(&mut h, "Sample closed meetup");
-            click(&mut h, play);
-            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { .. }]), "{chip}");
+            assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { invite, profile: p, .. }] if invite == "synthetic" && *p == profile), "{chip}");
             click(&mut h, "Sample open meetup");
             click(&mut h, play);
             assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, profile: p, .. }] if destination.instance_id == "5~region(eu)" && *p == profile), "{chip}");
             click(&mut h, "Home world");
         }
-        // Another account's: nothing private either, and nothing to sign in for.
+        // (Without the invite, its card fits.)
+        let invites = std::mem::take(&mut data.invites);
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        click(&mut h, "1 · Sample Earlier Name");
+        click(&mut h, "Sample closed meetup");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, profile: 1, .. }] if destination.instance_id.starts_with("6~group")));
+        click(&mut h, "Home world");
+        data.invites = invites;
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        // Another account's: nothing private (an event's invite arrives at home).
         click(&mut h, "2 · Sample Alt");
-        assert!(!there(&h, "Sample private room") && !there(&h, "Start without a place"));
+        assert!(!there(&h, "Sample private room"));
+        click(&mut h, "Sample closed meetup");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: 2, .. }]));
+        // VRChat's log cannot be read: nothing private, on any profile; a public place and VRChat's own start stay.
+        click(&mut h, &own);
+        for trouble in [LogTrouble::NoFolder, LogTrouble::NotWritten, LogTrouble::Denied("/x/VRChat".into())] {
+            data.log_trouble = Some(trouble.clone());
+            h.state.launcher_mut().set_data(Arc::new(data.clone()));
+            h.settle();
+            assert!(!there(&h, "Sample private room"), "{trouble:?}");
+            click(&mut h, "Sample open meetup");
+            click(&mut h, play);
+            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayAt { destination, .. }] if destination.instance_id == "5~region(eu)"), "{trouble:?}");
+            click(&mut h, "Home world");
+            click(&mut h, play);
+            assert!(matches!(sent(&mut h).as_slice(), [Action::PlayOn { profile: 0, .. }]), "{trouble:?}");
+            let said = crate::pages::launcher::destinations::log_words(&trouble);
+            assert!(said.contains("Private places need VRChat's log") && (said.contains("turn on Logging") || said.contains("allow Orbiters - N4N0 to read")), "why, and what to do: {said}");
+        }
+        // One profile alone: as it always was, whatever its log.
+        data.single_profile = true;
+        data.profiles = vec![GameProfile::default()];
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        click(&mut h, "Sample private room");
+        click(&mut h, play);
+        assert!(matches!(sent(&mut h).as_slice(), [Action::AcceptInviteOn { profile: 0, .. }]));
+    }
+
+    /// R1: while a private place is on its way Home says both steps, then why it was not delivered, with another try; × gives it
+    /// up. Nothing of it is said where no place is.
+    #[test]
+    fn home_says_both_steps_of_a_private_place_and_why_it_was_not_delivered() {
+        use crate::pages::launcher::hero::joining_line;
+        use orbiters_core::launcher::{Action, Game, JoinFailure, JoinStep, Joining, LaunchMode, LogTrouble};
+        orbiters_ui::widgets::watch_controls();
+        let joining = |step: JoinStep| Joining { world: "Sample private room".into(), step };
+        assert!(joining_line(&joining(JoinStep::Starting)).starts_with("Starting VRChat, then joining Sample private room"));
+        assert!(joining_line(&joining(JoinStep::SigningIn)).contains("who is signed in"));
+        for (why, says) in [
+            (JoinFailure::OtherAccount, "another account"),
+            (JoinFailure::NoProof, "did not say in time"),
+            (JoinFailure::Gone, "closed too soon"),
+            (JoinFailure::Log(LogTrouble::NotWritten), "Logging"),
+            (JoinFailure::NotSent("no network".into()), "no network"),
+        ] {
+            let line = joining_line(&joining(JoinStep::Failed(why)));
+            assert!(line.starts_with("Sample private room was not joined") && line.contains(says), "{line}");
+        }
+        let mut h = where_signed_in(Vec::new());
+        let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+        let there = |h: &Harness, label: &str| orbiters_ui::widgets::control(&h.ctx, label).is_some();
+        let again = |h: &Harness| h.recorder.launcher.lock().unwrap().iter().map(|a| if let Action::As { action, .. } = a { (**action).clone() } else { a.clone() }).filter(|a| matches!(a, Action::JoinAgain | Action::ForgetJoining)).collect::<Vec<_>>();
+        data.game = Game::Starting(LaunchMode::Desktop);
+        data.joining = Some(joining(JoinStep::Starting));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        assert!(!there(&h, "Try again"), "on its way");
+        data.game = Game::Running(LaunchMode::Desktop);
+        data.joining = Some(joining(JoinStep::Failed(JoinFailure::OtherAccount)));
+        h.state.launcher_mut().set_data(Arc::new(data.clone()));
+        h.settle();
+        click(&mut h, "Try again");
+        assert_eq!(again(&h), [Action::JoinAgain]);
+        data.joining = None;
+        h.state.launcher_mut().set_data(Arc::new(data));
+        h.settle();
+        assert!(!there(&h, "Try again"));
     }
 
     /// Tenth verification: Join into a game that runs asks for that game alone (none is started for it if it is gone by then):
@@ -2814,7 +2887,7 @@ mod tests {
         use crate::pages::launcher::previous::{Visit, OPEN_FOR};
         use orbiters_core::launcher::Action;
         orbiters_ui::widgets::watch_controls();
-        let visit = Visit { world_id: "wrld_00000000-0000-4000-8000-000000000801".into(), instance: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000 };
+        let visit = Visit { world_id: "wrld_00000000-0000-4000-8000-000000000801".into(), instance: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Harbor Market".into(), at: 1_794_990_000, account: Some(sample_me()) };
         let mut h = where_signed_in(vec![visit.clone()]);
         let instances = |h: &Harness| h.recorder.asked.lock().unwrap().iter().filter(|a| a.starts_with("Instance")).count();
         *h.recorder.alive.lock().unwrap() = Some(true);
@@ -2864,7 +2937,7 @@ mod tests {
     fn a_history_read_ending_while_the_sheet_is_closed_is_not_lost() {
         use crate::pages::launcher::previous::Visit;
         orbiters_ui::widgets::watch_controls();
-        let visit = Visit { world_id: "wrld_00000000-0000-4000-8000-000000000851".into(), instance: "77~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Snowy Cabin".into(), at: 1_794_990_000 };
+        let visit = Visit { world_id: "wrld_00000000-0000-4000-8000-000000000851".into(), instance: "77~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), name: "Snowy Cabin".into(), at: 1_794_990_000, account: Some(sample_me()) };
         let mut h = where_signed_in(Vec::new());
         let (permit, wait) = std::sync::mpsc::channel::<()>();
         let wait = Mutex::new(wait);
@@ -2897,7 +2970,7 @@ mod tests {
         use crate::pages::launcher::previous::Visit;
         orbiters_ui::widgets::watch_controls();
         let rows: Vec<Visit> = (0..8)
-            .map(|n| Visit { world_id: format!("wrld_00000000-0000-4000-8000-0000000009{n:02}"), instance: format!("{n}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)"), name: format!("Quiet World {n}"), at: 1_794_990_000 - n })
+            .map(|n| Visit { world_id: format!("wrld_00000000-0000-4000-8000-0000000009{n:02}"), instance: format!("{n}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)"), name: format!("Quiet World {n}"), at: 1_794_990_000 - n, account: Some(sample_me()) })
             .collect();
         let ids: Vec<String> = rows.iter().map(|r| r.world_id.clone()).collect();
         let mut h = where_signed_in(Vec::new());
@@ -2928,6 +3001,7 @@ mod tests {
             instance: format!("{}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)", 4240 + n),
             name: name.into(),
             at: 1_794_990_000,
+            account: Some(sample_me()),
         }
     }
 
@@ -3129,7 +3203,8 @@ mod tests {
     fn verify2_an_account_change_during_a_check_asks_again() {
         use orbiters_core::launcher::Source;
         orbiters_ui::widgets::watch_controls();
-        let visit = row_of(51, "Harbor Market");
+        // (One of nobody's, and public: either account's to go to. Another's own is given up, R3.)
+        let visit = crate::pages::launcher::previous::Visit { instance: "4291~region(eu)".into(), account: None, ..row_of(51, "Harbor Market") };
         let mut h = where_signed_in(vec![visit.clone()]);
         h.recorder.alive_by.lock().unwrap().insert(visit.instance.clone(), (Some(true), Duration::from_millis(400)));
         click(&mut h, "Previous instances");
@@ -3250,7 +3325,7 @@ mod tests {
         orbiters_ui::widgets::watch_controls();
         let visit = row_of(91, "Harbor Market");
         let mut h = where_signed_in(Vec::new());
-        let last = LastVisit { world_id: visit.world_id.clone(), instance: visit.instance.clone(), name: visit.name.clone(), at: visit.at, picture: None };
+        let last = LastVisit { world_id: visit.world_id.clone(), instance: visit.instance.clone(), name: visit.name.clone(), at: visit.at, picture: None, account: visit.account.clone() };
         h.state.launcher_mut().places.stand_in(Some(HistoryView { frequent: Vec::new(), last: Some(last) }), Vec::new(), Some(true), true);
         h.settle();
         click(&mut h, "Harbor Market");
@@ -3429,6 +3504,7 @@ mod tests {
         let (mut h, _, _) = friends_in_instances(false);
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
         data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000ee".into()), running: None, starting: None, assistant: false }];
+        data.single_profile = false;
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
         open_profile_of(&mut h, "Nova Sample");

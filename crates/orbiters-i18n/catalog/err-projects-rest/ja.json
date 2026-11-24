@@ -85,7 +85,6 @@
   "Invalid package name: {name}": "パッケージ名が無効です：{name}",
   "Required local package {name} is unavailable": "必要なローカルパッケージ{name}が利用できません",
   "Choose a Unity project containing ProjectSettings/ProjectVersion.txt.": "ProjectSettings/ProjectVersion.txtを含むUnityプロジェクトを選んでください。",
-  "Project path is not Unicode": "プロジェクトのパスがUnicodeではありません",
   "A repository URL must use HTTPS or HTTP.": "リポジトリのURLはHTTPSまたはHTTPにしてください。",
   "No compatible version of {name} is available in enabled repositories.": "有効なリポジトリに、{name}の互換性のあるバージョンがありません。",
   "{name} {version} is no longer in the enabled repositories.": "{name} {version}は有効なリポジトリにもうありません。",
@@ -115,5 +114,7 @@
   "{name} could not be put back ({why}): its copy is kept at {path}": "{name}を元に戻せませんでした（{why}）。コピーは{path}に保存されています",
   "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "パッケージの変更が途中で止まり、完全には元に戻せませんでした：{problems}。プロジェクトにあったものは{path}に保存されています。",
   "its record cannot be used": "その記録は使用できません",
-  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "パッケージは変更されましたが、{path}にある変更の記録を閉じられませんでした。次のパッケージ変更の前に削除してください"
+  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "パッケージは変更されましたが、{path}にある変更の記録を閉じられませんでした。次のパッケージ変更の前に削除してください",
+  "Orbiters' project list could not be saved": "Orbiters のプロジェクト一覧を保存できませんでした",
+  "Creator Companion's project list cannot be read now ({why}): the projects it had when it last could are shown. Orbiters changes nothing of it.": "今は Creator Companion のプロジェクト一覧を読み込めません（{why}）。最後に読み込めたときのプロジェクトを表示しています。Orbiters はその一覧を変更しません。"
 }

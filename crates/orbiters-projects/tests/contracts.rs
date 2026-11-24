@@ -1,4 +1,4 @@
-use orbiters_projects::{avatars, discovery, setup, templates, vpm};
+use orbiters_projects::{avatars, discovery, gallery, setup, templates};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 #[test]
@@ -167,20 +167,20 @@ fn copy_excludes_generated_folders() {
     assert!(templates::copy(&src, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).is_err());
 }
 #[test]
-fn shared_registration_uses_temp_store_only() {
+fn a_project_is_added_to_orbiters_list_and_taken_off() {
     let root = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("ProjectSettings")).unwrap();
     std::fs::create_dir_all(project.path().join("Packages")).unwrap();
     std::fs::write(project.path().join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
     std::fs::write(project.path().join("Packages/vpm-manifest.json"), "{\"dependencies\":{},\"locked\":{}}").unwrap();
-    orbiters_projects::runtime().unwrap().block_on(async {
-        vpm::register(root.path(), project.path(), true).await.unwrap();
-        assert_eq!(vpm::registered(root.path()).await.unwrap().len(), 1);
-        vpm::register(root.path(), project.path(), false).await.unwrap();
-        assert!(vpm::registered(root.path()).await.unwrap().is_empty());
-        assert!(project.path().join("ProjectSettings/ProjectVersion.txt").exists());
-    });
+    gallery::add(root.path(), project.path()).unwrap();
+    assert_eq!(gallery::listed(root.path()).projects.len(), 1);
+    gallery::remove(root.path(), project.path()).unwrap();
+    assert!(gallery::listed(root.path()).projects.is_empty());
+    assert!(project.path().join("ProjectSettings/ProjectVersion.txt").exists());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0, "nothing of Creator Companion's is made");
+    std::fs::remove_dir_all(orbiters_projects::own::dir(root.path())).unwrap();
 }
 
 #[test]

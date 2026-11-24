@@ -99,6 +99,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
             let top = ui.cursor().top();
             hero(ui, cx, state, &project, !split.docked);
+            only_here(ui, cx, state, &project);
             super::storage_card::card(ui, state, &project);
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
@@ -319,8 +320,8 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         if widgets::activated(&b.show_at(ui, main)) {
             let path = project.path.clone();
             state.task(&ctx, tr("Adding the project…"), move || {
-                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-                Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
+                orbiters_projects::gallery::add(&orbiters_projects::vcc_dir(), &path)?;
+                Ok(Outcome::Added(path, tr("Project added to Orbiters' list").into()))
             });
         }
     }
@@ -346,6 +347,32 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     let items: Vec<Item> = acts.iter().map(|(i, _)| *i).collect();
     if let Some(act) = popup::menu_button(ui, "project-menu", menu_r, icons::DOTS_THREE, tr("More"), &items).map(|k| acts[k].1) {
         super::menus::project_act(&ctx, cx, state, project, act, menu_r, sheet);
+    }
+}
+
+/// A project Creator Companion and ALCOM do not list: said, with what adds it there.
+fn only_here(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
+    if !super::menus::offers_companion(state, project) {
+        return;
+    }
+    let ctx = ui.ctx().clone();
+    let w = ui.available_width();
+    let b = Button::new(tr("Add to Creator Companion")).icon(icons::PLUS).size(Size::Sm).variant(Variant::Ghost).enabled(!state.running()).id_salt(("only-here", &project.path));
+    let bw = b.desired_width(ui);
+    let beside = w - bw - 8.0 >= 220.0;
+    let text = ui.painter().layout_job(
+        Txt::new(tr("Listed in Orbiters. Creator Companion and ALCOM do not list it: add its folder there to see it there too."), 11.5)
+            .color(theme::FG_3)
+            .line_height(17.0)
+            .job(if beside { w - bw - 34.0 } else { w - 26.0 }),
+    );
+    let (r, _) = ui.allocate_exact_size(vec2(w, if beside { text.size().y.max(32.0) } else { text.size().y + 36.0 } + 4.0), Sense::hover());
+    let top = if beside { r.center().y - text.size().y / 2.0 } else { r.top() };
+    widgets::icon(ui.painter(), pos2(r.left() + 8.0, top + 9.0), icons::INFO, 13.0, theme::FG_4);
+    ui.painter().galley(pos2(r.left() + 22.0, top), text, theme::FG_3);
+    let at = if beside { pos2(r.right() - bw, r.center().y - 16.0) } else { pos2(r.left() + 14.0, r.bottom() - 34.0) };
+    if widgets::activated(&b.show_at(ui, Rect::from_min_size(at, vec2(bw, 32.0)))) {
+        super::menus::companion(&ctx, cx, state, project);
     }
 }
 

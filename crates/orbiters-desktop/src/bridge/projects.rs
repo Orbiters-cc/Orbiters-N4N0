@@ -19,7 +19,7 @@ use super::tools::{paused_failure, Answer};
 use super::Call;
 use orbiters_core::account::Server;
 use orbiters_projects::discovery::{self, Kind, Project, Scan};
-use orbiters_projects::{blender, coherent, editor, git, hidden, missing, network, size, storage, templates, updates, vpm};
+use orbiters_projects::{blender, coherent, editor, gallery, git, hidden, missing, network, size, storage, templates, updates, vpm};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -216,15 +216,18 @@ pub fn resource() -> Value {
     json!({ "uri": GUIDE_URI, "name": "unity-projects", "title": "How to use the Unity projects tools", "description": "What the unity_ tools do, how their jobs go, and what to ask the person first.", "mimeType": "text/markdown" })
 }
 
+/// What a project added, made or copied is not in.
+const IN_ORBITERS: &str = "It is in Orbiters' list. Orbiters changes nothing of VCC's or ALCOM's: for them to list it, the person adds its folder there.";
+
 /// How the Unity projects tools go, for a model.
 pub const GUIDE: &str = "# Unity projects\n\n\
-These tools do what Orbiters - N4N0's Unity projects tab does, in the same shared VCC environment as Creator Companion and ALCOM, so what you change shows there and in the tab.\n\n\
-- `unity_list_projects` lists the projects found on this computer (`listed` ones are in VCC's list, the others were found on a disk). `refresh: true` looks again in a job.\n\
+These tools do what Orbiters - N4N0's Unity projects tab does, and what you change shows in the tab. The tab lists Creator Companion's and ALCOM's projects and package repositories with Orbiters' own; nothing of theirs is ever changed, so what is added or removed here stays in Orbiters (the packages of a project are the project's own files, and change for every program).\n\n\
+- `unity_list_projects` lists the projects found on this computer (`listed` ones are in the tab's list, the others were found on a disk; `in_creator_companion` says whether VCC or ALCOM list it). `refresh: true` looks again in a job.\n\
 - `unity_get_project` with a project's `path`: its installed packages, updates (and those held back, with why), Update all's plan, Unity's editor, its disk, Git, Blender files, previews and worlds.\n\
 - Packages: `unity_find_packages` for what the repositories offer; `unity_change_packages` to install (a version or the newest), remove, update one, update all, or restore what is missing. A change that conflicts comes back with the plan that makes it coherent: show it to the person if it removes anything, then `apply_plan`. A change that fails because no repository lists a package: `unity_missing_packages` looks for the repositories that have it and adds them.\n\
 - `unity_repositories` lists, adds (by URL), removes, turns on and off, and downloads again the VPM repositories; `suggest` searches Orbiters' catalog of known ones.\n\
 - `unity_editor` opens a project in Unity, brings it forward, asks it to Save & Exit, or (with `confirm`) kills it.\n\
-- `unity_manage_project`: add a found project to the list, remove one from it (its files stay; exact path and `confirm`), hide or show it in the tab, open its folder, Unity Hub or one of its Blender files.\n\
+- `unity_manage_project`: add a found project to the tab's list, remove one from it (its files stay, and so does its entry in VCC and ALCOM; exact path and `confirm`), hide or show it in the tab, open its folder, Unity Hub or one of its Blender files.\n\
 - New projects: `unity_list_templates`, then `unity_create_project`; `unity_duplicate_project` copies one with its exact packages (check_only says what it needs on the disk first).\n\
 - `unity_storage`: a project's disk, and moving its Library to a disk with room (`plan` first, then `repair`).\n\
 - `unity_add_orbiters`: Mixer, the Toolkit, My Avatar, or N4N0 on one of the project's avatars.\n\
@@ -575,6 +578,7 @@ fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, 
         "unity": project.unity,
         "kind": kind_name(project.kind),
         "listed": project.registered,
+        "in_creator_companion": project.shared,
         "folder_missing": project.missing,
         "hidden": hidden::contains(hidden, &project.path),
         "modified": project.modified,
@@ -834,7 +838,7 @@ impl Projects {
                 "Call unity_list_projects for the projects on this computer.",
             ));
         }
-        let listed = block_on(vpm::registered(&root())).unwrap_or_default().iter().any(|p| discovery::key(p) == key);
+        let listed = gallery::lists(&root(), &path);
         Ok(discovery::describe(path, listed, &mut Default::default()))
     }
 
@@ -1334,8 +1338,8 @@ impl Projects {
         let result = match action {
             "add" => {
                 Self::present(&project)?;
-                block_on(vpm::register(&root, &project.path, true)).map_err(|e| failed("add_failed", e, "Check that it is a Unity project."))?;
-                json!({ "listed": true, "note": "VCC and ALCOM list it too." })
+                gallery::add(&root, &project.path).map_err(|e| failed("add_failed", e, "Check that it is a Unity project."))?;
+                json!({ "listed": true, "in_creator_companion": project.shared, "note": IN_ORBITERS })
             }
             "hide" | "unhide" => {
                 let mut list = hidden::load();
@@ -1348,7 +1352,7 @@ impl Projects {
                 // Numbered by time: the window keeps its own count, and saves made here must win over older ones.
                 let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
                 hidden::save(&list, generation).map_err(|e| failed("save_failed", e, "Try again."))?;
-                json!({ "hidden": action == "hide", "note": "Only the tab's lists change: the project stays where it is and in VCC's list." })
+                json!({ "hidden": action == "hide", "note": "Only the tab's lists change: the project stays where it is, and VCC and ALCOM list it as before." })
             }
             "reveal" => {
                 Self::present(&project)?;
@@ -1371,7 +1375,7 @@ impl Projects {
         Ok(result)
     }
 
-    /// Takes a listed project out of the shared list: only by the path of one listed (never one guessed at), only with
+    /// Takes a listed project out of the tab's list: only by the path of one listed (never one guessed at), only with
     /// `confirm`, and its files stay. A project whose folder is gone can be taken out too.
     fn remove_from_list(root: &Path, args: &Value) -> Result<Value, Failure> {
         let given = text(args, "path").ok_or_else(|| bad("remove_from_list needs path: the listed project's own folder.", "Take it from unity_list_projects."))?;
@@ -1379,7 +1383,7 @@ impl Projects {
         if !on_a_local_drive(given) {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
         }
-        let listed = block_on(vpm::registered(root)).map_err(|e| failed("vpm_failed", e, "Try again."))?;
+        let listed = gallery::listed(root).projects;
         let Some(exact) = listed.iter().find(|p| discovery::key(p) == discovery::key(given)) else {
             return Err(Failure::new("not_listed", format!("{} is not in the project list.", given.display()), "unity_list_projects says which projects are listed."));
         };
@@ -1387,12 +1391,12 @@ impl Projects {
         if args["confirm"].as_bool() != Some(true) {
             return Err(Failure::new(
                 "confirm_needed",
-                format!("This takes {name} out of the list VCC, ALCOM and the tab share. Its files stay where they are."),
+                format!("This takes {name} out of the tab's list. Its files stay where they are, and VCC and ALCOM list it as before."),
                 "If the person agreed, call again with confirm true.",
             ));
         }
-        block_on(vpm::register(root, exact, false)).map_err(|e| failed("remove_failed", e, "Try again."))?;
-        Ok(json!({ "listed": false, "files_kept_at": exact, "note": "Removed from the shared project list. Its files stay." }))
+        gallery::remove(root, exact).map_err(|e| failed("remove_failed", e, "Try again."))?;
+        Ok(json!({ "listed": false, "files_kept_at": exact, "note": "Removed from the tab's list. Its files stay, and VCC and ALCOM list it as before." }))
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1449,7 +1453,7 @@ impl Projects {
         self.spawn(Lane::Action, label, Some(location.join(&name)), true, Progress::Copy(progress), cancel, None, args, call, move || {
             let path = block_on(templates::create(&orbiters_projects::vcc_dir(), &source, &location, &name, &unity, false, &c, &p))
                 .map_err(|e| failed("create_failed", e, "Read the message: a folder kept is said there."))?;
-            Ok(json!({ "path": path, "listed": true, "next": "unity_editor open opens it in Unity." }))
+            Ok(json!({ "path": path, "listed": true, "in_creator_companion": false, "note": IN_ORBITERS, "next": "unity_editor open opens it in Unity." }))
         })
     }
 
@@ -1497,7 +1501,7 @@ impl Projects {
         self.spawn(Lane::Action, label, Some(location.join(&name)), true, Progress::Copy(progress), cancel, None, args, call, move || {
             let path = block_on(templates::duplicate(&orbiters_projects::vcc_dir(), &source, &location, &name, keep, &c, &p))
                 .map_err(|e| failed("duplicate_failed", e, "Read the message: a copy kept and listed is said there, and unity_list_projects shows it."))?;
-            Ok(json!({ "path": path, "listed": true, "note": "Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
+            Ok(json!({ "path": path, "listed": true, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
         })
     }
 
@@ -1714,7 +1718,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_list_projects",
             "title": "List the Unity projects",
-            "description": "The Unity projects on this computer, as the Unity projects tab lists them: name, path, Unity version, kind (avatars, worlds, vrchat, unity), whether VCC lists it (listed) or it was only found on a disk, hidden, its avatars and worlds with their blueprint ids, whether Unity has it open, and its size when measured. refresh true looks through the disks again in a job.",
+            "description": "The Unity projects on this computer, as the Unity projects tab lists them: name, path, Unity version, kind (avatars, worlds, vrchat, unity), whether the tab lists it (listed) or it was only found on a disk, whether VCC or ALCOM list it (in_creator_companion), hidden, its avatars and worlds with their blueprint ids, whether Unity has it open, and its size when measured. refresh true looks through the disks again in a job.",
             "inputSchema": { "type": "object", "properties": {
                 "refresh": { "type": "boolean", "description": "Look for projects again (a job; the list returned is what is known now)." },
                 "include_hidden": { "type": "boolean", "description": "With the projects hidden in the tab." },
@@ -1773,7 +1777,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_repositories",
             "title": "VPM repositories",
-            "description": "The VPM repositories VCC, ALCOM and the tab share: list; add a listing by its URL (with headers if it needs them); remove one of the person's; enable or disable one (disabled ones stay in VCC's settings, their packages are left out); refresh downloads every repository again; suggest searches Orbiters' catalog of known repositories.",
+            "description": "The VPM repositories the tab works with: VCC's and ALCOM's, read, and Orbiters' own. list; add a listing by its URL (with headers if it needs them); remove one of the person's; enable or disable one (its packages are left out). All of it changes Orbiters' alone: VCC and ALCOM keep theirs; refresh downloads every repository again; suggest searches Orbiters' catalog of known repositories.",
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "enum": ["list", "add", "remove", "enable", "disable", "refresh", "suggest"], "description": "Default list." },
                 "url": { "type": "string", "description": "For add: the listing's URL (index.json)." },
@@ -1799,7 +1803,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_manage_project",
             "title": "Manage a project in the list",
-            "description": "add: puts a project found on a disk in the list VCC, ALCOM and the tab share. remove_from_list: takes a listed project out of it (its files stay; needs its exact path and confirm). hide, unhide: in the tab's lists only. reveal: its folder in Explorer. open_hub: Unity Hub. open_blender: one of its Blender files (blend) in Blender.",
+            "description": "add: puts a project found on a disk in the tab's list. remove_from_list: takes a listed project out of it (its files stay, and VCC and ALCOM list it as before; needs its exact path and confirm). hide, unhide: in the tab's lists only. reveal: its folder in Explorer. open_hub: Unity Hub. open_blender: one of its Blender files (blend) in Blender.",
             "inputSchema": { "type": "object", "properties": {
                 "path": path,
                 "action": { "type": "string", "enum": ["add", "remove_from_list", "hide", "unhide", "reveal", "open_hub", "open_blender"] },
@@ -1818,7 +1822,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_create_project",
             "title": "Create a Unity project",
-            "description": "A new project from a template, in location/name: copied, its packages restored, and listed in VCC and ALCOM, in a job (unity_cancel_job stops the copy).",
+            "description": "A new project from a template, in location/name: copied, its packages restored, and listed in the tab, in a job (unity_cancel_job stops the copy).",
             "inputSchema": { "type": "object", "properties": {
                 "name": { "type": "string", "description": "The folder's name." },
                 "template": { "type": "string", "description": "A template's id or name from unity_list_templates." },
@@ -1831,7 +1835,7 @@ pub fn list() -> Vec<Value> {
         json!({
             "name": "unity_duplicate_project",
             "title": "Duplicate a Unity project",
-            "description": "An independent copy of a project with its installed packages at their exact versions (repositories that are gone included), listed in VCC and ALCOM, as the tab's Duplicate: \"<name> copy\" beside it unless told otherwise, Library taken along with library true. check_only says what it needs and the room on that disk without copying. Its scenes keep their blueprint IDs. A job; unity_cancel_job stops the copy.",
+            "description": "An independent copy of a project with its installed packages at their exact versions (repositories that are gone included), listed in the tab, as the tab's Duplicate: \"<name> copy\" beside it unless told otherwise, Library taken along with library true. check_only says what it needs and the room on that disk without copying. Its scenes keep their blueprint IDs. A job; unity_cancel_job stops the copy.",
             "inputSchema": { "type": "object", "properties": {
                 "path": path,
                 "name": { "type": "string" },
@@ -2041,6 +2045,72 @@ mod tests {
         let crashed = projects.spawn(Lane::Scan, "crash".into(), None, true, Progress::None, Arc::default(), None, &json!({ "wait_s": 5 }), &call(), || panic!("a file nobody foresaw")).unwrap();
         assert_eq!(crashed["state"], "failed");
         assert_eq!(crashed["failure"]["code"], "crashed");
+    }
+
+    /// Not one of these tools writes Creator Companion's or ALCOM's files: what is added, copied and removed is Orbiters' own.
+    #[test]
+    fn no_tool_changes_creator_companions_files() {
+        // (The folder it has in a test: a temporary one of this process's.)
+        let vcc = root();
+        assert!(vcc.starts_with(std::env::temp_dir()), "{}", vcc.display());
+        let dir = tempfile_dir();
+        let project = |name: &str| {
+            let at = dir.join(name);
+            for folder in ["ProjectSettings", "Packages", "Assets"] {
+                std::fs::create_dir_all(at.join(folder)).unwrap();
+            }
+            std::fs::write(at.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+            std::fs::write(at.join("Packages/manifest.json"), r#"{"dependencies":{}}"#).unwrap();
+            std::fs::write(at.join("Packages/vpm-manifest.json"), r#"{"dependencies":{},"locked":{}}"#).unwrap();
+            at
+        };
+        let (theirs, mine) = (project("Theirs"), project("Mine"));
+        std::fs::create_dir_all(vcc.join("vrc-get")).unwrap();
+        std::fs::write(vcc.join("settings.json"), json!({ "userProjects": [theirs], "userRepos": [], "unknown": 1 }).to_string()).unwrap();
+        std::fs::write(vcc.join("vrc-get/settings.json"), r#"{"ignoreOfficialRepository":true,"ignoreCuratedRepository":true}"#).unwrap();
+        let files = || -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+            let mut out = vec![];
+            let mut open = vec![vcc.clone()];
+            while let Some(folder) = open.pop() {
+                for e in std::fs::read_dir(&folder).unwrap().flatten() {
+                    // (Of the entry itself: a folder's own list may say a time it has not caught up with.)
+                    let modified = std::fs::symlink_metadata(e.path()).unwrap().modified().unwrap();
+                    if e.path().is_dir() {
+                        out.push((e.path(), vec![], modified));
+                        open.push(e.path());
+                    } else {
+                        out.push((e.path(), std::fs::read(e.path()).unwrap(), modified));
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        let before = files();
+        let projects = Projects::default();
+        let of = |path: &Path| projects.project(&json!({ "path": path })).unwrap();
+        assert!(of(&theirs).registered && !of(&mine).registered);
+        let added = projects.manage_project(&json!({ "path": mine, "action": "add" })).unwrap();
+        assert_eq!((added["listed"].as_bool(), added["in_creator_companion"].as_bool()), (Some(true), Some(false)));
+        assert!(of(&mine).registered);
+        let copied = projects.duplicate_project(&json!({ "path": theirs, "name": "Copied", "wait_s": 30 }), &call()).unwrap();
+        assert_eq!((copied["state"].as_str(), copied["result"]["listed"].as_bool()), (Some("done"), Some(true)), "{copied}");
+        assert!(of(&dir.join("Copied")).registered);
+        for at in [&mine, &theirs, &dir.join("Copied")] {
+            let asked = projects.manage_project(&json!({ "path": at, "action": "remove_from_list" }));
+            assert_eq!(asked.err().unwrap().code, "confirm_needed");
+            let removed = projects.manage_project(&json!({ "path": at, "action": "remove_from_list", "confirm": true })).unwrap();
+            assert_eq!(removed["listed"], false);
+            assert!(!of(at).registered && at.join("Assets").is_dir(), "its files stay");
+        }
+        assert!(projects.manage_project(&json!({ "path": theirs, "action": "add" })).is_ok() && of(&theirs).registered);
+        let off = projects.repositories(&json!({ "action": "list" }), &call()).unwrap();
+        assert!(off["repositories"].is_array(), "{off}");
+        let after = files();
+        let other = |a: &[(PathBuf, Vec<u8>, std::time::SystemTime)], b: &[(PathBuf, Vec<u8>, std::time::SystemTime)]| -> Vec<PathBuf> { a.iter().filter(|f| !b.contains(f)).map(|f| f.0.clone()).collect() };
+        assert!(after == before, "their folder is as it was: {:?} {:?}", other(&before, &after), other(&after, &before));
+        let _ = std::fs::remove_dir_all(&vcc);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Removing from the list and killing Unity are never done on a guess: they want confirm, and the exact listed path.

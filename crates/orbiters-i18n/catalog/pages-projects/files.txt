@@ -45,3 +45,7 @@ crates/orbiters-projects/src/storage.rs
 crates/orbiters-projects/src/templates.rs
 crates/orbiters-projects/src/updates.rs
 crates/orbiters-projects/src/vpm.rs
+crates/orbiters-projects/src/gallery.rs
+crates/orbiters-projects/src/own.rs
+crates/orbiters-projects/src/repos.rs
+crates/orbiters-projects/src/theirs.rs

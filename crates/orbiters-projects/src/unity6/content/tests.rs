@@ -83,6 +83,13 @@ fn a_binary_file_is_read_whole() {
         let mut cut = file(version, &[7; 1000]);
         cut.pop();
         assert!(!of(&cut).1, "cut short");
+        // Its numbers agree, and it is not said which way round they are, or which Unity wrote it.
+        let (whole, after) = (file(version, &[7; 1000]), if version >= 22 { 48 } else { 20 });
+        for (at, b) in [(16, 2), (after, b'x'), (after + 4, b'?'), (after + 11, b' ')] {
+            let mut odd = whole.clone();
+            odd[at] = b;
+            assert!(!of(&odd).1, "{version} with {b} at {at}");
+        }
     }
     // The right version and length are not enough: something else with those numbers.
     for version in [17u32, 22] {

@@ -7,6 +7,7 @@ use std::time::Duration;
 /// Where Orbiters keeps its own for the Creator Companion folder `root`: its data folder. For any other folder than this
 /// computer's (a test's, a stand-in's) a temporary one, never the person's.
 pub fn dir(root: &Path) -> PathBuf {
+    crate::disk::companion(root);
     if !cfg!(test) && root == crate::vcc_dir() {
         return crate::data_dir();
     }
@@ -21,7 +22,7 @@ fn stand_ins() -> PathBuf {
         for e in std::fs::read_dir(&all).into_iter().flatten().flatten() {
             let age = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
             if age.is_some_and(|age| age > Duration::from_secs(24 * 3600)) {
-                let _ = std::fs::remove_dir_all(e.path());
+                let _ = crate::disk::remove_dir_all(e.path());
             }
         }
     });
@@ -50,9 +51,9 @@ pub(crate) fn read<T: DeserializeOwned>(file: &Path) -> Option<T> {
 /// Held until dropped: one change of `file` at a time, across this app's processes.
 pub(crate) fn lock(file: &Path) -> std::io::Result<std::fs::File> {
     if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
+        crate::disk::create_dir_all(dir)?;
     }
-    let held = std::fs::File::options().create(true).write(true).truncate(false).open(file.with_extension("lock"))?;
+    let held = crate::disk::open(std::fs::File::options().create(true).write(true).truncate(false), file.with_extension("lock"))?;
     held.lock()?;
     Ok(held)
 }
@@ -66,7 +67,7 @@ where
     let _held = lock(file)?;
     let whole: Option<T> = parse(file);
     if whole.is_none() && file.exists() {
-        std::fs::rename(file, file.with_extension(format!("damaged-{}.json", uuid::Uuid::new_v4().simple())))?;
+        crate::disk::rename(file, file.with_extension(format!("damaged-{}.json", uuid::Uuid::new_v4().simple())))?;
     }
     let kept = whole.clone().or_else(|| parse(&previous(file)));
     let mut now = kept.clone().unwrap_or_else(first);

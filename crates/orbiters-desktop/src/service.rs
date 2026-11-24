@@ -1090,6 +1090,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         }
     }));
     service.lend_pages();
+    crate::controller::member::empty_spool();
 
     service.usage.open(crate::usage::spool::folder());
     crate::usage::spool::set_current(service.usage.clone());

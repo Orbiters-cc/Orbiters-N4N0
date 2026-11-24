@@ -306,6 +306,8 @@ pub struct ListStatus {
     pub vrchat: bool,
     /// Its saved session is being restored (r21): not signed out yet.
     pub connecting: bool,
+    /// Because the saved Orbiters account cannot be read now.
+    pub unreadable: bool,
     /// A search of every world applies (two characters typed and the typing paused).
     pub searching: bool,
 }
@@ -2350,7 +2352,8 @@ impl Panel {
         let (icon, title, line) = if let Some((title, line)) = self.failure(d) {
             (icons::WARNING, title, line)
         } else if !searching && self.section.needs_vrchat() && !d.status.list.vrchat && d.status.list.connecting {
-            (icons::HOURGLASS_MEDIUM, tr("Connecting to VRChat…"), tr("Your VRChat session is being restored."))
+            let line = if d.status.list.unreadable { crate::state::AccountStatus { unreadable: true, ..Default::default() }.connecting() } else { tr("Your VRChat session is being restored.") };
+            (icons::HOURGLASS_MEDIUM, tr("Connecting to VRChat…"), line)
         } else if !searching && self.section.needs_vrchat() && !d.status.list.vrchat {
             (icons::SIGN_IN, tr("Sign in to VRChat to see these"), tr("On the computer: Orbiters - N4N0, Settings, VRChat account"))
         } else if self.loading(d) {
@@ -2937,7 +2940,18 @@ fn segment(p: &Painter, rect: Rect, label: &str, on: bool, hover: bool, pressed:
     let fg = if on { CARD } else { theme::FG_2 };
     let r = if pressed { rect.shrink(2.0) } else { rect.shrink(1.0) };
     p.rect_filled(r, CornerRadius::same((r.height() / 2.0) as u8), fade(bg, alpha));
-    text(p, r.center(), Align2::CENTER_CENTER, orbit_look::txt(label, 17.5).weight(weight::MEDIUM).color(fade(fg, alpha)));
+    // Its words inside it, whatever the language: smaller when they are longer.
+    let size = segment_size(p, label, r.width());
+    text(p, r.center(), Align2::CENTER_CENTER, orbit_look::txt(label, size).weight(weight::MEDIUM).color(fade(fg, alpha)));
+}
+
+/// The size a segment's words are written in, where they fit.
+const SEGMENT_TEXT: f32 = 17.5;
+
+/// The size `label` is written in, in a segment `width` wide.
+fn segment_size(p: &Painter, label: &str, width: f32) -> f32 {
+    let wide = p.layout_job(orbit_look::txt(label, SEGMENT_TEXT).weight(weight::MEDIUM).job(f32::INFINITY)).size().x;
+    (SEGMENT_TEXT * ((width - 16.0) / wide.max(1.0)).min(1.0)).max(11.0)
 }
 
 /// A label as a chip: its name and how many gave it; lit when the member gave it.
@@ -3285,6 +3299,28 @@ mod tests {
         assert_eq!(Quality::High.shown_label(), "Sharp");
         // The popular/featured name is the one the list is, whatever it is called.
         in_language(Language::PtBr, || assert_eq!(Section::Popular.label(false), "Destaques"));
+    }
+
+    /// The tabs' words stay in their tabs in every language, signed in to VRChat or not (Spanish "Destacados" ran into the next).
+    #[test]
+    fn the_tabs_words_stay_in_their_tabs() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for language in Language::TRANSLATED.into_iter().chain([Language::En]) {
+                in_language(language, || {
+                    for vrchat in [false, true] {
+                        for (i, s) in Section::ALL.into_iter().enumerate() {
+                            let (label, width) = (s.label(vrchat), section_rect(i).width() - 2.0);
+                            let size = segment_size(ui.painter(), label, width);
+                            let drawn = ui.painter().layout_job(orbit_look::txt(label, size).weight(weight::MEDIUM).job(f32::INFINITY)).size().x;
+                            assert!(drawn <= width - 12.0, "{language:?} {label}: {drawn} in {width}, at {size}");
+                        }
+                    }
+                });
+            }
+        });
+        out.textures_delta.clear();
     }
 
     /// A line with values in it (megabytes read) keeps them and takes the language's order, spacing and unit.

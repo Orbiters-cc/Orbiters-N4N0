@@ -45,6 +45,53 @@ impl Clipboard for WindowsClipboard {
     fn paste(&self) -> Option<String> {
         arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok().filter(|t| !t.is_empty())
     }
+
+    #[cfg(not(test))]
+    fn restorable(&self) -> Option<String> {
+        self.paste().filter(|_| plain_text_only())
+    }
+}
+
+/// Whether the clipboard holds nothing but a text (no formatting, picture or files beside it).
+#[cfg(all(windows, not(test)))]
+fn plain_text_only() -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(owner: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EnumClipboardFormats(format: u32) -> u32;
+        fn GetClipboardFormatNameW(format: u32, name: *mut u16, most: i32) -> i32;
+    }
+    // SAFETY: plain calls; the buffer's length is passed, and the clipboard is closed once opened.
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        let mut formats = Vec::new();
+        let mut format = 0;
+        loop {
+            format = EnumClipboardFormats(format);
+            if format == 0 {
+                break;
+            }
+            let mut name = [0u16; 128];
+            let written = GetClipboardFormatNameW(format, name.as_mut_ptr(), name.len() as i32);
+            formats.push((format, String::from_utf16_lossy(&name[..written.max(0) as usize])));
+        }
+        CloseClipboard();
+        formats.iter().all(|(format, name)| only_text(*format, name))
+    }
+}
+
+#[cfg(all(not(windows), not(test)))]
+fn plain_text_only() -> bool {
+    arboard::Clipboard::new().is_ok_and(|mut c| c.get().html().is_err())
+}
+
+/// Whether a clipboard format is a text's own (as text, its locale) or a note to clipboard managers.
+#[cfg(any(windows, test))]
+fn only_text(format: u32, name: &str) -> bool {
+    matches!(format, 1 | 7 | 13 | 16) || ["CanIncludeInClipboardHistory", "CanUploadToCloudClipboard", "ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore"].contains(&name) // i18n: not shown
 }
 
 /// What the tests copied.
@@ -391,5 +438,12 @@ mod tests {
         assert!(err.to_string().contains("voice worker was not found"), "{err}");
         WindowsClipboard.copy("kept for the test").unwrap();
         assert!(COPIED.lock().unwrap().iter().any(|t| t == "kept for the test"));
+    }
+
+    /// Verify5-r21 m9: a text beside which the clipboard holds its formatting, a picture or files is not put back as it was.
+    #[test]
+    fn only_a_plain_text_is_put_back() {
+        assert!(only_text(13, "") && only_text(1, "") && only_text(16, "") && only_text(49_300, "CanIncludeInClipboardHistory"));
+        assert!(!only_text(49_200, "HTML Format") && !only_text(49_201, "Rich Text Format") && !only_text(2, "") && !only_text(15, ""));
     }
 }

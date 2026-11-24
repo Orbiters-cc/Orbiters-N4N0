@@ -127,7 +127,7 @@ impl Action {
             Action::App(intent) => {
                 use crate::intents::Risk;
                 let (spec, risk) = (intent.spec(), intent.risk());
-                Effect { changes: spec.changes, reads_others: spec.reads_others, from_account: risk == Risk::Confirm, asks: matches!(risk, Risk::Ask | Risk::Confirm) }
+                Effect { changes: spec.changes || intent.listens(), reads_others: spec.reads_others, from_account: risk == Risk::Confirm, asks: matches!(risk, Risk::Ask | Risk::Confirm) }
             }
         }
     }

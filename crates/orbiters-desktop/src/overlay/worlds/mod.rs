@@ -214,6 +214,7 @@ pub struct Worlds {
     scope: Option<Scope>,
     vrchat: bool,
     vrchat_connecting: bool,
+    account_unreadable: bool,
     region: &'static str,
     /// What was typed and when it last changed, what is searched (the typing paused, or Done), Done pressed.
     typed: (String, Instant),
@@ -421,6 +422,7 @@ impl Worlds {
             scope: None,
             vrchat: false,
             vrchat_connecting: false,
+            account_unreadable: false,
             region: "us",
             typed: (String::new(), Instant::now()),
             searched: String::new(),
@@ -543,6 +545,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             scope: None,
             vrchat: false,
             vrchat_connecting: false,
+            account_unreadable: false,
             region: "us",
             typed: (String::new(), Instant::now()),
             searched: String::new(),
@@ -1284,6 +1287,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         self.vrchat = snap.vrchat_login.allowed && snap.vrchat_login.user.is_some();
         // r21: a saved session being restored: its lists say so instead of offering the sign-in.
         self.vrchat_connecting = snap.vrchat_login.presence() == crate::controller::vrchat_login::Presence::Connecting;
+        self.account_unreadable = snap.account.unreadable;
         self.panel.dirty = true;
     }
 
@@ -1378,6 +1382,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         };
         s.vrchat = self.vrchat;
         s.connecting = self.vrchat_connecting;
+        s.unreadable = self.account_unreadable;
         s.searching = matches!(shown, Shown::List(WorldList::Search(_)));
         s
     }

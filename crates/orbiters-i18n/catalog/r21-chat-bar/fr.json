@@ -52,5 +52,7 @@
   "Nothing was done: N4N0's question was not shown there. Read it and answer in the chat at the top of Orbiters' window, on Ask N4N0 beside VRChat's menu, or once it stands on N4N0's panel. It asks: {question}": "Rien n’a été fait : la question de N4N0 n’était pas affichée là. Lis-la et réponds dans le chat en haut de la fenêtre d’Orbiters, sur Demander à N4N0 à côté du menu de VRChat, ou une fois qu’elle est entière sur le panneau de N4N0. Sa question : {question}",
   "Open its chat": "Ouvrir son chat",
   "Scroll up to read all of it first": "Remonte pour tout lire d’abord",
-  "The next 3D capture is not shared after all: what N4N0 does from your account is off.": "La prochaine capture 3D n’est finalement pas partagée : ce que N4N0 fait depuis ton compte est désactivé."
+  "The next 3D capture is not shared after all: what N4N0 does from your account is off.": "La prochaine capture 3D n’est finalement pas partagée : ce que N4N0 fait depuis ton compte est désactivé.",
+  "Your Orbiters account can't be read here: trying again…": "Ton compte Orbiters ne peut pas être lu ici : nouvel essai…",
+  "Your Orbiters account could not be read on this computer just now. Orbiters keeps trying; if this stays, sign in again.": "Ton compte Orbiters n’a pas pu être lu sur cet ordinateur à l’instant. Orbiters continue d’essayer ; si cela dure, reconnecte-toi."
 }

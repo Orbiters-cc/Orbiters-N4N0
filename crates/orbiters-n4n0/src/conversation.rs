@@ -5,6 +5,7 @@
 use crate::fence::Fence;
 use crate::runtime::{N4n0, N4n0Runtime};
 use crate::status::{N4n0Line, N4n0Who, SignedAs};
+use orbiters_n4n0_core::context::Taint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,17 +15,35 @@ const LABEL: &[u8] = b"Orbiters N4N0 conversation";
 struct Kept {
     epoch: u64,
     conversation: Vec<Value>,
-    /// Which of them were said where other people's text was read (none told: an older file, all of them).
+    /// Whose words were read where each was said (none told: an older file, others' for all of them; `true` or `false`:
+    /// 0.3.9's, others' or none).
     #[serde(default)]
-    others: Option<Vec<bool>>,
+    others: Option<Vec<Mark>>,
     lines: Vec<N4n0Line>,
+}
+
+/// A message's mark in the file.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Mark {
+    Known(Taint),
+    Others(bool),
+}
+
+impl Mark {
+    fn taint(self) -> Taint {
+        match self {
+            Mark::Known(taint) => taint,
+            Mark::Others(others) => Taint::others(others),
+        }
+    }
 }
 
 impl Kept {
     /// As it stands, under `epoch`: not an error's line nor a note's, what was said.
     fn of(rt: &N4n0Runtime, epoch: u64) -> Self {
         let said = |l: &&N4n0Line| !l.streaming && matches!(l.who, N4n0Who::You | N4n0Who::N4n0);
-        Kept { epoch, conversation: rt.conversation.clone(), others: Some(rt.conversation_others.clone()), lines: rt.lines.iter().filter(said).cloned().collect() }
+        Kept { epoch, conversation: rt.conversation.clone(), others: Some(rt.conversation_others.iter().copied().map(Mark::Known).collect()), lines: rt.lines.iter().filter(said).cloned().collect() }
     }
 
     fn read(file: &std::path::Path) -> Option<Self> {
@@ -42,7 +61,7 @@ impl Kept {
 
     /// What was said goes on, before what was said since.
     fn restore(self, rt: &mut N4n0Runtime) {
-        rt.conversation_others = self.others.filter(|o| o.len() == self.conversation.len()).unwrap_or_else(|| vec![true; self.conversation.len()]);
+        rt.conversation_others = self.others.filter(|o| o.len() == self.conversation.len()).map_or_else(|| vec![Taint::Others; self.conversation.len()], |o| o.into_iter().map(Mark::taint).collect());
         rt.conversation = self.conversation;
         let after = std::mem::take(&mut *rt.lines);
         *rt.lines = self.lines;
@@ -56,21 +75,23 @@ pub(crate) struct Parked {
     kept: Kept,
 }
 
-/// The conversation after a turn, with which of its messages were said where other people's text was read: `full` (and its
-/// `marks`) before it, of which `sent` went with it (the ones of no others' text only when `some`); `now` as the turn
-/// left it, read with others' text or not (`tainted`).
-pub(crate) fn merged(full: Vec<Value>, marks: Vec<bool>, sent: &[Value], some: bool, now: Vec<Value>, tainted: bool) -> (Vec<Value>, Vec<bool>) {
-    let marked = |n: usize| marks.get(n).copied().unwrap_or(false);
+/// The conversation after a turn, with whose words were read where each message was said: `full` (and its `marks`) before it,
+/// of which `sent` went with it (`some`: not all of them, those left out being the marked ones); `now` as the turn left it,
+/// having read `taint`.
+pub(crate) fn merged(full: Vec<Value>, marks: Vec<Taint>, sent: &[Value], some: bool, now: Vec<Value>, taint: Taint) -> (Vec<Value>, Vec<Taint>) {
     if now.len() >= sent.len() && now[..sent.len()] == *sent {
-        let mut marks: Vec<bool> = (0..full.len()).map(marked).collect();
+        let mut marks: Vec<Taint> = (0..full.len()).map(|n| marks.get(n).copied().unwrap_or_default()).collect();
         let mut all = full;
         all.extend(now.into_iter().skip(sent.len()));
-        marks.resize(all.len(), tainted);
+        marks.resize(all.len(), taint);
         return (all, marks);
     }
-    // Written again by Orbiters: whatever any of it was said with.
-    let any = tainted || (!some && marks.iter().any(|m| *m));
-    let marks = vec![any; now.len()];
+    // Written again by Orbiters: whatever any of it was said with (of what went, the turn itself says).
+    let mut all = taint;
+    if !some {
+        marks.into_iter().for_each(|m| all |= m);
+    }
+    let marks = vec![all; now.len()];
     (now, marks)
 }
 
@@ -163,16 +184,21 @@ mod tests {
     fn messages_keep_whether_others_text_was_read_with_them() {
         let m = |t: &str| json!({ "role": "user", "content": t });
         let full = vec![m("a"), m("b"), m("c")];
-        let marks = vec![false, true, false];
+        let (no, yes, labels) = (Taint::None, Taint::Others, Taint::Labels);
+        let marks = vec![no, yes, no];
         // All of it was sent.
         let now = vec![m("a"), m("b"), m("c"), m("d")];
-        assert_eq!(merged(full.clone(), marks.clone(), &full, false, now, false), (vec![m("a"), m("b"), m("c"), m("d")], vec![false, true, false, false]));
+        assert_eq!(merged(full.clone(), marks.clone(), &full, false, now, labels), (vec![m("a"), m("b"), m("c"), m("d")], vec![no, yes, no, labels]));
         // The ones of no others' text only: the other is still there after it.
         let sent = vec![m("a"), m("c")];
         let now = vec![m("a"), m("c"), m("d")];
-        assert_eq!(merged(full.clone(), marks.clone(), &sent, true, now, true), (vec![m("a"), m("b"), m("c"), m("d")], vec![false, true, false, true]));
+        assert_eq!(merged(full.clone(), marks.clone(), &sent, true, now, yes), (vec![m("a"), m("b"), m("c"), m("d")], vec![no, yes, no, yes]));
         // Written again by Orbiters.
-        assert_eq!(merged(full.clone(), marks.clone(), &full, false, vec![m("z")], false), (vec![m("z")], vec![true]));
-        assert_eq!(merged(full, marks, &sent, true, vec![m("z")], false), (vec![m("z")], vec![false]));
+        assert_eq!(merged(full.clone(), marks.clone(), &full, false, vec![m("z")], no), (vec![m("z")], vec![yes]));
+        assert_eq!(merged(full, marks, &sent, true, vec![m("z")], no), (vec![m("z")], vec![no]));
+        // As 0.3.9 wrote them, and as they are now.
+        let read: Vec<Mark> = serde_json::from_str(r#"[true,false,"none","labels","others"]"#).unwrap();
+        assert_eq!(read.into_iter().map(Mark::taint).collect::<Vec<_>>(), [yes, no, no, labels, yes]);
+        assert_eq!(serde_json::to_string(&Mark::Known(labels)).unwrap(), r#""labels""#);
     }
 }

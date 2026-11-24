@@ -403,7 +403,7 @@ pub static ENTRIES: &[Entry] = &[
     e("translate.english", Language, mark("Translation in VR"), mark("English"), mark("VRChat's menus and most names are in English."), mark("translate English text")).gate(Gate::VrchatHere).controls(&["translate-english"]),
     // Privacy & feedback.
     e("privacy.world-performance", Privacy, CARD_PRIVACY, mark("Share my frame rate per world"), mark("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer."), mark("FPS statistics share world Map explorer")).gate(Gate::VrchatHere).controls(&["world-performance"]),
-    e("privacy.usage", Privacy, CARD_PRIVACY, mark("Beta usage statistics"), mark("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account and deleted with it. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people. Turned off, nothing more is counted and what was waiting to be sent is deleted."), mark("telemetry analytics statistics data tracking")).gate(Gate::VrchatHere).controls(&["usage-statistics"]),
+    e("privacy.usage", Privacy, CARD_PRIVACY, mark("Beta usage statistics"), mark("Counts which pages and buttons of Orbiters - N4N0 you use, in what order and when, and every few seconds how much processor, graphics card and memory the app, VRChat and the whole computer use, VRChat's frame rate in VR, and the basic hardware (processor and graphics card models, memory size, headset and its refresh rate). When you are signed in, it is linked to your Orbiters account and deleted with it. Only the Orbiters team sees it, to make the app easier and lighter; it is never shared publicly. Never what you type or say, pictures, links, worlds or people. Turned off, nothing more is counted and what was waiting to be sent is deleted."), mark("telemetry analytics statistics data tracking")).controls(&["usage-statistics"]),
     e("privacy.mismatch", Privacy, mark("Beta feedback"), mark("Menu mismatch buttons"), mark("Shows three buttons, always in view: \"Menu should be off\", \"Wheel should be on\" and \"Quick menu should be on\", in VR on your watch's wrist, on the desktop in the bottom left corner of VRChat's window. Press one when N4N0's menus do not match VRChat's. Each press keeps a report on this computer: the controller buttons and keys used for the menus and what N4N0 decided in the 30 seconds before, and VRChat's log lines about menus and worlds. Never what you type or say, nor anyone's name. Turned off, nothing is recorded."), mark("bug report feedback beta")).gate(Gate::VrchatHere).controls(&["mismatch-buttons"]),
     e("privacy.mismatch-picture", Privacy, mark("Beta feedback"), mark("Add a picture of the game"), mark("A small, blurred picture of what VRChat showed at the press goes with the report: the best clue of what its menus did, but it is a picture of your game, and can show the world and the people in it."), mark("screenshot picture report")).gate(Gate::VrchatHere).controls(&["mismatch-picture"]),
     // App & updates.
@@ -712,6 +712,12 @@ mod tests {
         assert!(ids("microphone").len() > 2);
         let both = ids("microphone ears");
         assert!(both.iter().all(|id| id.starts_with("voice.")), "{both:?}");
+    }
+
+    /// The notice of the statistics leads to their switch, wherever the app runs (a Mac too).
+    #[test]
+    fn the_statistics_switch_is_everywhere() {
+        assert_eq!(ENTRIES.iter().find(|e| e.id == "privacy.usage").unwrap().gate, Gate::Always);
     }
 
     #[test]

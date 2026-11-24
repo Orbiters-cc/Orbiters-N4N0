@@ -45,10 +45,10 @@ fn the_assistant_never_ends_or_unmutes_a_call_by_itself() {
     t.shutdown(&n);
 }
 
-/// A button's Hang up, Mute or Answer is for the call and the member it showed: naming none, or another member's, it does
-/// nothing. (Another call's number is the app's to refuse: controller/calls.rs.)
+/// A button's Hang up, Mute or Answer is for the call it showed: naming none it does nothing (another call's number is the
+/// app's to refuse: controller/calls.rs); Answer is for the member it was shown to as well.
 #[test]
-fn a_calls_button_names_its_call_and_its_member() {
+fn a_calls_button_names_its_call() {
     let (t, n, _device) = ready();
     *t.in_call.lock().unwrap() = true;
     // As an older window sends them.
@@ -57,22 +57,14 @@ fn a_calls_button_names_its_call_and_its_member() {
     }
     let epoch = shown_epoch(&t);
     let buttons = |call: Option<u64>, stamp: Option<Stamp>| [Command::EndCall { call, stamp }, Command::MuteCall { on: false, call, stamp }, Command::AnswerCall { call, stamp }];
-    for (call, stamp) in [(None, at(Surface::Window, None, epoch)), (Some(7), at(Surface::Window, None, epoch + 1)), (Some(7), None)] {
+    for (call, stamp) in [(None, at(Surface::Window, None, epoch)), (Some(7), None)] {
         for command in buttons(call, stamp) {
             n.command(command);
         }
     }
+    n.command(Command::AnswerCall { call: Some(7), stamp: at(Surface::Window, None, epoch + 1) });
     std::thread::sleep(Duration::from_millis(50));
     assert!(t.calls.lock().unwrap().is_empty(), "{:?}", t.calls.lock().unwrap());
-    // Captured under A, delivered once B is signed in.
-    let captured = buttons(Some(7), at(Surface::Window, None, epoch));
-    t.switch_member(&n, None);
-    for command in captured {
-        n.command(command);
-    }
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(t.calls.lock().unwrap().is_empty(), "{:?}", t.calls.lock().unwrap());
-    let epoch = shown_epoch(&t);
     for mut command in buttons(Some(7), None) {
         *command.stamp_mut().unwrap() = at(Surface::Window, None, epoch);
         n.command(command);
@@ -99,29 +91,6 @@ fn others_text_goes_only_with_what_asks_for_it_and_taints_it() {
     let bodies = turn(&t, &n, "what is this world called, and go faster", walk());
     assert!(bodies.lock().unwrap()[0].to_string().contains("INJECTED"));
     assert!(!t.settings().walk_boost.enabled && question_shown(&t).is_some(), "read: asked first");
-    t.shutdown(&n);
-}
-
-/// A control the owner names by its label goes to the model as a number, with the owner's own words: done at once, and the turn acts
-/// on. Named otherwise, the avatar's labels (its maker's) are read: it waits for a yes.
-#[test]
-fn a_control_named_by_the_owner_goes_by_its_number() {
-    let (t, n, vrchat) = n4n0_with_vrchat();
-    *t.app_facts.lock().unwrap() = Some(full());
-    n.publish();
-    let calls = |control: &str| json!([call("c", "set_avatar_control", json!({ "control": control, "on": true })), call("w", "orbiters_walk", json!({ "intent": "fast_walk", "on": true }))]);
-    received(&vrchat, Duration::from_millis(300));
-    let bodies = turn(&t, &n, "put my hoodie on and make me walk fast over the hills", calls("#1"));
-    let sent = received(&vrchat, Duration::from_millis(500));
-    assert!(sent.contains(&(parameter("Hoodie"), OscType::Bool(true))), "{sent:?}");
-    assert!(t.settings().walk_boost.enabled && question_shown(&t).is_none());
-    let first = bodies.lock().unwrap()[0]["context"]["summary"].as_str().unwrap().to_string();
-    assert!(first.contains("#1") && first.contains("hoodie") && !first.contains("Hoodie"), "{first}");
-    assert!(!bodies.lock().unwrap()[1]["tool_results"].to_string().contains("Hoodie"));
-    t.settings.lock().unwrap().walk_boost.enabled = false;
-    let bodies = turn(&t, &n, "my avatar, put the warm top on and walk fast over the hills", calls("Hoodie"));
-    assert!(bodies.lock().unwrap()[0]["context"]["summary"].as_str().unwrap().contains("Hoodie"));
-    assert!(!t.settings().walk_boost.enabled && question_shown(&t).is_some());
     t.shutdown(&n);
 }
 
@@ -168,17 +137,15 @@ fn earlier_messages_keep_their_mark() {
     t.shutdown(&n);
 }
 
-/// Opening the page instead is an action like another: it passes the fence, and the log has it, after others' text too.
+/// Opening the page instead is an action like another: it passes the fence, and the log has it.
 #[test]
 fn the_page_opened_instead_is_logged() {
-    for text in ["could you maybe make my status the orange one", "what is this world called, and make my status the orange one"] {
-        let (t, n, _device) = ready();
-        off(&t);
-        turn(&t, &n, text, json!([call("a", "orbiters_profile", json!({ "intent": "set_status", "status": "ask_me" }))]));
-        assert!(t.app_intents.lock().unwrap().iter().all(|i| matches!(i, Intent::OpenPage { .. })), "{text}: {:?}", t.app_intents.lock().unwrap());
-        assert!(t.view().assistant.log.iter().any(|l| l.intent == "open_page" && l.outcome == Outcome::Done), "{text}: {:?}", t.view().assistant.log);
-        t.shutdown(&n);
-    }
+    let (t, n, _device) = ready();
+    off(&t);
+    turn(&t, &n, "could you maybe make my status the orange one", json!([call("a", "orbiters_profile", json!({ "intent": "set_status", "status": "ask_me" }))]));
+    assert!(t.app_intents.lock().unwrap().iter().all(|i| matches!(i, Intent::OpenPage { .. })), "{:?}", t.app_intents.lock().unwrap());
+    assert!(t.view().assistant.log.iter().any(|l| l.intent == "open_page" && l.outcome == Outcome::Done), "{:?}", t.view().assistant.log);
+    t.shutdown(&n);
     let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assistant.rs")).unwrap().replace("\r\n", "\n");
     assert!(body(&source, "fn open_instead(").contains("permit("), "through the fence");
 }
@@ -491,3 +458,6 @@ fn a_yes_is_for_the_capture_and_the_person_it_was_shown() {
     assert_eq!(t.app_done.lock().unwrap().last().map(|(_, target)| target["friend"].clone()), Some(json!("usr_sam")), "as it was asked");
     t.shutdown(&n);
 }
+
+#[path = "tests_fix5.rs"]
+mod fix5;

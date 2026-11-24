@@ -887,8 +887,9 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             }
         }
         Group::Privacy => {
+            // (The statistics are counted wherever the app runs; the rest is of VRChat on this computer.)
+            apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
             if vrchat_here {
-                apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
                 apply |= place(&mut m, c, 2, mark("Beta feedback"), |ui| super::beta_feedback::card(ui, cx, 2, &mut state.beta, draft));
             }
         }
@@ -1261,6 +1262,7 @@ fn storage_card(ui: &mut Ui, cx: &Cx, index: usize, ctx: &egui::Context, draft: 
 fn privacy_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
     let mut apply = false;
     section(ui, cx, index, icons::SHIELD_CHECK, tr(registry::CARD_PRIVACY), Some(tr("What leaves this computer, and only when it is on")), |ui| {
+        if orbiters_core::osc::VRCHAT_RUNS_HERE {
         widgets::field(
             ui,
             tr("Share my frame rate per world"),
@@ -1271,6 +1273,7 @@ fn privacy_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> boo
             },
         );
         widgets::separator(ui);
+        }
         widgets::field(
             ui,
             tr("Beta usage statistics"),
@@ -1792,7 +1795,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         } else if connecting {
             state.picture = None;
             ui.add_space(6.0);
-            super::sharing::working(ui, tr("Connecting to VRChat…"));
+            super::sharing::working(ui, cx.snap.account.connecting());
         } else if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {
                 if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {

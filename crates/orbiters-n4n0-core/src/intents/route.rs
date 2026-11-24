@@ -198,41 +198,64 @@ pub fn needs(text: &str, groups: &BTreeSet<ToolGroup>) -> crate::context::Needs 
     let words = folded(text);
     let raw = text.to_lowercase();
     let back = BACK.iter().any(|w| if japanese(w) { raw.contains(w) } else { words.contains(&format!(" {w} ")) });
+    // A question about something named ("can you put my hoodie on?") asks how that stands, not how all does.
+    let asks = has(T::State) && (groups.len() == 1 || says(T::State, &words, &raw));
     crate::context::Needs {
-        world: has(T::Worlds) || has(T::Instances) || has(T::State),
+        world: has(T::Worlds) || has(T::Instances) || asks,
         video: has(T::Videos),
         avatar: has(T::Avatar),
+        // Only for what asks about it: the worn avatar's controls are told without it.
+        name: asks && has(T::Avatar),
         // A conversation (no group at all), what reads lists, or what points back at them.
-        earlier: back || groups.is_empty() || [T::Worlds, T::Instances, T::Friends, T::Videos, T::State].into_iter().any(has),
+        earlier: back || groups.is_empty() || [T::Worlds, T::Instances, T::Friends, T::Videos].into_iter().any(has) || asks,
     }
 }
 
-/// The controls among `labels` (a control's label, whole) the words of `text` name: their places, and those words.
-pub fn named(text: &str, labels: &[String]) -> Vec<(usize, String)> {
+/// Whether `text` (folded, and as it is in lower case) has one of `group`'s own words.
+fn says(group: ToolGroup, words: &str, raw: &str) -> bool {
+    topics(group).iter().any(|w| if japanese(w) { raw.contains(w) } else { words.contains(&format!(" {w} ")) || words.contains(&format!(" {w}s ")) })
+}
+
+/// Whether the words of `text` name `label` (a control's, whole).
+fn names(words: &str, label: &str) -> bool {
+    let label = folded(&crate::controls::plain(label));
+    label.trim().chars().count() >= 3 && words.contains(&label)
+}
+
+/// Whether the owner's own words leave no doubt that `path` (labels from the menu down) is the control meant among `paths`
+/// (verify5-r21 M2): they do not name its label, or no other control has that label, or what they say of its menus is said
+/// of no other one of them. Else the controls in doubt.
+pub fn settled<'p>(text: &str, path: &[String], paths: impl Iterator<Item = &'p [String]>) -> Result<(), Vec<&'p [String]>> {
     let words = folded(text);
-    labels
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.chars().count() >= 3)
-        .filter_map(|(i, l)| {
-            let label = folded(l).trim().to_string();
-            (!label.is_empty() && words.contains(&format!(" {label} "))).then_some((i, label))
-        })
-        .collect()
+    let Some(label) = path.last() else { return Ok(()) };
+    let plain = |l: &String| folded(&crate::controls::plain(l));
+    if !names(&words, label) {
+        return Ok(());
+    }
+    let same: Vec<&[String]> = paths.filter(|p| p.last().map(plain) == Some(plain(label))).collect();
+    // How many of its menus' words the sentence says.
+    let said = |p: &[String]| -> usize {
+        let menus: BTreeSet<String> = p[..p.len() - 1].iter().flat_map(|m| plain(m).split_whitespace().map(str::to_string).collect::<Vec<_>>()).filter(|w| w.chars().count() >= 3).collect();
+        menus.iter().filter(|w| words.contains(&format!(" {w} "))).count()
+    };
+    let mine = said(path);
+    if same.iter().filter(|p| said(p) >= mine).count() <= 1 {
+        return Ok(());
+    }
+    Err(same)
 }
 
 /// The groups `text` names. `controls`: the avatar's control labels (a sentence naming one is about the avatar).
 pub fn route(text: &str, controls: &[String]) -> BTreeSet<ToolGroup> {
     let words = folded(text);
     let raw = text.to_lowercase();
-    let has = |word: &str| if japanese(word) { raw.contains(word) } else { words.contains(&format!(" {word} ")) || words.contains(&format!(" {word}s ")) };
-    let mut out: BTreeSet<ToolGroup> = ToolGroup::ALL.into_iter().filter(|g| topics(*g).iter().any(|w| has(w))).collect();
+    let mut out: BTreeSet<ToolGroup> = ToolGroup::ALL.into_iter().filter(|g| says(*g, &words, &raw)).collect();
     // A question asks how things are.
     if text.contains('?') || text.contains('？') {
         out.insert(ToolGroup::State);
     }
     // A control of the avatar named by its label ("put my Hoodie on").
-    if !named(text, controls).is_empty() {
+    if controls.iter().any(|l| names(&words, l)) {
         out.insert(ToolGroup::Avatar);
     }
     out

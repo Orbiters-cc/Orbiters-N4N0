@@ -33,6 +33,11 @@ fn unreadable_text() -> &'static str {
     tr("Your Orbiters account could not be read on this computer, so you are signed out for now. Orbiters keeps trying; if this stays, sign in again.")
 }
 
+/// The same, where it was read before and stays in use for what is under way (a call).
+fn unreadable_now_text() -> &'static str {
+    tr("Your Orbiters account could not be read on this computer just now. Orbiters keeps trying; if this stays, sign in again.")
+}
+
 /// When a credential refused `refusals` times in a row is asked about again.
 fn refused_recheck(refusals: u32) -> Duration {
     RECHECK_REFUSED.saturating_mul(1 << refusals.clamp(1, 16).saturating_sub(1)).min(RECHECK_REFUSED_MAX)
@@ -76,6 +81,14 @@ struct SignIn {
 }
 
 impl AccountRuntime {
+    /// A sign-in ended without one, and `before` shows again. The check under way then was dropped with it: the account is read
+    /// and checked again, or "Checking" (and "Connecting", without the member's id) would stay (verify5-r21 m7).
+    fn put_back(&mut self, before: &AccountState) {
+        if matches!(before, AccountState::Checking { .. }) {
+            self.read = self.read.map(|(server, _)| (server, Some(SystemTime::UNIX_EPOCH)));
+        }
+    }
+
     /// Whose all this is; `None` while nothing was read at all.
     pub(super) fn identity(&self) -> Option<super::identity::Identity> {
         use super::identity::Identity;
@@ -128,7 +141,8 @@ impl Drop for SignIn {
 
 /// The account's file was read: what was said of one that could not be goes.
 fn readable_again(s: &mut crate::state::Snapshot) {
-    if s.account.error.as_deref() == Some(unreadable_text()) {
+    s.account.unreadable = false;
+    if [unreadable_text(), unreadable_now_text()].into_iter().any(|t| s.account.error.as_deref() == Some(t)) {
         s.account.error = None;
     }
 }
@@ -318,10 +332,16 @@ impl Controller {
                         rt.generation
                     })
                 });
-                if let Some(generation) = generation.filter(|_| !stays) {
+                if let Some(generation) = generation {
                     self.update_if(|s| {
                         if self.account_generation.load(Ordering::SeqCst) != generation || s.account.state == AccountState::SigningIn {
                             return false;
+                        }
+                        if stays {
+                            // Said, or "Connecting" would stay with no reason (verify5-r21 m3).
+                            let shown = std::mem::replace(&mut s.account.unreadable, true);
+                            s.account.error = Some(unreadable_now_text().into());
+                            return !shown;
                         }
                         s.account.development = server == Server::Development;
                         s.account.state = AccountState::SignedOut;
@@ -436,6 +456,7 @@ impl Controller {
             }
             s.account.state = state;
             s.account.error = None;
+            s.account.unreadable = false;
             true
         })
     }
@@ -482,7 +503,10 @@ impl Controller {
             Ok(started) => started,
             Err(e) => {
                 // Unless a newer sign-in or a sign-out came meanwhile, the account shows what it did before.
-                if self.account_runtime.lock().unwrap().generation == generation {
+                let mut rt = self.account_runtime.lock().unwrap();
+                if rt.generation == generation {
+                    rt.put_back(&before);
+                    drop(rt);
                     self.update(|s| s.account.state = before);
                 }
                 return Err(e);
@@ -567,6 +591,7 @@ impl Controller {
                 }
                 Exchange::Ended(message) => {
                     let before = rt.signing_in.take().map(|s| s.before.clone());
+                    before.iter().for_each(|b| rt.put_back(b));
                     drop(rt);
                     self.update_if(|s| {
                         let current = self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
@@ -584,6 +609,7 @@ impl Controller {
             let mut rt = self.account_runtime.lock().unwrap();
             if rt.signing_in.as_ref().is_some_and(|s| s.generation == generation) {
                 let before = rt.signing_in.take().map(|s| s.before.clone());
+                before.iter().for_each(|b| rt.put_back(b));
                 drop(rt);
                 self.update(|s| {
                     s.account.state = before.unwrap_or(AccountState::SignedOut);
@@ -608,7 +634,9 @@ impl Controller {
             let mut rt = self.account_runtime.lock().unwrap();
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
-            rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting())
+            let before = rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting());
+            rt.put_back(&before);
+            before
         };
         self.update(|s| {
             s.account.error = None;
@@ -635,23 +663,32 @@ impl Controller {
         server: Server,
         generation: u64,
         account: &Account,
-        read: impl FnOnce() -> anyhow::Result<Option<Account>>,
+        read: impl Fn() -> anyhow::Result<Option<Account>>,
         save: impl FnOnce(&Account) -> anyhow::Result<()>,
-        modified: impl FnOnce() -> Option<SystemTime>,
+        modified: impl Fn() -> Option<SystemTime>,
     ) {
         let _file = ACCOUNT_FILE.lock().unwrap_or_else(|e| e.into_inner());
         if self.account_runtime.lock().unwrap().generation != generation {
             return;
         }
+        let was = modified();
         match read() {
             Ok(Some(held)) if held.token == account.token && held.user.is_none() => {}
             _ => return,
+        }
+        // Written by another tool since it was read: theirs stays (verify5-r21 m8).
+        if modified() != was {
+            return;
         }
         if let Err(e) = save(account) {
             eprintln!("account file: {e:#}");
             return;
         }
+        // What the file holds is what was written here, or it is read again as the change it is.
         let written = modified();
+        if !matches!(read(), Ok(Some(held)) if held.token == account.token && held.user == account.user) || modified() != written {
+            return;
+        }
         let mut rt = self.account_runtime.lock().unwrap();
         // Not a change to read again: it is what was written here.
         if rt.generation == generation && rt.read.is_some_and(|(s, _)| s == server) {
@@ -953,6 +990,55 @@ mod tests {
         }
     }
 
+    /// Verify5-r21 m3: a file that was read and cannot be read any more is said, by the account and by what waits for it, until it
+    /// is read again.
+    #[test]
+    fn an_account_that_cannot_be_read_any_more_says_so() {
+        let c = Controller::new(Settings::default());
+        reread(&c, Server::Production, Some(member("fake-a", "1")), Some(member("fake-a", "1")));
+        assert!(!c.view().account.unreadable && c.view().account.error.is_none());
+        for _ in 0..2 {
+            c.read_account_with(Server::Production, None, false, || Err(anyhow::anyhow!("being written")), |_| unreachable!());
+            let account = c.view().account.clone();
+            assert!(account.unreadable && matches!(account.state, AccountState::SignedIn { .. }), "{account:?}");
+            assert_eq!(account.error.as_deref(), Some(unreadable_now_text()));
+            assert!(account.connecting().contains("can't be read"), "{}", account.connecting());
+        }
+        reread(&c, Server::Production, Some(member("fake-a", "1")), Some(member("fake-a", "1")));
+        let account = c.view().account.clone();
+        assert!(!account.unreadable && account.error.is_none() && account.connecting().contains("Connecting"), "{account:?}");
+    }
+
+    /// Verify5-r21 m7: Sign in pressed while the account was being checked, then cancelled: the check was dropped with it, and the
+    /// account is read and checked again.
+    #[test]
+    fn a_cancelled_sign_in_checks_the_account_again() {
+        let c = Controller::new(Settings::default());
+        let mut bare = member("fake-a", "1");
+        bare.user = None;
+        // The check under way as the sign-in starts.
+        let (again, inner) = (c.clone(), bare.clone());
+        c.read_account_with(Server::Production, Some(SystemTime::UNIX_EPOCH + Duration::from_secs(9)), false, move || Ok(Some(inner)), move |_| {
+            {
+                let mut rt = again.account_runtime.lock().unwrap();
+                rt.generation += 1;
+                again.account_generation.store(rt.generation, Ordering::SeqCst);
+                let before = again.snapshot.lock().unwrap().account.state.clone();
+                rt.signing_in = Some(SignIn { server: Server::Production, link_url: String::new(), generation: rt.generation, stop: Arc::new(AtomicBool::new(false)), before });
+            }
+            again.update(|s| s.account.state = AccountState::SigningIn);
+            Ok(Check::Valid(member("fake-a", "1")))
+        });
+        assert_eq!(c.view().account.state, AccountState::SigningIn);
+        let modified = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(9));
+        c.cancel_sign_in();
+        assert!(matches!(c.view().account.state, AccountState::Checking { .. }), "{:?}", c.view().account.state);
+        assert!(c.account_runtime.lock().unwrap().read != Some((Server::Production, modified)), "read again at the next look");
+        c.read_account_with(Server::Production, modified, false, move || Ok(Some(bare)), |_| Ok(Check::Valid(member("fake-a", "1"))));
+        assert!(matches!(c.view().account.state, AccountState::SignedIn { .. }));
+        assert_eq!(c.signed_as(), orbiters_n4n0::status::SignedAs::Member);
+    }
+
     /// P8: an older file without the member's id says it once Orbiters said whose it is, so that a restart knows it at once; never over
     /// what another tool wrote since, nor after a sign-out.
     #[test]
@@ -960,17 +1046,41 @@ mod tests {
         let wrote = std::cell::RefCell::new(Vec::new());
         let learned = |c: &Shared, held: Option<Account>, generation: u64| {
             wrote.borrow_mut().clear();
-            c.account_learned(Server::Production, generation, &member("fake-a", "1"), || Ok(held), |a| { wrote.borrow_mut().push(a.clone()); Ok(()) }, || Some(SystemTime::UNIX_EPOCH));
-            wrote.borrow().len()
+            c.account_learned(
+                Server::Production,
+                generation,
+                &member("fake-a", "1"),
+                || Ok(wrote.borrow().last().cloned().or(held.clone())),
+                |a| { wrote.borrow_mut().push(a.clone()); Ok(()) },
+                || Some(SystemTime::UNIX_EPOCH + Duration::from_secs(wrote.borrow().len() as u64)),
+            );
+            let n = wrote.borrow().len();
+            n
         };
         let c = Controller::new(Settings::default());
         let mut bare = member("fake-a", "1");
         bare.user = None;
         reread(&c, Server::Production, Some(bare.clone()), Some(member("fake-a", "1")));
         let generation = c.account_runtime.lock().unwrap().generation;
+        // Written by another tool between the read and the write: theirs stays. Just after the write: read again as a change.
+        let at = |n: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(n));
+        let before = c.account_runtime.lock().unwrap().read;
+        for theirs_after in [false, true] {
+            let (clock, saved) = (std::cell::Cell::new(0u64), std::cell::Cell::new(false));
+            c.account_learned(
+                Server::Production,
+                generation,
+                &member("fake-a", "1"),
+                || Ok(Some(if saved.get() { Account { token: "fake-b".into(), ..member("fake-b", "2") } } else { bare.clone() })),
+                |_| { saved.set(true); Ok(()) },
+                || { if !theirs_after { clock.set(clock.get() + 1); } at(clock.get()) },
+            );
+            assert_eq!(saved.get(), theirs_after);
+            assert_eq!(c.account_runtime.lock().unwrap().read, before, "not taken for what was written here");
+        }
         assert_eq!(learned(&c, Some(bare.clone()), generation), 1);
         assert_eq!(wrote.borrow()[0].user.as_deref(), Some("1"));
-        assert_eq!(c.account_runtime.lock().unwrap().read, Some((Server::Production, Some(SystemTime::UNIX_EPOCH))), "not a change to read again");
+        assert_eq!(c.account_runtime.lock().unwrap().read, Some((Server::Production, at(1))), "not a change to read again");
         for (what, held) in [("already there", Some(member("fake-a", "1"))), ("signed out elsewhere", None), ("another credential", Some(Account { token: "fake-b".into(), ..bare.clone() }))] {
             assert_eq!(learned(&c, held, generation), 0, "{what}");
         }

@@ -332,6 +332,11 @@ pub struct CallsRuntime {
 }
 
 impl CallsRuntime {
+    /// Its calls numbered from `numbered` on.
+    pub(super) fn from(numbered: u64) -> Self {
+        Self { numbered, ..Self::default() }
+    }
+
     fn current(&mut self, number: u64) -> Option<&mut Call> {
         self.call.as_mut().filter(|c| c.number == number)
     }
@@ -1946,39 +1951,52 @@ mod tests {
         ctl
     }
 
-    /// Verify4-r21 P2, through the real commands: Hang up and Unmute are for the call their button showed, and for the member who
-    /// saw it; a delayed one for another call, or after another member signed in, does nothing.
+    /// Verify4-r21 P2, verify5-r21 M1, through the real commands: Hang up and Mute end and mute the call their button showed,
+    /// whoever Orbiters takes the person for by then; for another call, or the one of a member who left, they do nothing.
     #[test]
-    fn a_hang_up_for_another_call_or_member_ends_nothing() {
+    fn a_hang_up_is_for_the_call_it_showed() {
         use crate::ipc::N4n0Command;
+        let server = orbiters_core::account::Server::Production;
         let ctl = signed_in_as_a_in_a_call();
         ctl.sign_in_for_test("1");
-        ctl.calls.lock().unwrap().call.as_mut().unwrap().muted = true;
         let shown = ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.number).unwrap();
         let at = |epoch: u64| Some(orbiters_n4n0::Stamp { epoch, question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() });
         let a = ctl.identity_epoch();
         let settle = || std::thread::sleep(Duration::from_millis(100));
-        let untouched = || {
-            settle();
-            ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted)
-        };
-        for (call, stamp) in [(Some(shown + 1), at(a)), (None, at(a)), (Some(shown), at(a + 1)), (Some(shown), None)] {
-            ctl.n4n0_command(N4n0Command::MuteCall { on: false, call, stamp });
+        for (call, stamp) in [(Some(shown + 1), at(a)), (None, at(a)), (Some(shown), None)] {
+            ctl.n4n0_command(N4n0Command::MuteCall { on: true, call, stamp });
             ctl.n4n0_command(N4n0Command::EndCall { call, stamp });
-            assert!(untouched(), "{call:?} {stamp:?}");
-        }
-        // B signs in (here their own call has the same number).
-        let delayed = at(a);
-        ctl.sign_in_for_test("2");
-        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: delayed });
-        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: delayed });
-        assert!(untouched(), "A's press, after B");
-        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: at(ctl.identity_epoch()) });
-        let until = Instant::now() + Duration::from_secs(3);
-        while ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted) {
-            assert!(Instant::now() < until, "B's own press");
             settle();
+            assert!(ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| !c.muted), "{call:?} {stamp:?}");
         }
+        // The account's file cannot be read: nobody is known, the call goes on, and is muted and left all the same, by what a
+        // window showed before or since.
+        ctl.account_runtime.lock().unwrap().read = Some((server, None));
+        ctl.read_account_with(server, None, false, || Err(anyhow::anyhow!("being written")), |_| unreachable!());
+        assert_eq!(ctl.signed_as(), orbiters_n4n0::status::SignedAs::Unknown);
+        let muted = || ctl.calls.lock().unwrap().call.as_ref().map(|c| c.muted);
+        ctl.n4n0_command(N4n0Command::MuteCall { on: true, call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        settle();
+        assert_eq!(muted(), Some(true));
+        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: at(a) });
+        settle();
+        assert_eq!(muted(), Some(false));
+        let late = at(a);
+        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        settle();
+        assert_eq!(muted(), None, "left");
+        // Another call since: a press that comes late is not for it.
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.numbered += 1;
+            let mut call = Call::new(rt.numbered, "c_2".into(), "Nova".into(), false, Instant::now());
+            call.phase = CallPhase::Connected;
+            rt.call = Some(call);
+        }
+        ctl.n4n0_command(N4n0Command::MuteCall { on: true, call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: late });
+        settle();
+        assert_eq!(muted(), Some(false));
     }
 
     fn in_a_call(ctl: &crate::controller::Shared) -> bool {

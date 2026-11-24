@@ -8,3 +8,7 @@ crates/orbiters-n4n0/src/fence.rs
 crates/orbiters-core/src/origin.rs
 crates/orbiters-n4n0/src/conversation.rs
 crates/orbiters-desktop/src/controller/assistant_access.rs
+# Verify4-r21 P3: what a window asks of Orbiters goes through the service.
+crates/orbiters-core/src/relay.rs
+crates/orbiters-desktop/src/member.rs
+crates/orbiters-desktop/src/controller/member.rs

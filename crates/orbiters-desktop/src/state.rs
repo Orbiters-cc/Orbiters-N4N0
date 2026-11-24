@@ -419,6 +419,10 @@ pub struct AccountStatus {
     pub development: bool,
     /// The last sign-in problem.
     pub error: Option<String>,
+    /// The member signed in, as pages key what is theirs: the environment and the id ("production/42"), never a name; none
+    /// while nobody is, or who it is is not known.
+    #[serde(default)]
+    pub member: Option<String>,
 }
 
 /// How Fast walk carries the person now, as the SteamVR overlay says it.

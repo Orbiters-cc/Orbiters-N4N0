@@ -7,6 +7,7 @@ use super::{Controller, Shared};
 use orbiters_core::launcher::{Action as Home, LaunchMode, Place, Presence, ProfileEdit, Source, Whereabouts};
 use orbiters_n4n0_core::context::{data, NAME_CHARS};
 use orbiters_n4n0_core::intents::{Facts, Intent, Page, SettingKey};
+use orbiters_i18n::tr;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
@@ -27,8 +28,8 @@ fn show_page(page: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The one friend of `friends` (id, name) the owner named; several alike is a question for the owner.
-fn pick<'a>(said: &str, friends: impl Iterator<Item = (&'a str, &'a str)>) -> Result<String, String> {
+/// The one friend of `friends` (id, name) the owner named, as their id and name; several alike is a question for the owner.
+fn pick<'a>(said: &str, friends: impl Iterator<Item = (&'a str, &'a str)>) -> Result<(String, String), String> {
     let fold = |t: &str| -> String {
         t.chars()
             .flat_map(|c| match orbiters_contracts::n4n0::unaccented(c) {
@@ -55,7 +56,7 @@ fn pick<'a>(said: &str, friends: impl Iterator<Item = (&'a str, &'a str)>) -> Re
         let names: Vec<String> = top.iter().take(5).map(|s| orbiters_n4n0_core::context::quoted(s.2, NAME_CHARS)).collect();
         return Err(format!("Several friends match: {}. Ask the owner which one.", names.join(", "))); // i18n: not shown
     }
-    Ok(top[0].1.to_string())
+    Ok((top[0].1.to_string(), top[0].2.to_string()))
 }
 
 impl Controller {
@@ -70,6 +71,7 @@ impl Controller {
             n4n0_prop: false,
             can_drop: false,
             computer: true,
+            clipboard: false,
             actions: self.assistant_actions(),
         }
     }
@@ -99,12 +101,52 @@ impl Controller {
         })
     }
 
-    /// Home's action, bound to the VRChat account on show as Home binds its presses (`pages::launcher::as_shown`).
-    fn as_shown(&self, action: Home) -> Home {
+    /// The VRChat account on show.
+    fn vrchat_shown(&self) -> Option<String> {
         match &self.view().launcher.source {
-            Source::SignedIn { user_id, .. } if !user_id.is_empty() => Home::As { account: user_id.clone(), action: Box::new(action) },
-            _ => action,
+            Source::SignedIn { user_id, .. } if !user_id.is_empty() => Some(user_id.clone()),
+            _ => None,
         }
+    }
+
+    /// Home's action, bound to the VRChat account it was asked for (`target`), as Home binds its presses to the one on show
+    /// (`pages::launcher::as_shown`); refused once another is on show.
+    fn as_asked(&self, target: &Value, action: Home) -> Result<Home, String> {
+        let asked = target.get("vrchat").and_then(Value::as_str);
+        if asked != self.vrchat_shown().as_deref() {
+            return Err(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+        }
+        Ok(match asked {
+            Some(account) => Home::As { account: account.to_string(), action: Box::new(action) },
+            None => action,
+        })
+    }
+
+    /// Who one of these is for, as it stands now: the VRChat account on show, and the friend a name (or "back") means. Taken
+    /// as the person is asked; [`Controller::assistant_intent`] does it for those.
+    pub(super) fn assistant_target(&self, intent: &Intent, _item: Option<&Value>) -> Result<Value, String> {
+        let friend = match intent {
+            Intent::Boop { friend: Some(said) } | Intent::RequestInvite { friend: said } | Intent::FriendProfile { friend: said } => Some(self.friend_named(said)?),
+            Intent::Boop { friend: None } => {
+                let s = self.view();
+                let b = s.launcher.boops.first().ok_or("Nobody booped the owner lately.")?; // i18n: not shown
+                Some((b.from_id.clone(), b.from_name.clone()))
+            }
+            Intent::GoToInstance { .. }
+            | Intent::GoToWorld { .. }
+            | Intent::Play { .. }
+            | Intent::AcceptInvite { .. }
+            | Intent::SetStatus { .. }
+            | Intent::SetStatusText { .. }
+            | Intent::SetBio { .. } => None,
+            _ => return Ok(Value::Null),
+        };
+        let mut target = json!({ "vrchat": self.vrchat_shown() });
+        if let Some((id, name)) = friend {
+            target["friend"] = json!(id);
+            target["says"] = json!(name);
+        }
+        Ok(target)
     }
 
     /// VR when SteamVR runs and VRChat is not in desktop mode, as Play's own choice reads it.
@@ -119,13 +161,17 @@ impl Controller {
 
     /// A new Friends+ instance of `world` made for the signed-in VRChat account, then VRChat started (or sent) into it:
     /// Home's Where's `make_and_go` (REQUEST20 2), the region the person played in last.
-    fn new_instance_and_play(self: &Shared, world: &str, name: &str, vr: bool) -> Result<Value, String> {
+    fn new_instance_and_play(self: &Shared, target: &Value, world: &str, name: &str, vr: bool) -> Result<Value, String> {
         use super::vrchat_data::{Request, Response, Scope};
         use orbiters_core::vrchat_api::{CreateAccess, InstanceRegion};
         let s = self.view();
-        let Source::SignedIn { user_id: me, .. } = &s.launcher.source else {
+        let Some(me) = target.get("vrchat").and_then(Value::as_str) else {
             return Err("A new Friends+ instance is made for the owner's VRChat account: none is connected (Settings).".into()); // i18n: not shown
         };
+        // The account it was asked for, still on show (the reading below is bound to it).
+        if s.vrchat_login.user.as_ref().map(|u| u.id.as_str()) != Some(me) || self.vrchat_shown().as_deref() != Some(me) {
+            return Err(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+        }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
         let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now).region()).unwrap_or(InstanceRegion::Us);
@@ -137,20 +183,21 @@ impl Controller {
         };
         let place = Place { world_id: made.world.clone(), world_name: name.into(), world_picture: String::new(), instance_id: made.id.clone(), access: made.access, region: made.region.clone() };
         let mode = if vr { LaunchMode::Vr } else { LaunchMode::Desktop };
-        self.launcher_action(Home::As { account: me.clone(), action: Box::new(Home::Play { mode, destination: Some(place) }) });
+        self.launcher_action(Home::As { account: me.to_string(), action: Box::new(Home::Play { mode, destination: Some(place) }) });
         Ok(json!({ "done": true, "instance": "new Friends+" }))
     }
 
     /// The friend the owner named, among the VRChat account's friends.
-    fn friend_id(&self, said: &str) -> Result<String, String> {
+    fn friend_named(&self, said: &str) -> Result<(String, String), String> {
         let s = self.view();
         pick(said, s.launcher.friends.iter().map(|f| (f.id.as_str(), f.name.as_str())))
     }
 
     /// Runs one of the app's intents, as its page would (the gate already ran). `item`: what an index named in the list
-    /// this answered before (its `ref`).
-    pub(super) fn assistant_intent(self: &Shared, intent: &Intent, item: Option<&Value>) -> Result<Value, String> {
+    /// this answered before (its `ref`). `target`: what it is for, as the person was asked ([`Controller::assistant_target`]).
+    pub(super) fn assistant_intent(self: &Shared, intent: &Intent, item: Option<&Value>, target: &Value) -> Result<Value, String> {
         let done = || Ok(json!({ "done": true }));
+        let friend = || target.get("friend").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "No friend named.".to_string()); // i18n: not shown
         let reference = || item.and_then(|i| i.get("ref")).and_then(Value::as_str).map(str::to_string).ok_or_else(|| "No such item in the last list.".to_string()); // i18n: not shown
         match intent {
             // The overlay's walk boost slider (`ToService::WalkBoost`).
@@ -213,7 +260,7 @@ impl Controller {
                 let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                 let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
                 // For the account on show: a private one goes to no other's game (`vrchat_launch::handing`).
-                self.launcher_action(self.as_shown(Home::Play { mode: self.launch_mode(), destination: Some(place) }));
+                self.launcher_action(self.as_asked(target, Home::Play { mode: self.launch_mode(), destination: Some(place) })?);
                 done()
             }
             // Home's Where: the places VRChat can start at, as its cards offer them (REQUEST20 2).
@@ -239,17 +286,17 @@ impl Controller {
                 let go = item.and_then(|i| i.get("go")).and_then(Value::as_str).unwrap_or("home");
                 match (index, go) {
                     (None, _) | (Some(_), "home") => self.launcher_action(Home::Play { mode, destination: None }),
-                    (Some(_), "invite") => self.launcher_action(self.as_shown(Home::AcceptInvite { invite: reference()?, mode })),
+                    (Some(_), "invite") => self.launcher_action(self.as_asked(target, Home::AcceptInvite { invite: reference()?, mode })?),
                     (Some(_), "instance") => {
                         let location = reference()?;
                         let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
                         let (access, region) = orbiters_core::launcher_feed::access(instance_id);
                         let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                        self.launcher_action(self.as_shown(Home::Play { mode, destination: Some(place) }));
+                        self.launcher_action(self.as_asked(target, Home::Play { mode, destination: Some(place) })?);
                     }
                     (Some(_), "new") => {
                         let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();
-                        return self.new_instance_and_play(&reference()?, &name, *vr);
+                        return self.new_instance_and_play(target, &reference()?, &name, *vr);
                     }
                     _ => return Err("Not a place of the last places list.".into()), // i18n: not shown
                 }
@@ -259,7 +306,7 @@ impl Controller {
             Intent::GoToWorld { .. } => {
                 let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();
                 let vr = self.launch_mode() == LaunchMode::Vr;
-                self.new_instance_and_play(&reference()?, &name, vr)
+                self.new_instance_and_play(target, &reference()?, &name, vr)
             }
             // Home's friends list, by its sections (REQUEST20 3).
             Intent::FriendsOnline => {
@@ -288,22 +335,16 @@ impl Controller {
                 Ok(json!({ "friends": items, "offline_count": offline }))
             }
             // Home's Boop (back), Request invite, profile.
-            Intent::Boop { friend } => {
-                let to = match friend {
-                    Some(name) => self.friend_id(name)?,
-                    None => self.view().launcher.boops.first().map(|b| b.from_id.clone()).ok_or("Nobody booped the owner lately.")?, // i18n: not shown
-                };
-                self.launcher_action(self.as_shown(Home::Boop { to, emoji: None }));
+            Intent::Boop { .. } => {
+                self.launcher_action(self.as_asked(target, Home::Boop { to: friend()?, emoji: None })?);
                 done()
             }
-            Intent::RequestInvite { friend } => {
-                let to = self.friend_id(friend)?;
-                self.launcher_action(self.as_shown(Home::RequestInvite { to }));
+            Intent::RequestInvite { .. } => {
+                self.launcher_action(self.as_asked(target, Home::RequestInvite { to: friend()? })?);
                 done()
             }
-            Intent::FriendProfile { friend } => {
-                let id = self.friend_id(friend)?;
-                self.launcher_action(self.as_shown(Home::OpenProfile { id }));
+            Intent::FriendProfile { .. } => {
+                self.launcher_action(self.as_asked(target, Home::OpenProfile { id: friend()? })?);
                 show_page("page:Home")?;
                 done()
             }
@@ -320,20 +361,20 @@ impl Controller {
             }
             Intent::AcceptInvite { .. } => {
                 let invite = reference()?;
-                self.launcher_action(self.as_shown(Home::AcceptInvite { invite, mode: self.launch_mode() }));
+                self.launcher_action(self.as_asked(target, Home::AcceptInvite { invite, mode: self.launch_mode() })?);
                 done()
             }
             // Home's own profile card (REQUEST15 7b).
             Intent::SetStatus { status } => {
-                self.launcher_action(self.as_shown(Home::EditProfile(ProfileEdit::Status(status.launcher()))));
+                self.launcher_action(self.as_asked(target, Home::EditProfile(ProfileEdit::Status(status.launcher())))?);
                 done()
             }
             Intent::SetStatusText { text } => {
-                self.launcher_action(self.as_shown(Home::EditProfile(ProfileEdit::StatusText(text.chars().take(orbiters_core::launcher::STATUS_TEXT_MAX).collect()))));
+                self.launcher_action(self.as_asked(target, Home::EditProfile(ProfileEdit::StatusText(text.chars().take(orbiters_core::launcher::STATUS_TEXT_MAX).collect())))?);
                 done()
             }
             Intent::SetBio { text } => {
-                self.launcher_action(self.as_shown(Home::EditProfile(ProfileEdit::Bio(text.chars().take(orbiters_core::launcher::BIO_MAX).collect()))));
+                self.launcher_action(self.as_asked(target, Home::EditProfile(ProfileEdit::Bio(text.chars().take(orbiters_core::launcher::BIO_MAX).collect())))?);
                 done()
             }
             Intent::MyStatus => {
@@ -392,11 +433,39 @@ pub fn window_page(page: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    /// A yes is for the friend and the VRChat account it was asked about: the list changing since changes nobody, another VRChat account
+    /// refuses.
+    #[test]
+    fn what_is_done_is_for_whom_it_was_asked() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let friend = |id: &str, name: &str| orbiters_core::launcher::Friend { id: id.into(), name: name.into(), ..Default::default() };
+        let account = |id: &str| Source::SignedIn { user_id: id.into(), name: String::new() };
+        ctl.update(|s| {
+            s.launcher.source = account("usr_me");
+            s.launcher.friends = vec![friend("usr_sam", "Samuel")].into();
+        });
+        let boop = Intent::Boop { friend: Some("sam".into()) };
+        let target = ctl.assistant_target(&boop, None).unwrap();
+        assert_eq!((target["vrchat"].as_str(), target["friend"].as_str(), target["says"].as_str()), (Some("usr_me"), Some("usr_sam"), Some("Samuel")));
+        ctl.update(|s| s.launcher.friends = vec![friend("usr_other", "Sam")].into());
+        let action = ctl.as_asked(&target, Home::Boop { to: target["friend"].as_str().unwrap().into(), emoji: None }).unwrap();
+        assert!(matches!(&action, Home::As { account, action } if account == "usr_me" && matches!(&**action, Home::Boop { to, .. } if to == "usr_sam")), "{action:?}");
+        for now in [account("usr_else"), Source::default()] {
+            ctl.update(|s| s.launcher.source = now.clone());
+            let refused = ctl.assistant_intent(&boop, None, &target).unwrap_err();
+            assert!(refused.contains("changed"), "{refused}");
+            for intent in [Intent::SetBio { text: "x".into() }, Intent::AcceptInvite { index: 1 }, Intent::GoToWorld { index: 1 }] {
+                let refused = ctl.assistant_intent(&intent, Some(&json!({ "ref": "wrld_1:2", "name": "W" })), &target).unwrap_err();
+                assert!(refused.contains("changed"), "{intent:?}: {refused}");
+            }
+        }
+    }
+
     #[test]
     fn a_friend_is_named_once_or_asked_about() {
         let friends = [("usr_1", "Sam"), ("usr_2", "Samuel"), ("usr_3", "Kira"), ("usr_4", "Kíra Two")];
-        assert_eq!(pick("sam", friends.iter().copied()), Ok("usr_1".into()), "the exact name first");
-        assert!(pick("kira", friends.iter().copied()) == Ok("usr_3".into()));
+        assert_eq!(pick("sam", friends.iter().copied()), Ok(("usr_1".into(), "Sam".into())), "the exact name first");
+        assert!(pick("kira", friends.iter().copied()) == Ok(("usr_3".into(), "Kira".into())));
         assert!(pick("ki", friends.iter().copied()).unwrap_err().contains("Several"), "two alike: the owner is asked");
         assert!(pick("nobody", friends.iter().copied()).unwrap_err().contains("No friend"));
         assert!(pick("", friends.iter().copied()).is_err());

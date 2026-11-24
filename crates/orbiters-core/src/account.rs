@@ -521,6 +521,10 @@ impl Api {
         Self { agent, base }
     }
 
+    pub(crate) fn with_agent(agent: ureq::Agent, base: String) -> Self {
+        Self { agent, base }
+    }
+
     pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path.trim_start_matches('/'))
     }

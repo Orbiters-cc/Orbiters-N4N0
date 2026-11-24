@@ -62,6 +62,9 @@ pub struct AccountRuntime {
     pub(super) epochs: super::identity::Epochs,
 }
 
+/// Held while this process reads the saved account's file to write it again, or removes it.
+static ACCOUNT_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A sign-in waiting for the browser: the page it opened, and the switch that closes its listener.
 struct SignIn {
     server: Server,
@@ -376,6 +379,8 @@ impl Controller {
         let answer = check(&saved.token);
         // The account's features as the check says them (N4N0 calls), for once the lock is let go.
         let mut features = None;
+        // Whose the saved account is, which its file (an older version's) does not say.
+        let mut learned = None;
         let state = self.install_account(|rt| {
             // Signed in or out meanwhile: that newer state wins.
             if rt.generation != generation || rt.account.as_ref().map(|a| &a.token) != Some(&saved.token) {
@@ -386,6 +391,7 @@ impl Controller {
                     // For the account as it is kept just below (its id as the server says it), with this credential.
                     features = Some((current.user.clone(), current.features.clone()));
                     let name = current.username.clone().or(saved.username.clone()).unwrap_or_default();
+                    learned = (saved.user.is_none() && current.user.is_some()).then(|| Account { token: saved.token.clone(), username: Some(name.clone()).filter(|n| !n.is_empty()), features: None, ..current.clone() });
                     rt.account = Some(Account { token: saved.token.clone(), ..current });
                     AccountState::SignedIn { username: name }
                 }
@@ -401,6 +407,12 @@ impl Controller {
             })
         });
         let Some(state) = state else { return };
+        if let Some(account) = learned {
+            // Tests never touch the Unity tools' account.
+            if !cfg!(test) {
+                self.account_learned(server, generation, &account, || account::read_saved(server), |a| account::save(server, a), || account::modified(server));
+            }
+        }
         if let Some((user, features)) = features {
             self.calls_access_checked(server, user.as_deref(), &saved.token, features.as_ref());
         }
@@ -604,7 +616,42 @@ impl Controller {
     /// Signs out of Orbiters in every tool (the saved account is removed, as in Unity).
     pub fn sign_out(&self) -> anyhow::Result<()> {
         let server = Server::current();
-        self.sign_out_with(server, || account::remove(server))
+        self.sign_out_with(server, || {
+            let _file = ACCOUNT_FILE.lock().unwrap_or_else(|e| e.into_inner());
+            account::remove(server)
+        })
+    }
+
+    /// Orbiters said whose the saved account is, which its file does not (an older version wrote it): the file says it from
+    /// now on, so that a restart knows it at once (verify4-r21 P8). Only for the credential the file still holds: what
+    /// another tool wrote, or a sign-out, stays.
+    pub(super) fn account_learned(
+        &self,
+        server: Server,
+        generation: u64,
+        account: &Account,
+        read: impl FnOnce() -> anyhow::Result<Option<Account>>,
+        save: impl FnOnce(&Account) -> anyhow::Result<()>,
+        modified: impl FnOnce() -> Option<SystemTime>,
+    ) {
+        let _file = ACCOUNT_FILE.lock().unwrap_or_else(|e| e.into_inner());
+        if self.account_runtime.lock().unwrap().generation != generation {
+            return;
+        }
+        match read() {
+            Ok(Some(held)) if held.token == account.token && held.user.is_none() => {}
+            _ => return,
+        }
+        if let Err(e) = save(account) {
+            eprintln!("account file: {e:#}");
+            return;
+        }
+        let written = modified();
+        let mut rt = self.account_runtime.lock().unwrap();
+        // Not a change to read again: it is what was written here.
+        if rt.generation == generation && rt.read.is_some_and(|(s, _)| s == server) {
+            rt.read = Some((server, written));
+        }
     }
 
     /// [`Controller::sign_out`] with the saved account removed by `remove` (tests: no file of the person's). Only once it
@@ -798,8 +845,9 @@ mod tests {
         // Read again (the same file, still without one): the same.
         reread(&c, Server::Production, Some(b.clone()), None);
         assert_eq!(c.identity_epoch(), epoch + 1);
-        // Orbiters says who it is: another identity again, whoever that is.
-        reread(&c, Server::Production, Some(b.clone()), Some(member("fake-b", "1")));
+        // Orbiters says who it is: another identity again, whoever that is (the first one's id brings their conversation back,
+        // verify4 P8; another's brings nothing).
+        reread(&c, Server::Production, Some(b.clone()), Some(member("fake-b", "2")));
         assert_eq!((c.identity_epoch(), c.signed_as()), (epoch + 2, SignedAs::Member));
         assert_eq!(lines(&c), 0);
         assert!(c.account_api_of(epoch + 2).is_some_and(|(_, token)| token == "fake-b"));
@@ -855,6 +903,74 @@ mod tests {
         let c = Controller::new(Settings::default());
         c.read_account_with(Server::Production, None, false, || { c.account_environment_changed(); Ok(Some(member("fake-a", "1"))) }, |_| Err(anyhow::anyhow!("offline")));
         assert!(c.account_api().is_none() && c.account_runtime.lock().unwrap().account.is_none());
+    }
+
+    /// Verify4-r21 P8: the file being written again by another tool (nobody known meanwhile) keeps the same member's conversation, out
+    /// of everyone's reach until they are known again; what N4N0 asked, and what their windows stamped before, is gone all the
+    /// same. Another member, and a sign-out, drop it for good.
+    #[test]
+    fn the_same_members_history_comes_back_and_nobody_elses() {
+        let unreadable = |c: &Shared| c.read_account_with(Server::Production, None, false, || Err(anyhow::anyhow!("being written")), |_| unreachable!());
+        let said = || {
+            let c = Controller::new(Settings::default());
+            reread(&c, Server::Production, Some(member("fake-a", "1")), None);
+            say(&c);
+            assert!(lines(&c) > 0);
+            c
+        };
+        let c = said();
+        let epoch = c.identity_epoch();
+        unreadable(&c);
+        assert_eq!((lines(&c), c.identity_epoch()), (0, epoch + 1));
+        unreadable(&c);
+        // Their own credential again, refreshed, of no known member until Orbiters says.
+        let mut bare = member("fake-a2", "1");
+        bare.user = None;
+        reread(&c, Server::Production, Some(bare.clone()), None);
+        assert_eq!(lines(&c), 0);
+        reread(&c, Server::Production, Some(bare), Some(member("fake-a2", "1")));
+        assert!(lines(&c) > 0, "the same member's conversation is gone");
+        assert!(c.identity_epoch() > epoch + 1, "what was stamped before is still nothing");
+        // Someone else comes first, or a sign-out, or the same id of another environment.
+        type Step = fn(&Shared);
+        let between: [(&str, Step); 3] = [
+            ("another member", |c| reread(c, Server::Production, Some(member("fake-b", "2")), None)),
+            ("a sign-out", |c| reread(c, Server::Production, None, None)),
+            ("another environment", |c| reread(c, Server::Development, Some(member("fake-d", "1")), None)),
+        ];
+        for (what, step) in between {
+            let c = said();
+            unreadable(&c);
+            step(&c);
+            assert_eq!(lines(&c), 0, "{what}");
+            reread(&c, Server::Production, Some(member("fake-a", "1")), None);
+            assert_eq!(lines(&c), 0, "{what}, then the first one again");
+        }
+    }
+
+    /// P8: an older file without the member's id says it once Orbiters said whose it is, so that a restart knows it at once; never over
+    /// what another tool wrote since, nor after a sign-out.
+    #[test]
+    fn the_saved_account_learns_its_members_id() {
+        let wrote = std::cell::RefCell::new(Vec::new());
+        let learned = |c: &Shared, held: Option<Account>, generation: u64| {
+            wrote.borrow_mut().clear();
+            c.account_learned(Server::Production, generation, &member("fake-a", "1"), || Ok(held), |a| { wrote.borrow_mut().push(a.clone()); Ok(()) }, || Some(SystemTime::UNIX_EPOCH));
+            wrote.borrow().len()
+        };
+        let c = Controller::new(Settings::default());
+        let mut bare = member("fake-a", "1");
+        bare.user = None;
+        reread(&c, Server::Production, Some(bare.clone()), Some(member("fake-a", "1")));
+        let generation = c.account_runtime.lock().unwrap().generation;
+        assert_eq!(learned(&c, Some(bare.clone()), generation), 1);
+        assert_eq!(wrote.borrow()[0].user.as_deref(), Some("1"));
+        assert_eq!(c.account_runtime.lock().unwrap().read, Some((Server::Production, Some(SystemTime::UNIX_EPOCH))), "not a change to read again");
+        for (what, held) in [("already there", Some(member("fake-a", "1"))), ("signed out elsewhere", None), ("another credential", Some(Account { token: "fake-b".into(), ..bare.clone() }))] {
+            assert_eq!(learned(&c, held, generation), 0, "{what}");
+        }
+        c.sign_out_with(Server::Production, || Ok(())).unwrap();
+        assert_eq!(learned(&c, Some(bare), generation), 0, "signed out here");
     }
 
     /// A refused credential is asked about again, later each time, never more often than every ten minutes.

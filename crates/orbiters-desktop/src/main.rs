@@ -36,6 +36,7 @@ mod mac_display;
 mod mac_update;
 mod mailbox;
 mod media;
+mod member;
 mod menu_host;
 mod mismatch;
 mod mixer_inbox;

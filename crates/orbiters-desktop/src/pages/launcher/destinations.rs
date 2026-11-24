@@ -536,18 +536,18 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
 }
 
 /// The member's events on now or soon, from Orbiters (signed in there; nothing otherwise).
-fn read_events(server: orbiters_core::account::Server, now: i64) -> Vec<EventSoon> {
-    let Some(account) = orbiters_core::account::read(server) else { return Vec::new() };
-    let api = orbiters_core::account::Api::new(server);
+fn read_events(server: orbiters_core::account::Server, member: Option<crate::member::Member>, now: i64) -> Vec<EventSoon> {
+    let _ = server;
+    let Some((api, token)) = member.map(|m| m.api()) else { return Vec::new() };
     let Ok(cards) = api.events(0) else { return Vec::new() };
     let mut out = Vec::new();
     // The few on now or soon: an answer each about the member's invites, one more for the live instance.
     for card in cards.items.iter().filter(|c| unix(c.starts_at.as_deref()).is_some_and(|s| EventSoon { starts_at: s, ends_at: unix(c.ends_at.as_deref()), ..Default::default() }.offered(now))).take(6) {
-        let Ok(invites) = api.my_invites(&account.token, &card.id) else { continue };
+        let Ok(invites) = api.my_invites(&token, &card.id) else { continue };
         if !interested(&invites) {
             continue;
         }
-        let location = api.event(Some(&account.token), &card.id).ok().and_then(|o| event_location(&o));
+        let location = api.event(Some(&token), &card.id).ok().and_then(|o| event_location(&o));
         let world = card.world.as_ref();
         out.push(EventSoon {
             id: card.id.clone(),
@@ -806,7 +806,10 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
             Some(HistoryView::of(&history, orbiters_core::visited::now()))
         });
         let server = orbiters_core::account::Server::current();
-        refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some(read_events(server, events_now())));
+        refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", {
+            let member = crate::member::reading(server);
+            move || Some(read_events(server, member, events_now()))
+        });
     }
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
     let loading = match &state.places.staged {

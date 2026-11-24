@@ -11,7 +11,7 @@
 //! - N4N0's own controls, the system's and Orbiters - N4N0's parameters are never offered at all
 //!   ([`crate::controls::Controls`]).
 
-use crate::context::{quoted, NAME_CHARS};
+use crate::context::{data, quoted, whole, NAME_CHARS};
 use crate::tools::Action;
 use std::collections::HashMap;
 
@@ -19,8 +19,6 @@ use std::collections::HashMap;
 pub const CALLS_PER_ROUND: usize = 8;
 /// Calls a whole turn may make.
 pub const CALLS_PER_TURN: usize = 24;
-/// Characters of a text the owner is asked about (the clipboard's, an AFK message).
-const ASKED_CHARS: usize = 80;
 
 /// The kinds of calls, each with its limit in a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -147,7 +145,7 @@ impl TurnPolicy {
 /// control's labels, what to copy) are cut short and quoted as JSON strings: the line stays the desktop's own.
 pub fn what(action: &Action, control: Option<&Control>) -> String {
     let named = |fallback: &str| match control {
-        Some(c) => quoted(&c.path, NAME_CHARS),
+        Some(c) => whole(&data(&c.path, usize::MAX)),
         None => quoted(fallback, NAME_CHARS),
     };
     let setting = |on: Option<bool>, value: Option<f32>| match (on, value) {
@@ -168,7 +166,7 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
         Action::Hold { control: name, on, value, .. } => {
             format!("keep {}{} (put back after every reset and avatar change, until released){nsfw}", named(name), setting(*on, *value)) // i18n: not shown
         }
-        Action::CopyToClipboard { text } => format!("copy to your clipboard: {}", quoted(text, ASKED_CHARS)), // i18n: not shown
+        Action::CopyToClipboard { text } => format!("copy to your clipboard: {}", whole(text)), // i18n: not shown
         Action::SetAfkMessage { text, enabled } => {
             let text = text.as_deref().unwrap_or_default();
             let switch = match enabled {
@@ -176,7 +174,7 @@ pub fn what(action: &Action, control: Option<&Control>) -> String {
                 Some(false) => ", and keep it off", // i18n: not shown
                 None => "",
             };
-            format!("show {} to people while you are away{switch}", quoted(text, ASKED_CHARS)) // i18n: not shown
+            format!("show {} to people while you are away{switch}", whole(text)) // i18n: not shown
         }
         Action::SetParameter { name, value } => format!("set {} to {value:.2}{nsfw}", named(name)), // i18n: not shown
         Action::FindControls { .. } => "search the avatar's controls".into(), // i18n: not shown
@@ -205,7 +203,7 @@ pub fn changes(action: &Action) -> bool {
 pub fn ask(action: &Action, control: Option<&Control>) -> String {
     use orbiters_i18n::tr;
     let named = |fallback: &str| match control {
-        Some(c) => quoted(&c.path, NAME_CHARS),
+        Some(c) => whole(&data(&c.path, usize::MAX)),
         None => quoted(fallback, NAME_CHARS),
     };
     let value = |v: f32| format!("{v:.2}");
@@ -224,7 +222,7 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
             }
         }
         Action::SetParameter { name, value: v } => tr!("N4N0 asks to set {control} to {value}.", control = named(name), value = value(*v)),
-        Action::CopyToClipboard { text } => tr!("N4N0 asks to copy to your clipboard: {text}", text = quoted(text, ASKED_CHARS)),
+        Action::CopyToClipboard { text } => tr!("N4N0 asks to copy to your clipboard: {text}", text = whole(text)),
         Action::SetAfkMessage { text, enabled } => {
             if text.is_none() {
                 return match enabled {
@@ -232,7 +230,7 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
                     _ => tr("N4N0 asks to turn your AFK message on.").into(),
                 };
             }
-            let text = quoted(text.as_deref().unwrap_or_default(), ASKED_CHARS);
+            let text = whole(text.as_deref().unwrap_or_default());
             match enabled {
                 Some(true) => tr!("N4N0 asks to show {text} to people while you are away, and to turn it on.", text = text),
                 Some(false) => tr!("N4N0 asks to show {text} to people while you are away, and to keep it off.", text = text),
@@ -252,7 +250,7 @@ pub fn ask(action: &Action, control: Option<&Control>) -> String {
         Action::FindControls { .. } | Action::ListSavedVideos | Action::OpenTools { .. } | Action::Mood { .. } => what(action, control), // i18n: not shown
     };
     match control.filter(|c| c.nsfw) {
-        Some(c) => format!("{asked} {}", tr!("The avatar's menu tags {control} as nsfw.", control = quoted(&c.path, NAME_CHARS))),
+        Some(c) => format!("{asked} {}", tr!("The avatar's menu tags {control} as nsfw.", control = whole(&data(&c.path, usize::MAX)))),
         None => asked,
     }
 }

@@ -11,7 +11,7 @@
 use super::Job;
 use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, CornerRadius, CursorIcon, Id, Order, Rect, Sense, Ui};
-use orbiters_core::account::{Api, Server};
+use orbiters_core::account::Server;
 use orbiters_core::community;
 use orbiters_core::gallery_talk::{Reaction, Reactions, Replies, Reply};
 use orbiters_i18n::{mark, tr, tr_n};
@@ -89,7 +89,8 @@ impl Talk {
         if !self.jobs.contains_key(&p.id) {
             let (id, replies, reactions) = (p.id, p.reply_count > 0, p.reaction_count > 0);
             let server = if development { Server::Development } else { Server::Production };
-            self.jobs.insert(id, Job::spawn(ctx, move || read(server, id, replies, reactions)));
+            let member = crate::member::reading(server);
+            self.jobs.insert(id, Job::spawn(ctx, move || read(member, id, replies, reactions)));
         }
         Some(Said { replies: if p.reply_count > 0 { Phase::Waiting } else { Phase::None }, reactions: if p.reaction_count > 0 { Phase::Waiting } else { Phase::None } })
     }
@@ -103,15 +104,14 @@ impl Talk {
 }
 
 /// Reads a picture's replies and reactions (those it has) on a worker.
-fn read(server: Server, id: u64, replies: bool, reactions: bool) -> Said {
-    let Some(account) = orbiters_core::account::read(server) else {
+fn read(member: Option<crate::member::Member>, id: u64, replies: bool, reactions: bool) -> Said {
+    let Some((api, token)) = member.map(|m| m.api()) else {
         let signed_out = || mark("Sign in to Orbiters in Settings first.").to_string();
         return Said {
             replies: if replies { Phase::Failed(signed_out()) } else { Phase::None },
             reactions: if reactions { Phase::Failed(signed_out()) } else { Phase::None },
         };
     };
-    let api = Api::new(server);
     fn phase<T>(asked: bool, read: impl FnOnce() -> anyhow::Result<T>) -> Phase<T> {
         match asked.then(read) {
             None => Phase::None,
@@ -120,8 +120,8 @@ fn read(server: Server, id: u64, replies: bool, reactions: bool) -> Said {
         }
     }
     Said {
-        replies: phase(replies, || api.picture_replies(&account.token, id)),
-        reactions: phase(reactions, || api.picture_reactions(&account.token, id)),
+        replies: phase(replies, || api.picture_replies(&token, id)),
+        reactions: phase(reactions, || api.picture_reactions(&token, id)),
     }
 }
 

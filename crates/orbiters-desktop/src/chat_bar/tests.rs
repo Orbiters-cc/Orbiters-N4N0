@@ -739,6 +739,59 @@ fn a_question_is_said_to_be_presented_when_its_card_is_in_view() {
     assert_eq!(w.backend.presented().last(), Some(&(6, 9)));
 }
 
+/// Verify4-r21 P6: a question longer than the chat is presented, and can be answered, once all of it came into view; its end alone
+/// is not all of it.
+#[test]
+fn a_long_question_is_presented_once_it_was_read_whole() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 5;
+    snap.n4n0.lines = vec![line(N4n0Who::You, "Copy it", 1)].into();
+    snap.n4n0.confirmations = vec![local_question(7, &format!("N4N0 asks to copy to your clipboard: {}", "some words of it ".repeat(130)))];
+    let mut w = Window::new(snap, 900.0);
+    w.key(Key::J, Modifiers::COMMAND);
+    w.settle();
+    let (yes, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes, at its end");
+    assert!(!on && w.backend.presented().is_empty(), "its end only was in view: {:?}", w.backend.presented());
+    w.press(yes.center());
+    assert!(w.backend.sent().is_empty(), "{:?}", w.backend.sent());
+    // Up to its beginning, then down again.
+    let middle = yes.center();
+    let scroll = |w: &mut Window, y: f32| {
+        for _ in 0..30 {
+            w.frame(vec![Event::PointerMoved(middle), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, y), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE, source: egui::MouseWheelSource::Wheel }]);
+        }
+        w.settle();
+    };
+    scroll(&mut w, 120.0);
+    scroll(&mut w, -60.0);
+    scroll(&mut w, -120.0);
+    assert_eq!(w.backend.presented(), [(5, 7)]);
+    let (yes, on) = orbiters_ui::widgets::control(&w.ctx, orbiters_i18n::tr("Yes, do it")).expect("Yes");
+    assert!(on);
+    w.press(yes.center());
+    assert!(matches!(w.backend.sent().last(), Some(N4n0Command::AskAnswer { yes: true, stamp: Some(Stamp { question: Some(7), .. }) })), "{:?}", w.backend.sent());
+}
+
+/// Verify4-r21 P9: the window's Talk let go names its press.
+#[test]
+fn the_windows_talk_names_the_press_it_lets_go() {
+    let mut snap = ready();
+    snap.n4n0.account_epoch = 5;
+    snap.n4n0.voice.installed = true;
+    let mut w = Window::new(snap, 1280.0);
+    w.settle();
+    let talk = w.ctx.read_response(egui::Id::unique("chat-bar-talk")).expect("the bar's Talk").rect;
+    w.frame(vec![Event::PointerMoved(talk.center())]);
+    let button = |pressed| Event::PointerButton { pos: talk.center(), button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    w.frame(vec![button(true)]);
+    w.frame(vec![]);
+    w.frame(vec![button(false)]);
+    w.frame(vec![]);
+    let talks: Vec<N4n0Command> = w.backend.sent().into_iter().filter(|c| matches!(c, N4n0Command::Talk { .. })).collect();
+    let [N4n0Command::Talk { down: true, stamp: Some(pressed), press: None }, N4n0Command::Talk { down: false, stamp: None, press: Some(let_go) }] = talks.as_slice() else { panic!("{talks:?}") };
+    assert_eq!(pressed.seq, *let_go);
+}
+
 /// M8: New conversation in the window names the conversation the last frame showed, and whose.
 #[test]
 fn the_windows_new_conversation_names_the_one_it_shows() {

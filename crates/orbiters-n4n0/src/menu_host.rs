@@ -425,6 +425,7 @@ impl<P: Pictures> MenuHost<P> {
             changed = true;
         }
         if calls.call.is_some() || m.call.is_some() {
+            m.call_number = calls.call.as_ref().map(|c| c.number);
             let call = calls.menu_call(crate::unix_ms());
             if m.call != call {
                 m.set_call(call);
@@ -650,8 +651,8 @@ impl<P: Pictures> MenuHost<P> {
                     service.save_settings(&base, &changed);
                 }
                 Effect::CallContact { id } => service.command(Command::Call { contact: id, stamp: None }),
-                Effect::Answer => service.command(Command::AnswerCall { stamp: None }),
-                Effect::HangUp => service.command(Command::EndCall),
+                Effect::Answer => service.command(Command::AnswerCall { call: self.menu.call_number, stamp: None }),
+                Effect::HangUp => service.command(Command::EndCall { call: self.menu.call_number, stamp: None }),
                 Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
                     let base = self.asked_settings(settings);
@@ -964,7 +965,7 @@ mod tests {
         n4n0.calls = CallsStatus {
             link: CallLink::Linked { account: "usr_1".into() },
             contacts: vec![CallContact { id: "c1".into(), name: "Ada".into() }],
-            call: Some(CallView { name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
+            call: Some(CallView { number: 3, name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
             ..Default::default()
         }
         .into();

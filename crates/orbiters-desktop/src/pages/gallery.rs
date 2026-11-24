@@ -573,7 +573,11 @@ impl State {
         };
         self.error = None;
         let owner = self.account.owner().cloned().unwrap_or_default();
-        self.feed_job = super::job_for(ctx, &owner, move || controller::feed(server, q));
+        let member = crate::member::reading(server);
+        self.feed_job = super::job_for(ctx, &owner, move || {
+            let (api, token) = member.ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
+            api.captures(&token, &q)
+        });
     }
 }
 
@@ -592,7 +596,7 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         // Progressive discoveries keep existing decoded pictures visible.
     }
     let development = cx.snap.settings.development;
-    let seen = state.account.see(&cx.snap.account.state, development);
+    let seen = state.account.see(&cx.snap.account, development);
     // Another account (or environment, or a sign-in refused): everything of the old one goes NOW, whatever the scan of
     // this computer's folders is doing (it went only once that scan ended, and an open remote picture, its editor or a
     // community's window stayed meanwhile).
@@ -2478,6 +2482,8 @@ mod tests {
         state.folders.set_sources(history_file, None);
         let mut time = 0.0;
         let mut frame = |state: &mut State, account: A| {
+            // (The member's key, as the service gives it with them.)
+            snap.account.member = account.username().map(|u| format!("production/{u}"));
             snap.account.state = account;
             time += 1.0 / 60.0;
             let mut toasts = orbiters_ui::toast::Toasts::default();
@@ -2548,6 +2554,8 @@ mod tests {
         snap.settings.sessions_dir = root.join("Sessions");
         let mut state = State { fixture: true, sources: Some((history_file, None)), ..Default::default() };
         let mut frame = |state: &mut State, account: A| {
+            // (The member's key, as the service gives it with them.)
+            snap.account.member = account.username().map(|u| format!("production/{u}"));
             snap.account.state = account;
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {

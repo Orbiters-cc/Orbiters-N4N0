@@ -7,7 +7,7 @@ use crate::tools::{self, Action};
 use serde_json::json;
 
 fn all() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, clipboard: true, actions: true }
 }
 
 /// A call of every intent with its parameters filled in, as a model would make it.
@@ -151,7 +151,7 @@ fn the_gate_follows_the_risk_classes() {
         match spec.risk {
             Risk::Act => assert_eq!(gate, Gate::Run, "{}", spec.name),
             // (b) never runs without a yes.
-            Risk::Confirm => assert_eq!(gate, Gate::Confirm, "{}", spec.name),
+            Risk::Confirm | Risk::Ask => assert_eq!(gate, Gate::Confirm, "{}", spec.name),
             // (c) never runs: a page is offered.
             Risk::PageOnly => assert!(matches!(gate, Gate::Offer(_)), "{}", spec.name),
         }
@@ -164,7 +164,7 @@ fn the_gate_follows_the_risk_classes() {
         }
     }
     // What the brief lists as outward is class (b); what is destructive or about accounts is (c).
-    for name in ["boop", "request_invite", "set_status", "set_status_text", "set_bio", "world_comment", "world_like", "world_label", "share_capture", "go_to_instance", "accept_invite", "invite_me", "call", "youtube_drop", "history_drop", "suggest"] {
+    for name in ["boop", "request_invite", "set_status", "set_status_text", "set_bio", "world_comment", "world_like", "world_label", "share_capture", "go_to_instance", "accept_invite", "invite_me", "call", "youtube_drop", "history_drop", "suggest", "end_call"] {
         assert_eq!(spec_of(name).unwrap().risk, Risk::Confirm, "{name}");
     }
     assert_eq!(gate(&Intent::Restricted { what: Restricted::SignOut }, &facts, false), Gate::Offer(Page::AppSettings));
@@ -323,11 +323,11 @@ fn the_offline_path_knows_the_common_commands_in_five_languages() {
         }
     }
     assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
-    // Everything the offline path does is harmless (class a).
+    // Everything the offline path does is harmless (class a), or asked about first (a recording stopped).
     for (_, sentence, _) in &cases {
         for action in quick::understand(sentence).unwrap() {
             if let Action::App(intent) = action {
-                assert_eq!(intent.risk(), Risk::Act, "{sentence}");
+                assert!(intent.risk() == Risk::Act || intent == Intent::StopRecording, "{sentence}");
             }
         }
     }
@@ -558,7 +558,10 @@ fn every_tool_declares_what_it_does() {
     for (name, input) in legacy_samples() {
         let action = tools::parse(name, &input).unwrap_or_else(|e| panic!("{name}: {e}"));
         let line = tools::TOOLS.iter().find(|(n, _)| *n == name).unwrap().1;
-        assert_eq!(action.effect(), line, "{name}");
+        // (What is taken back, or only switched, is not asked about.)
+        let effect = action.effect();
+        assert_eq!(crate::tools::Effect { asks: line.asks, ..effect }, line, "{name}");
+        assert!(line.asks || !effect.asks, "{name}");
         assert!(!line.from_account, "{name}: the older tools send nothing from an account");
     }
     // What only asks changes nothing.
@@ -610,11 +613,21 @@ fn without_the_switch_nothing_is_done_from_an_account() {
             }
         }
     }
+    // Muting is done at once; an unmute, which sends what is said next, is the account's (verify4-r21 P2).
+    let unmute = Intent::MuteCall { on: false };
+    assert_eq!((gate(&unmute, &off, false), gate(&unmute, &all(), false)), (Gate::Instead(Page::Calls), Gate::Confirm));
+    assert_eq!(gate(&Intent::MuteCall { on: true }, &off, false), Gate::Run);
+    assert!(Action::App(unmute).effect().from_account);
+    // A copy is done at once only where Undo puts back what it replaces (P7).
+    for copy in [Intent::YoutubeCopy { index: 1 }, Intent::HistoryCopy { index: 1 }, Intent::CopyWorldName { index: Some(1) }] {
+        assert_eq!(gate(&copy, &all(), false), Gate::Run);
+        assert_eq!(gate(&copy, &Facts { clipboard: false, ..all() }, false), Gate::Confirm);
+    }
     behind.sort_unstable();
     assert_eq!(
         behind,
         [
-            "accept_invite", "answer_call", "boop", "call", "go_to_instance", "go_to_world", "history_drop", "invite_me", "play", "request_invite",
+            "accept_invite", "answer_call", "boop", "call", "end_call", "go_to_instance", "go_to_world", "history_drop", "invite_me", "play", "request_invite",
             "set_bio", "set_status", "set_status_text", "share_capture", "suggest", "world_comment", "world_label", "world_like", "youtube_drop"
         ]
     );

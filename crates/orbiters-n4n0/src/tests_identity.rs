@@ -6,7 +6,7 @@ use super::*;
 use orbiters_n4n0_core::intents::{Facts, Intent};
 
 fn full() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, clipboard: true, actions: true }
 }
 
 fn ready() -> (Arc<TestHost>, Shared, Device) {
@@ -55,16 +55,27 @@ fn held_orbiters(answers: Vec<String>, go: Arc<std::sync::atomic::AtomicBool>, j
             reader.read_exact(&mut body).unwrap();
             seen.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap());
             let events = answers.next().unwrap_or_default();
+            // Orbiters takes the request at once; what it answers waits.
+            let mut stream = stream;
+            if json {
+                let head = format!("HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+", events.len()); // i18n: not shown
+                let _ = stream.write_all(head.as_bytes());
+            } else {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Connection: close
+
+"); // i18n: not shown
+            }
+            let _ = stream.flush();
             let start = Instant::now();
             while !go.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(10) {
                 std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut stream = stream;
-            if json {
-                let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", events.len()); // i18n: not shown
-                let _ = stream.write_all(head.as_bytes());
-            } else {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"); // i18n: not shown
             }
             let _ = stream.write_all(events.as_bytes());
             let _ = stream.flush();
@@ -119,7 +130,7 @@ fn typed(n: &Shared, text: &str, question: Option<u64>, epoch: u64) {
 /// The window's Talk pressed while it showed `question`.
 fn talk_pressed(n: &Shared, question: Option<u64>, epoch: u64) {
     showing(n, question, epoch);
-    n.app_talk(true, false, stamp(question, epoch));
+    n.app_talk(true, false, stamp(question, epoch), None);
 }
 
 /// The account epoch the windows are shown now.
@@ -148,7 +159,7 @@ fn a_late_spoken_yes_never_answers_a_question_asked_after_talk_was_pressed() {
     let epoch = shown_epoch(&t);
     talk_pressed(&n, None, epoch);
     assert!(n.n4n0.lock().unwrap().listening.is_some(), "Talk is pressed");
-    n.app_talk(false, false, None);
+    let_go(&n);
     model_asks(&t, &n, "Sam", "orbit-a");
     assert!(question_shown(&t).is_some());
     heard(&n, 1, "yes");
@@ -229,7 +240,7 @@ fn input_of_a_never_goes_out_as_b() {
     let epoch_a = shown_epoch(&t);
     talk_pressed(&n, None, epoch_a);
     assert!(n.n4n0.lock().unwrap().listening.is_some(), "Talk is pressed");
-    n.app_talk(false, false, None);
+    let_go(&n);
     let (base_b, bodies_b) = orbiters(vec![done(json!([]), json!([])), done(json!([]), json!([]))]);
     switch_member(&t, &n, base_b, "orbit-b");
     typed(&n, "A's private draft", None, epoch_a);
@@ -317,7 +328,7 @@ fn a_spoken_yes_is_for_the_question_up_at_the_press() {
     // Pressed on A; A is answered elsewhere and B asked before the recognition ends.
     talk_pressed(&n, Some(a), epoch);
     assert!(n.n4n0.lock().unwrap().listening.is_some(), "a question may be answered aloud");
-    n.app_talk(false, false, None);
+    let_go(&n);
     press_answer(&n, false, Some(a), epoch);
     model_asks(&t, &n, "Mira", "orbit-a");
     let b = question_shown(&t).unwrap();
@@ -328,7 +339,7 @@ fn a_spoken_yes_is_for_the_question_up_at_the_press() {
     assert!(said.contains("asked something else") && said.contains("Mira"), "the current question is said: {said}");
     // Pressed on B, said yes: B.
     talk_pressed(&n, Some(b), epoch);
-    n.app_talk(false, false, None);
+    let_go(&n);
     heard(&n, 2, "yes");
     assert_eq!(*t.app_intents.lock().unwrap(), vec![Intent::Boop { friend: Some("Mira".into()) }]);
     // Its question gone, a late yes is for nothing, and not a message either.

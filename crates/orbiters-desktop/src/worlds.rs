@@ -4,6 +4,7 @@
 //! for a few days); and pictures, decoded off the interface thread by a few loaders, with small thumbnails kept on
 //! disk so a library of 4K screenshots opens at once the second time.
 
+pub mod at_once;
 mod picture_cache;
 pub mod profile_pictures;
 
@@ -459,6 +460,7 @@ pub struct Infos {
     known: Arc<Mutex<[HashMap<String, Info>; 2]>>,
     asked: [HashSet<String>; 2],
     tx: mpsc::Sender<(Server, String)>,
+    ctx: egui::Context,
 }
 
 /// Where an environment's pages are in [`Infos`].
@@ -473,6 +475,7 @@ impl Infos {
     pub fn new(ctx: &egui::Context) -> Self {
         let known: Arc<Mutex<[HashMap<String, Info>; 2]>> = Arc::default();
         let (tx, rx) = mpsc::channel::<(Server, String)>();
+        let clock = ctx.clone();
         let (k, ctx) = (known.clone(), ctx.clone());
         std::thread::Builder::new()
             .name("world-infos".into())
@@ -511,7 +514,7 @@ impl Infos {
                 }
             })
             .expect("world infos thread");
-        Self { known, asked: Default::default(), tx }
+        Self { known, asked: Default::default(), tx, ctx: clock }
     }
 
     /// The world's page once fetched; asks for it the first time.
@@ -521,6 +524,15 @@ impl Infos {
         let e = env_index(server);
         if !self.asked[e].contains(id) {
             self.asked[e].insert(id.to_string());
+            // What is kept on this computer shows in this very frame, however old; a new page takes its place.
+            let kept = at_once::read(self.ctx.input(|i| i.time), false, || {
+                let (_, keep) = public_api_of(server);
+                let file = cache_dir().join("worlds").join(server.cache_name()).join(format!("{id}.json"));
+                keep.then(|| std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten()?.page
+            });
+            if let Some(Some(page)) = kept {
+                self.known.lock().unwrap()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Box::new(page)));
+            }
             note_outbound(id);
             let _ = self.tx.send((server, id.to_string()));
         }
@@ -722,7 +734,7 @@ impl Pictures {
                                     })
                                 };
                                 let via = backend.as_ref().map(|b| profile_fetch(b, scope));
-                                profile_pictures::Profiles::shared()
+                                profile_pictures::Profiles::of(scope.account().as_ref())
                                     .load(url, user.as_deref(), via, |old| deliver(Some(old), true), reply)
                                     .map(|image| Some(Some(image)))
                                     .unwrap_or(None)
@@ -785,7 +797,11 @@ impl Pictures {
             kept.slot = match image {
                 Ok(Some(image)) => {
                     kept.interim = None;
-                    Slot::Ready(textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR))
+                    let texture = textures.load_texture(format!("picture-{:x}", key(&p)), image, TextureOptions::LINEAR);
+                    if let Some(name) = at_once::name(&p) {
+                        at_once::keep(textures, name, &texture);
+                    }
+                    Slot::Ready(texture)
                 }
                 Ok(None) => Slot::Missing { since: now, tries: tries.saturating_add(1).min(NEVER - 1) },
                 Err(()) => Slot::Missing { since: now, tries: NEVER },
@@ -821,20 +837,40 @@ impl Pictures {
                         if let Some(i) = q.iter().position(|p| p == picture) {
                             let p = q.remove(i);
                             q.push(p);
-                        } else if let Picture::Profile { url, user, .. } = picture {
-                            profile_pictures::Profiles::shared().bump(url, user.as_deref());
+                        } else if let Picture::Profile { scope, url, user } = picture {
+                            profile_pictures::Profiles::of(scope.account().as_ref()).bump(url, user.as_deref());
                         }
                         interim
                     }
                 }
             }
             None => {
+                // One of VRChat's, shown on another page or under another state of the sign-in already, or kept on this
+                // computer: in this very frame (REQUEST28).
+                let name = at_once::name(picture);
+                let mut interim = None;
+                if let Some(name) = name {
+                    let texture = at_once::texture(textures, &name).or_else(|| {
+                        let (image, exact) = at_once::kept(picture, now)?;
+                        let texture = textures.load_texture(format!("picture-{:x}", key(picture)), image, TextureOptions::LINEAR);
+                        if exact {
+                            at_once::keep(textures, name, &texture);
+                            return Some(texture);
+                        }
+                        interim = Some(texture);
+                        None
+                    });
+                    if let Some(texture) = texture {
+                        self.slots.insert(picture.clone(), Kept { slot: Slot::Ready(texture.clone()), used: now, interim: None });
+                        return Some(texture);
+                    }
+                }
                 self.start();
-                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now, interim: None });
+                self.slots.insert(picture.clone(), Kept { slot: Slot::Loading { tries: 0 }, used: now, interim: interim.clone() });
                 let (lock, ready) = &*self.queue;
                 lock.lock().unwrap().push(picture.clone());
                 ready.notify_one();
-                None
+                interim
             }
         }
     }
@@ -872,7 +908,7 @@ impl Pictures {
             }
         }
         if let Some(backend) = &self.backend {
-            profile_pictures::Profiles::shared().warm(items, profile_fetch(backend, scope));
+            profile_pictures::Profiles::of(scope.account().as_ref()).warm(items, profile_fetch(backend, scope));
         }
     }
 

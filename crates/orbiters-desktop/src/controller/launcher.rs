@@ -1151,6 +1151,8 @@ pub(super) struct Runtime {
     worn: BTreeMap<String, Decorations>,
     /// World id → its name and picture (`None` once asked and not given).
     worlds: HashMap<String, Option<(String, String)>>,
+    /// Worlds known from before this run (`vrchat_kept`), read long ago: asked again when someone is there.
+    old_worlds: std::collections::HashSet<String>,
     /// World and decoration ids whose lookup failed for a passing reason, and when: asked again after [`LOOKUP_AGAIN`].
     lookup_failed: HashMap<String, Instant>,
     /// Profiles' details read, by person: `/profile`, `/users`, mutuals.
@@ -1257,6 +1259,7 @@ impl Default for Runtime {
             pictures: HashMap::new(),
             worn: BTreeMap::new(),
             worlds: HashMap::new(),
+            old_worlds: Default::default(),
             lookup_failed: HashMap::new(),
             profiles: HashMap::new(),
             dismissed: None,
@@ -1472,7 +1475,12 @@ impl Controller {
         let told = self.view().vrchat_login.user.as_ref().map(|u| u.id.clone());
         // Signed in, but the window is not told yet (the sign-in's own look comes first): its list would be nobody's.
         let untold = session.as_ref().is_some_and(|s| told.as_deref() != Some(s.by.user.as_str()));
-        if self.view().vrchat_login.waiting || untold {
+        // A saved session being restored, the account's list last on show shown meanwhile (REQUEST28): it stays too.
+        let restoring = session.is_none() && {
+            let view = self.view();
+            view.vrchat_login.restoring && view.launcher.kept.is_some()
+        };
+        if self.view().vrchat_login.waiting || untold || restoring {
             let (machine, check_game) = {
                 let mut rt = self.launcher.lock().unwrap();
                 let check_game = rt.game_checked.is_none_or(|t| t.elapsed() > GAME_EVERY);
@@ -1489,6 +1497,12 @@ impl Controller {
         let account = session.as_ref().map(|s| s.by.user.clone());
         let by = session.as_ref().map(|s| s.by.clone());
         let client = session.map(|s| s.client);
+        // What was kept of this account, when it is there for the first time in this run (or again after another).
+        let seed = by.as_ref().filter(|by| {
+            let rt = self.launcher.lock().unwrap();
+            rt.loaded_for.as_ref() != Some(&Some(by.user.clone())) || rt.loaded_by.as_ref().is_none_or(|b| !b.same(&by.stamp))
+        }).and_then(|by| self.kept_seed(by));
+        let mut kept_list = None;
         let reopen;
         let source_changed;
         let mut dropped = false;
@@ -1531,6 +1545,18 @@ impl Controller {
                 forgotten = rt.kept.take().is_some() || dropped;
                 // A cool-down taken by one account's press says nothing of another's.
                 rt.cooldowns = Cooldowns::default();
+                rt.old_worlds.clear();
+                // Its own from before: names and pictures stay while its list is read again.
+                if let Some(seed) = seed {
+                    rt.worlds.extend(seed.worlds.into_iter().map(|(id, w)| (id, Some(w))));
+                    rt.old_worlds.extend(seed.old_worlds);
+                    rt.pictures.extend(seed.decorations.into_iter().map(|(id, p)| (id, Some(p))));
+                    kept_list = seed.list;
+                    let dismissed = rt.dismissed.get_or_insert_with(load_dismissed);
+                    if let Some(list) = kept_list.as_mut() {
+                        list.boops.retain(|b| !dismissed.contains_key(&b.id));
+                    }
+                }
             }
             let every = if account.is_some() { FULL_EVERY } else { LOCAL_EVERY };
             // The pipeline came back: a full read, but not more often than every few minutes (kept pending meanwhile).
@@ -1569,6 +1595,17 @@ impl Controller {
                 self.forget_launcher(|l| l.profile = None);
             }
         }
+        // Its list as it was last on show, until it is read again (REQUEST28).
+        if let (Some(list), Some(by)) = (kept_list, &by) {
+            self.publish_launcher(by, |l| {
+                let shown = matches!(&l.source, Source::SignedIn { user_id, .. } if *user_id == by.user);
+                if !shown {
+                    *l = list;
+                } else if l.kept.is_some() {
+                    l.possible = list.possible;
+                }
+            });
+        }
         if due {
             if self.view().launcher.friends.is_empty() {
                 self.forget_launcher(|l| l.loading = true);
@@ -1590,8 +1627,18 @@ impl Controller {
     fn launcher_resolve_worlds(&self, client: &Arc<Mutex<Client>>, by: &By) {
         let wanted: Vec<String> = {
             let rt = self.launcher.lock().unwrap();
-            let mut ids = unnamed_worlds(&self.view().launcher);
-            ids.retain(|id| !rt.worlds.contains_key(id) && rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN));
+            let view = self.view();
+            let mut ids = unnamed_worlds(&view.launcher);
+            ids.retain(|id| !rt.worlds.contains_key(id));
+            // Named from before this run, long ago: asked again, as each world was in every run.
+            if !rt.old_worlds.is_empty() {
+                for id in places(&view.launcher).map(|p| &p.world_id) {
+                    if rt.old_worlds.contains(id) && !ids.contains(id) {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+            ids.retain(|id| rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN));
             ids.truncate(2);
             ids
         };
@@ -1607,20 +1654,31 @@ impl Controller {
                 Err(_) => failed.push(id),
             }
         }
+        let mut renamed = HashMap::new();
         let worlds = {
             let mut rt = self.launcher.lock().unwrap();
+            for (id, w) in &found {
+                if rt.old_worlds.remove(id) && w.is_some() && rt.worlds.get(id) != Some(w) {
+                    renamed.insert(id.clone(), w.clone());
+                }
+            }
             rt.worlds.extend(found);
             for id in failed {
                 rt.lookup_failed.insert(id, Instant::now());
             }
             // Nothing known to write in (every unnamed world still unknown or not given): no copy, no publish. A world
             // already known is still written into a friend who just moved there.
-            if !unnamed_worlds(&self.view().launcher).iter().any(|id| matches!(rt.worlds.get(id), Some(Some(_)))) {
+            if renamed.is_empty() && !unnamed_worlds(&self.view().launcher).iter().any(|id| matches!(rt.worlds.get(id), Some(Some(_)))) {
                 return;
             }
             rt.worlds.clone()
         };
-        self.publish_launcher(by, |state| fill_worlds(state, &worlds));
+        self.publish_launcher(by, |state| {
+            if !renamed.is_empty() {
+                rename_worlds(state, &renamed);
+            }
+            fill_worlds(state, &worlds)
+        });
     }
 
     fn launcher_game(self: &Shared, machine: &dyn Machine) {
@@ -2192,6 +2250,8 @@ impl Controller {
                             apply_pictures(&rt.pictures, d, &mut f.look);
                         }
                     }
+                    // The worlds named already keep their names: a full read does not blank them for a moment.
+                    fill_worlds(&mut state, &rt.worlds);
                     rt.pipeline.is_none()
                 };
                 self.launcher_commit_read(by, state);
@@ -2238,6 +2298,13 @@ impl Controller {
             state.loading = false;
             *shown = state;
         });
+    }
+
+    /// The worlds' names and pictures, and the decorations', known in this run ([`super::vrchat_kept`] keeps them).
+    pub(super) fn launcher_lookups(&self) -> (HashMap<String, (String, String)>, HashMap<String, String>) {
+        let rt = self.launcher.lock().unwrap();
+        let worlds = rt.worlds.iter().filter(|(id, _)| !rt.old_worlds.contains(*id)).filter_map(|(id, w)| Some((id.clone(), w.clone()?))).collect();
+        (worlds, rt.pictures.iter().filter_map(|(id, p)| Some((id.clone(), p.clone()?))).collect())
     }
 
     /// The one pipeline connection, until the account changes (or the session ends).
@@ -3496,19 +3563,39 @@ fn save_dismissed(kept: &BTreeMap<String, i64>) {
     }
 }
 
+/// The places of the list: the invites', then the friends' in the list's order.
+fn places(state: &LauncherState) -> impl Iterator<Item = &Place> {
+    let by_id: HashMap<&str, &orbiters_core::launcher::Friend> = state.friends.iter().map(|f| (f.id.as_str(), f)).collect();
+    let friends: Vec<&Place> = state
+        .groups
+        .iter()
+        .flat_map(|g| g.members.iter())
+        .filter_map(|id| by_id.get(id.as_str()).copied())
+        .filter_map(|f| match &f.whereabouts {
+            orbiters_core::launcher::Whereabouts::World(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    state.invites.iter().filter_map(|i| i.place.as_ref()).chain(friends)
+}
+
+/// Worlds whose name or picture changed since they were kept: their new ones, in every place of the state.
+fn rename_worlds(state: &mut LauncherState, worlds: &HashMap<String, Option<(String, String)>>) {
+    let friends = state.friends.iter_mut().chain(state.me.iter_mut()).chain(state.profile.iter_mut().map(|p| &mut p.friend)).filter_map(|f| match &mut f.whereabouts {
+        orbiters_core::launcher::Whereabouts::World(p) => Some(p),
+        _ => None,
+    });
+    for p in friends.chain(state.invites.iter_mut().filter_map(|i| i.place.as_mut())) {
+        if let Some(Some((name, picture))) = worlds.get(&p.world_id) {
+            (p.world_name, p.world_picture) = (name.clone(), picture.clone());
+        }
+    }
+}
+
 /// The worlds named by a place whose name is not known yet, friends in the list's order first.
 pub fn unnamed_worlds(state: &LauncherState) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    let by_id: HashMap<&str, &orbiters_core::launcher::Friend> = state.friends.iter().map(|f| (f.id.as_str(), f)).collect();
-    let places = state
-        .invites
-        .iter()
-        .filter_map(|i| i.place.as_ref())
-        .chain(state.groups.iter().flat_map(|g| g.members.iter()).filter_map(|id| by_id.get(id.as_str()).copied()).filter_map(|f| match &f.whereabouts {
-            orbiters_core::launcher::Whereabouts::World(p) => Some(p),
-            _ => None,
-        }));
-    for p in places {
+    for p in places(state) {
         if p.world_name.is_empty() && !ids.contains(&p.world_id) {
             ids.push(p.world_id.clone());
         }

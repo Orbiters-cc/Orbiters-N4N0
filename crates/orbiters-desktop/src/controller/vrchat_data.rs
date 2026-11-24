@@ -49,6 +49,16 @@ impl Scope {
     pub(super) fn verified_by(&self, now: &super::vrchat_scope::Stamp) -> bool {
         self.verified_for.as_ref().is_some_and(|v| v.epoch == now.epoch && v.member == now.owner.member && v.user == self.user)
     }
+    /// Whose folder on this computer is this account's (`orbiters_core::vrchat_store`): the Orbiters member and the VRChat
+    /// account it was verified for, signed in or on its way back.
+    pub fn account(&self) -> Option<orbiters_core::vrchat_store::Account> {
+        let v = self.verified_for.as_ref()?;
+        // Signed in as another than the one verified (never, but for a moment between two states): nobody's.
+        if self.user.is_some() && self.user != v.user {
+            return None;
+        }
+        orbiters_core::vrchat_store::Account::verified(v)
+    }
     /// The signed-in VRChat account this scope was taken under.
     pub fn vrchat_user(&self) -> Option<&str> {
         self.user.as_deref()

@@ -718,7 +718,7 @@ fn keep_pictures(data: &mut LauncherState) {
         let c = picture(sample);
         let rgba: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
         let image = image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, rgba).expect("a made-up picture");
-        crate::worlds::profile_pictures::Profiles::shared().keep(&url, Some(user), &image);
+        crate::worlds::profile_pictures::Profiles::of(None).keep(&url, Some(user), &image);
         url
     };
     for f in data.friends.iter_mut().chain(data.me.iter_mut()) {

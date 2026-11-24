@@ -374,6 +374,7 @@ impl Controller {
         let Some(stamp) = self.vrchat_now() else { return };
         let own = cached.filter(|(_, _, kept_for)| kept_for.as_ref() == Some(&stamp.owner.member)).map(|(user, picture, _)| (user, picture));
         if let Some((user, picture)) = own {
+            let id = user.id.clone();
             self.publish_login(&stamp, |st, _| {
                 if st.user.is_none() {
                     st.restoring = true;
@@ -381,6 +382,8 @@ impl Controller {
                     st.picture = picture;
                 }
             });
+            // And the friends list as it was last on show, before any window asks (REQUEST28).
+            self.kept_at_launch(&stamp, &id);
         }
     }
     /// One look: follows the Orbiters identity, asks Orbiters when due, hands the session to each new grant, reads the
@@ -649,6 +652,11 @@ impl Controller {
         };
         let cache_generation = self.vrchat_login.lock().unwrap().cache_generation;
         let owner = stamp.owner.member.clone();
+        // Who leaves, when this signs out.
+        let leaving = {
+            let login = &self.view().vrchat_login;
+            login.user.as_ref().or(login.known.as_ref()).map(|u| u.id.clone())
+        };
         let replacing_session = matches!(&command, Command::SignOut | Command::SignIn { .. } | Command::Cancel);
         self.publish_login(&stamp, |st, _| {
             if replacing_session { st.user = None; st.picture = None; st.methods.clear(); }
@@ -684,6 +692,7 @@ impl Controller {
             if matches!(result, Ok(Some(Login::SignedIn(_)))) && !c.signed_in() {
                 result = Err(Error::Unauthorized);
             }
+            let leaving = signed_out.as_ref().and(leaving.or_else(|| c.ended_user().map(|u| u.id.clone())));
             // Signed out here whatever VRChat answered and whatever could be removed: the session is gone from memory and
             // never restored. What could not be done is said as what it is (verify2-r21 M6).
             let forgotten = signed_out.is_some();
@@ -691,6 +700,10 @@ impl Controller {
             let mut untold = None;
             let ended = c.ended_user().cloned();
             drop(c);
+            if forgotten {
+                // Everything kept of what was read with it, its pictures too (REQUEST28).
+                removed &= ctl.kept_forget(leaving.as_deref());
+            }
             {
                 let mut rt = ctl.vrchat_login.lock().unwrap();
                 if let Some(out) = &signed_out {

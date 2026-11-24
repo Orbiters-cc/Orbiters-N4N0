@@ -38,15 +38,18 @@ pub enum Detour {
     Remote,
     /// The place is private and the VRChat here is not known to be signed in with the account it is for.
     OtherAccount,
+    /// Whose the VRChat that runs is cannot be told (its log cannot be read).
+    Unidentified,
 }
 
 /// What the computer is asked, real or a test's.
 pub trait Travel: Send + Sync {
     /// The VRChats running on this computer, by process id.
     fn running(&self) -> Vec<u32>;
-    /// Whether this VRChat's command line names OSC ports of its own (`--osc=` other than VRChat's 9000): a bridge
-    /// side session, even one whose process the bridge has not recorded yet.
-    fn own_osc_ports(&self, pid: u32) -> bool;
+    /// Whose this VRChat is, by whether its command line names OSC ports of its own (`--osc=` other than VRChat's 9000): a
+    /// bridge side session, even one whose process the bridge has not recorded yet. Asked only where there are several
+    /// profiles.
+    fn whose(&self, pid: u32) -> Side;
     /// Connects to VRChat's link pipe: the connection, and the process serving it when Windows says.
     fn connect(&self) -> std::io::Result<(Box<dyn LinkPipe>, Option<u32>)>;
     /// Starts VRChat (its own launcher, the default profile named so that no running VRChat is handed the link) in the
@@ -54,14 +57,38 @@ pub trait Travel: Send + Sync {
     fn start(&self, link: &str) -> Result<(), String>;
 }
 
+/// Whose a running VRChat is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Person,
+    /// One of the bridge's side sessions.
+    Bridge,
+    /// Its log cannot be read, or is not certainly its own.
+    Unknown,
+}
+
 pub trait LinkPipe {
     fn send(self: Box<Self>, link: &str) -> std::io::Result<()>;
 }
 
-/// The VRChats Orbiters' bridge runs, by process id: its main session and its side sessions.
+/// The VRChats Orbiters' bridge runs, by process id: its main session and its side sessions; and whether this computer uses
+/// several VRChat profiles, or may (with one, no VRChat but the bridge's main is anyone's but the person's, and nothing is asked
+/// of any log).
 pub struct Bridge {
     pub main: Option<u32>,
     pub sides: Vec<u32>,
+    pub several: bool,
+}
+
+impl Bridge {
+    /// Whose the running VRChat `pid` is.
+    fn whose(&self, pid: u32, travel: impl FnOnce(u32) -> Side) -> Side {
+        match Some(pid) == self.main || self.sides.contains(&pid) {
+            true => Side::Bridge,
+            false if self.several => travel(pid),
+            false => Side::Person,
+        }
+    }
 }
 
 /// What a press of Go there does now.
@@ -76,13 +103,16 @@ pub enum Route {
     BridgeBusy,
 }
 
-pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut side_by_args: impl FnMut(u32) -> bool) -> Route {
+pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut whose: impl FnMut(u32) -> Side) -> Route {
     if remote {
         return Route::Invite(Detour::Remote);
     }
-    let theirs: Vec<u32> = running.iter().copied().filter(|p| Some(*p) != bridge.main && !bridge.sides.contains(p) && !side_by_args(*p)).collect();
-    if !theirs.is_empty() {
+    let sides: Vec<Side> = running.iter().map(|pid| bridge.whose(*pid, &mut whose)).collect();
+    if sides.contains(&Side::Person) {
         Route::Pipe
+    } else if sides.contains(&Side::Unknown) {
+        // It may be the person's: the account's own invite, and none started beside it.
+        Route::Invite(Detour::Unidentified)
     } else if bridge.main.is_some_and(|m| running.contains(&m)) {
         Route::BridgeBusy
     } else {
@@ -95,7 +125,7 @@ pub fn route(remote: bool, running: &[u32], bridge: &Bridge, mut side_by_args: i
 #[cfg(test)]
 pub fn go(travel: &dyn Travel, remote: bool, bridge: &Bridge, world: &str, instance: &str) -> Result<Went, GoFailure> {
     let running = travel.running();
-    let chosen = route(remote, &running, bridge, |p| travel.own_osc_ports(p));
+    let chosen = route(remote, &running, bridge, |p| travel.whose(p));
     go_on(travel, chosen, &running, bridge, world, instance, &|_| true)
 }
 
@@ -117,7 +147,7 @@ pub fn go_on(travel: &dyn Travel, chosen: Route, running: &[u32], bridge: &Bridg
         Route::Pipe => {
             let Ok((pipe, server)) = travel.connect() else { return Err(GoFailure::Invite(Detour::LinkRefused)) };
             // The person's: running, and none of the bridge's. Unknown or another: nothing is written.
-            let theirs = server.filter(|s| running.contains(s) && Some(*s) != bridge.main && !bridge.sides.contains(s) && !travel.own_osc_ports(*s));
+            let theirs = server.filter(|s| running.contains(s) && bridge.whose(*s, |p| travel.whose(p)) == Side::Person);
             let Some(theirs) = theirs else { return Err(GoFailure::Invite(Detour::OtherVrchat)) };
             if !may(Some(theirs)) {
                 return Err(GoFailure::Invite(Detour::OtherAccount));
@@ -149,35 +179,27 @@ impl Travel for Real {
         super::bridge_side::vrchat_pids()
     }
 
-    fn own_osc_ports(&self, pid: u32) -> bool {
+    fn whose(&self, pid: u32) -> Side {
         // Without opening the game (verify-n4n0 5): its command line as its own log lists it, the log made in the minute
-        // after the process started. Anything uncertain counts as maybe the bridge's: the person is then offered an invite,
+        // after the process started. Anything uncertain may be the bridge's: the person is then offered an invite,
         // and nothing is written into a VRChat that may be an agent's.
-        let crate::bridge::game::Identity::Running(start) = super::bridge_side::vrchat_identity(pid) else { return true };
-        if start == 0 {
-            return true;
-        }
-        let Some(dir) = orbiters_core::paths::vrchat_log_dir() else { return true };
+        let Some((_, start)) = super::bridge_side::vrchats_now().into_iter().find(|(p, _)| *p == pid) else { return Side::Unknown };
+        let Some(dir) = orbiters_core::paths::vrchat_log_dir() else { return Side::Unknown };
         let logs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
             .map(|entries| {
                 entries
                     .flatten()
                     .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-                    .filter(|e| {
-                        e.metadata()
-                            .ok()
-                            .and_then(|m| m.created().ok())
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .is_some_and(|t| t.as_secs() >= start && t.as_secs() <= start + 60)
-                    })
+                    .filter(|e| e.metadata().ok().and_then(|m| super::vrchats::made_at(&m)).is_some_and(|made| super::vrchats::made_by(start, made)))
                     .map(|e| e.path())
                     .collect()
             })
             .unwrap_or_default();
-        let [log] = &logs[..] else { return true };
+        let [log] = &logs[..] else { return Side::Unknown };
         match crate::bridge::sessions::complete_args(&crate::bridge::sessions::read_head(log, 64 * 1024)) {
-            Some(args) => args.iter().any(|a| side_osc(a)),
-            None => true,
+            Some(args) if args.iter().any(|a| side_osc(a)) => Side::Bridge,
+            Some(_) => Side::Person,
+            None => Side::Unknown,
         }
     }
 
@@ -247,6 +269,8 @@ pub(crate) mod tests {
     pub(crate) struct Fake {
         pub running: Vec<u32>,
         pub side_args: Vec<u32>,
+        /// Their logs cannot be read: whose they are is not known.
+        pub unknown: Vec<u32>,
         pub server: Option<u32>,
         pub pipe_missing: bool,
         pub pipe_breaks: bool,
@@ -269,8 +293,12 @@ pub(crate) mod tests {
         fn running(&self) -> Vec<u32> {
             self.running.clone()
         }
-        fn own_osc_ports(&self, pid: u32) -> bool {
-            self.side_args.contains(&pid)
+        fn whose(&self, pid: u32) -> Side {
+            match (self.unknown.contains(&pid), self.side_args.contains(&pid)) {
+                (true, _) => Side::Unknown,
+                (_, true) => Side::Bridge,
+                _ => Side::Person,
+            }
         }
         fn connect(&self) -> std::io::Result<(Box<dyn LinkPipe>, Option<u32>)> {
             *self.connects.lock().unwrap() += 1;
@@ -291,7 +319,7 @@ pub(crate) mod tests {
     const W: &str = "wrld_266523e8-9161-40da-acd0-6bd82e075833";
     const I: &str = "46657~hidden(usr_1)~region(eu)";
     fn none() -> Bridge {
-        Bridge { main: None, sides: vec![] }
+        Bridge { main: None, sides: vec![], several: true }
     }
 
     #[test]
@@ -319,7 +347,7 @@ pub(crate) mod tests {
     #[test]
     fn a_bridge_session_owning_the_pipe_never_gets_the_link() {
         // Its side session started first (2026-11-15): the pipe is its, the person's VRChat is 10.
-        for (bridge, side_args) in [(Bridge { main: None, sides: vec![20] }, vec![]), (none(), vec![20])] {
+        for (bridge, side_args) in [(Bridge { main: None, sides: vec![20], several: true }, vec![]), (none(), vec![20])] {
             let pc = Fake { running: vec![20, 10], server: Some(20), side_args, ..Default::default() };
             assert_eq!(go(&pc, false, &bridge, W, I), Err(GoFailure::Invite(Detour::OtherVrchat)));
             assert!(pc.written.lock().unwrap().is_empty(), "nothing written to an AI's VRChat");
@@ -338,10 +366,10 @@ pub(crate) mod tests {
         assert_eq!(*pc.connects.lock().unwrap(), 0, "no pipe touched");
         // Only side sessions run: the person's starts beside them (default profile named).
         let pc = Fake { running: vec![20], server: Some(20), ..Default::default() };
-        assert_eq!(go(&pc, false, &Bridge { main: None, sides: vec![20] }, W, I), Ok(Went::Started));
+        assert_eq!(go(&pc, false, &Bridge { main: None, sides: vec![20], several: true }, W, I), Ok(Went::Started));
         assert!(pc.written.lock().unwrap().is_empty());
         let pc = Fake { running: vec![30], server: Some(30), ..Default::default() };
-        assert_eq!(go(&pc, false, &Bridge { main: Some(30), sides: vec![] }, W, I), Err(GoFailure::BridgeBusy));
+        assert_eq!(go(&pc, false, &Bridge { main: Some(30), sides: vec![], several: true }, W, I), Err(GoFailure::BridgeBusy));
         assert!(pc.written.lock().unwrap().is_empty() && pc.started.lock().unwrap().is_empty());
         let pc = Fake { start_fails: true, ..Default::default() };
         assert!(matches!(go(&pc, false, &none(), W, I), Err(GoFailure::Start(_))));

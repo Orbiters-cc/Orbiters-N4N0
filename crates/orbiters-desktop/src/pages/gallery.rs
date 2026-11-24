@@ -90,6 +90,8 @@ pub struct State {
     hash_asked: std::collections::HashSet<std::path::PathBuf>,
     shown_key: Option<(Filter, String)>,
     shown: Vec<Entry>,
+    /// Who looks: what is another VRChat account's is not listed, nor its place shown.
+    viewer: orbiters_core::visited::Viewer,
     key: Option<(u64, u64, std::path::PathBuf, bool, String, u64)>,
     /// Who the account is, for the key above (not how its check with Orbiters goes).
     account: crate::pages::AccountFollow,
@@ -555,6 +557,22 @@ impl State {
         self.instance = None;
     }
 
+    /// What is listed is kept to what the one who looks now may see; the instance on show is put away with it.
+    fn keep_to_viewer(&mut self) {
+        let viewer = &self.viewer;
+        self.locals.retain(|e| viewer.lists_capture(&e.owners));
+        for e in &mut self.locals {
+            e.instance = e.instance.take().filter(|instance| viewer.sees(&e.owners, instance));
+        }
+        self.shown_key = None;
+        self.instance = None;
+    }
+
+    /// The instance of `item`, of a capture of `owners`, where the one who looks may see it.
+    fn item_instance(&self, item: &orbiters_core::shares::Item, owners: &[String]) -> Option<String> {
+        item.instance_id.clone().filter(|instance| self.fixture || self.viewer.sees(owners, instance))
+    }
+
     fn observe_context(&mut self, key: (u64, u64, std::path::PathBuf, bool, String, u64)) {
         if self.key.as_ref().is_none_or(|k| k.1 != key.1 || k.3 != key.3 || k.4 != key.4) {
             self.asked = None;
@@ -599,6 +617,16 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
     if seen.changed {
         state.forget_account();
     }
+    // Another VRChat account acts: what is not its own goes now, and the list is made again.
+    let viewer = cx.snap.viewer();
+    if !state.fixture && state.viewer != viewer {
+        let same = state.viewer.single && viewer.single;
+        state.viewer = viewer;
+        if !same {
+            state.keep_to_viewer();
+            state.local_dirty = true;
+        }
+    }
     // A list made for another owner (asked before the change, landing after it) is dropped and made again: its remote
     // side, its sharing and associations are the old account's (night4, verify2).
     let landed = state.local_job.take().map(|r| r.take_for(state.account.owner()));
@@ -608,7 +636,8 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
     if let Some(Some((made, revision, entries))) = landed {
         state.locals = entries;
         state.listed = Some((made, revision));
-        state.shown_key = None;
+        // (The list may have been asked for before who looks changed.)
+        state.keep_to_viewer();
         // Screenshots: this computer's items, as the fixture has them, whenever they land.
         if state.fixture_locals {
             state.stage_locals();
@@ -645,6 +674,7 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         #[cfg(test)]
         let sources = state.sources.clone();
         let owner = seen.owner.clone();
+        let viewer = state.viewer.clone();
         state.local_job = super::job_for(ctx, &owner, move || {
             // The revision first, then the list: a change in between is in the list or not, and a later look, which
             // sees it, differs from this revision either way.
@@ -653,9 +683,9 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
             match sources {
                 Some((history, records)) => {
                     let revision = revision.look_at(&dir, &history, records.as_deref());
-                    (made, revision, controller::local_entries_at(&dir, Default::default(), &history, records.as_deref()))
+                    (made, revision, controller::local_entries_at(&dir, Default::default(), &history, records.as_deref(), &viewer))
                 }
-                None => (made, revision.look(&dir, server), controller::local_entries_with_folders(&dir, server, &folders)),
+                None => (made, revision.look(&dir, server), controller::local_entries_with_folders(&dir, server, &folders, &viewer)),
             }
         });
         if changed_account {
@@ -820,10 +850,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
                 e.remote = Some(item.clone());
                 e.world_name = item.world.name.clone();
                 if e.instance.is_none() {
-                    e.instance = item.instance_id.clone();
+                    e.instance = state.item_instance(item, &e.owners);
                 }
             } else {
                 let mut e = controller::remote_entry(item.clone());
+                e.instance = state.item_instance(item, &e.owners);
                 if !state.fixture {
                     // On Orbiters only (its folder here deleted, or never here): the picture Orbiters keeps of it.
                     e.picture = controller::remote_picture(item, development, false).or(e.picture);
@@ -2108,10 +2139,10 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         state.instance_checked = true;
         if let Some(instance) = e.instance.clone() {
             let backend = cx.ctl.clone();
-            let world = e.world_id.clone();
+            let (world, owners) = (e.world_id.clone(), e.owners.clone());
             state.instance_job = Job::spawn(ctx, move || {
                 use crate::controller::vrchat_data::{Request, Response};
-                match backend.vrchat_data(scope, Request::Instance { world, instance })? {
+                match backend.vrchat_data(scope, Request::Instance { world, instance, owners })? {
                     Response::Instance(alive) => Ok(alive),
                     _ => Err(tr("Unexpected instance response.").into()),
                 }
@@ -2234,7 +2265,15 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             .id_salt("instance-join");
         let open = if join { open } else { open.hint(tr("Only an instance that is still open can be joined")) };
         if sharing::pressed(open.show_at(ui, br)) {
-            if let Some(instance) = &e.instance {
+            // A private one goes to the account's own VRChat, never to the browser, whose account is not known.
+            let through_browser = state.viewer.single || state.fixture || e.instance.as_deref().is_some_and(orbiters_core::vrchat_launch::is_public_instance);
+            let place = e.instance.as_ref().and_then(|instance| orbiters_core::launcher_feed::place(&format!("{}:{instance}", e.world_id), &e.world_name));
+            if let (false, Some(place), Some(me)) = (through_browser, place, state.viewer.account()) {
+                use orbiters_core::launcher::Action;
+                let play = Action::Play { mode: cx.snap.settings.launch.last_mode, destination: Some(place) };
+                cx.ctl.launcher(Action::As { account: me.to_owned(), action: Box::new(play) });
+                close = true;
+            } else if let (true, Some(instance)) = (through_browser, &e.instance) {
                 open_link = Some(format!("https://vrchat.com/home/launch?worldId={}&instanceId={}", e.world_id, encode(instance)));
             }
         }
@@ -2395,6 +2434,7 @@ mod tests {
             std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
         let mut snap = (*ctl.view()).clone();
         snap.settings.sessions_dir = captures.clone();
+        snap.launcher.single_profile = true;
         let _pictures = crate::worlds::tests::pictures_lock();
         let pictures = crate::worlds::picture_revision();
         // With what the person did on the page: a search typed, the list scrolled.

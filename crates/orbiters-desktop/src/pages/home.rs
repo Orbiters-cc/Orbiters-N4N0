@@ -2690,7 +2690,7 @@ mod tests {
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
         let Source::SignedIn { user_id: me, name } = data.source.clone() else { panic!("the sample is signed in") };
         data.game = Game::NotRunning;
-        data.several_profiles = true;
+        data.single_profile = false;
         data.profiles = vec![
             GameProfile { profile: 0, account: Some(name.clone()), account_id: Some(me.clone()), ..Default::default() },
             // Only a name was ever seen on it: whose it is, the VRChat started there will say.
@@ -2769,7 +2769,7 @@ mod tests {
             assert!(said.contains("Private places need VRChat's log") && (said.contains("turn on Logging") || said.contains("allow Orbiters - N4N0 to read")), "why, and what to do: {said}");
         }
         // One profile alone: as it always was, whatever its log.
-        data.several_profiles = false;
+        data.single_profile = true;
         data.profiles = vec![GameProfile::default()];
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
@@ -3483,7 +3483,7 @@ mod tests {
         let (mut h, _, _) = friends_in_instances(false);
         let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
         data.profiles = vec![orbiters_core::launcher::GameProfile { profile: 0, account: Some("Someone Else".into()), account_id: Some("usr_00000000-0000-4000-8000-0000000000ee".into()), running: None, starting: None, assistant: false }];
-        data.several_profiles = true;
+        data.single_profile = false;
         h.state.launcher_mut().set_data(Arc::new(data));
         h.settle();
         open_profile_of(&mut h, "Nova Sample");

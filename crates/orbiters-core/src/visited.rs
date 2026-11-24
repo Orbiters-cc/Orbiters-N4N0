@@ -19,6 +19,8 @@ const MAX_VISITS: usize = 200;
 const MAX_WORLDS: usize = 5000;
 /// Instances kept (the newest): N4N0's Previous instances lists them.
 pub const MAX_INSTANCES: usize = 100;
+/// A visit lasts no longer than this: a capture taken later is not of it.
+const CAPTURED_WITHIN: u64 = 24 * 3600;
 /// Log bytes one [`History::read_logs_following`] reads at most: a first look at days of logs is spread over several
 /// calls rather than holding up the thread that makes them.
 const READ_BUDGET: u64 = 64 << 20;
@@ -42,17 +44,52 @@ impl WorldVisits {
     pub fn last(&self) -> Option<u64> {
         self.visits.last().copied()
     }
+}
 
-    /// The visits that may be shown where `acting` are the accounts acting ([`shown_to`]).
-    pub fn shown_to<'a>(&'a self, acting: &'a [String]) -> impl Iterator<Item = u64> + 'a {
-        self.visits.iter().copied().filter(move |at| self.by.iter().find(|(_, theirs)| theirs.contains(at)).is_none_or(|(account, _)| shown_to(Some(account), acting)))
+/// Who looks at what this computer keeps (the visits, the captures): the VRChat accounts acting (the one signed in in the app,
+/// the one of the profile chosen), and whether VRChat's default profile is the only one ever used here
+/// (`vrchat_launch::Profiles::single`), where things are as they were before there were several.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Viewer {
+    pub acting: Vec<String>,
+    pub single: bool,
+}
+
+impl Viewer {
+    /// The one account acting, when it is one.
+    pub fn account(&self) -> Option<&str> {
+        let (first, others) = self.acting.split_first()?;
+        others.iter().all(|other| other == first).then_some(first.as_str())
+    }
+
+    /// Whether a visit of `account` (`None`: nobody's) is listed: the acting account's alone, and nobody's.
+    pub fn lists(&self, account: Option<&str>) -> bool {
+        account.is_none_or(|account| match &self.acting[..] {
+            [] => self.single,
+            acting => acting.iter().all(|acts| acts == account),
+        })
+    }
+
+    /// Whether a capture of `owners` (none: not known) is listed: not while the app acts as another account.
+    pub fn lists_capture(&self, owners: &[String]) -> bool {
+        self.single || owners.is_empty() || self.acting.iter().all(|acts| owners.contains(acts))
+    }
+
+    /// Whether the place `instance` of `owners` (none: not known) is shown: a public one, or the acting account's own.
+    pub fn sees(&self, owners: &[String], instance: &str) -> bool {
+        self.single || may_be_told(owners, instance, self.account(), false)
     }
 }
 
-/// Whether what `account` produced (`None`: nobody's) may be shown where `acting` are the VRChat accounts acting (the one
-/// signed in in the app, the one of the profile chosen): never under another one.
-pub fn shown_to(account: Option<&str>, acting: &[String]) -> bool {
-    account.is_none_or(|account| acting.iter().all(|acts| acts == account))
+/// Whether the place `instance` of `owners` (none: not known) may be told to VRChat or Orbiters, acting as the VRChat account
+/// `acting` (signed in here now; `None`: none is). A public one; a private one of that very account; with either of the two
+/// not known, only where `single` ([`Viewer::single`]).
+pub fn may_be_told(owners: &[String], instance: &str, acting: Option<&str>, single: bool) -> bool {
+    crate::vrchat_launch::is_public_instance(instance)
+        || match (owners, acting) {
+            ([], _) | (_, None) => single,
+            (owners, Some(acting)) => owners.iter().any(|owner| owner == acting),
+        }
 }
 
 /// Whether the place `instance`, which `account` produced, may be sent anywhere for the VRChat account `me`: its own, or
@@ -230,6 +267,63 @@ impl History {
             self.instances.remove(0);
         }
         true
+    }
+
+    /// What `viewer` is shown of it: the acting account's visits, and nobody's without their private part (where one profile
+    /// alone is used here, with it).
+    pub fn seen_by(mut self, viewer: &Viewer) -> Self {
+        for world in self.worlds.values_mut() {
+            let hidden: Vec<u64> = world.by.iter().filter(|(account, _)| !viewer.lists(Some(account))).flat_map(|(_, theirs)| theirs.iter().copied()).collect();
+            world.visits.retain(|at| !hidden.contains(at));
+            world.by.retain(|account, _| viewer.lists(Some(account)));
+        }
+        self.worlds.retain(|_, world| !world.visits.is_empty());
+        self.instances.retain(|visit| viewer.lists(visit.account.as_deref()));
+        if !viewer.single {
+            for visit in self.instances.iter_mut().filter(|visit| visit.account.is_none() && !crate::vrchat_launch::is_public_instance(&visit.instance)) {
+                visit.instance.clear();
+            }
+            // A world's once, the last.
+            let bare: Vec<String> = self.instances.iter().filter(|v| v.instance.is_empty()).map(|v| v.world_id.clone()).collect();
+            let mut left: BTreeMap<String, usize> = BTreeMap::new();
+            for world in bare {
+                *left.entry(world).or_default() += 1;
+            }
+            self.instances.retain(|visit| {
+                let more = left.get_mut(&visit.world_id).filter(|_| visit.instance.is_empty());
+                more.is_none_or(|more| {
+                    *more -= 1;
+                    *more == 0
+                })
+            });
+        }
+        self
+    }
+
+    /// The visits kept in the file at `path`, as `viewer` is shown them.
+    pub fn load_for(path: &Path, viewer: &Viewer) -> Self {
+        Self::load(path).seen_by(viewer)
+    }
+
+    /// Whose a capture taken at `taken` (Unix seconds) in `world` is, by the visits kept: those who joined its very
+    /// `instance`, else whoever's visit to the world it was taken in. None where that is not certain.
+    pub fn owners_at(&self, world: &str, instance: Option<&str>, taken: u64) -> Vec<String> {
+        let joined = |v: &&InstanceVisit| v.world_id == world && Some(v.instance.as_str()) == instance;
+        let mut owners: Vec<String> = self.instances.iter().filter(joined).filter_map(|v| v.account.clone()).collect();
+        owners.sort();
+        owners.dedup();
+        if !owners.is_empty() {
+            return owners;
+        }
+        let Some(visits) = self.worlds.get(world) else { return Vec::new() };
+        let within = |at: &u64| *at <= taken && taken - *at <= CAPTURED_WITHIN;
+        let whose = |at: u64| visits.by.iter().find(|(_, theirs)| theirs.contains(&at)).map(|(account, _)| account.clone());
+        let mut whose: Vec<Option<String>> = visits.visits.iter().copied().filter(within).map(whose).collect();
+        whose.dedup();
+        match &whose[..] {
+            [Some(owner)] => vec![owner.clone()],
+            _ => Vec::new(),
+        }
     }
 
     /// The instances joined, the newest first, with their world's name when known.
@@ -1078,9 +1172,25 @@ mod tests {
             assert_eq!(of("2"), [Some(X), Some(Y)], "the same room, each account's own");
             assert_eq!(history.worlds[A].visits.len(), 5, "each once");
             assert_eq!((history.worlds[A].by[X].len(), history.worlds[A].by[Y].len()), (1, 1));
-            assert_eq!(history.worlds[A].shown_to(&[X.into()]).count(), 4, "all but Y's");
-            assert_eq!(history.worlds[A].shown_to(&[]).count(), 5);
-            assert_eq!(history.worlds[A].shown_to(&[X.into(), Y.into()]).count(), 3);
+            let seen = |acting: &[&str], single: bool| history.clone().seen_by(&Viewer { acting: acting.iter().map(|a| a.to_string()).collect(), single });
+            let visits = |acting: &[&str], single: bool| seen(acting, single).worlds[A].visits.len();
+            assert_eq!((visits(&[X], false), visits(&[X], true)), (4, 4), "all but Y's");
+            assert_eq!((visits(&[], true), visits(&[], false)), (5, 3), "nobody acting: as before where there is one profile, else nobody's alone");
+            assert_eq!(visits(&[X, Y], false), 3);
+            let rows = |acting: &[&str], single: bool| seen(acting, single).instances.iter().map(|v| (v.instance.clone(), v.account.clone())).collect::<Vec<_>>();
+            assert_eq!(rows(&[X], false), [("2~friends(usr_x)".into(), Some(X.into())), (String::new(), None)], "nobody's private ones without their private part, the world once");
+            assert_eq!(rows(&[], false), [(String::new(), None)], "another's are nobody's to see");
+            assert_eq!(rows(&[X], true).len(), 4, "one profile: as it was");
+            // Whose a capture is.
+            let time = |instance: &str, account: &str| history.instances.iter().find(|v| v.instance.starts_with(instance) && v.account.as_deref() == Some(account)).unwrap().at;
+            assert_eq!(history.owners_at(A, Some("2~friends(usr_x)"), time("2", Y)), [X, Y]);
+            assert!(history.owners_at(A, Some("4~friends(usr_x)"), u64::MAX / 2).is_empty(), "nobody's, and no visit of then");
+            let mut later = history.clone();
+            later.record_by(B, 1_000_000, Some(X));
+            assert_eq!(later.owners_at(B, Some("77~private(usr_x)"), 1_000_100), [X], "its row is long gone: whose visit it was taken in");
+            assert!(later.owners_at(B, None, 999_999).is_empty() && later.owners_at(B, None, 1_000_001 + CAPTURED_WITHIN).is_empty());
+            later.record_by(B, 1_000_050, Some(Y));
+            assert!(later.owners_at(B, None, 1_000_100).is_empty(), "either's");
             assert!(!history.read_logs(&dir), "read once");
             // Kept, and read on from there: who is signed in is the log's own.
             let mut again: History = serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
@@ -1094,8 +1204,20 @@ mod tests {
             assert_eq!(again.instances.iter().find(|v| v.instance.starts_with('9')).unwrap().account.as_deref(), Some(X));
         }
         // What may be shown, and sent.
-        let (mine, other) = (vec![X.to_string()], vec![X.to_string(), Y.to_string()]);
-        assert!(shown_to(Some(X), &mine) && !shown_to(Some(X), &other) && !shown_to(Some(Y), &mine) && shown_to(None, &other) && shown_to(Some(Y), &[]));
+        let viewer = |acting: &[&str], single: bool| Viewer { acting: acting.iter().map(|a| a.to_string()).collect(), single };
+        let (mine, both, nobody) = (viewer(&[X], false), viewer(&[X, Y], false), viewer(&[], false));
+        assert!(mine.lists(Some(X)) && !both.lists(Some(X)) && !mine.lists(Some(Y)) && both.lists(None) && !nobody.lists(Some(Y)) && viewer(&[], true).lists(Some(Y)));
+        let of = |owners: &[&str]| owners.iter().map(|o| o.to_string()).collect::<Vec<_>>();
+        // A capture is listed but as another account, or where one profile alone is used; its private place is its own account's.
+        assert!(mine.lists_capture(&of(&[X, Y])) && !mine.lists_capture(&of(&[Y])) && mine.lists_capture(&[]) && nobody.lists_capture(&of(&[Y])) && viewer(&[X], true).lists_capture(&of(&[Y])));
+        let private = "1~friends(usr_x)";
+        assert!(mine.sees(&of(&[X]), private) && !mine.sees(&of(&[Y]), private) && !mine.sees(&[], private) && !nobody.sees(&of(&[X]), private) && !both.sees(&of(&[X]), private));
+        assert!(mine.sees(&of(&[Y]), "1~region(eu)") && viewer(&[], true).sees(&[], private));
+        // And told: another's never, also where one profile alone is used; what is not known, there alone.
+        for single in [true, false] {
+            assert!(may_be_told(&of(&[X]), private, Some(X), single) && !may_be_told(&of(&[X]), private, Some(Y), single) && may_be_told(&of(&[X]), "1~region(eu)", None, single));
+            assert_eq!((may_be_told(&[], private, Some(X), single), may_be_told(&of(&[X]), private, None, single)), (single, single));
+        }
         assert!(goes_for(Some(X), "1~friends(usr_x)", X) && !goes_for(Some(X), "1~region(eu)", Y));
         assert!(goes_for(None, "1~region(eu)", X) && !goes_for(None, "1~friends(usr_x)", X));
         std::fs::remove_dir_all(dir).ok();

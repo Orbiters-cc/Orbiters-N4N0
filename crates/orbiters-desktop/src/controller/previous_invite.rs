@@ -13,10 +13,14 @@ use orbiters_n4n0_core::menu::{InstanceRow, InviteAnswer};
 use std::sync::Mutex;
 
 impl Controller {
-    /// The VRChat account the app acts as (its user id): the one signed in, or on its way back.
-    pub(super) fn vrchat_acting(&self) -> Vec<String> {
-        let view = self.view();
-        view.vrchat_login.user.as_ref().or(view.vrchat_login.known.as_ref()).map(|u| u.id.clone()).into_iter().collect()
+    /// Who looks at what this computer keeps.
+    pub(crate) fn viewer(&self) -> orbiters_core::visited::Viewer {
+        self.view().viewer()
+    }
+
+    /// The VRChat account signed in here now (its user id): what is told to VRChat or Orbiters is told as that one.
+    pub(super) fn vrchat_signed_in_as(&self) -> Option<String> {
+        self.vrchat_session().map(|session| session.by.user)
     }
 
     /// The VRChat account Invite me would go from now (its user id), when one is connected.
@@ -33,7 +37,8 @@ impl Controller {
         if client.lock().unwrap().signed_in_user_id() != Some(account) {
             return None;
         }
-        Some(invite_self(&client, account, &orbiters_n4n0_core::invites::read_rows(), location))
+        let viewer = orbiters_core::visited::Viewer { acting: vec![account.to_owned()], single: self.viewer().single };
+        Some(invite_self(&client, account, &orbiters_n4n0_core::invites::read_rows(&viewer), location))
     }
 }
 
@@ -53,6 +58,10 @@ pub fn invite_self(client: &Mutex<Client>, account: &str, known: &[InstanceRow],
     // One of this account's own (or nobody's, and public): another's is not sent to VRChat as this one, not even to look at it.
     let own = orbiters_n4n0_core::invites::goes_for(known, location, account);
     let changed = || failed(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+    // (Listed without its private part.)
+    if location.ends_with(':') {
+        return failed(tr("This private instance is not known to be your VRChat account's: nothing was sent.").into());
+    }
     let Some((world, instance)) = location_parts(location).filter(|_| known.iter().any(|row| row.location == location)) else {
         return failed(tr("Only an instance of your Previous instances can be invited to from here.").into());
     };

@@ -36,6 +36,28 @@ fn processes() -> Vec<(u32, String, u64)> {
         .collect()
 }
 
+/// The VRChats in `system`'s list with when each started (Unix nanoseconds, as precisely as Windows keeps it; 0 when it would not
+/// say). No process is opened for it.
+pub(super) fn vrchat_births(system: &sysinfo::System) -> Vec<(u32, u64)> {
+    // FILETIME (100 ns since 1601) to Unix nanoseconds.
+    const UNIX_FROM_1601: u64 = 116_444_736_000_000_000;
+    let exact: HashMap<u32, u64> = orbiters_booster::programs::scan().into_iter().map(|p| (p.pid, p.created.saturating_sub(UNIX_FROM_1601).saturating_mul(100))).collect();
+    system
+        .processes()
+        .values()
+        .filter(|p| is_vrchat(p.name().to_string_lossy().to_lowercase().as_str()))
+        .map(|p| (p.pid().as_u32(), p.start_time()))
+        .map(|(pid, seconds)| (pid, if cfg!(windows) { exact.get(&pid).copied().unwrap_or(0) } else { seconds.saturating_mul(1_000_000_000) }))
+        .collect()
+}
+
+/// The VRChats that run now, with when each started ([`vrchat_births`]).
+pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+    vrchat_births(&system)
+}
+
 fn is_vrchat(name: &str) -> bool {
     matches!(name, "vrchat.exe" | "vrchat")
 }

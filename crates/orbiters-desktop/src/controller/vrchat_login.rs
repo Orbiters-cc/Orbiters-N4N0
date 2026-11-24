@@ -1847,7 +1847,7 @@ mod tests {
                         match roll {
                             8 => drop(c.publish_launcher(&session.by, |l| l.profile = Some(orbiters_core::launcher::Profile { friend: mine.friends[0].clone(), ..Default::default() }))),
                             9 => drop(c.publish_launcher(&session.by, |l| (l.me, l.mine) = (mine.me, mine.mine))),
-                            12 => drop(c.publish_joining(&session.by, orbiters_core::launcher::Joining::default())),
+                            12 => drop(c.publish_joining(Some(&session.by), orbiters_core::launcher::Joining::default())),
                             10 => drop(c.publish_login(&session.by.stamp, |st, _| st.upload = Some(PictureUpload { serial: 1, id: "avtr_theirs".into(), step: None, outcome: None }))),
                             _ => drop(c.publish_login(&session.by.stamp, |st, _| st.known = Some(User { id: "usr_test".into(), ..Default::default() }))),
                         }

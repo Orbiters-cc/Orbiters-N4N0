@@ -220,6 +220,7 @@ impl State {
                     world_name: a.asset.name.clone(),
                     taken,
                     instance: None,
+                    owners: Vec::new(),
                     source_key: None,
                     people: if author.is_empty() { Vec::new() } else { vec![author] },
                     local: None,

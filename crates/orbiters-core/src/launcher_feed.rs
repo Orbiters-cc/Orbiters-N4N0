@@ -92,6 +92,10 @@ pub fn seconds(s: &str) -> Option<i64> {
 /// An instance id's kind and region: `~hidden(usr)` is Friends+, `~friends(usr)` Friends, `~private(usr)` Invite (with
 /// `~canRequestInvite`, Invite+), `~group(grp)~groupAccessType(public|plus|members)` the group kinds; none: Public.
 pub fn access(instance: &str) -> (InstanceAccess, String) {
+    // (A place whose instance is not shown.)
+    if instance.is_empty() {
+        return (InstanceAccess::Unknown, String::new());
+    }
     let parts: Vec<&str> = instance.split('~').skip(1).collect();
     let arg = |name: &str| parts.iter().find_map(|p| p.strip_prefix(name).and_then(|r| r.strip_prefix('(')).and_then(|r| r.strip_suffix(')')));
     let region = arg("region").unwrap_or("us").to_string();

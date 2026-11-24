@@ -137,5 +137,6 @@
   "{name} was not joined: VRChat is signed in as another account.": "{name}に参加しませんでした。VRChatは別のアカウントでサインインしています。",
   "{name} was not joined: VRChat did not say in time who is signed in.": "{name}に参加しませんでした。サインイン中のアカウントをVRChatが時間内に示しませんでした。",
   "{name} was not joined: VRChat did not start, or closed too soon.": "{name}に参加しませんでした。VRChatが起動しなかったか、その前に終了しました。",
-  "{name} was not joined: {reason}": "{name}に参加しませんでした。{reason}"
+  "{name} was not joined: {reason}": "{name}に参加しませんでした。{reason}",
+  "{name} was not joined: another VRChat start came in its place.": "{name}に参加しませんでした。代わりに別のVRChatが起動しました。"
 }

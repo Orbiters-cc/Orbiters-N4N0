@@ -9,7 +9,8 @@
   Home's carries it, a restart included, with no argument saved in the engine; an account is learnt only from that launch's own log;
   on a computer with several profiles, here or on Windows, no start carries a private place, an invite or an instance made for an
   account: VRChat starts without it, and it is delivered once that very VRChat's own log proves the account, `vrchat_launch::way`,
-  the one rule of every start and delivery; with one profile it goes with the start as it always did; `docs/vrchat-bridge.md`),
+  the one rule of every start and delivery; with one profile it goes as it always did, and no log is asked; "Several VRChat accounts
+  on one computer" below; `docs/vrchat-bridge.md`),
   started by N4N0 through
   Obelisk's engine without its window: `obelisk-cli`, built
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
@@ -104,6 +105,25 @@
   size, and hold the Unity project lock before changing cache paths. Preserve Assets, Packages, ProjectSettings
   and exact dependency versions. Copy and verify cache contents before switching locations; retain the original
   on failures and test rollback. Do not close other Unity projects or delete unrelated caches to recover space.
+
+## Several VRChat accounts on one computer
+
+The threat model every change and review here works by (the architect's proposal, 2026-11-24, after the twelfth verification; the
+owner may change it):
+- N4N0 must never **hand** a private place (an instance id with its nonce, an invite) to a game process, nor **send** it through
+  VRChat's or Orbiters' API, acting as another account than the one it belongs to, nor as an account it cannot identify.
+- Things stored on this computer (visit history, captures, caches) are shown in the app **per account**: what belongs to another
+  account is not listed while the app acts as a different one. Old entries with no known account show without their private part.
+- A computer on which **only profile 0 has ever been used** behaves as before profiles existed.
+- Out of scope: protecting one local account from another person with access to the same macOS/Windows user (files on disk are
+  readable by them anyway).
+
+Where it is decided, each once: whether a place goes with a start or to a game (`vrchat_launch::way`); whether one profile alone was
+ever used (`vrchat_launch::Profiles`, from N4N0's records, which remember every profile seen for good, the bridge's journal and
+VRChat's own data, `controller/profiles.rs`; what cannot be read is not one profile, except a game's log alone); who looks and what
+they are shown (`visited::Viewer`, `History::seen_by`, `Snapshot::viewer`: every view reads the history through it); whose a capture
+is (`History::owners_at`) and whether a place may be told (`visited::may_be_told`). With one profile nothing is asked of any log.
+Where whose a game is cannot be told, the way on is the account's own invite to itself: never a dead end, never a guess.
 
 ## Coordination notice, 2026-11-23: the VRChat bridge's files
 

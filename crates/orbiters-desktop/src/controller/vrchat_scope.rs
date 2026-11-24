@@ -95,7 +95,7 @@ pub(super) struct MachineParts {
     pub(super) picture_lost: Option<String>,
     pub(super) engine_trouble: Option<EngineTrouble>,
     pub(super) engine_setup: Option<EngineSetup>,
-    pub(super) several_profiles: bool,
+    pub(super) single_profile: bool,
     pub(super) log_trouble: Option<orbiters_core::launcher::LogTrouble>,
 }
 
@@ -110,7 +110,7 @@ impl MachineParts {
             picture_lost: l.picture_lost.clone(),
             engine_trouble: l.engine_trouble.clone(),
             engine_setup: l.engine_setup.clone(),
-            several_profiles: l.several_profiles,
+            single_profile: l.single_profile,
             log_trouble: l.log_trouble.clone(),
         }
     }
@@ -124,7 +124,7 @@ impl MachineParts {
         l.picture_lost = self.picture_lost;
         l.engine_trouble = self.engine_trouble;
         l.engine_setup = self.engine_setup;
-        l.several_profiles = self.several_profiles;
+        l.single_profile = self.single_profile;
         l.log_trouble = self.log_trouble;
     }
 }
@@ -200,11 +200,8 @@ pub(super) fn enforce(s: &mut Snapshot, rt: &mut Runtime, now: Option<&Stamp>) {
     }
     if s.launcher.joining.is_some() {
         let login = &s.vrchat_login;
-        // (Put there by hand, in tests only, it is nobody's.)
-        let theirs = match &rt.joining_for {
-            Some(by) => same(Some(&by.stamp), now) && login.user.as_ref().map_or(login.waiting || login.restoring, |u| u.id == by.user),
-            None => cfg!(test),
-        };
+        // (One of no account's is this computer's.)
+        let theirs = rt.joining_for.as_ref().is_none_or(|by| same(Some(&by.stamp), now) && login.user.as_ref().map_or(login.waiting || login.restoring, |u| u.id == by.user));
         if !theirs {
             s.launcher.joining = None;
             rt.joining_for = None;
@@ -399,16 +396,17 @@ impl Controller {
         })
     }
 
-    /// The private place on its way to a VRChat that was started without it, put on show for whom it is of (`by`: the member
-    /// who asked for it, and the VRChat account): only while that account is signed in, for that member still. Whether it was.
-    pub(super) fn publish_joining(&self, by: &By, joining: Joining) -> bool {
+    /// The place on its way to a VRChat that was started without it, put on show for whom it is of (`by`: the member who asked
+    /// for it, and the VRChat account): only while that account is signed in, for that member still. One of nobody's (a public
+    /// place, pressed on no account's list): whoever is there. Whether it was.
+    pub(super) fn publish_joining(&self, by: Option<&By>, joining: Joining) -> bool {
         let mut shown = false;
         self.update_if(|s| {
             let now = self.vrchat_stamp_of(&s.account);
-            if !same(now.as_ref(), Some(&by.stamp)) || s.vrchat_login.user.as_ref().is_none_or(|u| u.id != by.user) {
+            if by.is_some_and(|by| !same(now.as_ref(), Some(&by.stamp)) || s.vrchat_login.user.as_ref().is_none_or(|u| u.id != by.user)) {
                 return false;
             }
-            self.vrchat_login.lock().unwrap().joining_for = Some(by.clone());
+            self.vrchat_login.lock().unwrap().joining_for = by.cloned();
             shown = true;
             let joining = Some(joining);
             let changed = s.launcher.joining != joining;

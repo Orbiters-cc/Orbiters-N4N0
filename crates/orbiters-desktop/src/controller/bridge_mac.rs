@@ -24,7 +24,7 @@ use orbiters_core::vrchat_log::LogWatcher;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Weak};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// How much of the engine's log is read at one look, at most: the rest is read at the next looks, never skipped.
 const ENGINE_LOG_LOOK: usize = 8 << 20;
@@ -224,22 +224,33 @@ fn file_key(meta: &std::fs::Metadata) -> (u64, u64) {
     (meta.dev(), meta.ino())
 }
 
-/// The log VRChat began after `since` whose own argument list holds `link`: this start's, and no other VRChat's.
-pub(crate) fn log_of_launch(dir: &Path, since: SystemTime, link: &str) -> Option<(PathBuf, Vec<String>)> {
-    let mut logs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("output_log_"))
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
-        .filter(|(modified, _)| *modified + Duration::from_secs(2) >= since)
-        .collect();
-    logs.sort();
-    logs.into_iter().rev().find_map(|(_, path)| {
-        let mut head = String::new();
-        std::fs::File::open(&path).ok()?.take(256 * 1024).read_to_string(&mut head).ok();
-        let args = crate::bridge::sessions::complete_args(&head)?;
-        args.iter().any(|a| a == link).then_some((path, args))
-    })
+/// A start's own VRChat log, held to be the very file it was found as.
+#[derive(Debug)]
+pub(crate) struct LaunchLog {
+    pub path: PathBuf,
+    pub args: Vec<String>,
+    pub key: (u64, u64),
+    pub len: u64,
+}
+
+/// The one log VRChat made at or after the birth of its launcher (seconds, microseconds) whose own argument list holds `link`:
+/// this start's. One from before it is another start's, however lately it was written in; of two, neither is known to be it.
+pub(crate) fn log_of_launch(dir: &Path, birth: (u64, u32), link: &str) -> Option<LaunchLog> {
+    let born = super::incident::born_at(birth);
+    let mut found = std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("output_log_")).filter_map(|e| {
+        let path = e.path();
+        let mut file = std::fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        if meta.created().ok()? < born {
+            return None;
+        }
+        let mut head = Vec::new();
+        (&mut file).take(256 * 1024).read_to_end(&mut head).ok()?;
+        let args = crate::bridge::sessions::complete_args(&String::from_utf8_lossy(&head))?;
+        args.iter().any(|a| a == link).then(|| LaunchLog { path, args, key: file_key(&meta), len: meta.len() })
+    });
+    let one = found.next()?;
+    found.next().is_none().then_some(one)
 }
 
 /// Whether the log's world state says the local player arrived in the destination of the launch link `link` (its world
@@ -319,7 +330,6 @@ pub(crate) fn drawing(continuous: Option<bool>, shown_grew: Option<Instant>, pre
 struct Mine {
     /// The shared start's launch id of the bridge's start, when it was asked, and its launch link.
     launch: Option<u64>,
-    at: Option<SystemTime>,
     link: Option<String>,
     /// The engine's log file at the launch (the previous start's): the one found after it is this start's.
     engine_before: Option<(u64, u64)>,
@@ -479,15 +489,13 @@ impl MacGame {
                 (Some(key), Some(now)) if log_continues(key, mine.log_len, now) => mine.log_len = now.1,
                 _ => mine.lose_log(),
             }
-        } else if let (Some(at), Some(link)) = (mine.at, mine.link.clone()) {
-            if let Some((log, args)) = log_of_launch(&obelisk::vrchat_log_dir(library), at, &link) {
-                if let Ok(meta) = std::fs::metadata(&log) {
-                    mine.watcher = Some(LogWatcher::of_file(log.clone()));
-                    mine.log_key = Some(file_key(&meta));
-                    mine.log_len = meta.len();
-                    mine.log = Some(log);
-                    mine.args = Some(args);
-                }
+        } else if let (Some(birth), Some(link)) = (mine.ident.as_ref().filter(|i| i.launcher == launcher).map(|i| i.birth), mine.link.clone()) {
+            if let Some(log) = log_of_launch(&obelisk::vrchat_log_dir(library), birth, &link) {
+                mine.watcher = Some(LogWatcher::of_file(log.path.clone()));
+                mine.log_key = Some(log.key);
+                mine.log_len = log.len;
+                mine.log = Some(log.path);
+                mine.args = Some(log.args);
             }
         }
         if let Some(watcher) = mine.watcher.as_mut() {
@@ -786,11 +794,10 @@ impl Game for MacGame {
         own_account(&ctl, &machine, &owner)?;
         let link = crate::bridge::game::launch_link(&plan.world_id, &plan.instance);
         let engine_before = std::fs::metadata(obelisk::engine_log(&obelisk::home())).ok().map(|m| file_key(&m));
-        let at = SystemTime::now();
         let token = self.reserved.lock().unwrap().take();
         match mac.start_launch_reserved(&plan.args(), token) {
             Ok(id) => {
-                *self.mine.lock().unwrap() = Mine { launch: Some(id), at: Some(at), link: Some(link), engine_before, ..Default::default() };
+                *self.mine.lock().unwrap() = Mine { launch: Some(id), link: Some(link), engine_before, ..Default::default() };
                 Ok(())
             }
             Err(super::obelisk_cli::Refused::Wait(wait)) => Err(start_wait_failure(wait)),
@@ -1126,13 +1133,15 @@ fn not_here() -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     #[test]
     fn the_start_s_own_log_is_the_one_that_names_its_link() {
         let dir = std::env::temp_dir().join(format!("orbiters-mac-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let since = SystemTime::now() - Duration::from_secs(1);
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let (born, later) = (((now.as_secs() - 1), 0), (now.as_secs() + 60, 0));
         let link = "vrchat://launch?ref=orbiters.cc&id=wrld_1:2~private(usr_1)~region(eu)~nonce(n)";
         let head = |args: &[&str]| {
             let mut text = format!("2026.11.22 20:45:07 Debug      -  Launching with args: {}\n", args.len());
@@ -1144,11 +1153,20 @@ mod tests {
         // As VRChat under the engine wrote it on 2026-11-22: the exe, Steam's --no-vr, then ours in order.
         std::fs::write(dir.join("output_log_2026-11-22_20-45-03.txt"), head(&["Z:\\opt\\game\\VRChat.exe", "--no-vr", "-screen-fullscreen", "0", link])).unwrap();
         std::fs::write(dir.join("output_log_2026-11-22_20-50-00.txt"), head(&["Z:\\opt\\game\\VRChat.exe", "--no-vr"])).unwrap();
-        let (log, args) = log_of_launch(&dir, since, link).expect("its own log");
-        assert!(log.ends_with("output_log_2026-11-22_20-45-03.txt"));
-        assert_eq!(args.last().map(String::as_str), Some(link));
-        assert_eq!(log_of_launch(&dir, since, "vrchat://launch?ref=orbiters.cc&id=wrld_1:3"), None, "a log naming another instance is not this start's");
-        assert_eq!(log_of_launch(&dir, SystemTime::now() + Duration::from_secs(60), link), None, "a log from before the start is not this start's");
+        let log = log_of_launch(&dir, born, link).expect("its own log");
+        assert!(log.path.ends_with("output_log_2026-11-22_20-45-03.txt"));
+        assert_eq!(log.args.last().map(String::as_str), Some(link));
+        assert!(log_of_launch(&dir, born, "vrchat://launch?ref=orbiters.cc&id=wrld_1:3").is_none(), "a log naming another instance is not this start's");
+        // A resumed link: an earlier start's log that names it, written in just now, was made before this launcher was born.
+        let own = log.path.clone();
+        std::fs::File::options().append(true).open(&own).unwrap().set_modified(SystemTime::now() + Duration::from_secs(120)).unwrap();
+        assert!(log_of_launch(&dir, later, link).is_none(), "a log from before the start is not this start's");
+        // Two that name it: neither is known to be this start's.
+        let second = dir.join("output_log_2026-11-22_20-55-00.txt");
+        std::fs::write(&second, head(&["Z:\\opt\\game\\VRChat.exe", link])).unwrap();
+        assert!(log_of_launch(&dir, born, link).is_none());
+        std::fs::remove_file(&second).unwrap();
+        assert!(log_of_launch(&dir, born, link).is_some());
         let _ = std::fs::remove_dir_all(&dir);
         // An older program is never asked to quit without the session (it would quit whatever game runs).
         assert_eq!(quit_command(Some("0.1.5"), "6da7c40d").unwrap(), ["steam", "quit", "438100", "--session", "6da7c40d"]);

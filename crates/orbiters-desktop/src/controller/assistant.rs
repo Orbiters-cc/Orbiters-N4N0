@@ -58,14 +58,20 @@ fn pick<'a>(said: &str, friends: impl Iterator<Item = (&'a str, &'a str)>) -> Re
     Ok(top[0].1.to_string())
 }
 
-/// Those of `rows` that the VRChat accounts `acting` may be taken to: their own, and public ones that are nobody's.
-fn previous_rows(rows: &[orbiters_n4n0_core::menu::InstanceRow], acting: &[String]) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
+/// Those of `rows` that `viewer` may be taken to: the acting account's own, and public ones that are nobody's.
+fn previous_rows(rows: Vec<orbiters_n4n0_core::menu::InstanceRow>, viewer: &orbiters_core::visited::Viewer) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
     let instance = |row: &orbiters_n4n0_core::menu::InstanceRow| row.location.split_once(':').map_or("", |(_, instance)| instance).to_string();
-    let goes = |row: &orbiters_n4n0_core::menu::InstanceRow| match acting {
-        [] => orbiters_core::vrchat_launch::is_public_instance(&instance(row)),
-        acting => acting.iter().all(|me| orbiters_core::visited::goes_for(row.account.as_deref(), &instance(row), me)),
+    let goes = |row: &orbiters_n4n0_core::menu::InstanceRow| match viewer.acting.is_empty() {
+        true => orbiters_core::vrchat_launch::is_public_instance(&instance(row)),
+        false => viewer.acting.iter().all(|me| orbiters_core::visited::goes_for(row.account.as_deref(), &instance(row), me)),
     };
-    orbiters_n4n0_core::invites::shown(rows.to_vec(), acting).into_iter().filter(goes).collect()
+    rows.into_iter().filter(goes).collect()
+}
+
+/// `action` as a press of the account `owner`, whose the place it goes to is: with another one signed in by then, nothing is
+/// done.
+fn as_owner(action: Home, owner: String) -> Home {
+    Home::As { account: owner, action: Box::new(action) }
 }
 
 impl Controller {
@@ -120,15 +126,26 @@ impl Controller {
     /// The previous instances of the VRChat account on show: none of another's, and none that could not be gone to with it (a
     /// private one that is nobody's).
     fn previous_rows(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
-        previous_rows(&orbiters_n4n0_core::invites::read_rows(), &self.vrchat_acting())
+        let viewer = self.viewer();
+        previous_rows(orbiters_n4n0_core::invites::read_rows(&viewer), &viewer)
     }
 
-    /// The previous instance `location` as a place to go to, when it is one of [`Self::previous_rows`] now.
-    fn previous_place(&self, location: &str) -> Result<Place, String> {
+    /// VRChat to the previous instance `location`, when it is one of [`Self::previous_rows`] now: as the account whose it is, or
+    /// the one on show for a public one that is nobody's.
+    fn previous_play(&self, location: &str, mode: LaunchMode) -> Result<Home, String> {
         let row = self.previous_rows().into_iter().find(|row| row.location == location).ok_or("That instance is not one of the VRChat account's on show.")?; // i18n: not shown
-        let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
+        self.play_row(row, mode)
+    }
+
+    fn play_row(&self, row: orbiters_n4n0_core::menu::InstanceRow, mode: LaunchMode) -> Result<Home, String> {
+        let (world_id, instance_id) = row.location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
         let (access, region) = orbiters_core::launcher_feed::access(instance_id);
-        Ok(Place { world_id: world_id.into(), world_name: row.world, world_picture: String::new(), instance_id: instance_id.into(), access, region })
+        let place = Place { world_id: world_id.into(), world_name: row.world, world_picture: String::new(), instance_id: instance_id.into(), access, region };
+        let play = Home::Play { mode, destination: Some(place) };
+        Ok(match row.account {
+            Some(owner) => as_owner(play, owner),
+            None => self.as_shown(play),
+        })
     }
 
     /// VR when SteamVR runs and VRChat is not in desktop mode, as Play's own choice reads it.
@@ -151,8 +168,8 @@ impl Controller {
             return Err("A new Friends+ instance is made for the owner's VRChat account: none is connected (Settings).".into()); // i18n: not shown
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-        let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now, &self.vrchat_acting()).region()).unwrap_or(InstanceRegion::Us);
+        let history = orbiters_core::visited::History::load_for(&orbiters_core::visited::history_file(), &s.viewer());
+        let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now).region()).unwrap_or(InstanceRegion::Us);
         let made = match self.vrchat_data(Scope::of(&s), Request::CreateInstance { world: world.into(), access: CreateAccess::FriendsPlus, region }) {
             Ok(Response::CreatedInstance(made)) => made,
             Ok(Response::WorldError(e)) => return Err(format!("VRChat did not make the instance: {e:?}")), // i18n: not shown
@@ -233,9 +250,7 @@ impl Controller {
             }
             // Play with a destination, as Home's place chips and the Instances sheet's Go do.
             Intent::GoToInstance { .. } => {
-                // For the account on show, whose it is (or nobody's, and public).
-                let place = self.previous_place(&reference()?)?;
-                self.launcher_action(self.as_shown(Home::Play { mode: self.launch_mode(), destination: Some(place) }));
+                self.launcher_action(self.previous_play(&reference()?, self.launch_mode())?);
                 done()
             }
             // Home's Where: the places VRChat can start at, as its cards offer them (REQUEST20 2).
@@ -249,8 +264,8 @@ impl Controller {
                 for r in self.previous_rows().iter().take(3) {
                     items.push(json!({ "ref": r.location, "go": "instance", "name": data(&r.world, NAME_CHARS), "type": r.kind() }));
                 }
-                let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-                for f in crate::pages::launcher::destinations::frequent(&history, now, &self.vrchat_acting()).iter().take(3) {
+                let history = orbiters_core::visited::History::load_for(&orbiters_core::visited::history_file(), &s.viewer());
+                for f in crate::pages::launcher::destinations::frequent(&history, now).iter().take(3) {
                     items.push(json!({ "ref": f.world_id, "go": "new", "name": data(&f.name, NAME_CHARS), "visits_lately": f.visits, "instance": "a new Friends+ one" })); // i18n: not shown
                 }
                 Ok(json!({ "items": items }))
@@ -262,10 +277,7 @@ impl Controller {
                 match (index, go) {
                     (None, _) | (Some(_), "home") => self.launcher_action(Home::Play { mode, destination: None }),
                     (Some(_), "invite") => self.launcher_action(self.as_shown(Home::AcceptInvite { invite: reference()?, mode })),
-                    (Some(_), "instance") => {
-                        let place = self.previous_place(&reference()?)?;
-                        self.launcher_action(self.as_shown(Home::Play { mode, destination: Some(place) }));
-                    }
+                    (Some(_), "instance") => self.launcher_action(self.previous_play(&reference()?, mode)?),
                     (Some(_), "new") => {
                         let name = item.and_then(|i| i.get("name")).and_then(Value::as_str).unwrap_or_default().to_string();
                         return self.new_instance_and_play(&reference()?, &name, *vr);
@@ -416,9 +428,30 @@ mod tests {
     fn the_assistant_lists_and_goes_to_no_other_account_s_instances() {
         let row = |n: u64, tags: &str, account: Option<&str>| orbiters_n4n0_core::menu::InstanceRow { location: format!("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:{n}{tags}"), world: "W".into(), at: n, account: account.map(str::to_owned) };
         let rows = [row(1, "~friends(usr_z)", Some("usr_x")), row(2, "~region(eu)", Some("usr_x")), row(3, "~friends(usr_z)", None), row(4, "~region(eu)", None), row(5, "~private(usr_y)", Some("usr_y"))];
-        let of = |acting: &[&str]| previous_rows(&rows, &acting.iter().map(|a| a.to_string()).collect::<Vec<_>>()).iter().map(|r| r.at).collect::<Vec<_>>();
+        let viewer = |acting: &[&str]| orbiters_core::visited::Viewer { acting: acting.iter().map(|a| a.to_string()).collect(), single: true };
+        let of = |acting: &[&str]| previous_rows(orbiters_n4n0_core::invites::shown(rows.to_vec(), &viewer(acting)), &viewer(acting)).iter().map(|r| r.at).collect::<Vec<_>>();
         assert_eq!((of(&["usr_x"]), of(&["usr_y"])), (vec![1, 2, 4], vec![4, 5]));
         assert_eq!(of(&[]), [2, 4], "nobody signed in: public ones");
+    }
+
+    /// The verifier's case: the account switched between the list's check and the press. The place goes as the account whose row it
+    /// is, which is not the one signed in any more: nothing is done.
+    #[test]
+    fn a_previous_instance_is_dispatched_as_the_account_whose_it_is() {
+        let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        let (_, calls) = ctl.test_vrchat(vec![]);
+        ctl.update(|s| s.launcher.possible.play = true);
+        let location = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:1~friends(usr_z)";
+        let row = |account: Option<&str>| orbiters_n4n0_core::menu::InstanceRow { location: location.into(), world: "W".into(), at: 1, account: account.map(str::to_owned) };
+        let Home::As { account, action } = ctl.play_row(row(Some("usr_x")), LaunchMode::Desktop).unwrap() else { panic!("as its owner") };
+        assert_eq!(account, "usr_x");
+        assert!(matches!(&*action, Home::Play { destination: Some(place), .. } if place.instance_id == "1~friends(usr_z)"));
+        // (The one signed in is another by now.)
+        assert!(matches!(ctl.launcher_do(Home::As { account, action }), Some(orbiters_core::launcher::Notice::Error(_))));
+        assert!(calls.lock().unwrap().is_empty() && ctl.launcher_machine_now().running().is_empty());
+        // Nobody's: as the one on show.
+        ctl.update(|s| s.launcher.source = Source::SignedIn { user_id: "usr_test".into(), name: String::new() });
+        assert!(matches!(ctl.play_row(row(None), LaunchMode::Desktop).unwrap(), Home::As { account, .. } if account == "usr_test"));
     }
 
     #[test]

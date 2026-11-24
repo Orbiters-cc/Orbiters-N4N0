@@ -1,6 +1,6 @@
 {
   "Sign in to VRChat in Orbiters - N4N0 to list the avatars of your favorites.": "お気に入りのアバターを一覧にするには、Orbiters - N4N0でVRChatにサインインしてください。",
-  "VRChat sign-in in Orbiters - N4N0 isn't open to your account yet: the picker needs it to read your favorites.": "Orbiters - N4N0でのVRChatサインインは、まだあなたのアカウントでは使えません。お気に入りを読むためにピッカーに必要です。",
+  "VRChat sign-in isn't available for your account right now. The picker needs it to read your favorites.": "今はあなたのアカウントでVRChatサインインを使えません。お気に入りを読むためにピッカーに必要です。",
   "No public avatar in your favorites yet. Favorite public avatars in VRChat and they show up here.": "お気に入りにパブリックアバターがまだありません。VRChatでパブリックアバターをお気に入りにすると、ここに表示されます。",
   "No public avatar in this list": "このリストにパブリックアバターはありません",
   "VRChat asks to slow down. Try again in {seconds} s.": "VRChatから速度を落とすよう求められました。{seconds}秒後にもう一度お試しください。",
@@ -48,5 +48,10 @@
   "Ask first": "先に確認",
   "Anyone": "誰でも",
   "Not loaded: choose an avatar.": "未装填：アバターを選んでください。",
-  "Loaded with {name}": "{name}を装填中"
+  "Loaded with {name}": "{name}を装填中",
+  "Anyone with an avatar gun can do this to you. You can turn it off.": "アバターガンを持っている人なら誰でも、あなたにこれができます。オフにすることもできます。",
+  "Turn off": "オフにする",
+  "Keep it on": "オンのまま",
+  "Turned off. You can turn it back on in Settings.": "オフにしました。設定でまたオンにできます。",
+  "Kept on. You can change it anytime in Settings.": "オンのままです。設定でいつでも変えられます。"
 }

@@ -1,6 +1,6 @@
 {
   "Sign in to VRChat in Orbiters - N4N0 to list the avatars of your favorites.": "Entre no VRChat pelo Orbiters - N4N0 para listar os avatares dos seus favoritos.",
-  "VRChat sign-in in Orbiters - N4N0 isn't open to your account yet: the picker needs it to read your favorites.": "O login do VRChat no Orbiters - N4N0 ainda não está liberado para a sua conta: o seletor precisa dele para ler seus favoritos.",
+  "VRChat sign-in isn't available for your account right now. The picker needs it to read your favorites.": "O login do VRChat não está disponível para a sua conta agora. O seletor precisa dele para ler seus favoritos.",
   "No public avatar in your favorites yet. Favorite public avatars in VRChat and they show up here.": "Ainda não há avatares públicos nos seus favoritos. Favorite avatares públicos no VRChat e eles aparecem aqui.",
   "No public avatar in this list": "Nenhum avatar público nesta lista",
   "VRChat asks to slow down. Try again in {seconds} s.": "O VRChat pediu para ir mais devagar. Tente de novo em {seconds} s.",
@@ -48,5 +48,10 @@
   "Ask first": "Perguntar antes",
   "Anyone": "Qualquer pessoa",
   "Not loaded: choose an avatar.": "Não carregada: escolha um avatar.",
-  "Loaded with {name}": "Carregada com {name}"
+  "Loaded with {name}": "Carregada com {name}",
+  "Anyone with an avatar gun can do this to you. You can turn it off.": "Qualquer pessoa com uma arma de avatares pode fazer isso com você. Você pode desativar.",
+  "Turn off": "Desativar",
+  "Keep it on": "Manter",
+  "Turned off. You can turn it back on in Settings.": "Desativado. Você pode reativar nas Configurações.",
+  "Kept on. You can change it anytime in Settings.": "Mantido. Você pode mudar quando quiser nas Configurações."
 }

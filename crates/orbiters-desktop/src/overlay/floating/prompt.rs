@@ -65,8 +65,9 @@ pub enum Face {
     /// "No 3D picture of this world yet" with "Take a 3D picture" and its cross (`crate::world_notice`, REQUEST13, made
     /// discreet by Request20); whether it says the point a picture there earns, the part a laser is on.
     World { earns_one: bool, on: Option<crate::world_notice::Part> },
-    /// The avatar gun's card (`crate::avatar_gun_ui`): its question (`ask`) straight ahead, its notices low and to the right.
-    Gun { ask: bool },
+    /// The avatar gun's card (`crate::avatar_gun_ui`): its question (`ask`) straight ahead, its notices low and to the right;
+    /// the first change's notice (`tall`) with its hint under it.
+    Gun { ask: bool, tall: bool },
 }
 
 impl Face {
@@ -74,7 +75,8 @@ impl Face {
     pub fn size(self) -> ([u32; 2], f32) {
         match self {
             Face::World { .. } => (crate::world_notice::VR_PX, crate::world_notice::VR_WIDTH_M),
-            Face::Gun { .. } => (crate::avatar_gun_ui::VR_PX, crate::avatar_gun_ui::VR_WIDTH_M),
+            Face::Gun { tall: false, .. } => (crate::avatar_gun_ui::VR_PX, crate::avatar_gun_ui::VR_WIDTH_M),
+            Face::Gun { tall: true, .. } => (crate::avatar_gun_ui::VR_TALL_PX, crate::avatar_gun_ui::VR_WIDTH_M),
             _ => (VR_PX, VR_WIDTH_M),
         }
     }
@@ -83,7 +85,7 @@ impl Face {
     /// head faces, in metres. The world notice low and to the right, out of the way (Request20); the rest straight ahead.
     pub fn spot(self) -> (f32, f32, f32) {
         match self {
-            Face::World { .. } | Face::Gun { ask: false } => {
+            Face::World { .. } | Face::Gun { ask: false, .. } => {
                 let s = crate::world_notice::VR_SPOT;
                 (s.distance, s.below, s.right)
             }

@@ -41,6 +41,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the notices stay: after a change (its Undo with it), and when a change could not be made.
 const CHANGED_FOR_MS: u64 = 20_000;
 const FAILED_FOR_MS: u64 = 12_000;
+/// The first change's notice, which also says the setting exists: longer, and at least this long after its hint is answered.
+const FIRST_CHANGED_FOR_MS: u64 = 30_000;
+const ANSWERED_FOR_MS: u64 = 6_000;
 
 /// What the menus show of the avatar gun.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -71,11 +74,34 @@ pub struct Card {
     pub thumbnail: String,
     pub until_ms: u64,
     pub for_ms: u64,
+    /// The first change ever: under the notice, that anyone's gun can do this and how to turn it off.
+    #[serde(default)]
+    pub hint: Hint,
+}
+
+/// What the first change's notice says under it (Enzo, 2026-11-24: the surprise is the default, and the first time says
+/// it can be turned off). Only on [`CardKind::Changed`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Hint {
+    /// A later change: the notice and Undo alone.
+    #[default]
+    None,
+    /// "Anyone with an avatar gun can do this to you": Turn off, Keep it on.
+    Offered,
+    /// Turn off was pressed: the setting is Nobody now.
+    TurnedOff,
+    /// Keep it on was pressed.
+    KeptOn,
 }
 
 impl Card {
     pub fn up(&self, now_ms: u64) -> bool {
         now_ms < self.until_ms
+    }
+
+    /// Whether it shows its hint under the notice (the taller card).
+    pub fn hinted(&self) -> bool {
+        self.kind == CardKind::Changed && self.hint != Hint::None
     }
 
     /// The share of its time left.
@@ -129,6 +155,12 @@ pub const FAILED: &str = mark("Could not change your avatar");
 pub const ALLOW: &str = mark("Allow");
 pub const NOT_NOW: &str = mark("Not now");
 pub const UNDO: &str = mark("Undo");
+/// The first change's hint, its two answers, and what each answer says after.
+pub const HINT: &str = mark("Anyone with an avatar gun can do this to you. You can turn it off.");
+pub const TURN_OFF: &str = mark("Turn off");
+pub const KEEP_ON: &str = mark("Keep it on");
+pub const TURNED_OFF: &str = mark("Turned off. You can turn it back on in Settings.");
+pub const KEPT_ON: &str = mark("Kept on. You can change it anytime in Settings.");
 
 impl Card {
     /// Its line: what is asked or told, with who and which avatar.
@@ -151,6 +183,18 @@ impl Card {
         }
     }
 
+    /// The hint's words, while it has one.
+    pub fn hint_says(&self) -> Option<&'static str> {
+        if !self.hinted() {
+            return None;
+        }
+        Some(tr(match self.hint {
+            Hint::TurnedOff => TURNED_OFF,
+            Hint::KeptOn => KEPT_ON,
+            Hint::Offered | Hint::None => HINT,
+        }))
+    }
+
     /// Its buttons: the main one and the other (none while VRChat is asked).
     pub fn buttons(&self) -> (Option<&'static str>, Option<&'static str>) {
         match self.kind {
@@ -169,6 +213,8 @@ pub enum Command {
     Main { card: u64 },
     /// Not now, or its cross.
     Close { card: u64 },
+    /// The first change's hint answered: Keep it on (`keep`), or Turn off (the setting becomes Nobody).
+    Hint { card: u64, keep: bool },
 }
 
 /// What a hit asks, as the settings, the friendship, the cooldown and the instance say ([`decide`]).
@@ -346,6 +392,7 @@ impl Controller {
         let (card, main) = match command {
             Command::Main { card } => (card, true),
             Command::Close { card } => (card, false),
+            Command::Hint { card, keep } => return self.avatar_gun_hint(card, keep),
         };
         let shown = self.view().avatar_gun.card.clone().filter(|c| c.id == card);
         let Some(shown) = shown else { return };
@@ -373,6 +420,28 @@ impl Controller {
         }
     }
 
+    /// The first change's hint answered on card `card`: Turn off makes the setting Nobody; either way the hint says where
+    /// the setting is, and the notice (its Undo with it) stays a little longer.
+    fn avatar_gun_hint(self: &Shared, card: u64, keep: bool) {
+        if !self.view().avatar_gun.card.as_ref().is_some_and(|c| c.id == card && c.hinted() && c.hint == Hint::Offered) {
+            return;
+        }
+        eprintln!("avatar gun: first change's hint: {}", if keep { "kept on" } else { "turned off" }); // i18n: not shown (a log's line)
+        if !keep {
+            self.update_settings(|s| s.avatar_gun.allow = AvatarGunAllow::Nobody);
+        }
+        let now = now_ms();
+        self.update_if(|s| {
+            let Some(c) = s.avatar_gun.card.as_mut().filter(|c| c.id == card) else { return false };
+            c.hint = if keep { Hint::KeptOn } else { Hint::TurnedOff };
+            // Its time from when it came stays (it does not fade in again); only its end may come later.
+            let until = c.until_ms.max(now + ANSWERED_FOR_MS);
+            c.for_ms += until - c.until_ms;
+            c.until_ms = until;
+            true
+        });
+    }
+
     /// The card `card` and its hit go.
     fn avatar_gun_end(&self, card: u64) {
         {
@@ -392,6 +461,11 @@ impl Controller {
 
     /// Shows `kind` on the card of `hit` (a new time for it).
     fn avatar_gun_card(&self, hit: &Hit, kind: CardKind, for_ms: u64) {
+        self.avatar_gun_card_hinted(hit, kind, for_ms, Hint::None);
+    }
+
+    /// [`Self::avatar_gun_card`] with a hint under it.
+    fn avatar_gun_card_hinted(&self, hit: &Hit, kind: CardKind, for_ms: u64, hint: Hint) {
         let card = Card {
             id: hit.card,
             kind,
@@ -401,6 +475,7 @@ impl Controller {
             thumbnail: hit.avatar.thumbnail.clone().unwrap_or_default(),
             until_ms: now_ms() + for_ms,
             for_ms,
+            hint,
         };
         self.update(|s| s.avatar_gun.card = Some(card));
     }
@@ -764,7 +839,15 @@ impl Controller {
                     rt.put_on = Some(hit.avatar.id.clone());
                     rt.changed_at = Some(Instant::now());
                 }
-                ctl.avatar_gun_card(&hit, CardKind::Changed, CHANGED_FOR_MS);
+                // The first change ever also says that anyone's gun can do this, and how to turn it off; Settings shows
+                // the setting from now on.
+                let first = !ctl.view().settings.avatar_gun.changed_once;
+                if first {
+                    ctl.update_settings(|s| s.avatar_gun.changed_once = true);
+                    ctl.avatar_gun_card_hinted(&hit, CardKind::Changed, FIRST_CHANGED_FOR_MS, Hint::Offered);
+                } else {
+                    ctl.avatar_gun_card(&hit, CardKind::Changed, CHANGED_FOR_MS);
+                }
                 ctl.avatar_gun_answer(&hit.shot, Outcome::Changed);
             } else {
                 ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::DidNotFollow { signed_in }), FAILED_FOR_MS);
@@ -911,7 +994,7 @@ mod tests {
 
     #[test]
     fn its_words_are_in_every_language() {
-        let all = [ASKS, CHANGED, CHANGING, UNDOING, FAILED, ALLOW, NOT_NOW, UNDO, CROSSED];
+        let all = [ASKS, CHANGED, CHANGING, UNDOING, FAILED, ALLOW, NOT_NOW, UNDO, CROSSED, HINT, TURN_OFF, KEEP_ON, TURNED_OFF, KEPT_ON];
         for language in orbiters_i18n::Language::TRANSLATED {
             for words in all {
                 let said = orbiters_i18n::in_language(language, || tr(words).to_string());
@@ -975,7 +1058,7 @@ mod tests {
     /// The card says who and what: the question with both names, the notice with the shooter's.
     #[test]
     fn the_card_says_who_and_what() {
-        let card = Card { id: 1, kind: CardKind::Ask, from: "Kite".into(), avatar_id: "avtr_x".into(), avatar: "Robot".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000 };
+        let card = Card { id: 1, kind: CardKind::Ask, from: "Kite".into(), avatar_id: "avtr_x".into(), avatar: "Robot".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000, hint: Hint::None };
         orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
             assert_eq!(card.title(), "Kite wants to change your avatar to Robot");
             assert_eq!(card.buttons(), (Some("Allow"), Some("Not now")));
@@ -985,5 +1068,21 @@ mod tests {
             assert_eq!(Card { kind: CardKind::Changing, ..card.clone() }.buttons(), (None, None));
         });
         assert!((card.left(10_000) - 0.5).abs() < 1e-6 && card.up(19_999) && !card.up(20_000));
+    }
+
+    /// The first change's hint: only on the notice of a change, its words following its answer; a later change has none.
+    #[test]
+    fn the_first_change_says_it_can_be_turned_off() {
+        let changed = Card { id: 1, kind: CardKind::Changed, from: "Kite".into(), avatar_id: "avtr_x".into(), avatar: "Robot".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000, hint: Hint::None };
+        orbiters_i18n::in_language(orbiters_i18n::Language::En, || {
+            assert!(!changed.hinted() && changed.hint_says().is_none(), "a later change: the notice alone");
+            let first = Card { hint: Hint::Offered, ..changed.clone() };
+            assert!(first.hinted());
+            assert_eq!(first.hint_says(), Some("Anyone with an avatar gun can do this to you. You can turn it off."));
+            assert_eq!(first.buttons(), (Some("Undo"), None), "Undo stays");
+            assert_eq!(Card { hint: Hint::TurnedOff, ..changed.clone() }.hint_says(), Some(TURNED_OFF));
+            assert_eq!(Card { hint: Hint::KeptOn, ..changed.clone() }.hint_says(), Some(KEPT_ON));
+            assert!(!Card { kind: CardKind::Undoing, hint: Hint::Offered, ..changed.clone() }.hinted(), "going back shows no hint");
+        });
     }
 }

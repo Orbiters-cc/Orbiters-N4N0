@@ -2274,7 +2274,7 @@ pub(super) fn avatar_portrait(seed: usize) -> ColorImage {
 /// desktop mode's corner show them, over a bright and a dark made-up world. The language is the run's (`--language`).
 pub(super) fn avatar_gun_shots(out: &Path) -> anyhow::Result<()> {
     use crate::avatar_gun_picker::{self as picker, Stage, Store};
-    use crate::controller::avatar_gun::{Card, CardKind, Failure};
+    use crate::controller::avatar_gun::{Card, CardKind, Failure, Hint};
     use panels::{Action, Sheet};
     let lang = orbiters_i18n::language().tag();
     let hd = vec2(1280.0, 720.0);
@@ -2323,25 +2323,58 @@ pub(super) fn avatar_gun_shots(out: &Path) -> anyhow::Result<()> {
         let all = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), pointed: Some(Action::AvatarGun), ..base.clone() };
         r19_scene(&format!("avatar-gun-all-tools-{form}-{lang}"), out, hd, &all, Some(Action::AvatarGun), false)?;
     }
-    // The hit player's card: its faces as the band and the corner paint them, over a bright and a dark world.
-    let card = |kind: CardKind| Card { id: 1, kind, from: "Kite".into(), avatar_id: "avtr_00000000-0000-4000-8000-000000000003".into(), avatar: "Starlight Witch".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000 }; // i18n: not shown (made-up names)
-    let kinds = [("ask", CardKind::Ask, Some(crate::avatar_gun_ui::Part::Main)), ("changing", CardKind::Changing, None), ("changed", CardKind::Changed, None), ("failed", CardKind::Failed(Failure::DidNotFollow { signed_in: false }), Some(crate::avatar_gun_ui::Part::Other))];
-    let [w, h] = crate::avatar_gun_ui::VR_PX;
-    for (name, kind, hover) in kinds {
+    // The hit player's card: its faces as the band and the corner paint them, over a bright and a dark world; the first
+    // change's with its hint, pointed at, and each of its answers.
+    let card = |kind: CardKind, hint: Hint| Card { id: 1, kind, from: "Kite".into(), avatar_id: "avtr_00000000-0000-4000-8000-000000000003".into(), avatar: "Starlight Witch".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000, hint }; // i18n: not shown (made-up names)
+    use crate::avatar_gun_ui::Part;
+    let faces = [
+        ("ask", card(CardKind::Ask, Hint::None), Some(Part::Main)),
+        ("changing", card(CardKind::Changing, Hint::None), None),
+        ("changed", card(CardKind::Changed, Hint::None), None),
+        ("first", card(CardKind::Changed, Hint::Offered), None),
+        ("first-pointed", card(CardKind::Changed, Hint::Offered), Some(Part::TurnOff)),
+        ("first-turned-off", card(CardKind::Changed, Hint::TurnedOff), None),
+        ("first-kept-on", card(CardKind::Changed, Hint::KeptOn), None),
+        ("failed", card(CardKind::Failed(Failure::DidNotFollow { signed_in: false }), Hint::None), Some(Part::Other)),
+    ];
+    for (name, face, hover) in &faces {
+        let [w, h] = if face.hinted() { crate::avatar_gun_ui::VR_TALL_PX } else { crate::avatar_gun_ui::VR_PX };
         for (ground, colour) in [("bright", Color32::from_rgb(226, 232, 240)), ("dark", Color32::from_rgb(20, 18, 34))] {
             let (pw, ph) = (w + 80, h + 80);
             let mut canvas = Canvas::new(pw, ph);
-            let face = card(kind.clone());
             for _ in 0..2 {
                 canvas.paint(0.0, |p| {
                     p.rect_filled(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(pw as f32, ph as f32)), 0.0, colour);
-                    crate::avatar_gun_ui::paint_card(p, pos2(40.0, 40.0), crate::avatar_gun_ui::VR_S, crate::world_notice::GROUND, &face, None, hover, 0.62);
+                    crate::avatar_gun_ui::paint_card(p, pos2(40.0, 40.0), crate::avatar_gun_ui::VR_S, crate::world_notice::GROUND, face, None, *hover, 0.62);
                 });
             }
             let path = out.join(format!("avatar-gun-card-{name}-{ground}-{lang}.png"));
             save_png(&path, &over_ground(canvas.pixels(), pw, ph))?;
             println!("{}", path.display());
         }
+    }
+    // Desktop mode: the first change's card in the bottom right corner of a VRChat window (a made-up evening sky), at the
+    // size and place desk_notice gives it, with nothing in its way.
+    for (name, face, hover) in faces.iter().filter(|(n, _, _)| matches!(*n, "changed" | "first" | "first-pointed" | "first-turned-off")) {
+        let (w, h) = (hd.x as u32, hd.y as u32);
+        let (rect, zoom) = crate::overlay::orbit::desk_notice::rect_of(hd, crate::avatar_gun_ui::size(face));
+        let mut canvas = Canvas::new(w, h);
+        for _ in 0..2 {
+            canvas.paint(0.0, |p| {
+                let rows = 48;
+                for i in 0..rows {
+                    let t = i as f32 / (rows - 1) as f32;
+                    let mix = |a: f32, b: f32| (a + (b - a) * t) as u8;
+                    let band = egui::Rect::from_min_size(pos2(0.0, hd.y * i as f32 / rows as f32), vec2(hd.x, hd.y / rows as f32 + 1.0));
+                    p.rect_filled(band, 0.0, Color32::from_rgb(mix(64.0, 214.0), mix(84.0, 128.0), mix(150.0, 96.0)));
+                }
+                p.rect_filled(egui::Rect::from_min_max(pos2(0.0, hd.y * 0.72), hd.to_pos2()), 0.0, Color32::from_rgb(34, 40, 52));
+                crate::avatar_gun_ui::paint_card(p, rect.min, zoom, crate::world_notice::GROUND, face, None, *hover, 0.62);
+            });
+        }
+        let path = out.join(format!("avatar-gun-desktop-{name}-{lang}.png"));
+        save_png(&path, &over_ground(canvas.pixels(), w, h))?;
+        println!("{}", path.display());
     }
     Ok(())
 }

@@ -2249,3 +2249,136 @@ fn youtube_search_picture(facts: &Facts, history_pointed: bool, px: [u32; 2]) ->
     panels::cut_page_corners(&mut out, px, [0, 0, px[0], px[1]]);
     out
 }
+
+/// A made-up avatar's thumbnail (4:3, as VRChat's): a coloured ground and a figure on it, by `seed`. No real avatar.
+pub(super) fn avatar_portrait(seed: usize) -> ColorImage {
+    let (w, h) = (256usize, 192usize);
+    let hues: [[f32; 3]; 7] = [[0.95, 0.42, 0.62], [0.36, 0.62, 0.98], [0.42, 0.85, 0.55], [0.98, 0.72, 0.30], [0.66, 0.48, 0.96], [0.30, 0.86, 0.88], [0.94, 0.52, 0.34]];
+    let [r, g, b] = hues[seed % hues.len()];
+    let mut pixels = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+            let shade = 0.35 + 0.45 * (1.0 - fy) + 0.1 * (fx * 6.0 + seed as f32).sin();
+            let head = ((fx - 0.5) * 1.33).powi(2) + (fy - 0.36).powi(2) < 0.016;
+            let body = ((fx - 0.5) / 0.26).powi(2) + ((fy - 0.95) / 0.42).powi(2) < 1.0;
+            let c = if head || body { [0.97, 0.95, 0.93].map(|v| v * (0.82 + 0.18 * (1.0 - fy))) } else { [r * shade, g * shade, b * shade] };
+            pixels.extend([(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8]);
+        }
+    }
+    ColorImage::from_rgb([w, h], &pixels)
+}
+
+/// `--only avatar-gun`: the avatar gun's picker sheet (made-up lists and avatars only) in each of its states, beside the
+/// Quick Menu on a screen (`-desk`) and as a headset lays it (`-vr`), and the hit player's card faces as the VR band and
+/// desktop mode's corner show them, over a bright and a dark made-up world. The language is the run's (`--language`).
+pub(super) fn avatar_gun_shots(out: &Path) -> anyhow::Result<()> {
+    use crate::avatar_gun_picker::{self as picker, Stage, Store};
+    use crate::controller::avatar_gun::{Card, CardKind, Failure};
+    use panels::{Action, Sheet};
+    let lang = orbiters_i18n::language().tag();
+    let hd = vec2(1280.0, 720.0);
+    let desk = Facts { recent: recent(), timer: 3, n4n0: true, desktop: true, music: Some(("The Weeknd - Moth to a Flame".into(), true)), beside_wing: true, can_avatar_gun: true, ..Default::default() };
+    let vr = Facts { desktop: false, vr_close: true, beside_wing: false, can_call: true, can_states: true, can_light: true, ..desk.clone() };
+    let mut snap = crate::state::Snapshot::new(Default::default());
+    let mut settings = (*snap.settings).clone();
+    settings.avatar_gun.loaded = Some(orbiters_core::settings::LoadedAvatar { id: "avtr_00000000-0000-4000-8000-000000000001".into(), name: "Paper Robot".into(), thumbnail: String::new() });
+    snap.settings = settings.into();
+    snap.account.state = crate::state::AccountState::SignedIn { username: "SampleMember".into() };
+    snap.avatar_gun.gun = true;
+    snap.avatar_gun.loaded = true;
+    let facts_of = |stage: Stage, groups: Vec<picker::Group>, snap: &crate::state::Snapshot, picked: Option<&str>| {
+        let mut store = Store::default();
+        store.stand_in(stage, groups);
+        panels::avatar_gun_sheet::facts(&store, snap, picked)
+    };
+    let mut many = picker::sample(false);
+    many[1].avatars = Some((0..14).map(|n| picker::Pick { id: format!("avtr_00000000-0000-4000-8000-{:012}", 20 + n), name: ["Rubber Duck", "Walking Toaster", "Moon Rabbit", "Cloud Whale", "Pixel Knight", "Velvet Moth", "Cactus Pal"][n % 7].into(), thumbnail: String::new() }).collect()); // i18n: not shown (made-up avatars)
+    let mut failed_group = picker::sample(false);
+    failed_group[1].avatars = None;
+    failed_group[1].error = Some(crate::controller::vrchat_data::ListError::RateLimited { seconds: 12 });
+    let mut not_ready = snap.clone();
+    not_ready.avatar_gun.loaded = false;
+    let mut no_gun = snap.clone();
+    no_gun.avatar_gun.gun = false;
+    let scenes: Vec<(&str, panels::GunFacts, f32, Option<Action>)> = vec![
+        ("ready", facts_of(Stage::Ready, many.clone(), &snap, None), 0.0, None),
+        ("pointed", facts_of(Stage::Ready, many.clone(), &snap, None), 0.0, Some(Action::AvatarGunPick(4))),
+        ("picked", facts_of(Stage::Ready, many.clone(), &snap, Some("avtr_00000000-0000-4000-8000-000000000004")), 0.0, None),
+        ("scrolled", facts_of(Stage::Ready, many.clone(), &snap, None), 300.0, None),
+        ("arriving", facts_of(Stage::Ready, picker::sample(true), &not_ready, None), 0.0, None),
+        ("loading", facts_of(Stage::Loading, Vec::new(), &not_ready, None), 0.0, None),
+        ("group-failed", facts_of(Stage::Ready, failed_group, &snap, None), 0.0, None),
+        ("failed", facts_of(Stage::Failed(crate::controller::vrchat_data::ListError::Failed("VRChat is unavailable".into())), Vec::new(), &snap, None), 0.0, None), // i18n: not shown (a made-up error)
+        ("signed-out", facts_of(Stage::SignedOut { gated: false }, Vec::new(), &no_gun, None), 0.0, Some(Action::ConnectVrchat)),
+        ("gated", facts_of(Stage::SignedOut { gated: true }, Vec::new(), &no_gun, None), 0.0, None),
+        ("empty", facts_of(Stage::Ready, vec![picker::Group { tag: "avatars1".into(), name: "Favorites".into(), avatars: Some(Vec::new()), error: None }], &snap, None), 0.0, None), // i18n: not shown (made-up list)
+    ];
+    for (form, base) in [("desk", &desk), ("vr", &vr)] {
+        for (state, gun, scroll, pointed) in &scenes {
+            let page = Facts { sheet: Some(Sheet::AvatarGun), sheet_title: "Avatar gun".into(), avatar_gun: gun.clone(), gallery_scroll: *scroll, pointed: *pointed, ..base.clone() };
+            avatar_gun_scene(&format!("avatar-gun-sheet-{state}-{form}-{lang}"), out, hd, &page, *pointed)?;
+        }
+        // All tools, offering it (the worn avatar has the gun).
+        let all = Facts { sheet: Some(Sheet::All), sheet_title: "All tools".into(), pointed: Some(Action::AvatarGun), ..base.clone() };
+        r19_scene(&format!("avatar-gun-all-tools-{form}-{lang}"), out, hd, &all, Some(Action::AvatarGun), false)?;
+    }
+    // The hit player's card: its faces as the band and the corner paint them, over a bright and a dark world.
+    let card = |kind: CardKind| Card { id: 1, kind, from: "Kite".into(), avatar_id: "avtr_00000000-0000-4000-8000-000000000003".into(), avatar: "Starlight Witch".into(), thumbnail: String::new(), until_ms: 20_000, for_ms: 20_000 }; // i18n: not shown (made-up names)
+    let kinds = [("ask", CardKind::Ask, Some(crate::avatar_gun_ui::Part::Main)), ("changing", CardKind::Changing, None), ("changed", CardKind::Changed, None), ("failed", CardKind::Failed(Failure::DidNotFollow { signed_in: false }), Some(crate::avatar_gun_ui::Part::Other))];
+    let [w, h] = crate::avatar_gun_ui::VR_PX;
+    for (name, kind, hover) in kinds {
+        for (ground, colour) in [("bright", Color32::from_rgb(226, 232, 240)), ("dark", Color32::from_rgb(20, 18, 34))] {
+            let (pw, ph) = (w + 80, h + 80);
+            let mut canvas = Canvas::new(pw, ph);
+            let face = card(kind.clone());
+            for _ in 0..2 {
+                canvas.paint(0.0, |p| {
+                    p.rect_filled(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(pw as f32, ph as f32)), 0.0, colour);
+                    crate::avatar_gun_ui::paint_card(p, pos2(40.0, 40.0), crate::avatar_gun_ui::VR_S, crate::world_notice::GROUND, &face, None, hover, 0.62);
+                });
+            }
+            let path = out.join(format!("avatar-gun-card-{name}-{ground}-{lang}.png"));
+            save_png(&path, &over_ground(canvas.pixels(), pw, ph))?;
+            println!("{}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// The picker's sheet over the Quick Menu (a stand-in), its avatars given made-up pictures (every fifth none, as if not
+/// read yet).
+fn avatar_gun_scene(name: &str, out: &Path, client: Vec2, facts: &Facts, pointed: Option<panels::Action>) -> anyhow::Result<()> {
+    let (w, h) = (client.x as u32, client.y as u32);
+    let mut ground = Canvas::new(w, h);
+    stand_in_menu(Around::QuickMenu, client, &mut ground);
+    let mut image = ground.pixels().to_vec();
+    let back = zones::place(Zone::SheetBack, client).expect("it fits");
+    let (pixels, px) = picture(&back, facts, None, None);
+    blit(&mut image, w, &pixels, px, back.rect.min);
+    let page = zones::place(Zone::Takeover, client).expect("it fits");
+    let page_px = [page.rect.width() as u32, page.rect.height() as u32];
+    let mut canvas = Canvas::zoomed(page_px[0], page_px[1], page_px[0] as f32 / 1024.0).in_orbit_look();
+    let textures: Vec<_> = (0..7).map(|i| canvas.ctx().load_texture("avatar", avatar_portrait(i), TextureOptions::LINEAR)).collect();
+    let mut facts = facts.clone();
+    for (i, tile) in facts.avatar_gun.tiles.iter_mut().enumerate().filter(|(i, _)| i % 5 != 4) {
+        tile.picture = Some(textures[i % textures.len()].id());
+    }
+    if let Some(loaded) = facts.avatar_gun.loaded.as_mut() {
+        loaded.1 = Some(textures[1].id());
+    }
+    let sheet = facts.sheet.expect("a sheet");
+    let hover = pointed.and_then(|a| panels::sheet_items(sheet, &facts).iter().position(|i| i.action == a));
+    for _ in 0..2 {
+        canvas.paint(0.0, |p| panels::paint_sheet(p, sheet, &facts, hover, None));
+    }
+    let from = canvas.pixels().to_vec();
+    let mut pixels = from.clone();
+    panels::finish_picture(&mut pixels, &from, page_px, page_px[0] as f32 / 1024.0, [0, 0, page_px[0], page_px[1]]);
+    panels::cut_page_corners(&mut pixels, page_px, [0, 0, page_px[0], page_px[1]]);
+    blit(&mut image, w, &pixels, page_px, page.rect.min);
+    let path = out.join(format!("{name}.png"));
+    save_png(&path, &over_ground(&image, w, h))?;
+    println!("{}", path.display());
+    Ok(())
+}

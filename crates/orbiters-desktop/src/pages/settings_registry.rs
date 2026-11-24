@@ -282,6 +282,9 @@ pub static ENTRIES: &[Entry] = &[
                 (!s.settings.n4n0.calls).then_some(mark("Shown when Calls is on"))
             }
         }).controls(&["n4n0-direct-calls"]),
+    e("n4n0.avatar-gun", N4n0, super::avatar_gun::TITLE, super::avatar_gun::WHO, super::avatar_gun::WHO_WHY, super::avatar_gun::KEYWORDS)
+        .gate(Gate::VrchatHere)
+        .controls(&["avatar-gun-allow"]),
     // Voice & assistant.
     e("voice.assistant", Voice, mark("Assistant"), mark("AI assistant"), mark("Off, N4N0 is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."), mark("AI brain chat answers")).controls(&["n4n0-ai"]),
     e("voice.personality", Voice, mark("Assistant"), mark("Personality and own key"), mark("N4N0's roast level, its language and your own AI key are on the Orbiters website."), mark("roast API key website")).controls(&[mark("Open")]),

@@ -91,6 +91,35 @@ pub enum Request {
         world: String,
         instance: String,
     },
+    /// The signed-in VRChat account's avatar favourite groups (the avatar gun's picker), answered as
+    /// [`Response::AvatarGroups`] or [`Response::ListError`]. With its groups asked one by one ([`Request::AvatarFavorites`]),
+    /// a picker shows each group as it arrives.
+    AvatarFavoriteGroups,
+    /// The public avatars of one avatar favourite group (its tag), every page: [`Response::AvatarList`] or
+    /// [`Response::ListError`].
+    AvatarFavorites {
+        group: String,
+    },
+}
+
+/// Why a list of the account's own could not be read: no personal session, VRChat's rate limit (for this long), or
+/// anything else, in its words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListError {
+    SignInRequired,
+    RateLimited { seconds: u64 },
+    Failed(String),
+}
+
+impl ListError {
+    fn of(e: &anyhow::Error) -> Self {
+        use orbiters_core::vrchat_api::Error;
+        match e.downcast_ref::<Error>() {
+            Some(Error::Unauthorized | Error::Disabled) => ListError::SignInRequired,
+            Some(Error::RateLimited(wait)) => ListError::RateLimited { seconds: wait.as_secs().max(1) },
+            _ => ListError::Failed(e.to_string()),
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -108,6 +137,11 @@ pub enum Response {
     Worlds(orbiters_core::maps::FoundWorlds),
     Invited,
     Went(super::travel::Went),
+    /// Avatar favourite groups: tag and name, in VRChat's order.
+    AvatarGroups(Vec<(String, String)>),
+    /// A group's public avatars.
+    AvatarList(Vec<orbiters_core::vrchat_api::Avatar>),
+    ListError(ListError),
 }
 
 /// Structured failures for WorldDetails, WorldInstances, CreateInstance and InviteSelf. No UI wording here.
@@ -283,6 +317,14 @@ impl Controller {
                     }
                     Response::Worlds(source.worlds(&list, page)?)
                 }
+                Request::AvatarFavoriteGroups => match source.favorite_avatar_groups() {
+                    Ok(groups) => Response::AvatarGroups(groups),
+                    Err(e) => Response::ListError(ListError::of(&e)),
+                },
+                Request::AvatarFavorites { group } => match source.favorite_avatars(&group) {
+                    Ok(avatars) => Response::AvatarList(avatars),
+                    Err(e) => Response::ListError(ListError::of(&e)),
+                },
                 Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } | Request::GoThere { .. } => unreachable!(),
             })
         })()

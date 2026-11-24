@@ -478,6 +478,7 @@ fn turn_of(panels: &mut Panels, snap: &Snapshot, around: Option<Around>, library
     panels.serve_menu(snap);
     panels.follow(snap, library);
     panels.serve_assistant(snap);
+    panels.serve_avatar_gun(snap);
     panels.menu_turn(snap);
     panels.step_springs(0.011);
     let mut handed = Vec::new();

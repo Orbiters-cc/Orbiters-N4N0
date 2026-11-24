@@ -811,6 +811,9 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             apply |= place(&mut m, c, 1, "N4N0", |ui| super::settings_n4n0::n4n0_card(ui, cx, 1, base, draft, &mut state.texts));
             apply |= place(&mut m, c, 2, mark("N4N0's menu"), |ui| super::settings_n4n0::menu_card(ui, cx, 2, draft));
             apply |= place(&mut m, c, 3, mark("Calls"), |ui| super::settings_n4n0::calls_card(ui, cx, 3, draft));
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                apply |= place(&mut m, c, 4, super::avatar_gun::TITLE, |ui| super::settings_n4n0::avatar_gun_card(ui, cx, 4, draft));
+            }
         }
         Group::Voice => {
             apply |= place(&mut m, c, 1, mark("Assistant"), |ui| super::settings_n4n0::assistant_card(ui, cx, 1, draft));

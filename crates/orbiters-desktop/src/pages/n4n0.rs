@@ -14,14 +14,22 @@ use orbiters_ui::theme::{self, weight, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
 
 #[derive(Default)]
-pub struct State {}
+pub struct State {
+    /// The avatar gun's card and its picker (`super::avatar_gun`).
+    gun: super::avatar_gun::State,
+}
 
 impl State {
+    /// The avatar gun's card and picker (the screenshot review stages them).
+    pub fn gun_mut(&mut self) -> &mut super::avatar_gun::State {
+        &mut self.gun
+    }
+
     /// Leaving the page (talking to N4N0, and a held Talk, are the chat bar's: `crate::chat_bar`).
     pub fn leave(&mut self, _cx: &crate::backend::Ctl) {}
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let snap = cx.snap;
     // A setting of N4N0's asked for (the heading's Settings, the Calls card's): Settings opens on it.
     let mut to_settings: Option<&'static str> = None;
@@ -155,6 +163,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
             }));
 
             let videos_sub = if n4n0.videos.is_empty() { tr("Ask N4N0 to “save this video” while a world plays one").to_string() } else { tr!("{count} saved", count = n4n0.videos.len()) };
+            // The avatar gun: what it is loaded with, its picker, who may change this avatar (where VRChat runs here).
+            if orbiters_core::osc::VRCHAT_RUNS_HERE {
+                let gun = &mut state.gun;
+                m.add(6, |ui| super::avatar_gun::card(ui, cx, 6, gun));
+            }
             m.add(5, |ui| section(ui, cx, 5, icons::FILM_STRIP, tr("Saved videos"), Some(&videos_sub), |ui| {
                 if let Some(video) = &snap.vrchat.world.last_video {
                     widgets::field(ui, tr("Playing in this world"), Some(&video.url), 150.0, |ui| {
@@ -288,6 +301,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, _state: &mut State) {
     if let Some(target) = to_settings {
         cx.go = Some(super::Go::Settings(target));
     }
+    // The avatar gun's picker, over the page while it shows.
+    let ctx = ui.ctx().clone();
+    super::avatar_gun::detail(&ctx, cx, &mut state.gun);
 }
 
 pub(super) fn heading_line(snap: &crate::state::Snapshot) -> String {

@@ -273,6 +273,12 @@ fn chip_hint(p: &GameProfile, busy: Option<&'static str>) -> String {
     if whose.is_empty() { state.to_string() } else { format!("{state} {whose}") }
 }
 
+/// Whether the chip of `p`, the one chosen, has an × that takes it off the choice: any but the default one's, while no VRChat runs
+/// or starts on it.
+fn chip_goes(p: &GameProfile, next: u32) -> bool {
+    p.profile != 0 && p.profile == next && p.running.is_none() && p.starting.is_none()
+}
+
 /// Where one VRChat runs at a time (a Mac): why no other profile starts now, while one runs or starts.
 fn one_at_a_time(game: &Game) -> Option<&'static str> {
     match game {
@@ -365,12 +371,21 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) -> (
                 Some(p) => {
                     let label = chip_label(p);
                     let (glyph, tone) = chip_icon(p);
-                    let chip = widgets::Chip::new(&label).icon(glyph).tone(tone).selected(p.profile == next).id_salt(("launcher-profile", p.profile));
+                    let chip = widgets::Chip::new(&label).icon(glyph).tone(tone).selected(p.profile == next).removable(chip_goes(p, next)).id_salt(("launcher-profile", p.profile));
                     let got = chip.show_at(ui, r);
                     if got.pressed {
                         state.chosen_profile = Some(p.profile);
                     }
-                    got.response.on_hover_text(chip_hint(p, busy));
+                    if got.removed {
+                        state.added_profile = state.added_profile.filter(|added| *added != p.profile);
+                        state.chosen_profile = None;
+                        state.act(cx, clock, Action::ForgetProfile { profile: p.profile });
+                    }
+                    let mut hint = chip_hint(p, busy);
+                    if chip_goes(p, next) {
+                        hint = format!("{hint} {}", tr("× takes it off this list: VRChat keeps its sign-in."));
+                    }
+                    got.response.on_hover_text(hint);
                 }
                 None => {
                     let got = widgets::Chip::new(new_label).icon(icons::PLUS).id_salt("launcher-profile-new").show_at(ui, r);

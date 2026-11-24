@@ -534,7 +534,6 @@ pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;
 mod previous_invite;
-mod profiles;
 mod performance;
 pub mod publish_cost;
 pub mod picture_repair;
@@ -3337,7 +3336,7 @@ fn spawn_watchers(ctl: Shared) {
             };
             let mut log = new_log();
             // Every VRChat running, and which the app follows (controller/vrchats.rs).
-            let mut roster = vrchats::Roster::default();
+            let mut roster = vrchats::Roster::seeing(ctl.launcher_machine_now().vrchats_seen().unwrap_or_default());
             let mut log_target: Option<(u32, Option<PathBuf>)> = None;
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).

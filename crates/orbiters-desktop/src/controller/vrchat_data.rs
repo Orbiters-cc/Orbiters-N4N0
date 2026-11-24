@@ -74,11 +74,9 @@ pub enum Request {
         ids: Vec<String>,
     },
     Friends,
-    /// Whether the instance of a capture of `owners` (none: not known) is open.
     Instance {
         world: String,
         instance: String,
-        owners: Vec<String>,
     },
     /// Whether it is open, as VRChat said at most `max_age_ms` ago, and how long ago that was: what Play goes by
     /// (verify3-r21 M2).
@@ -289,16 +287,9 @@ impl Controller {
                     Response::Avatars { pictures, errors }
                 }
                 Request::Friends => Response::Friends(source.friends()?),
-                // With the session of the account it was asked as, checked on the hold that sends it: another's by then is sent
-                // nothing of it.
-                Request::Instance { world, instance, owners } => {
-                    let kept = std::time::Duration::from_secs(60);
-                    // (A private place is asked about as its own account alone.)
-                    if !orbiters_core::visited::may_be_told(&owners, &instance, scope.user.as_deref(), self.viewer().single) { return Ok(Response::Instance(None)); }
-                    Response::Instance(self.instance_seen_as(&source, &scope, &world, &instance, kept)?.0)
-                }
+                Request::Instance { world, instance } => Response::Instance(source.instance_alive(&world, &instance)?),
                 Request::InstanceSeen { world, instance, max_age_ms } => {
-                    let (open, age) = self.instance_seen_as(&source, &scope, &world, &instance, std::time::Duration::from_millis(max_age_ms))?;
+                    let (open, age) = source.instance_seen(&world, &instance, std::time::Duration::from_millis(max_age_ms))?;
                     Response::InstanceSeen { open, age_ms: age.as_millis() as u64 }
                 }
                 Request::Image { url } => Response::Image(source.image(&url)?),
@@ -331,16 +322,6 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn made_for_tests(&self, world: &str, instance: &str, owner: &str) {
         self.instance_permits.lock().unwrap().owned(world, instance, owner);
-    }
-
-    /// Whether the instance is open, as `scope`'s account sees it.
-    fn instance_seen_as(&self, source: &orbiters_core::vrchat_source::Source, scope: &Scope, world: &str, instance: &str, at_most: std::time::Duration) -> anyhow::Result<(Option<bool>, std::time::Duration)> {
-        use orbiters_core::vrchat_api::Error;
-        let Some(user) = scope.user.as_deref() else { return Ok((None, std::time::Duration::ZERO)) };
-        match source.personal(user, || *scope == Scope::of(&self.view()), |c| c.instance_seen(world, instance, at_most)) {
-            Err(Error::Disabled | Error::Unauthorized) => Ok((None, std::time::Duration::ZERO)),
-            seen => Ok(seen?),
-        }
     }
 
     fn vrchat_world_data(self: &Shared, scope: Scope, request: Request, deadline: std::time::Instant) -> Response {
@@ -393,9 +374,10 @@ impl Controller {
                 }
                 Request::InviteSelf { world, instance } | Request::GoThere { world, instance } => {
                     let direct = matches!(way, Way::Direct);
-                    // Made here for another account: not this one's to go to.
+                    // Made here for another account: not this one's to go to, where there are several profiles.
                     let made_for = self.made_for(&world, &instance);
-                    if made_for.as_deref().is_some_and(|owner| owner != user) { return Err(WorldError::NotListed); }
+                    let another = made_for.as_deref().is_some_and(|owner| owner != user);
+                    if another && self.launcher_several(self.launcher_machine_now().as_ref(), None) { return Err(WorldError::NotListed); }
                     let bound = made_for.is_some();
                     if !self.instance_permits.lock().unwrap().contains(&scope, &world, &instance) { return Err(WorldError::NotListed); }
                     let fresh = source.personal_until(user, || scope == Scope::of(&self.view()), deadline, |c| c.world_instance(&world, &instance)).map_err(WorldError::Api)?
@@ -761,7 +743,7 @@ mod tests {
     fn unavailable_instance_keeps_unknown_without_using_a_session() {
         let c = Controller::new(orbiters_core::settings::Settings::default());
         assert!(matches!(
-            c.vrchat_data(Scope::of(&c.view()), Request::Instance { world: "wrld_test".into(), instance: "123".into(), owners: Vec::new() }),
+            c.vrchat_data(Scope::of(&c.view()), Request::Instance { world: "wrld_test".into(), instance: "123".into() }),
             Ok(Response::Instance(None))
         ));
     }
@@ -1151,7 +1133,7 @@ mod tests {
         for (access, id) in [(orbiters_core::vrchat_api::CreateAccess::FriendsPlus, MADE_ID), (orbiters_core::vrchat_api::CreateAccess::Public, "46657~region(eu)")] {
             for (running, account) in [(vec![10], None), (vec![10], Some("usr_other"))] {
                 let ctl = Controller::new(orbiters_core::settings::Settings::default());
-                ctl.update_settings(|s| s.launch.profiles_seen.extend([1]));
+                ctl.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
                 let mut made = made_answer(MADE_WORLD);
                 made["instanceId"] = id.into();
                 if access == orbiters_core::vrchat_api::CreateAccess::Public {
@@ -1223,8 +1205,9 @@ mod tests {
             permits.owned(MADE_WORLD, &format!("{n}~region(us)"), "usr_y");
         }
         assert_eq!(permits.owner(MADE_WORLD, "1~region(eu)"), Some("usr_x"));
-        // Listed for Y too (it is a public room): not Y's to be taken to from here.
+        // Listed for Y too (it is a public room): not Y's to be taken to from here, where there are several profiles.
         let ctl = Controller::new(orbiters_core::settings::Settings::default());
+        ctl.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
         let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(MADE_WORLD)); 2]);
         let scope = Scope::of(&ctl.view());
         ctl.instance_permits.lock().unwrap().made(&scope, MADE_WORLD, MADE_ID);
@@ -1232,34 +1215,6 @@ mod tests {
         for request in [Request::GoThere { world: MADE_WORLD.into(), instance: MADE_ID.into() }, Request::InviteSelf { world: MADE_WORLD.into(), instance: MADE_ID.into() }] {
             assert!(matches!(ctl.vrchat_data(scope.clone(), request).unwrap(), Response::WorldError(WorldError::NotListed)));
         }
-        assert!(calls.lock().unwrap().is_empty());
-    }
-
-    /// R3 (the verifier's case): whether an instance is open is asked with the session of the account it was asked as, checked on
-    /// the hold that sends it; and a picture's private instance is asked about as its own account alone.
-    #[test]
-    fn an_instance_is_asked_about_only_as_whose_it_is() {
-        // The verifier's case: X's capture opened as Y, or as nobody that is known, its visit long gone from the history or an
-        // old one of nobody's: VRChat is not asked of its private instance.
-        let asked = |owners: &[&str], instance: &str, single: bool| {
-            let ctl = Controller::new(orbiters_core::settings::Settings::default());
-            ctl.update(|s| s.launcher.single_profile = single);
-            let (_, calls) = ctl.test_vrchat(vec![(200, serde_json::json!({ "id": "wrld_a:1", "instanceId": "1", "n_users": 3 })); 2]);
-            let request = Request::Instance { world: "wrld_a".into(), instance: instance.into(), owners: owners.iter().map(|o| o.to_string()).collect() };
-            assert!(matches!(ctl.vrchat_data(Scope::of(&ctl.view()), request).unwrap(), Response::Instance(_)), "the capture still opens");
-            let asked = calls.lock().unwrap().len();
-            asked
-        };
-        let private = "1~friends(usr_z)~region(eu)";
-        assert_eq!((asked(&["usr_x"], private, false), asked(&["usr_x"], private, true)), (0, 0), "another's, on any computer");
-        assert_eq!((asked(&[], private, false), asked(&[], private, true)), (0, 1), "not known: where one profile alone is used, as before");
-        assert_eq!((asked(&["usr_test"], private, false), asked(&["usr_x", "usr_test"], private, false), asked(&["usr_x"], "4~region(eu)", false)), (1, 1, 1));
-        // The session that would send it is another account's than the one asked as: nothing goes.
-        let ctl = Controller::new(orbiters_core::settings::Settings::default());
-        let (_, calls) = ctl.test_vrchat(vec![(200, serde_json::json!({})); 2]);
-        let source = ctl.vrchat_source();
-        let asked_as = Scope { user: Some("usr_x".into()), ..Scope::of(&ctl.view()) };
-        assert_eq!(ctl.instance_seen_as(&source, &asked_as, "wrld_a", "1~friends(usr_z)", std::time::Duration::ZERO).unwrap().0, None);
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -1296,7 +1251,7 @@ mod tests {
         assert!(!calls.lock().unwrap().iter().any(|(_, u)| u.contains("/invite/")), "no invite to accept");
         // A bridge side session owns the pipe: nothing written there, the invite goes, and says why.
         let ctl = Controller::new(orbiters_core::settings::Settings::default());
-        ctl.update_settings(|s| s.launch.profiles_seen.extend([1]));
+        ctl.update_settings(|s| drop(s.launch.profiles.insert(1, "Sample Alt".into())));
         let world = DIRECT_WORLDS[1];
         let (_, calls) = ctl.test_vrchat(vec![(200, made_answer(DIRECT_WORLDS[1])), (200, made_answer(DIRECT_WORLDS[1])), (200, serde_json::json!({}))]);
         let pc = fake_pc(&ctl, Fake { running: vec![20, 10], server: Some(20), side_args: vec![20], ..Default::default() });

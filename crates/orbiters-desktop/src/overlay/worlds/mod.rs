@@ -206,8 +206,6 @@ pub struct Worlds {
     /// VRChat's worlds in general: lists' pages read lately, the worlds visited.
     finder: finder::Finder,
     visited: finder::Visited,
-    /// Who looks: another VRChat account's visits are not listed.
-    viewer: orbiters_core::visited::Viewer,
     /// What the finder and the panel showed last (a change paints again).
     found_seen: (u64, u64),
     /// The tray service (VRChat's requests go through it), the account and session they are made for, signed in to
@@ -418,7 +416,6 @@ impl Worlds {
             pictures: crate::worlds::Pictures::new(&ctx),
             finder: finder::Finder::default(),
             visited: finder::Visited::default(),
-            viewer: Default::default(),
             found_seen: (0, 0),
             backend: None,
             scope: None,
@@ -541,7 +538,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             pictures: crate::worlds::Pictures::new(&ctx),
             finder: finder::Finder::default(),
             visited: finder::Visited::default(),
-            viewer: Default::default(),
             found_seen: (0, 0),
             backend: None,
             scope: None,
@@ -1274,11 +1270,6 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
             self.me = me;
             self.panel.dirty = true;
         }
-        let viewer = snap.viewer();
-        if self.viewer != viewer {
-            self.viewer = viewer;
-            self.panel.dirty = true;
-        }
         let scope = Scope::of(snap);
         if self.scope.as_ref() == Some(&scope) {
             return;
@@ -1419,7 +1410,7 @@ fn keep_an_eye_frame(steamvr: &vr::Client, n: u32) {
         };
         match shown {
             Shown::Captures => {}
-            Shown::Visited => self.visited.refresh(&self.viewer),
+            Shown::Visited => self.visited.refresh(),
             Shown::List(list) => {
                 if !self.askable(&list) {
                     return;

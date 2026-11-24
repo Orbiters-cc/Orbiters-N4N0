@@ -84,7 +84,6 @@ pub(crate) struct TestHost {
     /// and the locations it was asked for.
     vrchat_invite: Mutex<Option<orbiters_n4n0_core::menu::InviteAnswer>>,
     invited_self: Mutex<Vec<String>>,
-    /// Orbiters may not be asked about a previous instance.
     /// The VRChat account connected, when one is.
     vrchat_account: Mutex<String>,
     /// World feedback the menus asked.
@@ -3817,6 +3816,23 @@ fn orbiters_invites(status: u16, body: &'static str) -> (String, Arc<AtomicUsize
     (base, asked)
 }
 
+/// A private room of Previous instances goes to Orbiters' account as a public one does, whatever is known of whose visit it was
+/// (nothing is): that account may be able to invite there. What it could not do is said.
+#[test]
+fn invite_me_through_orbiters_goes_to_a_private_room() {
+    use orbiters_n4n0_core::menu::InviteAnswer;
+    let (base, asked) = orbiters_invites(201, r#"{"sent":true}"#);
+    let host = TestHost::default();
+    *host.server.lock().unwrap() = Some((base, "orbit-test".into()));
+    let rooms = ["1~friends(usr_x)~region(eu)", "1~hidden(usr_x)", "1~private(usr_x)~canRequestInvite", "1~private(usr_x)~nonce(n)", "1~group(grp_x)~groupAccessType(plus)"];
+    for (n, room) in rooms.iter().enumerate() {
+        let location = format!("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:{room}");
+        assert_eq!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), &location), InviteAnswer::Sent, "{room}");
+        assert_eq!(asked.load(Ordering::SeqCst), n + 1);
+    }
+    assert!(host.invited_self.lock().unwrap().is_empty());
+}
+
 /// REQUEST20 4: Invite me goes from the person's own VRChat account when the app has one connected (Orbiters is not
 /// asked); without one, Orbiters' account is asked, its befriend answer kept, and what it could not do says to connect
 /// a VRChat account.
@@ -3849,15 +3865,5 @@ fn invite_me_takes_the_connected_vrchat_account_else_orbiters_and_then_says_to_c
     assert!(message.contains("VRChat refused this invite") && message.contains("Connect your VRChat account"), "{message}");
     *host.server.lock().unwrap() = None;
     assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, host.invite_account().as_deref(), location), InviteAnswer::NeedsVrchat { message } if message.contains("Sign in to Orbiters")));
-    // A private one is one VRChat account's, which the member's is not known to be: not sent to Orbiters, whatever this computer
-    // keeps of it.
-    let host = TestHost::default();
-    *host.server.lock().unwrap() = Some((base, "orbit-test".into()));
-    let before = asked.load(Ordering::SeqCst);
-    for private in ["1~friends(usr_x)", "1~hidden(usr_x)", "1~private(usr_x)~nonce(n)", "1~group(grp_x)~groupAccessType(plus)", ""] {
-        let location = format!("wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd:{private}");
-        assert!(matches!(crate::screen::invite_route(&host, crate::FIRST_EPOCH, None, &location), InviteAnswer::NeedsVrchat { message } if message.contains("not known to be")), "{private}");
-    }
-    assert_eq!(asked.load(Ordering::SeqCst), before);
     assert!(host.invited_self.lock().unwrap().is_empty());
 }

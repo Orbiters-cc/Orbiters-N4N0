@@ -31,6 +31,9 @@ pub struct Gate {
     base: Instant,
     expires: AtomicU64,
     operations: AtomicU64,
+    /// Who its client is signed in as (the client says it as it changes): read without the client, which is held for as long
+    /// as VRChat takes to answer.
+    user: Mutex<Option<String>>,
 }
 impl Default for Gate {
     fn default() -> Self {
@@ -39,12 +42,16 @@ impl Default for Gate {
 }
 impl Gate {
     pub fn for_duration(lifetime: Duration) -> Self {
-        let gate = Self { revoked: AtomicBool::new(false), base: Instant::now(), expires: AtomicU64::new(0), operations: AtomicU64::new(0) };
+        let gate = Self { revoked: AtomicBool::new(false), base: Instant::now(), expires: AtomicU64::new(0), operations: AtomicU64::new(0), user: Mutex::new(None) };
         gate.extend(lifetime);
         gate
     }
     pub fn allowed(&self) -> bool {
         !self.revoked.load(Ordering::Acquire) && (self.base.elapsed().as_nanos() as u64) < self.expires.load(Ordering::Acquire)
+    }
+    /// Who its client is signed in as, while it allows it ([`Client::signed_in_user_id`], for one that may not wait for it).
+    pub fn signed_in_user_id(&self) -> Option<String> {
+        self.allowed().then(|| self.user.lock().unwrap().clone()).flatten()
     }
     /// Good for at least `lifetime` from now (never shorter than it was). A revoked gate stays revoked.
     pub fn extend(&self, lifetime: Duration) {
@@ -902,6 +909,11 @@ impl Client {
     pub fn signed_in_user_id(&self) -> Option<&str> {
         self.signed_in().then(|| self.user.as_ref().map(|u| u.id.as_str())).flatten()
     }
+    /// Who is signed in changes here alone: the gate says it too. Gives who was.
+    fn set_user(&mut self, user: Option<User>) -> Option<User> {
+        *self.allowed.user.lock().unwrap() = user.as_ref().map(|u| u.id.clone());
+        std::mem::replace(&mut self.user, user)
+    }
     fn authenticated(&self) -> Result<()> {
         self.permitted()?;
         if self.user.is_some() {
@@ -966,7 +978,7 @@ impl Client {
     /// Lets go of the session in memory only (its file stays for a later restore).
     fn clear(&mut self) {
         self.cookies = Cookies::default();
-        self.user = None;
+        self.set_user(None);
         self.pending_methods.clear();
         self.challenge_verified = false;
         self.avatars.clear();
@@ -978,7 +990,7 @@ impl Client {
     /// VRChat ended the session: it is let go of in memory, its account kept for "Sign in again". The file is not removed
     /// (only the person's own sign-out does that): if VRChat was wrong, a restart or "Try again" brings it back.
     fn end(&mut self) {
-        if let Some(user) = self.user.take() {
+        if let Some(user) = self.set_user(None) {
             self.ended = Some(user);
         }
         self.clear();
@@ -999,7 +1011,8 @@ impl Client {
     /// session: cookies, who is signed in, what was read with it, its transport and saved file. This one keeps nothing
     /// and stays on its own, revoked gate: requests queued on it are refused. Nothing is read again or asked of VRChat.
     pub fn hand_over(&mut self, gate: Arc<Gate>) -> Client {
-        Client {
+        let user = self.set_user(None);
+        let mut next = Client {
             transport: self.transport.clone(),
             cookies: std::mem::take(&mut self.cookies),
             allowed: gate,
@@ -1007,7 +1020,7 @@ impl Client {
             #[cfg(test)]
             pacing_pause: None,
             limiter: self.limiter.clone(),
-            user: self.user.take(),
+            user: None,
             pending_methods: std::mem::take(&mut self.pending_methods),
             challenge_verified: std::mem::take(&mut self.challenge_verified),
             avatars: std::mem::take(&mut self.avatars),
@@ -1019,7 +1032,9 @@ impl Client {
             ended: self.ended.take(),
             recheck_delay: self.recheck_delay,
             retrying: false,
-        }
+        };
+        next.set_user(user);
+        next
     }
     /// Who is signed in, while the grant allows it.
     pub fn signed_in_user(&self) -> Option<User> {
@@ -1225,7 +1240,7 @@ impl Client {
         match &login {
             Login::SignedIn(user) => {
                 self.save()?;
-                self.user = Some(user.clone());
+                self.set_user(Some(user.clone()));
                 self.ended = None;
                 self.pending_methods.clear();
                 self.challenge_verified = false;
@@ -1233,7 +1248,7 @@ impl Client {
             Login::TwoFactor(methods) => {
                 // A new challenge (also when a saved two-factor cookie no longer counts): the next code is sent.
                 self.challenge_verified = false;
-                self.user = None;
+                self.set_user(None);
                 self.avatars.clear();
                 self.worlds.clear();
                 self.friends = None;
@@ -2918,6 +2933,27 @@ pub(crate) mod tests {
         assert!(c.instance_seen("wrld_00000000-0000-4000-8000-000000000001", "1~region(eu)", Duration::from_secs(5)).unwrap().1 < Duration::from_secs(5));
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
+    /// Who is signed in is said by the gate too, for one that may not wait for the client: at a sign-in, its end, and a new grant,
+    /// whose old one says nobody.
+    #[test]
+    fn the_gate_says_who_its_client_is_signed_in_as() {
+        let gate = Arc::new(Gate::for_duration(Duration::from_secs(60)));
+        let mut c = Client::new(gate.clone());
+        c.store = None;
+        assert_eq!(gate.signed_in_user_id(), None);
+        c.cookies.auth = "fake".into();
+        c.set_user(Some(User { id: "usr_a".into(), ..Default::default() }));
+        let held = c.signed_in_user_id().map(str::to_owned);
+        assert_eq!((gate.signed_in_user_id(), held), (Some("usr_a".into()), Some("usr_a".into())));
+        let next = Arc::new(Gate::for_duration(Duration::from_secs(60)));
+        let mut new = c.hand_over(next.clone());
+        assert_eq!((gate.signed_in_user_id(), next.signed_in_user_id()), (None, Some("usr_a".into())));
+        new.end();
+        assert_eq!(next.signed_in_user_id(), None);
+        new.set_user(Some(User { id: "usr_b".into(), ..Default::default() }));
+        next.revoke();
+        assert_eq!(next.signed_in_user_id(), None, "nothing is allowed");
+    }
     /// r20: a new grant (another Orbiters identity or environment) goes on with the session in memory: nothing read again,
     /// nothing asked of VRChat, and the earlier grant's client keeps nothing.
     #[test]
@@ -3217,7 +3253,7 @@ pub fn offline_client(gate: Arc<Gate>) -> Client {
     let (c, _) = test_client(gate, vec![]);
     let mut c = c;
     c.cookies = Cookies::default();
-    c.user = None;
+    c.set_user(None);
     c
 }
 
@@ -3238,7 +3274,7 @@ pub fn test_client(gate: Arc<Gate>, replies: Vec<(u16, serde_json::Value)>) -> (
     c.recheck_delay = Duration::ZERO;
     c.limiter = Arc::new(Mutex::new(Limiter { unpaced: true, ..Default::default() }));
     c.cookies.auth = "fake".into();
-    c.user = Some(User { id: "usr_test".into(), ..Default::default() });
+    c.set_user(Some(User { id: "usr_test".into(), ..Default::default() }));
     c.transport = Arc::new(Fake { replies: Mutex::new(replies.into()), calls: calls.clone() });
     (c, calls)
 }

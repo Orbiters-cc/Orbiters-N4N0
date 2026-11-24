@@ -370,17 +370,11 @@ pub struct InstanceRow {
     pub world: String,
     /// When it was joined last (Unix seconds).
     pub at: u64,
-    /// The VRChat account (its user id) that joined it, when its log said: shown and sent for that one alone.
-    pub account: Option<String>,
 }
 
 impl InstanceRow {
     /// Who may join it, as VRChat names it: Public, Friends+, Friends, Invite+, Invite, Group, Group+, Group Public.
     pub fn kind(&self) -> &'static str {
-        // (Not shown: it is not known to be the account's.)
-        if self.location.ends_with(':') {
-            return mark("Private");
-        }
         let tags = self.location.split_once('~').map_or("", |(_, t)| t);
         let has = |tag: &str| tags.split('~').any(|t| t.starts_with(tag));
         if has("group(") {
@@ -3793,7 +3787,7 @@ mod tests {
     }
 
     fn instance(i: u64) -> InstanceRow {
-        InstanceRow { location: format!("wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f:{i}~region(eu)"), world: format!("World {i}"), at: 1000 + i, account: None }
+        InstanceRow { location: format!("wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f:{i}~region(eu)"), world: format!("World {i}"), at: 1000 + i }
     }
 
     #[test]

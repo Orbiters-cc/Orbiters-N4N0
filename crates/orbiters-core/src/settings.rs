@@ -940,8 +940,6 @@ impl Settings {
         if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
             settings.usage.enabled = false;
         }
-        // Which VRChat profiles are used here was remembered in what did not read: it is not known now, and not again.
-        settings.launch.profiles_lost |= dropped.iter().any(|d| matches!(d.as_str(), "(not JSON)" | "launch" | "launch.profiles" | "launch.profile_ids" | "launch.profiles_seen" | "launch.profiles_lost"));
         (settings, dropped)
     }
 
@@ -1004,7 +1002,6 @@ impl Settings {
     fn unread() -> Self {
         let mut s = Self::default();
         s.usage.enabled = false;
-        s.launch.profiles_lost = true;
         s
     }
 
@@ -1298,37 +1295,6 @@ mod tests {
         assert_eq!(read(&format!(r#"{{"sessions_dir": "/Users/sample/Orbiters", "{LEGACY_N4N0_KEY}": {{"wake_word": true}}, "launch": {{"mac_render_percent": 58}}}}"#)), 45);
         assert!(Settings::load_from(&path).n4n0.wake_word);
         std::fs::remove_dir_all(dir).ok();
-    }
-
-    /// Which VRChat profiles are used here is remembered; where that could not be read, it is known not to be known, at the next
-    /// start too.
-    #[test]
-    fn the_profiles_remembered_are_kept_or_known_to_be_lost() {
-        let path = std::env::temp_dir().join(format!("orbiters-settings-profiles-{}.json", uuid::Uuid::new_v4()));
-        let load = |text: &str| {
-            std::fs::write(&path, text).unwrap();
-            Settings::load_from(&path).launch
-        };
-        let kept = load(r#"{"launch": {"profiles_seen": [2]}}"#);
-        assert!(!kept.profiles_lost && kept.profiles_seen.contains(&2));
-        let mut settings = Settings::default();
-        settings.launch.profiles_seen.insert(5);
-        settings.save_to(&path).unwrap();
-        assert!(Settings::load_from(&path).launch.profiles_seen.contains(&5));
-        assert!(!load("{}").profiles_lost, "a first start remembers none");
-        assert!(!load(r#"{"launch": {"fps": "x", "profiles_seen": [2]}}"#).profiles_lost, "another field of it");
-        for damaged in ["{", r#"{"launch": 3}"#, r#"{"launch": {"profiles": 3}}"#, r#"{"launch": {"profiles_seen": ["x"]}}"#] {
-            let lost = load(damaged);
-            assert!(lost.profiles_lost, "{damaged}");
-            Settings { launch: lost, ..Settings::default() }.save_to(&path).unwrap();
-            assert!(Settings::load_from(&path).launch.profiles_lost, "and at the next start: {damaged}");
-        }
-        for entry in std::fs::read_dir(path.parent().unwrap()).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(&*path.file_name().unwrap().to_string_lossy()) {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 
     /// Settings another program held while they were loaded (a backup, an antivirus, a sync client) are not saved over

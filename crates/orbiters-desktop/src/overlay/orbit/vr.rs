@@ -2060,6 +2060,7 @@ impl OrbitVr {
         }
         self.panels.follow(cx.snap, cx.backend.library_version());
         self.panels.serve_assistant(cx.snap);
+        self.panels.serve_avatar_gun(cx.snap);
         self.panels.menu_turn(cx.snap);
         self.panels.step_springs(dt);
 

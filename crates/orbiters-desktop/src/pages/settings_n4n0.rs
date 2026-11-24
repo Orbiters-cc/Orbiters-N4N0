@@ -205,6 +205,20 @@ pub fn menu_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bo
     apply
 }
 
+/// The avatar gun: who may change this player's avatar with one (contracts `Docs/avatar-gun.md`). The gun itself, its
+/// picker and how it works, are on the N4N0 page.
+pub fn avatar_gun_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
+    let mut apply = false;
+    section(ui, cx, index, icons::CROSSHAIR, tr(super::avatar_gun::TITLE), Some(tr(super::avatar_gun::SUB)), |ui| {
+        let options = super::avatar_gun::allow_options();
+        let width = widgets::segmented_width(ui, &options, true);
+        widgets::field(ui, tr(super::avatar_gun::WHO), Some(tr(super::avatar_gun::WHO_WHY)), width, |ui| {
+            apply |= widgets::segmented(ui, "avatar-gun-allow", &mut draft.avatar_gun.allow, &options, true);
+        });
+    });
+    apply
+}
+
 /// Calls on or off, and directly or through the relay. The calls themselves are on the N4N0 page.
 pub fn calls_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
     let calls = &cx.snap.n4n0.calls;

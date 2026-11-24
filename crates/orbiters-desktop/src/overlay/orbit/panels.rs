@@ -24,6 +24,8 @@ mod booster_sheet;
 pub mod share_sheet;
 pub mod share_here;
 pub mod history_sheet;
+pub mod avatar_gun_sheet;
+pub use avatar_gun_sheet::GunFacts;
 pub use history_sheet::HistoryFacts;
 pub use share_sheet::{ChooserRow, ChooserView, ShareView};
 pub use booster_sheet::{booster_level_at, BoosterFacts, BoosterPick};
@@ -184,6 +186,10 @@ pub enum Action {
     Peek,
     /// The FPS booster's sheet.
     Booster,
+    /// The avatar gun's picker; an avatar of it pressed (its place in the page's list), Try again.
+    AvatarGun,
+    AvatarGunPick(usize),
+    AvatarGunRetry,
     /// Live translation's sheet.
     Translate,
     /// The sheet of settings for these menus, and something chosen on it.
@@ -342,6 +348,8 @@ pub enum Sheet {
     Translate,
     /// The videos the worlds' players played (REQUEST19 2), from YouTube's page: the window's Videos tab's list.
     VideoHistory,
+    /// The avatar gun's picker: the avatars of the account's favourite lists.
+    AvatarGun,
 }
 
 /// What can be chosen on the sheet of settings.
@@ -724,6 +732,9 @@ pub struct Facts {
     pub videos_for: String,
     /// History's page (REQUEST19 2): the videos played in worlds, those in view.
     pub history: HistoryFacts,
+    /// The avatar gun's picker, made only while it shows; and whether the worn avatar has the gun (All tools offers it then).
+    pub avatar_gun: GunFacts,
+    pub can_avatar_gun: bool,
     /// Talking with N4N0: where it stands, the conversation (whether the person said it, what was said), what N4N0 says right now, and how to call it by name when that is on.
     pub talk: TalkNow,
     /// Listening by itself (it hears when the person starts and stops), or by the button (F24).
@@ -974,6 +985,10 @@ pub enum Look {
     /// page: its way back, a video's row, its Copy link and Drop in world ([`history_sheet`]).
     HistoryButton,
     HistoryBack,
+    /// The avatar gun's picker ([`avatar_gun_sheet`]): an avatar's tile, Try again, Connect VRChat.
+    AvatarGunTile(usize),
+    AvatarGunRetry,
+    AvatarGunConnect,
     HistoryRow(usize),
     HistoryCopy(usize),
     HistoryDrop(usize),
@@ -1233,6 +1248,10 @@ fn accessories(facts: &Facts) -> Vec<(Action, &'static str, &'static str)> {
     }
     if orbiters_core::osc::VRCHAT_RUNS_HERE {
         small.push((Action::Booster, icons::GAUGE, tr("FPS booster")));
+    }
+    // Only while the worn avatar has the gun: no page that could do nothing.
+    if facts.can_avatar_gun && orbiters_core::osc::VRCHAT_RUNS_HERE {
+        small.push((Action::AvatarGun, icons::CROSSHAIR, tr(avatar_gun_sheet::TITLE)));
     }
     small.push((Action::Settings, icons::GEAR_SIX, tr("Settings")));
     small.push((Action::OpenApp, icons::N4N0_MARK, tr("Open Orbiters")));
@@ -1815,6 +1834,7 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
         Sheet::Booster => booster_items(facts),
         Sheet::Translate => translate_items(facts),
         Sheet::VideoHistory => history_sheet::items(facts),
+        Sheet::AvatarGun => avatar_gun_sheet::items(facts),
         Sheet::Menu | Sheet::Worlds => Vec::new(),
     }
 }
@@ -2162,6 +2182,7 @@ pub fn snap_scroll(sheet: Sheet, facts: &Facts, to: f32) -> f32 {
             nearest(&mut (0..facts.videos.len()).map(|i| i as f32 * (height + 12.0)))
         }
         Sheet::VideoHistory => nearest(&mut history_sheet::row_tops(facts)),
+        Sheet::AvatarGun => nearest(&mut avatar_gun_sheet::row_tops(&facts.avatar_gun).into_iter()),
         _ => to,
     }
 }
@@ -2178,6 +2199,7 @@ pub fn max_scroll(sheet: Sheet, facts: &Facts) -> f32 {
             (top + facts.videos.len().div_ceil(columns) as f32 * (height + 12.0) + 8.0 - 576.0).max(0.0)
         }
         Sheet::VideoHistory => history_sheet::max_scroll(facts),
+        Sheet::AvatarGun => avatar_gun_sheet::max_scroll(&facts.avatar_gun),
         Sheet::Talk if facts.talk_actions => (TALK_TOP + facts.talk_log.len() as f32 * (TALK_LOG_ROW + 8.0) + 8.0 - talk_bottom(facts)).max(0.0),
         Sheet::Talk => (TALK_TOP + facts.talk_lines.iter().map(|(_, t)| talk_line_height(t)).sum::<f32>() + facts.talk_heard.as_deref().map_or(0.0, talk_line_height) + 8.0 - talk_bottom(facts)).max(0.0),
         _ => 0.0,
@@ -2192,6 +2214,7 @@ pub fn scroll_bar(sheet: Sheet, facts: &Facts) -> Option<(f32, f32, f32)> {
             Sheet::Pictures => GALLERY_TOP,
             Sheet::Results => RESULTS_TOP,
             Sheet::VideoHistory => history_sheet::TOP,
+            Sheet::AvatarGun => avatar_gun_sheet::TOP,
             Sheet::Talk => TALK_TOP,
             _ => 8.0,
         };
@@ -2207,8 +2230,8 @@ pub fn scroll_from_bar(sheet: Sheet, facts: &Facts, y: f32) -> f32 {
 
 /// Whether a press on this is the start of a drag as much as a press: what lies in a list that scrolls. It only acts if let go without moving.
 pub fn scrolls_with_a_drag(sheet: Sheet, look: &Look) -> bool {
-    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory)
-        && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop | Look::VideoCopy(_) | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_))
+    matches!(sheet, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory | Sheet::AvatarGun)
+        && matches!(look, Look::Capture(_) | Look::Visit(_) | Look::Chip { .. } | Look::Video(_) | Look::VideoDrop | Look::VideoCopy(_) | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_) | Look::AvatarGunTile(_))
 }
 
 /// Where what plays's timeline lies on its panel, tall enough for a laser to find.
@@ -2317,6 +2340,7 @@ fn tile_line(action: Action, facts: &Facts) -> Option<String> {
         Action::Page(Target::Qr) => tr("Open a link shown in the world"),
         Action::Page(Target::Suggest) => tr("Tell the Orbiters team"),
         Action::Booster => tr("More frames, only what helps"),
+        Action::AvatarGun => tr(avatar_gun_sheet::TILE_LINE),
         Action::Translate => tr("Signs and chat in your language"),
         Action::Settings => tr("These menus' look and sound"),
         Action::OpenApp => tr("The full app, on your computer."),
@@ -2609,6 +2633,7 @@ fn sheet_how(facts: &Facts) -> Option<String> {
         Sheet::Instances => tr("Press a time to be invited back to that visit.").to_string(),
         Sheet::Results => tr("Drop in world puts a card there that anyone can take.").to_string(),
         Sheet::VideoHistory => tr("Press a video to copy its link, for the world's player.").to_string(),
+        Sheet::AvatarGun => tr(avatar_gun_sheet::HOW).to_string(),
         Sheet::Talk => tr("N4N0 answers aloud and here, in the conversation.").to_string(),
         Sheet::All => tr("Point at a tile to read what it does.").to_string(),
         _ => return None,
@@ -2623,6 +2648,7 @@ fn sheet_says(facts: &Facts) -> &'static str {
         Some(Sheet::Instances) => tr("Where you were lately. Go back with an invite."),
         Some(Sheet::Results) => tr("Copy a link for the world's player, or drop it in the world."),
         Some(Sheet::VideoHistory) => tr(history_sheet::OPEN_WHY),
+        Some(Sheet::AvatarGun) => tr(avatar_gun_sheet::OPEN_WHY),
         Some(Sheet::Talk) => tr("Press the button, and ask N4N0 anything."),
         Some(Sheet::Settings) => tr("How these menus lie, move, sound and look."),
         Some(Sheet::Tracking) => tr("Less jitter, a little more lag, in milliseconds."),
@@ -2646,6 +2672,7 @@ fn sheet_mark(facts: &Facts) -> (&'static str, Color32) {
         Some(Sheet::Mics) => (icons::MICROPHONE, look::LABEL),
         Some(Sheet::Tracking) => (icons::VIRTUAL_REALITY, tool_tint(Action::Page(Target::Tracking))),
         Some(Sheet::Booster) => (icons::GAUGE, look::LABEL),
+        Some(Sheet::AvatarGun) => (icons::CROSSHAIR, look::LABEL),
         Some(Sheet::Translate) => (icons::GLOBE, look::LABEL),
         // A colour of its own too, as every sheet's head has (round 11's judges found it the only grey one): indigo, which no large tile of it has.
         Some(Sheet::All) => (icons::SQUARES_FOUR, theme::INDIGO),
@@ -2786,6 +2813,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::VideoDrop(_) => (tr("Drop in world").into(), tr("Puts a card with the link in front of you, for anyone to grab.").into()),
         Action::ResultsBack => (tr("Search again").into(), tr("Back to the search, to change what you looked for.").into()),
         Action::VideoHistory | Action::HistoryCopy(_) | Action::HistoryDrop(_) => return history_sheet::caption(action, facts),
+        Action::AvatarGun | Action::AvatarGunPick(_) | Action::AvatarGunRetry => return avatar_gun_sheet::caption(action, facts),
         Action::Talk if facts.n4n0 && facts.assistant_off => (tr("Ask N4N0").into(), tr("Its assistant is off: open it to turn it back on.").into()),
         Action::Talk if facts.n4n0 => (tr("Ask N4N0").into(), tr("Your assistant in VRChat: talk to it, and see all it said.").into()),
         Action::AssistantSwitch if !facts.assistant_off => (tr("Assistant on").into(), tr("Press to turn it off: N4N0 stops listening and answering.").into()),
@@ -3123,7 +3151,7 @@ pub fn paint(p: &Painter, zone: Zone, size: Vec2, facts: &Facts, hover: Option<u
     }
     // A list goes on under its foot: it fades there, and is not cut.
     if zone == Zone::Takeover && facts.opened.is_none() {
-        if let Some(sheet) = facts.sheet.filter(|s| matches!(s, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory)) {
+        if let Some(sheet) = facts.sheet.filter(|s| matches!(s, Sheet::Pictures | Sheet::Instances | Sheet::Results | Sheet::VideoHistory | Sheet::AvatarGun)) {
             if facts.gallery_scroll < max_scroll(sheet, facts) - 1.0 {
                 let foot = Rect::from_min_max(pos2(0.0, 576.0 - 56.0), pos2(1024.0 - SCROLL_BAR_GRAB, 576.0));
                 orbiters_ui::paint::fill_gradient(p, &[foot.left_top(), foot.right_top(), foot.right_bottom(), foot.left_bottom()], &orbiters_ui::paint::Gradient::vertical(foot, &[(0.0, Color32::TRANSPARENT), (1.0, look::OPAQUE)]));
@@ -3168,6 +3196,9 @@ pub fn paint_sheet(p: &Painter, sheet: Sheet, facts: &Facts, hover: Option<usize
     }
     if sheet == Sheet::VideoHistory {
         history_sheet::draw_page(p, facts);
+    }
+    if sheet == Sheet::AvatarGun {
+        avatar_gun_sheet::draw_page(p, facts);
     }
     if sheet == Sheet::Instances && facts.worlds_visited.is_empty() {
         widgets::icon(p, page.center() - vec2(0.0, 30.0), icons::CLOCK, 54.0, look::MUTED);
@@ -4187,6 +4218,7 @@ fn draw(p: &Painter, zone: Zone, item: &Item, facts: &Facts, hovered: bool, pres
             clip.text(rect.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
         }
         Look::HistoryButton => history_sheet::draw_round_button(p, rect, hovered, pressed),
+        Look::AvatarGunTile(_) | Look::AvatarGunRetry | Look::AvatarGunConnect => avatar_gun_sheet::draw_item(p, item, facts, hovered, pressed),
         Look::HistoryBack | Look::HistoryRow(_) | Look::HistoryCopy(_) | Look::HistoryDrop(_) => history_sheet::draw_item(p, item, facts, hovered, pressed),
         Look::Back => {
             // What was searched, as a field: it can be changed from here.
@@ -5962,7 +5994,7 @@ mod tests {
         let pages: Vec<(Sheet, &str)> = vec![
             (Sheet::Worlds, "Worlds"), (Sheet::Results, "YouTube"), (Sheet::Menu, "YouTube"), (Sheet::Instances, "Instances"), (Sheet::Pictures, "Pictures"),
             (Sheet::Talk, "Ask N4N0"), (Sheet::Settings, "Settings"), (Sheet::Tracking, "Smooth tracking"), (Sheet::Mics, "Microphones"), (Sheet::Booster, "Boost FPS"),
-            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"), (Sheet::VideoHistory, "Video history"),
+            (Sheet::Menu, "Saved looks"), (Sheet::Menu, "QR code"), (Sheet::VideoHistory, "Video history"), (Sheet::AvatarGun, "Avatar gun"),
         ];
         let size = Zone::SheetBack.units().size();
         for language in Language::ALL {

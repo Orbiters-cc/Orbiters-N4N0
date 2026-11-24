@@ -267,6 +267,10 @@ pub enum ToService {
     N4n0 {
         command: N4n0Command,
     },
+    /// The avatar gun: a press on the hit player's card.
+    AvatarGun {
+        command: crate::controller::avatar_gun::Command,
+    },
     /// Explorer points: a press on the world notice or the camera's share buttons.
     Explorer {
         command: crate::controller::explorer::Command,

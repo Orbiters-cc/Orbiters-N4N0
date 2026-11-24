@@ -4148,7 +4148,7 @@ fn with_world_notice(snap: &Snapshot) -> Snapshot {
 fn with_wake_offer(snap: &Snapshot) -> Snapshot {
     use crate::state::{CallPhase, CallView};
     let mut s = snap.clone();
-    s.n4n0.calls.call = Some(CallView { name: "Nova Fox".into(), phase: CallPhase::Connected, incoming: false, connected_at_ms: Some(crate::wake_offer::now_ms() - 192_000), muted: false, mic_level: 0.2, remote_level: 0.4 });
+    s.n4n0.calls.call = Some(CallView { number: 1, name: "Nova Fox".into(), phase: CallPhase::Connected, incoming: false, connected_at_ms: Some(crate::wake_offer::now_ms() - 192_000), muted: false, mic_level: 0.2, remote_level: 0.4 });
     // Long enough for the frames the harness paints.
     s.n4n0.voice.wake_offer = Some(orbiters_n4n0::status::WakeOffer { id: 1, until_ms: crate::wake_offer::now_ms() + 600_000, for_ms: 1_200_000 });
     s
@@ -4181,6 +4181,7 @@ fn with_calls(snap: &Snapshot, ringing: bool) -> Snapshot {
         ["Kiri", "Nova Fox", "Rexouium Fan"].iter().enumerate().map(|(i, n)| CallContact { id: format!("c_{i}"), name: n.to_string() }).collect();
     if ringing {
         s.n4n0.calls.call = Some(CallView {
+            number: 1,
             name: "Nova Fox".into(),
             phase: CallPhase::Ringing,
             incoming: true,

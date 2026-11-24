@@ -46,5 +46,11 @@
   "Orbiters is still signing you in: nothing was done. Try again in a moment.": "Orbitersがまだログイン処理中です。何も実行されていません。少ししてからもう一度お試しください。",
   "Your Orbiters account could not be read on this computer, so you are signed out for now. Orbiters keeps trying; if this stays, sign in again.": "このパソコンでOrbitersアカウントを読み込めなかったため、今はサインアウトしています。Orbitersは再試行を続けます。続く場合は、もう一度サインインしてください。",
   "Your VRChat account changed meanwhile: nothing was sent.": "その間にVRChatアカウントが変わりました。何も送信されていません。",
-  "This Orbiters account belongs to another environment: nothing was sent.": "このOrbitersアカウントは別の環境のものです。何も送信されていません。"
+  "This Orbiters account belongs to another environment: nothing was sent.": "このOrbitersアカウントは別の環境のものです。何も送信されていません。",
+  "N4N0 asks about more than fits here: read and answer it in the chat of Orbiters' window.": "N4N0の質問は長くてここには収まりません。Orbitersのウィンドウのチャットで読んで答えてください。",
+  "N4N0 asks you something: read and answer it in the chat of Orbiters' window.": "N4N0から質問があります。Orbitersのウィンドウのチャットで読んで答えてください。",
+  "Nothing was done: N4N0's question was not shown there. Read it and answer in the chat at the top of Orbiters' window, on Ask N4N0 beside VRChat's menu, or once it stands on N4N0's panel. It asks: {question}": "何も実行されていません。N4N0の質問はそこには表示されていませんでした。Orbitersのウィンドウ上部のチャット、VRChatのメニューの横の「N4N0に聞く」、またはN4N0のパネルに全部表示されてから、読んで答えてください。質問：{question}",
+  "Open its chat": "チャットを開く",
+  "Scroll up to read all of it first": "先に上へスクロールして全部読んでください",
+  "The next 3D capture is not shared after all: what N4N0 does from your account is off.": "次の3Dキャプチャは結局共有されません。N4N0があなたのアカウントから行う操作がオフになっています。"
 }

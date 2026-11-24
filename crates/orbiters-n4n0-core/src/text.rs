@@ -138,6 +138,16 @@ fn greek(c: char) -> Option<&'static str> {
     })
 }
 
+/// Whether N4N0's panel (and its screen, whose letters are the panel's) shows every character of `text` as it is: typographic
+/// quotes, dashes and spaces as their plain ones, nothing dropped and nothing in another's place.
+pub fn shown_as_is(text: &str) -> bool {
+    text.chars().all(|c| {
+        n4n0::glyph_index(c).is_some()
+            || c.is_whitespace()
+            || matches!(c, '\u{2018}'..='\u{201F}' | '\u{2010}'..='\u{2015}')
+    })
+}
+
 /// `text` with what the contract's folding (`n4n0::fold`) cannot place made placeable first: accents written as a
 /// letter and a combining mark joined into one letter, Vietnamese letters as their nearest, Greek in Latin letters.
 /// The contract would show them as `?`, or drop the accent.

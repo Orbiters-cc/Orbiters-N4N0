@@ -530,6 +530,7 @@ mod incident;
 mod picture;
 mod language;
 mod maps;
+mod member;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;

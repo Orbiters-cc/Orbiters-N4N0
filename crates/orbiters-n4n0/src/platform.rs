@@ -36,11 +36,14 @@ pub struct Scene {
 pub enum CallRequest {
     /// Calls a friend (a contact id of [`CallsStatus`]).
     Contact(String),
-    /// Answers the ringing call.
-    Answer,
-    /// Declines the ringing call or hangs up.
-    End,
-    Mute(bool),
+    /// Answers the ringing call of that number ([`crate::status::CallView::number`]); another one, or none: nothing.
+    Answer(u64),
+    /// Declines the ringing call of that number, or hangs it up.
+    End(u64),
+    Mute {
+        call: u64,
+        on: bool,
+    },
     /// The avatar's call menu (`N4N0/Call/Menu`): the panel lists the friends, or no longer.
     Menu,
     /// `N4N0/Call/Go`: calls the friend picked, or ends the call.
@@ -234,10 +237,21 @@ pub trait Host: Send + Sync + 'static {
     fn assistant_state(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
+    /// Who and what one of the app's own intents is for, now (the VRChat account, the friend a name means): taken as the
+    /// person is asked, done for those or not at all. `says`, in it, names it for the person.
+    fn assistant_target(&self, _intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        Ok(serde_json::Value::Null)
+    }
     /// Runs one of the app's own intents by the path its pages use (on the assistant's thread: it may wait for a
     /// moment). `item`: the list item an index named, as this app answered it (its `ref`). The result is for the model;
     /// a query's list goes in `items`.
-    fn assistant_intent(&self, _intent: &orbiters_n4n0_core::intents::Intent, _item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+    /// `target`: what [`Host::assistant_target`] said the intent is for, as it was asked about.
+    fn assistant_intent(
+        &self,
+        _intent: &orbiters_n4n0_core::intents::Intent,
+        _item: Option<&serde_json::Value>,
+        _target: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         Err(orbiters_n4n0_core::intents::Need::Computer.missing().into())
     }
 }

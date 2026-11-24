@@ -181,7 +181,8 @@ pub fn test_root() -> std::path::PathBuf {
     orbiters_core::paths::test_roots().config.parent().expect("the test root").to_path_buf()
 }
 
-/// Who a page's work for Orbiters is for: the environment and the account's key ([`AccountFollow::see`]).
+/// Who a page's work for Orbiters is for: the environment and the member's key, their id there and never their name
+/// ([`AccountFollow::see`], verify4-r21 P3).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Owner {
     pub development: bool,
@@ -203,9 +204,9 @@ pub struct Seen {
 }
 
 /// Follows the account for what a page asked Orbiters for it: WHO it is, not how its check with Orbiters is going.
-/// `Checking`, `Offline` and `SignedIn` of the same name are the same person (the check runs again every minute while
+/// `Checking`, `Offline` and `SignedIn` of the same member are the same person (the check runs again every minute while
 /// Orbiters cannot be reached, and whenever a tool rewrites the saved account): what was shown for them stays. Another
-/// name (or none), another environment, or a sign-in Orbiters refused (`Expired`), is another owner.
+/// member (or none), another environment, or a sign-in Orbiters refused (`Expired`), is another owner.
 #[derive(Default)]
 pub struct AccountFollow {
     /// Orbiters answered for this account at its last answer (`SignedIn`); a check under way keeps the last answer.
@@ -214,8 +215,9 @@ pub struct AccountFollow {
 }
 
 impl AccountFollow {
-    pub fn see(&mut self, state: &crate::state::AccountState, development: bool) -> Seen {
+    pub fn see(&mut self, status: &crate::state::AccountStatus, development: bool) -> Seen {
         use crate::state::AccountState as A;
+        let state = &status.state;
         let answered = match state {
             A::SignedIn { .. } => true,
             A::Checking { .. } | A::SigningIn => self.answered,
@@ -223,9 +225,10 @@ impl AccountFollow {
         };
         let now = answered && !self.answered;
         self.answered = answered;
-        let name = state.username().unwrap_or_default();
+        // Nobody known (being read, signed out): nobody's.
+        let member = status.member.as_deref().unwrap_or_default();
         // A sign-in Orbiters refused is no longer that account's access: what was asked with it goes.
-        let account = if matches!(state, A::Expired { .. }) { format!("{name}\u{0}expired") } else { name.to_owned() };
+        let account = if matches!(state, A::Expired { .. }) { format!("{member}\u{0}expired") } else { member.to_owned() };
         let owner = Owner { development, account };
         let changed = self.last.as_ref().is_some_and(|l| *l != owner);
         self.last = Some(owner.clone());
@@ -734,38 +737,76 @@ mod tests {
         use crate::state::AccountState as A;
         let x = || Some("x".to_owned());
         let mut f = AccountFollow::default();
-        let mut see = |s: &A| {
-            let seen = f.see(s, false);
+        let mut see = |s: A, member: Option<&str>| {
+            let seen = f.see(&crate::state::AccountStatus { state: s, member: member.map(str::to_string), ..Default::default() }, false);
             (seen.owner.account, seen.answered)
         };
-        assert_eq!(see(&A::Unknown), (String::new(), false));
-        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false));
-        assert_eq!(see(&A::Offline { username: x() }), ("x".into(), false));
-        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false));
-        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), true));
-        assert_eq!(see(&A::Checking { username: x() }), ("x".into(), false), "a check under way keeps the last answer");
-        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), false));
-        assert_eq!(see(&A::Expired { username: x() }), ("x\u{0}expired".into(), false), "a refused sign-in is not the same access");
-        assert_eq!(see(&A::SignedIn { username: "x".into() }), ("x".into(), true), "a renewed sign-in asks again");
-        assert_eq!(see(&A::SignedOut), (String::new(), false));
+        let m = Some("production/1");
+        assert_eq!(see(A::Unknown, None), (String::new(), false));
+        assert_eq!(see(A::Checking { username: x() }, m), ("production/1".into(), false));
+        assert_eq!(see(A::Offline { username: x() }, m), ("production/1".into(), false));
+        assert_eq!(see(A::Checking { username: x() }, m), ("production/1".into(), false));
+        assert_eq!(see(A::SignedIn { username: "x".into() }, m), ("production/1".into(), true));
+        assert_eq!(see(A::Checking { username: x() }, m), ("production/1".into(), false), "a check under way keeps the last answer");
+        assert_eq!(see(A::SignedIn { username: "renamed".into() }, m), ("production/1".into(), false));
+        assert_eq!(see(A::Expired { username: x() }, m), ("production/1\u{0}expired".into(), false), "a refused sign-in is not the same access");
+        assert_eq!(see(A::SignedIn { username: "x".into() }, m), ("production/1".into(), true), "a renewed sign-in asks again");
+        assert_eq!(see(A::SignedIn { username: "x".into() }, None), (String::new(), false), "nobody known, whatever the name");
+        assert_eq!(see(A::SignedOut, None), (String::new(), false));
     }
 
-    /// Night4, verify2 PAGES-UI-23: another owner is said the frame it comes, whatever a page asked; a result is taken
-    /// in only for the owner it was asked for.
+    /// Night4, verify2 PAGES-UI-23, verify4-r21 P3: another owner is said the frame it comes, whatever a page asked, a member of
+    /// the same name too; a result is taken in only for the owner it was asked for.
     #[test]
     fn a_result_is_taken_only_for_the_owner_it_was_asked_for() {
         use crate::state::AccountState as A;
+        let of = |state: A, member: &str| crate::state::AccountStatus { state, member: Some(member.to_string()), ..Default::default() };
+        let sam = || A::SignedIn { username: "Sam".into() };
         let mut f = AccountFollow::default();
-        let a = f.see(&A::SignedIn { username: "a".into() }, false);
+        let a = f.see(&of(sam(), "production/1"), false);
         assert!(!a.changed, "the first look is no change");
         let late = ForAccount::new(&a.owner, vec!["a's picture"]);
-        let b = f.see(&A::SignedIn { username: "b".into() }, false);
-        assert!(b.changed, "another account");
+        let b = f.see(&of(sam(), "production/2"), false);
+        assert!(b.changed, "another member, of the same name");
         assert_eq!(late.take_for(f.owner()), None, "a's answer landing after b came is dropped");
         assert_eq!(ForAccount::new(&b.owner, 1).take_for(f.owner()), Some(1));
-        assert!(f.see(&A::SignedIn { username: "b".into() }, true).changed, "another environment");
-        assert!(f.see(&A::Expired { username: Some("b".into()) }, true).changed, "a refused sign-in");
-        assert!(!f.see(&A::Expired { username: Some("b".into()) }, true).changed);
+        assert!(!f.see(&of(A::SignedIn { username: "Renamed".into() }, "production/2"), false).changed, "the same member, renamed");
+        assert!(f.see(&of(sam(), "development/2"), true).changed, "another environment");
+        assert!(f.see(&of(A::Expired { username: Some("Sam".into()) }, "development/2"), true).changed, "a refused sign-in");
+        assert!(!f.see(&of(A::Expired { username: Some("Sam".into()) }, "development/2"), true).changed);
+    }
+
+    /// Verify4-r21 P3: no page of a window (nor its pictures) reads the saved account: what it asks is the service's to send, as the
+    /// member on show.
+    #[test]
+    fn no_window_page_reads_the_saved_account() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    file(&path, out);
+                }
+            }
+        }
+        fn file(path: &std::path::Path, out: &mut Vec<String>) {
+            let source = std::fs::read_to_string(path).unwrap();
+            for (n, line) in source.lines().enumerate().filter(|(_, l)| !l.contains("contains(") && !l.trim_start().starts_with("//")) {
+                if ["account::read(", "account::read_saved(", "shares::api(", "controller::api("].iter().any(|w| line.contains(w)) {
+                    out.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        for dir in ["pages", "chat_bar", "overlay", "worlds"] {
+            walk(&src.join(dir), &mut found);
+        }
+        for name in ["worlds.rs", "app.rs", "window.rs"] {
+            file(&src.join(name), &mut found);
+        }
+        assert!(found.is_empty(), "{}", found.join("\n"));
     }
 
     /// What is said by the day is worked out again at each wait [`local_day_in`] gives. Followed from wait to wait

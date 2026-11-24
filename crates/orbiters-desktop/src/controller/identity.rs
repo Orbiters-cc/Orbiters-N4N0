@@ -45,6 +45,14 @@ impl Identity {
         }
     }
 
+    /// A member's key: the environment and the id (never a name); none for anyone else.
+    pub(super) fn key(&self) -> Option<String> {
+        match self {
+            Identity::Member { development, user } => Some(format!("{}{user}", crate::member::prefix(if *development { Server::Development } else { Server::Production }))),
+            _ => None,
+        }
+    }
+
     pub(super) fn signed_as(&self) -> SignedAs {
         match self {
             Identity::Anonymous => SignedAs::Nobody,
@@ -143,21 +151,28 @@ impl Controller {
     pub(super) fn install_account<R>(&self, install: impl FnOnce(&mut super::account::AccountRuntime) -> R) -> R {
         // Before the account's lock: what acts holds this and asks for the account (orbiters_n4n0's `fence`).
         let paused = self.n4n0.pause_effects();
-        let (out, moved, epoch, known) = {
+        let (out, moved, epoch, known, left, now) = {
             let mut rt = self.account_runtime.lock().unwrap();
             let before = rt.signed_as();
+            let left = rt.epochs.identity.clone();
             let out = install(&mut rt);
             let moved = rt.identity().map_or(Moved::Same, |next| rt.epochs.becomes(next));
             if let Moved::To(epoch) = moved {
                 self.identity_epoch.store(epoch, Ordering::SeqCst);
             }
-            (out, moved, rt.epochs.epoch(), before != rt.signed_as())
+            (out, moved, rt.epochs.epoch(), before != rt.signed_as(), left, rt.epochs.identity.clone())
         };
         match moved {
             Moved::Same if known => self.n4n0.publish(),
             Moved::Same => {}
             Moved::Resumed => paused.resume_account(epoch),
-            Moved::To(epoch) => paused.forget_account(epoch),
+            // Verify4-r21 P8: not known for a while (the file is being written again, or Orbiters has not said) is not a
+            // sign-out: what the member had said waits for them, out of everyone's reach.
+            Moved::To(epoch) => match now {
+                Identity::Unknown { .. } => paused.park_account(epoch, left.key().as_deref()),
+                Identity::Member { .. } => paused.establish_account(epoch, &now.key().unwrap_or_default()),
+                Identity::Anonymous => paused.forget_account(epoch),
+            },
         }
         out
     }
@@ -297,7 +312,7 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("controller");
         // (file, what is asked, how many times, why it may).
         const MAY: &[(&str, &str, usize, &str)] = &[
-            ("account.rs", "account::read_saved(", 2, "the account thread itself: what it reads is installed under the gate"),
+            ("account.rs", "account::read_saved(", 3, "the account thread itself: what it reads is installed under the gate; and whether the file still holds the credential whose member's id is written to it"),
             ("assistant.rs", "self.account_api()", 1, "whether somebody is signed in"),
             ("calls.rs", "account_api()", 5, "the calls' own identity: every request is stamped with it and checked as it goes (verify3 of calls)"),
             ("explorer.rs", "account_api()", 1, "reading the points shown"),

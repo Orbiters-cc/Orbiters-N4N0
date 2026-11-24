@@ -774,10 +774,6 @@ pub fn api(server: Server) -> anyhow::Result<(Api, String)> {
     let whose = Whose::saved(server)?;
     Ok((whose.api, whose.token))
 }
-pub fn feed(server: Server, query: shares::Query) -> anyhow::Result<shares::Feed> {
-    let (api, token) = api(server)?;
-    api.captures(&token, &query)
-}
 #[derive(Serialize, Deserialize)]
 struct Record {
     path: PathBuf,
@@ -919,6 +915,10 @@ fn edits_now(entry: &Entry) -> anyhow::Result<Option<String>> {
     }
 }
 fn records_path(server: Server) -> anyhow::Result<PathBuf> {
+    // A window lists what the member it shows uploaded; the service, the account saved.
+    if crate::member::linked() {
+        return records_of(server, crate::member::reading(server).map(|m| m.user).as_deref());
+    }
     let account = account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in first")))?;
     records_of(server, account.user.as_deref())
 }

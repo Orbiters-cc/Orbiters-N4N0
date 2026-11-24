@@ -1549,19 +1549,22 @@ impl super::Controller {
     }
 
     /// Answers the ringing call.
-    pub fn call_answer(self: &Shared) {
+    /// Answers the ringing call `number`, the one its surface showed; another one rings on.
+    pub fn call_answer(self: &Shared, number: u64) {
         if !self.calls_open_or_say() {
             return;
         }
         let (mic, direct) = self.with_settings(|s| (s.n4n0.mic_device.clone(), s.n4n0.direct_calls));
         let mic = (!mic.is_empty()).then_some(mic);
         let mut rt = self.calls.lock().unwrap();
+        if !rt.call.as_ref().is_some_and(|c| c.number == number && c.ringing_in()) {
+            return;
+        }
         rt.direct = direct;
         let without_relays = rt.call.as_ref().filter(|c| c.ringing_in()).and_then(|c| c.offer.as_ref()).is_some_and(|(_, servers)| servers.is_empty());
         if without_relays && !direct {
             // The call came without relay servers: this side asks for its own first (not on this thread, which may
             // be the one OSC arrives on). The answer is for this call, pressed by this identity.
-            let number = rt.call.as_ref().map(|c| c.number).unwrap_or_default();
             drop(rt);
             let whose = self.calls_identity().map(|(w, ..)| w);
             let ctl = self.clone();
@@ -1578,15 +1581,21 @@ impl super::Controller {
         self.calls_act(rt, acts);
     }
 
-    /// Declines a ringing call or hangs up.
-    pub fn call_end(self: &Shared) {
+    /// Declines the ringing call `number`, or hangs it up; another one goes on.
+    pub fn call_end(self: &Shared, number: u64) {
         let mut rt = self.calls.lock().unwrap();
+        if !rt.call.as_ref().is_some_and(|c| c.number == number) {
+            return;
+        }
         let acts = rt.hang_up();
         self.calls_act(rt, acts);
     }
 
-    pub fn call_mute(self: &Shared, on: bool) {
+    pub fn call_mute(self: &Shared, number: u64, on: bool) {
         let mut rt = self.calls.lock().unwrap();
+        if !rt.call.as_ref().is_some_and(|c| c.number == number) {
+            return;
+        }
         let acts = rt.mute(on);
         self.calls_act(rt, acts);
     }
@@ -1646,12 +1655,12 @@ impl super::Controller {
         }
         let (ringing, chosen) = {
             let rt = self.calls.lock().unwrap();
-            let ringing = rt.call.as_ref().is_some_and(Call::ringing_in);
+            let ringing = rt.call.as_ref().filter(|c| c.ringing_in()).map(|c| c.number);
             let chosen = (rt.menu_open && rt.call.is_none()).then(|| rt.contacts.get(rt.picked).map(|c| c.id.clone())).flatten();
             (ringing, chosen)
         };
-        if ringing {
-            self.call_answer();
+        if let Some(number) = ringing {
+            self.call_answer(number);
             return true;
         }
         if let Some(id) = chosen {
@@ -1716,6 +1725,7 @@ impl super::Controller {
                 link: rt.link.clone(),
                 contacts: rt.contacts.clone(),
                 call: rt.call.as_ref().map(|c| CallView {
+                    number: c.number,
                     name: c.name.clone(),
                     phase: c.phase,
                     incoming: c.incoming,
@@ -1830,7 +1840,10 @@ mod tests {
             ctl.calls.lock().unwrap().call = None;
             rung_anyway(&ctl, "k_3");
             let workers = ctl.calls.lock().unwrap().workers;
-            ctl.call_answer();
+            let number = ctl.calls.lock().unwrap().call.as_ref().unwrap().number;
+            ctl.call_answer(number + 1);
+            assert_eq!(ctl.calls.lock().unwrap().workers, workers, "another call's Answer");
+            ctl.call_answer(number);
             assert_eq!(ctl.calls.lock().unwrap().workers > workers, allowed, "Answer asked the worker to answer: {allowed}");
             // What every surface reads: "Coming soon" without the feature.
             ctl.calls.lock().unwrap().call = None;
@@ -2035,7 +2048,7 @@ mod tests {
         ctl.account_runtime.lock().unwrap().account =
             Some(orbiters_core::account::Account { token: "orbit-b".into(), user: Some("43".into()), username: Some("B".into()), avatar_url: None, features: None });
         ctl.calls_account_changed();
-        ctl.call_end();
+        ctl.call_end(1);
         let rt = ctl.calls.lock().unwrap();
         assert!(rt.call.is_none() && rt.identity.as_ref().is_some_and(|i| i.1 == "orbit-b"));
         assert!(rt.signals.is_none(), "B's Hang up had nothing of A's call to send");
@@ -2063,6 +2076,41 @@ mod tests {
         }
         ctl.calls_publish(|_| {});
         ctl
+    }
+
+    /// Verify4-r21 P2, through the real commands: Hang up and Unmute are for the call their button showed, and for the member who
+    /// saw it; a delayed one for another call, or after another member signed in, does nothing.
+    #[test]
+    fn a_hang_up_for_another_call_or_member_ends_nothing() {
+        use crate::ipc::N4n0Command;
+        let ctl = signed_in_as_a_in_a_call();
+        ctl.sign_in_for_test("1");
+        ctl.calls.lock().unwrap().call.as_mut().unwrap().muted = true;
+        let shown = ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.number).unwrap();
+        let at = |epoch: u64| Some(orbiters_n4n0::Stamp { epoch, question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() });
+        let a = ctl.identity_epoch();
+        let settle = || std::thread::sleep(Duration::from_millis(100));
+        let untouched = || {
+            settle();
+            ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted)
+        };
+        for (call, stamp) in [(Some(shown + 1), at(a)), (None, at(a)), (Some(shown), at(a + 1)), (Some(shown), None)] {
+            ctl.n4n0_command(N4n0Command::MuteCall { on: false, call, stamp });
+            ctl.n4n0_command(N4n0Command::EndCall { call, stamp });
+            assert!(untouched(), "{call:?} {stamp:?}");
+        }
+        // B signs in (here their own call has the same number).
+        let delayed = at(a);
+        ctl.sign_in_for_test("2");
+        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: delayed });
+        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: delayed });
+        assert!(untouched(), "A's press, after B");
+        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        let until = Instant::now() + Duration::from_secs(3);
+        while ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted) {
+            assert!(Instant::now() < until, "B's own press");
+            settle();
+        }
     }
 
     fn in_a_call(ctl: &crate::controller::Shared) -> bool {

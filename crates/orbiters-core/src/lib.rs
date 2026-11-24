@@ -25,6 +25,7 @@ pub mod maps;
 pub mod notice_log;
 pub mod obelisk;
 pub mod origin;
+pub mod relay;
 pub mod osc;
 pub mod picture_sources;
 pub mod pipeline;

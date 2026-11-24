@@ -130,6 +130,10 @@ pub struct ChatBar {
     morph: Morph,
     /// Talk is held (on the bar's or the composer's microphone).
     talking: bool,
+    /// The press held, by its stamp's number: what letting go names.
+    press: Option<u64>,
+    /// How much of the question's card came into view, from its top down: its number, its height, and how far.
+    read: Option<(u64, f32, f32)>,
     /// An input method is composing (Japanese): Enter is its own until it commits.
     composing: bool,
     /// The chat shows what N4N0 did instead of the conversation.
@@ -229,7 +233,7 @@ impl ChatBar {
     pub fn leave(&mut self, ctl: &Ctl) {
         if self.talking {
             self.talking = false;
-            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None });
+            ctl.n4n0(N4n0Command::Talk { down: false, stamp: None, press: self.press.take() });
         }
     }
 
@@ -259,7 +263,7 @@ impl ChatBar {
                 ctx.input_mut(|i| i.events.retain(|e| !is_key_event(e)));
             }
             (self.reveal, self.seen, self.copied, self.answered, self.retried) = (None, None, None, None, None);
-            self.presented = None;
+            (self.presented, self.read) = (None, None);
             self.log = false;
             self.count = 0;
             if let Some(mut state) = egui::TextEdit::load_state(ctx, field_id()) {
@@ -525,7 +529,13 @@ impl ChatBar {
         }
         self.talking = held;
         // What is heard is taken as of this press, however late it is recognised.
-        ctl.n4n0(N4n0Command::Talk { down: held, stamp: self.stamp().filter(|_| held) });
+        let stamp = self.stamp().filter(|_| held);
+        // Let go: that press, and no other sentence (verify4-r21 P9).
+        let press = if held { None } else { self.press.take() };
+        if held {
+            self.press = stamp.map(|s| s.seq);
+        }
+        ctl.n4n0(N4n0Command::Talk { down: held, stamp, press });
         Some(held)
     }
 

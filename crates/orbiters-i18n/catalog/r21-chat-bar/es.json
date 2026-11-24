@@ -46,5 +46,11 @@
   "Orbiters is still signing you in: nothing was done. Try again in a moment.": "Orbiters todavía está iniciando tu sesión: no se hizo nada. Vuelve a intentarlo en un momento.",
   "Your Orbiters account could not be read on this computer, so you are signed out for now. Orbiters keeps trying; if this stays, sign in again.": "No se pudo leer tu cuenta de Orbiters en este ordenador, así que por ahora la sesión está cerrada. Orbiters sigue intentándolo; si continúa, vuelve a iniciar sesión.",
   "Your VRChat account changed meanwhile: nothing was sent.": "Tu cuenta de VRChat cambió mientras tanto: no se envió nada.",
-  "This Orbiters account belongs to another environment: nothing was sent.": "Esta cuenta de Orbiters es de otro entorno: no se envió nada."
+  "This Orbiters account belongs to another environment: nothing was sent.": "Esta cuenta de Orbiters es de otro entorno: no se envió nada.",
+  "N4N0 asks about more than fits here: read and answer it in the chat of Orbiters' window.": "La pregunta de N4N0 es demasiado larga para mostrarla aquí: léela y respóndela en el chat de la ventana de Orbiters.",
+  "N4N0 asks you something: read and answer it in the chat of Orbiters' window.": "N4N0 te pregunta algo: léelo y respóndelo en el chat de la ventana de Orbiters.",
+  "Nothing was done: N4N0's question was not shown there. Read it and answer in the chat at the top of Orbiters' window, on Ask N4N0 beside VRChat's menu, or once it stands on N4N0's panel. It asks: {question}": "No se hizo nada: la pregunta de N4N0 no se mostraba ahí. Léela y responde en el chat de la parte superior de la ventana de Orbiters, en Preguntar a N4N0 junto al menú de VRChat, o cuando esté entera en el panel de N4N0. Pregunta: {question}",
+  "Open its chat": "Abrir su chat",
+  "Scroll up to read all of it first": "Primero sube para leerlo todo",
+  "The next 3D capture is not shared after all: what N4N0 does from your account is off.": "La próxima captura 3D al final no se comparte: lo que N4N0 hace desde tu cuenta está desactivado."
 }

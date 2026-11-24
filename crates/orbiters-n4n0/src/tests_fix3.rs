@@ -37,15 +37,15 @@ fn a_question_is_answered_only_where_it_was_presented() {
                     "typed" => n.command(Command::Ask { text: "yes".into(), stamp: at(from, Some(question), epoch) }),
                     // (The avatar's own Talk captures its stamp itself.)
                     _ if from == Avatar => {
-                        n.talk(true, crate::runtime::Source::Menu, None);
+                        n.talk(true, crate::runtime::Source::Menu, None, None);
                         assert!(n.n4n0.lock().unwrap().listening.is_some());
-                        n.talk(false, crate::runtime::Source::Menu, None);
+                        n.talk(false, crate::runtime::Source::Menu, None, None);
                         heard(&n, 1, "yes");
                     }
                     _ => {
-                        n.app_talk(true, false, at(from, Some(question), epoch));
+                        n.app_talk(true, false, at(from, Some(question), epoch), None);
                         assert!(n.n4n0.lock().unwrap().listening.is_some(), "{shown:?} {from:?}");
-                        n.app_talk(false, false, None);
+                        let_go(&n);
                         heard(&n, 1, "yes");
                     }
                 }
@@ -67,15 +67,15 @@ fn the_avatars_talk_answers_only_what_the_avatar_has_shown() {
     let question = question_shown(&t).unwrap();
     // The window has shown it, where the person may not be.
     present(&n, question, Surface::Window);
-    n.talk(true, crate::runtime::Source::Menu, None);
-    n.talk(false, crate::runtime::Source::Menu, None);
+    n.talk(true, crate::runtime::Source::Menu, None, None);
+    n.talk(false, crate::runtime::Source::Menu, None, None);
     heard(&n, 1, "yes");
     assert_eq!(boops(&t), 0);
     assert_eq!(question_shown(&t), Some(question), "it still waits");
     assert!(t.view().lines.last().unwrap().text.contains("Sam"), "it is said again: {:?}", t.view().lines);
     present(&n, question, Surface::Avatar);
-    n.talk(true, crate::runtime::Source::Menu, None);
-    n.talk(false, crate::runtime::Source::Menu, None);
+    n.talk(true, crate::runtime::Source::Menu, None, None);
+    n.talk(false, crate::runtime::Source::Menu, None, None);
     heard(&n, 2, "yes");
     assert_eq!(boops(&t), 1);
     t.shutdown(&n);
@@ -160,9 +160,10 @@ fn the_fence_gives_leave_by_the_one_rule_for_every_tool() {
     let fence = n.acts();
     for action in &actions {
         let effect = action.effect();
-        assert_eq!(fence.permit(action, true).is_some(), !effect.changes && !effect.from_account, "{action:?} after others' text");
-        assert_eq!(fence.permit(action, false).is_some(), !effect.from_account, "{action:?}");
-        assert_eq!(fence.permit_said(action).is_some(), !effect.from_account, "{action:?} said");
+        assert!(!effect.from_account || effect.asks, "{action:?}");
+        assert_eq!(fence.permit(action, true).is_some(), !effect.changes && !effect.asks, "{action:?} after others' text");
+        assert_eq!(fence.permit(action, false).is_some(), !effect.asks, "{action:?}");
+        assert_eq!(fence.permit_said(action).is_some(), !effect.asks, "{action:?} said");
         assert!(fence.permit_yes(action).is_some(), "{action:?}: the owner's yes, the switch on");
     }
     drop(fence);
@@ -253,10 +254,12 @@ fn acting(stamp: Option<Stamp>) -> Vec<Command> {
         Command::Ask { text: "private words".into(), stamp },
         Command::AskAnswer { yes: true, stamp },
         Command::RetryTurn { id: 1, stamp },
-        Command::Talk { down: true, stamp },
-        Command::AskTalk { down: true, stamp },
+        Command::Talk { down: true, stamp, press: None },
+        Command::AskTalk { down: true, stamp, press: None },
         Command::Call { contact: "c1".into(), stamp },
-        Command::AnswerCall { stamp },
+        Command::AnswerCall { call: Some(7), stamp },
+        Command::EndCall { call: Some(7), stamp },
+        Command::MuteCall { on: false, call: Some(7), stamp },
         Command::Suggest { text: "private idea".into(), voice: false, stamp },
         Command::Drop { link: "https://example.com/private".into(), title: "A card".into(), video: None, stamp },
         Command::InviteMe { location: "wrld_1:2".into(), stamp },
@@ -512,11 +515,11 @@ fn a_refused_ask_talk_leaves_the_listening_as_it_was() {
     t.sign_in(base, "orbit-a");
     n.ask_page(true);
     for stamp in [None, at(Surface::Overlay, None, shown_epoch(&t) + 1), at(Surface::Overlay, None, 0)] {
-        n.command(Command::AskTalk { down: true, stamp });
+        n.command(Command::AskTalk { down: true, stamp, press: None });
         let rt = n.n4n0.lock().unwrap();
         assert!(rt.voice.automatic && rt.listening.is_some(), "{stamp:?} ended the page's listening");
     }
-    n.command(Command::AskTalk { down: true, stamp: at(Surface::Overlay, None, shown_epoch(&t)) });
+    n.command(Command::AskTalk { down: true, stamp: at(Surface::Overlay, None, shown_epoch(&t)), press: None });
     assert!(!n.n4n0.lock().unwrap().voice.automatic, "the person's own takes over");
     t.shutdown(&n);
 }
@@ -617,8 +620,17 @@ fn every_acting_command_passes_the_gate_and_nothing_resolves_whoever_is_signed_i
     }
     for (file, source) in &all {
         let calls = |what: &str| source.matches(what).count();
-        assert_eq!(calls(".invite_account("), (*file == "screen.rs") as usize, "{file}: the VRChat account is resolved as an invite is accepted");
+        let may = match *file {
+            "screen.rs" => 1,
+            // As the person is asked, and the same one as they say yes.
+            "assistant.rs" => 2,
+            _ => 0,
+        };
+        assert_eq!(calls(".invite_account("), may, "{file}: the VRChat account is resolved as an invite is accepted");
         assert_eq!(calls(".invite_self("), (*file == "screen.rs") as usize, "{file}: and nowhere but in invite_route is it used");
     }
     let _ = Permit::for_test;
 }
+
+#[path = "tests_fix4.rs"]
+mod fix4;

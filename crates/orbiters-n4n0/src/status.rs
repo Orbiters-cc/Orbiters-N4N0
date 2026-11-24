@@ -110,6 +110,9 @@ pub struct VoiceStatus {
     /// The wake word was heard during a call: instead of listening, N4N0 offers "Talk with N4N0?" until then.
     #[serde(default)]
     pub wake_offer: Option<WakeOffer>,
+    /// The press the sentence being held is of (its stamp's number): what letting go names.
+    #[serde(default)]
+    pub press: Option<u64>,
 }
 
 /// "Talk with N4N0?", up for a few seconds after the wake word was heard during a call (the call's voices reach the
@@ -512,6 +515,9 @@ pub enum CallPhase {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CallView {
+    /// The app's number for it: what Answer, Hang up and Mute name.
+    #[serde(default)]
+    pub number: u64,
     pub name: String,
     pub phase: CallPhase,
     pub incoming: bool,

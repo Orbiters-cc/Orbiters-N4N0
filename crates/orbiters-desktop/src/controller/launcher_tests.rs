@@ -1722,7 +1722,9 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     let machine = Arc::new(Pretend { installed: true, ..Default::default() });
     machine.running.lock().unwrap().push((10, false));
     let c = controller(machine.clone());
-    assert!(matches!(c.launcher_do(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: place.clone() }), Some(Notice::Error(_))));
+    signed(&c);
+    let refused = c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 0, destination: place.clone() }));
+    assert_eq!(refused, Some(Notice::Error("VRChat already runs on profile 0: choose another profile to start one more.".into())), "its own account's profile, which runs");
     assert!(machine.started.lock().unwrap().is_empty() && machine.beside.lock().unwrap().is_empty(), "nothing went to the running one");
     signed(&c);
     assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Desktop, profile: 1, destination: place.clone() })), Some(Notice::Sent { .. })));
@@ -1745,7 +1747,7 @@ fn where_starts_the_chosen_profile_in_the_chosen_instance() {
     let (_, _) = c.test_vrchat(vec![]);
     signed_in_list(&c);
     let other = Action::As { account: "usr_other".into(), action: Box::new(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place.clone() }) };
-    assert!(matches!(c.launcher_do(other), Some(Notice::Error(_))));
+    assert_eq!(c.launcher_do(other), Some(changed_account()));
     assert!(machine.started.lock().unwrap().is_empty());
     assert!(matches!(c.launcher_do(mine(Action::PlayAt { mode: LaunchMode::Vr, profile: 1, destination: place })), Some(Notice::Sent { .. })), "its own account's: it goes");
 }
@@ -1925,7 +1927,7 @@ fn launch_times(orbiters: Duration, vrchat: Duration) -> (Option<Duration>, Opti
     {
         let mut rt = c.account_runtime.lock().unwrap();
         rt.read = Some((orbiters_core::account::Server::current(), None));
-        rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: None, username: Some("tester".into()), avatar_url: None, features: None });
+        rt.account = Some(orbiters_core::account::Account { token: "fake".into(), user: Some("1".into()), username: Some("tester".into()), avatar_url: None, features: None });
     }
     let development = orbiters_core::account::Server::current() == orbiters_core::account::Server::Development;
     c.update(|s| {
@@ -2290,22 +2292,122 @@ fn a_program_too_old_starts_no_vrchat() {
 }
 
 /// verify3-r21 M1: a destination verified for an account starts for that very account, its friends list read or not; for
-/// another login it starts nothing.
+/// another login it starts nothing. A private one goes by R1 (`vrchat_launch::way`): with the start where VRChat has one
+/// profile; where it has several VRChat starts without it, and only that very VRChat, once its own log proves that account, is
+/// given it; one that says another account never is.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn verify3_a_bound_destination_needs_its_account_not_its_list() {
-    let machine = Arc::new(Pretend { installed: true, ..Default::default() });
-    let c = controller(machine.clone());
-    c.test_vrchat(vec![]);
-    let there = || Place { world_id: W.into(), world_name: String::new(), world_picture: String::new(), instance_id: "4242~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::FriendsPlus, region: "eu".into() };
-    let play = || Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: there() };
-    let other = c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(play()) });
-    assert!(matches!(other, Some(Notice::Error(_))), "{other:?}");
-    assert!(machine.started.lock().unwrap().is_empty());
-    assert!(!matches!(c.view().launcher.source, Source::SignedIn { .. }), "its list is not read yet");
-    let sent = c.launcher_do(mine(play()));
-    assert!(matches!(sent, Some(Notice::Sent { .. })), "{sent:?}");
-    assert_eq!(machine.started.lock().unwrap().len(), 1);
+    let there = || private_place("hidden(usr_00000000-0000-4000-8000-000000000004)");
+    let link = orbiters_core::vrchat_launch::link(W, &there().instance_id);
+    let unread = |several: bool| {
+        let on = Computer::new(false);
+        on.c.update(|s| s.launcher.source = Source::Nothing);
+        if several {
+            on.remembers(&[0, 1]);
+        }
+        // Another login than the one it was proven for, whatever the profiles.
+        let other = on.c.launcher_do(Action::As { account: "usr_other".into(), action: Box::new(Action::PlayAt { mode: LaunchMode::Vr, profile: 0, destination: there() }) });
+        assert_eq!(other, Some(changed_account()), "several {several}");
+        assert!(on.starts().is_empty() && on.pending().is_none());
+        on
+    };
+    let sent = Some(Notice::Sent { to: W.into(), action: SentKind::Launch });
+    let on = unread(false);
+    assert_eq!(on.at(0, there()), sent, "one profile");
+    assert_eq!(on.starts()[0].last(), Some(&link));
+    for (says, goes) in [("usr_test", true), ("usr_other", false)] {
+        let on = unread(true);
+        assert_eq!(on.at(0, there()), sent, "several");
+        assert!(!on.starts()[0].iter().any(|arg| arg.contains("vrchat://")), "{:?}", on.starts());
+        assert!(on.pending().is_some_and(|p| p.proof && p.errand.account.as_deref() == Some("usr_test")), "bound to its account");
+        // It is up, and has not said whose it is.
+        on.runs(&[(42, 0, None, true)]);
+        on.look();
+        assert_eq!(on.step(), Some(JoinStep::SigningIn));
+        // It says.
+        on.runs(&[(42, 0, Some(says), true)]);
+        on.look();
+        assert!(on.pending().is_none());
+        let until = Instant::now() + Duration::from_secs(5);
+        while goes && on.joining().is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(on.step(), (!goes).then_some(JoinStep::Failed(JoinFailure::OtherAccount)), "{says}");
+        assert!(!matches!(on.c.view().launcher.source, Source::SignedIn { .. }), "its list is not read yet");
+    }
+}
+
+/// verify4-r21 (B6, for dev.46's place on its way): it is its account's: gone from the first state that is another member's,
+/// nobody's or an unknown one's, and from that of another VRChat account; what ends late for the one before shows nothing.
+/// Its own member's stays, their Orbiters server out of reach too.
+#[test]
+fn verify4_a_place_on_its_way_is_its_own_members_alone() {
+    use crate::state::AccountState;
+    let signed = |name: &str| AccountState::SignedIn { username: name.into() };
+    let waiting = || {
+        let on = Computer::new(false);
+        on.remembers(&[1]);
+        assert!(matches!(on.at(0, private_place("friends(usr_x)")), Some(Notice::Sent { .. })));
+        assert_eq!(on.step(), Some(JoinStep::Starting));
+        on
+    };
+    let late = |on: &Computer, errand: Errand| {
+        let by = errand.by().unwrap();
+        assert!(by.is_some() && !on.c.publish_joining(by.as_ref(), Joining::default()), "refused where it is written");
+        on.c.launcher_join_failed(errand.clone(), JoinFailure::Gone);
+        let failed = on.joining();
+        on.c.launcher_join_after(on.machine().as_ref(), errand, Vec::new());
+        failed.or(on.joining())
+    };
+    type Change = fn(&Controller);
+    let changes: [(&str, Change); 6] = [
+        ("another member", |c| c.sign_in_for_test("2")),
+        ("another member, granted the same VRChat account", |c| {
+            c.sign_in_for_test("2");
+            c.update(|_| {});
+            c.test_signed_in();
+            c.update(|s| (s.vrchat_login.allowed, s.vrchat_login.user) = (true, Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), ..Default::default() })));
+            assert!(c.vrchat_now().is_some());
+        }),
+        ("an account with no id", |c| c.install_account(|rt| if let Some(a) = rt.account.as_mut() { a.user = None })),
+        ("an account that cannot be read", |c| c.install_account(|rt| rt.unknown = true)),
+        ("nobody", |c| c.update(|s| s.account.state = AccountState::SignedOut)),
+        ("another VRChat account", |c| c.update(|s| s.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_second".into(), ..Default::default() }))),
+    ];
+    let mut wrong = Vec::new();
+    for (what, change) in changes {
+        let on = waiting();
+        let errand = on.pending().unwrap().errand;
+        change(&on.c);
+        on.c.update(|_| {});
+        if on.joining().is_some() {
+            wrong.push(format!("{what}: still on show, {:?}", on.joining()));
+        }
+        if let Some(late) = late(&on, errand) {
+            wrong.push(format!("{what}: shown late, {late:?}"));
+        }
+    }
+    let on = waiting();
+    on.c.update(|s| s.account.state = AccountState::Offline { username: Some("tester".into()) });
+    if on.step() != Some(JoinStep::Starting) {
+        wrong.push(format!("its own member, Orbiters out of reach: {:?}", on.joining()));
+    }
+    on.c.update(|s| s.account.state = signed("tester"));
+    on.c.launcher_join_failed(on.pending().unwrap().errand, JoinFailure::Gone);
+    if on.step() != Some(JoinStep::Failed(JoinFailure::Gone)) {
+        wrong.push(format!("its own member, not delivered: {:?}", on.joining()));
+    }
+    // A public place asked for on no account's list is this computer's: said to whoever is there.
+    let on = waiting();
+    let errand = Errand::plain(LaunchMode::Desktop, Some(0)).to(Some(open_place()), None);
+    on.c.sign_in_for_test("2");
+    on.c.launcher_join_failed(errand, JoinFailure::Gone);
+    if on.step() != Some(JoinStep::Failed(JoinFailure::Gone)) {
+        wrong.push(format!("a public one: {:?}", on.joining()));
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("
+"));
 }
 
 // --- One VRChat at a time on a Mac, on the profile chosen on Home ---
@@ -2975,7 +3077,10 @@ fn a_private_place_that_is_not_proven_goes_nowhere_and_is_kept() {
         on.runs(&[(42, 2, Some("usr_test"), true)]);
         on.c.launcher.lock().unwrap().pending.as_mut().unwrap().errand.account = Some("usr_gone".into());
         on.look();
-        failed(&on, JoinFailure::OtherAccount);
+        // (Said to that account only, which is not signed in: verify4-r21.)
+        assert!(on.joining().is_none() && on.pending().is_none());
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(on.calls.lock().unwrap().is_empty(), "{:?}", on.calls.lock().unwrap());
     }
 }
 
@@ -3667,7 +3772,9 @@ fn an_ordinary_player_s_presses(mac: bool) {
         if !signed_in {
             on.c.update(|s| s.launcher.source = Source::Nothing);
         }
-        let went = on.c.assistant_intent(&orbiters_n4n0_core::intents::Intent::GoToInstance { index: 0 }, Some(&json!({ "ref": location })));
+        let (go, item) = (orbiters_n4n0_core::intents::Intent::GoToInstance { index: 0 }, json!({ "ref": location }));
+        let target = on.c.assistant_target(&go, Some(&item)).unwrap();
+        let went = on.c.assistant_intent(&go, Some(&item), &target);
         assert!(went.is_ok(), "{went:?}");
         eventually_so(|| !on.starts().is_empty());
         in_one_step(&on, there);

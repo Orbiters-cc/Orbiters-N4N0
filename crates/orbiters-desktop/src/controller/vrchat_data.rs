@@ -39,7 +39,7 @@ impl Scope {
     }
     /// The Orbiters member the VRChat account is verified for, by the id Orbiters gives them (hashed), when it is known.
     pub(crate) fn orbiters_member(&self) -> Option<&str> {
-        self.verified_for.as_ref()?.member.as_deref()
+        self.verified_for.as_ref().map(|v| v.member.as_str()).filter(|m| !m.is_empty())
     }
     /// The identity's epoch it was verified in (controller/identity.rs).
     pub(crate) fn epoch(&self) -> Option<u64> {

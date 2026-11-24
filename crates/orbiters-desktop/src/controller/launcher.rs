@@ -815,12 +815,14 @@ pub struct Errand {
     invite: Option<String>,
     /// Pressed again for a place that was not delivered: into the VRChat that runs on its profile, when one does.
     again: bool,
+    /// The Orbiters member who asked for it, and when: what is said of it on its way is theirs alone.
+    asked: Option<Stamp>,
 }
 
 impl Errand {
     /// VRChat's own start.
     fn plain(mode: LaunchMode, profile: Option<u32>) -> Self {
-        Errand { mode, profile, destination: None, account: None, bound: false, running_only: false, invite: None, again: false }
+        Errand { mode, profile, destination: None, account: None, bound: false, running_only: false, invite: None, again: false, asked: None }
     }
 
     fn to(self, destination: Option<Place>, account: Option<&str>) -> Self {
@@ -835,6 +837,18 @@ impl Errand {
     /// The account its destination is of, for a start that may be made again.
     fn owner(&self) -> Option<&str> {
         self.account.as_deref().filter(|_| self.destination.is_some())
+    }
+
+    /// Whose what is said of its destination on its way is: its account's, for the member who asked; nobody's (`Ok(None)`) for
+    /// a public one asked for on no account's list. `Err`: an account's, and by whom is not known: it is said to nobody.
+    fn by(&self) -> Result<Option<By>, ()> {
+        if !self.private() && self.owner().is_none() {
+            return Ok(None);
+        }
+        match (&self.asked, self.owner()) {
+            (Some(stamp), Some(user)) => Ok(Some(By { stamp: stamp.clone(), user: user.to_owned() })),
+            _ => Err(()),
+        }
     }
 
     /// Whether its destination is not everyone's.
@@ -1491,7 +1505,7 @@ impl Controller {
             (due, rt.machine.clone(), check_game)
         };
         if forgotten {
-            self.publish_machine(|m| m.joining = None);
+            self.joining_goes(None);
         }
         if dropped {
             self.launcher_say(changed_account());
@@ -1744,11 +1758,7 @@ impl Controller {
         // The VRChat it was proven for, or that came up for it: no other one takes it.
         let Pending { errand, proof, seen, .. } = pending;
         match waited {
-            Waited::Wait(step) if proof => drop(self.publish_machine(|m| {
-                if let Some(joining) = &mut m.joining {
-                    joining.step = step;
-                }
-            })),
+            Waited::Wait(step) if proof => self.joining_goes(Some(step)),
             Waited::Wait(_) | Waited::Over => {}
             Waited::Failed(why) => self.launcher_join_failed(errand, why),
             Waited::Deliver => {
@@ -1759,7 +1769,7 @@ impl Controller {
                     let notice = ctl.launcher_deliver(&errand, seen.map(|(pid, _)| pid));
                     match &notice {
                         Notice::Error(words) if proof => ctl.launcher_join_failed(errand, JoinFailure::NotSent(words.clone())),
-                        _ if proof => drop(ctl.publish_machine(|m| m.joining = None)),
+                        _ if proof => ctl.joining_goes(None),
                         _ => {}
                     }
                     ctl.launcher_notice(asked.as_ref(), notice.clone());
@@ -1774,18 +1784,23 @@ impl Controller {
     /// VRChats that ran before that start.
     fn launcher_join_after(&self, machine: &dyn Machine, errand: Errand, before: Vec<u32>) {
         let world = errand.destination.as_ref().map(|place| place.world_name.clone()).unwrap_or_default();
+        let by = errand.by();
         {
             let mut rt = self.launcher.lock().unwrap();
             let profile = errand.profile.or(Some(0));
             rt.kept = None;
             rt.pending = Some(Pending { errand: Errand { profile, ..errand }, since: Instant::now(), proof: true, before, launch: machine.newest_launch().map(|(id, _)| id), seen: None });
         }
-        self.publish_machine(|m| m.joining = Some(Joining { world, step: JoinStep::Starting }));
+        // (Nothing to say to anyone else signed in by now, nor of the place before.)
+        if !by.is_ok_and(|by| self.publish_joining(by.as_ref(), Joining { world, step: JoinStep::Starting })) {
+            self.joining_goes(None);
+        }
     }
 
     /// A place that was not delivered: Home says why, it is kept, and the card of the invite it is of comes back.
     fn launcher_join_failed(&self, errand: Errand, why: JoinFailure) {
         let world = errand.destination.as_ref().map(|place| place.world_name.clone()).unwrap_or_default();
+        let by = errand.by();
         {
             let mut rt = self.launcher.lock().unwrap();
             if let Some(accepted) = errand.invite.as_ref().and_then(|id| rt.accepted.iter_mut().find(|a| a.invite.id == *id)) {
@@ -1794,7 +1809,10 @@ impl Controller {
             }
             rt.kept = Some(errand);
         }
-        self.publish_machine(|m| m.joining = Some(Joining { world, step: JoinStep::Failed(why) }));
+        // (Nothing to say to anyone else signed in by now.)
+        if !by.is_ok_and(|by| self.publish_joining(by.as_ref(), Joining { world, step: JoinStep::Failed(why) })) {
+            self.joining_goes(None);
+        }
     }
 
     /// Whether the game that runs on this Mac is positively another account's than `account` (each one's own log says so), where
@@ -1838,7 +1856,7 @@ impl Controller {
             waited || kept
         };
         if over {
-            self.publish_machine(|m| m.joining = None);
+            self.joining_goes(None);
         }
     }
 
@@ -1847,7 +1865,7 @@ impl Controller {
     pub(super) fn launcher_start_there(self: &Shared, world: &str, instance: &str, bound: bool, account: &str) -> Result<(), String> {
         let Some(place) = launcher_feed::place(&format!("{world}:{instance}"), "") else { return Err(tr("VRChat does not know this world.").into()) };
         let mode = self.view().settings.launch.last_mode;
-        match self.launcher_play_on(Errand { bound, ..Errand::plain(mode, Some(0)).to(Some(place), Some(account)) }) {
+        match self.launcher_play_on(Errand { bound, asked: self.vrchat_now(), ..Errand::plain(mode, Some(0)).to(Some(place), Some(account)) }) {
             Notice::Error(words) => Err(words),
             _ => Ok(()),
         }
@@ -1856,7 +1874,7 @@ impl Controller {
     /// The place kept is given up.
     fn launcher_forget_joining(&self) {
         if self.launcher.lock().unwrap().kept.take().is_some() {
-            self.publish_machine(|m| m.joining = None);
+            self.joining_goes(None);
         }
     }
 
@@ -1888,11 +1906,7 @@ impl Controller {
                 pending.seen = Some((run.0, Instant::now()));
             }
         }
-        self.publish_machine(|m| {
-            if let Some(joining) = &mut m.joining {
-                joining.step = JoinStep::SigningIn;
-            }
-        });
+        self.joining_goes(Some(JoinStep::SigningIn));
         Some(Notice::Sent { to: errand.destination.as_ref().map(|p| p.world_id.clone()).unwrap_or_default(), action: SentKind::Join })
     }
 
@@ -2440,7 +2454,7 @@ impl Controller {
                     rt.kept = None;
                     rt.pending = rt.pending.take().filter(|pending| !pending.proof);
                 }
-                self.publish_machine(|m| m.joining = None);
+                self.joining_goes(None);
                 None
             }
             Action::ForgetProfile { profile } => (profile != 0).then(|| self.launcher_forget_profile(profile)).flatten(),
@@ -2478,7 +2492,7 @@ impl Controller {
                         *with_it.lock().unwrap() = None;
                         let Some(place) = launch.place() else { return Ok(launch.args.clone()) };
                         let profile = orbiters_core::vrchat_launch::profile_of(&launch.args);
-                        let errand = Errand { bound: launch.bound, ..Errand::plain(LaunchMode::Desktop, Some(profile)).to(Some(place.clone()), launch.account.as_deref()) };
+                        let errand = Errand { bound: launch.bound, asked: asked.clone(), ..Errand::plain(LaunchMode::Desktop, Some(profile)).to(Some(place.clone()), launch.account.as_deref()) };
                         let mut args = launch.without_place();
                         match ctl.launcher_start_way(machine.as_ref(), &errand, profile) {
                             Way::Direct => {
@@ -2607,7 +2621,10 @@ impl Controller {
     }
 
     /// One press, done: on the profile it names, or as Play does.
-    fn launcher_run(self: &Shared, errand: Errand) -> Notice {
+    fn launcher_run(self: &Shared, mut errand: Errand) -> Notice {
+        if (errand.private() || errand.scoped()) && errand.asked.is_none() {
+            errand.asked = self.vrchat_now();
+        }
         if errand.again {
             let machine = self.launcher.lock().unwrap().machine.clone();
             if errand.scoped() && !self.launcher_live(errand.account.as_deref()) {
@@ -2632,7 +2649,7 @@ impl Controller {
                 }
             }
             if over {
-                self.publish_machine(|m| m.joining = None);
+                self.joining_goes(None);
             }
         }
         notice

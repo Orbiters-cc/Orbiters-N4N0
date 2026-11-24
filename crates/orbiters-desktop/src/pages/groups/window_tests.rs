@@ -940,9 +940,9 @@ fn a_draft_changed_in_its_notification_stays() {
 fn what_is_kept_is_the_verified_members() {
     let r = rig();
     let as_member = |member: Option<&str>, name: &str, epoch: u64| {
-        let v = orbiters_core::launcher::VerifiedFor { epoch, member: member.map(str::to_string), user: Some("usr_test".into()) };
+        let v = member.map(|member| orbiters_core::launcher::VerifiedFor { epoch, member: member.into(), user: Some("usr_test".into()) });
         r.service.ctl.update(|s| {
-            s.vrchat_login.verified_for = Some(v);
+            s.vrchat_login.verified_for = v;
             s.account.state = crate::state::AccountState::SignedIn { username: name.into() };
         });
         Scope::of(&r.service.ctl.view())

@@ -1157,7 +1157,7 @@ fn one_precondition_changed_and_nothing_leaves() {
         // (what, when: before the commit, before the last read, during the last read)
         let mut changes: Vec<(&str, [bool; 3], Change)> = vec![
             ("another sign-in", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.revision += 1))),
-            ("another member verified", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.verified_for.as_mut().unwrap().member = Some("other".into())))),
+            ("another member verified", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.verified_for.as_mut().unwrap().member = "other".into()))),
             ("the same member, another time of theirs", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.verified_for.as_mut().unwrap().epoch += 1))),
             ("signed out of VRChat", [true, false, true], Arc::new(|c, _, _| c.update(|s| s.vrchat_login.user = None))),
             ("cancelled", [true, false, false], Arc::new(|c, s, _| drop(ask(c, Request::Cancel { op: s.op.clone() })))),
@@ -1488,7 +1488,7 @@ fn what_an_answer_leaves_out_hides_nothing() {
 fn the_records_owner_is_the_scopes() {
     let (c, _, _) = world();
     let verified = |epoch: u64, member: &str| {
-        let v = orbiters_core::launcher::VerifiedFor { epoch, member: Some(member.into()), user: Some("usr_test".into()) };
+        let v = orbiters_core::launcher::VerifiedFor { epoch, member: member.into(), user: Some("usr_test".into()) };
         c.update(|s| s.vrchat_login.verified_for = Some(v));
         scope(&c)
     };

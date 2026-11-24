@@ -7,7 +7,7 @@ use super::*;
 use orbiters_n4n0_core::intents::{self, model, Facts, Intent, Outcome, Page, Via, CATALOGUE};
 
 fn full() -> Facts {
-    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, actions: true }
+    Facts { vrchat: true, signed_in: true, vrchat_account: true, calls: true, n4n0_prop: true, can_drop: true, computer: true, clipboard: true, actions: true }
 }
 
 /// N4N0 in a stand-in app that has every feature.
@@ -63,7 +63,7 @@ fn the_offline_path_works_signed_out_and_without_a_network() {
     n.asked("早歩きをオフにして".into(), "voice");
     assert!(!t.settings().walk_boost.enabled);
     // The model hears of it at its next turn, in its own words.
-    assert!(n.n4n0.lock().unwrap().notes.iter().any(|note| note.contains("did it by itself") && note.contains("Fast walk on")));
+    assert!(n.n4n0.lock().unwrap().notes.iter().any(|note| note.text.contains("did it by itself") && note.text.contains("Fast walk on")));
     // What is not a known command goes to the model, which needs a sign-in.
     n.asked("what world am I in".into(), "voice");
     assert_eq!(t.view().lines.last().map(|l| l.who), Some(N4n0Who::Error));
@@ -216,6 +216,7 @@ pub(super) fn sample(name: &str) -> Value {
 #[test]
 fn every_intent_runs_by_its_own_path() {
     let (t, n) = ready();
+    *t.in_call.lock().unwrap() = true;
     t.world(|w| {
         w.in_world = true;
         w.world_id = Some("wrld_here".into());
@@ -268,7 +269,7 @@ fn every_intent_runs_by_its_own_path() {
     until("the 3D picture", || t.photos.load(Ordering::Relaxed) == 1);
     assert_eq!(*t.taken.lock().unwrap(), vec![orbiters_core::settings::PictureMode::World], "picture_3d of the world");
     let calls = t.calls.lock().unwrap().clone();
-    assert!(calls.contains(&CallRequest::End) && calls.contains(&CallRequest::Answer) && calls.contains(&CallRequest::Mute(true)), "{calls:?}");
+    assert!(calls.contains(&CallRequest::End(7)) && calls.contains(&CallRequest::Answer(7)) && calls.contains(&CallRequest::Mute { call: 7, on: true }), "{calls:?}");
     assert!(got("call").unwrap_err().contains("Nobody called"), "a friend not among the contacts is asked about");
     assert!(got("state").unwrap()["untrusted_text_from_others"]["explorer_points"]["points"] == 42, "the app's own state answers too");
     assert!(CLIPBOARD.lock().unwrap().contains(&"https://youtu.be/bbbbbbbbbbb".to_string()), "history_copy: the second played video's link");

@@ -1103,6 +1103,8 @@ pub struct Menu {
     pub contacts: Vec<Contact>,
     pub contact_page: usize,
     pub call: Option<Call>,
+    /// Which call that is (the app's number for it): what Answer and Hang up are for.
+    pub call_number: Option<u64>,
     /// The Orbiters account has not N4N0 calls (or that is not known yet): Call is greyed out, "Coming soon", and opens
     /// nothing; pressed, it says so ([`CALLS_SOON_WHY`]). The host's service is what refuses the calls themselves.
     pub calls_soon: bool,

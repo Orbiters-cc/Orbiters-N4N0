@@ -128,7 +128,7 @@ pub fn menu_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bo
         tr("Opens in the SteamVR overlay, in front of you")
     };
     section(ui, cx, index, icons::STACK, tr("N4N0's menu"), Some(menu_sub), |ui| {
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.around() {
             use orbiters_core::settings::MenuDisplay;
             // Two different things, each whole without the other (moved from Settings' Performance card).
             let ways = [SegOption::new(MenuDisplay::AvatarScreen, tr("Avatar's screen")), SegOption::new(MenuDisplay::Floating, tr("Floating"))];

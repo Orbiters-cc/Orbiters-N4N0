@@ -1,5 +1,5 @@
-//! Current-user protection shared by the two independent account stores: Windows' DPAPI, or on the Mac a key the login
-//! keychain keeps (see [`crypt`]'s there). Elsewhere there is none.
+//! Current-user protection shared by the two independent account stores: Windows' DPAPI, on the Mac a key the login
+//! keychain keeps, on Linux a key in a file of the person's (see each [`crypt`]). Elsewhere there is none.
 #[cfg(windows)]
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
@@ -23,7 +23,7 @@ pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Resul
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) fn crypt(_: &[u8], _: &[u8], _: bool) -> anyhow::Result<Vec<u8>> {
     anyhow::bail!("{}", orbiters_i18n::tr("VRChat session storage requires Windows DPAPI"))
 }
@@ -38,19 +38,242 @@ pub(crate) fn crypt(_: &[u8], _: &[u8], _: bool) -> anyhow::Result<Vec<u8>> {
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     let key = mac::key()?;
     if encrypt {
-        return mac::seal(&key, data, entropy);
+        return sealing::seal(&key, data, entropy);
     }
     // What an unsigned build of this computer sealed with its key file opens too (`mac::older_key`).
-    mac::open(&key, data, entropy).or_else(|e| match mac::older_key().filter(|older| *older != key) {
-        Some(older) => mac::open(&older, data, entropy).map_err(|_| e),
+    sealing::open(&key, data, entropy).or_else(|e| match mac::older_key().filter(|older| *older != key) {
+        Some(older) => sealing::open(&older, data, entropy).map_err(|_| e),
         None => Err(e),
     })
 }
 
-#[cfg(target_os = "macos")]
-mod mac {
+/// What DPAPI does on Windows, on Linux: AES-256-GCM under a random key made the first time it is needed, `entropy` counted in the
+/// seal as DPAPI's is. The key is a file only the person can read, beside the settings, as a DPAPI secret is any program of the
+/// person's to open: the Secret Service (GNOME's keyring, KWallet) would give it to every program of theirs as well, is not on
+/// every desktop, and one that is there one day and not the next would take the saved session with it.
+#[cfg(target_os = "linux")]
+pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
+    let key = sealing::file_key(&crate::paths::config_dir().join(sealing::KEY_FILE))?;
+    if encrypt {
+        sealing::seal(&key, data, entropy)
+    } else {
+        sealing::open(&key, data, entropy)
+    }
+}
+
+/// A key kept in a file of the person's, and what is sealed with a key: shared by the Mac (for builds its keychain cannot know)
+/// and Linux.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod sealing {
     use orbiters_i18n::tr;
     use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    pub(super) const KEY_LEN: usize = 32;
+
+    /// The key's file, in the settings' folder: on Linux, and on a Mac for builds the keychain cannot know again.
+    pub(super) const KEY_FILE: &str = "session-key";
+
+    /// The key in a file only the person reads, made when there is none yet. A new key is written whole into a file of its
+    /// own, then linked to the key file's name, which fails when another process put its key there first: then theirs is
+    /// the key. A key file is never removed while it may be another process's being made; one of another length that has
+    /// not changed for a minute is damage, set aside (never deleted) and replaced.
+    pub(super) fn file_key(file: &std::path::Path) -> anyhow::Result<[u8; KEY_LEN]> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Some(Ok(key)) = read_whole(file) {
+            return Ok(key);
+        }
+        if let Some(folder) = file.parent() {
+            std::fs::create_dir_all(folder)?;
+        }
+        // Repair and first creation one process at a time (a lock beside it), every look made again under it: another
+        // process may have repaired or made it meanwhile.
+        let _held = lock(file)?;
+        if let Some(key) = read_key_file(file)? {
+            return Ok(key);
+        }
+        let mut key = [0u8; KEY_LEN];
+        SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
+        let made = file.with_file_name(format!(".{KEY_FILE}.{}.{}", std::process::id(), next_part()));
+        let written = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&made).and_then(|mut f| {
+            f.write_all(&key)?;
+            f.sync_all()
+        });
+        let published = written.and_then(|()| std::fs::hard_link(&made, file));
+        let _ = std::fs::remove_file(&made);
+        match published {
+            Ok(()) => Ok(key),
+            // Someone else's key got there first: it is the one.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_key_file(file)?.ok_or_else(|| anyhow::anyhow!("{}", tr("the key file is being written: try again"))),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Reads the key file whole: `None` when there is none, `Some(Err)` for one of another length (or unreadable).
+    pub(super) fn read_whole(file: &std::path::Path) -> Option<Result<[u8; KEY_LEN], ()>> {
+        match std::fs::read(file) {
+            Ok(bytes) => Some(<[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| ())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => Some(Err(())),
+        }
+    }
+
+    /// The lock of the key file's repair and creation, held while the returned file is.
+    fn lock(file: &std::path::Path) -> anyhow::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(file.with_file_name(format!(".{KEY_FILE}.lock")))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    /// A number for each key file this process makes.
+    fn next_part() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The key file's key; `None` when there is none (or only damage, now set aside). A file of another length that changed
+    /// in the last minute may be another process's being written: an error, asked again later.
+    /// Called with the repair lock held: the file set aside is the very one read (its identity checked again right before).
+    fn read_key_file(file: &std::path::Path) -> anyhow::Result<Option<[u8; KEY_LEN]>> {
+        use std::os::unix::fs::MetadataExt as _;
+        let identity = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec());
+        let before = match std::fs::metadata(file) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = std::fs::read(file)?;
+        if let Ok(key) = <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
+            return Ok(Some(key));
+        }
+        let age = before.modified().ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+        anyhow::ensure!(age >= std::time::Duration::from_secs(60), "{}", tr("the key file is being written: try again"));
+        // Still the same file as read: a whole key put there since is never set aside.
+        anyhow::ensure!(std::fs::metadata(file).is_ok_and(|now| identity(&now) == identity(&before)), "{}", tr("the key file is being written: try again"));
+        std::fs::rename(file, file.with_file_name(format!("{KEY_FILE}.damaged")))?;
+        Ok(None)
+    }
+
+    fn cipher(key: &[u8; KEY_LEN]) -> anyhow::Result<LessSafeKey> {
+        Ok(LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_| anyhow::anyhow!("{}", tr("not a key")))?))
+    }
+
+    /// A fresh nonce, then the sealed text and its tag.
+    pub(super) fn seal(key: &[u8; KEY_LEN], data: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let mut nonce = [0u8; NONCE_LEN];
+        SystemRandom::new().fill(&mut nonce).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
+        let mut sealed = data.to_vec();
+        cipher(key)?
+            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(entropy), &mut sealed)
+            .map_err(|_| anyhow::anyhow!("{}", tr("sealing failed")))?;
+        let mut out = nonce.to_vec();
+        out.append(&mut sealed);
+        Ok(out)
+    }
+
+    pub(super) fn open(key: &[u8; KEY_LEN], sealed: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(sealed.len() >= NONCE_LEN, "{}", tr("too short to be sealed"));
+        let (nonce, text) = sealed.split_at(NONCE_LEN);
+        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow::anyhow!("{}", tr("not a nonce")))?;
+        let mut text = text.to_vec();
+        let plain = cipher(key)?.open_in_place(nonce, Aad::from(entropy), &mut text).map_err(|_| anyhow::anyhow!("{}", tr("not sealed for this user")))?.len();
+        text.truncate(plain);
+        Ok(text)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_seal_opens_only_with_its_key_and_its_entropy() {
+            let key = [7u8; KEY_LEN];
+            let plain = br#"{"auth":"test-cookie"}"#;
+            let sealed = seal(&key, plain, b"entropy").unwrap();
+            assert!(!sealed.windows(4).any(|w| w == b"auth"), "the text is not readable");
+            assert_eq!(open(&key, &sealed, b"entropy").unwrap(), plain);
+            assert!(open(&key, &sealed, b"other").is_err());
+            assert!(open(&[8u8; KEY_LEN], &sealed, b"entropy").is_err());
+            let mut changed = sealed.clone();
+            *changed.last_mut().unwrap() ^= 1;
+            assert!(open(&key, &changed, b"entropy").is_err(), "tampered with");
+            assert_ne!(seal(&key, plain, b"entropy").unwrap(), sealed, "a new nonce each time");
+        }
+
+        #[test]
+        fn the_key_s_file_is_one_only_the_person_reads() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let folder = std::env::temp_dir().join(format!("orbiters-key-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&folder);
+            let file = folder.join("settings").join(KEY_FILE);
+            let first = file_key(&file).unwrap();
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(file_key(&file).unwrap(), first, "the same key at the next start: the session still opens");
+            // A file of another length may be another process's being written: left alone, asked again later.
+            std::fs::write(&file, b"cut short").unwrap();
+            assert!(file_key(&file).is_err(), "not replaced while it may be someone's being written");
+            assert_eq!(std::fs::read(&file).unwrap(), b"cut short");
+            // One that has not changed for a minute is damage: set aside, never deleted, and replaced.
+            let old = std::fs::File::options().write(true).open(&file).unwrap();
+            old.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+            assert_ne!(file_key(&file).unwrap(), first);
+            assert_eq!(std::fs::read(&file).unwrap().len(), KEY_LEN);
+            assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"cut short");
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+
+        /// The verifier's case: two first uses at once (two processes, here threads) each make a key; one key file results,
+        /// and both use the key in it.
+        #[test]
+        fn two_first_uses_at_once_end_with_one_key_for_both() {
+            // M10: two processes both find an old short file; one repairs it; the other never sets the repaired key aside.
+            for round in 0..10 {
+                let folder = std::env::temp_dir().join(format!("orbiters-key-repair-{}-{round}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&folder);
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = folder.join(KEY_FILE);
+                std::fs::write(&file, b"short").unwrap();
+                std::fs::File::options().write(true).open(&file).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
+                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
+                        if let Ok(key) = file_key(&file) {
+                            break key;
+                        }
+                    })).collect();
+                    racers.into_iter().map(|r| r.join().unwrap()).collect()
+                });
+                let on_disk = std::fs::read(&file).unwrap();
+                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one repaired key for all");
+                assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"short", "only the damage set aside");
+                let _ = std::fs::remove_dir_all(&folder);
+            }
+            for round in 0..20 {
+                let folder = std::env::temp_dir().join(format!("orbiters-key-race-{}-{round}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&folder);
+                let file = folder.join(KEY_FILE);
+                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
+                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
+                        if let Ok(key) = file_key(&file) {
+                            break key;
+                        }
+                    })).collect();
+                    racers.into_iter().map(|r| r.join().unwrap()).collect()
+                });
+                let on_disk = std::fs::read(&file).unwrap();
+                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one key for all");
+                assert!(std::fs::read_dir(&folder).unwrap().flatten().all(|e| { let n = e.file_name(); let n = n.to_string_lossy(); n == KEY_FILE || n == ".session-key.lock" }), "nothing left beside it but its lock");
+                let _ = std::fs::remove_dir_all(&folder);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::sealing::{file_key, read_whole, KEY_FILE, KEY_LEN};
+    use orbiters_i18n::tr;
     use ring::rand::{SecureRandom, SystemRandom};
     use security_framework::passwords::{delete_generic_password, get_generic_password};
 
@@ -59,14 +282,10 @@ mod mac {
     /// gives to no other build without asking for the login password. It is removed, never read.
     const ACCOUNT: &str = "session key 2"; // i18n: not shown (the name of a Keychain item)
     const FIRST_ACCOUNT: &str = "session key"; // i18n: not shown (the name of a Keychain item)
-    const KEY_LEN: usize = 32;
     /// The Keychain's "item not found" (`errSecItemNotFound`).
     const NOT_FOUND: i32 = -25300;
     /// The Keychain's "already there" (`errSecDuplicateItem`): another process made the key first.
     const DUPLICATE: i32 = -25299;
-
-    /// The key file of builds the keychain cannot know again, in the settings' folder.
-    const KEY_FILE: &str = "session-key";
 
     /// The keychain's "interaction not allowed": it is locked (the Mac's screen locked, or before the person's login),
     /// and no question could be asked. Not a refusal: asked again at the next need.
@@ -135,88 +354,6 @@ mod mac {
     /// What `codesign -dv` says of a team: `TeamIdentifier=V83Y447ML9`, or `TeamIdentifier=not set` for ad hoc.
     pub(super) fn names_a_team(described: &str) -> bool {
         described.lines().filter_map(|l| l.strip_prefix("TeamIdentifier=")).any(|team| team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric()))
-    }
-
-    /// The key in a file only the person reads, made when there is none yet. A new key is written whole into a file of its
-    /// own, then linked to the key file's name, which fails when another process put its key there first: then theirs is
-    /// the key. A key file is never removed while it may be another process's being made; one of another length that has
-    /// not changed for a minute is damage, set aside (never deleted) and replaced.
-    pub(super) fn file_key(file: &std::path::Path) -> anyhow::Result<[u8; KEY_LEN]> {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        if let Some(Ok(key)) = read_whole(file) {
-            return Ok(key);
-        }
-        if let Some(folder) = file.parent() {
-            std::fs::create_dir_all(folder)?;
-        }
-        // Repair and first creation one process at a time (a lock beside it), every look made again under it: another
-        // process may have repaired or made it meanwhile.
-        let _held = lock(file)?;
-        if let Some(key) = read_key_file(file)? {
-            return Ok(key);
-        }
-        let mut key = [0u8; KEY_LEN];
-        SystemRandom::new().fill(&mut key).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
-        let made = file.with_file_name(format!(".{KEY_FILE}.{}.{}", std::process::id(), next_part()));
-        let written = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&made).and_then(|mut f| {
-            f.write_all(&key)?;
-            f.sync_all()
-        });
-        let published = written.and_then(|()| std::fs::hard_link(&made, file));
-        let _ = std::fs::remove_file(&made);
-        match published {
-            Ok(()) => Ok(key),
-            // Someone else's key got there first: it is the one.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_key_file(file)?.ok_or_else(|| anyhow::anyhow!("{}", tr("the key file is being written: try again"))),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Reads the key file whole: `None` when there is none, `Some(Err)` for one of another length (or unreadable).
-    fn read_whole(file: &std::path::Path) -> Option<Result<[u8; KEY_LEN], ()>> {
-        match std::fs::read(file) {
-            Ok(bytes) => Some(<[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| ())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => Some(Err(())),
-        }
-    }
-
-    /// The lock of the key file's repair and creation, held while the returned file is.
-    fn lock(file: &std::path::Path) -> anyhow::Result<std::fs::File> {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(file.with_file_name(format!(".{KEY_FILE}.lock")))?;
-        lock.lock()?;
-        Ok(lock)
-    }
-
-    /// A number for each key file this process makes.
-    fn next_part() -> u64 {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The key file's key; `None` when there is none (or only damage, now set aside). A file of another length that changed
-    /// in the last minute may be another process's being written: an error, asked again later.
-    /// Called with the repair lock held: the file set aside is the very one read (its identity checked again right before).
-    fn read_key_file(file: &std::path::Path) -> anyhow::Result<Option<[u8; KEY_LEN]>> {
-        use std::os::unix::fs::MetadataExt as _;
-        let identity = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec());
-        let before = match std::fs::metadata(file) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let bytes = std::fs::read(file)?;
-        if let Ok(key) = <[u8; KEY_LEN]>::try_from(bytes.as_slice()) {
-            return Ok(Some(key));
-        }
-        let age = before.modified().ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
-        anyhow::ensure!(age >= std::time::Duration::from_secs(60), "{}", tr("the key file is being written: try again"));
-        // Still the same file as read: a whole key put there since is never set aside.
-        anyhow::ensure!(std::fs::metadata(file).is_ok_and(|now| identity(&now) == identity(&before)), "{}", tr("the key file is being written: try again"));
-        std::fs::rename(file, file.with_file_name(format!("{KEY_FILE}.damaged")))?;
-        Ok(None)
     }
 
     /// What a signed build does with the keychain's answer and a key file an unsigned build may have left.
@@ -320,120 +457,15 @@ mod mac {
         }
     }
 
-    fn cipher(key: &[u8; KEY_LEN]) -> anyhow::Result<LessSafeKey> {
-        Ok(LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|_| anyhow::anyhow!("{}", tr("not a key")))?))
-    }
-
-    /// A fresh nonce, then the sealed text and its tag.
-    pub(super) fn seal(key: &[u8; KEY_LEN], data: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut nonce = [0u8; NONCE_LEN];
-        SystemRandom::new().fill(&mut nonce).map_err(|_| anyhow::anyhow!("{}", tr("no random numbers")))?;
-        let mut sealed = data.to_vec();
-        cipher(key)?
-            .seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(entropy), &mut sealed)
-            .map_err(|_| anyhow::anyhow!("{}", tr("sealing failed")))?;
-        let mut out = nonce.to_vec();
-        out.append(&mut sealed);
-        Ok(out)
-    }
-
-    pub(super) fn open(key: &[u8; KEY_LEN], sealed: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
-        anyhow::ensure!(sealed.len() >= NONCE_LEN, "{}", tr("too short to be sealed"));
-        let (nonce, text) = sealed.split_at(NONCE_LEN);
-        let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| anyhow::anyhow!("{}", tr("not a nonce")))?;
-        let mut text = text.to_vec();
-        let plain = cipher(key)?.open_in_place(nonce, Aad::from(entropy), &mut text).map_err(|_| anyhow::anyhow!("{}", tr("not sealed for this user")))?.len();
-        text.truncate(plain);
-        Ok(text)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
 
         #[test]
-        fn a_seal_opens_only_with_its_key_and_its_entropy() {
-            let key = [7u8; KEY_LEN];
-            let plain = br#"{"auth":"test-cookie"}"#;
-            let sealed = seal(&key, plain, b"entropy").unwrap();
-            assert!(!sealed.windows(4).any(|w| w == b"auth"), "the text is not readable");
-            assert_eq!(open(&key, &sealed, b"entropy").unwrap(), plain);
-            assert!(open(&key, &sealed, b"other").is_err());
-            assert!(open(&[8u8; KEY_LEN], &sealed, b"entropy").is_err());
-            let mut changed = sealed.clone();
-            *changed.last_mut().unwrap() ^= 1;
-            assert!(open(&key, &changed, b"entropy").is_err(), "tampered with");
-            assert_ne!(seal(&key, plain, b"entropy").unwrap(), sealed, "a new nonce each time");
-        }
-
-        #[test]
-        fn a_build_without_a_team_keeps_its_key_in_a_file_only_the_person_reads() {
-            use std::os::unix::fs::PermissionsExt as _;
+        fn a_build_without_a_team_is_known() {
             assert!(names_a_team("Identifier=cc.orbiters.n4n0\nTeamIdentifier=V83Y447ML9\nSealed Resources version=2"));
             assert!(!names_a_team("Identifier=cc.orbiters.n4n0\nSignature=adhoc\nTeamIdentifier=not set"));
             assert!(!names_a_team("orbiters-desktop: code object is not signed at all"));
-
-            let folder = std::env::temp_dir().join(format!("orbiters-key-test-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&folder);
-            let file = folder.join("settings").join(KEY_FILE);
-            let first = file_key(&file).unwrap();
-            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(file_key(&file).unwrap(), first, "the same key at the next start: the session still opens");
-            // A file of another length may be another process's being written: left alone, asked again later.
-            std::fs::write(&file, b"cut short").unwrap();
-            assert!(file_key(&file).is_err(), "not replaced while it may be someone's being written");
-            assert_eq!(std::fs::read(&file).unwrap(), b"cut short");
-            // One that has not changed for a minute is damage: set aside, never deleted, and replaced.
-            let old = std::fs::File::options().write(true).open(&file).unwrap();
-            old.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
-            assert_ne!(file_key(&file).unwrap(), first);
-            assert_eq!(std::fs::read(&file).unwrap().len(), KEY_LEN);
-            assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"cut short");
-            let _ = std::fs::remove_dir_all(&folder);
-        }
-
-        /// The verifier's case: two first uses at once (two processes, here threads) each make a key; one key file results,
-        /// and both use the key in it.
-        #[test]
-        fn two_first_uses_at_once_end_with_one_key_for_both() {
-            // M10: two processes both find an old short file; one repairs it; the other never sets the repaired key aside.
-            for round in 0..10 {
-                let folder = std::env::temp_dir().join(format!("orbiters-key-repair-{}-{round}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&folder);
-                std::fs::create_dir_all(&folder).unwrap();
-                let file = folder.join(KEY_FILE);
-                std::fs::write(&file, b"short").unwrap();
-                std::fs::File::options().write(true).open(&file).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
-                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
-                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
-                        if let Ok(key) = file_key(&file) {
-                            break key;
-                        }
-                    })).collect();
-                    racers.into_iter().map(|r| r.join().unwrap()).collect()
-                });
-                let on_disk = std::fs::read(&file).unwrap();
-                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one repaired key for all");
-                assert_eq!(std::fs::read(file.with_file_name(format!("{KEY_FILE}.damaged"))).unwrap(), b"short", "only the damage set aside");
-                let _ = std::fs::remove_dir_all(&folder);
-            }
-            for round in 0..20 {
-                let folder = std::env::temp_dir().join(format!("orbiters-key-race-{}-{round}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&folder);
-                let file = folder.join(KEY_FILE);
-                let keys: Vec<[u8; KEY_LEN]> = std::thread::scope(|scope| {
-                    let racers: Vec<_> = (0..8).map(|_| scope.spawn(|| loop {
-                        if let Ok(key) = file_key(&file) {
-                            break key;
-                        }
-                    })).collect();
-                    racers.into_iter().map(|r| r.join().unwrap()).collect()
-                });
-                let on_disk = std::fs::read(&file).unwrap();
-                assert!(keys.iter().all(|k| k.as_slice() == on_disk.as_slice()), "round {round}: one key for all");
-                assert!(std::fs::read_dir(&folder).unwrap().flatten().all(|e| { let n = e.file_name(); let n = n.to_string_lossy(); n == KEY_FILE || n == ".session-key.lock" }), "nothing left beside it but its lock");
-                let _ = std::fs::remove_dir_all(&folder);
-            }
         }
 
         /// Two signed processes at their first use: the keychain item is added, never set over another's; the one that

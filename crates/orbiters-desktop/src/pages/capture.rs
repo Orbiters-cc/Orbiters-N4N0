@@ -197,9 +197,9 @@ pub(super) fn flight_labels() -> [&'static str; 3] {
     [strings.get(FLIGHTS[0]), strings.get(FLIGHTS[1]), strings.get(FLIGHTS[2])]
 }
 
-/// Whether N4N0 is missing from the avatar worn (an avatar is known, VRChat runs here, the notice was accepted).
+/// Whether N4N0 is missing from the avatar worn (an avatar is known, VRChat can be captured here, the notice was accepted).
 fn kit_missing(snap: &crate::state::Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE
+    orbiters_core::here::HERE.camera_frames
         && snap.vrchat.running
         && snap.settings.consent_acknowledged
         && snap.n4n0.avatar_id.is_some()
@@ -431,7 +431,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
     right = more_r.left() - 8.0;
     let x = tile.right() + 14.0;
     let consent = snap.settings.consent_acknowledged;
-    let here = orbiters_core::osc::VRCHAT_RUNS_HERE;
+    let here = orbiters_core::here::HERE.camera_frames;
     if capturing && !open {
         let stop = match c.state {
             CaptureState::Stopping => tr("Saving…"),
@@ -572,7 +572,7 @@ fn options(
     chips(ui, cx, projects);
     tops.push((Part::Recording, ui.cursor().top()));
     // A recording's numbers and what it records: chosen and read where recording happens, the test pattern's aside.
-    let here = orbiters_core::osc::VRCHAT_RUNS_HERE;
+    let here = orbiters_core::here::HERE.camera_frames;
     if here || cx.snap.is_capturing() {
         grid(ui, cx);
         camera_path(ui, cx);
@@ -723,7 +723,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, upload: &mut Option<(String, Option<bool>)>
     if snap.is_capturing() || snap.capture.state == CaptureState::Stopping {
         return under_way(ui, cx);
     }
-    if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+    if !orbiters_core::here::HERE.camera_frames {
         return recording_elsewhere(ui, cx);
     }
     // The worn avatar's upload, read once per avatar: a picture of the world says beforehand that it would show.
@@ -799,8 +799,19 @@ fn actions(ui: &mut Ui, cx: &mut Cx, upload: &mut Option<(String, Option<bool>)>
 /// tries the whole path from the capture worker to a reconstruction.
 fn recording_elsewhere(ui: &mut Ui, cx: &mut Cx) {
     let mut test = false;
-    super::section(ui, cx, 1, icons::CUBE_FOCUS, tr("3D pictures and recordings"), Some(tr("Taken on the computer that runs VRChat")), |ui| {
-        let note = tr("Without a VRChat here, the test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures.");
+    // VRChat runs on a Linux computer, and its camera cannot be read there yet.
+    let (sub, note) = if orbiters_core::here::LINUX {
+        (
+            tr("Not there yet on Linux"),
+            tr("Orbiters - N4N0 cannot read VRChat's camera on Linux yet. The test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures."),
+        )
+    } else {
+        (
+            tr("Taken on the computer that runs VRChat"),
+            tr("Without a VRChat here, the test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures."),
+        )
+    };
+    super::section(ui, cx, 1, icons::CUBE_FOCUS, tr("3D pictures and recordings"), Some(sub), |ui| {
         widgets::field(ui, tr("Test pattern"), Some(note), 150.0, |ui| {
             test = Button::new(tr("Test pattern")).icon(icons::FLASK).size(Size::Sm).show(ui).clicked();
         });
@@ -1087,7 +1098,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
 fn vrchat_picker(ui: &mut Ui, cx: &mut Cx) {
     let snap = cx.snap;
     let runs = &snap.vrchat.runs;
-    if runs.len() < 2 || !orbiters_core::osc::VRCHAT_RUNS_HERE {
+    if runs.len() < 2 || !orbiters_core::here::HERE.camera_frames {
         return;
     }
     let target = runs.iter().find(|r| r.target);
@@ -1246,7 +1257,7 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
             let (text, tone) = super::network::sidebar_status(&snap.lan);
             (icons::MONITOR_PLAY, "VRChat", text, tone)
         },
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.camera_frames {
             (
                 icons::BROADCAST,
                 tr("Spout source"),

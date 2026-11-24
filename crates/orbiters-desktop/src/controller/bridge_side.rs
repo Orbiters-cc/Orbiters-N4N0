@@ -27,6 +27,12 @@ const LOG_CHUNK: u64 = 4 << 20;
 /// The processes running now: id, name (lower case), start (Unix seconds; 0 when unknown). One list of the system's, as Task
 /// Manager reads it: no process is opened for it, VRChat's least of all (BRIDGE-3; sysinfo opened every process with
 /// memory-read rights, a few times a second).
+#[cfg(target_os = "linux")]
+fn processes() -> Vec<(u32, String, u64)> {
+    orbiters_core::processes::all().into_iter().map(|p| (p.pid, p.name.to_lowercase(), p.started_s())).collect()
+}
+
+#[cfg(not(target_os = "linux"))]
 fn processes() -> Vec<(u32, String, u64)> {
     // FILETIME (100 ns since 1601) to Unix seconds.
     const UNIX_FROM_1601_S: u64 = 11_644_473_600;
@@ -38,6 +44,7 @@ fn processes() -> Vec<(u32, String, u64)> {
 
 /// The VRChats in `system`'s list with when each started (Unix nanoseconds, as precisely as Windows keeps it; 0 when it would not
 /// say). No process is opened for it.
+#[cfg(not(target_os = "linux"))]
 pub(super) fn vrchat_births(system: &sysinfo::System) -> Vec<(u32, u64)> {
     // FILETIME (100 ns since 1601) to Unix nanoseconds.
     const UNIX_FROM_1601: u64 = 116_444_736_000_000_000;
@@ -51,7 +58,20 @@ pub(super) fn vrchat_births(system: &sysinfo::System) -> Vec<(u32, u64)> {
         .collect()
 }
 
+/// The VRChats among `processes` with when each started (Unix nanoseconds, as precisely as the kernel keeps it).
+#[cfg(target_os = "linux")]
+pub(super) fn vrchat_births(processes: &[orbiters_core::processes::Process]) -> Vec<(u32, u64)> {
+    processes.iter().filter(|p| p.is_vrchat()).map(|p| (p.pid, p.started_ns)).collect()
+}
+
 /// The VRChats that run now, with when each started ([`vrchat_births`]).
+#[cfg(target_os = "linux")]
+pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
+    vrchat_births(&orbiters_core::processes::all())
+}
+
+/// The VRChats that run now, with when each started ([`vrchat_births`]).
+#[cfg(not(target_os = "linux"))]
 pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
     let mut system = sysinfo::System::new();
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());

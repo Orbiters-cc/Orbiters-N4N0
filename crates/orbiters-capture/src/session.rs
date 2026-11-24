@@ -463,37 +463,6 @@ impl Areas {
     }
 }
 
-/// Free bytes on the disk holding `dir`.
-#[cfg(windows)]
-fn free_space(dir: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
-    }
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
-    let mut available = 0u64;
-    // SAFETY: a NUL-terminated path and an out-parameter; the totals are not asked for.
-    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) };
-    (ok != 0).then_some(available)
-}
-
-/// Free bytes on the disk holding `dir`.
-#[cfg(target_os = "macos")]
-fn free_space(dir: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
-    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: a NUL-terminated path and an out-parameter.
-    let failed = unsafe { libc::statfs(path.as_ptr(), &mut stats) };
-    (failed == 0).then(|| stats.f_bavail * u64::from(stats.f_bsize))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn free_space(_dir: &Path) -> Option<u64> {
-    None
-}
-
 /// What [`CaptureSession::process`] made of a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Processed {
@@ -858,7 +827,7 @@ impl CaptureSession {
             return;
         }
         self.free_checked = Some(Instant::now());
-        let Some(free) = free_space(self.writer.dir()) else { return };
+        let Some(free) = orbiters_core::disk::free_space(self.writer.dir()) else { return };
         let mb = free >> 20;
         if free < FREE_STOP && self.stop.is_none() {
             self.stop = Some(tr!("Recording stopped: only {mb} MB is free on the disk the sessions are saved to.", mb = mb));
@@ -1639,13 +1608,6 @@ fn session_calibrations(overlay: &[Calibration], detected: Vec<Calibration>, dev
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// On a Mac too a recording stops before the disk is full.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_macs_disk_says_how_much_room_it_has() {
-        assert!(free_space(&std::env::temp_dir()).is_some_and(|free| free > 0));
-    }
-
     #[test]
     fn encoded_picture_thumbnail_excludes_both_data_bands() {
         let dir = std::env::temp_dir().join(format!("orbiters-encoded-thumb-{}", uuid::Uuid::new_v4()));

@@ -166,7 +166,7 @@ fn has_foreground(process: u32) -> bool {
 fn game_running() -> Option<String> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
     let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
     system.processes().values().map(|p| p.name().to_string_lossy().to_lowercase()).find(|name| ["vrchat.exe", "vrserver.exe", "vrmonitor.exe", "vrchat", "vrserver"].contains(&name.as_str()))
 }
 

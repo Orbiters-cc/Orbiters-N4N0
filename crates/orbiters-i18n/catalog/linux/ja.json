@@ -1,0 +1,11 @@
+{
+  "Sound is not recorded on Linux yet.": "Linuxでは、音声の録音はまだできません。",
+  "Sound devices are not used on Linux yet.": "Linuxでは、サウンドデバイスはまだ使えません。",
+  "Nothing shows over VRChat on Linux yet.": "Linuxでは、VRChatの上にはまだ何も表示されません。",
+  "Starting with your session is not there yet on Linux.": "Linuxでは、セッションと同時の起動はまだできません。",
+  "Orbiters - N4N0 cannot start VRChat on Linux yet: start it from Steam.": "Linuxでは、Orbiters - N4N0からVRChatをまだ起動できません。Steamから起動してください。",
+  "Not there yet on Linux": "Linuxではまだ使えません",
+  "Orbiters - N4N0 cannot read VRChat's camera on Linux yet. The test pattern records a generated picture through the capture worker, to try the whole path. It shows in Free up space, not among your pictures.": "Linuxでは、Orbiters - N4N0はVRChatのカメラをまだ読み取れません。テストパターンはキャプチャワーカー経由で生成した画像を録画し、一連の流れを試せます。写真には含まれず、「空き容量を増やす」に表示されます。",
+  "One VRChat runs at a time here: quit it to start on another profile.": "ここで動かせるVRChatは一度に1つです。別のプロフィールで起動するには、先に終了してください。",
+  "Show its pictures in the file manager": "写真をファイルマネージャーで表示"
+}

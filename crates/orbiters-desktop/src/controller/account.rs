@@ -154,7 +154,7 @@ pub fn open_url(url: &str) -> anyhow::Result<()> {
     #[cfg(windows)]
     open_with_browser(url)?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(url).spawn()?;
+    crate::linux::open::url(url)?;
     #[cfg(target_os = "macos")]
     std::process::Command::new("open").arg(url).spawn()?;
     Ok(())

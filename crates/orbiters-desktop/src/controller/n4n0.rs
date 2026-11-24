@@ -425,7 +425,7 @@ impl Controller {
     /// CPU and memory of Orbiters' processes and VRChat's (the N4N0 page's footprint).
     fn n4n0_resources(&self, system: &mut sysinfo::System) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-        system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks().with_cpu().with_memory());
         let processes: Vec<(String, f32, f32)> = system.processes().values().map(|p| (p.name().to_string_lossy().into_owned(), p.cpu_usage(), p.memory() as f32 / (1024.0 * 1024.0))).collect();
         self.n4n0.set_resources(footprint(processes.iter().map(|(n, c, m)| (n.as_str(), *c, *m))));
     }

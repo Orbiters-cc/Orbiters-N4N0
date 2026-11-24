@@ -286,7 +286,7 @@ fn one_at_a_time(game: &Game) -> Option<&'static str> {
         Game::Starting(_) => Some(tr("Wait for the VRChat starting now")),
         _ => None,
     }
-    .filter(|_| !SEVERAL_HERE)
+    .filter(|_| !SEVERAL_HERE && orbiters_core::here::HERE.starts_vrchat)
 }
 
 /// The Play buttons and the profile choice, as blocks from `index`: what Play can do, and the next block's index.
@@ -307,7 +307,11 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) -> (
                 let p = ui.painter();
                 widgets::frame(p, rect, 16.0, theme::surface_soft());
                 widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
-                let line = tr("VRChat isn't installed on this computer: install it from Steam or the Meta app, then come back.");
+                let line = if orbiters_core::here::HERE.starts_vrchat {
+                    tr("VRChat isn't installed on this computer: install it from Steam or the Meta app, then come back.")
+                } else {
+                    tr(crate::controller::launcher::CANNOT_START)
+                };
                 widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 60.0);
             });
             return (play, index + 1);

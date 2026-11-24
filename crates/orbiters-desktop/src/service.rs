@@ -208,7 +208,7 @@ impl Service {
     /// Once per SteamVR session: SteamVR is told a start with it chosen while it was not running, or else what it says
     /// is kept in the settings (its own settings may have changed it): [`crate::startup`]. It is asked only while it runs.
     fn keep_steamvr_start(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        if self.quitting.load(Ordering::Relaxed) || !orbiters_core::here::HERE.steam_vr {
             return;
         }
         let snap = self.ctl.view();
@@ -278,7 +278,7 @@ impl Service {
 
     /// Starts the SteamVR overlay process while SteamVR runs (and the setting allows it); closes it otherwise.
     fn keep_overlay(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        if self.quitting.load(Ordering::Relaxed) || !orbiters_core::here::HERE.vr_overlay {
             return;
         }
         let snap = self.ctl.view();
@@ -813,7 +813,7 @@ impl Service {
         }
         drop(talk);
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
-        if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
+        if role == Role::Window && !orbiters_core::here::HERE.tray {
             self.quit();
         }
     }
@@ -1168,8 +1168,8 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         })?;
         crate::mac::run_service(service.clone())?;
     }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = quit_rx.recv();
+    #[cfg(target_os = "linux")]
+    crate::linux::tray::run(&service, &quit_rx);
 
     // Let the windows read their Close before the process goes.
     #[cfg(not(target_os = "macos"))]

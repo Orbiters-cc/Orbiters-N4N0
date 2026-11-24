@@ -14,11 +14,14 @@ fn admitted(server: Session, now: u64) -> bool {
     now.saturating_sub(server.1) >= MAX_STARTUP_WAIT_SECS
 }
 
+/// SteamVR's server, as the system lists it.
+const SERVER: &str = if cfg!(target_os = "linux") { "vrserver" } else { "vrserver.exe" };
+
 /// PID plus creation time avoids treating a reused PID as the previous runtime.
 pub fn current_session() -> Option<Session> {
     let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    system.processes().values().find(|p| p.name().eq_ignore_ascii_case("vrserver.exe")).map(|p| (p.pid().as_u32(), p.start_time()))
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing().without_tasks());
+    system.processes().values().find(|p| p.name().eq_ignore_ascii_case(SERVER)).map(|p| (p.pid().as_u32(), p.start_time()))
 }
 
 pub fn ready_session() -> Option<Session> {

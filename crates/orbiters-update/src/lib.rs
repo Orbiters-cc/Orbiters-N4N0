@@ -109,7 +109,15 @@ pub fn development() -> bool {
 
 /// The folder of the feed a platform's releases are in: a Mac's programs are not Windows', and an installed app of either
 /// must never hear of the other's. Windows' stay at the feed's root, where its apps have always looked.
-pub const PLATFORM_FOLDER: &str = if cfg!(target_os = "macos") { "macos/" } else { "" };
+pub const PLATFORM_FOLDER: &str = if cfg!(target_os = "macos") {
+    "macos/"
+} else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    "linux-aarch64/"
+} else if cfg!(target_os = "linux") {
+    "linux-x86_64/"
+} else {
+    ""
+};
 
 /// Where a channel's release is published.
 pub fn release_url(feed: &str, channel: &str) -> String {
@@ -124,6 +132,11 @@ pub const MAC_BUNDLE_ID: &str = "cc.orbiters.n4n0";
 /// What a Mac release is downloaded as to update an install: the application, zipped with its signature whole.
 pub fn mac_archive_name(version: &str) -> String {
     format!("Orbiters-N4N0-{version}-macos-arm64.zip")
+}
+
+/// What a Linux release is, to install and to update.
+pub fn linux_image_name(version: &str) -> String {
+    format!("Orbiters-N4N0-{version}-{}.AppImage", std::env::consts::ARCH)
 }
 
 /// What a person downloads to install it by hand.
@@ -307,6 +320,9 @@ pub fn updates_dir() -> PathBuf {
 pub fn setup_file(version: &str) -> PathBuf {
     if cfg!(target_os = "macos") {
         return updates_dir().join(mac_archive_name(version));
+    }
+    if cfg!(target_os = "linux") {
+        return updates_dir().join(linux_image_name(version));
     }
     updates_dir().join(format!("OrbitersSetup-{version}.exe"))
 }

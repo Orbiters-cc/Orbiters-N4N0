@@ -96,7 +96,7 @@ fn usage_name(action: &Action) -> String {
 /// says it is in desktop mode: the person is at the screen, verify2-r15 S5), and the settings say so: a menu around VRChat's, its camera's
 /// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE
+    orbiters_core::here::HERE.desktop_panels
         && snap.vrchat.running
         && !snap.vrchat.remote
         && (!snap.steamvr.running || snap.n4n0.desktop_mode)
@@ -5227,7 +5227,7 @@ mod desktop_wanted_tests {
         snap.settings.translate.enabled = true;
         snap.settings.translate.window_on = true;
         if menus_off {
-            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::here::HERE.desktop_panels, "translation on, menus off");
             snap.settings.translate.enabled = false;
             assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
         }
@@ -5237,7 +5237,7 @@ mod desktop_wanted_tests {
     /// overlay's menu; VRChat in desktop mode, with SteamVR running or not, the desktop's panels, whose process then runs.
     #[test]
     fn the_menu_request_has_one_host_by_vrchat_s_mode() {
-        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if !orbiters_core::here::HERE.desktop_panels {
             return;
         }
         let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());

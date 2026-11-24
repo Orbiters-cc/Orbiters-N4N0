@@ -41,12 +41,23 @@ security-framework = "3"
 core-foundation = "0.10"
 ring = "0.17"
 
-# TLS (`http_tls`): Windows' own through native TLS on the desktop; rustls with ring on Android, where native TLS would
-# mean OpenSSL. Crates that reach the web through this one take its TLS.
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# TLS (`http_tls`): the system's own through native TLS on Windows and the Mac; rustls with ring on Linux and Android, where
+# native TLS would mean OpenSSL. Crates that reach the web through this one take its TLS.
+[target.'cfg(not(any(target_os = "android", target_os = "linux")))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 # VRChat's pipeline (`pipeline.rs`): the TLS ureq already brings in.
 native-tls = "0.2"
 
-[target.'cfg(target_os = "android")'.dependencies]
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# VRChat's pipeline (`pipeline.rs`): the TLS ureq already brings in there.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# The session store's AES-GCM and its key (`dpapi`).
+ring = "0.17"
+
+# A disk's free space (`disk`), the clock ticks of `/proc` (`processes`).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"

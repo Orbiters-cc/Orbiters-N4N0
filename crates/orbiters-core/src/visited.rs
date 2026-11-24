@@ -473,10 +473,14 @@ pub fn screenshot_dirs_with(extra: &[PathBuf]) -> Vec<PathBuf> {
         let custom = std::fs::read_to_string(log.join("config.json"))
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v.get("picture_output_folder")?.as_str().map(PathBuf::from));
+            .and_then(|v| v.get("picture_output_folder")?.as_str().and_then(vrchats_path));
         if let Some(c) = custom {
             found.push(c);
         }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(vrchat) = crate::proton::vrchat() {
+        found.push(vrchat.prefix.pictures_dir());
     }
     if let Some(p) = crate::paths::pictures_dir().map(|p| p.join("VRChat")) {
         if !found.contains(&p) {
@@ -489,6 +493,20 @@ pub fn screenshot_dirs_with(extra: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// A folder as VRChat's own settings name it: under Proton a Windows path inside its prefix.
+#[cfg(target_os = "linux")]
+fn vrchats_path(text: &str) -> Option<PathBuf> {
+    if text.starts_with('/') {
+        return Some(PathBuf::from(text));
+    }
+    crate::proton::vrchat()?.prefix.unix_path(text)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn vrchats_path(text: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(text))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -32,9 +32,9 @@ pub fn starts_with_windows() -> bool {
     {
         mac::is_set()
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
-        false
+        crate::linux::startup::is_set()
     }
 }
 
@@ -48,10 +48,9 @@ pub fn set_start_with_windows(on: bool) -> anyhow::Result<()> {
     {
         mac::set(on)
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = on;
-        anyhow::bail!("{}", tr("starting with the system is for Windows only"))
+        crate::linux::startup::set(on)
     }
 }
 

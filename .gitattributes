@@ -3,3 +3,4 @@
 *.icns binary
 *.qoi binary
 *.onnx binary
+*.sh text eol=lf

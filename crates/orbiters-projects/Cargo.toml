@@ -14,6 +14,8 @@ uuid.workspace = true
 time.workspace = true
 orbiters-core.workspace = true
 vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
+# Reads Creator Companion's and ALCOM's project list (theirs.rs), with the reader vrc-get itself has; never writes it.
+vrc-get-litedb = { version = "=0.3.0-beta.8", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 indexmap = "2"
@@ -48,4 +50,5 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
 
 [dev-dependencies]
+ring = "0.17"
 tempfile = "3"

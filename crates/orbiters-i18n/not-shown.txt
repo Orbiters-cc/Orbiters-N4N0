@@ -25,6 +25,7 @@ crates/orbiters-desktop/src/chat_bar/tests.rs
 crates/orbiters-desktop/src/bridge/tools.rs
 crates/orbiters-desktop/src/bridge/caps.rs
 crates/orbiters-desktop/src/bridge/flow_tests.rs
+crates/orbiters-projects/src/no_write_tests.rs
 crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs
 crates/orbiters-desktop/src/bridge/vr.rs

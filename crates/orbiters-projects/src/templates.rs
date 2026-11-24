@@ -419,7 +419,7 @@ pub async fn create(
 }
 
 /// A copy of the project in `source` named `name` in `parent`, taking along what `keep` asks for: its packages
-/// restored and registered in the list VCC and ALCOM share. Its scenes keep their blueprint IDs.
+/// restored and registered in Orbiters' list ([`crate::gallery`]). Its scenes keep their blueprint IDs.
 pub async fn duplicate(
     root: &Path,
     source: &Path,
@@ -478,7 +478,7 @@ async fn make(
     // Register the completed copy before any fallible restoration (AGENTS.md): from here on every failure leaves a
     // project the gallery lists, and says where it is.
     progress.lock().unwrap().phase = mark("Registering project").into();
-    crate::vpm::register(root, &destination, true).await
+    crate::gallery::add(root, &destination)
         .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
     let listed = || tr!("The copy is listed at {path}, but its local packages could not be copied", path = destination.display());
     if copy.is_some() { copy_local_packages(source, &destination, cancel, progress).with_context(listed)?; }
@@ -797,7 +797,7 @@ mod tests {
         let rt = crate::runtime().unwrap();
         let copy = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).unwrap();
         assert!(installed_dependencies_complete(&copy).unwrap());
-        assert!(rt.block_on(crate::vpm::registered(&root)).unwrap().iter().any(|p| p.canonicalize().unwrap() == copy.canonicalize().unwrap()));
+        assert!(crate::gallery::lists(&root, &copy));
         std::fs::remove_file(copy.join("Packages/private.package/package.json")).unwrap();
         assert!(!installed_dependencies_complete(&copy).unwrap());
     }
@@ -810,9 +810,8 @@ mod tests {
         std::fs::write(dir.join("Assets/a.txt"), "a").unwrap();
         crate::write_json(&dir.join("Packages/manifest.json"), &serde_json::json!({ "dependencies": dependencies })).unwrap();
     }
-    fn is_registered(rt: &tokio::runtime::Runtime, root: &Path, path: &Path) -> bool {
-        let wanted = crate::discovery::key(path);
-        rt.block_on(crate::vpm::registered(root)).unwrap().iter().any(|p| crate::discovery::key(p) == wanted)
+    fn is_registered(root: &Path, path: &Path) -> bool {
+        crate::gallery::lists(root, path)
     }
 
     #[test]
@@ -832,7 +831,7 @@ mod tests {
             .unwrap_err();
         let copy = temp.path().join("Copy");
         assert!(said.contains(&copy.display().to_string()), "{said}");
-        assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
+        assert!(is_registered(&root, &copy), "the copy is in the gallery's list");
     }
 
     /// PROJECTS-4: a copy that stops halfway is not a project the gallery lists, and its folder is kept as it is.
@@ -988,7 +987,7 @@ mod tests {
         let made = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())));
         STOP_AFTER_COPY.with(|s| s.set(false));
         let _ = made;
-        assert!(is_registered(&rt, &root, &temp.path().join("Copy")));
+        assert!(is_registered(&root, &temp.path().join("Copy")));
     }
 
     /// A package folder is copied whole (its own Logs or Library are part of it); an archive the project already holds

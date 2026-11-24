@@ -85,7 +85,6 @@
   "Invalid package name: {name}": "Nome de pacote inválido: {name}",
   "Required local package {name} is unavailable": "O pacote local necessário {name} não está disponível",
   "Choose a Unity project containing ProjectSettings/ProjectVersion.txt.": "Escolha um projeto do Unity que contenha ProjectSettings/ProjectVersion.txt.",
-  "Project path is not Unicode": "O caminho do projeto não é Unicode",
   "A repository URL must use HTTPS or HTTP.": "A URL de um repositório deve usar HTTPS ou HTTP.",
   "No compatible version of {name} is available in enabled repositories.": "Nenhuma versão compatível de {name} está disponível nos repositórios ativados.",
   "{name} {version} is no longer in the enabled repositories.": "{name} {version} não está mais nos repositórios ativados.",
@@ -115,5 +114,7 @@
   "{name} could not be put back ({why}): its copy is kept at {path}": "Não foi possível restaurar {name} ({why}): a cópia está guardada em {path}",
   "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Uma alteração de pacotes parou no meio e não pôde ser totalmente restaurada: {problems}. O que o projeto tinha está guardado em {path}.",
   "its record cannot be used": "o registro dela não pode ser usado",
-  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Os pacotes foram alterados, mas o registro da alteração em {path} não pôde ser fechado: remova-o antes da próxima alteração de pacotes"
+  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Os pacotes foram alterados, mas o registro da alteração em {path} não pôde ser fechado: remova-o antes da próxima alteração de pacotes",
+  "Orbiters' project list could not be saved": "Não foi possível salvar a lista de projetos do Orbiters",
+  "Creator Companion's project list cannot be read now ({why}): the projects it had when it last could are shown. Orbiters changes nothing of it.": "A lista de projetos do Creator Companion não pode ser lida agora ({why}): são mostrados os projetos que ela tinha na última leitura. O Orbiters não altera nada nela."
 }

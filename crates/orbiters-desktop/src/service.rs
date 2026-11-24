@@ -643,6 +643,7 @@ impl Service {
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::Explorer { command, epoch } => ctl.explorer_command(command, epoch),
+            ToService::AvatarGun { command } => ctl.avatar_gun_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             // Quickly, on this thread: Stop is the person taking control back.

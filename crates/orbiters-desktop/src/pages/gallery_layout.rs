@@ -98,8 +98,13 @@ pub fn rows(aspects: &[f32], width: f32) -> (Vec<Rect>, f32) {
 
 /// Grid: cards of `card_h` (their picture and body) in as many columns of at least `min` as fit.
 pub fn grid(n: usize, width: f32, min: f32, body: f32) -> (Vec<Rect>, f32) {
+    grid_shaped(n, width, min, 16.0 / 9.0, body)
+}
+
+/// [`grid`] with pictures of shape `aspect` (width over height): VRChat's avatar thumbnails are 4:3.
+pub fn grid_shaped(n: usize, width: f32, min: f32, aspect: f32, body: f32) -> (Vec<Rect>, f32) {
     let (cols, w) = orbiters_ui::layout::columns(width, min, GAP);
-    let h = w * 9.0 / 16.0 + body;
+    let h = w / aspect + body;
     let rects = (0..n).map(|i| Rect::from_min_size(pos2((i % cols) as f32 * (w + GAP), (i / cols) as f32 * (h + GAP)), vec2(w, h))).collect();
     (rects, (n.div_ceil(cols) as f32 * (h + GAP) - GAP).max(0.0))
 }

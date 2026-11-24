@@ -248,6 +248,8 @@ pub struct Controller {
     rig: Mutex<rig::RigRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
+    /// The avatar gun: its parameters, the event stream, shots, hits and the change (controller/avatar_gun.rs).
+    avatar_gun: Mutex<avatar_gun::Runtime>,
     shared_view: Mutex<shared_view::SharedRuntime>,
     /// Updates of an installed app (controller/update.rs).
     updates: Mutex<update::UpdateRuntime>,
@@ -501,6 +503,7 @@ fn publish_log(line: &str) {
 }
 
 mod account;
+pub mod avatar_gun;
 pub mod assistant;
 mod assistant_access;
 mod around;
@@ -516,6 +519,7 @@ mod burst;
 mod pause_tests;
 mod calls;
 mod calls_access;
+mod event_stream;
 mod cleanup;
 mod dolly;
 pub mod groups;
@@ -635,6 +639,7 @@ impl Controller {
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             calls: Mutex::new(calls::CallsRuntime::default()),
+            avatar_gun: Mutex::new(avatar_gun::Runtime::default()),
             shared_view: Mutex::new(shared_view::SharedRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
@@ -716,6 +721,7 @@ impl Controller {
         self.start_n4n0();
         self.start_perf();
         self.start_calls();
+        self.start_avatar_gun();
         self.start_shared_view();
         self.start_updates();
     }
@@ -1899,6 +1905,7 @@ impl Controller {
                     // Face tracking's flood skips N4N0's buttons (none is one of its parameters).
                     if !face_tracking(&name) {
                         self.n4n0.on_parameter(&name, &value);
+                        self.avatar_gun_parameter(&name, &value);
                     }
                     if name == record_parameter {
                         self.record_toggled(value.truthy());
@@ -1911,6 +1918,7 @@ impl Controller {
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
+                    self.avatar_gun_avatar(&id);
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
                 OscEvent::Values { address, values } => {
@@ -2509,6 +2517,7 @@ impl Controller {
         // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
         self.n4n0.shutdown();
         self.calls_stop();
+        self.stop_avatar_gun();
         self.put_vrchat_back();
         // Stopped outside the lock: stopping waits for the receiving thread.
         let osc = self.osc.lock().unwrap().take();

@@ -32,6 +32,8 @@ pub struct App {
     show_splash: bool,
     sidebar_since: Option<f64>,
     toasts: toast::Toasts,
+    /// The avatar gun card's picture of the avatar (`crate::avatar_gun_ui`), made at its first card.
+    gun_pictures: Option<crate::worlds::Pictures>,
     home: pages::home::State,
     capture: pages::capture::State,
     projects: pages::projects::State,
@@ -107,6 +109,7 @@ impl App {
             show_splash: true,
             sidebar_since: None,
             toasts: toast::Toasts::default(),
+            gun_pictures: None,
             home: Default::default(),
             capture: Default::default(),
             projects: Default::default(),
@@ -219,6 +222,10 @@ impl App {
 
     pub fn settings_mut(&mut self) -> &mut pages::settings::State {
         &mut self.settings
+    }
+
+    pub fn n4n0_mut(&mut self) -> &mut pages::n4n0::State {
+        &mut self.n4n0
     }
 
     pub fn home_mut(&mut self) -> &mut pages::home::State {
@@ -374,6 +381,16 @@ impl App {
         let shared_up = snap.shared_view.offer.as_ref().is_some_and(|o| o.until_ms > crate::wake_offer::now_ms());
         let lift = if talk_up { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 } + if shared_up { crate::shared_view_ui::HEIGHT + 12.0 } else { 0.0 };
         crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), lift);
+        // The avatar gun's question or notice (`crate::avatar_gun_ui`), over all of them.
+        let notice_up = snap.explorer.notice.as_ref().is_some_and(|n| n.up(crate::controller::explorer::now_ms()));
+        let lift = lift + if notice_up { crate::world_notice::CARD.y * 1.1 + 12.0 } else { 0.0 };
+        let gun_card = snap.avatar_gun.card.as_ref().filter(|c| c.up(crate::controller::unix_ms()));
+        let picture = gun_card.filter(|c| !c.thumbnail.is_empty()).and_then(|c| {
+            let scope = crate::controller::vrchat_data::Scope::of(&snap);
+            let pictures = self.gun_pictures.get_or_insert_with(|| crate::worlds::Pictures::with_backend(&ctx, Some(self.ctl.clone())));
+            pictures.get(&ctx, &crate::worlds::Picture::Avatar { scope, avatar_id: c.avatar_id.clone(), url: c.thumbnail.clone() }).map(|t| t.id())
+        });
+        crate::avatar_gun_ui::window(&ctx, &self.ctl, gun_card, lift, picture);
         if splash_on {
             splash(&ctx, full, splash_t);
         }

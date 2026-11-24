@@ -1,0 +1,8 @@
+# The avatar gun (contracts Docs/avatar-gun.md, 2026-11-24): the shooter's picker of public favourite avatars (window page,
+# menus' sheet), the hit player's card (ask, changed, failed, undo) in the window, the VR band and desktop mode, the
+# shooter's toasts, and Settings' "Who can change my avatar".
+crates/orbiters-desktop/src/controller/avatar_gun.rs
+crates/orbiters-desktop/src/avatar_gun_ui.rs
+crates/orbiters-desktop/src/avatar_gun_picker.rs
+crates/orbiters-desktop/src/pages/avatar_gun.rs
+crates/orbiters-desktop/src/overlay/orbit/panels/avatar_gun_sheet.rs

@@ -59,6 +59,8 @@ mod upload_prep;
 mod usage;
 mod views;
 mod shared_view_ui;
+mod avatar_gun_picker;
+mod avatar_gun_ui;
 mod wake_offer;
 mod world_notice;
 mod window_rest;

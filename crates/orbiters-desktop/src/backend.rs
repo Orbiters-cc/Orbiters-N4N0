@@ -187,6 +187,8 @@ pub trait Backend: Send + Sync {
     fn n4n0(&self, command: N4n0Command);
     /// Explorer points: the world notice's and the camera's share buttons' presses (controller/explorer.rs).
     fn explorer(&self, _command: controller::explorer::Command) {}
+    /// The avatar gun: a press on the hit player's card (Allow, Not now, Undo).
+    fn avatar_gun(&self, _command: controller::avatar_gun::Command) {}
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
@@ -484,6 +486,9 @@ impl Backend for Remote {
     fn explorer(&self, command: controller::explorer::Command) {
         self.0.send(&ToService::Explorer { command, epoch: self.shown_epoch() });
     }
+    fn avatar_gun(&self, command: controller::avatar_gun::Command) {
+        self.0.send(&ToService::AvatarGun { command });
+    }
 
     fn updates(&self, action: UpdateAction) {
         self.0.send(&ToService::Updates { action });
@@ -739,6 +744,10 @@ impl Backend for Local {
 
     fn explorer(&self, command: controller::explorer::Command) {
         self.ctl.explorer_command(command, self.shown_epoch());
+    }
+
+    fn avatar_gun(&self, command: controller::avatar_gun::Command) {
+        self.ctl.avatar_gun_command(command);
     }
 
     fn updates(&self, action: UpdateAction) {

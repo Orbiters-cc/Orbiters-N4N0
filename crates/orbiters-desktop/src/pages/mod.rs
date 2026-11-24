@@ -1,5 +1,6 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
+pub mod avatar_gun;
 mod beta_feedback;
 mod booster_card;
 mod launch_card;

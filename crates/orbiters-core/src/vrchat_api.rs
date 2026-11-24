@@ -11,6 +11,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
+mod avatars;
 mod groups;
 mod social;
 pub use groups::{art_body, file_md5 as group_file_md5, post_create_body, role_create_body, role_update_body, Failure as GroupFailure, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
@@ -232,6 +233,15 @@ pub struct Avatar {
     /// The account that uploaded it (`usr_…`); empty when the answer did not say.
     #[serde(default)]
     pub author_id: String,
+    /// `public` or `private`; empty when the answer did not say (Orbiters' fallback says nothing of it).
+    #[serde(default)]
+    pub release_status: String,
+}
+impl Avatar {
+    /// VRChat says anybody may wear it.
+    pub fn public(&self) -> bool {
+        self.release_status == "public"
+    }
 }
 /// A world as VRChat describes it to the signed-in account (its own private uploads too).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -482,13 +492,13 @@ pub fn world_list_path(list: &crate::maps::WorldList, page: usize) -> String {
     }
 }
 
-/// `GET /favorite/groups`' world groups: tag and name (the tag when it has none). A group of another type, or with a tag that
-/// is not a plain word, is left out.
-fn parse_favorite_groups(body: &[u8]) -> Result<Vec<(String, String)>> {
+/// `GET /favorite/groups`' groups of `kind` (`world`, `avatar`): tag and name (the tag when it has none), in VRChat's
+/// order. A group of another type, or with a tag that is not a plain word, is left out.
+fn parse_favorite_groups(body: &[u8], kind: &str) -> Result<Vec<(String, String)>> {
     let list: Vec<serde_json::Value> = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
     Ok(list
         .iter()
-        .filter(|g| g["type"] == "world")
+        .filter(|g| g["type"] == kind)
         .filter_map(|g| {
             let tag = g["name"].as_str().filter(|t| !t.is_empty() && t.len() <= 64 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))?;
             let name = g["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(tag);
@@ -843,6 +853,8 @@ pub struct Client {
     instances: HashMap<(String, String), (Instant, Option<bool>)>,
     /// Pages of world lists (searches, popular, favorites) by their path: what they found and whether more follow.
     world_lists: HashMap<String, (Instant, Vec<crate::maps::FoundWorld>, bool)>,
+    /// The public avatars of each avatar favourite group, by its tag ([`Client::favorite_avatars`]).
+    avatar_lists: HashMap<String, (Instant, Vec<Avatar>)>,
     store: Option<PathBuf>,
     /// The account whose session VRChat ended (a 401 confirmed by a second look, or its cookie deleted): kept for "Sign
     /// in again" instead of looking like a computer that never signed in. A new sign-in clears it.
@@ -881,6 +893,7 @@ impl Client {
             friends: None,
             instances: HashMap::new(),
             world_lists: HashMap::new(),
+            avatar_lists: HashMap::new(),
             // `%LOCALAPPDATA%/Orbiters` as before, or the given folders' (a harness, a test: never the person's session).
             store: Some(crate::paths::local_data_root().join(SESSION_FILE)),
             ended: None,
@@ -986,6 +999,7 @@ impl Client {
         self.friends = None;
         self.instances.clear();
         self.world_lists.clear();
+        self.avatar_lists.clear();
     }
     /// VRChat ended the session: it is let go of in memory, its account kept for "Sign in again". The file is not removed
     /// (only the person's own sign-out does that): if VRChat was wrong, a restart or "Try again" brings it back.
@@ -1028,6 +1042,7 @@ impl Client {
             friends: self.friends.take(),
             instances: std::mem::take(&mut self.instances),
             world_lists: std::mem::take(&mut self.world_lists),
+            avatar_lists: std::mem::take(&mut self.avatar_lists),
             store: self.store.clone(),
             ended: self.ended.take(),
             recheck_delay: self.recheck_delay,
@@ -1254,6 +1269,7 @@ impl Client {
                 self.friends = None;
                 self.instances.clear();
                 self.world_lists.clear();
+                self.avatar_lists.clear();
                 self.pending_methods = methods.clone();
             }
         }
@@ -1481,7 +1497,7 @@ impl Client {
     pub fn favorite_world_groups(&mut self) -> Result<Vec<(String, String)>> {
         self.authenticated()?;
         let r = self.get("favorites", "/favorite/groups?type=world&n=50")?;
-        parse_favorite_groups(&r.body)
+        parse_favorite_groups(&r.body, "world")
     }
     /// The first bounded batch of fresh visible instances; remaining holds the exact IDs for continuation.
     pub fn world_instances(&mut self, world: &str) -> Result<WorldInstances> {
@@ -2007,7 +2023,7 @@ pub(crate) mod tests {
         assert_eq!(world_list_path(&WorldList::Row(Row::New), 0), "/worlds?sort=publication&order=descending&releaseStatus=public&n=25&offset=0");
         assert_eq!(world_list_path(&WorldList::FavoriteGroup("worlds2".into()), 1), "/worlds/favorites?tag=worlds2&n=25&offset=24");
         let body = br#"[{"id":"fvgrp_1","name":"worlds1","displayName":"Chill spots","type":"world"},{"name":"avatars1","displayName":"Mine","type":"avatar"},{"name":"worlds2","displayName":"","type":"world"},{"name":"../x","type":"world"}]"#;
-        assert_eq!(parse_favorite_groups(body).unwrap(), [("worlds1".to_string(), "Chill spots".to_string()), ("worlds2".to_string(), "worlds2".to_string())]);
+        assert_eq!(parse_favorite_groups(body, "world").unwrap(), [("worlds1".to_string(), "Chill spots".to_string()), ("worlds2".to_string(), "worlds2".to_string())]);
     }
 
     #[test]

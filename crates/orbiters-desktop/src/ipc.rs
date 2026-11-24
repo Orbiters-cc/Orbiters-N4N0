@@ -1372,6 +1372,8 @@ pub(crate) mod tests {
             offer: Some(crate::state::ShareOffer { id: 2, from: "Kiri".into(), title: "The Black Cat".into(), until_ms: 1_762_800_030_000, for_ms: 30_000 }),
             watching: Some(crate::state::ShareWatching { id: 3, from: "Nova Fox".into(), title: "Sky".into(), capture: 412, revision: 77, file: None, start: None, view: Some((12.0, [0.5, -1.0])), failed: None }),
         });
+        // The avatar gun: worn, loaded, its picker asked for once.
+        s.avatar_gun = crate::controller::avatar_gun::Status { gun: true, loaded: true, choose: 1, ..Default::default() };
         s
     }
 

@@ -599,8 +599,15 @@ fn refused(name: &str, read: &source::Read) -> Vec<String> {
 /// The paths of `read` that can write Creator Companion's or ALCOM's files.
 fn theirs(read: &source::Read) -> Vec<String> {
     let reaches = |p: &str| {
-        p.starts_with("vrc_get_vpm::") && !p.starts_with("vrc_get_vpm::version::") || p == "vrc_get_vpm" || p.starts_with("vrc_get_litedb") || p.starts_with("crate::vpm") || p.starts_with("super::super::vpm") || p.starts_with("crate::copies::list")
-            || p.starts_with("crate::templates::make") || p.starts_with("crate::templates::duplicate") || p.starts_with("crate::templates::create")
+        // From the crate or from where it is called, however far up that is said.
+        let own = p.split("::").any(|part| matches!(part, "crate" | "super"));
+        let parts: Vec<&str> = p.split("::").skip_while(|part| matches!(*part, "crate" | "super" | "self")).collect();
+        match parts[..] {
+            ["vrc_get_vpm", "version", ..] => false,
+            ["vrc_get_vpm" | "vrc_get_litedb", ..] => true,
+            ["vpm" | "vcc_store", ..] | ["copies", "list", ..] | ["templates", "make" | "duplicate" | "create", ..] => own,
+            _ => false,
+        }
     };
     read.paths.iter().filter(|p| reaches(p)).cloned().collect()
 }
@@ -619,6 +626,11 @@ fn no_call_into_creator_companions_files_is_missed() {
         "async fn f() { vrc_get_vpm::environment::VccDatabaseConnection::connect(io).await; }",
         "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::parse(b); }",
         "fn f() { crate::copies::list(a, b, c); }",
+        "fn f() { crate::vcc_store::Settings::plan(r, p, true, false, is); }",
+        "use crate::vpm::*; async fn f() { register(r, p, true).await; }",
+        "async fn f() { super::vpm::register(r, p, true).await; }",
+        "use super::super::{vcc_store as store}; fn f() { store::database_is_whole(r); }",
+        "fn f() { super::super::super::templates::create(a); }",
         "fn f() { crate::templates::duplicate(a); }",
         "fn f() { anyhow::ensure!(crate::vpm::register(r, p, true).is_ok()); }",
     ] {

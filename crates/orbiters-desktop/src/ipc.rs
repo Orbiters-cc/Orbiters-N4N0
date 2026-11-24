@@ -999,7 +999,15 @@ impl Client {
             return Err(unanswered());
         }
         self.send(&ToService::Member { id: id.clone(), epoch, request: Box::new(request) });
-        let answer = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(unanswered()));
+        // A file may take a while to come; a link that closes ends the wait.
+        let until = Instant::now() + orbiters_core::account::TRANSFER_TIMEOUT + Duration::from_secs(60);
+        let answer = loop {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(answer) => break answer,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < until && !self.state.lock().unwrap().closed => {}
+                Err(_) => break Err(unanswered()),
+            }
+        };
         self.member.lock().unwrap().remove(&id);
         answer
     }

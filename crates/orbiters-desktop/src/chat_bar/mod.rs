@@ -94,6 +94,11 @@ pub fn has_conversation(snap: &Snapshot) -> bool {
     !snap.n4n0.lines.is_empty() || !snap.n4n0.confirmations.is_empty() || snap.n4n0.thinking || snap.n4n0.listening
 }
 
+/// What is said while who is signed in is not known.
+fn signing_in(snap: &Snapshot) -> &'static str {
+    if snap.account.unreadable { snap.account.connecting() } else { tr("Signing in…") }
+}
+
 /// N4N0's latest whole answer (when it was said, and its words' hash): one that came while the chat was closed lights the
 /// bar. Its identity, not a count: the conversation keeps its last lines only, so a full one does not grow (verify-r21
 /// minor 5).
@@ -495,7 +500,7 @@ impl ChatBar {
         if self.draft.is_empty() {
             let hint = match gate(snap) {
                 Gate::SignedOut => tr("Sign in to talk to N4N0"),
-                Gate::SigningIn => tr("Signing in…"),
+                Gate::SigningIn => signing_in(snap),
                 Gate::Off if !snap.settings.n4n0.enabled => tr("N4N0 is off"),
                 Gate::Off => tr("N4N0's assistant is off"),
                 Gate::Ready if unread => tr("N4N0 answered"),
@@ -608,7 +613,7 @@ impl ChatBar {
             let hint = match gate(snap) {
                 Gate::Ready => tr("Ask N4N0 anything…"),
                 Gate::SignedOut => tr("Sign in to talk to N4N0"),
-                Gate::SigningIn => tr("Signing in…"),
+                Gate::SigningIn => signing_in(snap),
                 Gate::Off => tr("N4N0's assistant is off"),
             };
             let hint = Txt::new(hint, 14.0).color(theme::FG_4);

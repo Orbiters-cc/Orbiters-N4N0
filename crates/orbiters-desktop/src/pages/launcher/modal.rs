@@ -387,7 +387,7 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
     if reach == Reach::SignIn && cx.snap.vrchat_login.presence() != crate::controller::vrchat_login::Presence::SignedOut {
         // r21: the saved session is being restored: no sign-in offered meanwhile.
         widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::HOURGLASS_MEDIUM, 15.0, theme::FG_3);
-        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Connecting to VRChat…"), 13.0).color(theme::FG_2), r.width() - 30.0);
+        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(cx.snap.account.connecting(), 13.0).color(theme::FG_2), r.width() - 30.0);
         return;
     }
     if reach == Reach::SignIn {

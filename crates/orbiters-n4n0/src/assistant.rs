@@ -398,7 +398,7 @@ impl Fence<'_> {
 
     /// The clipboard's text as it is now is what Undo puts back after `what` (nothing readable: nothing to undo).
     pub(crate) fn keep_clipboard(&self, what: String) {
-        if let Some(text) = self.device.clipboard.paste() {
+        if let Some(text) = self.device.clipboard.restorable() {
             self.keep_undo(what, UndoStep::Clipboard(text));
         }
     }
@@ -809,7 +809,7 @@ impl Fence<'_> {
 
     /// What undoes a copy: the text the clipboard holds before it.
     fn undo_copy(&self, intent: &Intent) -> Option<UndoStep> {
-        intent.copies().then(|| self.device.clipboard.paste()).flatten().map(UndoStep::Clipboard)
+        intent.copies().then(|| self.device.clipboard.restorable()).flatten().map(UndoStep::Clipboard)
     }
 
     /// What undoes an app intent, from the settings before it.
@@ -847,9 +847,9 @@ impl Fence<'_> {
 
     /// The page where the person does it themselves opens (the account's actions are off for them): an action like any
     /// other, with its leave, its line in the log and its count.
-    pub(crate) fn open_instead(&self, page: Page, tainted: bool, via: Via) {
+    pub(crate) fn open_instead(&self, page: Page, via: Via) {
         let open = Intent::OpenPage { page };
-        if let Some(permit) = self.permit(&Action::App(open.clone()), tainted) {
+        if let Some(permit) = self.permit(&Action::App(open.clone()), false) {
             let _ = self.intent_run(&permit, open, via);
         }
     }
@@ -929,7 +929,7 @@ impl Fence<'_> {
 
     /// Whether a copy could be undone, when `intent` is one (the clipboard is read for nothing else).
     pub(crate) fn see_clipboard(&self, intent: &Intent, facts: &mut Facts) {
-        facts.clipboard = intent.copies() && self.device.clipboard.paste().is_some();
+        facts.clipboard = intent.copies() && self.device.clipboard.restorable().is_some();
     }
 
     /// The offline path: the person's sentence `text` was a known command; `actions` run now, in order. Said in the
@@ -966,7 +966,7 @@ impl Fence<'_> {
                     Gate::Offer(_) => refused.push(intent.says()),
                     Gate::Instead(page) => {
                         self.intent_log(&intent, Outcome::Refused, Some(tr("Not from your account yet: its page opened instead.").into()), Via::Quick);
-                        self.open_instead(page, false, Via::Quick);
+                        self.open_instead(page, Via::Quick);
                         refused.push(format!("{} ({})", intent.says(), tr("not from your account yet")));
                     }
                 },
@@ -1008,7 +1008,7 @@ impl Fence<'_> {
         if !asked_en.is_empty() {
             note.push_str(&format!(" It asked the owner first about: {}.", asked_en.join(", "))); // i18n: not shown
         }
-        rt.notes.push(context::Note { text: note, others: false });
+        rt.notes.push(context::Note { text: note, taint: Default::default() });
         drop(rt);
         if !asked.is_empty() {
             self.ask_owner(asked);

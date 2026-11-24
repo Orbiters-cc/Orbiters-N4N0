@@ -524,7 +524,7 @@ mod incident;
 mod picture;
 mod language;
 mod maps;
-mod member;
+pub mod member;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;
@@ -628,7 +628,8 @@ impl Controller {
             world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
-            calls: Mutex::new(calls::CallsRuntime::default()),
+            // (Counted on from the moment it starts: a press that waited in a window since before is for no call of now.)
+            calls: Mutex::new(calls::CallsRuntime::from(if cfg!(test) { 0 } else { orbiters_n4n0::unix_ms() })),
             shared_view: Mutex::new(shared_view::SharedRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),

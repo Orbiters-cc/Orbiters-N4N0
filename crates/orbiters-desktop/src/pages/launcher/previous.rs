@@ -108,6 +108,15 @@ pub struct Previous {
     pub(super) log: Option<orbiters_core::launcher::LogTrouble>,
     /// VRChat's saved session is being restored: who is signed in is not known yet (Major 1).
     pub(super) connecting: bool,
+    /// Because the saved Orbiters account cannot be read now.
+    pub(super) unreadable: bool,
+}
+
+impl Previous {
+    /// What is said while it connects.
+    pub(super) fn connecting_text(&self) -> &'static str {
+        crate::state::AccountStatus { unreadable: self.unreadable, ..Default::default() }.connecting()
+    }
 }
 
 type Reader = Arc<dyn Fn() -> Vec<Visit> + Send + Sync>;
@@ -268,7 +277,7 @@ pub(super) fn line(places: &Places) -> Option<(String, Tone)> {
         (Verified::Closed, Some(name)) => (orbiters_i18n::tr!("{name}'s instance is closed now: choose another place.", name = name), Tone::Warn),
         (Verified::Closed, None) => (orbiters_i18n::tr!("{name} is closed now: choose another place.", name = world), Tone::Warn),
         (Verified::Unverified, Some(name)) if nobody && places.previous.connecting => (orbiters_i18n::tr!("Connecting to VRChat: {name}'s instance is checked next…", name = name), Tone::Busy),
-        (Verified::Unverified, None) if nobody && places.previous.connecting => (tr("Connecting to VRChat…").into(), Tone::Busy),
+        (Verified::Unverified, None) if nobody && places.previous.connecting => (places.previous.connecting_text().into(), Tone::Busy),
         (Verified::Unverified | Verified::Unknown, _) if nobody => (tr("VRChat is not signed in for this profile: choose another place.").into(), Tone::Warn),
         (Verified::Unknown, Some(name)) => (orbiters_i18n::tr!("VRChat did not say whether {name}'s instance is open: Play asks again.", name = name), Tone::Warn),
         (Verified::Unknown, None) => (orbiters_i18n::tr!("VRChat did not say whether {name} is open: Play asks again.", name = world), Tone::Warn),
@@ -542,7 +551,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     let me = state.places.desk.asker().account.clone();
     let note = if me.is_none() && state.places.previous.connecting {
         // A saved session being restored: no sign-in offered; what is picked is asked once it is known (Major 1).
-        Some(tr("Connecting to VRChat…"))
+        Some(state.places.previous.connecting_text())
     } else if me.is_none() {
         Some(if state.places.previous.signed_in_elsewhere || state.places.previous.log.is_some() {
             tr("These are this computer's: on this profile, Play opens a new public instance of the world chosen.")
@@ -665,7 +674,7 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         }
         Some((Verified::Open { .. }, _)) => Some((tr("Open · chosen").into(), theme::ACCENT, icons::CHECK)),
         Some((Verified::Closed, _)) => Some((tr("Closed now").into(), theme::WARN, icons::WARNING_CIRCLE)),
-        Some((Verified::Unverified, _)) if nobody && connecting => Some((tr("Connecting to VRChat…").into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
+        Some((Verified::Unverified, _)) if nobody && connecting => Some((state.places.previous.connecting_text().into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
         Some((Verified::Unverified | Verified::Unknown, _)) if nobody => Some((tr("Not signed in").into(), theme::WARN, icons::WARNING_CIRCLE)),
         Some((Verified::Unknown, _)) => Some((tr("VRChat did not say").into(), theme::WARN, icons::WARNING_CIRCLE)),
         Some((Verified::Unverified | Verified::Checking { .. }, _)) => Some((tr("Asking VRChat…").into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),

@@ -7,8 +7,52 @@ use orbiters_core::account::{Api, Server};
 use orbiters_i18n::tr;
 use std::time::Duration;
 
-/// The largest answer handed to a window (a picture's file).
-const ANSWER_MOST: u64 = 48 << 20;
+/// The largest answer that goes to a window over the link; a larger one (a picture's file) goes in a file.
+const ANSWER_LINKED: u64 = 1 << 20;
+/// The largest answer at all.
+const ANSWER_MOST: u64 = 2 << 30;
+/// How long a file may take to come.
+const FILE_WITHIN: Duration = orbiters_core::account::TRANSFER_TIMEOUT;
+
+/// Where large answers wait for the window that asked: this user's own, emptied as the service starts.
+fn spool() -> std::path::PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join(format!("orbiters-test-answers-{}", std::process::id()))
+    } else {
+        orbiters_core::paths::cache_dir().join("answers")
+    }
+}
+
+/// Answers no window read (it closed meanwhile): gone.
+pub fn empty_spool() {
+    let _ = std::fs::remove_dir_all(spool());
+}
+
+/// `body`, read: in memory, or, when it is large, in a file.
+fn taken(body: ureq::Body) -> anyhow::Result<(Vec<u8>, Option<std::path::PathBuf>)> {
+    use std::io::Read;
+    let mut reader = body.into_with_config().limit(ANSWER_MOST).reader();
+    let mut bytes = Vec::new();
+    (&mut reader).take(ANSWER_LINKED + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 <= ANSWER_LINKED {
+        return Ok((bytes, None));
+    }
+    let dir = spool();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(uuid::Uuid::new_v4().to_string());
+    let mut write = || -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(&bytes)?;
+        std::io::copy(&mut reader, &mut file)?;
+        Ok(file.flush()?)
+    };
+    if let Err(e) = write() {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok((Vec::new(), Some(path)))
+}
 
 /// Whether `path` names something under the API and nothing else.
 fn within(path: &str) -> bool {
@@ -45,7 +89,13 @@ impl super::Controller {
             tr("Orbiters could not be reached").to_string()
         };
         let response = if reads {
-            let sent = api.agent().configure_request(sent.body(()).map_err(|e| e.to_string())?).timeout_global(Some(Duration::from_secs(90))).build();
+            let sent = api
+                .agent()
+                .configure_request(sent.body(()).map_err(|e| e.to_string())?)
+                .timeout_global(Some(FILE_WITHIN))
+                .timeout_connect(Some(Duration::from_secs(10)))
+                .timeout_recv_response(Some(Duration::from_secs(60)))
+                .build();
             api.agent().run(sent)
         } else {
             // (A handover waits for these: not for long.)
@@ -54,6 +104,8 @@ impl super::Controller {
                 .configure_request(sent.body(request.body).map_err(|e| e.to_string())?)
                 .timeout_global(Some(Duration::from_secs(60)))
                 .timeout_connect(Some(Duration::from_secs(10)))
+                .timeout_send_request(Some(Duration::from_secs(5)))
+                .timeout_send_body(Some(Duration::from_secs(10)))
                 .timeout_recv_response(Some(Duration::from_secs(20)))
                 .build();
             api.agent().run(sent)
@@ -63,13 +115,35 @@ impl super::Controller {
         let response = response.map_err(unreachable)?;
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         let (status, content_type, retry_after) = (response.status().as_u16(), header("content-type"), header("retry-after"));
-        let body = response.into_body().into_with_config().limit(ANSWER_MOST).read_to_vec().map_err(unreachable)?;
-        Ok(MemberAnswer { status, content_type, retry_after, body })
+        let (body, file) = taken(response.into_body()).map_err(|e| {
+            eprintln!("member request: {e:#}");
+            tr("Orbiters could not be reached").to_string()
+        })?;
+        Ok(MemberAnswer { status, content_type, retry_after, body, file })
     }
 
     /// The member signed in, as the windows key what is theirs: the environment and the id.
     pub(super) fn member_key(&self) -> Option<String> {
         let rt = self.account_runtime.lock().unwrap();
         rt.identity()?.key()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify5-r21 m5: a small answer goes over the link, a large one in a file, whole.
+    #[test]
+    fn a_large_answer_waits_in_a_file() {
+        let body = |n: usize| ureq::Body::builder().reader(std::io::Cursor::new((0..n).map(|i| (i % 251) as u8).collect::<Vec<u8>>()));
+        let (bytes, file) = taken(body(ANSWER_LINKED as usize)).unwrap();
+        assert!(bytes.len() as u64 == ANSWER_LINKED && file.is_none());
+        let n = 3 << 20;
+        let (bytes, file) = taken(body(n)).unwrap();
+        let path = file.expect("in a file");
+        let read = std::fs::read(&path).unwrap();
+        assert!(bytes.is_empty() && read.len() == n && read.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8));
+        std::fs::remove_file(path).unwrap();
     }
 }

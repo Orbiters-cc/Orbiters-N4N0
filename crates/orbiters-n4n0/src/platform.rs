@@ -279,6 +279,10 @@ pub trait Clipboard: Send + Sync {
     fn paste(&self) -> Option<String> {
         None
     }
+    /// The same, when that is all it holds: what puts it back loses nothing (verify5-r21 m9).
+    fn restorable(&self) -> Option<String> {
+        self.paste()
+    }
 }
 
 /// Opens a web page in the person's browser (only pages of the Orbiters website reach it).

@@ -34,6 +34,9 @@ pub struct MemberAnswer {
     pub retry_after: Option<String>,
     #[serde(default, with = "bytes")]
     pub body: Vec<u8>,
+    /// Instead of `body`, when it is large: a file of the service's, removed by who reads it.
+    #[serde(default)]
+    pub file: Option<std::path::PathBuf>,
 }
 
 mod bytes {
@@ -86,6 +89,11 @@ pub fn reading(server: Server) -> Option<Member> {
 }
 
 impl Member {
+    /// As pages key what is theirs ([`crate::state::AccountStatus::member`]).
+    pub fn key(&self) -> String {
+        format!("{}{}", prefix(self.server), self.user)
+    }
+
     pub(crate) fn of(ctl: Ctl, server: Server) -> Option<Self> {
         let epoch = ctl.shown_epoch();
         Self::at(ctl, server, epoch)
@@ -117,7 +125,7 @@ impl Relay for Member {
         let Asked { method, path, content_type, accept, body } = asked;
         let request = MemberRequest { development: self.server == Server::Development, method, path, content_type, accept, body };
         let a = self.ctl.member_request(self.epoch, request)?;
-        Ok(Answered { status: a.status, content_type: a.content_type, retry_after: a.retry_after, body: a.body })
+        Ok(Answered { status: a.status, content_type: a.content_type, retry_after: a.retry_after, body: a.body, file: a.file })
     }
 }
 

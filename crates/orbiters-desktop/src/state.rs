@@ -426,6 +426,20 @@ pub struct AccountStatus {
     /// while nobody is, or who it is is not known.
     #[serde(default)]
     pub member: Option<String>,
+    /// The saved account's file, read before, cannot be read now: who is signed in is not known until it can.
+    #[serde(default)]
+    pub unreadable: bool,
+}
+
+impl AccountStatus {
+    /// What a surface says while VRChat's account waits to be known again.
+    pub fn connecting(&self) -> &'static str {
+        if self.unreadable {
+            orbiters_i18n::tr("Your Orbiters account can't be read here: trying again…")
+        } else {
+            orbiters_i18n::tr("Connecting to VRChat…")
+        }
+    }
 }
 
 /// How Fast walk carries the person now, as the SteamVR overlay says it.

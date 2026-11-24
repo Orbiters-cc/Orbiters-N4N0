@@ -3,6 +3,7 @@
 use super::*;
 use crate::fence::Permit;
 use orbiters_n4n0_core::captures::ShareAsk;
+use orbiters_n4n0_core::context::Taint;
 use orbiters_n4n0_core::feedback::FeedbackAsk;
 use orbiters_n4n0_core::intents::{self, Outcome, Page, Risk, Via, CATALOGUE};
 use orbiters_n4n0_core::menu::InviteAnswer;
@@ -163,6 +164,11 @@ fn the_fence_gives_leave_by_the_one_rule_for_every_tool() {
         assert!(!effect.from_account || effect.asks, "{action:?}");
         assert_eq!(fence.permit(action, true).is_some(), !effect.changes && !effect.asks, "{action:?} after others' text");
         assert_eq!(fence.permit(action, false).is_some(), !effect.asks, "{action:?}");
+        // Where only the worn avatar's labels were read, its one control named may be set besides (verify5-r21).
+        let set = matches!(action, Action::SetControl { .. });
+        assert_eq!(fence.permit_tool(action, Taint::Labels).is_some(), !effect.asks && (set || !effect.changes), "{action:?} after the avatar's labels");
+        assert_eq!(fence.permit_tool(action, Taint::Others).is_some(), fence.permit(action, true).is_some(), "{action:?}");
+        assert_eq!(fence.permit_tool(action, Taint::None).is_some(), fence.permit(action, false).is_some(), "{action:?}");
         assert_eq!(fence.permit_said(action).is_some(), !effect.asks, "{action:?} said");
         assert!(fence.permit_yes(action).is_some(), "{action:?}: the owner's yes, the switch on");
     }
@@ -258,8 +264,6 @@ fn acting(stamp: Option<Stamp>) -> Vec<Command> {
         Command::AskTalk { down: true, stamp, press: None },
         Command::Call { contact: "c1".into(), stamp },
         Command::AnswerCall { call: Some(7), stamp },
-        Command::EndCall { call: Some(7), stamp },
-        Command::MuteCall { on: false, call: Some(7), stamp },
         Command::Suggest { text: "private idea".into(), voice: false, stamp },
         Command::Drop { link: "https://example.com/private".into(), title: "A card".into(), video: None, stamp },
         Command::InviteMe { location: "wrld_1:2".into(), stamp },

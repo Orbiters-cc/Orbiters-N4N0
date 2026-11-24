@@ -818,6 +818,11 @@ impl Intent {
         }
     }
 
+    /// It opens the Ask page, which listens by itself as it opens (verify5-r21 m2).
+    pub fn listens(&self) -> bool {
+        matches!(self, Intent::OpenPage { page: Page::Ask })
+    }
+
     /// It replaces what the clipboard holds.
     pub fn copies(&self) -> bool {
         matches!(self, Intent::YoutubeCopy { .. } | Intent::HistoryCopy { .. } | Intent::CopyWorldName { .. })
@@ -1232,7 +1237,7 @@ pub fn gate(intent: &Intent, facts: &Facts, tainted: bool) -> Gate {
         // The text it replaces could not be put back.
         Risk::Act if intent.copies() && !facts.clipboard => Gate::Confirm,
         // A change after reading others' text is the person's to say yes to.
-        Risk::Act if tainted && spec.changes => Gate::Confirm,
+        Risk::Act if tainted && (spec.changes || intent.listens()) => Gate::Confirm,
         Risk::Act => Gate::Run,
     }
 }

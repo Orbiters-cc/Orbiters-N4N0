@@ -82,5 +82,6 @@
   "VRChat could not be started again yet: press Play in a moment.": "VRChat ne peut pas encore être relancé : appuyez sur Jouer dans un instant.",
   "VRChat did not quit in time: quit it yourself, then press Play.": "VRChat n’a pas quitté à temps : quittez-le vous-même, puis appuyez sur Jouer.",
   "VRChat draws again, or is no longer the one Home started: nothing was done.": "VRChat affiche de nouveau une image, ou ce n’est plus celui que l’Accueil a lancé : rien n’a été fait.",
-  "VRChat is starting again.": "VRChat redémarre."
+  "VRChat is starting again.": "VRChat redémarre.",
+  "This place was made for another VRChat account: choose another one.": "Cet endroit a été créé pour un autre compte VRChat : choisis-en un autre."
 }

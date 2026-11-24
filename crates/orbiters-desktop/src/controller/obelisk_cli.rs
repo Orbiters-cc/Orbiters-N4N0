@@ -1087,6 +1087,9 @@ impl Play {
         if let Some(percent) = &percent {
             command.extend(["--render-percent", percent.as_str()]);
         }
+        // The arguments given here are the only ones of the player's: whatever the engine keeps for the installation (a
+        // `--profile` among them) starts no game of N4N0's.
+        command.push("--no-saved-arguments");
         if !args.is_empty() {
             command.push("--");
             command.extend(args.iter().map(String::as_str));
@@ -2017,24 +2020,24 @@ mod tests {
         let (new, new_said) = program_of("0.1.7");
         let play = Arc::new(Play::default());
         let id = play.start_rendered(&new, &library, &args, Some(58), None).expect("starts");
-        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "58", "--", "-screen-fullscreen", "1"]);
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "58", "--no-saved-arguments", "--", "-screen-fullscreen", "1"]);
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
         let (old, old_said) = program_of("0.1.6");
         let id = play.start_rendered(&old, &library, &args, Some(58), None).expect("starts");
-        assert_eq!(said(&old_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "an older program: the engine's size");
+        assert_eq!(said(&old_said), ["steam", "play", "438100", "--no-saved-arguments", "--", "-screen-fullscreen", "1"], "an older program: the engine's size");
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
         std::fs::remove_file(&new_said).unwrap();
         let id = play.start_reserved(&new, &library, &args, None).expect("the bridge's start");
         // Fourth verification, finding 10: the bridge's start says 100 % itself, so that no percentage saved for the
         // installation applies to the game the bridge measures at 100 %.
-        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "100", "--", "-screen-fullscreen", "1"], "the bridge's: always the whole size, said");
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "100", "--no-saved-arguments", "--", "-screen-fullscreen", "1"], "the bridge's: always the whole size, said");
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
         std::fs::remove_file(&old_said).unwrap();
         let id = play.start_reserved(&old, &library, &args, None).expect("the bridge's start, older program");
-        assert_eq!(said(&old_said), ["steam", "play", "438100", "--", "-screen-fullscreen", "1"], "an older program has no percent to save or override");
+        assert_eq!(said(&old_said), ["steam", "play", "438100", "--no-saved-arguments", "--", "-screen-fullscreen", "1"], "an older program has no percent to save or override");
         let _ = wait_for(&play, id, |l| l.over);
         let _ = std::fs::remove_dir_all(&dir);
     }

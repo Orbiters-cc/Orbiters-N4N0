@@ -1890,7 +1890,7 @@ impl N4n0 {
                 Effect::Instances => {
                     let n = self.clone();
                     std::thread::spawn(move || {
-                        let rows = orbiters_n4n0_core::invites::read_rows();
+                        let rows = n.host.previous_instances();
                         n.n4n0.lock().unwrap().screen.menu.set_instances(rows, true, "");
                         n.publish();
                     });
@@ -3166,6 +3166,9 @@ pub(crate) fn invite_route(host: &dyn crate::Host, epoch: u64, account: Option<&
     if let Some(account) = account {
         // Their own VRChat account, as it was when they asked: gone since, nothing is sent instead.
         return host.invite_self(location, account).unwrap_or_else(|| InviteAnswer::Failed { message: tr("Your VRChat account changed meanwhile: nothing was sent.").into() });
+    }
+    if !host.may_ask_orbiters(location) {
+        return InviteAnswer::NeedsVrchat { message: tr("Connect your VRChat account here to be invited: this place is private, and is not known to be your account's.").into() };
     }
     // As the member who asked, or not at all.
     let answer = match host.account_for(epoch) {

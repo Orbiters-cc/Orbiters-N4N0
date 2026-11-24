@@ -58,6 +58,16 @@ fn pick<'a>(said: &str, friends: impl Iterator<Item = (&'a str, &'a str)>) -> Re
     Ok(top[0].1.to_string())
 }
 
+/// Those of `rows` that the VRChat accounts `acting` may be taken to: their own, and public ones that are nobody's.
+fn previous_rows(rows: &[orbiters_n4n0_core::menu::InstanceRow], acting: &[String]) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
+    let instance = |row: &orbiters_n4n0_core::menu::InstanceRow| row.location.split_once(':').map_or("", |(_, instance)| instance).to_string();
+    let goes = |row: &orbiters_n4n0_core::menu::InstanceRow| match acting {
+        [] => orbiters_core::vrchat_launch::is_public_instance(&instance(row)),
+        acting => acting.iter().all(|me| orbiters_core::visited::goes_for(row.account.as_deref(), &instance(row), me)),
+    };
+    orbiters_n4n0_core::invites::shown(rows.to_vec(), acting).into_iter().filter(goes).collect()
+}
+
 impl Controller {
     /// What the app can do now, for the intents' needs (N4N0 adds the prop's).
     pub(super) fn assistant_facts(&self) -> Facts {
@@ -107,6 +117,20 @@ impl Controller {
         }
     }
 
+    /// The previous instances of the VRChat account on show: none of another's, and none that could not be gone to with it (a
+    /// private one that is nobody's).
+    fn previous_rows(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
+        previous_rows(&orbiters_n4n0_core::invites::read_rows(), &self.vrchat_acting())
+    }
+
+    /// The previous instance `location` as a place to go to, when it is one of [`Self::previous_rows`] now.
+    fn previous_place(&self, location: &str) -> Result<Place, String> {
+        let row = self.previous_rows().into_iter().find(|row| row.location == location).ok_or("That instance is not one of the VRChat account's on show.")?; // i18n: not shown
+        let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
+        let (access, region) = orbiters_core::launcher_feed::access(instance_id);
+        Ok(Place { world_id: world_id.into(), world_name: row.world, world_picture: String::new(), instance_id: instance_id.into(), access, region })
+    }
+
     /// VR when SteamVR runs and VRChat is not in desktop mode, as Play's own choice reads it.
     fn launch_mode(&self) -> LaunchMode {
         let s = self.view();
@@ -128,7 +152,7 @@ impl Controller {
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-        let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now).region()).unwrap_or(InstanceRegion::Us);
+        let region = crate::overlay::worlds::panel::go::region_of(crate::pages::launcher::destinations::HistoryView::of(&history, now, &self.vrchat_acting()).region()).unwrap_or(InstanceRegion::Us);
         let made = match self.vrchat_data(Scope::of(&s), Request::CreateInstance { world: world.into(), access: CreateAccess::FriendsPlus, region }) {
             Ok(Response::CreatedInstance(made)) => made,
             Ok(Response::WorldError(e)) => return Err(format!("VRChat did not make the instance: {e:?}")), // i18n: not shown
@@ -200,7 +224,8 @@ impl Controller {
             // Previous instances (N4N0's menu's list, `invites::read_rows`).
             Intent::Instances => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                let items: Vec<Value> = orbiters_n4n0_core::invites::read_rows()
+                let items: Vec<Value> = self
+                    .previous_rows()
                     .iter()
                     .map(|r| json!({ "ref": r.location, "world": data(&r.world, NAME_CHARS), "type": r.kind(), "region": r.region(), "minutes_ago": now.saturating_sub(r.at) / 60 }))
                     .collect();
@@ -208,11 +233,8 @@ impl Controller {
             }
             // Play with a destination, as Home's place chips and the Instances sheet's Go do.
             Intent::GoToInstance { .. } => {
-                let location = reference()?;
-                let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
-                let (access, region) = orbiters_core::launcher_feed::access(instance_id);
-                let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
-                // For the account on show: a private one goes to no other's game (`vrchat_launch::handing`).
+                // For the account on show, whose it is (or nobody's, and public).
+                let place = self.previous_place(&reference()?)?;
                 self.launcher_action(self.as_shown(Home::Play { mode: self.launch_mode(), destination: Some(place) }));
                 done()
             }
@@ -224,11 +246,11 @@ impl Controller {
                 for i in s.launcher.invites.iter().filter(|i| i.kind == orbiters_core::launcher::InviteKind::Invite && i.place.is_some()).take(3) {
                     items.push(json!({ "ref": i.id, "go": "invite", "name": i.place.as_ref().map(|p| data(&p.world_name, NAME_CHARS)), "from": data(&i.from_name, NAME_CHARS) }));
                 }
-                for r in orbiters_n4n0_core::invites::read_rows().iter().take(3) {
+                for r in self.previous_rows().iter().take(3) {
                     items.push(json!({ "ref": r.location, "go": "instance", "name": data(&r.world, NAME_CHARS), "type": r.kind() }));
                 }
                 let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-                for f in crate::pages::launcher::destinations::frequent(&history, now).iter().take(3) {
+                for f in crate::pages::launcher::destinations::frequent(&history, now, &self.vrchat_acting()).iter().take(3) {
                     items.push(json!({ "ref": f.world_id, "go": "new", "name": data(&f.name, NAME_CHARS), "visits_lately": f.visits, "instance": "a new Friends+ one" })); // i18n: not shown
                 }
                 Ok(json!({ "items": items }))
@@ -241,10 +263,7 @@ impl Controller {
                     (None, _) | (Some(_), "home") => self.launcher_action(Home::Play { mode, destination: None }),
                     (Some(_), "invite") => self.launcher_action(self.as_shown(Home::AcceptInvite { invite: reference()?, mode })),
                     (Some(_), "instance") => {
-                        let location = reference()?;
-                        let (world_id, instance_id) = location.split_once(':').ok_or("Not a VRChat location.")?; // i18n: not shown
-                        let (access, region) = orbiters_core::launcher_feed::access(instance_id);
-                        let place = Place { world_id: world_id.into(), world_name: String::new(), world_picture: String::new(), instance_id: instance_id.into(), access, region };
+                        let place = self.previous_place(&reference()?)?;
                         self.launcher_action(self.as_shown(Home::Play { mode, destination: Some(place) }));
                     }
                     (Some(_), "new") => {
@@ -391,6 +410,16 @@ pub fn window_page(page: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R3 (the verifier's case): what X visited is neither listed nor gone to as Y.
+    #[test]
+    fn the_assistant_lists_and_goes_to_no_other_account_s_instances() {
+        let row = |n: u64, tags: &str, account: Option<&str>| orbiters_n4n0_core::menu::InstanceRow { location: format!("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:{n}{tags}"), world: "W".into(), at: n, account: account.map(str::to_owned) };
+        let rows = [row(1, "~friends(usr_z)", Some("usr_x")), row(2, "~region(eu)", Some("usr_x")), row(3, "~friends(usr_z)", None), row(4, "~region(eu)", None), row(5, "~private(usr_y)", Some("usr_y"))];
+        let of = |acting: &[&str]| previous_rows(&rows, &acting.iter().map(|a| a.to_string()).collect::<Vec<_>>()).iter().map(|r| r.at).collect::<Vec<_>>();
+        assert_eq!((of(&["usr_x"]), of(&["usr_y"])), (vec![1, 2, 4], vec![4, 5]));
+        assert_eq!(of(&[]), [2, 4], "nobody signed in: public ones");
+    }
 
     #[test]
     fn a_friend_is_named_once_or_asked_about() {

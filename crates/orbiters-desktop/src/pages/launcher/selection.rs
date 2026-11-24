@@ -552,7 +552,7 @@ mod tests {
     use super::*;
 
     fn visit(n: u32) -> Visit {
-        Visit { world_id: format!("wrld_00000000-0000-4000-8000-{n:012}"), instance: format!("{n}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)"), name: format!("World {n}"), at: 0 }
+        Visit { world_id: format!("wrld_00000000-0000-4000-8000-{n:012}"), instance: format!("{n}~hidden(usr_00000000-0000-4000-8000-000000000004)~region(eu)"), name: format!("World {n}"), at: 0, account: None }
     }
 
     fn instance(n: u32) -> Destination {

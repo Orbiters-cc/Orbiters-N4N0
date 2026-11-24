@@ -114,6 +114,10 @@ pub struct VrchatRun {
     pub query: Option<SocketAddr>,
     /// The account signed in (id, display name).
     pub account: Option<(String, String)>,
+    /// Whether that is who is signed in now, for certain (the last its log says, read to its end).
+    pub account_sure: bool,
+    /// Whether `log` is its own for certain: made at or after its start, and no other VRChat's.
+    pub log_sure: bool,
     /// Its log says nobody is signed in now.
     pub signed_out: bool,
     /// Its command line names exactly one profile (or none: the default one).
@@ -294,6 +298,8 @@ impl Sides {
                     osc_in: mark.osc_in,
                     query: mark.query,
                     account: None,
+                    account_sure: false,
+                    log_sure: false,
                     signed_out: false,
                     one_profile: true,
                     world: None,

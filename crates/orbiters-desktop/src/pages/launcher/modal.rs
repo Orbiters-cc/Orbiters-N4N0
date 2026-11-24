@@ -327,8 +327,8 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
         Whereabouts::World(place)
             if state.data.possible.play
                 && !(starts && state.places.previous.signed_in_elsewhere)
-                // (nor into a private one on a profile whose account is not known)
-                && !(starts && state.places.previous.unproven && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
+                // (nor into a private one where whose the VRChat started is could not be told)
+                && !(idle && state.places.previous.log.is_some() && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
                 && !matches!(state.data.game, orbiters_core::launcher::Game::NotInstalled | orbiters_core::launcher::Game::NoEngine)
                 && super::destinations::joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)) =>
         {

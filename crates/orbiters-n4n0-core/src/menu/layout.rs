@@ -3335,7 +3335,7 @@ mod tests {
         shared.instances_ready = true;
         shared.instances = ["~group(g)~groupAccessType(public)~region(us)", "~private(u)~canRequestInvite~region(jp)", "~friends(u)", "~hidden(u)~region(eu)", ""]
             .into_iter()
-            .map(|tags| InstanceRow { location: format!("wrld_x:1{tags}"), world: "Moonlit Garden".into(), at: taken })
+            .map(|tags| InstanceRow { location: format!("wrld_x:1{tags}"), world: "Moonlit Garden".into(), at: taken, account: None })
             .collect();
         let sharings = [Sharing::Idle, Sharing::Waiting { public: true, people: 0 }, Sharing::Busy { public: false, people: 3 }, Sharing::Done { public: true, people: 0 }, Sharing::Done { public: true, people: 12 }, Sharing::Done { public: false, people: 1 }, Sharing::Explicit, Sharing::Failed { message: "x".into() }];
         let phases = [CapturePhase::Recording, CapturePhase::Saving, CapturePhase::Waiting, CapturePhase::Making { percent: 42 }, CapturePhase::Paused { percent: 42 }, CapturePhase::NoView, CapturePhase::Ready];

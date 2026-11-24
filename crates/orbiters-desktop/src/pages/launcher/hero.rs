@@ -5,7 +5,7 @@
 use super::states::{self, PlayState};
 use super::{access_name, cover_uv, region_tag, Cx, State};
 use egui::{pos2, vec2, Align2, CursorIcon, Id, Rect, Sense, Ui};
-use orbiters_core::launcher::{Action, EngineSetup, Game, GameProfile, Invite, InviteKind, LaunchMode};
+use orbiters_core::launcher::{Action, EngineSetup, Game, GameProfile, Invite, InviteKind, JoinFailure, JoinStep, Joining, LaunchMode};
 use orbiters_core::vrchat_launch::{SEVERAL_HERE, VR_HERE};
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
@@ -37,7 +37,12 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     if !state.shown() {
         return;
     }
-    let (play, index) = hero_profiles(ui, cx, state, index);
+    let (play, mut index) = hero_profiles(ui, cx, state, index);
+    // A private place on its way to the VRChat started without it, or why it was not delivered: nothing of another account's.
+    if let Some(on_its_way) = state.data.joining.clone().filter(|_| !state.stale()) {
+        super::super::block(ui, cx, index, LINE_H, |ui, rect| joining(ui, cx, state, rect, &on_its_way));
+        index += 1;
+    }
     if VR_HERE {
         return;
     }
@@ -61,6 +66,47 @@ pub fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         return super::super::block(ui, cx, index, LINE_H, low_power);
     }
     let _ = play;
+}
+
+/// The line of a private place on its way ([`Joining`]).
+pub(crate) fn joining_line(joining: &Joining) -> String {
+    let name = if joining.world.trim().is_empty() { tr("A world").to_string() } else { joining.world.clone() };
+    match &joining.step {
+        JoinStep::Starting => tr!("Starting VRChat, then joining {name}…", name = name),
+        JoinStep::SigningIn => tr!("VRChat is up: joining {name} once it says who is signed in…", name = name),
+        JoinStep::Failed(JoinFailure::OtherAccount) => tr!("{name} was not joined: VRChat is signed in as another account.", name = name),
+        JoinStep::Failed(JoinFailure::NoProof) => tr!("{name} was not joined: VRChat did not say in time who is signed in.", name = name),
+        JoinStep::Failed(JoinFailure::Gone) => tr!("{name} was not joined: VRChat did not start, or closed too soon.", name = name),
+        JoinStep::Failed(JoinFailure::Log(trouble)) => tr!("{name} was not joined: {reason}", name = name, reason = super::destinations::log_words(trouble)),
+        JoinStep::Failed(JoinFailure::NotSent(words)) => tr!("{name} was not joined: {reason}", name = name, reason = words),
+    }
+}
+
+/// A private place VRChat was started without: on its way, or why it was not delivered, with another try; × gives it up.
+fn joining(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, joining: &Joining) {
+    let failed = matches!(joining.step, JoinStep::Failed(_));
+    let line = joining_line(joining);
+    let close = Rect::from_center_size(pos2(rect.right() - 26.0, rect.center().y), vec2(30.0, 30.0));
+    let button = failed.then(|| widgets::Button::new(tr("Try again")).variant(widgets::Variant::Primary).id_salt("launcher-join-again"));
+    let bw = button.as_ref().map_or(0.0, |b| b.desired_width(ui));
+    let at = Rect::from_min_size(pos2(close.left() - 8.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
+    let p = ui.painter().clone();
+    widgets::frame(&p, rect, 16.0, theme::surface_soft());
+    if failed {
+        widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
+    } else {
+        orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::ACCENT);
+    }
+    let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::FG_2), text.width());
+    ui.interact(text, Id::unique("launcher-joining"), Sense::hover()).on_hover_text(line);
+    let clock = anim::time(ui.ctx());
+    if button.is_some_and(|b| b.show_at(ui, at).clicked()) {
+        state.act(cx, clock, Action::JoinAgain);
+    }
+    if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(30.0, 14.0).id_salt("launcher-joining-x").show_at(ui, close)) {
+        state.act(cx, clock, Action::ForgetJoining);
+    }
 }
 
 /// Home's VRChat runs and its graphics went for good (confirmed: R1 of the performance review): a line and a restart,

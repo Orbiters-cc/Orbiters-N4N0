@@ -228,7 +228,7 @@ voile-lkd's `tests/timeline/results/2026-11-23-switches.md` and `docs/wsd-switch
   buffers a frame beside two `Flush`. On a hot, busy Mac (thermal pressure 2, as in those starts) the same pair gave 24.5 and 14.2
   frames a second, with 5.8 cuts (disturbed runs: the direction, not a size). A cut costs this client 1.6 to 3.6 ms (blended content; flat scenes: 0.4). An occlusion query ended
   in the middle of a scene with target changes cuts it too; timestamps and readbacks do; `Map(WRITE_DISCARD)`, `NO_OVERWRITE`, dynamic
-  textures and uploads nothing reads do not. DXMT is unchanged: the fix is proposed, not made.
+  textures and uploads nothing reads do not. The fix, behind a switch, is below (2026-11-24).
 - **MetalFX Spatial in `wsd`** (off, `OBELISK_WSD_UPSCALE=metalfx`): 1.5 ms of GPU a frame at full clock against 0.06 to 0.12 for today's draw (3 to
   5.6 ms when the GPU idles at a low clock), to 2940 x 1912 from 1323 x 860 or 1705 x 1109; 1.2 dB nearer to the frame drawn at full size than
   macOS's stretch, text and thin lines visibly sharper. It makes no frame faster.
@@ -244,6 +244,26 @@ voile-lkd's `tests/timeline/results/2026-11-23-switches.md` and `docs/wsd-switch
   the front to no program that the active app neither started nor yields to. The timeline's own bench (voile-lkd `tools/timeline/bench.py`)
   brings the game's app to the front and names what was there instead; `tools/mac-bench/bench.py` here is to take that over. Whether a
   start from Home gets the keyboard was not looked at.
+
+### DXMT: a look at an event query flushes once (2026-11-24; no VRChat start)
+
+`OBELISK_DXMT_QUERY_RESCUE=once` in the render server's environment (off unless set, in no release; DXMT `perf-timeline` `ed73857`). A `DONOTFLUSH`
+look at an event or disjoint query after its 64th miss commits what has been recorded only while the query's marker was not handed to the
+encoder, once; from there on it says `S_FALSE`. Flags 0, `Flush`, both `End`s, timestamps, occlusion and readbacks are as they were. The decision is
+made under a small lock nothing waits under, against the last event handed over; the one commit under the device's lock, if it is free. Numbers,
+conditions, what is not covered: voile-lkd's `tests/timeline/results/2026-11-24-query-rescue.md`.
+
+| Owned client, frames a second, off / once | 100 % | 58 % | 45 % |
+|---|---|---|---|
+| nothing | 46.6 / 46.5 | 135.5 / 135.1 | 224.1 / 223.4 |
+| one event query a frame | **35.6 / 46.5** | **128.7 / 135.4** | 226.1 / 223.9 |
+| event query mid-scene | **34.6 / 39.5** | **101.2 / 113.7** | 187.2 / 185.8 |
+| four timestamps; four occlusion queries | 35.2 / 35.3; 35.3 / 35.3 | 102.0 / 100.7; 100.4 / 100.4 | 169.0 / 167.9; 164.6 / 163.6 |
+| event query, 16 ms of CPU between the draws | **29.6 / 45.6** | 61.2 / 61.2 | |
+
+Commits for nothing 2.7 a frame and cuts of the target 2.6, with it 0 and 0.01; every picture's hash the same; 5.6 million randomised Ends without a hang.
+An occlusion query whose draws span two targets, or that is in a command list, is counted wrong now and then by this DXMT, with the switch and without. Whether
+VRChat gains is not known until it is started with and without.
 
 ### Next (not done)
 

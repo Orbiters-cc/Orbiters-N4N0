@@ -10,6 +10,8 @@
 //! implementation, and only once its gate lets it:
 //!
 //! - [`Risk::Act`]: harmless and reversible: done at once, said and logged, undoable where it has an opposite.
+//! - [`Risk::Ask`]: of this computer or avatar only, but not undone in one step (a recording stopped, a state applied, a card
+//!   taken back): asked about each time, for everyone.
 //! - [`Risk::Confirm`]: outward-facing or account-affecting (anything sent from the VRChat or the Orbiters account, joining
 //!   a place, calling someone, putting a card in the world): said, then done only after the person's own yes, every time.
 //! - [`Risk::PageOnly`]: destructive or security-relevant: never done by voice; the right page is offered instead.
@@ -25,7 +27,7 @@ mod phrases;
 #[cfg(test)]
 mod tests;
 
-use crate::context::{quoted, NAME_CHARS};
+use crate::context::quoted;
 use crate::menu::{PhotoLength, PhotoMode};
 use orbiters_i18n::{mark, tr, tr_ctx};
 use serde::{Deserialize, Serialize};
@@ -39,6 +41,8 @@ use std::time::{Duration, Instant};
 pub enum Risk {
     /// (a) Harmless or reversible: at once.
     Act,
+    /// Of this computer or avatar only, but not undone in one step: only after the person's yes, each time.
+    Ask,
     /// (b) Outward-facing or account-affecting: only after the person's yes, each time.
     Confirm,
     /// (c) Destructive or security-relevant: never by voice; the page where the person does it is offered.
@@ -105,6 +109,9 @@ pub struct Facts {
     pub computer: bool,
     /// What is sent from an account may be done by the assistant (`orbiters_core::features::N4N0_ASSISTANT_ACTIONS`).
     pub actions: bool,
+    /// What the clipboard holds is a text N4N0 can put back (Undo): else a copy waits for a yes.
+    #[serde(default)]
+    pub clipboard: bool,
 }
 
 impl Facts {
@@ -662,7 +669,7 @@ pub const CATALOGUE: &[Spec] = &[
     spec("walk_boost", G::Walk, R::Act, &[], false, true),
     spec("picture_3d", G::Pictures, R::Act, &[N::Computer, N::Vrchat], false, true),
     spec("picture_length", G::Pictures, R::Act, &[], false, true),
-    spec("stop_recording", G::Pictures, R::Act, &[N::Computer], false, true),
+    spec("stop_recording", G::Pictures, R::Ask, &[N::Computer], false, true),
     spec("camera_qr", G::Pictures, R::Act, &[N::Computer, N::Vrchat], false, true),
     spec("captures", G::Pictures, R::Act, &[N::Computer], true, false),
     spec("share_capture", G::Pictures, R::Confirm, &[N::Computer, N::SignedIn], false, true),
@@ -673,7 +680,7 @@ pub const CATALOGUE: &[Spec] = &[
     spec("video_history", G::Videos, R::Act, &[N::Computer], true, false),
     spec("history_copy", G::Videos, R::Act, &[N::Computer], false, true),
     spec("history_drop", G::Videos, R::Confirm, &[N::Computer, N::Vrchat, N::CanDrop], false, true),
-    spec("take_back_card", G::Videos, R::Act, &[N::Vrchat], false, true),
+    spec("take_back_card", G::Videos, R::Ask, &[N::Vrchat], false, true),
     spec("where_am_i", G::Worlds, R::Act, &[N::Vrchat], true, false),
     spec("world_search", G::Worlds, R::Act, &[N::Computer], true, false),
     spec("world_page", G::Worlds, R::Act, &[N::Computer], false, false),
@@ -700,14 +707,14 @@ pub const CATALOGUE: &[Spec] = &[
     spec("my_status", G::Profile, R::Act, &[N::Computer], true, false),
     spec("call", G::Calls, R::Confirm, &[N::Computer, N::Calls], false, true),
     spec("answer_call", G::Calls, R::Confirm, &[N::Computer, N::Calls], false, true),
-    spec("end_call", G::Calls, R::Act, &[N::Computer, N::Calls], false, true),
+    spec("end_call", G::Calls, R::Confirm, &[N::Computer, N::Calls], false, true),
     spec("mute_call", G::Calls, R::Act, &[N::Computer, N::Calls], false, true),
     spec("translation", G::Translation, R::Act, &[N::Computer], false, true),
     spec("translate_into", G::Translation, R::Act, &[N::Computer], false, true),
     spec("show_n4n0", G::Companion, R::Act, &[N::Vrchat, N::N4n0Prop], false, true),
     spec("n4n0_menu", G::Companion, R::Act, &[N::Vrchat], false, true),
     spec("save_state", G::Companion, R::Act, &[N::Vrchat], false, true),
-    spec("apply_state", G::Companion, R::Act, &[N::Vrchat], false, true),
+    spec("apply_state", G::Companion, R::Ask, &[N::Vrchat], false, true),
     spec("smoothing", G::Companion, R::Act, &[N::Computer], false, true),
     spec("stay_here", G::Companion, R::Act, &[N::Vrchat, N::N4n0Prop], false, true),
     spec("assistant_off", G::Companion, R::Act, &[], false, true),
@@ -728,7 +735,7 @@ impl Intent {
             Intent::HistoryDrop { .. } => Page::VideoHistory,
             Intent::WorldLike { .. } | Intent::WorldComment { .. } | Intent::WorldLabel { .. } | Intent::GoToWorld { .. } => Page::Worlds,
             Intent::InviteMe { .. } | Intent::GoToInstance { .. } => Page::Instances,
-            Intent::Call { .. } | Intent::AnswerCall => Page::Calls,
+            Intent::Call { .. } | Intent::AnswerCall | Intent::EndCall | Intent::MuteCall { .. } => Page::Calls,
             Intent::Suggest { .. } => Page::Suggest,
             // Home: Play, friends, invites and the person's own card.
             _ => Page::AppHome,
@@ -803,13 +810,23 @@ impl Intent {
         spec_of(self.name()).expect("every intent is in the catalogue")
     }
 
+    /// Its risk class, as this very call is (a mute is taken back at once; an unmute sends what is said next).
     pub fn risk(&self) -> Risk {
-        self.spec().risk
+        match self {
+            Intent::MuteCall { on: false } => Risk::Confirm,
+            _ => self.spec().risk,
+        }
+    }
+
+    /// It replaces what the clipboard holds.
+    pub fn copies(&self) -> bool {
+        matches!(self, Intent::YoutubeCopy { .. } | Intent::HistoryCopy { .. } | Intent::CopyWorldName { .. })
     }
 
     /// What it does, in the person's language: the action log's line, the toast, the question before a yes.
     pub fn says(&self) -> String {
-        let q = |t: &str| quoted(t, NAME_CHARS);
+        // Whole: what a yes does is what was read (verify4-r21 P6).
+        let q = |t: &str| crate::context::whole(t);
         let n = |i: &usize| i.to_string();
         match self {
             Intent::FastWalk { on: true } => tr("Fast walk on").into(),
@@ -916,7 +933,7 @@ impl Intent {
 
 /// A list of names as the person reads them.
 fn names(friends: &[String]) -> String {
-    friends.iter().map(|f| quoted(f, NAME_CHARS)).collect::<Vec<_>>().join(", ")
+    friends.iter().map(|f| crate::context::whole(f)).collect::<Vec<_>>().join(", ")
 }
 
 /// A language of translation's targets, in its own name.
@@ -988,10 +1005,14 @@ fn index(input: &Value, key: &str) -> Result<usize, String> {
     Ok(i as usize)
 }
 
-/// A text the owner gave, cut to `max` characters.
+/// A text the owner gave, as it is asked about and as it is then used: at most `max` characters, nothing in it that does not
+/// show ([`crate::context::exact`]).
 fn said(input: &Value, key: &str, max: usize) -> Result<String, String> {
-    let t = text(input, key).ok_or_else(|| format!("needs \"{key}\": ask the owner for it."))?; // i18n: not shown
-    Ok(t.chars().take(max).collect())
+    let t = crate::context::exact(&text(input, key).unwrap_or_default(), max);
+    if t.is_empty() {
+        return Err(format!("needs \"{key}\": ask the owner for it.")); // i18n: not shown
+    }
+    Ok(t)
 }
 
 fn needs(key: &str) -> String {
@@ -1053,7 +1074,7 @@ fn parse_in(group: Group, input: &Value) -> Result<Intent, String> {
             let friends: Vec<String> = input
                 .get("friends")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).map(|s| s.trim().chars().take(64).collect::<String>()).filter(|s| !s.is_empty()).take(8).collect())
+                .map(|a| a.iter().filter_map(Value::as_str).map(|s| crate::context::exact(s, 64)).filter(|s| !s.is_empty()).take(8).collect())
                 .unwrap_or_default();
             let public = flag(input, "public").unwrap_or(false);
             if !public && friends.is_empty() {
@@ -1091,7 +1112,7 @@ fn parse_in(group: Group, input: &Value) -> Result<Intent, String> {
         "invite_me" => Intent::InviteMe { index: index(input, "index")? },
         "go_to_instance" => Intent::GoToInstance { index: index(input, "index")? },
         "friends_online" => Intent::FriendsOnline,
-        "boop" => Intent::Boop { friend: text(input, "friend").map(|f| f.chars().take(64).collect()) },
+        "boop" => Intent::Boop { friend: text(input, "friend").map(|f| crate::context::exact(&f, 64)).filter(|f| !f.is_empty()) },
         "request_invite" => Intent::RequestInvite { friend: said(input, "friend", 64)? },
         "friend_profile" => Intent::FriendProfile { friend: said(input, "friend", 64)? },
         "invites" => Intent::Invites,
@@ -1193,21 +1214,23 @@ pub enum Gate {
 
 /// Whether `intent` runs now (`facts`: what the app can do; `tainted`: the turn read text other people wrote).
 pub fn gate(intent: &Intent, facts: &Facts, tainted: bool) -> Gate {
-    if intent.spec().risk == Risk::Confirm && !facts.actions {
+    if intent.risk() == Risk::Confirm && !facts.actions {
         return Gate::Instead(intent.instead());
     }
     if let Some(need) = facts.lacks(intent) {
         return Gate::Refuse(need.missing().into());
     }
     let spec = intent.spec();
-    match spec.risk {
+    match intent.risk() {
         // Never on a turn that read other people's text: the world, a title or a name may have asked for it.
         Risk::PageOnly if tainted => Gate::Refuse("Not available by voice, and not offered after reading other people's text.".into()), // i18n: not shown
         Risk::PageOnly => match intent {
             Intent::Restricted { what } => Gate::Offer(what.page()),
             _ => Gate::Refuse("Not available by voice.".into()), // i18n: not shown
         },
-        Risk::Confirm => Gate::Confirm,
+        Risk::Confirm | Risk::Ask => Gate::Confirm,
+        // The text it replaces could not be put back.
+        Risk::Act if intent.copies() && !facts.clipboard => Gate::Confirm,
         // A change after reading others' text is the person's to say yes to.
         Risk::Act if tainted && spec.changes => Gate::Confirm,
         Risk::Act => Gate::Run,
@@ -1248,7 +1271,7 @@ impl Limiter {
         keep(&mut self.acts, Duration::from_secs(60));
         keep(&mut self.outward, Duration::from_secs(3600));
         match risk {
-            Risk::Act => {
+            Risk::Act | Risk::Ask => {
                 if self.acts.len() >= ACTS_PER_MINUTE {
                     return Err(format!("At most {ACTS_PER_MINUTE} actions a minute: wait a moment.")); // i18n: not shown
                 }

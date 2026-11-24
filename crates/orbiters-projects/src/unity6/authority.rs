@@ -186,9 +186,9 @@ pub fn allow_on(dir: &Path, path: &Path, action: Action, mac: bool) -> Result<Wa
     }
     match (&state, action) {
         (TrialState::NotATrial | TrialState::Abandoned { whole: true, .. }, _) => Ok(Way::Plain),
-        // Creator Companion's list is the person's, in it: no action here puts a trial on it or takes one off.
+        // A trial is in the gallery by its record: no other list has it, and only forgetting it takes it off.
         (state, Action::List | Action::Unlist) if !matches!(state, TrialState::Unknown(_)) => {
-            Err(tr("This is a Unity 6 trial: Orbiters does not change Creator Companion's list for it. Add it there, or take it off, yourself.").into())
+            Err(tr("This is a Unity 6 trial: it is on the page as long as Orbiters keeps its record. Forget the trial, in its panel, to take it off.").into())
         }
         // Where trials are only shown, nothing changes one.
         (TrialState::Migrated(_) | TrialState::WaitingForMigration(_) | TrialState::Superseded(_), Action::Packages | Action::Storage) if mac => {

@@ -1046,6 +1046,8 @@ pub struct Panels {
     hidden: bool,
     /// Talk is held.
     talking: bool,
+    /// The press this page holds, by its stamp's number.
+    ask_press: Option<u64>,
     /// The question said to N4N0 as shown on the Ask page (and whose).
     asked_shown: Option<(u64, u64)>,
     started: Instant,
@@ -1191,6 +1193,7 @@ impl Panels {
             worlds_here,
             hidden: false,
             talking: false,
+            ask_press: None,
             asked_shown: None,
             started: Instant::now(),
             clock: None,
@@ -1677,7 +1680,9 @@ impl Panels {
     fn stop_talking(&mut self) {
         if self.facts.sheet == Some(Sheet::Talk) { self.backend.n4n0(N4n0Command::AskPage { open: false }); }
         if std::mem::take(&mut self.talking) {
-            self.backend.n4n0(N4n0Command::Talk { down: false, stamp: None });
+            // The press held as the person saw it: another one's sentence goes on (verify4-r21 P9).
+            let press = self.ask_press.take().or(self.facts.talk_press);
+            self.backend.n4n0(N4n0Command::Talk { down: false, stamp: None, press });
         }
     }
 
@@ -2509,6 +2514,19 @@ impl Panels {
             visited_worlds(&menu.instances, now, &self.visit_pictures, here.as_deref())
         } else { Vec::new() };
         let live = !snap.capture.photo_3d;
+        // What N4N0 asks, where it shows whole; elsewhere it is answered (verify4-r21 P6).
+        let asked = snap.n4n0.confirmations.iter().rev().find(|c| c.is_local()).filter(|_| self.facts.sheet == Some(Sheet::Talk));
+        let (talk_question, talk_question_id) = match asked {
+            Some(c) => {
+                let words = c.summary.trim_end_matches(orbiters_i18n::tr("(or say yes or no)")).trim();
+                if panels::talk_question_fits(words) {
+                    (Some(words.to_string()), c.local_question())
+                } else {
+                    (Some(orbiters_i18n::tr("N4N0 asks about more than fits here: read and answer it in the chat of Orbiters' window.").to_string()), None)
+                }
+            }
+            None => (None, None),
+        };
         Facts {
             recording,
             rec_starting: live && snap.capture.state == CaptureState::Starting,
@@ -2648,10 +2666,11 @@ impl Panels {
                 Vec::new()
             },
             // What N4N0 asks, does and did (REQUEST20 6), on its page.
-            talk_question: snap.n4n0.confirmations.iter().rev().find(|c| c.is_local()).map(|c| c.summary.trim_end_matches(orbiters_i18n::tr("(or say yes or no)")).trim().to_string()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_question,
             // Its number goes with the Yes or No pressed on it: a late press answers nothing newer (verify-r21 1).
-            talk_question_id: snap.n4n0.confirmations.iter().rev().find_map(|c| c.local_question()).filter(|_| self.facts.sheet == Some(Sheet::Talk)),
+            talk_question_id,
             talk_epoch: snap.n4n0.account_epoch,
+            talk_press: snap.n4n0.voice.press,
             talk_conversation: snap.n4n0.conversation,
             talk_retry: snap.n4n0.assistant.failure.as_ref().filter(|f| f.retry && !snap.n4n0.thinking && self.facts.sheet == Some(Sheet::Talk)).map(|f| {
                 let now = orbiters_n4n0::unix_ms();
@@ -3476,7 +3495,10 @@ impl Panels {
                     let down = snap.n4n0.voice.automatic || !snap.n4n0.listening;
                     self.talking = down;
                     let stamp = self.ask_stamp().filter(|_| down);
-                    self.backend.n4n0(N4n0Command::AskTalk { down, stamp });
+                    // Let go: the press on the picture that was pressed (verify4-r21 P9).
+                    let press = if down { None } else { self.action_facts().talk_press };
+                    self.ask_press = stamp.map(|s| s.seq);
+                    self.backend.n4n0(N4n0Command::AskTalk { down, stamp, press });
                 }
             },
             // The conversation on the picture that was pressed, never one begun since.
@@ -4742,7 +4764,7 @@ fn talk_log_rows(log: &[orbiters_n4n0_core::intents::LogEntry], now_ms: u64) -> 
             if e.via == Via::Quick {
                 detail.push(tr("understood offline").to_string());
             }
-            if e.risk == Risk::Confirm {
+            if matches!(e.risk, Risk::Confirm | Risk::Ask) {
                 detail.push(tr("needs your yes each time").to_string());
             }
             if let Some(why) = &e.why {
@@ -5360,7 +5382,7 @@ mod tests {
     #[test]
     fn where_the_person_was_is_a_row_for_each_world_the_last_time_first() {
         use orbiters_n4n0_core::menu::InstanceRow;
-        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at, account: None };
+        let row = |world: &str, id: &str, instance: &str, at: u64| InstanceRow { location: format!("wrld_{id}:{instance}~region(eu)"), world: world.into(), at };
         let now = 100_000;
         let rows = [row("Rain", "a", "1", now - 300), row("Sky", "b", "2", now - 600), row("Rain", "a", "3", now - 1320), row("", "c", "4", now - 7200)];
         let worlds = visited_worlds(&rows, now, &HashMap::new(), None);

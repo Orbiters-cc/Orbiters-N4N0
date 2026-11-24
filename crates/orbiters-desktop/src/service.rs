@@ -536,6 +536,16 @@ impl Service {
                     });
                 }
             }
+            ToService::Member { id, epoch, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    let ctl = ctl.clone();
+                    std::thread::spawn(move || {
+                        let answer = ctl.member_request(epoch, *request);
+                        mailbox.post(ToClient::Member { id, answer });
+                    });
+                }
+            }
             // Only the window picks picture files; the upload runs on a thread of its own.
             ToService::ShowWindow => self.show_window(false),
             ToService::ShowPage { page } => self.show_page(page),
@@ -583,15 +593,18 @@ impl Service {
             ToService::Booster { command } => ctl.booster_command(command),
             ToService::WalkPath { path } => ctl.set_walk_path(crate::tracking::walk_path_said(path)),
             // Which Talk button is held matters: the service lets it go when that window or overlay goes away.
-            ToService::N4n0 { command: N4n0Command::Talk { down, stamp } } => {
+            ToService::N4n0 { command: N4n0Command::Talk { down, stamp, press } } => {
                 if role == Role::Overlay {
-                    ctl.n4n0_app_talk(down, true, stamp);
+                    ctl.n4n0_app_talk(down, true, stamp, press);
                 } else {
                     // Held through the runtime's transition, as a link's close holds it: a press, a release and a close
                     // are taken one at a time (verify-controller, AD-1).
                     let mut talk = self.talk.lock().unwrap();
                     if talk.talk(link, down) {
-                        ctl.n4n0_app_talk(down, false, stamp);
+                        if down {
+                            talk.press = stamp.map(|s| s.seq);
+                        }
+                        ctl.n4n0_app_talk(down, false, stamp, press);
                     }
                 }
             }
@@ -751,6 +764,7 @@ impl Service {
         // Held until what the closed link let go is done: a press of another link waits for it (verify-controller).
         let mut talk = self.talk.lock().unwrap();
         let held_talk = role != Role::Overlay && talk.closed(id);
+        let press = talk.press;
         if role == Role::Overlay && !still_there {
             // What it held (its Talk button, its open menu) ends with it.
             self.ctl.n4n0_link_closed(true);
@@ -762,7 +776,7 @@ impl Service {
         if role == Role::Orbit {
             // Its panels' Talk only when they held it down (AD-1: the window's sentence is not theirs to end); its menu; its
             // Ask N4N0 page when no other panels' link is left (OVL2-13).
-            for command in orbit_gone(held_talk, held_ask) {
+            for command in orbit_gone(held_talk, press, held_ask) {
                 self.ctl.n4n0_command(command);
             }
         }
@@ -828,21 +842,25 @@ fn is_file_work(msg: &ToService) -> bool {
 /// Which link pressed the app's Talk button last and has not let it go. The window and the desktop panels talk to N4N0 as
 /// one source: what one of them holds is let go when THAT link closes, not when another one does.
 #[derive(Default)]
-struct TalkHolder(Option<u64>);
+struct TalkHolder {
+    link: Option<u64>,
+    /// Which press that is, by its stamp's number.
+    press: Option<u64>,
+}
 
 impl TalkHolder {
     /// `link` pressed (`down`) or let go the app's Talk: whether that goes to N4N0. The first press holds it; a press of
     /// another link meanwhile (N4N0 ignores it: one sentence at a time) and a release of a link that does not hold it
     /// go nowhere, so they can neither take the sentence over nor finish it (verify-controller).
     fn talk(&mut self, link: u64, down: bool) -> bool {
-        match (down, self.0) {
+        match (down, self.link) {
             (true, None) => {
-                self.0 = Some(link);
+                self.link = Some(link);
                 true
             }
             (true, Some(holder)) => holder == link,
             (false, Some(holder)) if holder == link => {
-                self.0 = None;
+                self.link = None;
                 true
             }
             (false, _) => false,
@@ -856,9 +874,9 @@ impl TalkHolder {
 
     /// `link` went away: whether it held the Talk button (which is then let go).
     fn closed(&mut self, link: u64) -> bool {
-        let held = self.0 == Some(link);
+        let held = self.link == Some(link);
         if held {
-            self.0 = None;
+            self.link = None;
         }
         held
     }
@@ -902,11 +920,11 @@ fn child_exited(waited: std::io::Result<Option<std::process::ExitStatus>>) -> Op
 /// service never saw that let go; a Talk the window holds is not the panels' to end, AD-1), its menu, and its Ask N4N0 page when
 /// it was this link that opened it (`held_ask`): a process killed with that page open left N4N0 arming the microphone after every
 /// sentence with no page anywhere (OVL2-13), and closing a page another opened cancelled the window's sentence (verify-vr).
-fn orbit_gone(held_talk: bool, held_ask: bool) -> Vec<crate::ipc::N4n0Command> {
+fn orbit_gone(held_talk: bool, press: Option<u64>, held_ask: bool) -> Vec<crate::ipc::N4n0Command> {
     use crate::ipc::N4n0Command;
     let mut out = Vec::new();
     if held_talk {
-        out.push(N4n0Command::Talk { down: false, stamp: None });
+        out.push(N4n0Command::Talk { down: false, stamp: None, press });
     }
     out.push(N4n0Command::MenuState { open: false, dictation: false, keyboard: false });
     if held_ask {
@@ -1214,10 +1232,10 @@ pub(crate) mod tests {
     /// listening) is touched.
     #[test]
     fn the_panels_gone_close_only_their_own_ask_page() {
-        let said = |talk: bool, ask: bool| orbit_gone(talk, ask).iter().map(|c| format!("{c:?}")).collect::<Vec<String>>();
+        let said = |talk: bool, ask: bool| orbit_gone(talk, Some(3), ask).iter().map(|c| format!("{c:?}")).collect::<Vec<String>>();
         let theirs = said(true, true);
         assert!(theirs.iter().any(|c| c.contains("AskPage") && c.contains("false")), "{theirs:?}");
-        assert!(theirs.iter().any(|c| c.starts_with("Talk")), "their Talk let go");
+        assert!(theirs.iter().any(|c| c.starts_with("Talk") && c.contains("press: Some(3)")), "their Talk let go, the press they held: {theirs:?}");
         let window_talking = said(false, false);
         assert!(!window_talking.iter().any(|c| c.contains("AskPage") || c.starts_with("Talk")), "nothing of the window's: {window_talking:?}");
         assert!(window_talking.iter().any(|c| c.starts_with("MenuState")));

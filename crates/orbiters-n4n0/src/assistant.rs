@@ -107,6 +107,28 @@ pub(crate) struct Retrying {
 enum UndoStep {
     Action(Action),
     Effects(Vec<Effect>),
+    /// The text the clipboard held.
+    Clipboard(String),
+}
+
+/// What an intent is for, taken as the person is asked (or as it runs at once): done for that, or not at all.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Target {
+    /// The item an index names.
+    item: Option<Value>,
+    video: Option<orbiters_n4n0_core::youtube::Video>,
+    capture: Option<String>,
+    recipients: Vec<orbiters_n4n0_core::captures::Friend>,
+    /// The world the owner is in.
+    world: Option<String>,
+    /// The call under way, or ringing.
+    call: Option<u64>,
+    contact: Option<String>,
+    state: Option<(String, String)>,
+    /// The app's own ([`crate::Host::assistant_target`]).
+    app: Value,
+    /// What names it for the person, beside what is done: others' text, as data.
+    pub(crate) says: Option<String>,
 }
 
 /// A share asked for the next capture ("take a 3D picture, then share it"): it goes once a newer capture is ready.
@@ -126,9 +148,10 @@ struct ShareNext {
 pub(crate) struct AssistantRuntime {
     pub(crate) limiter: Limiter,
     pub(crate) view: Slice<AssistantView>,
-    undo: Vec<(Intent, UndoStep)>,
+    /// What was done (English, for the model), and what undoes it.
+    undo: Vec<(String, UndoStep)>,
     /// The last list of each kind a tool answered with, its items as given (`ref` names what an index acts on).
-    lists: HashMap<&'static str, Vec<Value>>,
+    pub(crate) lists: HashMap<&'static str, Vec<Value>>,
     youtube: Vec<orbiters_n4n0_core::youtube::Video>,
     /// The groups of the app's tools the last turn carried: the next one carries them too (r23).
     pub(crate) last_groups: std::collections::BTreeSet<orbiters_n4n0_core::intents::route::ToolGroup>,
@@ -142,6 +165,11 @@ impl AssistantRuntime {
     pub(crate) fn clear_failure(&mut self) {
         self.retry = None;
         self.view.failure = None;
+    }
+
+    /// The assistant is off: nothing it was to do later is done.
+    pub(crate) fn disarm(&mut self) {
+        self.share_next = None;
     }
 
     /// Forgets everything of the Orbiters account before (verify-r21 3): the log, what is being done, the page asked for,
@@ -244,6 +272,12 @@ impl crate::N4n0 {
     pub(crate) fn share_next_check(self: &Shared) {
         let Some(epoch) = self.n4n0.lock().unwrap().assistant.share_next.as_ref().map(|n| n.epoch) else { return };
         let Some(fence) = self.fence(&Ticket::input(epoch)) else { return };
+        // The switch, and the assistant, as they are now (verify4-r21 P11): off, it never goes.
+        let share = Action::App(Intent::ShareCapture { which: Which::Next, public: true, friends: Vec::new() });
+        if fence.permit_yes(&share).is_none() || !fence.with_settings(|s| s.n4n0.enabled && s.n4n0.assistant) {
+            fence.cancel_share_next();
+            return;
+        }
         let ask = {
             let mut rt = fence.n4n0.lock().unwrap();
             let Some(next) = rt.assistant.share_next.as_ref().filter(|n| n.epoch == epoch) else { return };
@@ -263,6 +297,30 @@ impl crate::N4n0 {
         fence.share_capture(ask);
         fence.add_line(N4n0Who::Note, tr("N4N0 shares the 3D capture you just took, as you said."));
         fence.publish();
+    }
+
+    /// A share asked for the next capture is not made any more.
+    pub(crate) fn cancel_share_next(&self) {
+        if self.n4n0.lock().unwrap().assistant.share_next.take().is_some() {
+            self.add_line(N4n0Who::Note, tr("The next 3D capture is not shared after all: what N4N0 does from your account is off."));
+            self.publish();
+        }
+    }
+
+    /// What N4N0 may do from the account changed ([`crate::Host::assistant_facts`]): off, what was asked or armed of it goes at
+    /// once.
+    pub fn account_actions_changed(self: &Shared) {
+        if self.assistant_facts().actions {
+            return;
+        }
+        self.cancel_share_next();
+        let dropped = {
+            let mut rt = self.n4n0.lock().unwrap();
+            rt.drop_account_question()
+        };
+        if dropped {
+            self.publish();
+        }
     }
 }
 
@@ -292,6 +350,12 @@ impl Fence<'_> {
     /// Runs `intent` (its gate said so, or the owner said yes): counted against the rate limits, said, logged, its undo
     /// kept. The result is for the model.
     pub(crate) fn intent_run(&self, permit: &Permit, intent: Intent, via: Via) -> Result<Value, String> {
+        let target = self.resolve(&intent)?;
+        self.intent_run_for(permit, intent, via, &target)
+    }
+
+    /// [`Fence::intent_run`] for `target`, as it was asked about.
+    pub(crate) fn intent_run_for(&self, permit: &Permit, intent: Intent, via: Via, target: &Target) -> Result<Value, String> {
         let risk = intent.risk();
         let limited = self.n4n0.lock().unwrap().assistant.limiter.take(if risk == Risk::Confirm { Risk::Confirm } else { Risk::Act }, Instant::now());
         if let Err(why) = limited {
@@ -301,15 +365,12 @@ impl Fence<'_> {
         }
         self.intent_doing(Some(intent.says()));
         self.publish();
-        let outcome = self.intent_do(permit, &intent);
+        let outcome = self.intent_do(permit, &intent, target);
         self.intent_doing(None);
         match outcome {
             Ok((value, undo)) => {
                 if let Some(step) = undo {
-                    let mut rt = self.n4n0.lock().unwrap();
-                    rt.assistant.undo.push((intent.clone(), step));
-                    let excess = rt.assistant.undo.len().saturating_sub(UNDO_KEPT);
-                    rt.assistant.undo.drain(..excess);
+                    self.keep_undo(intent.what(), step);
                 }
                 self.intent_log(&intent, Outcome::Done, None, via);
                 // Every change shows and sounds where the person is (a toast on the desktop, the press in VR).
@@ -326,6 +387,84 @@ impl Fence<'_> {
                 Err(e)
             }
         }
+    }
+
+    fn keep_undo(&self, what: String, step: UndoStep) {
+        let mut rt = self.n4n0.lock().unwrap();
+        rt.assistant.undo.push((what, step));
+        let excess = rt.assistant.undo.len().saturating_sub(UNDO_KEPT);
+        rt.assistant.undo.drain(..excess);
+    }
+
+    /// The clipboard's text as it is now is what Undo puts back after `what` (nothing readable: nothing to undo).
+    pub(crate) fn keep_clipboard(&self, what: String) {
+        if let Some(text) = self.device.clipboard.paste() {
+            self.keep_undo(what, UndoStep::Clipboard(text));
+        }
+    }
+
+    /// Who and what `intent` is for, now (verify4-r21, binding what a yes acts on): its list's item, the newest capture, the
+    /// friends its names mean, the world, the call, the VRChat account. An error says what is missing, for the model.
+    pub(crate) fn resolve(&self, intent: &Intent) -> Result<Target, String> {
+        let mut t = Target { item: self.item(intent)?, ..Target::default() };
+        let name = |text: &str| Some(context::quoted(text, NAME_CHARS)).filter(|_| !text.trim().is_empty());
+        t.says = t.item.as_ref().and_then(|i| ["name", "title", "world", "from"].into_iter().find_map(|k| field(i, k)).and_then(name));
+        let call = || self.host.calls().call.ok_or_else(|| "No call now.".to_string()); // i18n: not shown
+        match intent {
+            Intent::YoutubeWatch { index } | Intent::YoutubeCopy { index } | Intent::YoutubeDrop { index } => {
+                let video = self.n4n0.lock().unwrap().assistant.youtube.get(index - 1).cloned().ok_or("No such result: search again.")?; // i18n: not shown
+                t.says = name(&video.title);
+                t.video = Some(video);
+            }
+            Intent::ShareCapture { which, friends, .. } => {
+                t.recipients = if friends.is_empty() { Vec::new() } else { self.recipients(friends)? };
+                let view = (*self.n4n0.lock().unwrap().captures).clone();
+                match which {
+                    Which::Next => {}
+                    Which::Latest => {
+                        let row = view.latest.as_ref().or(view.history.first()).ok_or("No 3D capture yet.")?; // i18n: not shown
+                        (t.capture, t.says) = (Some(row.key.clone()), name(&row.world));
+                    }
+                    Which::Index(_) => {
+                        t.capture = Some(t.item.as_ref().and_then(|i| field(i, "ref")).map(str::to_string).ok_or("No such capture in the last list.")?); // i18n: not shown
+                    }
+                }
+                // The friends their names mean, in full.
+                let to: Vec<String> = t.recipients.iter().filter_map(|f| name(&f.name)).collect();
+                t.says = Some(t.says.into_iter().chain(to).collect::<Vec<_>>().join(", ")).filter(|s| !s.is_empty());
+            }
+            Intent::WorldLike { .. } | Intent::WorldComment { .. } | Intent::WorldLabel { .. } | Intent::WorldFeedback => {
+                t.world = Some(self.here()?);
+                t.says = self.host.world().world_name.as_deref().and_then(name);
+            }
+            // Sent from the VRChat account connected now, or not at all.
+            Intent::InviteMe { .. } => t.app = json!({ "vrchat": self.host.invite_account() }),
+            Intent::Call { friend } => {
+                let calls = self.host.calls();
+                let (id, full) = pick_person(friend, calls.contacts.iter().map(|c| (c.id.as_str(), c.name.as_str())))?;
+                (t.contact, t.says) = (Some(id), name(&full));
+            }
+            Intent::AnswerCall | Intent::EndCall | Intent::MuteCall { .. } => {
+                let call = call()?;
+                (t.call, t.says) = (Some(call.number), name(&call.name));
+            }
+            Intent::ApplyState { name: said } => {
+                let rt = self.n4n0.lock().unwrap();
+                let view = rt.states.view(rt.avatar_id.as_deref(), None);
+                let names: Vec<String> = view.states.iter().map(|s| s.name.clone()).collect();
+                let state = pick_person(said, view.states.iter().map(|s| (s.id.as_str(), s.name.as_str())))
+                    .map_err(|_| format!("No saved state called {} on this avatar; its states: {}.", context::quoted(said, NAME_CHARS), names.iter().map(|n| context::quoted(n, NAME_CHARS)).collect::<Vec<_>>().join(", ")))?; // i18n: not shown
+                t.says = name(&state.1);
+                t.state = Some(state);
+            }
+            _ => {
+                t.app = self.host.assistant_target(intent, t.item.as_ref())?;
+                if let Some(says) = t.app.get("says").and_then(Value::as_str) {
+                    t.says = name(says);
+                }
+            }
+        }
+        Ok(t)
     }
 
     /// The item an index names in its list, as the last answer gave it.
@@ -351,10 +490,10 @@ impl Fence<'_> {
     }
 
     /// Does `intent`, by the same path its menu or page takes. Its result for the model, and what undoes it.
-    fn intent_do(&self, permit: &Permit, intent: &Intent) -> Result<(Value, Option<UndoStep>), String> {
+    fn intent_do(&self, permit: &Permit, intent: &Intent, target: &Target) -> Result<(Value, Option<UndoStep>), String> {
         let done = || json!({ "done": true });
         let settings = self.settings();
-        let item = self.item(intent)?;
+        let item = target.item.clone();
         Ok(match intent {
             Intent::FastWalk { on } => {
                 let was = settings.walk_boost.enabled;
@@ -400,18 +539,15 @@ impl Fence<'_> {
                 let items = self.keep_list(intent, items);
                 (intents::untrusted(json!({ "captures": items, "listed": view.listed })), None)
             }
-            Intent::ShareCapture { which, public, friends } => {
-                let recipients = if friends.is_empty() { Vec::new() } else { self.recipients(friends)? };
-                let view = (*self.n4n0.lock().unwrap().captures).clone();
-                let key = match which {
-                    Which::Next => {
-                        self.n4n0.lock().unwrap().assistant.share_next =
-                            Some(ShareNext { after: view.latest.as_ref().map(|l| l.key.clone()), public: *public, recipients, asked: Instant::now(), epoch: self.epoch() });
-                        return Ok((json!({ "done": true, "note": "It is shared once the next 3D capture is ready (its 3D view made)." }), None)); // i18n: not shown
-                    }
-                    Which::Latest => view.latest.as_ref().or(view.history.first()).map(|r| r.key.clone()).ok_or("No 3D capture yet.")?, // i18n: not shown
-                    Which::Index(_) => item.as_ref().and_then(|i| field(i, "ref")).map(str::to_string).ok_or("No such capture in the last list.")?, // i18n: not shown
-                };
+            Intent::ShareCapture { which, public, .. } => {
+                let recipients = target.recipients.clone();
+                if *which == Which::Next {
+                    let mut rt = self.n4n0.lock().unwrap();
+                    let after = rt.captures.latest.as_ref().map(|l| l.key.clone());
+                    rt.assistant.share_next = Some(ShareNext { after, public: *public, recipients, asked: Instant::now(), epoch: self.epoch() });
+                    return Ok((json!({ "done": true, "note": "It is shared once the next 3D capture is ready (its 3D view made)." }), None)); // i18n: not shown
+                }
+                let key = target.capture.clone().ok_or("No such capture in the last list.")?; // i18n: not shown
                 self.share_capture(orbiters_n4n0_core::captures::ShareAsk { key, public: *public, recipients, acknowledge_explicit: false });
                 (json!({ "done": true, "note": "Sharing: it may take a minute; Photos & captures shows how it goes." }), None) // i18n: not shown
             }
@@ -427,16 +563,17 @@ impl Fence<'_> {
                 let items = self.keep_list(intent, items);
                 (intents::untrusted(json!({ "results": items })), None)
             }
-            Intent::YoutubeWatch { index } | Intent::YoutubeCopy { index } | Intent::YoutubeDrop { index } => {
-                let video = self.n4n0.lock().unwrap().assistant.youtube.get(index - 1).cloned().ok_or("No such result: search again.")?; // i18n: not shown
+            Intent::YoutubeWatch { .. } | Intent::YoutubeCopy { .. } | Intent::YoutubeDrop { .. } => {
+                let video = target.video.clone().ok_or("No such result: search again.")?; // i18n: not shown
                 let (link, title) = (video.link(), video.title.clone());
                 let effect = match intent {
                     Intent::YoutubeWatch { .. } => Effect::WatchVideo { link },
                     Intent::YoutubeCopy { .. } => Effect::Copy { link, title },
                     _ => Effect::Drop { link, title, video: Some(video.id.clone()) },
                 };
+                let undo = self.undo_copy(intent);
                 self.screen_effects(vec![effect]);
-                (done(), None)
+                (done(), undo)
             }
             Intent::HistoryCopy { .. } | Intent::HistoryDrop { .. } => {
                 let item = item.ok_or("No such video in the last list.")?; // i18n: not shown
@@ -444,8 +581,9 @@ impl Fence<'_> {
                 let title = field(&item, "title").unwrap_or_default().to_string();
                 let video = orbiters_n4n0_core::videos::youtube_id(&link);
                 let effect = if matches!(intent, Intent::HistoryCopy { .. }) { Effect::Copy { link, title } } else { Effect::Drop { link, title, video } };
+                let undo = self.undo_copy(intent);
                 self.screen_effects(vec![effect]);
-                (done(), None)
+                (done(), undo)
             }
             Intent::TakeBackCard => {
                 self.screen_effects(vec![Effect::TakeBack]);
@@ -453,7 +591,7 @@ impl Fence<'_> {
             }
             Intent::WhereAmI => {
                 let world = self.host.world();
-                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0, account: None }.kind());
+                let kind = world.instance.as_deref().map(|i| orbiters_n4n0_core::menu::InstanceRow { location: format!("w:{i}"), world: String::new(), at: 0 }.kind());
                 (
                     intents::untrusted(json!({
                         "in_world": world.in_world,
@@ -485,21 +623,22 @@ impl Fence<'_> {
                     None => self.host.world().world_name,
                 };
                 let name = name.filter(|n| !n.trim().is_empty()).ok_or("No world name to copy.")?; // i18n: not shown
+                let undo = self.undo_copy(intent);
                 self.screen_effects(vec![Effect::CopyText { text: name }]);
-                (done(), None)
+                (done(), undo)
             }
             Intent::WorldLike { on } => {
-                let world = self.here()?;
+                let world = target.world.clone().ok_or("The owner is in no world now.")?; // i18n: not shown
                 self.feedback_ask(orbiters_n4n0_core::feedback::FeedbackAsk::Like { world, on: *on });
                 (done(), None)
             }
             Intent::WorldComment { text } => {
-                let world = self.here()?;
+                let world = target.world.clone().ok_or("The owner is in no world now.")?; // i18n: not shown
                 self.feedback_ask(orbiters_n4n0_core::feedback::FeedbackAsk::Comment { world, text: text.clone() });
                 (done(), None)
             }
             Intent::WorldLabel { label, on } => {
-                let world = self.here()?;
+                let world = target.world.clone().ok_or("The owner is in no world now.")?; // i18n: not shown
                 let found = orbiters_contracts::world_feedback::labels()
                     .iter()
                     .find(|l| l.id.eq_ignore_ascii_case(label) || l.text.values().any(|t| name_matches(label, t) == 2))
@@ -514,7 +653,7 @@ impl Fence<'_> {
                 (done(), None)
             }
             Intent::WorldFeedback => {
-                let world = self.here()?;
+                let world = target.world.clone().ok_or("The owner is in no world now.")?; // i18n: not shown
                 self.feedback_ask(orbiters_n4n0_core::feedback::FeedbackAsk::Show { world: world.clone() });
                 let rt = self.n4n0.lock().unwrap();
                 let f = rt.feedback.world(&world);
@@ -533,26 +672,25 @@ impl Fence<'_> {
             Intent::InviteMe { .. } => {
                 let item = item.ok_or("No such instance in the last list.")?; // i18n: not shown
                 let location = field(&item, "ref").ok_or("No location for that instance.")?.to_string(); // i18n: not shown
+                if target.app.get("vrchat").and_then(Value::as_str) != self.host.invite_account().as_deref() {
+                    return Err(tr("Your VRChat account changed meanwhile: nothing was sent.").into());
+                }
                 self.invite_send(location, false);
                 (json!({ "done": true, "note": "The invite's answer shows on Previous instances." }), None) // i18n: not shown
             }
-            Intent::Call { friend } => {
-                let calls = self.host.calls();
-                let (id, _) = pick_person(friend, calls.contacts.iter().map(|c| (c.id.as_str(), c.name.as_str())))?;
-                self.host.call(crate::CallRequest::Contact(id));
+            Intent::Call { .. } => {
+                self.host.call(crate::CallRequest::Contact(target.contact.clone().ok_or("Nobody to call.")?)); // i18n: not shown
                 (done(), None)
             }
-            Intent::AnswerCall => {
-                self.host.call(crate::CallRequest::Answer);
+            // The call it was asked about, or none. (Nothing undoes them: unmuting sends what is said next.)
+            Intent::AnswerCall | Intent::EndCall | Intent::MuteCall { .. } => {
+                let call = target.call.ok_or("No call now.")?; // i18n: not shown
+                self.host.call(match intent {
+                    Intent::AnswerCall => crate::CallRequest::Answer(call),
+                    Intent::MuteCall { on } => crate::CallRequest::Mute { call, on: *on },
+                    _ => crate::CallRequest::End(call),
+                });
                 (done(), None)
-            }
-            Intent::EndCall => {
-                self.host.call(crate::CallRequest::End);
-                (done(), None)
-            }
-            Intent::MuteCall { on } => {
-                self.host.call(crate::CallRequest::Mute(*on));
-                (done(), Some(UndoStep::Action(Action::App(Intent::MuteCall { on: !on }))))
             }
             Intent::ShowN4n0 { on } => {
                 let (was, avatar) = {
@@ -580,14 +718,8 @@ impl Fence<'_> {
                 self.screen_effects(vec![Effect::SaveState { name: name.clone(), size: true, pose: false, default: false }]);
                 (done(), None)
             }
-            Intent::ApplyState { name } => {
-                let state = {
-                    let rt = self.n4n0.lock().unwrap();
-                    let view = rt.states.view(rt.avatar_id.as_deref(), None);
-                    let names: Vec<String> = view.states.iter().map(|s| s.name.clone()).collect();
-                    pick_person(name, view.states.iter().map(|s| (s.id.as_str(), s.name.as_str())))
-                        .map_err(|_| format!("No saved state called {} on this avatar; its states: {}.", context::quoted(name, NAME_CHARS), names.iter().map(|n| context::quoted(n, NAME_CHARS)).collect::<Vec<_>>().join(", ")))? // i18n: not shown
-                };
+            Intent::ApplyState { .. } => {
+                let state = target.state.clone().ok_or("No such saved state.")?; // i18n: not shown
                 self.screen_effects(vec![Effect::ApplyState { id: state.0, name: state.1 }]);
                 (done(), None)
             }
@@ -624,7 +756,7 @@ impl Fence<'_> {
                 self.open_page(*page, None);
                 if page.on_window() {
                     // The window's pages through the app, which brings the window up on it.
-                    self.host.assistant_intent(intent, None)?;
+                    self.host.assistant_intent(intent, None, &Value::Null)?;
                 }
                 (done(), None)
             }
@@ -632,7 +764,7 @@ impl Fence<'_> {
                 // Never done: only its page opens, after the owner's yes.
                 self.open_page(what.page(), None);
                 if what.page().on_window() {
-                    self.host.assistant_intent(&Intent::OpenPage { page: what.page() }, None)?;
+                    self.host.assistant_intent(&Intent::OpenPage { page: what.page() }, None, &Value::Null)?;
                 }
                 (json!({ "opened": what.page().key(), "note": "Only the page opened: the owner does this there." }), None) // i18n: not shown
             }
@@ -642,19 +774,25 @@ impl Fence<'_> {
                 let (undone, step) = last.ok_or("Nothing to undo.")?; // i18n: not shown
                 match step {
                     UndoStep::Effects(effects) => self.screen_effects(effects),
+                    UndoStep::Clipboard(text) => self.device.clipboard.copy(&text)?,
+                    // What undoes is judged as itself: one that waits for a yes is not done as an undo.
+                    UndoStep::Action(action) if action.effect().asks || action.effect().from_account => {
+                        return Err("That is not undone by voice: the owner does it on its page.".into()); // i18n: not shown
+                    }
                     UndoStep::Action(Action::App(i)) => {
-                        self.intent_do(permit, &i)?;
+                        let target = self.resolve(&i)?;
+                        self.intent_do(permit, &i, &target)?;
                     }
                     UndoStep::Action(action) => {
                         self.run_action_for_assistant(permit, action)?;
                     }
                 }
-                (json!({ "undone": undone.what() }), None)
+                (json!({ "undone": undone }), None)
             }
             // The app's own: through its controller, as its pages do. What it read is kept as the list of its kind.
             _ => {
                 let undo = self.host_undo(intent, &settings);
-                let value = self.host.assistant_intent(intent, item.as_ref())?;
+                let value = self.host.assistant_intent(intent, item.as_ref(), &target.app)?;
                 let value = match value.get("items").and_then(Value::as_array) {
                     Some(items) => {
                         let items = self.keep_list(intent, items.clone());
@@ -667,6 +805,11 @@ impl Fence<'_> {
                 (if intent.spec().reads_others { intents::untrusted(value) } else { value }, undo)
             }
         })
+    }
+
+    /// What undoes a copy: the text the clipboard holds before it.
+    fn undo_copy(&self, intent: &Intent) -> Option<UndoStep> {
+        intent.copies().then(|| self.device.clipboard.paste()).flatten().map(UndoStep::Clipboard)
     }
 
     /// What undoes an app intent, from the settings before it.
@@ -702,11 +845,12 @@ impl Fence<'_> {
             .collect()
     }
 
-    /// The page where the person does it themselves opens (the account's actions are off for them).
-    pub(crate) fn open_instead(&self, page: Page) {
-        self.open_page(page, None);
-        if page.on_window() {
-            let _ = self.host.assistant_intent(&Intent::OpenPage { page }, None);
+    /// The page where the person does it themselves opens (the account's actions are off for them): an action like any
+    /// other, with its leave, its line in the log and its count.
+    pub(crate) fn open_instead(&self, page: Page, tainted: bool, via: Via) {
+        let open = Intent::OpenPage { page };
+        if let Some(permit) = self.permit(&Action::App(open.clone()), tainted) {
+            let _ = self.intent_run(&permit, open, via);
         }
     }
 
@@ -783,16 +927,24 @@ impl Fence<'_> {
         Value::Object(out)
     }
 
+    /// Whether a copy could be undone, when `intent` is one (the clipboard is read for nothing else).
+    pub(crate) fn see_clipboard(&self, intent: &Intent, facts: &mut Facts) {
+        facts.clipboard = intent.copies() && self.device.clipboard.paste().is_some();
+    }
+
     /// The offline path: the person's sentence `text` was a known command; `actions` run now, in order. Said in the
     /// conversation, on the avatar's panel, logged, and told to the model at its next turn.
     pub(crate) fn quick(&self, text: &str, actions: Vec<Action>) {
         self.add_line(N4n0Who::You, text.to_string());
-        let facts = self.assistant_facts();
+        let mut facts = self.assistant_facts();
         let (mut said, mut said_en, mut refused, mut panel) = (Vec::new(), Vec::new(), Vec::new(), Vec::<String>::new());
         let (mut asked, mut asked_en) = (Vec::new(), Vec::new());
         for action in actions {
             match action {
-                Action::App(intent) => match intents::gate(&intent, &facts, false) {
+                Action::App(intent) => match {
+                    self.see_clipboard(&intent, &mut facts);
+                    intents::gate(&intent, &facts, false)
+                } {
                     Gate::Run => match self.permit_said(&Action::App(intent.clone())).ok_or_else(String::new).and_then(|permit| self.intent_run(&permit, intent.clone(), Via::Quick)) {
                         Ok(_) => {
                             said.push(intent.says());
@@ -814,7 +966,7 @@ impl Fence<'_> {
                     Gate::Offer(_) => refused.push(intent.says()),
                     Gate::Instead(page) => {
                         self.intent_log(&intent, Outcome::Refused, Some(tr("Not from your account yet: its page opened instead.").into()), Via::Quick);
-                        self.open_instead(page);
+                        self.open_instead(page, false, Via::Quick);
                         refused.push(format!("{} ({})", intent.says(), tr("not from your account yet")));
                     }
                 },
@@ -856,7 +1008,7 @@ impl Fence<'_> {
         if !asked_en.is_empty() {
             note.push_str(&format!(" It asked the owner first about: {}.", asked_en.join(", "))); // i18n: not shown
         }
-        rt.notes.push(note);
+        rt.notes.push(context::Note { text: note, others: false });
         drop(rt);
         if !asked.is_empty() {
             self.ask_owner(asked);

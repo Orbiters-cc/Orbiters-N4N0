@@ -19,12 +19,14 @@ crates/orbiters-n4n0-core/src/intents/route.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
 crates/orbiters-n4n0/src/tests_fix3.rs
+crates/orbiters-n4n0/src/tests_fix4.rs
 crates/orbiters-n4n0/src/tests_identity.rs
 # The tests of N4N0's bar and chat (REQUEST21 3).
 crates/orbiters-desktop/src/chat_bar/tests.rs
 crates/orbiters-desktop/src/bridge/tools.rs
 crates/orbiters-desktop/src/bridge/caps.rs
 crates/orbiters-desktop/src/bridge/flow_tests.rs
+crates/orbiters-projects/src/no_write_tests.rs
 crates/orbiters-desktop/src/bridge/projects.rs
 crates/orbiters-desktop/src/bridge/sandbox.rs
 crates/orbiters-desktop/src/bridge/vr.rs

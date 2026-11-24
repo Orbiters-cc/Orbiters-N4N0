@@ -8,6 +8,7 @@ mod copying;
 pub mod copies;
 pub mod discovery;
 pub mod editor;
+pub mod gallery;
 pub mod git;
 pub mod hidden;
 pub mod icons;
@@ -15,17 +16,21 @@ pub mod icons;
 mod mac;
 pub mod missing;
 pub mod network;
+#[cfg(test)]
+mod no_write_tests;
+pub mod own;
 pub mod owned;
 pub mod preview;
+mod repos;
 pub mod scene;
 pub mod setup;
 pub mod size;
 pub mod storage;
 pub mod suggestions;
 pub mod templates;
+mod theirs;
 pub mod unity6;
 pub mod updates;
-mod vcc_store;
 pub mod vpm;
 mod vpm_http;
 
@@ -41,8 +46,8 @@ pub fn data_dir() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("Orbiters")
 }
 
-/// The shared VPM environment VCC and ALCOM keep (settings, project list, repositories, templates). Without Creator
-/// Companion it starts empty and VPM creates what it needs, as ALCOM does. `ORBITERS_VCC_DIR` points it elsewhere
+/// Creator Companion's and ALCOM's folder (settings, project list, repositories, templates): read, and never written ([`own`],
+/// [`gallery`]). Without Creator Companion there is none, and nothing makes it. `ORBITERS_VCC_DIR` points it elsewhere
 /// (tests of a computer without VCC; never the person's real folder).
 pub fn vcc_dir() -> PathBuf {
     if let Some(roots) = orbiters_core::paths::roots() {

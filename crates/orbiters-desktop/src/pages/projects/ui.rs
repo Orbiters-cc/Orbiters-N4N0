@@ -12,7 +12,7 @@ use crate::pages::header::{Action, Header};
 use crate::pages::{self, Cx, PAD_X};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, UiBuilder};
 use std::path::PathBuf;
-use orbiters_projects::{discovery::Project, vpm};
+use orbiters_projects::discovery::Project;
 use orbiters_ui::anim::{self, ease, Spring};
 use orbiters_ui::layout::{self, PANE_GAP};
 use orbiters_ui::paint::{self, Gradient};
@@ -163,12 +163,12 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     modals(ui, cx, state);
 }
 
-/// Asks for a Unity project's folder and adds it to the list VCC and ALCOM share; it opens once the scan lists it.
+/// Asks for a Unity project's folder and adds it to Orbiters' list; it opens once the scan lists it.
 pub(super) fn add_existing(ctx: &egui::Context, state: &mut State) {
     state.task(ctx, tr("Choose a Unity project…"), move || {
         if let Some(p) = rfd::FileDialog::new().set_title(tr("Add a Unity project")).pick_folder() {
-            orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &p, true))?;
-            Ok(Outcome::Added(p, tr("Project added: VCC and ALCOM list it too").into()))
+            orbiters_projects::gallery::add(&orbiters_projects::vcc_dir(), &p)?;
+            Ok(Outcome::Added(p, tr("Project added to Orbiters' list").into()))
         } else {
             Ok(Outcome::Picked(None))
         }
@@ -292,7 +292,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if !proposals.is_empty() {
         ui.add_space(32.0);
-        section_title(ui, tr("Found on this computer"), Some(proposals_n), Some(tr("Add one to manage its avatars and packages here, in VCC and in ALCOM.")));
+        section_title(ui, tr("Found on this computer"), Some(proposals_n), Some(tr("Add one to manage its avatars and packages here.")));
         ui.add_space(10.0);
         found(ui, cx, state, &proposals);
     }
@@ -573,8 +573,8 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
     }
     if let Some(path) = add {
         state.task(&ctx, tr("Adding the project…"), move || {
-            orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-            Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
+            orbiters_projects::gallery::add(&orbiters_projects::vcc_dir(), &path)?;
+            Ok(Outcome::Added(path, tr("Project added to Orbiters' list").into()))
         });
     } else if let Some(path) = open {
         state.open(&ctx, path);

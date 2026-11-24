@@ -130,7 +130,7 @@ pub(crate) fn last(e: &Env) -> (Job, Status) {
 }
 
 pub(crate) fn listed(e: &Env, path: &Path) -> bool {
-    let all = crate::runtime().unwrap().block_on(crate::vpm::registered(&e.vcc)).unwrap_or_default();
+    let all = crate::gallery::listed(&e.vcc).projects;
     all.iter().any(|p| crate::discovery::key(p) == crate::discovery::key(path))
 }
 
@@ -146,7 +146,7 @@ pub(crate) fn their_store(e: &Env) {
     for name in ["Theirs A", "Theirs B"] {
         let at = e.root.join("Theirs").join(name);
         copy_tree(&e.source, &at);
-        crate::runtime().unwrap().block_on(crate::vpm::register(&e.vcc, &at, true)).unwrap();
+        crate::gallery::add(&e.vcc, &at).unwrap();
     }
 }
 
@@ -464,7 +464,7 @@ fn taking_a_trial_off_changes_orbiters_record_alone() {
     let e = env();
     their_store(&e);
     let job = run(&e).unwrap();
-    crate::runtime().unwrap().block_on(crate::vpm::registered(&e.vcc)).unwrap();
+    crate::gallery::listed(&e.vcc);
     let before = store(&e);
     let left = abandon(&e.app, &job.id).unwrap();
     assert_eq!(left, Forgotten { at: job.trial.path.clone(), there: true });

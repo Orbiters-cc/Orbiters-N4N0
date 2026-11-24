@@ -195,7 +195,8 @@ fn every_entry_point_of_the_library_asks() {
     // The gallery's and the bridge's Add and Remove, and a plan of changes.
     let listed_before = store(&e);
     for add in [true, false] {
-        assert!(said(rt.block_on(crate::vpm::register(&e.vcc, &at, add))).contains("yourself"));
+        let set = if add { crate::gallery::add(&e.vcc, &at) } else { crate::gallery::remove(&e.vcc, &at) };
+        assert!(said(set).contains("Forget"));
     }
     assert!(store(&e) == listed_before);
     assert!(said(rt.block_on(crate::coherent::solve(&e.vcc, &at, &[], &[], false)).map(|_| ())).contains("Creator Companion"));
@@ -221,7 +222,7 @@ fn every_entry_point_of_the_library_asks() {
         assert!(run_at(&e, &e.root.join("Projects"), "F", &|_| false, &ok).is_err());
     }
     let f = e.root.join("Projects/F");
-    assert!(rt.block_on(crate::vpm::register(&e.vcc, &f, true)).is_err() && rt.block_on(crate::vpm::register(&e.vcc, &f, false)).is_err());
+    assert!(crate::gallery::add(&e.vcc, &f).is_err() && crate::gallery::remove(&e.vcc, &f).is_err());
     assert!(store(&e) == listed_before);
     let cancel = AtomicBool::new(false);
     assert!(crate::storage::repair(&f, &Default::default(), &cancel).is_err());

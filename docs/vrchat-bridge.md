@@ -150,22 +150,22 @@ The resource `bridge://guide` and the prompt `world_tour` explain the loop to an
 
 The same server, behind the same gate, address and token, also does what the **Unity projects** tab does
 (`crates/orbiters-desktop/src/bridge/projects.rs`). They run in the tray service and call what the tab's buttons call
-(`orbiters_projects`: the VCC environment through vrc-get, the projects found on the disks, Unity's editors, the Library
+(`orbiters_projects`: vrc-get in Orbiters' own environment, VCC's and ALCOM's files read and never written, the projects found on the disks, Unity's editors, the Library
 move, the templates), so they work with the window closed and behave as the tab does; each change bumps the snapshot's
 `projects_changed`, and the tab looks again. Their guide is the resource `bridge://unity-projects`.
 
 | Tool | What for |
 | --- | --- |
-| `unity_list_projects` | The projects on this computer: name, path, Unity version, kind, listed or only found, hidden, avatars and worlds (blueprint ids), Unity open, size. `refresh` looks again (a job). |
+| `unity_list_projects` | The projects on this computer: name, path, Unity version, kind, listed or only found, listed by VCC or ALCOM (`in_creator_companion`), hidden, avatars and worlds (blueprint ids), Unity open, size. `refresh` looks again (a job). |
 | `unity_get_project` | One project: installed packages and versions, updates and held updates with why, Update all's plan, Unity's editor, disk health, Git, Blender files, previews, worlds' captures and uploads, missing packages. |
 | `unity_find_packages` | What the enabled repositories offer, with versions (pre-releases on request) and the installed one. |
 | `unity_change_packages` | `install` (a version or the newest; also changes a version), `remove`, `update`, `update_all`, `restore` (Resolve), `apply_plan` (a conflict's plan), `solve` (a plan, nothing applied). A job. |
 | `unity_missing_packages` | After `packages_not_listed`: `lookup` finds the repositories that have them, `add` adds them and runs the change again. |
 | `unity_repositories` | `list`, `add` (URL, headers), `remove`, `enable`, `disable`, `refresh` (download again), `suggest` (Orbiters' catalog). |
 | `unity_editor` | `status`, `open` (Open in Unity), `show`, `save_and_exit`, `kill` (needs `confirm`). |
-| `unity_manage_project` | `add` to the list, `remove_from_list` (exact listed path and `confirm`; files stay), `hide`, `unhide`, `reveal`, `open_hub`, `open_blender`. |
+| `unity_manage_project` | `add` to the tab's list, `remove_from_list` (exact listed path and `confirm`; files stay), `hide`, `unhide`, `reveal`, `open_hub`, `open_blender`. |
 | `unity_list_templates` | Templates, their Unity version and whether it is installed, the default folder. |
-| `unity_create_project` | A project from a template, listed in VCC and ALCOM. A job. |
+| `unity_create_project` | A project from a template, on the tab's list. A job. |
 | `unity_duplicate_project` | Duplicate with exact packages, Library optional; `check_only` gives bytes needed and free. A job. |
 | `unity_storage` | `check` the disk, `plan` and `repair` the Library move, `measure` the size. Jobs. |
 | `unity_add_orbiters` | `mixer`, `toolkit` (and open in Unity), `my_avatar`, `n4n0` on one of the project's avatars. A job. |
@@ -207,37 +207,45 @@ last known account is shown, or none. While a game starts or runs, whoever start
 as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
 `get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
-**A private place rides with no start where VRChat has several profiles** (2026-11-24, the architect's rulings after the eleventh
-verification), by one rule for every computer and every way there is (`vrchat_launch::way`). Private is anything but a public
+**A private place rides with no start where VRChat has several profiles** (2026-11-24; AGENTS.md, "Several VRChat accounts on one
+computer"), by one rule for every computer and every way there is (`vrchat_launch::way`). Private is anything but a public
 instance (`is_public_instance`: public, a group's public; a kind not known here is private), an invite whatever its instance, an
 instance made here for an account (`InstancePermits::owners`: that account's for as long as N4N0 runs, whatever a listing says
-since and whoever signs in; its own history keeps it after that).
-- **One profile** (none but the default one known, remembered, running or starting in N4N0's own records, Home's and the bridge's:
-  `launcher_several`): the link goes with the start, as it did before there were profiles. Nothing is asked of a log.
+since and whoever signs in).
+- **One profile**: the link goes with the start and to the game that runs, as it did before there were profiles: nothing is asked of
+  a log, and one that cannot be read changes nothing. A computer has several only by plain evidence (`vrchat_launch::several`): a
+  nonzero profile on Home's choice (`LaunchSettings::profiles`), or one that runs or starts now, Home's or the bridge's. Taken off the
+  choice (the × of its chip, when it is the one chosen and does not run; `Action::ForgetProfile`), the last one leaves one profile
+  again. What 0.3.9-dev.46 and dev.47 kept for good (`profiles_seen`, `profiles_lost`, `profile_ids`) is not read.
 - **Several**: VRChat starts on the profile chosen without any place, and the place waits (`Pending`) for **this** VRChat (on a Mac
   the very launch, on a PC the process that came on that profile since) to prove, by the user id its own log says, that the account
   signed in on it is the one it is for. Then it is delivered: by the link pipe on a PC (asked again of the process that takes it;
   else an invite to oneself), as an invite to oneself on a Mac, sent as the account, which can arrive in no other's game. Another
   account, no word within 5 minutes of its coming up, a VRChat that closed, a log that cannot be read (`log_trouble`: no folder, not
   allowed, none written): nothing is delivered, Home says which in one line (`LauncherState::joining`), and the place is kept
-  (**Try again**). An invite's card comes back.
-- **To a VRChat that runs**, on any computer: its link only while its own log proves the account; else the account's own invite.
+  (**Try again**; where whose it is could not be told, **Invite me**: the account's own invite to itself). Another start in its
+  place, or a VRChat on another profile, keeps it too. An invite's card comes back.
+- **To a VRChat that runs**, with several profiles: its link only while its own log proves the account at that moment (read anew, to
+  its end, once the pipe is open and its process known), and only to the process it was proven for; else the account's own invite.
+  A VRChat that cannot be told from the assistant's (`travel::Side::Unknown`) takes that invite too. On a Mac, whose only way to a
+  game is that invite, nothing is sent into one whose own log says another account (the invite would reach no game here): Home says so
+  and the place is kept (**Try again**); where whose it is is not known, the invite goes.
 - A restart after a lost picture, Go there, the first start after the set-up and a start beside the assistant's are the same rule.
   Join into a game that runs (`JoinRunning`, `AcceptInviteRunning`) starts none and claims none.
 
-**Evidence** is a log made at or after its process's start and no other's, read to its end: none of two that could be, one from
-before, one cut shorter, one that cannot be read, a later sign-in line that names nobody or that VRChat did not write itself, a look
-that is over 15 s old, are "not known". What an earlier run said (`LaunchSettings::profile_ids`) is a label: it only tells Home not to
-offer an account's places on a profile last seen as another's. **History** is each account's: a visit (`visited-worlds.json`) carries
-the account its log said, Where, the menus' Previous instances and the assistant show and send none of another's, and a private
-place that is nobody's (from before accounts were kept, in a log that is gone) goes nowhere; whether an instance is open is asked with
-the session of the account it is asked as, on the hold that sends it.
+**Evidence** is a log made at or after its process's start (both as precisely as the system keeps them: a log of the same second may
+be from before) and no other's, of those that run or were seen here to run beside it (`vrchats::Seen`: a log in doubt between two
+stays so when one of them ends), read to its end: none of two that could be, one from before, one cut shorter, one that cannot be
+read, a later sign-in line that names nobody or that VRChat did not write itself, a look that is over 15 s old, are "not known".
+(What is only shown of a VRChat, its account's name and its world, may come from a log made up to five seconds before it.) **Not
+kept apart by account** (deliberately; widening it is the owner's decision): the visit history and every list of it, captures and
+their places, whether a capture's instance is still open, the background presence, uploads, and Orbiters' own account's invites are
+as they were before profiles. A place taken from them goes to VRChat by the rule above, for the account that presses it.
 
 **On a Mac every start is made with exactly its own arguments** (`steam play --no-saved-arguments`, obelisk-cli 0.1.13): a
 `--profile` saved in the engine's launch settings reaches no game of N4N0's. **The bridge's start on a Mac** carries its private
 instance, so it needs a Mac with one profile (`several_profiles` is its refusal otherwise, before anything is made: the second step
-would be an invite a person takes in the game). Its instance is made with the session of the account the start was admitted for, and
-launched for that one, a resumed one too (`account_changed`).
+would be an invite a person takes in the game). Otherwise it is as it was before profiles, as the bridge on Windows is.
 
 **Known limit, the bridge on Windows.** Its main session is as it was, a standing decision: `go_to_world` makes the private
 instance with the app's VRChat account and starts VRChat on the profile asked for (the default one when none is) with the

@@ -66,6 +66,11 @@ pub enum ToClient {
     /// Close (the app quits, or another window replaced this one).
     Close,
     /// Orbiters' answer to a [`ToService::Translate`].
+    /// The answer to [`ToService::Member`].
+    Member {
+        id: String,
+        answer: Result<crate::member::MemberAnswer, String>,
+    },
     Translated {
         id: String,
         result: crate::controller::translate::Answer,
@@ -235,6 +240,13 @@ pub enum ToService {
         session: PathBuf,
         #[serde(default)]
         epoch: u64,
+    },
+    /// A request of Orbiters as the member the process shows (`crate::member`), answered with [`ToClient::Member`].
+    Member {
+        id: String,
+        #[serde(default)]
+        epoch: u64,
+        request: Box<crate::member::MemberRequest>,
     },
     /// Asks what this member added to the Map explorer (answered with `ToClient::Maps`).
     Maps,
@@ -655,6 +667,7 @@ pub struct Client {
     worker_log: Mutex<Option<Vec<String>>>,
     maps: Mutex<Option<MapsMine>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
+    member: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<Result<crate::member::MemberAnswer, String>>>>,
     translated: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::translate::Answer>>>,
     /// [`ToClient::Locomotion`]'s values, with when they came, until the overlay takes them.
     locomotion: Mutex<Vec<(Instant, String, f32)>>,
@@ -711,6 +724,7 @@ impl Client {
             worker_log: Mutex::new(None),
             maps: Mutex::new(None),
             vrchat_data: Mutex::default(),
+            member: Mutex::default(),
             translated: Mutex::default(),
             locomotion: Mutex::default(),
             show: AtomicBool::new(false),
@@ -765,6 +779,11 @@ impl Client {
                     ToClient::VrchatData { id, result } => {
                         if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
                             let _ = tx.send(result);
+                        }
+                    }
+                    ToClient::Member { id, answer } => {
+                        if let Some(tx) = c.member.lock().unwrap().remove(&id) {
+                            let _ = tx.send(answer);
                         }
                     }
                     ToClient::Translated { id, result } => {
@@ -925,6 +944,7 @@ impl Client {
         // Cancels waiting receivers, not work the service has already accepted. Nothing is replayed. A translation
         // waiting for its answer returns at once too, not after its 30 s (CTL-11 f).
         self.vrchat_data.lock().unwrap().clear();
+        self.member.lock().unwrap().clear();
         self.translated.lock().unwrap().clear();
         if SAY_STATE.load(Ordering::Relaxed) { println!("link ended"); }
         self.repaint(false);
@@ -965,6 +985,23 @@ impl Client {
         let result = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(orbiters_i18n::tr("VRChat data request timed out. Please try again.").into()));
         self.vrchat_data.lock().unwrap().remove(&id);
         result
+    }
+
+    /// A request of Orbiters as the member this process shows.
+    pub fn member_request(&self, epoch: u64, request: crate::member::MemberRequest) -> Result<crate::member::MemberAnswer, String> {
+        let unanswered = || orbiters_i18n::tr("Orbiters could not be reached").to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.member.lock().unwrap().insert(id.clone(), tx);
+        // As for VRChat data: after the close, nothing answers.
+        if self.state.lock().unwrap().closed {
+            self.member.lock().unwrap().remove(&id);
+            return Err(unanswered());
+        }
+        self.send(&ToService::Member { id: id.clone(), epoch, request: Box::new(request) });
+        let answer = rx.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|_| Err(unanswered()));
+        self.member.lock().unwrap().remove(&id);
+        answer
     }
 
     /// Lines translated by Orbiters' service, through the desktop service (which holds the account's credential).

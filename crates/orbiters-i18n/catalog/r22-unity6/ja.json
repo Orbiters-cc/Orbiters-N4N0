@@ -231,7 +231,7 @@
   "This copy is not recorded any more.": "このコピーの記録はもうありません。",
   "This folder is a Unity 6 trial that was taken off before it was complete: it stays at {path}, and is not a project to open.": "このフォルダーは完成前に外された Unity 6 のお試しです。{path} に残りますが、開けるプロジェクトではありません。",
   "This folder is a Unity 6 trial whose copy failed, not a project: it stays at {path}. Start a new trial.": "このフォルダーはコピーに失敗した Unity 6 のお試しで、プロジェクトではありません。{path} に残ります。新しいお試しを始めてください。",
-  "This is a Unity 6 trial: Orbiters does not change Creator Companion's list for it. Add it there, or take it off, yourself.": "これは Unity 6 の試用コピーです。Orbiters は Creator Companion の一覧を変更しません。追加や削除は Creator Companion で行ってください。",
+  "This is a Unity 6 trial: it is on the page as long as Orbiters keeps its record. Forget the trial, in its panel, to take it off.": "これは Unity 6 の試用コピーです。Orbiters が記録している間はページに表示されます。パネルの「試用コピーを忘れる」で外せます。",
   "This place cannot be checked: {why}": "この場所を確認できません: {why}",
   "This project does not say which Unity version it uses, so Orbiters prepares no upload from it.": "このプロジェクトは使用する Unity のバージョンを示していないため、Orbiters はここからのアップロードを準備しません。",
   "This project does not say which Unity version it uses: no tool of the bridge opens it.": "このプロジェクトは使用する Unity のバージョンを示していません。ブリッジのツールでは開きません。",

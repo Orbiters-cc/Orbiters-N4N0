@@ -17,6 +17,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
         "projects-worlds-failed",
         "projects-worlds-signed-out",
         "projects-worlds-capture-menu",
+        "projects-only-here",
         "projects-duplicate",
         "projects-duplicate-taken",
         "projects-duplicate-library",

@@ -892,8 +892,6 @@ pub(crate) struct Player {
     /// The VRChat profile its launcher starts it on, once its command line could be read; `None` too where that names several
     /// (a saved flag beside the one asked for): which one the game took is not known.
     pub profile: Option<u32>,
-    /// Its command line could be read, and names several.
-    pub several: bool,
     /// The account its own log says is signed in (its display name), once it said; `None` is "not known", never "nobody".
     pub account: Option<String>,
     /// That account's VRChat user id, while it is the one signed in.
@@ -937,9 +935,6 @@ pub(crate) struct SignedIn {
     out: bool,
 }
 
-/// A line still being written is no longer than this.
-const PARTIAL_LINE: u64 = 64 << 10;
-
 impl SignedIn {
     /// Reads what the held `file` gained, up to [`SCAN_AT_MOST`] a look, the rest at the next ones. A file cut shorter is
     /// read anew, and what it said before is forgotten.
@@ -966,7 +961,8 @@ impl SignedIn {
             None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
             None => {}
         }
-        self.whole = len.saturating_sub(self.read) <= PARTIAL_LINE;
+        // Read up to its end: what is left is a line still being written.
+        self.whole = (bytes.len() as u64) < SCAN_AT_MOST;
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
@@ -1010,7 +1006,7 @@ pub(crate) fn game_arguments(command: &[String]) -> Option<Vec<String>> {
 }
 
 /// A process's birth as a time.
-fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
+pub(super) fn born_at((seconds, micros): (u64, u32)) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::new(seconds, micros.saturating_mul(1000))
 }
 
@@ -1074,9 +1070,8 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
             signed_in.read(log);
         }
         let profile = followed.arguments.as_deref().and_then(orbiters_core::vrchat_launch::profile_told);
-        let several = followed.arguments.is_some() && profile.is_none();
         let (account, account_id) = (signed_in.name().map(str::to_owned), signed_in.id().map(str::to_owned));
-        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, several, account, account_id, signed_out: signed_in.signed_out(), logged: followed.vrchat.is_some(), at: std::time::Instant::now() });
+        *PLAYER.lock().unwrap() = Some(Player { launcher, birth, profile, account, account_id, signed_out: signed_in.signed_out(), logged: followed.vrchat.is_some(), at: std::time::Instant::now() });
         // Seconds since the supervisor accepted a Quit, from its record (both on the boot clock).
         let quit_since = record.quit_accepted.as_ref().and_then(|(boot, millis)| {
             let now = super::obelisk_cli::boot_clock();
@@ -1978,7 +1973,7 @@ mod tests {
         }
         assert_eq!(later.id(), Some("usr_00000000-0000-4000-8000-000000000003"));
         // Nor while the looks have stopped.
-        let seen = |at| Player { launcher: 1, birth, profile: Some(2), several: false, account: None, account_id: Some("usr_x".into()), signed_out: false, logged: true, at };
+        let seen = |at| Player { launcher: 1, birth, profile: Some(2), account: None, account_id: Some("usr_x".into()), signed_out: false, logged: true, at };
         let now = std::time::Instant::now();
         assert_eq!(seen(now).proven(), Some("usr_x"));
         assert_eq!(seen(now - PLAYER_FOR).proven(), None, "stale");

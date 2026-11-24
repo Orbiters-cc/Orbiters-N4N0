@@ -72,6 +72,7 @@ impl Host for Link {
     /// slices it keeps: one it did not change is the snapshot's own part still, and is neither compared nor replaced.
     fn publish(&self, mut status: N4n0Status) {
         self.with(|c| {
+            let member = c.member_key();
             c.update_if(|s| {
                 status.calls = s.n4n0.calls.clone();
                 if status.states.avatar_name.is_none() {
@@ -81,7 +82,12 @@ impl Host for Link {
                 if changed {
                     s.n4n0 = status;
                 }
-                changed
+                // With the epoch it is of.
+                let moved = s.account.member != member;
+                if moved {
+                    s.account.member = member;
+                }
+                changed || moved
             })
         });
     }
@@ -115,17 +121,6 @@ impl Host for Link {
         self.with(|c| c.previous_instance_account()).flatten()
     }
 
-    fn previous_instances(&self) -> Vec<orbiters_n4n0_core::menu::InstanceRow> {
-        let acting = self.with(|c| c.vrchat_acting()).unwrap_or_default();
-        orbiters_n4n0_core::invites::shown(orbiters_n4n0_core::invites::read_rows(), &acting)
-    }
-
-    fn may_ask_orbiters(&self, location: &str) -> bool {
-        let several = self.with(|c| c.view().launcher.several_profiles).unwrap_or(true);
-        let public = location.split_once(':').is_some_and(|(_, instance)| orbiters_core::vrchat_launch::is_public_instance(instance));
-        public || (!several && orbiters_n4n0_core::invites::goes_to_orbiters(&orbiters_n4n0_core::invites::read_rows(), location))
-    }
-
     /// On the OSC action thread, in order with the record toggle.
     fn queue(&self, action: Box<dyn FnOnce() + Send>) -> bool {
         self.with(|c| c.osc_action(move |_| action())).unwrap_or(false)
@@ -142,9 +137,9 @@ impl Host for Link {
     fn call(&self, request: CallRequest) {
         self.with(|c| match request {
             CallRequest::Contact(id) => c.call_contact(id),
-            CallRequest::Answer => c.call_answer(),
-            CallRequest::End => c.call_end(),
-            CallRequest::Mute(on) => c.call_mute(on),
+            CallRequest::Answer(call) => c.call_answer(call),
+            CallRequest::End(call) => c.call_end(call),
+            CallRequest::Mute { call, on } => c.call_mute(call, on),
             CallRequest::Menu => c.calls_menu(),
             CallRequest::Go => {
                 c.calls_go();
@@ -225,8 +220,17 @@ impl Host for Link {
         self.with(|c| c.assistant_state()).unwrap_or_default()
     }
 
-    fn assistant_intent(&self, intent: &orbiters_n4n0_core::intents::Intent, item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
-        self.with(|c| c.assistant_intent(intent, item)).unwrap_or_else(|| Err("Orbiters - N4N0 is closing.".into())) // i18n: not shown
+    fn assistant_target(&self, intent: &orbiters_n4n0_core::intents::Intent, item: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        self.with(|c| c.assistant_target(intent, item)).unwrap_or_else(|| Err("Orbiters - N4N0 is closing.".into())) // i18n: not shown
+    }
+
+    fn assistant_intent(
+        &self,
+        intent: &orbiters_n4n0_core::intents::Intent,
+        item: Option<&serde_json::Value>,
+        target: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.with(|c| c.assistant_intent(intent, item, target)).unwrap_or_else(|| Err("Orbiters - N4N0 is closing.".into())) // i18n: not shown
     }
 
     /// The avatar's Walk boost radial: kept, and not sent back to the radial.
@@ -386,8 +390,9 @@ impl Controller {
     }
 
     /// The Talk button of the window, or of the overlay (`overlay`), from the service's link with it.
-    pub fn n4n0_app_talk(self: &Shared, down: bool, overlay: bool, stamp: Option<orbiters_n4n0::Stamp>) {
-        self.n4n0.app_talk(down, overlay, stamp);
+    /// `press`: which press a release ends.
+    pub fn n4n0_app_talk(self: &Shared, down: bool, overlay: bool, stamp: Option<orbiters_n4n0::Stamp>, press: Option<u64>) {
+        self.n4n0.app_talk(down, overlay, stamp, press);
     }
 
     /// The window or the overlay went away: a Talk button it held is let go without its sentence, and the overlay's menu

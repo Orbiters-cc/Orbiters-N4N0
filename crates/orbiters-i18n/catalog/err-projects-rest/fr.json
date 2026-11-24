@@ -85,7 +85,6 @@
   "Invalid package name: {name}": "Nom de package invalide : {name}",
   "Required local package {name} is unavailable": "Le package local requis {name} n’est pas disponible",
   "Choose a Unity project containing ProjectSettings/ProjectVersion.txt.": "Choisis un projet Unity contenant ProjectSettings/ProjectVersion.txt.",
-  "Project path is not Unicode": "Le chemin du projet n’est pas en Unicode",
   "A repository URL must use HTTPS or HTTP.": "L’URL d’un dépôt doit utiliser HTTPS ou HTTP.",
   "No compatible version of {name} is available in enabled repositories.": "Aucune version compatible de {name} n’est disponible dans les dépôts activés.",
   "{name} {version} is no longer in the enabled repositories.": "{name} {version} n’est plus dans les dépôts activés.",
@@ -115,5 +114,7 @@
   "{name} could not be put back ({why}): its copy is kept at {path}": "{name} n’a pas pu être remis ({why}) : sa copie est gardée dans {path}",
   "A package change stopped halfway and could not be fully put back: {problems}. What the project had is kept in {path}.": "Une modification de packages s’est arrêtée en cours et n’a pas pu être entièrement annulée : {problems}. Ce que le projet avait est gardé dans {path}.",
   "its record cannot be used": "son journal est inutilisable",
-  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Les packages ont été modifiés, mais le journal de la modification dans {path} n’a pas pu être fermé : supprime-le avant la prochaine modification de packages"
+  "The packages were changed, but the record of the change at {path} could not be closed: remove it before the next package change": "Les packages ont été modifiés, mais le journal de la modification dans {path} n’a pas pu être fermé : supprime-le avant la prochaine modification de packages",
+  "Orbiters' project list could not be saved": "La liste de projets d’Orbiters n’a pas pu être enregistrée",
+  "Creator Companion's project list cannot be read now ({why}): the projects it had when it last could are shown. Orbiters changes nothing of it.": "La liste de projets de Creator Companion ne peut pas être lue pour l’instant ({why}) : les projets qu’elle avait à la dernière lecture sont affichés. Orbiters n’y change rien."
 }

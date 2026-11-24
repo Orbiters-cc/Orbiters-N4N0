@@ -169,8 +169,6 @@ pub struct MenuHost<P: Pictures> {
     waker: Option<Waker>,
     /// Which menu this is, for the scanner and the friends it holds (MENU-13).
     holder: MenuHolder,
-    /// The VRChat accounts acting in the app: a previous instance of another one is not shown.
-    acting: Vec<String>,
 }
 
 impl<P: Pictures> MenuHost<P> {
@@ -204,20 +202,6 @@ impl<P: Pictures> MenuHost<P> {
             feedback_seen: Default::default(),
             waker: None,
             holder: MenuHolder::Any,
-            acting: Vec::new(),
-        }
-    }
-
-    /// The VRChat accounts acting in the app now: what is another one's goes from the list at once.
-    pub fn act_as(&mut self, acting: Vec<String>) {
-        if self.acting != acting {
-            self.acting = acting;
-            let rows = orbiters_n4n0_core::invites::shown(self.menu.instances.clone(), &self.acting);
-            if rows != self.menu.instances {
-                let (ready, note) = (self.menu.instances_ready, self.menu.instances_note.clone());
-                self.menu.set_instances(rows, ready, &note);
-                self.dirty = true;
-            }
         }
     }
 
@@ -441,6 +425,7 @@ impl<P: Pictures> MenuHost<P> {
             changed = true;
         }
         if calls.call.is_some() || m.call.is_some() {
+            m.call_number = calls.call.as_ref().map(|c| c.number);
             let call = calls.menu_call(crate::unix_ms());
             if m.call != call {
                 m.set_call(call);
@@ -666,8 +651,8 @@ impl<P: Pictures> MenuHost<P> {
                     service.save_settings(&base, &changed);
                 }
                 Effect::CallContact { id } => service.command(Command::Call { contact: id, stamp: None }),
-                Effect::Answer => service.command(Command::AnswerCall { stamp: None }),
-                Effect::HangUp => service.command(Command::EndCall),
+                Effect::Answer => service.command(Command::AnswerCall { call: self.menu.call_number, stamp: None }),
+                Effect::HangUp => service.command(Command::EndCall { call: self.menu.call_number, stamp: None }),
                 Effect::PhotoChoice { timer, length, mode } | Effect::Photo3d { timer, length, mode } => {
                     let take = matches!(effect, Effect::Photo3d { .. });
                     let base = self.asked_settings(settings);
@@ -704,7 +689,7 @@ impl<P: Pictures> MenuHost<P> {
                 Effect::WatchVideo { link } => service.command(Command::Watch { link }),
                 Effect::SaveVideo => service.command(Command::SaveVideo),
                 // This computer's visits, read here (a small file): the service keeps it as VRChat's logs grow.
-                Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::shown(orbiters_n4n0_core::invites::read_rows(), &self.acting), true, ""),
+                Effect::Instances => self.menu.set_instances(orbiters_n4n0_core::invites::read_rows(), true, ""),
                 Effect::InviteMe { location } => service.command(Command::InviteMe { location, stamp: None }),
                 Effect::CopyText { text } => service.command(Command::CopyText { text }),
                 Effect::OpenLink { link } => service.command(Command::Watch { link }),
@@ -980,7 +965,7 @@ mod tests {
         n4n0.calls = CallsStatus {
             link: CallLink::Linked { account: "usr_1".into() },
             contacts: vec![CallContact { id: "c1".into(), name: "Ada".into() }],
-            call: Some(CallView { name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
+            call: Some(CallView { number: 3, name: "Ada".into(), phase: CallPhase::Ringing, incoming: true, connected_at_ms: None, muted: false, mic_level: 0.0, remote_level: 0.0 }),
             ..Default::default()
         }
         .into();

@@ -412,9 +412,18 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     let foot = card.bottom() - 16.0 - 34.0;
     let id = Id::unique(("chat-confirm", &c.id));
     let question = c.local_question();
-    // Its card is in view: what is typed or said from here on can answer it (and nothing newer).
-    let seen = card.intersect(ui.clip_rect()).height();
-    if question.is_some() && ui.is_rect_visible(card) && seen >= 0.6 * card.height().min(ui.clip_rect().height()) {
+    // Its whole card came into view, from its top down, and some of it still is: what is typed or said from here on can
+    // answer it, and nothing newer (verify4-r21 P6: what a yes does is all that was read).
+    let view = card.intersect(ui.clip_rect());
+    let whole = question.is_some_and(|q| {
+        let mut read = bar.read.filter(|(n, h, _)| *n == q && *h == card.height()).map_or(0.0, |(_, _, to)| to);
+        if ui.is_rect_visible(card) && view.height() > 0.0 && view.top() - card.top() <= read + 0.5 {
+            read = read.max(view.bottom() - card.top());
+        }
+        bar.read = Some((q, card.height(), read));
+        read >= card.height() - 1.0
+    });
+    if whole && ui.is_rect_visible(card) && view.height() > 0.0 {
         bar.drawing = question;
     }
     if local && question.is_some() && bar.answered == question {
@@ -423,17 +432,21 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
         let sent = Txt::new(tr("Answer sent"), 12.5).weight(weight::MEDIUM).color(theme::FG_3);
         widgets::text(&p, pos2(card.right() - 20.0, foot + 17.0), Align2::RIGHT_CENTER, &sent);
     } else if let (true, Some(question)) = (local, question) {
-        let yes = Button::new(tr("Yes, do it")).icon(icons::CHECK).variant(Variant::Primary).size(Size::Sm).id_salt(id.with("yes"));
+        let yes = Button::new(tr("Yes, do it")).icon(icons::CHECK).variant(Variant::Primary).size(Size::Sm).enabled(whole).id_salt(id.with("yes"));
         let yw = yes.desired_width(ui);
         let yes_rect = Rect::from_min_size(pos2(card.right() - 16.0 - yw, foot), vec2(yw, 34.0));
-        let no = Button::new(tr("No, leave it")).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).id_salt(id.with("no"));
+        let no = Button::new(tr("No, leave it")).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).enabled(whole).id_salt(id.with("no"));
         let nw = no.desired_width(ui);
+        if !whole {
+            let hint = Txt::new(tr("Scroll up to read all of it first"), 12.5).color(theme::FG_3);
+            widgets::text_truncated(&p, pos2(card.left() + 20.0, foot + 17.0), Align2::LEFT_CENTER, &hint, (yes_rect.left() - 8.0 - nw - card.left() - 32.0).max(0.0));
+        }
         // Each names its question (a late press answers nothing newer: verify-r21 1), and only a pointer, an
         // accessibility tool or a fresh key press answers it, never a held key's repeats (verify-r21 2).
         let no_resp = no.show_at(ui, Rect::from_min_size(pos2(yes_rect.left() - 8.0 - nw, foot), vec2(nw, 34.0)));
         let yes_resp = yes.show_at(ui, yes_rect);
         for (resp, answer) in [(no_resp, false), (yes_resp, true)] {
-            if widgets::activated_fresh(&resp) {
+            if whole && widgets::activated_fresh(&resp) {
                 let stamp = bar.stamp().map(|s| Stamp { question: Some(question), ..s });
                 ctl.n4n0(N4n0Command::AskAnswer { yes: answer, stamp });
                 bar.answered = Some(question);

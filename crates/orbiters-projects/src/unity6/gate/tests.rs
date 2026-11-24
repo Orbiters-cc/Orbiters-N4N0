@@ -565,8 +565,8 @@ const READS: &[&str] = &[
 const ALONE: &[(&str, &[&str])] = &[
     // Not the Unity 6 feature's: a duplicate's or a new project's own. A restore's staging folder, in app data, is filled by VPM;
     // it is put on the list VCC and ALCOM share; the bundled templates' own cache.
-    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::vpm::register", "crate::bundled_templates::builtins"]),
-    ("copies.rs", &["crate::vpm::register"]),
+    ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::gallery::add", "crate::own::dir", "crate::bundled_templates::builtins"]),
+    ("copies.rs", &["crate::gallery::add"]),
     // Asking a disk and an editor's program what they are.
     ("budget.rs", &["windows::core::PCWSTR", "windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW", "windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW", "windows::Win32::Storage::FileSystem::GetVolumePathNameW"]),
     ("editors.rs", &["windows::", "winreg::", "plist::"]),
@@ -605,7 +605,7 @@ fn theirs(read: &source::Read) -> Vec<String> {
         match parts[..] {
             ["vrc_get_vpm", "version", ..] => false,
             ["vrc_get_vpm" | "vrc_get_litedb", ..] => true,
-            ["vpm" | "vcc_store", ..] | ["copies", "list", ..] | ["templates", "make" | "duplicate" | "create", ..] => own,
+            ["vpm" | "gallery" | "repos" | "theirs", ..] | ["copies", "list", ..] | ["templates", "make" | "duplicate" | "create", ..] => own,
             _ => false,
         }
     };
@@ -626,10 +626,10 @@ fn no_call_into_creator_companions_files_is_missed() {
         "async fn f() { vrc_get_vpm::environment::VccDatabaseConnection::connect(io).await; }",
         "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::parse(b); }",
         "fn f() { crate::copies::list(a, b, c); }",
-        "fn f() { crate::vcc_store::Settings::plan(r, p, true, false, is); }",
+        "fn f() { crate::gallery::add(r, p); }",
         "use crate::vpm::*; async fn f() { register(r, p, true).await; }",
         "async fn f() { super::vpm::register(r, p, true).await; }",
-        "use super::super::{vcc_store as store}; fn f() { store::database_is_whole(r); }",
+        "use super::super::{gallery as list}; fn f() { list::remove(r, p); }",
         "fn f() { super::super::super::templates::create(a); }",
         "fn f() { crate::templates::duplicate(a); }",
         "fn f() { anyhow::ensure!(crate::vpm::register(r, p, true).is_ok()); }",

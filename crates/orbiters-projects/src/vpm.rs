@@ -1,24 +1,23 @@
-//! Uses ALCOM's VPM resolver and its shared VCC environment. Never hand-edit a VPM manifest.
+//! Uses ALCOM's VPM resolver, in an environment of Orbiters' own ([`crate::repos`]): nothing of Creator Companion's or ALCOM's is
+//! ever written. Never hand-edit a VPM manifest.
 use anyhow::{bail, Context};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings, VccDatabaseConnection};
+use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings};
 use vrc_get_vpm::io::{DefaultEnvironmentIo, DefaultProjectIo};
 use vrc_get_vpm::{PackageCollection as _, UnityProject, VersionSelector};
 
 pub const ORBITERS_REPOSITORY: &str = "https://orbiters.cc/vpm/orbiters/index.json";
 
-/// One operation on the shared folder at a time, across this app's processes, until the guard is dropped.
+/// One operation on the environment at a time, across this app's processes, until the guard is dropped.
 #[cfg(windows)]
 async fn named_lock(io: &DefaultEnvironmentIo, _root: &Path, name: &str) -> std::io::Result<Box<dyn Send + Sync>> {
     Ok(Box::new(io.new_mutex(name.as_ref()).await?))
 }
 
-/// Off Windows upstream's `new_mutex` ignores the name: it is one lock for the process, which
-/// `VccDatabaseConnection::connect` takes too, so holding it while connecting waits on itself for ever. A file of our own
-/// beside the settings does the job here.
+/// Off Windows upstream's `new_mutex` ignores the name: it is one lock for the process. A file of our own does the job here.
 #[cfg(not(windows))]
 async fn named_lock(_io: &DefaultEnvironmentIo, root: &Path, name: &str) -> std::io::Result<std::fs::File> {
     let path = root.join(format!(".{}.lock", name.rsplit('\\').next().unwrap_or(name)));
@@ -72,92 +71,6 @@ pub struct View {
 fn http() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder().user_agent(format!("Orbiters-N4N0/{}", orbiters_core::app_version())).timeout(std::time::Duration::from_secs(90)).build()?)
 }
-fn gui_config(root: &Path) -> PathBuf {
-    root.join("vrc-get/gui-config.json")
-}
-fn read_gui(root: &Path) -> serde_json::Value {
-    std::fs::read(gui_config(root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}))
-}
-fn hidden(root: &Path) -> HashSet<String> {
-    read_gui(root)["guiHiddenRepositories"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect()).unwrap_or_default()
-}
-
-/// Read-only: deliberately does not call migrate/save, or UnityProject::load (upstream may repair its manifest).
-pub async fn registered(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let io = DefaultEnvironmentIo::new(root.into());
-    let settings = Settings::load(&io).await?;
-    let db = VccDatabaseConnection::connect(&io).await?;
-    let mut projects: Vec<PathBuf> = db.get_projects().iter().filter_map(|p| p.path().map(PathBuf::from)).collect();
-    if let Some(paths) = settings.user_projects() {
-        projects.extend(paths.iter().map(|s| PathBuf::from(s.as_ref())));
-    }
-    Ok(each_once(projects))
-}
-
-/// Once each, however it is spelled; two folders whose names differ only by case (where a disk keeps those apart) are two.
-fn each_once(mut projects: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut seen: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    projects.retain(|p| {
-        let same = seen.entry(crate::discovery::key(p)).or_default();
-        let new = !same.iter().any(|other| crate::discovery::same(other, p));
-        if new {
-            same.push(p.clone());
-        }
-        new
-    });
-    projects
-}
-
-/// Puts the project at `path` on the list VCC and ALCOM share, or takes it off: the gallery's, the bridge's, Duplicate's and New
-/// project's. Never a Unity 6 trial's: where it stands as one is asked first, before anything is opened.
-pub async fn register(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
-    use crate::unity6::authority::{allow, Action};
-    allow(&crate::data_dir(), path, if add { Action::List } else { Action::Unlist }).map_err(|why| anyhow::anyhow!("{why}"))?;
-    register_any(root, path, add).await?;
-    if add {
-        crate::copies::listed(&crate::data_dir(), path);
-    }
-    Ok(())
-}
-
-/// One entry of that list, put in or taken out ([`crate::vcc_store`]).
-async fn register_any(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
-    std::fs::create_dir_all(root)?;
-    let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    // Their own lock of the database, before anything is read: what they save while this waits for it is read after it.
-    let mut db = VccDatabaseConnection::connect(&io).await?;
-    crate::vcc_store::database_is_whole(root)?;
-    let text = path.to_str().with_context(|| tr("Project path is not Unicode"))?;
-    let (others, found) = (!db.get_projects().is_empty(), db.find_project(text)?);
-    let mut changed = true;
-    if add {
-        if !crate::discovery::is_project(path) {
-            bail!("{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
-        }
-        let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
-        match found {
-            None => db.add_project(&project).await?,
-            Some(_) => changed = false,
-        }
-    } else {
-        match &found {
-            Some(p) => db.remove_project(p),
-            None => changed = false,
-        }
-    }
-    let mut settings = crate::vcc_store::Settings::plan(root, text, add, others, |p| crate::discovery::same(Path::new(p), path))?;
-    // The list first: a stop between the two leaves what both programs bring into the database themselves.
-    settings.write()?;
-    if changed {
-        if let Err(e) = db.save(&io).await {
-            settings.put_back()?;
-            return Err(e.into());
-        }
-    }
-    Ok(())
-}
-
 /// Whether VPM's project loader leaves the project as it is: vrc-get's `UnityProject::load` rewrites a manifest holding the
 /// "3.2-3.8" range spelling an old vrc-get wrote.
 pub(crate) fn loads_unchanged(path: &Path) -> std::io::Result<bool> {
@@ -210,14 +123,13 @@ fn remote_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
 /// A cache file that is there but cannot be used: empty (written while its disk was full: vrc-get writes it in place),
 /// cut short, or not a listing at all. vrc-get takes such a file for a repository never downloaded, and only a refresh
 /// downloads it again: until then its packages have no versions and no updates.
-fn unusable_cache(path: &Path) -> bool {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
-            !serde_json::from_slice::<serde_json::Value>(text).is_ok_and(|v| v.is_object())
-        }
-        Err(_) => false,
-    }
+pub(crate) fn unusable_cache(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| !is_listing(&bytes))
+}
+/// Whether these bytes are a whole listing.
+pub(crate) fn is_listing(bytes: &[u8]) -> bool {
+    let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    serde_json::from_slice::<serde_json::Value>(text).is_ok_and(|v| v.is_object())
 }
 /// The remote repositories' caches that are there and unusable ([`unusable_cache`]).
 fn broken_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
@@ -269,11 +181,23 @@ fn restore_usable(before: &[(PathBuf, Vec<u8>)]) -> Vec<PathBuf> {
     }
     restored
 }
-pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
-    let io = DefaultEnvironmentIo::new(root.into());
+/// The environment vrc-get works in: Orbiters' own ([`crate::repos`]), never Creator Companion's folder. The one place one is made.
+async fn environment(root: &Path) -> anyhow::Result<(DefaultEnvironmentIo, Settings)> {
+    let io = DefaultEnvironmentIo::new(crate::repos::prepare(root)?.into());
     let settings = Settings::load(&io).await?;
-    // Disabled repositories remain in VCC's settings; only the collection supplied to the resolver omits them.
-    let hidden = hidden(root);
+    Ok((io, settings))
+}
+/// What Creator Companion or ALCOM downloaded already of what `changes` installs.
+fn archives(root: &Path, changes: &vrc_get_vpm::unity_project::PendingProjectChanges<'_>) {
+    for p in changes.package_changes().values().filter_map(|c| c.as_install()?.install_package()) {
+        crate::repos::archive(root, p.name(), &p.version().to_string());
+    }
+}
+pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Settings, EnabledCollection)> {
+    let (io, settings) = environment(root).await?;
+    // Repositories turned off remain in the settings; only the collection supplied to the resolver omits them.
+    let hidden = crate::repos::hidden(root);
+    let root = &crate::repos::dir(root);
     let mut packages = PackageCollection::load_cache(&settings, &io).await?;
     // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start. `load`
     // downloads every remote repository and writes its cache (its `update_cache`).
@@ -287,7 +211,7 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
 }
 pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow::Result<View> {
     let (settings, collection) = collection(root, refresh).await?;
-    let hidden = hidden(root);
+    let hidden = crate::repos::hidden(root);
     let mut repos = vec![];
     for r in settings.get_user_repos() {
         let id = r.id().unwrap_or_default().to_string();
@@ -368,42 +292,61 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
     })
 }
 
+/// Adds a repository to Orbiters' own: Creator Companion and ALCOM keep theirs as they are.
 pub async fn add_repo(root: &Path, url: &str, headers: BTreeMap<String, String>) -> anyhow::Result<()> {
-    let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    let mut settings = Settings::load(&io).await?;
     let url = url::Url::parse(url)?;
     if !matches!(url.scheme(), "https" | "http") {
         bail!("{}", tr("A repository URL must use HTTPS or HTTP."));
     }
+    // One of theirs that was removed here is there again.
+    let id = crate::repos::their_repository(root, url.as_str());
+    crate::repos::choose(root, |c| {
+        c.removed.remove(url.as_str());
+        if let Some(id) = &id {
+            c.removed.remove(id);
+        }
+    })?;
+    let (io, mut settings) = environment(root).await?;
     if settings.get_user_repos().iter().any(|r| r.url() == Some(&url)) {
         return Ok(());
     }
     let client = crate::vpm_http::Client::new(http()?, &settings)?.with_new_repository(&url, &headers);
-    environment::add_remote_repo(&mut settings, url, None, headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect(), &io, &client).await?;
-    settings.save(&io).await?;
-    Ok(())
+    environment::add_remote_repo(&mut settings, url.clone(), None, headers.iter().map(|(k, v)| (k.as_str().into(), v.as_str().into())).collect(), &io, &client).await?;
+    let new = settings.get_user_repos().iter().find(|r| r.url() == Some(&url)).context("no repository")?; // i18n: not shown (vrc-get just added it)
+    let added = crate::repos::Added {
+        url: url.to_string(),
+        name: new.name().map(ToOwned::to_owned),
+        id: new.id().map(ToOwned::to_owned),
+        headers,
+        file: new.local_path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+    };
+    crate::repos::choose(root, |c| {
+        c.added.retain(|a| a.url != added.url);
+        c.added.push(added);
+    })
 }
+/// Takes a repository out of Orbiters'; one of Creator Companion's or ALCOM's stays there.
 pub async fn remove_repo(root: &Path, id: &str) -> anyhow::Result<()> {
-    let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    let mut settings = Settings::load(&io).await?;
-    settings.remove_repo(|r| r.id() == Some(id));
-    settings.save(&io).await?;
-    Ok(())
+    let (_, settings) = environment(root).await?;
+    let found: Vec<(Option<String>, Option<String>)> =
+        settings.get_user_repos().iter().filter(|r| r.id() == Some(id)).map(|r| (r.id().map(ToOwned::to_owned), r.url().map(ToString::to_string))).collect();
+    let theirs = crate::repos::their_repositories(root);
+    crate::repos::choose(root, |c| {
+        for (id, url) in found {
+            let own = |a: &crate::repos::Added| (url.is_some() && Some(&a.url) == url.as_ref()) || (a.id.is_some() && a.id == id);
+            c.added.retain(|a| !own(a));
+            // By its URL: another one that takes the same id later is another one.
+            c.removed.extend(url.or(id).filter(|r| theirs.contains(r)));
+        }
+    })
 }
+/// Turns a repository on or off in Orbiters.
 pub async fn set_enabled(root: &Path, id: &str, enabled: bool) -> anyhow::Result<()> {
-    let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Settings").await?;
-    let mut config = read_gui(root);
-    let mut ids = hidden(root);
-    if enabled {
-        ids.remove(id);
-    } else {
-        ids.insert(id.into());
-    }
-    config["guiHiddenRepositories"] = serde_json::to_value(ids)?;
-    crate::write_json(&gui_config(root), &config)
+    crate::repos::choose(root, |c| {
+        let (to, from) = if enabled { (&mut c.on, &mut c.off) } else { (&mut c.off, &mut c.on) };
+        from.remove(id);
+        to.insert(id.into());
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -425,17 +368,18 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // Toolkit's update).
     may_change(path)?;
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
-    let io = DefaultEnvironmentIo::new(root.into());
-    let _lock = named_lock(&io, root, "Global\\Orbiters.Vpm.Packages").await?;
+    let (io, _) = environment(root).await?;
+    let _lock = named_lock(&io, &crate::repos::dir(root), "Global\\Orbiters.Vpm.Packages").await?;
     // A plan an earlier run stopped halfway is put back first, from its journal (kept outside the project), before any
     // repository is reached: a network failure must not hold that up.
     recover_plans(path, &plan_journals(root))?;
+    recover_plans(path, &old_plan_journals(root))?;
     let (settings, packages) = collection(root, true).await?;
     // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
     let client = crate::vpm_http::Client::new(http()?, &settings)?;
     let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
     if let Change::Plan { install, remove, prerelease } = &action {
-        return apply_plan(&io, &client, &packages, path, project, install, remove, *prerelease, &plan_journals(root)).await;
+        return apply_plan(root, &io, &client, &packages, path, project, install, remove, *prerelease, &plan_journals(root)).await;
     }
     let mut asked: Vec<(String, String)> = vec![];
     let changes = match &action {
@@ -473,6 +417,7 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
             )
         );
     }
+    archives(root, &changes);
     project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await?;
     project.save().await?;
     Ok(())
@@ -480,6 +425,7 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
 
 #[allow(clippy::too_many_arguments)]
 async fn apply_plan(
+    root: &Path,
     io: &DefaultEnvironmentIo,
     client: &crate::vpm_http::Client,
     packages: &EnabledCollection,
@@ -512,6 +458,7 @@ async fn apply_plan(
             let names: Vec<&str> = remove.iter().map(String::as_str).collect();
             let changes = project.remove_request(&names).await?;
             kept.take(&affected(&changes))?;
+            archives(root, &changes);
             project.apply_pending_changes(&installer, changes).await?;
             project.save().await?;
             project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
@@ -527,6 +474,7 @@ async fn apply_plan(
             );
         }
         kept.take(&affected(&changes))?;
+        archives(root, &changes);
         project.apply_pending_changes(&installer, changes).await?;
         project.save().await?;
         Ok(())
@@ -544,6 +492,7 @@ async fn apply_plan(
     let restored: anyhow::Result<()> = async {
         let mut project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
         let changes = project.resolve_request(packages).await?;
+        archives(root, &changes);
         project.apply_pending_changes(&installer, changes).await?;
         project.save().await?;
         Ok(())
@@ -579,7 +528,7 @@ fn affected(changes: &vrc_get_vpm::unity_project::PendingProjectChanges<'_>) -> 
 }
 
 /// `bytes` written over `path` through a file beside it, renamed over it: never a half-written file.
-fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("json.orbiters-{}", uuid::Uuid::new_v4().simple()));
     let written = (|| {
         use std::io::Write as _;
@@ -595,10 +544,13 @@ fn replace_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// Where the journals of package plans are: beside the settings of the Creator Companion folder `root` this app
-/// changes packages with, outside every project (verifier round 2). A journal found anywhere else (in a project copied
-/// or imported from elsewhere) is never acted on.
+/// Where the journals of package plans are: in Orbiters' data folder, outside every project (verifier round 2). A journal found
+/// anywhere else (in a project copied or imported from elsewhere) is never acted on.
 fn plan_journals(root: &Path) -> PathBuf {
+    crate::repos::dir(root).join("package-plans")
+}
+/// Where they were up to 0.3.8, in a folder of Orbiters' own beside Creator Companion's files: one left there is still finished.
+fn old_plan_journals(root: &Path) -> PathBuf {
     root.join("Orbiters").join("package-plans")
 }
 /// The manifest as it was, in the plan's folder of copies.
@@ -880,8 +832,7 @@ pub async fn install_orbiters(root: &Path, path: &Path, names: &[&str]) -> anyho
     may_change(path)?;
     add_repo(root, ORBITERS_REPOSITORY, BTreeMap::new()).await?;
     // Ensure an existing disabled Orbiters repo is enabled before resolving its packages.
-    let io = DefaultEnvironmentIo::new(root.into());
-    let settings = Settings::load(&io).await?;
+    let (_, settings) = environment(root).await?;
     if let Some(id) = settings.get_user_repos().iter().find(|r| r.url().is_some_and(|u| u.as_str() == ORBITERS_REPOSITORY)).and_then(|r| r.id()) {
         set_enabled(root, id, true).await?;
     }

@@ -1624,7 +1624,7 @@ fn a_previous_instance_opens_its_world_s_page_and_back_comes_to_where_it_was() {
     person.press(Action::Page(Target::Instances));
     person.turns(2);
     assert_eq!(person.panels.facts.sheet, Some(Sheet::Instances));
-    let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600, account: None }).collect();
+    let rows: Vec<InstanceRow> = (0..12).map(|i| InstanceRow { location: format!("{}:1234{i}~region(eu)", world(i)), world: format!("World {i}"), at: now - i as u64 * 3600 }).collect();
     for capture in [false, true] {
         // These instances, whatever this computer's history has (opening Instances reads it).
         person.panels.stage.host.menu.set_instances(rows.clone(), true, "");
@@ -2015,6 +2015,42 @@ fn an_answer_on_the_ask_page_is_for_the_question_its_picture_shows() {
         person.press(Action::TalkToggle);
         let talk = heard.said().into_iter().filter(|c| c.contains("AskTalk") && c.contains("down: true")).next_back().expect("Talk");
         assert!(talk.contains("question: Some(8)") && talk.contains("epoch: 4"), "{talk}");
+    }
+}
+
+/// Verify4-r21 P6 and P9 (the overlay): a question its page cannot show whole is presented nowhere on it and has no Yes there, and
+/// the page says where it is answered; Talk let go names the press its picture shows.
+#[test]
+fn the_ask_page_answers_only_what_it_shows_whole_and_ends_only_its_press() {
+    use orbiters_n4n0::status::{N4n0Confirmation, VoiceReadiness, LOCAL_APPROVAL};
+    for worker in [false, true] {
+        let (mut person, heard) = Person::heard();
+        person.panels.stage.async_pages = worker;
+        let mut snap = (*person.snap).clone();
+        snap.settings.n4n0.enabled = true;
+        snap.n4n0.voice.readiness = VoiceReadiness::Ready;
+        snap.n4n0.account_epoch = 3;
+        snap.n4n0.confirmations = vec![N4n0Confirmation { id: "n4n0-7".into(), title: String::new(), summary: "N4N0 asks to copy: ".to_string() + &"many words ".repeat(400), approve_url: format!("{LOCAL_APPROVAL}7") }];
+        person.snap = Arc::new(snap.clone());
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        person.press(Action::Talk);
+        for _ in 0..40 {
+            person.turn();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(person.panels.facts.talk_question.as_deref().is_some_and(|q| q.contains("chat of Orbiters")), "worker {worker}");
+        assert!(person.find(Action::AskAnswer(true)).is_none() && person.find(Action::AskAnswer(false)).is_none());
+        assert!(!heard.said().iter().any(|c| c.contains("Presented")), "worker {worker}: {:?}", heard.said());
+        // Listening to press 41, as the page shows: let go, it names that one.
+        snap.n4n0.confirmations.clear();
+        snap.n4n0.listening = true;
+        snap.n4n0.voice.press = Some(41);
+        person.snap = Arc::new(snap.clone());
+        person.turns_until("the press on the picture", |p| p.panels.takeover.as_ref().and_then(|t| t.displayed.as_ref()).or(p.panels.stage.presented.as_ref().map(|(_, f, _)| f)).is_some_and(|f| f.talk_press == Some(41)));
+        person.press(Action::TalkToggle);
+        let up = heard.said().into_iter().rfind(|c| c.contains("AskTalk")).expect("let go");
+        assert!(up.contains("down: false") && up.contains("press: Some(41)"), "{up}");
     }
 }
 

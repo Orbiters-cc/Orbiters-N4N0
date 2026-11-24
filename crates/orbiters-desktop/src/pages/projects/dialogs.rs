@@ -28,7 +28,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let nano = state.flow.as_ref().map(|f| !f.packages_only).or(state.pending.as_ref().map(|p| p.2)).unwrap_or(true);
     let names = state.flow.as_ref().map(|f| (f.avatar.name.clone(), f.project.name.clone())).or(state.pending.as_ref().map(|p| (p.1.clone(), p.0.clone())));
     let (glyph, title, subtitle, width) = match &modal {
-        Modal::Repos => (icons::STACK, tr("Package repositories").to_string(), tr("Shared with VCC and ALCOM: what you add here, they list too").to_string(), 620.0),
+        Modal::Repos => (icons::STACK, tr("Package repositories").to_string(), tr("VCC's and ALCOM's, and your own: what you change here stays in Orbiters").to_string(), 620.0),
         Modal::New => (glyph::FOLDER_PLUS, tr("New Unity project").into(), tr("From a VRChat template, or a copy of one of your projects").into(), 640.0),
         Modal::Avatars => (
             icons::N4N0_MARK,
@@ -555,7 +555,7 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
             // A copy is ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
             let later = if duplicate { templates::packages_only_in_library(&path) } else { vec![] };
             if later.is_empty() {
-                Ok(Outcome::Added(path.clone(), tr!("{name} is ready: VCC and ALCOM list it too", name = name)))
+                Ok(Outcome::Added(path.clone(), tr!("{name} is ready, in Orbiters' list", name = name)))
             } else {
                 Ok(Outcome::Added(path.clone(), tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
             }
@@ -813,7 +813,7 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
             Tone::Info,
             None,
             if nano { tr("Installing My Avatar and Toolkit") } else { tr("Installing My Avatar") },
-            tr("Orbiters adds the packages to the project through VCC's own files: Unity does not need to be open.").to_string(),
+            tr("Orbiters adds the packages to the project itself: Unity does not need to be open.").to_string(),
         ),
         Stage::Installed => {
             (Tone::Ok, Some(icons::CHECK), tr("My Avatar is installed"), tr("Open the project: My Avatar's window is in Unity's Tools menu.").to_string())

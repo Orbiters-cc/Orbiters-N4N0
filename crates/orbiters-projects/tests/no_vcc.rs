@@ -1,6 +1,6 @@
 //! A computer without Creator Companion: an empty VPM folder (what `ORBITERS_VCC_DIR` points the app at to test it).
-//! Everything the Unity projects page does starts from nothing, as ALCOM does, and leaves VCC's own format behind.
-use orbiters_projects::{templates, vpm};
+//! Everything the Unity projects page does starts from nothing, and makes nothing there: what it keeps is Orbiters' own.
+use orbiters_projects::{gallery, templates, vpm};
 use serde_json::json;
 use std::path::Path;
 
@@ -20,26 +20,26 @@ fn the_page_works_from_an_empty_vpm_folder() {
     let rt = orbiters_projects::runtime().unwrap();
     rt.block_on(async {
         // Nothing there yet: no project, no error.
-        assert!(vpm::registered(&root).await.unwrap().is_empty());
+        assert!(gallery::listed(&root).projects.is_empty());
         // VRChat's repositories are left out here (no network in tests): the listing is empty but readable.
         orbiters_projects::write_json(&root.join("vrc-get/settings.json"), &json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true})).unwrap();
         let view = vpm::view(&root, None, false).await.unwrap();
         assert!(view.repos.is_empty() && view.packages.is_empty());
         assert!(view.default_path.is_absolute());
 
-        // Adding a project writes VCC's own files (settings.json and vcc.liteDb), which VCC and ALCOM read later.
+        // Adding a project writes nothing there: the list is Orbiters' own.
         let a = projects.path().join("Avatar project");
         project(&a);
-        vpm::register(&root, &a, true).await.unwrap();
-        assert!(root.join("settings.json").is_file() && root.join("vcc.liteDb").is_file());
-        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("settings.json")).unwrap()).unwrap();
-        assert_eq!(settings["userProjects"], json!([a.to_str().unwrap()]));
-        assert_eq!(vpm::registered(&root).await.unwrap(), [a.clone()]);
+        gallery::add(&root, &a).unwrap();
+        assert!(!root.join("settings.json").exists() && !root.join("vcc.liteDb").exists() && !root.join("Repos").exists());
+        assert_eq!(gallery::listed(&root).projects, [a.clone()]);
+        assert!(!gallery::listed(&root).companion);
         // Its packages read as any project's.
         assert!(vpm::view(&root, Some(&a), false).await.unwrap().packages.is_empty());
-        vpm::register(&root, &a, false).await.unwrap();
-        assert!(vpm::registered(&root).await.unwrap().is_empty());
+        gallery::remove(&root, &a).unwrap();
+        assert!(gallery::listed(&root).projects.is_empty());
     });
+    std::fs::remove_dir_all(orbiters_projects::own::dir(&root)).unwrap();
 
     // Templates come with the app: Avatar, World and Base, without VCC's covers.
     let cache = tempfile::tempdir().unwrap();

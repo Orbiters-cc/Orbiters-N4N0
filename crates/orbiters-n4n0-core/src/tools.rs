@@ -79,10 +79,16 @@ pub struct Effect {
     pub reads_others: bool,
     /// It is sent from, or acts on, the VRChat or the Orbiters account, or joins or starts somewhere (risk class b).
     pub from_account: bool,
+    /// It waits for the person's yes every time, whatever was read (it lasts, shows to others, or is not undone in one step).
+    pub asks: bool,
 }
 
 const fn effect(changes: bool, reads_others: bool) -> Effect {
-    Effect { changes, reads_others, from_account: false }
+    Effect { changes, reads_others, from_account: false, asks: false }
+}
+
+const fn asks(changes: bool, reads_others: bool) -> Effect {
+    Effect { changes, reads_others, from_account: false, asks: true }
 }
 
 /// The tools that are not the app's intents, each with its effect (one of them for every call of it). The catalogue's other
@@ -92,13 +98,13 @@ pub const TOOLS: &[(&str, Effect)] = &[
     (MORE, effect(false, false)),
     ("set_avatar_control", effect(true, true)),
     ("find_avatar_controls", effect(false, true)),
-    ("hold_avatar_control", effect(true, true)),
+    ("hold_avatar_control", asks(true, true)),
     ("set_avatar_parameter", effect(true, true)),
     ("take_photo", effect(true, false)),
     ("save_video", effect(true, true)),
     ("list_saved_videos", effect(false, true)),
-    ("copy_to_clipboard", effect(true, false)),
-    ("set_afk_message", effect(true, false)),
+    ("copy_to_clipboard", asks(true, false)),
+    ("set_afk_message", asks(true, false)),
     ("control_media", effect(true, true)),
     ("n4n0_light", effect(true, false)),
     ("n4n0_mood", effect(true, false)),
@@ -109,16 +115,19 @@ impl Action {
     /// nothing.)
     pub fn effect(&self) -> Effect {
         match self {
+            Action::Hold { release: false, .. } => asks(true, true),
             Action::SetControl { .. } | Action::SetParameter { .. } | Action::Hold { .. } => effect(true, true),
+            Action::CopyToClipboard { .. } | Action::SetAfkMessage { text: Some(_), .. } => asks(true, false),
             Action::FindControls { .. } | Action::ListSavedVideos => effect(false, true),
-            Action::TakePhoto { .. } | Action::CopyToClipboard { .. } | Action::SetAfkMessage { .. } | Action::Light { .. } | Action::Mood { .. } => effect(true, false),
+            Action::TakePhoto { .. } | Action::SetAfkMessage { .. } | Action::Light { .. } | Action::Mood { .. } => effect(true, false),
             Action::SaveVideo => effect(true, true),
             Action::Media { command: None, volume_change: None } => effect(false, true),
             Action::Media { .. } => effect(true, true),
             Action::OpenTools { .. } => effect(false, false),
             Action::App(intent) => {
-                let spec = intent.spec();
-                Effect { changes: spec.changes, reads_others: spec.reads_others, from_account: spec.risk == crate::intents::Risk::Confirm }
+                use crate::intents::Risk;
+                let (spec, risk) = (intent.spec(), intent.risk());
+                Effect { changes: spec.changes, reads_others: spec.reads_others, from_account: risk == Risk::Confirm, asks: matches!(risk, Risk::Ask | Risk::Confirm) }
             }
         }
     }
@@ -264,6 +273,8 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
         return intent.map(Action::App);
     }
     let need = |key: &str| text(input, key).ok_or_else(|| format!("{name} needs \"{key}\".")); // i18n: not shown
+    // As it is asked about, and as it is then used (verify4-r21 P6).
+    let exact = |key: &str, max: usize| Some(crate::context::exact(&need(key)?, max)).filter(|t| !t.is_empty()).ok_or_else(|| format!("{name} needs \"{key}\".")); // i18n: not shown
     Ok(match name {
         "set_avatar_control" => Action::SetControl { control: need("control")?, on: flag(input, "on"), value: number(input, "value") },
         "find_avatar_controls" => Action::FindControls { query: text(input, "query").unwrap_or_default() },
@@ -274,8 +285,8 @@ pub fn parse(name: &str, input: &Value) -> Result<Action, String> {
         "take_photo" => Action::TakePhoto { delay_seconds: number(input, "delay_seconds").unwrap_or(0.0).clamp(0.0, 10.0) as u32 },
         "save_video" => Action::SaveVideo,
         "list_saved_videos" => Action::ListSavedVideos,
-        "copy_to_clipboard" => Action::CopyToClipboard { text: need("text")?.chars().take(2000).collect() },
-        "set_afk_message" => Action::SetAfkMessage { text: text(input, "text").map(|t| t.chars().take(120).collect()), enabled: flag(input, "enabled") },
+        "copy_to_clipboard" => Action::CopyToClipboard { text: exact("text", 2000)? },
+        "set_afk_message" => Action::SetAfkMessage { text: text(input, "text").map(|t| crate::context::exact(&t, 120)).filter(|t| !t.is_empty()), enabled: flag(input, "enabled") },
         "n4n0_mood" => Action::Mood {
             mood: match text(input, "mood").as_deref() {
                 Some("happy") => Mood::Happy,

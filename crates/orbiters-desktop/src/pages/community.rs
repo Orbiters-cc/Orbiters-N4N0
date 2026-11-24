@@ -10,7 +10,7 @@ use super::{sharing, Cx, Job};
 use crate::controller::shares::{self as controller, Entry};
 use crate::worlds::{Picture, Pictures};
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Order, Rect, Sense, TextureHandle, Ui, UiBuilder};
-use orbiters_core::account::{Api, Server};
+use orbiters_core::account::Server;
 use orbiters_core::community::{self, Card, Galleries, Gallery};
 use orbiters_i18n::{mark, tr, tr_n};
 use orbiters_ui::anim::{self, ease, Spring};
@@ -60,9 +60,10 @@ pub(super) fn source(p: &community::Picture, large: bool, development: bool, sta
 }
 
 fn ask_galleries(ctx: &egui::Context, server: Server, owner: &crate::pages::Owner) -> Job<crate::pages::ForAccount<anyhow::Result<Galleries>>> {
+    let member = crate::member::reading(server);
     crate::pages::job_for(ctx, owner, move || {
-        let account = orbiters_core::account::read(server).ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?;
-        Api::new(server).galleries(&account.token)
+        let (api, token) = member.ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
+        api.galleries(&token)
     })
 }
 
@@ -183,7 +184,7 @@ impl State {
         let server = if development { Server::Development } else { Server::Production };
         self.covers.development = development;
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let seen = self.account.see(&cx.snap.account.state, development);
+        let seen = self.account.see(&cx.snap.account, development);
         if seen.changed {
             self.forget_account();
         }
@@ -234,9 +235,10 @@ impl State {
     fn fetch(&mut self, ctx: &egui::Context, server: Server, more: bool) {
         let (gallery, cursor) = (self.chosen, if more { self.feed.next() } else { None });
         let owner = self.account.owner().cloned().unwrap_or_default();
+        let member = crate::member::reading(server);
         self.feed_job = crate::pages::job_for(ctx, &owner, move || {
-            let Some(account) = orbiters_core::account::read(server) else { return Ok(community::Pictures::default()) };
-            Api::new(server).gallery_pictures(&account.token, gallery, cursor.as_deref(), 24)
+            let Some((api, token)) = member.map(|m| m.api()) else { return Ok(community::Pictures::default()) };
+            api.gallery_pictures(&token, gallery, cursor.as_deref(), 24)
         });
     }
 

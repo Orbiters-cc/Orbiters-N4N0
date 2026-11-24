@@ -35,11 +35,11 @@ pub struct Project {
     pub unity: String,
     pub kind: Kind,
     pub modified: u64,
-    /// In the gallery's own list: on the one VCC and ALCOM share, or Orbiters' own ([`Project::own`]).
+    /// On the page's list ([`crate::gallery`], a Unity 6 trial's own record), not only found on a disk.
     pub registered: bool,
-    /// In it by Orbiters' own record alone (a Unity 6 trial): nothing says VCC lists it.
+    /// Creator Companion or ALCOM list it.
     #[serde(default)]
-    pub own: bool,
+    pub shared: bool,
     pub missing: bool,
     pub avatars: Vec<Avatar>,
     /// The worlds its scenes were uploaded as (`wrld_…` blueprint IDs), with My World's thumbnail when it keeps one.
@@ -54,6 +54,9 @@ pub struct Scan {
     pub full_scan_ms: u64,
     pub directories: u64,
     pub warnings: Vec<String>,
+    /// Creator Companion's or ALCOM's project list is on this computer.
+    #[serde(default)]
+    pub companion: bool,
     #[serde(skip)]
     pub status: String,
     #[serde(default)]
@@ -182,7 +185,6 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         .unwrap_or(0);
     let avatars = vec![];
     Project {
-        own: false,
         name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         missing: !is_project(&path),
         path,
@@ -190,6 +192,7 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         kind,
         modified,
         registered,
+        shared: false,
         avatars,
         worlds: vec![],
     }
@@ -355,15 +358,11 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
         notify(scan);
     };
-    let shared = crate::runtime()?.block_on(crate::vpm::registered(&crate::vcc_dir()));
-    let registered = match shared {
-        Ok(p) => p,
-        Err(e) => {
-            scan.warnings = vec![e.to_string()];
-            scan.projects.iter().filter(|p| p.registered).map(|p| p.path.clone()).collect()
-        }
-    };
-    let mut known = Known::default();
+    let listed = crate::gallery::listed(&crate::vcc_dir());
+    scan.warnings = listed.warning.iter().cloned().collect();
+    scan.companion = listed.companion;
+    let registered = listed.projects;
+    let mut known = Known { shared: listed.shared, ..Default::default() };
     let mut found = HashMap::new();
     for p in &registered {
         known.listed.insert(put(&mut found, p.clone()));
@@ -464,8 +463,10 @@ fn in_dot_folder(path: &Path) -> bool {
 /// What is shown wherever it is, by its place among what was found.
 #[derive(Default)]
 struct Known {
-    /// On the list VCC and ALCOM share.
+    /// On Orbiters' page ([`crate::gallery`]).
     listed: HashSet<String>,
+    /// Creator Companion or ALCOM list it ([`key`]).
+    shared: HashSet<String>,
     /// Unity 6 trials, in the gallery by Orbiters' own record.
     trials: HashSet<String>,
     /// Copies that could not be listed yet.
@@ -508,9 +509,8 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         // one the person registered stays wherever it is.
         .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && (known.trials.contains(*k) || known.copies.contains(*k) || !in_dot_folder(p))))
         .map(|(k, p)| {
-            let listed = known.listed.contains(k);
-            let mut project = describe(p.clone(), listed || known.trials.contains(k), &mut scan.scenes);
-            project.own = known.trials.contains(k) && !listed;
+            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut scan.scenes);
+            project.shared = known.shared.contains(&key(p));
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
         })
@@ -742,34 +742,19 @@ fn hints_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) 
     candidates
 }
 
-/// Editors of `version` VCC or ALCOM found or were given (outside Unity Hub's lists), from their database.
+/// Editors of `version` VCC or ALCOM found or were given (outside Unity Hub's lists), as their database records them.
 pub fn database_editors(version: &str) -> Vec<PathBuf> {
     database_editors_in(version, &crate::vcc_dir())
 }
 
 fn database_editors_in(version: &str, vcc: &Path) -> Vec<PathBuf> {
-    // VCC's database can be held by VCC itself: a wait there must not hold up Open in Unity, whose answer is then "not
-    // installed" as for any version not in the lists above.
-    let version = version.to_string();
-    let vcc = vcc.to_path_buf();
-    crate::within(std::time::Duration::from_secs(5), move || {
-        crate::runtime().ok().map(|rt| {
-            rt.block_on(async {
-                let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(vcc.into());
-                let Ok(db) = vrc_get_vpm::environment::VccDatabaseConnection::connect(&io).await else { return vec![] };
-                let Some(wanted) = vrc_get_vpm::version::UnityVersion::parse(&version) else { return vec![] };
-                db.get_unity_installations()
-                    .iter()
-                    .filter(|u| u.version() == Some(wanted))
-                    .filter_map(|u| u.path().map(PathBuf::from))
-                    .map(|p| if cfg!(target_os = "macos") { editor_program(p) } else { p })
-                    .filter(|p| p.is_absolute())
-                    .collect()
-            })
-        })
-    })
-    .flatten()
-    .unwrap_or_default()
+    let Some(wanted) = vrc_get_vpm::version::UnityVersion::parse(version) else { return vec![] };
+    crate::theirs::editors(vcc)
+        .into_iter()
+        .filter(|(v, _)| vrc_get_vpm::version::UnityVersion::parse(v) == Some(wanted))
+        .map(|(_, p)| if cfg!(target_os = "macos") { editor_program(p) } else { p })
+        .filter(|p| p.is_absolute())
+        .collect()
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {
@@ -1028,6 +1013,7 @@ mod retained_lists {
         let mut found = HashMap::new();
         let mut known = Known::default();
         known.listed.insert(put(&mut found, listed.clone()));
+        known.shared.insert(key(&listed));
         keep(&mut found, plain.clone());
         for p in [&trial, &listed] {
             known.trials.insert(keep(&mut found, p.clone()));
@@ -1035,9 +1021,9 @@ mod retained_lists {
         known.copies.insert(keep(&mut found, copy.clone()));
         let mut scan = Scan::default();
         rebuild(&mut scan, &found, &known);
-        let of = |p: &Path| scan.projects.iter().find(|x| x.path == p).map(|x| (x.registered, x.own));
-        assert_eq!(of(&trial), Some((true, true)), "in the list, by Orbiters' own record");
-        assert_eq!(of(&listed), Some((true, false)), "a trial the person added in VCC");
+        let of = |p: &Path| scan.projects.iter().find(|x| x.path == p).map(|x| (x.registered, x.shared));
+        assert_eq!(of(&trial), Some((true, false)), "in the gallery, by Orbiters' own record");
+        assert_eq!(of(&listed), Some((true, true)), "a trial the person added in VCC");
         assert_eq!((of(&copy), of(&plain)), (Some((false, false)), Some((false, false))));
         assert_eq!(scan.projects.len(), 4);
     }
@@ -1056,15 +1042,15 @@ mod retained_lists {
         }
         let apart = crate::owned::id_of(&a).unwrap() != crate::owned::id_of(&b).unwrap();
         assert_eq!((apart, same(&a, &b), same(&a, &a)), (disk, !disk, true));
-        // The list Creator Companion and ALCOM share has both, and Orbiters takes off the one named.
-        let (vcc, rt) = (temp.path().join("vcc"), crate::runtime().unwrap());
-        let listed = || rt.block_on(crate::vpm::registered(&vcc)).unwrap();
-        rt.block_on(crate::vpm::register(&vcc, &a, true)).unwrap();
-        rt.block_on(crate::vpm::register(&vcc, &b, true)).unwrap();
+        // Orbiters' list has both, and takes off the one named.
+        let vcc = temp.path().join("vcc");
+        let listed = || crate::gallery::listed(&vcc).projects;
+        crate::gallery::add(&vcc, &a).unwrap();
+        crate::gallery::add(&vcc, &b).unwrap();
         let mut both = listed();
         both.sort();
         assert_eq!(both, if disk { vec![b.clone(), a.clone()] } else { vec![a.clone()] });
-        rt.block_on(crate::vpm::register(&vcc, &a, false)).unwrap();
+        crate::gallery::remove(&vcc, &a).unwrap();
         assert_eq!(listed(), if disk { vec![b.clone()] } else { vec![] });
         let mut found = HashMap::new();
         let first = put(&mut found, a.clone());

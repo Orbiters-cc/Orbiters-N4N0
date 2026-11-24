@@ -967,10 +967,8 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
         Picture::Profile { .. } => None, // Requires the service backend, handled by the loader.
         Picture::Capture { development, id, large } => {
             let server = if *development { Server::Development } else { Server::Production };
-            let account = orbiters_core::account::read(server)?;
-            let api = Api::new(server);
-            let r =
-                api.agent().get(&api.url(&format!("captures/picture/{id}/file"))).header("Authorization", &format!("Bearer {}", account.token)).call().ok()?;
+            let (api, token) = crate::member::reading(server)?.api();
+            let r = api.agent().get(&api.url(&format!("captures/picture/{id}/file"))).header("Authorization", &format!("Bearer {token}")).call().ok()?;
             if !r.status().is_success() {
                 return None;
             }
@@ -984,7 +982,10 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
             // without the account and kept in memory only.
             let (api, token) = match std::env::var("ORBITERS_PUBLIC_API") {
                 Ok(base) if !base.is_empty() => (Api::at(&base), None),
-                _ => (Api::new(server), orbiters_core::account::read(server).map(|a| a.token)),
+                _ => match crate::member::reading(server).map(|m| m.api()) {
+                    Some((api, token)) => (api, Some(token)),
+                    None => (Api::new(server), None),
+                },
             };
             let file = keep.then(|| capture_view_file(*development, *id, url, *large));
             let image = capture_view(&api, token.as_deref(), url, *large, file.as_deref())?;
@@ -992,12 +993,8 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
         }
         Picture::EventCover { development, id } => {
             let server = if *development { Server::Development } else { Server::Production };
-            let api = Api::new(server);
-            let mut request = api.agent().get(&api.event_banner_url(id).ok()?);
-            if let Some(account) = orbiters_core::account::read(server) {
-                request = request.header("Authorization", &format!("Bearer {}", account.token));
-            }
-            let r = request.call().ok()?;
+            let api = crate::member::reading(server).map_or_else(|| Api::new(server), |m| m.api().0);
+            let r = api.agent().get(&api.event_banner_url(id).ok()?).call().ok()?;
             if !r.status().is_success() {
                 return None;
             }
@@ -1020,8 +1017,8 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                 Some(b) => b,
                 None if *id != 0 => {
                     let server = if *development { Server::Development } else { Server::Production };
-                    let account = orbiters_core::account::read(server)?;
-                    let renewed = Api::new(server).picture_source(&account.token, *asset, *id, !url.is_empty()).ok()?;
+                    let (api, token) = crate::member::reading(server)?.api();
+                    let renewed = api.picture_source(&token, *asset, *id, !url.is_empty()).ok()?;
                     let url = if *large { renewed.full_url.or(renewed.src) } else { renewed.src }?;
                     api.image(&url).ok()?
                 }

@@ -231,7 +231,7 @@
   "This copy is not recorded any more.": "Esta cópia não está mais registrada.",
   "This folder is a Unity 6 trial that was taken off before it was complete: it stays at {path}, and is not a project to open.": "Esta pasta é um teste do Unity 6 retirado antes de ficar completo: ela fica em {path} e não é um projeto para abrir.",
   "This folder is a Unity 6 trial whose copy failed, not a project: it stays at {path}. Start a new trial.": "Esta pasta é um teste do Unity 6 cuja cópia falhou, não um projeto: ela fica em {path}. Comece um novo teste.",
-  "This is a Unity 6 trial: Orbiters does not change Creator Companion's list for it. Add it there, or take it off, yourself.": "Este é um teste do Unity 6: o Orbiters não altera a lista do Creator Companion por ele. Adicione-o ou remova-o você mesmo lá.",
+  "This is a Unity 6 trial: it is on the page as long as Orbiters keeps its record. Forget the trial, in its panel, to take it off.": "Este é um teste do Unity 6: fica na página enquanto o Orbiters guardar o registro. “Esquecer o teste”, no painel dele, o remove.",
   "This place cannot be checked: {why}": "Este lugar não pode ser verificado: {why}",
   "This project does not say which Unity version it uses, so Orbiters prepares no upload from it.": "Este projeto não diz qual versão do Unity usa, então o Orbiters não prepara nenhum envio por ele.",
   "This project does not say which Unity version it uses: no tool of the bridge opens it.": "Este projeto não diz qual versão do Unity usa: nenhuma ferramenta da ponte o abre.",

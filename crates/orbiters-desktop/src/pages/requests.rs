@@ -112,14 +112,15 @@ impl State {
         self.fresh = None;
         self.error = None;
         let owner = self.account.owner().cloned().unwrap_or_default();
+        let member = crate::member::reading(server);
         self.list = super::job_for(ctx, &owner, move || {
-            let (api, token) = controller::api(server)?;
+            let (api, token) = member.ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
             Ok((api.capture_requests(&token, true)?, api.capture_requests(&token, false)?))
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, cx: &Cx) {
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let seen = self.account.see(&cx.snap.account.state, cx.snap.settings.development);
+        let seen = self.account.see(&cx.snap.account, cx.snap.settings.development);
         let key = (seen.owner.development, seen.owner.account.clone(), cx.visit);
         if seen.answered && self.loaded.as_ref().is_some_and(|old| old.0 == key.0 && old.1 == key.1) {
             // Orbiters answers again: asked again, nothing that shows is put away.
@@ -154,7 +155,9 @@ impl State {
                         return None;
                     }
                     let ask = || -> anyhow::Result<_> {
-                        let (api, token) = controller::api(server)?;
+                        // As the owner it asks for, or not at all.
+                        let member = crate::member::reading(server).filter(|m| owner.account == format!("{}{}", crate::member::prefix(server), m.user));
+                        let (api, token) = member.ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
                         Ok((api.capture_requests(&token, true)?.requests, api.capture_requests(&token, false)?.requests))
                     };
                     Some(super::ForAccount::new(&owner, ask().map_err(|e| e.to_string())))
@@ -586,6 +589,7 @@ mod tests {
         let mut snap = (*ctl.view()).clone();
         let mut state = State { fixture: true, ..Default::default() };
         let mut frame = |state: &mut State, account: A| {
+            snap.account.member = account.username().map(|u| format!("production/{u}"));
             snap.account.state = account;
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let mut output = ctx.run_ui(egui::RawInput::default(), |_| {

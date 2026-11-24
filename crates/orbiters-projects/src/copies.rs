@@ -171,12 +171,12 @@ fn take(dir: &Path, id: &str) -> anyhow::Result<(Copy, Lock)> {
     Ok((copy, held))
 }
 
-/// Puts a whole copy on the list VCC and ALCOM share (`root`); its record goes once it is there.
+/// Puts a whole copy on Orbiters' list (for Creator Companion's folder `root`); its record goes once it is there.
 pub fn list(dir: &Path, root: &Path, id: &str) -> anyhow::Result<PathBuf> {
     let (mut copy, held) = take(dir, id)?;
     let there = copy.folder.is_some_and(|folder| owned::is_same(&copy.destination, folder));
     anyhow::ensure!(there && copy.state == State::Whole && crate::discovery::is_project(&copy.destination), "{}", tr!("The folder at {path} is not the whole copy Orbiters made.", path = copy.destination.display()));
-    if let Err(e) = crate::runtime()?.block_on(crate::vpm::register(root, &copy.destination, true)) {
+    if let Err(e) = crate::gallery::add(root, &copy.destination) {
         copy.error = Some(format!("{e:#}"));
         let _ = AppRoot::existing(dir)?.replace_json(&file(id), &copy);
         return Err(e);

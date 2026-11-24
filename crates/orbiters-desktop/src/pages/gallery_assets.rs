@@ -13,7 +13,7 @@ use super::super::{sharing, Cx, Job};
 use crate::controller::shares::{self as controller, Entry};
 use crate::worlds::Picture;
 use egui::{pos2, vec2, Align2, Rect, Ui};
-use orbiters_core::account::{Api, Server};
+use orbiters_core::account::Server;
 use orbiters_core::assets::{self, How, Owned};
 use orbiters_core::community;
 use orbiters_i18n::{mark, tr, tr_n};
@@ -45,9 +45,10 @@ fn how(o: &Owned) -> &'static str {
 }
 
 fn ask(ctx: &egui::Context, server: Server, owner: &crate::pages::Owner) -> Job<crate::pages::ForAccount<anyhow::Result<Vec<Owned>>>> {
+    let member = crate::member::reading(server);
     crate::pages::job_for(ctx, owner, move || {
-        let Some(account) = orbiters_core::account::read(server) else { return Ok(Vec::new()) };
-        Api::new(server).owned_assets(&account.token)
+        let Some((api, token)) = member.map(|m| m.api()) else { return Ok(Vec::new()) };
+        api.owned_assets(&token)
     })
 }
 
@@ -147,7 +148,7 @@ impl State {
         let development = cx.snap.settings.development;
         let server = if development { Server::Development } else { Server::Production };
         // Who the account is, not how its check goes: offline, the check comes and goes every minute.
-        let seen = self.account.see(&cx.snap.account.state, development);
+        let seen = self.account.see(&cx.snap.account, development);
         if seen.changed {
             self.forget_account();
         }

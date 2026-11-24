@@ -181,6 +181,46 @@ fn japanese(word: &str) -> bool {
     word.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}'))
 }
 
+/// Words that point back at what was said or read before ("the second one", "that", "again"), in the five languages.
+const BACK: &[&str] = &[
+    "it", "that", "this", "them", "those", "these", "again", "undo", "one", "first", "second", "third", "fourth", "fifth", "last", "same", "other", "another", "next", "previous", "him", "her", "more", "too",
+    "ca", "cela", "celui", "celle", "encore", "annule", "premier", "premiere", "deuxieme", "second", "seconde", "troisieme", "dernier", "derniere", "autre", "suivant", "lui", "elle", "le meme", "la meme", "aussi",
+    "eso", "esto", "ese", "otra vez", "primero", "primera", "segundo", "segunda", "tercero", "ultimo", "ultima", "otro", "otra", "mismo", "misma", "tambien", "deshaz",
+    "isso", "isto", "esse", "de novo", "primeiro", "primeira", "terceiro", "outro", "outra", "mesmo", "mesma", "tambem", "desfaz",
+    "それ", "これ", "あれ", "もう一度", "最初", "二番", "番目", "最後", "同じ", "別", "次", "元に戻",
+];
+
+/// What a request of `text`, whose own words name `groups`, needs told of what other people wrote (verify4-r21 P4): a request
+/// only to act ("turn on fast walk") needs none of it, and is then free to act.
+pub fn needs(text: &str, groups: &BTreeSet<ToolGroup>) -> crate::context::Needs {
+    use ToolGroup as T;
+    let has = |g: T| groups.contains(&g);
+    let words = folded(text);
+    let raw = text.to_lowercase();
+    let back = BACK.iter().any(|w| if japanese(w) { raw.contains(w) } else { words.contains(&format!(" {w} ")) });
+    crate::context::Needs {
+        world: has(T::Worlds) || has(T::Instances) || has(T::State),
+        video: has(T::Videos),
+        avatar: has(T::Avatar),
+        // A conversation (no group at all), what reads lists, or what points back at them.
+        earlier: back || groups.is_empty() || [T::Worlds, T::Instances, T::Friends, T::Videos, T::State].into_iter().any(has),
+    }
+}
+
+/// The controls among `labels` (a control's label, whole) the words of `text` name: their places, and those words.
+pub fn named(text: &str, labels: &[String]) -> Vec<(usize, String)> {
+    let words = folded(text);
+    labels
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.chars().count() >= 3)
+        .filter_map(|(i, l)| {
+            let label = folded(l).trim().to_string();
+            (!label.is_empty() && words.contains(&format!(" {label} "))).then_some((i, label))
+        })
+        .collect()
+}
+
 /// The groups `text` names. `controls`: the avatar's control labels (a sentence naming one is about the avatar).
 pub fn route(text: &str, controls: &[String]) -> BTreeSet<ToolGroup> {
     let words = folded(text);
@@ -192,11 +232,7 @@ pub fn route(text: &str, controls: &[String]) -> BTreeSet<ToolGroup> {
         out.insert(ToolGroup::State);
     }
     // A control of the avatar named by its label ("put my Hoodie on").
-    if controls.iter().filter(|c| c.chars().count() >= 3).any(|c| {
-        let label = folded(c);
-        let label = label.trim();
-        !label.is_empty() && words.contains(&format!(" {label} "))
-    }) {
+    if !named(text, controls).is_empty() {
         out.insert(ToolGroup::Avatar);
     }
     out

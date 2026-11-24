@@ -6,7 +6,7 @@ use super::art::glyph;
 use super::state::{server, Outcome, State};
 use crate::pages::Cx;
 use egui::{Rect, Ui};
-use orbiters_projects::{avatars::Avatar, discovery::Project, vpm};
+use orbiters_projects::{avatars::Avatar, discovery::Project};
 use orbiters_ui::popup::{self, Item};
 use orbiters_ui::{icons, theme};
 
@@ -22,6 +22,7 @@ pub(super) enum ProjectAct {
     Kill,
     Add,
     Folder,
+    Companion,
     CopyPath,
     Duplicate,
     Hide,
@@ -54,6 +55,9 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
     if !opening && !project.missing && state.session(&project.path).open() {
         acts.push((Item::new(tr("Open the folder")).icon(icons::FOLDER_OPEN), ProjectAct::Folder));
     }
+    if offers_companion(state, project) {
+        acts.push((Item::new(tr("Add to Creator Companion")).icon(icons::PLUS), ProjectAct::Companion));
+    }
     acts.push((Item::new(tr("Copy the folder's path")).icon(icons::COPY), ProjectAct::CopyPath));
     if !project.missing && !busy {
         acts.push((Item::new(tr("Duplicate…")).icon(icons::COPY_SIMPLE), ProjectAct::Duplicate));
@@ -67,6 +71,23 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
         acts.push((Item::new(tr("Remove from the list")).icon(glyph::TRASH_SIMPLE).danger(), ProjectAct::Remove));
     }
     acts
+}
+
+/// A project of Orbiters' list that Creator Companion and ALCOM, whose list is on this computer, do not have.
+pub(super) fn offers_companion(state: &State, project: &Project) -> bool {
+    state.scan.companion && project.registered && !project.shared && !project.missing
+}
+
+/// Orbiters writes nothing of Creator Companion's or ALCOM's, and neither documents a way to be given a folder: the person adds it
+/// there, with its folder open and its path copied.
+pub(super) fn companion(ctx: &egui::Context, cx: &mut Cx, state: &mut State, project: &Project) {
+    ctx.copy_text(project.path.display().to_string());
+    cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, tr("Add this folder in Creator Companion or ALCOM (Add Existing Project): its path is copied and its folder is open."));
+    let path = project.path.clone();
+    state.task(ctx, tr("Opening the folder…"), move || {
+        orbiters_projects::reveal(&path)?;
+        Ok(Outcome::Picked(None))
+    });
 }
 
 /// Does `act` to `project`; a dialog it opens grows out of `anchor`. `sheet`: the panel slides over the cards (a
@@ -86,8 +107,8 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
         ProjectAct::Add => {
             let path = project.path.clone();
             state.task(ctx, tr("Adding the project…"), move || {
-                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, true))?;
-                Ok(Outcome::Added(path, tr("Project added: VCC and ALCOM list it too").into()))
+                orbiters_projects::gallery::add(&orbiters_projects::vcc_dir(), &path)?;
+                Ok(Outcome::Added(path, tr("Project added to Orbiters' list").into()))
             });
         }
         ProjectAct::Folder => {
@@ -97,6 +118,7 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
                 Ok(Outcome::Picked(None))
             });
         }
+        ProjectAct::Companion => companion(ctx, cx, state, project),
         ProjectAct::CopyPath => {
             ctx.copy_text(project.path.display().to_string());
             cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, tr("Path copied"));
@@ -125,8 +147,8 @@ pub(super) fn project_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, p
                 state.selected = None;
             }
             state.task(ctx, tr("Removing from the list…"), move || {
-                orbiters_projects::runtime()?.block_on(vpm::register(&orbiters_projects::vcc_dir(), &path, false))?;
-                Ok(Outcome::Changed(tr("Removed from the shared project list. Its files stay.").into()))
+                orbiters_projects::gallery::remove(&orbiters_projects::vcc_dir(), &path)?;
+                Ok(Outcome::Changed(tr("Removed from Orbiters' list. Its files stay, and VCC and ALCOM list it as before.").into()))
             });
         }
     }
@@ -214,5 +236,12 @@ mod tests {
         assert_eq!(acts(&state, &project(true, false), false), [CopyPath, Duplicate, Hide, Remove], "the panel's own menu");
         assert_eq!(acts(&state, &project(false, false), true), [Add, Folder, CopyPath, Duplicate, Hide], "found on the computer");
         assert_eq!(acts(&state, &project(true, true), true), [CopyPath, Hide, Remove], "its folder is missing");
+        // Where Creator Companion's list is on the computer and does not have it: offered, never done by itself.
+        let mut state = State::default();
+        state.scan.companion = true;
+        assert_eq!(acts(&state, &project(true, false), true), [Open, Folder, Companion, CopyPath, Duplicate, Hide, Remove]);
+        assert_eq!(acts(&state, &Project { shared: true, ..project(true, false) }, true), [Open, Folder, CopyPath, Duplicate, Hide, Remove]);
+        assert_eq!(acts(&state, &project(false, false), true), [Add, Folder, CopyPath, Duplicate, Hide], "added here first");
+        assert_eq!(acts(&state, &project(true, true), true), [CopyPath, Hide, Remove]);
     }
 }

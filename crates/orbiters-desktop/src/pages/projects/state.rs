@@ -1339,13 +1339,13 @@ impl State {
                     })
                     .collect();
                 Project {
-                    own: false,
                     path: PathBuf::from(format!("{STAND_IN_PROJECTS}/{label}")),
                     name: label,
                     unity: if i == 5 { "2019.4.31f1".into() } else { "2022.3.22f1".into() },
                     kind,
                     modified: discovery::now() - (hours * 3600.0) as u64 - i as u64 * 7,
                     registered: i < 3,
+                    shared: i < 3,
                     missing: false,
                     avatars,
                     worlds: vec![],
@@ -1589,6 +1589,14 @@ impl State {
                 self.selected = Some(first.path.clone());
                 self.scroll_to_packages = matches!(name, "projects-packages" | "projects-dropdown");
             }
+            // Duplicated, created or added here, and not in Creator Companion's list.
+            "projects-only-here" => {
+                self.scan.companion = true;
+                if let Some(p) = self.scan.projects.first_mut() {
+                    p.shared = false;
+                }
+                self.selected = Some(first.path.clone());
+            }
             "projects-loading" => {
                 self.scan.projects.clear();
                 self.fixture_scanning = true;
@@ -1602,7 +1610,7 @@ impl State {
                 self.fixture_view_loading = true;
             }
             "projects-error" => {
-                self.error = Some("VCC's project list could not be read: settings.json is locked by another program. Close VCC and refresh.".into()); // i18n: not shown (sample data of the screenshot scenes)
+                self.error = Some("Creator Companion's project list cannot be read now: its projects are shown as they last were.".into()); // i18n: not shown (sample data of the screenshot scenes)
                 self.scan.warnings = vec!["D: could not be searched: access denied".into()]; // i18n: not shown (sample data of the screenshot scenes)
             }
             "projects-busy" => {

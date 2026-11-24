@@ -47,7 +47,7 @@ Windows' installed apps, so it can be removed from Settings › Apps like any ot
 shortcut, starting with Windows (in the tray) and starting with SteamVR; all three can be changed later in the app's
 Settings.
 
-The setup is not code-signed yet, so Windows SmartScreen warns about it ("Windows protected your PC": More info, then
+The setup is not code-signed yet, so Windows SmartScreen may warn about it ("Windows protected your PC": More info, then
 Run anyway). See [Releases and signing](#releases-and-signing) for how releases are checked today.
 
 | | |
@@ -56,15 +56,16 @@ Run anyway). See [Releases and signing](#releases-and-signing) for how releases 
 | VRChat | The Steam version, on the same computer, for everything that reads the game (camera, log, overlays). |
 | SteamVR | Optional. Needed for the headset features: the overlay in VR, fast walk, tracking smoothing, live translation. |
 | Accounts | None required. An Orbiters account adds sharing, events, N4N0's assistant and explorer points. |
-| Disk | About 30 MB installed. Speech models (about 490 MB) and translation models are downloaded only if you turn those features on. |
+| Disk | About 210 MB installed (the setup is about 90 MB). Speech models (about 490 MB) and translation models are downloaded only if you turn those features on. |
 | macOS | Apple silicon, development pre-releases only so far: see [On a Mac](#on-a-mac). |
 
 Stable releases are marked *Latest* on the releases page; versions named `-dev.N` are development pre-releases.
 
 ## What it does
 
-The window has nine pages: **Home**, **N4N0**, **Capture**, **Unity projects**, **Photos & captures**,
-**Visited worlds**, **Events**, **Videos** and **Settings**. Most of what follows is also reachable inside VRChat,
+The window has eight pages: **Home**, **N4N0**, **Unity projects**, **Photos & captures**, **Visited worlds**,
+**Events**, **Video history** and **Settings**. Recordings and 3D pictures are started from the capture bar of
+Photos & captures. Most of what follows is also reachable inside VRChat,
 from the tiles beside its menus or from N4N0's menu.
 
 ### Start VRChat and see your friends
@@ -122,8 +123,8 @@ VRChat's; in VR they are SteamVR overlays riding the hand that opened the menu, 
 
 When VRChat's camera is open, tiles beside it offer **3D of people**, **3D of world** (1, 4 or 8 seconds),
 **Record** and **QR code**. A 3D picture flies the camera around you while it records; the app then reconstructs the
-place on your graphics card. Pointing the camera at a QR code opens its page in a panel next to the camera (an
-off-screen browser view), or in your browser if you ask; styled codes (inverted, coloured, with a logo) are read too.
+place on your graphics card. Pointing the camera at a QR code opens its page: in a headset in a panel above the
+camera (an off-screen browser view, with Open in browser), in desktop mode in your browser; styled codes (inverted, coloured, with a logo) are read too.
 
 ![The tiles beside VRChat's camera in desktop mode](docs/readme/camera-desktop.webp)
 
@@ -159,12 +160,12 @@ Explorer points.
   layers of VRChat's multi-layer pictures); the original is never written ([docs/photo-editor.md](docs/photo-editor.md)).
 - **Visited worlds**: every world you visited, read from VRChat's own log files and kept after VRChat deletes them,
   with the pictures you took and the sessions you recorded there. **Previous instances** lets you go back.
-- **Videos**: every video the worlds' players played, from the same logs, by day, with its link to copy for another
+- **Video history**: every video the worlds' players played, from the same logs, by day, with its link to copy for another
   world's player and lists of bookmarks of your own.
 
 ### YouTube and music
 
-YouTube search with suggestions as you type, five results a page and **Copy link** to paste in a world's video player;
+YouTube search with suggestions as you type, up to five results a page and **Copy link** to paste in a world's video player;
 in VR, a copied link can be dropped in the world as a card others can grab. It reads YouTube the way its website does,
 with no account and no key. What plays on the computer (Spotify, a browser, any app that reports to Windows' media
 controls) shows with play, pause and next.
@@ -278,7 +279,7 @@ What leaves it, and to whom:
 | GitHub releases (k2-fsa), Hugging Face | Model downloads (speech, text reading, translation) | Only when you install those models |
 | A translation service you choose | The text to translate: an AI server on this computer, one on your network, or Orbiters | Only with live translation on |
 | VPM package repositories | Package listings and downloads | On the Unity projects page |
-| The page a QR code points to | An ordinary web request, in a private off-screen view | When you open a scanned code |
+| The page a QR code points to | An ordinary web request, in a private off-screen view (in a headset; your browser in desktop mode) | When you open a scanned code |
 
 Where credentials are kept: the Orbiters sign-in is shared with the Orbiters Unity tools in Unity's preferences folder,
 protected with Windows' DPAPI for your Windows user. The optional VRChat session keeps only VRChat's `auth` and

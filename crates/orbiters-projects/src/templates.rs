@@ -300,7 +300,7 @@ pub async fn create(
 }
 
 /// A copy of the project in `source` named `name` in `parent`, taking along what `keep` asks for: its packages
-/// restored and registered in the list VCC and ALCOM share. Its scenes keep their blueprint IDs.
+/// restored and registered in Orbiters' list ([`crate::gallery`]). Its scenes keep their blueprint IDs.
 pub async fn duplicate(
     root: &Path,
     source: &Path,
@@ -383,7 +383,7 @@ async fn make(
         copying::unmark(&held, marker)?;
         between(Step::MarkerGone)?;
         progress.lock().unwrap().phase = mark("Registering project").into();
-        crate::vpm::register(root, &path, true).await
+        crate::gallery::add(root, &path)
     }
     .await;
     if let Err(e) = listed {
@@ -426,14 +426,14 @@ thread_local! {
     pub(crate) static RESTORES: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
-/// What one missing package may take at most, in the folder it is restored in (downloaded and unpacked), in VCC's cache, and in the
+/// What one missing package may take at most, in the folder it is restored in (downloaded and unpacked), in the downloads', and in the
 /// copy: the largest of VRChat's and the community's are well below. (No list says how large a package is.)
 const RESTORED: u64 = 384 * 1024 * 1024;
 const CACHED: u64 = 128 * 1024 * 1024;
 /// A template names a package or two, and those name others.
 const FEWEST: u64 = 4;
 
-/// Room on every disk a restore writes on, before anything is downloaded: app data, VCC's cache and the copy's own.
+/// Room on every disk a restore writes on, before anything is downloaded: app data (with the downloads) and the copy's own.
 fn restore_room(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &dyn Room) -> anyhow::Result<()> {
     let manifest: serde_json::Value = payload.read(Path::new("Packages/vpm-manifest.json"))?.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let mut names: Vec<&String> = ["dependencies", "locked"].iter().flat_map(|s| manifest[*s].as_object().into_iter().flatten()).map(|(n, _)| n).collect();
@@ -442,7 +442,7 @@ fn restore_room(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &
     let missing = names.iter().filter(|n| !payload.items.contains_key(&Path::new("Packages").join(n).join("package.json"))).count() as u64; // i18n: not shown (a folder's name)
     let count = missing.max(FEWEST);
     let demand = |need, at: &Path, bytes| Demand { need, at: at.to_path_buf(), bytes, low: None };
-    let demands = vec![demand(Need::Download, app, count * RESTORED), demand(Need::Download, root, count * CACHED), demand(Need::Copy, copy, count * RESTORED)];
+    let demands = vec![demand(Need::Download, app, count * RESTORED), demand(Need::Download, &crate::own::dir(root), count * CACHED), demand(Need::Copy, copy, count * RESTORED)];
     for v in budget::plan(demands, room, false).volumes {
         anyhow::ensure!(
             v.fits(),
@@ -822,7 +822,7 @@ mod tests {
         let rt = crate::runtime().unwrap();
         let copy = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).unwrap();
         assert!(installed_dependencies_complete(&copy).unwrap());
-        assert!(rt.block_on(crate::vpm::registered(&root)).unwrap().iter().any(|p| p.canonicalize().unwrap() == copy.canonicalize().unwrap()));
+        assert!(crate::gallery::lists(&root, &copy));
         std::fs::remove_file(copy.join("Packages/private.package/package.json")).unwrap();
         assert!(!installed_dependencies_complete(&copy).unwrap());
     }
@@ -841,9 +841,8 @@ mod tests {
         std::fs::write(dir.join("Assets/a.txt"), "a").unwrap();
         crate::write_json(&dir.join("Packages/manifest.json"), &serde_json::json!({ "dependencies": dependencies })).unwrap();
     }
-    fn is_registered(rt: &tokio::runtime::Runtime, root: &Path, path: &Path) -> bool {
-        let wanted = crate::discovery::key(path);
-        rt.block_on(crate::vpm::registered(root)).unwrap().iter().any(|p| crate::discovery::key(p) == wanted)
+    fn is_registered(root: &Path, path: &Path) -> bool {
+        crate::gallery::lists(root, path)
     }
 
     #[test]
@@ -863,7 +862,7 @@ mod tests {
             .unwrap_err();
         let copy = temp.path().join("Copy");
         assert!(said.contains(&copy.display().to_string()), "{said}");
-        assert!(is_registered(&rt, &root, &copy), "the copy is in the gallery's list");
+        assert!(is_registered(&root, &copy), "the copy is in the gallery's list");
     }
 
     /// PROJECTS-4: a copy that stops halfway is not a project the gallery lists, and its folder is kept as it is.
@@ -1051,7 +1050,7 @@ mod tests {
             Ok(())
         };
         stepping(stop, || rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &cancel, &Arc::new(Mutex::default())))).unwrap();
-        assert!(is_registered(&rt, &root, &temp.path().join("Copy")));
+        assert!(is_registered(&root, &temp.path().join("Copy")));
     }
 
     /// A package folder is copied whole (its own Logs or Library are part of it); an archive the project already holds
@@ -1079,7 +1078,7 @@ mod tests {
         let said = made_from(temp.path(), &source, "Copy2").unwrap_err();
         assert!(said.contains("my.archive.tgz") && said.contains("listed"), "{said}");
         let rt = crate::runtime().unwrap();
-        assert!(is_registered(&rt, &temp.path().join("vcc"), &dst), "the copy is in the gallery's list");
+        assert!(is_registered(&temp.path().join("vcc"), &dst), "the copy is in the gallery's list");
         assert_eq!(std::fs::read_to_string(dst.join("Packages/my.archive.tgz")).unwrap(), "something else");
         // Gone: named with where it was looked for.
         let source = temp.path().join("Source3");
@@ -1119,7 +1118,7 @@ mod tests {
         let made = stepping(hook, || rt.block_on(duplicate(&root, &source, copy.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())))).unwrap();
         assert_eq!(*seen.borrow(), [Step::Made, Step::Folders, Step::Copied, Step::MarkerGone, Step::Listed]);
         assert!(crate::copies::shown(&crate::data_dir()).iter().all(|(c, _)| c.destination != copy), "on the list: no record of it left");
-        assert!(made == copy && is_registered(&rt, &root, &copy));
+        assert!(made == copy && is_registered(&root, &copy));
         // Everything of its own was written once, with the rest.
         let settings = std::fs::read_to_string(copy.join("ProjectSettings/ProjectSettings.asset")).unwrap();
         assert!(settings.contains("productName: \"Copy\"") && !settings.contains("productGUID: aa"), "{settings}");
@@ -1156,7 +1155,7 @@ mod tests {
         });
         let copy = temp.path().join("Copy");
         assert!(said.contains("could not be restored") && said.contains(&copy.display().to_string()), "{said}");
-        assert!(is_registered(&rt, &root, &copy) && crate::discovery::is_project(&copy));
+        assert!(is_registered(&root, &copy) && crate::discovery::is_project(&copy));
         assert_eq!(std::fs::read(copy.join("Packages/vpm-manifest.json")).unwrap(), manifest, "its package list is the project's");
         assert!(stages_left(&crate::data_dir()).is_empty());
     }
@@ -1193,7 +1192,7 @@ mod tests {
         let read = |at: &str| std::fs::read_to_string(copy.join(at)).ok();
         assert_eq!(read("Packages/kept/mine.txt").as_deref(), Some("mine"));
         assert_eq!(read("Packages/half/Runtime/new.txt").as_deref(), Some("new"));
-        assert!(installed_dependencies_complete(&copy).unwrap() && is_registered(&rt, &root, &copy));
+        assert!(installed_dependencies_complete(&copy).unwrap() && is_registered(&root, &copy));
         assert_eq!(std::fs::read(source.join("Packages/half/old.txt")).unwrap(), b"old", "the source is the source's");
     }
 
@@ -1216,7 +1215,7 @@ mod tests {
         // The list is there again.
         std::fs::remove_file(&root).unwrap();
         crate::copies::list(&app, &root, &copy.id).unwrap();
-        assert!(mine().is_none() && is_registered(&rt, &root, &at));
+        assert!(mine().is_none() && is_registered(&root, &at));
     }
 
     /// Room for a restore is asked of every disk it writes on, before anything is downloaded.
@@ -1227,7 +1226,7 @@ mod tests {
             fn of(&self, path: &Path) -> Option<(String, u64)> {
                 match path.to_str()? {
                     "app" => Some(("a".into(), self.0)),
-                    "vcc" => Some(("v".into(), self.1)),
+                    downloads if downloads.contains("orbiters-projects-tests") => Some(("v".into(), self.1)),
                     _ => Some(("c".into(), self.2)),
                 }
             }

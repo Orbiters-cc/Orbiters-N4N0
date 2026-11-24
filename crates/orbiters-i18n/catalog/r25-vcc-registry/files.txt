@@ -1,2 +1,0 @@
-# One entry of Creator Companion's project list (r25).
-crates/orbiters-projects/src/vcc_store.rs

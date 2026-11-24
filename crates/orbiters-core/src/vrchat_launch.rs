@@ -69,11 +69,6 @@ pub struct LaunchSettings {
     /// Home's profile choice says whose each one is (REQUEST15 7a; not a setting, written as they are seen).
     #[serde(with = "profile_keys")]
     pub profiles: std::collections::BTreeMap<u32, String>,
-    /// The account (its VRChat user id) each profile's own log last said is signed in on it: a label, like its name above, and
-    /// never what a private destination goes by (a VRChat that runs says whose it is, [`way`]). Gone as soon as its log says
-    /// nobody is.
-    #[serde(with = "profile_keys")]
-    pub profile_ids: std::collections::BTreeMap<u32, String>,
     /// On a Mac: the share of the display's drawing resolution, per side, Home's Play has VRChat draw at (25 to 100, 100
     /// being the panel's real pixels; macOS scales the picture to the screen). Not used elsewhere.
     pub mac_render_percent: u32,
@@ -96,7 +91,6 @@ impl Default for LaunchSettings {
             last_mode: LaunchMode::Vr,
             desktop_window: None,
             profiles: std::collections::BTreeMap::new(),
-            profile_ids: std::collections::BTreeMap::new(),
             mac_render_percent: crate::obelisk::DEFAULT_RENDER_PERCENT,
             mac_render_default: crate::obelisk::DEFAULT_RENDER_PERCENT,
         }
@@ -260,10 +254,10 @@ pub fn destination_of(args: &[String]) -> Option<(&str, &str)> {
 /// Where a destination would go, for [`way`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum To<'a> {
-    /// A VRChat that is about to be started; whether this computer uses several VRChat profiles ([`several_profiles`]).
+    /// A VRChat that is about to be started; whether this computer uses several VRChat profiles ([`several`]).
     Start { several: bool },
-    /// A VRChat that runs, and the account (its user id) its own log proves is the one signed in on it now.
-    Running { proven: Option<&'a str> },
+    /// A VRChat that runs; the same, and the account (its user id) its own log proves is the one signed in on it now.
+    Running { several: bool, proven: Option<&'a str> },
 }
 
 /// How a destination goes to a VRChat, by whose each is.
@@ -283,15 +277,15 @@ pub enum Way {
 
 /// The one rule for giving VRChat a destination, on every computer and for every way there is (a start, a start made again, a
 /// game that runs). A public one goes anywhere. A `private` one (an instance not everyone may enter, an invite, one made for
-/// the account), of the account `owner`, goes with a start only where VRChat has a single profile, as it always did; on a
-/// computer with several, never: VRChat starts without it and it is delivered once its account is proven. To a game that
-/// runs it goes only while that game's account is proven to be its own.
+/// the account), of the account `owner`, goes with a start and to the game that runs where VRChat has a single profile, as it
+/// always did. On a computer with several, never with a start: VRChat starts without it and it is delivered once its account is
+/// proven; and to a game that runs only while that game's account is proven to be its own.
 pub fn way(private: bool, owner: Option<&str>, to: To) -> Way {
     let owner = owner.filter(|id| !id.is_empty());
     match (private, to) {
-        (false, _) | (true, To::Start { several: false }) => Way::Direct,
+        (false, _) | (true, To::Start { several: false } | To::Running { several: false, .. }) => Way::Direct,
         (true, To::Start { several: true }) => if owner.is_some() { Way::AfterProof } else { Way::NoOwner },
-        (true, To::Running { proven }) => match (owner, proven.filter(|id| !id.is_empty())) {
+        (true, To::Running { several: true, proven }) => match (owner, proven.filter(|id| !id.is_empty())) {
             (None, _) => Way::NoOwner,
             (Some(_), None) => Way::UnknownAccount,
             (Some(owner), Some(game)) if owner == game => Way::Direct,
@@ -300,10 +294,11 @@ pub fn way(private: bool, owner: Option<&str>, to: To) -> Way {
     }
 }
 
-/// Whether the VRChat profiles this computer has records of (known, remembered, running or starting) are more than the default
-/// one alone.
-pub fn several_profiles(recorded: impl IntoIterator<Item = u32>) -> bool {
-    recorded.into_iter().any(|profile| profile != 0)
+/// Whether a computer uses several VRChat profiles: one other than the default one is remembered (`chips`, the profiles Home's
+/// choice remembers: [`LaunchSettings::profiles`]) or runs or starts now. Nothing else says so, and neither lasts: a profile taken
+/// off the choice, and not running, is one no more.
+pub fn several(chips: impl IntoIterator<Item = u32>, now: impl IntoIterator<Item = u32>) -> bool {
+    chips.into_iter().chain(now).any(|profile| profile != 0)
 }
 
 /// The profile a command line names, when it names exactly one (0: none named). `None` where it names several, or one that is
@@ -544,7 +539,8 @@ mod tests {
             assert_eq!(way(true, owner, To::Start { several: false }), Way::Direct, "one profile: as before there were several");
             assert_eq!(way(true, owner, To::Start { several: true }), if owned { Way::AfterProof } else { Way::NoOwner }, "{owner:?}");
             for proven in [None, Some(""), a, b] {
-                assert_eq!(way(false, owner, To::Running { proven }), Way::Direct);
+                assert_eq!(way(false, owner, To::Running { several: true, proven }), Way::Direct);
+                assert_eq!(way(true, owner, To::Running { several: false, proven }), Way::Direct, "one profile: whatever its log says, or does not");
                 let known = proven.is_some_and(|g| !g.is_empty());
                 let want = match (owned, known, owner == proven) {
                     (false, ..) => Way::NoOwner,
@@ -552,11 +548,9 @@ mod tests {
                     (_, true, true) => Way::Direct,
                     (_, true, false) => Way::OtherAccount,
                 };
-                assert_eq!(way(true, owner, To::Running { proven }), want, "{owner:?} {proven:?}");
+                assert_eq!(way(true, owner, To::Running { several: true, proven }), want, "{owner:?} {proven:?}");
             }
         }
-        assert!(!several_profiles([]) && !several_profiles([0, 0]));
-        assert!(several_profiles([0, 1]) && several_profiles([7]));
         for public in ["12345", "1~region(eu)", "8~group(grp_x)~groupAccessType(public)~region(jp)"] {
             assert!(is_public_instance(public), "{public}");
         }
@@ -574,6 +568,8 @@ mod tests {
         ] {
             assert!(!is_public_instance(private), "{private}");
         }
+        assert!(!several([], []) && !several([0], [0]), "the default one alone");
+        assert!(several([0, 2], []) && several([0], [1]) && several([], [7]));
         // What is really launched says where it goes, and on which profile.
         let w = "wrld_00000000-0000-4000-8000-0000000000aa";
         let args = arguments_on(LaunchMode::Desktop, &LaunchSettings::default(), Vec::new(), 2, Some((w, "1~friends(usr_a)")));
@@ -602,7 +598,6 @@ mod tests {
         }
         let mut launch = LaunchSettings::default();
         launch.profiles = [(0, "Sample Me".to_string()), (3, "Sample Alt".to_string())].into();
-        launch.profile_ids = [(3, "usr_a".to_string())].into();
         let text = serde_json::to_string(&Message::State { launch: launch.clone() }).unwrap();
         assert!(text.contains(r#""profiles":{"0":"Sample Me","3":"Sample Alt"}"#), "the file's form is unchanged: {text}");
         let Message::State { launch: back } = serde_json::from_str(&text).unwrap();

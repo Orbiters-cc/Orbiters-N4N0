@@ -231,7 +231,7 @@
   "This copy is not recorded any more.": "Cette copie n’est plus enregistrée.",
   "This folder is a Unity 6 trial that was taken off before it was complete: it stays at {path}, and is not a project to open.": "Ce dossier est un essai Unity 6 retiré avant d’être complet : il reste à {path}, et n’est pas un projet à ouvrir.",
   "This folder is a Unity 6 trial whose copy failed, not a project: it stays at {path}. Start a new trial.": "Ce dossier est un essai Unity 6 dont la copie a échoué, pas un projet : il reste à {path}. Commence un nouvel essai.",
-  "This is a Unity 6 trial: Orbiters does not change Creator Companion's list for it. Add it there, or take it off, yourself.": "C’est un essai Unity 6 : Orbiters ne modifie pas la liste de Creator Companion pour lui. Ajoute-le ou retire-le toi-même là-bas.",
+  "This is a Unity 6 trial: it is on the page as long as Orbiters keeps its record. Forget the trial, in its panel, to take it off.": "C’est un essai Unity 6 : il est sur la page tant qu’Orbiters garde sa fiche. « Oublier l’essai », dans son panneau, le retire.",
   "This place cannot be checked: {why}": "Cet endroit ne peut pas être vérifié : {why}",
   "This project does not say which Unity version it uses, so Orbiters prepares no upload from it.": "Ce projet ne dit pas quelle version d’Unity il utilise : Orbiters ne prépare donc pas d’envoi depuis lui.",
   "This project does not say which Unity version it uses: no tool of the bridge opens it.": "Ce projet ne dit pas quelle version d’Unity il utilise : aucun outil du pont ne l’ouvre.",

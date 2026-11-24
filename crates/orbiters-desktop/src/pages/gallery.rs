@@ -573,7 +573,11 @@ impl State {
         };
         self.error = None;
         let owner = self.account.owner().cloned().unwrap_or_default();
-        self.feed_job = super::job_for(ctx, &owner, move || controller::feed(server, q));
+        let member = crate::member::reading(server);
+        self.feed_job = super::job_for(ctx, &owner, move || {
+            let (api, token) = member.ok_or_else(|| anyhow::anyhow!("{}", tr("Sign in to Orbiters in Settings first.")))?.api();
+            api.captures(&token, &q)
+        });
     }
 }
 
@@ -592,7 +596,7 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
         // Progressive discoveries keep existing decoded pictures visible.
     }
     let development = cx.snap.settings.development;
-    let seen = state.account.see(&cx.snap.account.state, development);
+    let seen = state.account.see(&cx.snap.account, development);
     // Another account (or environment, or a sign-in refused): everything of the old one goes NOW, whatever the scan of
     // this computer's folders is doing (it went only once that scan ended, and an open remote picture, its editor or a
     // community's window stayed meanwhile).
@@ -2284,7 +2288,7 @@ fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<Vec<usize>> 
 fn is_current(world: &WorldState, e: &Entry) -> bool {
     world.in_world && world.world_id.as_ref() == Some(&e.world_id) && e.instance.is_some() && world.instance == e.instance
 }
-fn join_available(current: bool, alive: Option<bool>) -> bool {
+pub(crate) fn join_available(current: bool, alive: Option<bool>) -> bool {
     alive.unwrap_or(current)
 }
 
@@ -2431,7 +2435,7 @@ mod tests {
 
         // From outside: a capture's folder goes, the history learns where the other was taken, its upload is recorded.
         std::fs::remove_dir_all(&one).unwrap();
-        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "77~private".into(), at: controller::unix("2026-11-10T19:30:00Z"), account: None });
+        history.instances.push(InstanceVisit { world_id: "wrld_a".into(), instance: "77~private".into(), at: controller::unix("2026-11-10T19:30:00Z") });
         history.save(&history_file).unwrap();
         let item = orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Capture, id: 9, mine: true, ..Default::default() };
         controller::write_record_for_test(&records_file, &two, item);
@@ -2478,6 +2482,8 @@ mod tests {
         state.folders.set_sources(history_file, None);
         let mut time = 0.0;
         let mut frame = |state: &mut State, account: A| {
+            // (The member's key, as the service gives it with them.)
+            snap.account.member = account.username().map(|u| format!("production/{u}"));
             snap.account.state = account;
             time += 1.0 / 60.0;
             let mut toasts = orbiters_ui::toast::Toasts::default();
@@ -2548,6 +2554,8 @@ mod tests {
         snap.settings.sessions_dir = root.join("Sessions");
         let mut state = State { fixture: true, sources: Some((history_file, None)), ..Default::default() };
         let mut frame = |state: &mut State, account: A| {
+            // (The member's key, as the service gives it with them.)
+            snap.account.member = account.username().map(|u| format!("production/{u}"));
             snap.account.state = account;
             let mut toasts = orbiters_ui::toast::Toasts::default();
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {

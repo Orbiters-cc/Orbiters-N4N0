@@ -61,6 +61,10 @@ pub enum Command {
         down: bool,
         #[serde(default)]
         stamp: Option<Stamp>,
+        /// Let go: which press that ends ([`crate::VoiceStatus::press`], the number its press was stamped with). Another one's
+        /// release ends nothing.
+        #[serde(default)]
+        press: Option<u64>,
     },
     /// Audio output owns this gate until playback drains, so the answer cannot become input.
     AskPlayback { active: bool },
@@ -102,6 +106,10 @@ pub enum Command {
         down: bool,
         #[serde(default)]
         stamp: Option<Stamp>,
+        /// Let go: which press that ends ([`crate::VoiceStatus::press`], the number its press was stamped with). Another one's
+        /// release ends nothing.
+        #[serde(default)]
+        press: Option<u64>,
     },
     /// Shows a text on the panel as it is (tries the panel).
     Say {
@@ -157,12 +165,26 @@ pub enum Command {
     },
     /// Answers the ringing call.
     AnswerCall {
+        /// Which call its surface showed (`CallView::number`): another one, or none, and nothing is done.
+        #[serde(default)]
+        call: Option<u64>,
         #[serde(default)]
         stamp: Option<Stamp>,
     },
     /// Declines the ringing call or hangs up.
-    EndCall,
+    EndCall {
+        /// Which call its surface showed (`CallView::number`): another one, or none, and nothing is done.
+        #[serde(default)]
+        call: Option<u64>,
+        #[serde(default)]
+        stamp: Option<Stamp>,
+    },
     MuteCall {
+        /// Which call its surface showed (`CallView::number`): another one, or none, and nothing is done.
+        #[serde(default)]
+        call: Option<u64>,
+        #[serde(default)]
+        stamp: Option<Stamp>,
         on: bool,
     },
     /// Testing: holds N4N0 in a state (`None`: back to what N4N0 is doing).
@@ -310,8 +332,8 @@ impl Command {
     /// computer and what it shows, whoever is signed in.
     pub fn stamp_mut(&mut self) -> Option<&mut Option<Stamp>> {
         match self {
-            Command::AskTalk { down: true, stamp }
-            | Command::Talk { down: true, stamp }
+            Command::AskTalk { down: true, stamp, .. }
+            | Command::Talk { down: true, stamp, .. }
             | Command::RetryTurn { stamp, .. }
             | Command::AskAnswer { stamp, .. }
             | Command::Ask { stamp, .. }
@@ -319,14 +341,16 @@ impl Command {
             | Command::Presented { stamp }
             | Command::OpenLink { stamp, .. }
             | Command::Call { stamp, .. }
-            | Command::AnswerCall { stamp }
+            | Command::AnswerCall { stamp, .. }
+            | Command::EndCall { stamp, .. }
+            | Command::MuteCall { stamp, .. }
             | Command::Suggest { stamp, .. }
             | Command::Drop { stamp, .. }
             | Command::InviteMe { stamp, .. }
             | Command::ShareCapture { stamp, .. }
             | Command::Feedback { stamp, .. } => Some(stamp),
-            // Letting go, or ending: what a press began (which was stamped).
-            Command::AskTalk { down: false, .. } | Command::Talk { down: false, .. } | Command::EndCall | Command::MuteCall { .. } => None,
+            // Letting go: of the press it names (which was stamped).
+            Command::AskTalk { down: false, .. } | Command::Talk { down: false, .. } => None,
             // This computer's, its settings', the worn avatar's or the menus' own.
             Command::AskPage { .. }
             | Command::AskPlayback { .. }
@@ -384,7 +408,7 @@ mod tests {
     #[test]
     fn commands_keep_their_json() {
         let json = |c: &Command| serde_json::to_string(c).unwrap();
-        assert_eq!(json(&Command::Talk { down: false, stamp: None }), r#"{"kind":"talk","down":false,"stamp":null}"#);
+        assert_eq!(json(&Command::Talk { down: false, stamp: None, press: None }), r#"{"kind":"talk","down":false,"stamp":null,"press":null}"#);
         assert_eq!(json(&Command::Photo3DIn { seconds: 3 }), r#"{"kind":"photo_3d_in","seconds":3}"#);
         assert_eq!(json(&Command::Photo3D), r#"{"kind":"photo3_d"}"#);
         assert_eq!(json(&Command::TestFace { face: Some(N4n0Face::Happy) }), r#"{"kind":"test_face","face":"happy"}"#);
@@ -403,7 +427,7 @@ mod tests {
         assert_eq!(json(&Command::InviteMe { location: "wrld_a:1".into(), stamp: None }), r#"{"kind":"invite_me","location":"wrld_a:1","stamp":null}"#);
         // What had no fields before still reads.
         assert_eq!(serde_json::from_str::<Command>(r#"{"kind":"new_conversation"}"#).unwrap(), Command::NewConversation { conversation: None, stamp: None });
-        assert_eq!(serde_json::from_str::<Command>(r#"{"kind":"answer_call"}"#).unwrap(), Command::AnswerCall { stamp: None });
+        assert_eq!(serde_json::from_str::<Command>(r#"{"kind":"answer_call"}"#).unwrap(), Command::AnswerCall { call: None, stamp: None });
         assert_eq!(json(&Command::Qr { on: true, holder: MenuHolder::Overlay }), r#"{"kind":"qr","on":true,"holder":"overlay"}"#);
         assert_eq!(json(&Command::Friends { on: false, holder: MenuHolder::Window }), r#"{"kind":"friends","on":false,"holder":"window"}"#);
         // An older sender's command, without a holder.

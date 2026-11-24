@@ -290,12 +290,11 @@ pub fn fetch(source: &Source) -> anyhow::Result<()> {
     use orbiters_core::account::{Api, Server};
     let server = if r.development { Server::Development } else { Server::Production };
     // A public link needs no account.
-    let token = match orbiters_core::account::read(server) {
-        Some(a) => a.token,
-        None if r.kind == RemoteKind::Link => String::new(),
+    let (api, token) = match crate::member::reading(server) {
+        Some(m) => m.api(),
+        None if r.kind == RemoteKind::Link => (Api::new(server), String::new()),
         None => anyhow::bail!("{}", orbiters_i18n::tr("Sign in to Orbiters in Settings to edit its pictures")),
     };
-    let api = Api::new(server);
     if let Some(dir) = source.picture.parent() {
         std::fs::create_dir_all(dir)?;
     }

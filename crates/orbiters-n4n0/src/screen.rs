@@ -1390,24 +1390,6 @@ pub(crate) enum Opened {
 }
 
 impl N4n0 {
-    /// Previous instances read for the avatar's menu, as whoever looks now is shown them.
-    pub(crate) fn instances_read(self: &Shared) {
-        let n = self.clone();
-        std::thread::spawn(move || {
-            let rows = n.host.previous_instances();
-            n.n4n0.lock().unwrap().screen.menu.set_instances(rows, true, "");
-            n.publish();
-        });
-    }
-
-    /// Who looks changed (another VRChat account acts, or plays): what the avatar's menu lists is read again for them.
-    pub fn viewer_changed(self: &Shared) {
-        let listed = self.n4n0.lock().unwrap().screen.menu.instances_ready;
-        if listed {
-            self.instances_read();
-        }
-    }
-
     /// Something asked for N4N0's menu (the wake word alone, a hand on N4N0, a controller button): it opens on the
     /// avatar's screen when there is one, else in the overlay; N4N0 listens either way. Opening it again closes it.
     pub(crate) fn menu_open(self: &Shared, toggle: bool) {
@@ -1905,7 +1887,14 @@ impl N4n0 {
                     }
                 }
                 Effect::SaveVideo => self.command(crate::Command::SaveVideo),
-                Effect::Instances => self.instances_read(),
+                Effect::Instances => {
+                    let n = self.clone();
+                    std::thread::spawn(move || {
+                        let rows = orbiters_n4n0_core::invites::read_rows();
+                        n.n4n0.lock().unwrap().screen.menu.set_instances(rows, true, "");
+                        n.publish();
+                    });
+                }
                 Effect::InviteMe { location } => self.as_now(Surface::Avatar, |fence| fence.invite_send(location, true)),
                 Effect::QrScan(on) => {
                     let n = self.clone();
@@ -3177,9 +3166,6 @@ pub(crate) fn invite_route(host: &dyn crate::Host, epoch: u64, account: Option<&
     if let Some(account) = account {
         // Their own VRChat account, as it was when they asked: gone since, nothing is sent instead.
         return host.invite_self(location, account).unwrap_or_else(|| InviteAnswer::Failed { message: tr("Your VRChat account changed meanwhile: nothing was sent.").into() });
-    }
-    if !orbiters_n4n0_core::invites::goes_to_orbiters(location) {
-        return InviteAnswer::NeedsVrchat { message: tr("Connect your VRChat account here to be invited: this place is private, and is not known to be your account's.").into() };
     }
     // As the member who asked, or not at all.
     let answer = match host.account_for(epoch) {

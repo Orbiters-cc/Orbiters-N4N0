@@ -13,6 +13,5 @@
   "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "Connecte ton compte VRChat ici et l’invitation viendra de lui. Le compte d’Orbiters n’a pas pu t’inviter : {reason}",
   "Invite me needs your VRChat account": "L’invitation demande ton compte VRChat",
   "This instance has closed: VRChat cannot invite you there.": "Cette instance est fermée : VRChat ne peut pas t’y inviter.",
-  "This instance is full right now: try later or pick another.": "Cette instance est pleine : réessaie plus tard ou choisis-en une autre.",
-  "This private instance is not known to be your VRChat account's: nothing was sent.": "Rien ne dit que cette instance privée est à ton compte VRChat : rien n’a été envoyé."
+  "This instance is full right now: try later or pick another.": "Cette instance est pleine : réessaie plus tard ou choisis-en une autre."
 }

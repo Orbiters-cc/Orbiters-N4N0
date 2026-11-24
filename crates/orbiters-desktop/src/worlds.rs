@@ -171,9 +171,8 @@ impl VisitedWorld {
     }
 }
 
-/// Every world visited, pictured or recorded, the latest first, as `viewer` is shown them: no visit, picture or capture of
-/// another VRChat account's than the one the app acts as.
-pub fn load(sessions_dir: &Path, viewer: &visited::Viewer) -> Vec<VisitedWorld> {
+/// Every world visited, pictured or recorded, the latest first.
+pub fn load(sessions_dir: &Path) -> Vec<VisitedWorld> {
     let file = visited::shot_index_file();
     let index = {
         let _one = shot_index_lock();
@@ -182,26 +181,24 @@ pub fn load(sessions_dir: &Path, viewer: &visited::Viewer) -> Vec<VisitedWorld> 
         index
     };
     picture_cache::set_index(&index);
-    from_index(sessions_dir, index, false, viewer)
+    from_index(sessions_dir, index, false)
 }
 
 /// Photos & captures can show the cached listing while an archive is being checked, including pictures with no world.
-pub fn load_gallery(sessions_dir: &Path, folders: &[PathBuf], viewer: &visited::Viewer) -> Vec<VisitedWorld> {
-    from_index(sessions_dir, picture_index(&visited::shot_index_file(), visited::screenshot_dirs_with(folders)), true, viewer)
+pub fn load_gallery(sessions_dir: &Path, folders: &[PathBuf]) -> Vec<VisitedWorld> {
+    from_index(sessions_dir, picture_index(&visited::shot_index_file(), visited::screenshot_dirs_with(folders)), true)
 }
 
 /// [`load_gallery`] from a pictures' index and a visit history handed over, not read from where the app keeps them.
-pub fn gallery_from(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History, viewer: &visited::Viewer) -> Vec<VisitedWorld> {
-    from_index_with(sessions_dir, index, history, true, viewer)
+pub fn gallery_from(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History) -> Vec<VisitedWorld> {
+    from_index_with(sessions_dir, index, history, true)
 }
 
-fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool, viewer: &visited::Viewer) -> Vec<VisitedWorld> {
-    from_index_with(sessions_dir, index, &visited::History::load(&visited::history_file()), unplaced, viewer)
+fn from_index(sessions_dir: &Path, index: visited::ShotIndex, unplaced: bool) -> Vec<VisitedWorld> {
+    from_index_with(sessions_dir, index, &visited::History::load(&visited::history_file()), unplaced)
 }
 
-fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History, unplaced: bool, viewer: &visited::Viewer) -> Vec<VisitedWorld> {
-    let seen = history.clone().seen_by(viewer);
-    let listed = |world: &str, instance: Option<&str>, taken: u64| viewer.lists_capture(&history.owners_at(world, instance, taken));
+fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &visited::History, unplaced: bool) -> Vec<VisitedWorld> {
     let mut worlds: BTreeMap<String, VisitedWorld> = BTreeMap::new();
     fn entry<'a>(worlds: &'a mut BTreeMap<String, VisitedWorld>, id: &str) -> &'a mut VisitedWorld {
         worlds.entry(id.to_string()).or_insert_with(|| VisitedWorld {
@@ -214,7 +211,7 @@ fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &vis
             sessions: Vec::new(),
         })
     }
-    for (id, v) in &seen.worlds {
+    for (id, v) in &history.worlds {
         let w = entry(&mut worlds, id);
         w.visits = v.visits.len();
         w.last = w.last.max(v.last().unwrap_or(0));
@@ -225,9 +222,6 @@ fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &vis
     for (shot, layers) in group_layers(index.every_shot()) {
         if shot.info.world_id.is_none() && !unplaced { continue; }
         let id = shot.info.world_id.clone().unwrap_or_default();
-        if !listed(&id, shot.info.instance.as_deref(), shot.info.taken) {
-            continue;
-        }
         let w = entry(&mut worlds, &id);
         w.last = w.last.max(shot.info.taken);
         if w.name.is_empty() {
@@ -241,9 +235,6 @@ fn from_index_with(sessions_dir: &Path, index: visited::ShotIndex, history: &vis
     for s in sessions(sessions_dir) {
         let Some(world) = s.manifest.world.as_ref() else { continue };
         let Some(id) = world.id.clone().filter(|id| id.starts_with("wrld_")) else { continue };
-        if !listed(&id, world.instance.as_deref(), crate::controller::shares::unix(&s.manifest.created_utc)) {
-            continue;
-        }
         let w = entry(&mut worlds, &id);
         w.last = w.last.max(s.modified);
         if w.name.is_empty() {

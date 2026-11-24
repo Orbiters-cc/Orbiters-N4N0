@@ -72,7 +72,7 @@ pub trait LinkPipe {
 }
 
 /// The VRChats Orbiters' bridge runs, by process id: its main session and its side sessions; and whether this computer uses
-/// several VRChat profiles, or may (with one, no VRChat but the bridge's main is anyone's but the person's, and nothing is asked
+/// several VRChat profiles (with one, no VRChat but the bridge's main is anyone's but the person's, and nothing is asked
 /// of any log).
 pub struct Bridge {
     pub main: Option<u32>,

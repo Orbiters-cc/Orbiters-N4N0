@@ -108,22 +108,23 @@
 
 ## Several VRChat accounts on one computer
 
-The threat model every change and review here works by (the architect's proposal, 2026-11-24, after the twelfth verification; the
-owner may change it):
-- N4N0 must never **hand** a private place (an instance id with its nonce, an invite) to a game process, nor **send** it through
-  VRChat's or Orbiters' API, acting as another account than the one it belongs to, nor as an account it cannot identify.
-- Things stored on this computer (visit history, captures, caches) are shown in the app **per account**: what belongs to another
-  account is not listed while the app acts as a different one. Old entries with no known account show without their private part.
-- A computer on which **only profile 0 has ever been used** behaves as before profiles existed.
-- Out of scope: protecting one local account from another person with access to the same macOS/Windows user (files on disk are
-  readable by them anyway).
-
-Where it is decided, each once: whether a place goes with a start or to a game (`vrchat_launch::way`); whether one profile alone was
-ever used (`vrchat_launch::Profiles`, from N4N0's records, which remember every profile seen for good, the bridge's journal and
-VRChat's own data, `controller/profiles.rs`; what cannot be read is not one profile, except a game's log alone); who looks and what
-they are shown (`visited::Viewer`, `History::seen_by`, `Snapshot::viewer`: every view reads the history through it); whose a capture
-is (`History::owners_at`) and whether a place may be told (`visited::may_be_told`). With one profile nothing is asked of any log.
-Where whose a game is cannot be told, the way on is the account's own invite to itself: never a dead end, never a guess.
+What is kept apart, and what is not (the architect's ruling, 2026-11-24, after the thirteenth verification). **How far this goes is
+Enzo's decision, not taken yet: do not widen it without his word**; three rounds that did took working ways away from ordinary players.
+- **A computer of one profile behaves as before VRChat's profiles existed** (0.3.9-dev.42), on Windows and on a Mac: a private place
+  goes with the start, or straight into the game that runs; no game log is asked, and nothing is hidden, refused or withheld.
+- **Several profiles** is plain evidence that can be taken back, and nothing else: a nonzero profile on Home's choice
+  (`LaunchSettings::profiles`; its × takes it off), or one that runs or starts now, Home's or the bridge's
+  (`vrchat_launch::several`, `Controller::launcher_several`). Never guess it from VRChat's folder, its logs or its saved values, nor
+  from settings that could not be read, and never remember it for good.
+- **Protected, on a computer of several profiles: the launch hand-off of a private place** (anything but a public instance, an invite,
+  an instance made here for an account). It rides with no cold start: the profile chosen starts without it, that very VRChat's own log
+  proves who is signed in (made at or after its process, at full precision, and no other's), and it is delivered on a match alone (a
+  PC: the link into that very game, proven again right before; else the account's own invite to itself; a Mac: that invite). Otherwise
+  nothing is sent, Home says why and keeps it for **Try again**. The one rule is `vrchat_launch::way`. The Mac's bridge, which cannot do
+  the second step with nobody there, refuses its own starts (`several_profiles`).
+- **Deliberately not kept apart today**: what this computer stores (the visit history and every list of it, captures and their
+  places), whether a capture's instance is still open, the background presence and uploads to Orbiters, Orbiters' own account's invites,
+  and the Windows bridge's main session. They act as the app's accounts did before profiles.
 
 ## Coordination notice, 2026-11-23: the VRChat bridge's files
 

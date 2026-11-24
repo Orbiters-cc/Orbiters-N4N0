@@ -13,6 +13,5 @@
   "Connect your VRChat account here and the invite comes from it. Orbiters' account could not invite you: {reason}": "ここでVRChatアカウントを接続すると、そのアカウントから招待が届きます。Orbitersのアカウントでは招待できませんでした：{reason}",
   "Invite me needs your VRChat account": "招待にはあなたのVRChatアカウントが必要です",
   "This instance has closed: VRChat cannot invite you there.": "このインスタンスは閉じられました。VRChatは招待できません。",
-  "This instance is full right now: try later or pick another.": "このインスタンスは満員です。あとで試すか別のものを選んでください。",
-  "This private instance is not known to be your VRChat account's: nothing was sent.": "このプライベートインスタンスがあなたのVRChatアカウントのものか確認できないため、何も送信しませんでした。"
+  "This instance is full right now: try later or pick another.": "このインスタンスは満員です。あとで試すか別のものを選んでください。"
 }

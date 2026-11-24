@@ -259,7 +259,7 @@ impl super::Controller {
     /// Lists the computer's captures again for History (a menu opened it), as Photos & captures lists them.
     pub(super) fn menu_captures_list(self: &Shared) {
         let settings = self.settings();
-        let entries = shares::local_entries(&settings.sessions_dir, server(settings.development), &self.view().viewer_in_game());
+        let entries = shares::local_entries(&settings.sessions_dir, server(settings.development));
         self.menu_shares.lock().unwrap().list(entries);
         self.menu_captures_tick();
     }
@@ -294,7 +294,7 @@ impl super::Controller {
             }
         }
         let settings = self.settings();
-        let entries = shares::local_entries(&settings.sessions_dir, server(settings.development), &self.view().viewer_in_game());
+        let entries = shares::local_entries(&settings.sessions_dir, server(settings.development));
         let entry = entries.iter().find(|e| matches!(e.local, Some(Local::Session(_))) && folder_of(&e.key) == name).cloned();
         let Some(mut entry) = entry else { return Err(tr_latin("This capture is no longer on the computer").into()) };
         let made = self.menu_shares.lock().unwrap().made.contains(&name);
@@ -405,7 +405,6 @@ mod tests {
             world_name: "Rooftop".into(),
             taken: 1,
             instance: None,
-            owners: Vec::new(),
             source_key: Some(folder(dir)),
             people: Vec::new(),
             local: Some(Local::Session(dir.to_path_buf())),

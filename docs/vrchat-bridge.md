@@ -207,19 +207,16 @@ last known account is shown, or none. While a game starts or runs, whoever start
 as before, Home says why first, and no destination pressed for another profile waits for that game or is sent to its account.
 `get_state`'s `vrchats` says the profile of the VRChat that runs, `null` while it is not known.
 
-**A private place rides with no start where VRChat has several profiles** (2026-11-24, the architect's rulings after the eleventh
-verification), by one rule for every computer and every way there is (`vrchat_launch::way`). Private is anything but a public
+**A private place rides with no start where VRChat has several profiles** (2026-11-24; AGENTS.md, "Several VRChat accounts on one
+computer"), by one rule for every computer and every way there is (`vrchat_launch::way`). Private is anything but a public
 instance (`is_public_instance`: public, a group's public; a kind not known here is private), an invite whatever its instance, an
 instance made here for an account (`InstancePermits::owners`: that account's for as long as N4N0 runs, whatever a listing says
-since and whoever signs in; its own history keeps it after that).
-- **One profile**, by all of the evidence (`launcher_profiles`): N4N0's own records (known, running or starting, Home's and the
-  bridge's, its journal; a profile once seen is remembered for good in `LaunchSettings::profiles_seen`, whoever signed in on it) and
-  what VRChat itself shows (`controller/profiles.rs`): the `--profile` in its logs' command lines, and the names in its data folder
-  and of its saved values (the registry; a Mac's is the engine's `user.reg`) that mark another profile. The link goes with the start
-  and to the game that runs, as it did before there were profiles: nothing is asked of a log, and one that cannot be read changes
-  nothing. Records that were lost (`profiles_lost`) or data that cannot be read are not one profile: what is not known is several.
-  (Measured 2026-11-24 on a Mac that used profile 0 alone: `Cookies/Library`, `Library`, and no saved value with `profile` in its
-  name. VRChat documents no name of another profile's: its command lines, which its logs keep for a day, are the firm evidence.)
+since and whoever signs in).
+- **One profile**: the link goes with the start and to the game that runs, as it did before there were profiles: nothing is asked of
+  a log, and one that cannot be read changes nothing. A computer has several only by plain evidence (`vrchat_launch::several`): a
+  nonzero profile on Home's choice (`LaunchSettings::profiles`), or one that runs or starts now, Home's or the bridge's. Taken off the
+  choice (the × of its chip, when it is the one chosen and does not run; `Action::ForgetProfile`), the last one leaves one profile
+  again. What 0.3.9-dev.46 and dev.47 kept for good (`profiles_seen`, `profiles_lost`, `profile_ids`) is not read.
 - **Several**: VRChat starts on the profile chosen without any place, and the place waits (`Pending`) for **this** VRChat (on a Mac
   the very launch, on a PC the process that came on that profile since) to prove, by the user id its own log says, that the account
   signed in on it is the one it is for. Then it is delivered: by the link pipe on a PC (asked again of the process that takes it;
@@ -237,21 +234,15 @@ since and whoever signs in; its own history keeps it after that).
 **Evidence** is a log made at or after its process's start (both as precisely as the system keeps them: a log of the same second may
 be from before) and no other's, read to its end: none of two that could be, one from
 before, one cut shorter, one that cannot be read, a later sign-in line that names nobody or that VRChat did not write itself, a look
-that is over 15 s old, are "not known". What an earlier run said (`LaunchSettings::profile_ids`) is a label: it only tells Home not to
-offer an account's places on a profile last seen as another's. **History** is each account's: a visit (`visited-worlds.json`) carries
-the account its log said, and every view of it (Where, the menus' Previous instances, the visited worlds, World feedback, the
-assistant, the bridge's visited worlds) reads it through `History::seen_by` and shows and sends none of another's; a private place
-that is nobody's (from before accounts were kept, in a log that is gone) goes nowhere and is shown as its world. A capture is of the
-account whose visit it was taken in (`History::owners_at`): not listed as another one, its private instance shown, asked about and
-told to Orbiters (its upload, the presence) as that one alone (`visited::may_be_told`); Orbiters' own account is asked to invite to
-public instances only; whether an instance is open is asked with
-the session of the account it is asked as, on the hold that sends it.
+that is over 15 s old, are "not known". **Not kept apart by account** (deliberately; widening
+it is the owner's decision): the visit history and every list of it, captures and their places, whether a capture's instance is still
+open, the background presence, uploads, and Orbiters' own account's invites are as they were before profiles. A place taken from them
+goes to VRChat by the rule above, for the account that presses it.
 
 **On a Mac every start is made with exactly its own arguments** (`steam play --no-saved-arguments`, obelisk-cli 0.1.13): a
 `--profile` saved in the engine's launch settings reaches no game of N4N0's. **The bridge's start on a Mac** carries its private
 instance, so it needs a Mac with one profile (`several_profiles` is its refusal otherwise, before anything is made: the second step
-would be an invite a person takes in the game). Its instance is made with the session of the account the start was admitted for, and
-launched for that one, a resumed one too (`account_changed`).
+would be an invite a person takes in the game). Otherwise it is as it was before profiles, as the bridge on Windows is.
 
 **Known limit, the bridge on Windows.** Its main session is as it was, a standing decision: `go_to_world` makes the private
 instance with the app's VRChat account and starts VRChat on the profile asked for (the default one when none is) with the

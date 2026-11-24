@@ -943,7 +943,7 @@ impl eframe::App for App {
             } else if let Some(dir) = page.strip_prefix("share-to:") {
                 // "Share to …" beside VRChat's camera on the desktop: this window's own share dialog, on its friends.
                 let server = if self.ctl.view().settings.development { orbiters_core::account::Server::Development } else { orbiters_core::account::Server::Production };
-                if let Some(entry) = crate::controller::shares::session_entry(std::path::Path::new(dir), server, &self.ctl.view().viewer()) {
+                if let Some(entry) = crate::controller::shares::session_entry(std::path::Path::new(dir), server) {
                     self.set_page(Page::Sessions, anim::time(ctx));
                     self.sessions.gallery_mut().open_share_to(ctx, entry);
                     bring_to_front(ctx);

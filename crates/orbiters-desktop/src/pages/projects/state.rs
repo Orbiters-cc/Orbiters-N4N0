@@ -256,7 +256,7 @@ pub struct State {
     /// World projects' worlds as this computer has them (the captures recorded and the pictures taken there), read
     /// once per visit and library change, for the Worlds card.
     pub(super) here: HashMap<String, super::world_card::Here>,
-    pub(super) here_key: Option<(u64, PathBuf, u64, orbiters_core::visited::Viewer)>,
+    pub(super) here_key: Option<(u64, PathBuf, u64)>,
     pub(super) here_job: Job<HashMap<String, super::world_card::Here>>,
     /// Pictures picked to add to a world (the file dialog runs on a worker): the world's ID and name, and the files.
     pub(super) pick_job: Job<Option<(String, String, Vec<PathBuf>)>>,

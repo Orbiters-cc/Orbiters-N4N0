@@ -457,7 +457,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     // The pictures' index is the run's own ([`sandbox_user_data`]: VRChat's own picture folder only, unless
     // `ORBITERS_SCREENSHOT_PICTURE_FOLDERS` names more); `ORBITERS_SCREENSHOT_NO_PICTURES` leaves it out altogether,
     // for scenarios that do not show pictures when VRChat's folder is a large one.
-    let visited = if std::env::var_os("ORBITERS_SCREENSHOT_NO_PICTURES").is_some() { Vec::new() } else { crate::worlds::load(&settings.sessions_dir, &orbiters_core::visited::Viewer { single: true, ..Default::default() }) };
+    let visited = if std::env::var_os("ORBITERS_SCREENSHOT_NO_PICTURES").is_some() { Vec::new() } else { crate::worlds::load(&settings.sessions_dir) };
     let captured = visited.iter().max_by_key(|w| (w.reconstructed(), w.sessions.len())).cloned();
     let pictured = visited.iter().max_by_key(|w| w.shots.len()).cloned();
     let signed_in = with_account(&idle, crate::state::AccountState::SignedIn { username: "Desktop Tester".into() }, None);
@@ -2952,7 +2952,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             }
             if sc.open_detail && !world_opened && f >= 45 && app.worlds_mut().loaded() {
                 world_opened = true;
-                let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir, &orbiters_core::visited::Viewer { single: true, ..Default::default() });
+                let visited = crate::worlds::load(&sc.snapshot.settings.sessions_dir);
                 let pick = if sc.name == "world-close" {
                     // The first card: it is on screen to land back on.
                     visited.first()

@@ -314,6 +314,9 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
             }
         });
     }
+    if none && failed.is_some() {
+        return;
+    }
     if none && busy {
         for _ in 0..2 {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 164.0), Sense::hover());

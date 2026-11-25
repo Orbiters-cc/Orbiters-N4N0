@@ -4418,6 +4418,7 @@ dependencies = [
  "time",
  "tokio",
  "ufbx",
+ "ureq 3.4.2",
  "url",
  "uuid",
  "vrc-get-litedb",

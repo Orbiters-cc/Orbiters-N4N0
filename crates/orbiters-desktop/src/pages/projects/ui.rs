@@ -250,6 +250,12 @@ fn keep_places(list: &mut [Project], places: &mut std::collections::HashMap<std:
 
 fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.selected.is_none() && state.modal.is_none() {
+        // An install that stopped, of a project whose panel is not open.
+        if let Some(project) = state.opening.ended_for() {
+            if super::opening::card(ui, cx, state, &project, "gallery") {
+                ui.add_space(12.0);
+            }
+        }
         errors(ui, state, "gallery");
     }
     for (i, w) in state.scan.warnings.clone().iter().enumerate() {
@@ -651,14 +657,19 @@ fn activity(ui: &mut Ui, state: &mut State, area: Rect) {
     });
     // A Library move elsewhere than the panel on screen: an action of the page has the capsule while it runs, a moment.
     let repair = if a.is_none() && !shown_in_dialog { state.repair_capsule() } else { None };
+    // So has an editor being installed for a project whose panel is not the one on screen.
+    let install = if a.is_none() && repair.is_none() && !shown_in_dialog { state.install_capsule() } else { None };
     let b = repair.as_ref().map(|(label, detail, fraction, cancel)| feedback::Activity {
         label,
         detail: (!detail.is_empty()).then_some(detail.as_str()),
         fraction: *fraction,
         cancel: *cancel,
     });
-    if feedback::activity(ui, Id::unique("projects-activity"), area, a.as_ref().or(b.as_ref())) {
-        if repair.is_some() {
+    let c = install.as_ref().map(|(label, fraction)| feedback::Activity { label, detail: None, fraction: *fraction, cancel: true });
+    if feedback::activity(ui, Id::unique("projects-activity"), area, a.as_ref().or(b.as_ref()).or(c.as_ref())) {
+        if install.is_some() {
+            state.cancel_install();
+        } else if repair.is_some() {
             state.cancel_repair();
         } else {
             state.copy_cancel.store(true, Ordering::Relaxed);

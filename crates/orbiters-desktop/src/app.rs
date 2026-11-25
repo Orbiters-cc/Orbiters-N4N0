@@ -824,6 +824,8 @@ impl App {
             top: TITLE_H,
             go: None,
         };
+        // An editor being installed ends by opening its project, whatever page shows.
+        self.projects.poll_opening(&ctx, &mut cx);
         match self.page {
             Page::Home => pages::home::show(&mut child, &mut cx, &mut self.home),
             Page::Projects => pages::projects::show(&mut child, &mut cx, &mut self.projects),

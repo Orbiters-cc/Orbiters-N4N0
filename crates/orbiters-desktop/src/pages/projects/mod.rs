@@ -7,6 +7,7 @@ mod dialogs;
 mod duplicate;
 mod menus;
 mod missing_card;
+mod opening;
 mod package_fixtures;
 mod packages_card;
 mod panel;

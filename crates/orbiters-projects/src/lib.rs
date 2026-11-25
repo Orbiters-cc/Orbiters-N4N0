@@ -32,6 +32,7 @@ pub mod suggestions;
 pub mod templates;
 mod theirs;
 pub mod unity6;
+pub mod unity_install;
 pub mod updates;
 pub mod vpm;
 mod vpm_http;
@@ -376,7 +377,7 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
     }
     let unity = stamp.text.clone();
     // Only that exact editor and build: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
-    let chosen = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
+    let chosen = choose_editor(&unity, stamp.revision.as_deref(), unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
     let editor = chosen.program.clone();
     let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
@@ -416,22 +417,23 @@ fn preflight(project: &Path) -> Option<PathBuf> {
 }
 
 /// The program Open uses for a project on `unity`: one that says it is exactly that version, of the build the project names,
-/// for this computer; never another one, which is named instead.
-fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<unity6::editors::Candidate> {
-    match found {
-        unity6::editors::Found::Exact(c) => Ok(c),
-        unity6::editors::Found::Unverified(c) => anyhow::bail!(
-            "{}",
-            tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = c.program.display(), version = unity)
-        ),
-        unity6::editors::Found::Missing { wrong } => match wrong.first() {
-            Some(other) => anyhow::bail!(
-                "{}",
-                tr!("Unity {version} is not installed: {path} is another version. Open Unity Hub to install {version}.", version = unity, path = other.program.display())
-            ),
-            None => anyhow::bail!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = unity)),
+/// for this computer; never another one, which is named instead ([`unity_install::NotInstalled`]).
+fn choose_editor(unity: &str, revision: Option<&str>, found: unity6::editors::Found) -> anyhow::Result<unity6::editors::Candidate> {
+    let (found, words) = match found {
+        unity6::editors::Found::Exact(c) => return Ok(c),
+        unity6::editors::Found::Unverified(c) => {
+            let words = tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = c.program.display(), version = unity);
+            (Some(c.program), words)
+        }
+        unity6::editors::Found::Missing { wrong } => match wrong.into_iter().next() {
+            Some(other) => {
+                let words = tr!("Unity {version} is not installed: {path} is another version. Open Unity Hub to install {version}.", version = unity, path = other.program.display());
+                (Some(other.program), words)
+            }
+            None => (None, tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = unity)),
         },
-    }
+    };
+    Err(anyhow::Error::new(unity_install::NotInstalled { version: unity.to_owned(), revision: revision.map(str::to_owned), found, words }))
 }
 
 /// An editor that started and ended at once (its exit status when the system gave one, and the sentence saying so): a
@@ -776,16 +778,16 @@ mod open_tests {
         use unity6::editors::{Candidate, Check, Found, Hint};
         let candidate = |program: &str, check: Check| Candidate { program: PathBuf::from(program), hint: Hint::HubFolder, check, identity: None, modules: Default::default() };
         let wrong = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Wrong("it is Unity 2022.3.22f1, not 6000.0.67f1".into()));
-        let error = format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![wrong] }).unwrap_err());
+        let error = format!("{:#}", choose_editor("6000.0.67f1", None, Found::Missing { wrong: vec![wrong] }).unwrap_err());
         assert!(error.contains("another version") && error.contains("6000.0.67f1"), "{error}");
-        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![] }).unwrap_err()).contains("not installed"));
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", None, Found::Missing { wrong: vec![] }).unwrap_err()).contains("not installed"));
         // Verification blocker 4: a program found by another tool's hint that says nothing of itself is not used.
         let mut vcc_hint = candidate("D:/Elsewhere/Unity.exe", Check::Unverified);
         vcc_hint.hint = Hint::VccSettings;
-        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Unverified(vcc_hint)).unwrap_err()).contains("could not be verified"));
-        assert!(choose_editor("6000.0.67f1", Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_err(), "not even in Hub's own folder of that version");
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", None, Found::Unverified(vcc_hint)).unwrap_err()).contains("could not be verified"));
+        assert!(choose_editor("6000.0.67f1", None, Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_err(), "not even in Hub's own folder of that version");
         let exact = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Verified);
-        assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap().program, PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
+        assert_eq!(choose_editor("6000.0.67f1", None, Found::Exact(exact)).unwrap().program, PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
         // The scan saw 2022; Creator Companion changed the file since: the file is what counts, and a file naming no
         // version stops Open before any editor is looked for.
         let temp = tempfile::tempdir().unwrap();

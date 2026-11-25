@@ -510,7 +510,7 @@ mod tests {
         assert!(!acts.iter().any(|(_, a)| *a == super::super::menus::ProjectAct::Open), "no Open in its menu");
         let ctx = egui::Context::default();
         state.open_unity(&ctx, &project, false);
-        assert!(!state.action.running() && state.error.as_deref().is_some_and(|e| e.contains("Creator Companion")));
+        assert!(!state.action.running() && state.opening.note.as_ref().is_some_and(|n| n.project == path && n.words.contains("Creator Companion")), "said beside its button");
         // Not finished, or the first copy once Creator Companion's own copy was taken: the same.
         let mut l = look(&[]);
         l.trials = vec![(trial_job(&path, None), trial::Status::Unfinished)];

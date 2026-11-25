@@ -48,6 +48,8 @@ libc = "0.2"
 
 # Unity's and Blender's bundles, the volumes mounted, and the applications running (mac.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
+# Unity Hub's download and Unity's release data (unity_install.rs), with the app's own agent.
+ureq = { version = "3", default-features = false }
 plist = "1"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }

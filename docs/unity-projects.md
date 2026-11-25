@@ -309,6 +309,33 @@ when it stayed open after the question) and **Kill** (after Kill, losing unsaved
 import workers ended, other editors untouched, nothing in the project deleted). The Toolkit has no command channel
 with the desktop, so saving is Unity's own question rather than a silent save.
 
+## What Open in Unity came to, and the editor it needs
+
+What a press of Open in Unity comes to is said beside the button (`pages/projects/opening.rs`): one card, under the panel's hero, under its
+compact bar once scrolled, over the button in the preview's window, in the set-up dialog and on the Unity 6 sheet; a gallery card's menu opens
+the panel, where the card is. The button itself turns meanwhile. Nothing of it goes to the page's banner, which can be off screen (the owner's
+first try on a Mac, 2026-11-25: the notice was between two cards far down, and the press looked like nothing).
+
+**On a Mac, a missing editor is installed from there** (`orbiters_projects::unity_install`), as Home sets VRChat's engine up. The version is
+the project's own; its changeset the project's, else the release list's (`unity6-data.json`), else Unity's release data: no constant of its
+own. In order: the room on each disk, asked before anything comes and again before the editor (`unity6::budget`, Unity's published sizes);
+Unity Hub when it is missing, from Unity's downloads (size, SHA-512 and Unity's signature checked, resumed where it was cut), into
+`/Applications`, else `~/Applications`, with no password; the editor for Apple silicon with Windows Build Support (Mono), by the Hub's own
+command line; then the editor is looked for and must be that version, that build and for Apple silicon.
+
+- Unity Hub 4 (looked at: 4.0.2) **no longer runs** `-- --headless`: its bundle has Unity's command line, `Contents/Resources/unity`, whose
+  `install ... --format ndjson` says its progress and goes on from a partial download. A Hub 3 is still asked headless. What neither can do (a
+  folder macOS wants a password for) is done in Unity Hub itself, opened on `unityhub://<version>/<changeset>`, and the flow goes on once the
+  editor is there.
+- It survives the app: the command runs in a group of its own, its words in `<data>/unity-install/install.log`, its process and when it began in
+  `install.json`. The next window follows it, or offers to go on. Cancel is a Ctrl+C: what was downloaded stays.
+- What only the person can do is one step with one button: signing in and the free Personal licence, in Unity Hub (never accepted for them:
+  no `--accept-eula`, no `license activate`). It is waited for (Unity's licence files, else its command line), with **Open the project anyway** for
+  a licence this cannot see. No Rosetta is needed.
+- Windows keeps what it had, in the same card: Unity Hub on that very editor.
+
+Tests: `unity_install/tests.rs` (a made-up Hub and downloads), `opening.rs`; screenshots `projects-opening-*`.
+
 ## Verification
 
 Set `CARGO_TARGET_DIR=C:/Users/Enzo/.orbiters-target` and `CARGO_INCREMENTAL=0` for every build. Focused checks:

@@ -159,6 +159,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             if b.confirm(ui) {
                 state.open_unity_as_is(&ctx, &project);
             }
+            super::opening::card(ui, cx, state, &project.path, "u6-sheet");
         }
         Step::Place => {
             look(&ctx, state, &project);

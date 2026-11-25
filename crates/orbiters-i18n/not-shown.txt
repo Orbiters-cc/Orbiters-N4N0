@@ -109,3 +109,5 @@ crates/orbiters-projects/src/copies/tests.rs
 crates/orbiters-desktop/src/controller/groups_tests.rs
 crates/orbiters-desktop/src/controller/groups_world.rs
 crates/orbiters-desktop/src/pages/groups/window_tests.rs
+# Installing the Unity editor: its tests (made-up programs and their words).
+crates/orbiters-projects/src/unity_install/tests.rs

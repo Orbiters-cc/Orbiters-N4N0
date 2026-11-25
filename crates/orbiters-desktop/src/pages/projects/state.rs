@@ -74,6 +74,8 @@ pub(super) enum Outcome {
     Picked(Option<PathBuf>),
     /// Done, with only this to say (a program opened).
     Said(String),
+    /// A project Unity did not open: what is said beside the button.
+    NotOpened(Box<super::opening::Note>),
     /// A package change refused for a conflict: the project and the plan making it coherent.
     Conflict(PathBuf, orbiters_projects::coherent::Plan),
 }
@@ -210,6 +212,8 @@ pub struct State {
     /// Screenshots: a real run's Repair storage was pressed.
     pub(super) stage_repair_started: bool,
     pub(super) error: Option<String>,
+    /// Open in Unity: what it came to, and the editor being installed (`opening`).
+    pub(super) opening: super::opening::Opening,
     pub(super) query: String,
     pub(super) package_query: String,
     pub(super) prerelease: bool,
@@ -400,6 +404,7 @@ impl Default for State {
             storage: Default::default(),
             stage_repair_started: false,
             error: None,
+            opening: Default::default(),
             query: String::new(),
             package_query: String::new(),
             prerelease: false,
@@ -783,8 +788,10 @@ impl State {
             let c = c.or_what_was_loaded(&self.catalog);
             self.set_catalog(c);
         }
+        self.poll_opening(ctx, cx);
         if let Some(result) = self.action.take() {
             self.action_label.clear();
+            self.opening.now = None;
             self.adding_repositories = false;
             self.busy_package = None;
             self.repo_adding = None;
@@ -805,6 +812,15 @@ impl State {
                         self.close_modal(ctx);
                     }
                     self.reveal = Some(path);
+                    self.load_view(ctx, false);
+                    self.refresh(ctx, false);
+                }
+                Ok(Outcome::NotOpened(note)) => {
+                    // (what the set-up dialog was to go on with did not come)
+                    if let Some(f) = self.flow.as_mut() {
+                        f.unity_open = false;
+                    }
+                    self.not_opened(ctx, *note);
                     self.load_view(ctx, false);
                     self.refresh(ctx, false);
                 }
@@ -1608,6 +1624,30 @@ impl State {
                 self.view.packages.clear();
                 self.git = None;
                 self.fixture_view_loading = true;
+            }
+            name if name.starts_with("projects-opening-") => {
+                use orbiters_projects::unity_install::{End, Step, Wanted};
+                self.selected = Some(first.path.clone());
+                let wanted = Wanted { version: first.unity.clone(), changeset: Some("887be4894c44".into()), project: first.path.clone(), name: first.name.clone() };
+                let gb = 1_000_000_000u64;
+                let (step, ended) = match name {
+                    "projects-opening-installing" => (Some(Step::Editor { percent: 43, installing: false, bytes: 3_813_490_806 }), None),
+                    "projects-opening-licence" => (Some(Step::Licence { signed_in: false }), None),
+                    "projects-opening-room" => (None, Some(End::Room { at: "/Applications/Unity/Hub/Editor".into(), need: 16 * gb, free: Some(9 * gb) })),
+                    "projects-opening-failed" => (None, Some(End::Failed("Unity Hub could not install it: the connection was lost.".into()))), // i18n: not shown (sample data of the screenshot scenes)
+                    _ => (None, None),
+                };
+                self.opening = super::opening::Opening::fixture(wanted.clone(), step, ended);
+                if matches!(name, "projects-opening-missing" | "projects-opening-elsewhere" | "projects-opening-scrolled") {
+                    self.opening.offers = Some(name != "projects-opening-elsewhere");
+                    let error = anyhow::Error::new(orbiters_projects::unity_install::NotInstalled {
+                        version: wanted.version.clone(),
+                        revision: wanted.changeset,
+                        found: None,
+                        words: tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = wanted.version),
+                    });
+                    self.opening.note = Some(super::opening::Note::of(&first, &error));
+                }
             }
             "projects-error" => {
                 self.error = Some("Creator Companion's project list cannot be read now: its projects are shown as they last were.".into()); // i18n: not shown (sample data of the screenshot scenes)

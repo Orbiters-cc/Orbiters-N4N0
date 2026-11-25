@@ -114,22 +114,27 @@ impl State {
     }
 
     fn open_unity_with(&mut self, ctx: &egui::Context, project: &Project, quiet: bool, open: fn(&Project) -> anyhow::Result<orbiters_projects::Opened>) {
-        if self.u6.waiting(&project.path) {
-            self.error = Some(tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").into());
-            return;
+        let refused = if self.u6.waiting(&project.path) {
+            Some(tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").to_string())
+        } else if self.repairing(&project.path) {
+            Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name))
+        } else if self.action.running() {
+            // A menu's Open is not greyed out by another action, and saying nothing would look like a click that did nothing.
+            Some(tr!("Unity was not opened: wait for this to end first ({action}).", action = self.action_label.trim_end_matches('…')))
+        } else {
+            None
+        };
+        if let Some(words) = refused {
+            return self.not_opened(ctx, super::opening::Note::said(&project.path, words));
         }
-        if self.repairing(&project.path) {
-            self.error = Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name));
-            return;
-        }
-        // A menu's Open is not greyed out by another action, and saying nothing would look like a click that did nothing.
-        if self.action.running() {
-            self.error = Some(tr!("Unity was not opened: wait for this to end first ({action}).", action = self.action_label.trim_end_matches('…')));
-            return;
-        }
+        self.opening.note = None;
+        self.opening.now = Some(project.path.clone());
         let p = project.clone();
         self.task(ctx, tr("Opening Unity…"), move || {
-            let opened = open(&p)?;
+            let opened = match open(&p) {
+                Ok(opened) => opened,
+                Err(e) => return Ok(super::opening::outcome(&p, &e)),
+            };
             if quiet {
                 return Ok(super::state::Outcome::Picked(None));
             }
@@ -583,7 +588,9 @@ mod tests {
         });
         assert!(state.repairing(&project.path), "the same folder, however it is written");
         state.open_unity(&ctx, &project, false);
-        assert!(state.error.as_deref().is_some_and(|e| e.contains("moving the Library of Avatorbit")));
+        let note = state.opening.note.clone().expect("said beside the button");
+        assert!(note.words.contains("moving the Library of Avatorbit") && note.project == project.path);
+        assert_eq!(state.selected.as_ref(), Some(&project.path), "pressed from a card's menu: its panel opens, where that is");
         assert!(!state.action.running(), "no attempt to open it was started");
         // Another project opens meanwhile: the move holds nothing of the page's (one action at a time is for short ones).
         let other = Project { name: "Other".into(), path: PathBuf::from("Z:/no/such/project"), ..Default::default() };

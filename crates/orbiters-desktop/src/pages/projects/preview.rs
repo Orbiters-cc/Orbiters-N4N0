@@ -1028,6 +1028,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if !closing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !orbiters_ui::popup::any_open(&ctx) {
         close = true;
     }
+    let (inside, content) = (f.rect, f.content);
     pv.light_switch = light_switch;
     pv.scene_rects = rects_out;
     match act {
@@ -1050,6 +1051,15 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             state.open_unity(&ctx, &project, false);
         }
         None => {}
+    }
+    // What Open in Unity came to, right over its button.
+    if !closing && content > 0.5 && state.says_of_opening(&project.path) {
+        let high = state.anchors.get("opening-preview").map_or(150.0, |r| r.height());
+        let at = Rect::from_min_size(pos2(inside.right() - 14.0 - (inside.width() - 28.0).min(460.0), inside.bottom() - 14.0 - 32.0 - 10.0 - high), vec2((inside.width() - 28.0).min(460.0), high));
+        orbiters_ui::front::area(&ctx, wid.with("opening"), Order::Foreground, true).fixed_pos(at.min).fade_in(false).show(&ctx, |ui| {
+            ui.set_width(at.width());
+            super::opening::card(ui, cx, state, &project.path, "preview");
+        });
     }
     if close {
         if let Some(m) = state.preview.window.as_mut() {

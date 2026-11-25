@@ -89,7 +89,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::New => new_project(ui, state),
                 Modal::Avatars => avatar_picker(ui, cx, state),
                 Modal::ChooseProject(avatar) => project_choice(ui, state, avatar),
-                Modal::Setup => setup_steps(ui, state),
+                Modal::Setup => setup_steps(ui, cx, state),
                 Modal::Duplicate(path) => super::duplicate::body(ui, state, path),
                 Modal::Conflict => super::conflict::body(ui, state),
                 Modal::Unity6(path) => super::unity6_sheet::body(ui, cx, state, path),
@@ -802,9 +802,14 @@ enum Step {
     Stopped(Tone),
 }
 
-fn setup_steps(ui: &mut Ui, state: &mut State) {
+fn setup_steps(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     errors(ui, state, "setup");
+    if let Some(project) = state.flow.as_ref().map(|f| f.project.path.clone()) {
+        if super::opening::card(ui, cx, state, &project, "setup") {
+            ui.add_space(8.0);
+        }
+    }
     let s = stage(state);
     let nano = state.flow.as_ref().map(|f| !f.packages_only).or(state.pending.as_ref().map(|p| p.2)).unwrap_or(true);
     let result = state.flow.as_ref().and_then(|f| f.result.as_ref()).map(|r| r.message.clone()).unwrap_or_default();
@@ -994,10 +999,9 @@ fn setup_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             open_project(state, ui, false);
             let hub = Button::new(tr("Unity Hub")).icon(icons::CUBE).variant(Variant::Ghost).id_salt("setup-hub");
             if widgets::activated(&hub.show(ui)) {
-                state.task(&ctx, tr("Opening Unity Hub…"), move || {
-                    orbiters_projects::open_hub()?;
-                    Ok(Outcome::Picked(None))
-                });
+                if let Some(project) = state.flow.as_ref().map(|f| f.project.path.clone()) {
+                    state.open_hub_for(&ctx, &project);
+                }
             }
         }
     }

@@ -103,6 +103,8 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
             let top = ui.cursor().top();
             hero(ui, cx, state, &project, !split.docked);
+            // What Open in Unity came to, right under it.
+            super::opening::card(ui, cx, state, &project.path, "panel");
             only_here(ui, cx, state, &project);
             super::storage_card::card(ui, state, &project);
             ctx.data_mut(|d| d.insert_temp(unity6_y, ui.cursor().top() - top));
@@ -168,11 +170,11 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
     let dy = 8.0 * (1.0 - k);
     let mut bu = ui.new_child(UiBuilder::new().max_rect(band).id_salt("project-panel-bar"));
     bu.multiply_opacity(k);
-    let b = Button::new(tr("Open in Unity"))
+    let b = Button::new(state.opening_label(&project.path).unwrap_or(tr("Open in Unity")))
         .icon(icons::PLAY)
         .variant(Variant::Primary)
         .size(Size::Sm)
-        .enabled(project.registered && !project.missing && !state.running() && !state.repairing(&project.path) && !state.u6.waiting(&project.path) && k > 0.5)
+        .enabled(project.registered && !project.missing && !state.running() && !state.repairing(&project.path) && !state.u6.waiting(&project.path) && state.opening_label(&project.path).is_none() && k > 0.5)
         .id_salt("panel-bar-open");
     let open = project.registered && state.session(&project.path).open();
     let bw = if open { 280.0_f32.min(band.width() * 0.6) } else { b.desired_width(&bu) };
@@ -201,6 +203,17 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         }
     } else if project.registered && widgets::activated(&b.show_at(&mut bu, br)) {
         state.open_unity(&ctx, project, false);
+    }
+    // The card under the hero is out of sight: the same under the bar, while it says something.
+    if k > 0.5 && state.says_of_opening(&project.path) {
+        let under = Rect::from_min_max(pos2(rect.left() + 8.0, band.bottom() + 8.0), pos2(rect.right() - 14.0, rect.bottom() - 8.0));
+        let mut ou = ui.new_child(UiBuilder::new().max_rect(under).layout(egui::Layout::top_down(egui::Align::Min)).id_salt("project-panel-bar-opening"));
+        ou.set_clip_rect(rect.intersect(ui.clip_rect()));
+        // (what is under it is not pressed through it)
+        if let Some(r) = state.anchors.get("opening-bar").copied() {
+            let _ = ou.interact(r, Id::unique("project-panel-bar-opening-body"), Sense::click());
+        }
+        super::opening::card(&mut ou, cx, state, &project.path, "bar");
     }
 }
 
@@ -324,12 +337,12 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         } else if waiting {
             tr("Waiting for migration")
         } else {
-            tr("Open in Unity")
+            state.opening_label(&project.path).unwrap_or(tr("Open in Unity"))
         })
             .icon(icons::PLAY)
             .variant(Variant::Primary)
             .width(main_w)
-            .enabled(!project.missing && !busy && !moving && !waiting)
+            .enabled(!project.missing && !busy && !moving && !waiting && state.opening.installing().is_none_or(|w| w.project != project.path))
             .id_salt("panel-open");
         if widgets::activated(&b.show_at(ui, main)) {
             state.open_unity(&ctx, project, false);
@@ -354,10 +367,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     }
     let hub = IconButton::new(icons::CUBE, mark("Open Unity Hub")).size(40.0, 17.0).backdrop(theme::control()).id_salt("panel-hub");
     if !open && widgets::activated(&hub.show_at(ui, round(1))) {
-        state.task(&ctx, tr("Opening Unity Hub…"), move || {
-            orbiters_projects::open_hub()?;
-            Ok(Outcome::Picked(None))
-        });
+        state.open_hub_for(&ctx, &project.path);
     }
     let menu_r = round(0);
     state.anchors.insert("project-menu".into(), menu_r);

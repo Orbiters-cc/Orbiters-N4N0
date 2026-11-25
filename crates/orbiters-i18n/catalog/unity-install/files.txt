@@ -1,0 +1,3 @@
+# Installing the Unity editor a project needs, and what Open in Unity came to, beside its button.
+crates/orbiters-projects/src/unity_install.rs
+crates/orbiters-desktop/src/pages/projects/opening.rs

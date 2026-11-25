@@ -88,7 +88,7 @@ pub(super) fn buttons(ui: &mut Ui, list: &[(&str, &str, bool, &str)], primary: b
     pressed
 }
 
-fn open_url(ctx: &egui::Context, cx: &mut Cx, url: &str) {
+pub(super) fn open_url(ctx: &egui::Context, cx: &mut Cx, url: &str) {
     if let Err(e) = crate::controller::open_url(url) {
         cx.toasts.push(ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
     }

@@ -1480,16 +1480,7 @@ impl Projects {
                 json!({ "listed": true, "in_creator_companion": project.shared, "note": IN_ORBITERS })
             }
             "hide" | "unhide" => {
-                let mut list = hidden::load();
-                let key = discovery::key(&project.path);
-                if action == "hide" {
-                    list.insert(key);
-                } else {
-                    list.remove(&key);
-                }
-                // Numbered by time: the window keeps its own count, and saves made here must win over older ones.
-                let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                hidden::save(&list, generation).map_err(|e| failed("save_failed", e, "Try again."))?;
+                hidden::Change::new(&project.path, action == "hide").save().map_err(|e| failed("save_failed", e, "Try again."))?;
                 json!({ "hidden": action == "hide", "note": "Only the tab's lists change: the project stays where it is, and VCC and ALCOM list it as before." })
             }
             "reveal" => {

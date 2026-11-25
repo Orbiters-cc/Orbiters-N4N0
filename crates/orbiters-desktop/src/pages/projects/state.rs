@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 pub(super) enum ScanEvent {
     /// The projects hidden from the lists, read before the cached scan.
-    Hidden(BTreeSet<String>),
+    /// The hidden projects, and how many of the changes made here were saved when they were read.
+    Hidden(BTreeSet<String>, u64),
     Update(Scan),
     Done(Result<Scan, String>),
 }
@@ -247,10 +248,11 @@ pub struct State {
     /// Screenshots (`projects-revisit`): the pictures asked for again after the page's second visit, the same but one.
     pub(super) fixture_arrivals: Vec<(String, TextureHandle, u64)>,
     /// Projects hidden from the lists ([`hidden`], by [`discovery::key`] of their folder), how many changes were made
-    /// to it here (each save numbered; a list read later than one never replaces it), and whether the lists show them
-    /// anyway, dimmed and marked.
+    /// to it here and how many of them are saved (a list read before one was never replaces it), and whether the lists show
+    /// them anyway, dimmed and marked.
     pub(super) hidden: BTreeSet<String>,
     pub(super) hidden_changes: u64,
+    pub(super) hidden_saved: Arc<std::sync::atomic::AtomicU64>,
     pub(super) show_hidden: bool,
     /// Projects' sizes on disk as last measured ([`size`]), the projects looked up since the page opened, the lookup
     /// and the walk running (one project at a time) and its cancel.
@@ -433,6 +435,7 @@ impl Default for State {
             fixture_arrivals: vec![],
             hidden: BTreeSet::new(),
             hidden_changes: 0,
+            hidden_saved: Arc::default(),
             show_hidden: false,
             sizes: HashMap::new(),
             sizes_asked: HashSet::new(),
@@ -591,9 +594,11 @@ impl State {
         let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
         // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
         let working = super::super::Working::begin();
+        let hidden_saved = self.hidden_saved.clone();
         std::thread::spawn(move || {
             let _working = working;
-            let _ = tx.send(ScanEvent::Hidden(hidden::load()));
+            let saved = hidden_saved.load(Ordering::SeqCst);
+            let _ = tx.send(ScanEvent::Hidden(hidden::load(), saved));
             let scan = retained.unwrap_or_else(discovery::cached);
             let _ = tx.send(ScanEvent::Update(scan.clone()));
             ctx.request_repaint();
@@ -733,8 +738,8 @@ impl State {
             while let Ok(event) = rx.try_recv() {
                 match event {
                     // A list read before a change made here would undo it.
-                    ScanEvent::Hidden(list) if self.hidden_changes == 0 => self.hidden = list,
-                    ScanEvent::Hidden(_) => {}
+                    ScanEvent::Hidden(list, saved) if saved == self.hidden_changes => self.hidden = list,
+                    ScanEvent::Hidden(..) => {}
                     ScanEvent::Update(scan) => {
                         self.scan = scan;
                         self.scan_serial += 1;
@@ -1136,12 +1141,14 @@ impl State {
             return;
         }
         self.hidden_changes += 1;
-        let (list, generation) = (self.hidden.clone(), self.hidden_changes);
+        let (change, saved) = (hidden::Change::new(path, hide), self.hidden_saved.clone());
         let working = super::super::Working::begin();
         std::thread::spawn(move || {
             let _working = working;
-            if let Err(e) = hidden::save(&list, generation) {
-                eprintln!("hidden projects: {e:#}");
+            match change.save() {
+                Ok(()) => drop(saved.fetch_add(1, Ordering::SeqCst)),
+                // (Not counted as saved: the list as it is here stays.)
+                Err(e) => eprintln!("hidden projects: {e:#}"),
             }
         });
     }

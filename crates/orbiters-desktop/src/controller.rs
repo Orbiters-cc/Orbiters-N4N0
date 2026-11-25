@@ -17,7 +17,7 @@ use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
 use orbiters_core::visited;
 use orbiters_i18n::{mark, tr};
-use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
+use orbiters_core::vrchat_log::{LogEvent, WorldState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -593,6 +593,7 @@ impl Controller {
         let mut snapshot = Snapshot::with(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
+        let sides = Arc::<crate::bridge::sessions::Sides>::default();
         // N4N0 lives in the controller and reaches it through a weak link: no cycle keeps either alive.
         Arc::new_cyclic(|me| Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
@@ -638,7 +639,7 @@ impl Controller {
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),
             bridge: Mutex::new(None),
-            sides: Arc::default(),
+            sides: sides.clone(),
             followed: Mutex::new(None),
             quieted: Mutex::new(Vec::new()),
             travel: Mutex::new(None),
@@ -657,7 +658,7 @@ impl Controller {
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
-            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
+            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::new(vrchats::TargetLog::new(None, sides))),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             // (Counted on from the moment it starts: a press that waited in a window since before is for no call of now.)
@@ -677,11 +678,11 @@ impl Controller {
             groups_admitted: Arc::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
-            pending_start: Mutex::new(None),
             settings_changes: Mutex::default(),
             osc_starting: Mutex::new(()),
             #[cfg(test)]
             test_settings_acted: Mutex::default(),
+            pending_start: Mutex::new(None),
             #[cfg(test)]
             test_commands: Mutex::new(None),
             #[cfg(test)]
@@ -2274,7 +2275,6 @@ impl Controller {
             (revision, s.settings.clone())
         };
         self.publish();
-        if echo && previous.walk_boost.strength != settings.walk_boost.strength {
         self.queue_save(revision, (*settings).clone());
         self.act_on_settings();
     }
@@ -2311,6 +2311,7 @@ impl Controller {
 
     /// What a change of the settings does to what runs.
     fn settings_changed(self: &Shared, SettingsChange { previous, settings, echo }: SettingsChange) {
+        if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
         if previous.language != settings.language {
@@ -2465,8 +2466,8 @@ impl Controller {
     }
 
     fn start_osc(self: &Shared) {
-        self.start_osc_with(true);
         let _one = self.osc_starting.lock().unwrap();
+        self.start_osc_with(true);
     }
 
     /// Runs `f` with the OSC service when it runs (tests point it at a stand-in VRChat).
@@ -3399,17 +3400,10 @@ fn spawn_watchers(ctl: Shared) {
     std::thread::Builder::new()
         .name("watchers".into())
         .spawn(move || {
-            // The bridge's side sessions' logs are theirs: the app follows its target's log only (bridge/sessions.rs).
-            let new_log = || {
-                let mut log = LogWatcher::new(None);
-                let sides = ctl.sides.clone();
-                log.set_skip(Arc::new(move |path: &std::path::Path| sides.skips_log(path)));
-                log
-            };
-            let mut log = new_log();
+            // The bridge's side sessions' logs are theirs: the app follows its target's log only.
+            let mut log = vrchats::TargetLog::new(None, ctl.sides.clone());
             // Every VRChat running, and which the app follows (controller/vrchats.rs).
             let mut roster = vrchats::Roster::seeing(ctl.launcher_machine_now().vrchats_seen().unwrap_or_default());
-            let mut log_target: Option<(u32, Option<PathBuf>)> = None;
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
             let history_file = visited::history_file();
@@ -3470,16 +3464,6 @@ fn spawn_watchers(ctl: Shared) {
                         ctl.publish_runs();
                     }
                     let pid = ctl.sides.app_pid(&vrchats);
-                    // Another VRChat followed: its log from its last world, as at a start (never its whole past as news).
-                    let target = ctl.sides.target();
-                    let now_target = target.as_ref().map(|t| (t.pid, t.log.clone()));
-                    if now_target != log_target {
-                        let followed_log = log.state.log_file.clone();
-                        if target.as_ref().is_some_and(|t| t.log.is_some() && followed_log.is_some() && t.log != followed_log) {
-                            log = new_log();
-                        }
-                        log_target = now_target;
-                    }
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
@@ -4853,6 +4837,22 @@ mod tests {
     #[test]
     fn a_burst_of_avatar_changes_switches_the_kit_on_once() {
         let vrchat = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut settings = Settings::default();
+        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
+        let ctl = Controller::new(settings);
+        ctl.start_osc_with(false);
+        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { depth: false });
+        ctl.update(|s| s.capture.state = CaptureState::Recording);
+        for _ in 0..50 {
+            ctl.on_avatar_changed();
+        }
+        let sent = received(&vrchat, KIT_SETTLE + Duration::from_millis(700));
+        assert_eq!(sent.len(), 2, "record and depth switched on once: {sent:?}");
+        ctl.update(|s| s.capture.state = CaptureState::Idle);
+        ctl.shutdown();
+    }
+
     /// DCT-2: two changes at once are acted on in the order they were made, whichever thread is the slower: what runs is as the
     /// newest has it. A change made by what acting does comes after, and waits for nobody.
     #[test]
@@ -4883,22 +4883,6 @@ mod tests {
             go.send(()).unwrap();
         });
         assert_eq!(*seen.lock().unwrap(), [(0.25, false), (0.75, false), (0.75, true)]);
-    }
-
-        vrchat.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-        let mut settings = Settings::default();
-        settings.osc.vrchat_port = vrchat.local_addr().unwrap().port();
-        let ctl = Controller::new(settings);
-        ctl.start_osc_with(false);
-        *ctl.avatar_before.lock().unwrap() = Some(AvatarToggles { depth: false });
-        ctl.update(|s| s.capture.state = CaptureState::Recording);
-        for _ in 0..50 {
-            ctl.on_avatar_changed();
-        }
-        let sent = received(&vrchat, KIT_SETTLE + Duration::from_millis(700));
-        assert_eq!(sent.len(), 2, "record and depth switched on once: {sent:?}");
-        ctl.update(|s| s.capture.state = CaptureState::Idle);
-        ctl.shutdown();
     }
 
     #[test]

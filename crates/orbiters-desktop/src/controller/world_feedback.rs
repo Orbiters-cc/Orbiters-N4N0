@@ -1,5 +1,5 @@
 //! World feedback in the tray service (contracts `Docs/world-feedback.md`): the N4N0 world's `[N4N0-Feedback]` lines
-//! read from VRChat's log (a follower of its own, read to its end before each answer), the local address the world
+//! read from VRChat's log (the one the app follows, by a follower of its own read to its end before each answer), the local address the world
 //! loads to know Orbiters - N4N0 runs (`http://127.0.0.1:22541/n4n0/feedback/v1`), the member's likes, labels and
 //! comments sent to Orbiters under the signed-in account through a queue kept on disk (retried with backoff), and the
 //! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
@@ -8,7 +8,8 @@
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
 use orbiters_core::account::Api;
-use orbiters_core::vrchat_log::{LogEvent, LogWatcher};
+use super::vrchats::TargetLog;
+use orbiters_core::vrchat_log::LogEvent;
 use orbiters_i18n::{mark, tr, tr_latin};
 use orbiters_core::world_feedback::{client_id, Action, Client, Failure, Known, Queue, Seen, Set, Stamp};
 use orbiters_n4n0_core::feedback::{CommentRow, FeedbackAsk, FeedbackView, LabelCount, Subject, Why, WorldFeedback, SUBJECTS_MAX};
@@ -45,7 +46,7 @@ struct WorldSession {
 }
 
 pub(super) struct WorldFeedbackRuntime {
-    log: LogWatcher,
+    log: TargetLog,
     /// The world the log last joined (lowercase), while in it.
     joined: Option<String>,
     world: WorldSession,
@@ -72,11 +73,18 @@ pub(super) struct WorldFeedbackRuntime {
     parked: Vec<(Stamp, u64)>,
 }
 
+#[cfg(test)]
 impl Default for WorldFeedbackRuntime {
     fn default() -> Self {
+        Self::new(TargetLog::new(None, Default::default()))
+    }
+}
+
+impl WorldFeedbackRuntime {
+    pub(super) fn new(log: TargetLog) -> Self {
         let queue_path = if cfg!(test) { std::env::temp_dir().join(format!("orbiters-feedback-test-{}.json", std::process::id())) } else { Queue::file() };
         Self {
-            log: LogWatcher::new(None),
+            log,
             joined: None,
             world: WorldSession::default(),
             known: HashMap::new(),
@@ -107,9 +115,16 @@ fn accepted(world: Option<&str>, development: bool) -> bool {
 impl WorldFeedbackRuntime {
     /// Reads VRChat's log to its end and acts on the world's lines. `signed_in`: an account can send what they ask.
     fn follow(&mut self, development: bool, signed_in: bool) -> bool {
+        let followed = self.log.state.log_file.clone();
         let events = self.log.poll();
         let live = self.log.live();
         let mut changed = false;
+        if self.log.state.log_file != followed {
+            // Another VRChat's, or another run of it: what the last one's world said is not this one's.
+            self.joined = None;
+            self.world = WorldSession::default();
+            changed = true;
+        }
         for e in events {
             match e {
                 LogEvent::Joining { world_id, .. } => {
@@ -856,7 +871,7 @@ mod tests {
         ];
         std::fs::write(&log, lines.concat()).unwrap();
         let rt = std::sync::Mutex::new(WorldFeedbackRuntime {
-            log: LogWatcher::new(Some(dir.clone())),
+            log: TargetLog::new(Some(dir.clone()), Default::default()),
             queue: Queue::default(),
             queue_path: dir.join("queue.json"),
             ..Default::default()
@@ -898,6 +913,49 @@ mod tests {
         std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(line(&format!("[Behaviour] Joining {WORLD}:1")).as_bytes()).unwrap();
         let (head, _) = ask(&rt, "127.0.0.1:22541");
         assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DCT-3: the lines that count are the followed VRChat's alone, of two in worlds whose lines count; and when the other one is
+    /// followed, its past is not news, and nothing of the first one's world stays.
+    #[test]
+    fn only_the_followed_vrchats_lines_count() {
+        use super::super::vrchats::{run_of, LogFacts};
+        use crate::bridge::sessions::{Driver, Sides};
+        let dir = std::env::temp_dir().join(format!("orbiters-feedback-two-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |message: &str| format!("2026.10.18 20:23:20 Debug      -  {message}\n");
+        let said = |session: &str, seq: u64, body: &str| line(&format!(r#"[N4N0-Feedback] {{"v":1,"session":"{session}","seq":{seq},{body}}}"#));
+        let joined = line(&format!("[Behaviour] Joining {}:12345~region(eu)", contract::N4N0_WORLD));
+        let like = |session: &str, seq| said(session, seq, &format!(r#""t":"like","world":"{WORLD}","on":true"#));
+        let (own, side) = (dir.join("output_log_2026-11-15_13-38-44.txt"), dir.join("output_log_2026-11-15_14-00-00.txt"));
+        std::fs::write(&own, [joined.clone(), said("5f3a9c01", 1, &format!(r#""t":"select","world":"{WORLD}","name":"Home","preview":1,"slot":2,"key":3"#))].concat()).unwrap();
+        std::fs::write(&side, &joined).unwrap();
+        let run = |pid: u32, log: &PathBuf, driver: Driver| crate::bridge::sessions::VrchatRun { driver, ..run_of(pid, 1, Some(log), Some(&LogFacts::default())) };
+        let sides = std::sync::Arc::new(Sides::default());
+        sides.set_roster(vec![run(1, &own, Driver::Person), run(2, &side, Driver::Bridge)]);
+        let mut rt = WorldFeedbackRuntime {
+            log: TargetLog::new(Some(dir.clone()), sides.clone()),
+            queue: Queue::default(),
+            queue_path: dir.join("queue.json"),
+            ..Default::default()
+        };
+        assert!(rt.follow(false, true));
+        let write = |log: &PathBuf, text: String| std::fs::OpenOptions::new().append(true).open(log).unwrap().write_all(text.as_bytes()).unwrap();
+        write(&side, [said("00000002", 1, r#""t":"hello""#), like("00000002", 2)].concat());
+        rt.follow(false, true);
+        assert_eq!(rt.queue.items.len(), 0, "the other VRChat's line is nobody's here");
+        assert_eq!((rt.world.session.as_deref(), rt.world.selected.as_ref().map(|s| s.1.as_str())), (Some("5f3a9c01"), Some("Home")));
+        write(&own, like("5f3a9c01", 2));
+        rt.follow(false, true);
+        assert_eq!(rt.queue.items.len(), 1, "the followed one's is the member's");
+        // The other one is followed from now on.
+        sides.choose(Some(2));
+        assert!(rt.follow(false, true));
+        assert_eq!((rt.queue.items.len(), rt.world.session.as_deref(), rt.world.selected.clone()), (1, Some("00000002"), None), "its past is not acted on");
+        write(&side, said("00000002", 3, &format!(r#""t":"comment","world":"{WORLD}","text":"Great!","id":"9c1e04ab""#)));
+        rt.follow(false, true);
+        assert_eq!(rt.queue.items.len(), 2, "what it says now is");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

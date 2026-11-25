@@ -22,7 +22,7 @@ flate2 = { workspace = true }
 vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
 # Reads Creator Companion's and ALCOM's project list (theirs.rs), with the reader vrc-get itself has; never writes it.
 vrc-get-litedb = { version = "=0.3.0-beta.8", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util", "sync"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 indexmap = "2"
 futures = "0.3"

@@ -150,8 +150,8 @@ fn blur(a: &mut [f32], w: usize, h: usize, sigma: f32) {
             for i in 0..=(r as usize).min(n - 1) {
                 sum += get(i);
             }
-            for i in 0..n {
-                line[i] = sum * k;
+            for (i, out) in line.iter_mut().enumerate().take(n) {
+                *out = sum * k;
                 let add = i as i64 + r + 1;
                 if add < n as i64 {
                     sum += get(add as usize);

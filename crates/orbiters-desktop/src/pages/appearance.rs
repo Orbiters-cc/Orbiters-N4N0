@@ -99,7 +99,7 @@ fn choice(ui: &mut Ui, key: &'static str, n: usize, rect: Rect, radius: f32, cho
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     widgets::mark_control(key, "tile", rect);
     let label = name.to_string();
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, chosen, &label));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, chosen, &label));
     let ctx = ui.ctx().clone();
     let on = anim::toggle(&ctx, id.with("on"), chosen, Spring::SNAPPY);
     let over = anim::toggle(&ctx, id.with("over"), resp.hovered(), Spring::SNAPPY);

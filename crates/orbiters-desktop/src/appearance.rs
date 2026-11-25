@@ -326,13 +326,6 @@ impl Wallpaper {
         }
         running
     }
-
-    /// Screenshots and the bench: it starts `seconds` in.
-    pub fn at(&mut self, seconds: f64) {
-        if let Some(s) = self.shown.as_mut() {
-            s.moved = seconds;
-        }
-    }
 }
 
 #[cfg(test)]

@@ -442,11 +442,6 @@ impl App {
         self.wallpaper.paint(ui.painter(), full, a, motion);
     }
 
-    /// The background's motion (screenshots, the bench).
-    pub fn wallpaper_mut(&mut self) -> &mut crate::appearance::Wallpaper {
-        &mut self.wallpaper
-    }
-
     /// The title strip; says where it put N4N0's bar (drawn after it, with the chat).
     fn title_bar(&mut self, ui: &mut Ui, snap: &Snapshot, rect: Rect) -> crate::chat_bar::layout::Strip {
         let ctx = ui.ctx().clone();

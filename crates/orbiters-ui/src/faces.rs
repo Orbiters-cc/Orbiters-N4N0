@@ -264,7 +264,7 @@ fn size_of(bytes: &[u8], index: u32) -> Option<(f32, f32)> {
 /// The scale that brings a font to the default's sizes: as tall, unless its words would be wider.
 fn fit(bytes: &[u8], index: u32) -> f32 {
     let Some((x, wide)) = size_of(bytes, index) else { return 1.0 };
-    let (want_x, want_wide) = crate::fonts::default_sizes(|b, i| size_of(b, i)).unwrap_or((0.5, 0.5));
+    let (want_x, want_wide) = crate::fonts::default_sizes(size_of).unwrap_or((0.5, 0.5));
     (want_x / x.max(0.2)).min(want_wide * 1.02 / wide.max(0.2)).clamp(0.8, 1.15)
 }
 

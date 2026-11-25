@@ -940,6 +940,10 @@ fn relocate_on(
     link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> anyhow::Result<RepairEnd> {
     let library = project.join("Library");
+    // A Library copied back from an earlier move holds its cache's markers: they are not taken along. Left out before anything is
+    // counted, so that the last file is one that is copied, and flushed (PRJ-32).
+    let files: Vec<&(PathBuf, u64)> = files.iter().filter(|(file, _)| ![SWITCHED, COPYING].iter().any(|marker| *file == library.join(marker))).collect();
+    let taken: Vec<&Path> = files.iter().map(|(file, _)| file.as_path()).collect();
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
     anyhow::ensure!(!target.exists(), "{}", tr("Cache destination already exists"));
     // The record first: a kill at any moment after this leaves a cache that says which project it was for, and the exact
@@ -964,18 +968,14 @@ fn relocate_on(
     });
     let mut buffers = check_buffers();
     let mut copy_all = || -> anyhow::Result<bool> {
-        for (i, (file, _)) in files.iter().enumerate() {
+        for (i, file) in taken.iter().enumerate() {
             let relative = file.strip_prefix(&library)?;
-            // A Library copied back from an earlier move holds its cache's markers: they are not taken along.
-            if relative == Path::new(SWITCHED) || relative == Path::new(COPYING) {
-                continue;
-            }
             let to = target.join(relative);
             crate::disk::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
             // Flushed all the way once it has passed, before the switch and before the original goes: every file, or the
             // last one ([`Written::persists_every_file`]).
-            let persist = disk.persists_every_file() || i + 1 == files.len();
+            let persist = disk.persists_every_file() || i + 1 == taken.len();
             if !copy_and_check(disk, file, &to, &mut buffers, work, persist).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
                 return Ok(false);
             }
@@ -1993,6 +1993,30 @@ mod tests {
         });
         assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
         assert_eq!(*disk.persisted.borrow(), copies);
+        remove_redirect(&library).unwrap();
+    }
+
+    /// PRJ-32: a Library moved back by hand holds the marker of the move before, which is not taken along. Listed last (the order is
+    /// the file system's), it took the one full flush with it.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_last_file_copied_is_flushed_whatever_is_listed_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = project(temp.path(), "project", 2, 5000);
+        let library = project.join("Library");
+        let mut files = files_of(&project);
+        for marker in [COPYING, SWITCHED] {
+            std::fs::write(library.join(marker), b"").unwrap();
+            files.push((library.join(marker), 0));
+        }
+        let (progress, cancel) = (SharedProgress::default(), AtomicBool::new(false));
+        let (disk, target) = (Probe::default(), temp.path().join("moved"));
+        let last = target.join(files[1].0.strip_prefix(&library).unwrap());
+        relocate_on(&disk, &project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| {
+            assert_eq!(*disk.persisted.borrow(), [last.clone()], "flushed before Library is switched");
+            redirect(t, l)
+        })
+        .unwrap();
         remove_redirect(&library).unwrap();
     }
 

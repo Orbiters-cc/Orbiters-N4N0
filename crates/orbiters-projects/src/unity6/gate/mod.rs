@@ -615,20 +615,9 @@ pub fn apart(own: &[&Path], protected: &[Protected]) -> Result<(), Refused> {
     Ok(())
 }
 
-/// Whether Unity holds the project's lock file, asked by reading only (the original is never opened for writing): a read that
-/// shares the file with no writer fails while anybody has it open to write, or to themselves alone.
+/// Whether Unity holds the project's lock file, asked by reading only (the original is never opened for writing).
 pub fn unity_holds(project: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let opened = std::fs::OpenOptions::new().read(true).share_mode(1 | 4).open(project.join("Temp/UnityLockfile"));
-        // Not there: not open. Anything else that refuses the read is taken for Unity.
-        opened.is_err_and(|e| !matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory))
-    }
-    #[cfg(not(windows))]
-    {
-        crate::unity_open(project)
-    }
+    crate::unity_open(project)
 }
 
 /// The program at `path`, held so that nothing replaces it while it is looked at and started (Windows; elsewhere a program

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long an answer about a folder stands: a copy asks it thousands of times.
@@ -47,8 +47,11 @@ pub(crate) fn companion(root: &Path) {
     }
 }
 
-/// This computer's own: Creator Companion's folder and program, ALCOM's own settings. (A test, whose folder is a stand-in, does not
-/// look at them.)
+/// How long what is installed is known: the registry is asked that often at most.
+const INSTALLED: Duration = Duration::from_secs(30);
+
+/// This computer's own: Creator Companion's folder and program, ALCOM's own settings and program, a portable Creator Companion the
+/// person pointed at ([`crate::programs`]). (A test, whose folder is a stand-in, does not look at them.)
 fn this_computers(more: &[PathBuf]) -> Vec<PathBuf> {
     let own = crate::vcc_dir();
     if cfg!(test) || !more.is_empty() && !more.contains(&own) {
@@ -56,12 +59,15 @@ fn this_computers(more: &[PathBuf]) -> Vec<PathBuf> {
     }
     let mut all = vec![own];
     if orbiters_core::paths::roots().is_none() {
-        static PROGRAMS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-        all.extend(PROGRAMS.get_or_init(|| {
-            let alcom = [dirs::data_local_dir(), dirs::config_dir(), dirs::data_dir()];
-            alcom.into_iter().flatten().map(|d| d.join("com.anatawa12.vrc-get-gui")).chain(crate::vcc_app_dir()).collect()
-        }).iter().cloned());
+        let alcom = [dirs::data_local_dir(), dirs::config_dir(), dirs::data_dir()];
+        all.extend(alcom.into_iter().flatten().map(|d| d.join("com.anatawa12.vrc-get-gui")));
     }
+    static PROGRAMS: Mutex<Option<(Instant, Vec<PathBuf>)>> = Mutex::new(None);
+    let mut programs = PROGRAMS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if programs.as_ref().is_none_or(|(at, _)| at.elapsed() >= INSTALLED) {
+        *programs = Some((Instant::now(), crate::programs::folders()));
+    }
+    all.extend(programs.iter().flat_map(|(_, p)| p.iter().cloned()));
     all
 }
 
@@ -99,6 +105,11 @@ thread_local! {
     static FINE: RefCell<(Option<Instant>, u64, HashSet<PathBuf>)> = RefCell::default();
 }
 
+/// Whether the folder `dir` is one of theirs: one that is known, or a portable Creator Companion's by its look, wherever it is.
+fn is_theirs(dir: &Path, ids: &Ids) -> bool {
+    id_of(dir).is_ok_and(|id| ids.theirs.contains(&number(id))) || crate::programs::is_portable_data(dir) || crate::programs::is_portable(dir)
+}
+
 /// Whether `dir` (a folder there, or to be made) is in one of theirs.
 fn outside(dir: &Path, ids: &Ids, changes: u64, asked: &Path, depth: usize) -> io::Result<()> {
     if depth > 64 {
@@ -126,7 +137,7 @@ fn outside(dir: &Path, ids: &Ids, changes: u64, asked: &Path, depth: usize) -> i
                 // (And the link itself is where it is.)
             }
             Ok(_) => {
-                if id_of(here).is_ok_and(|id| ids.theirs.contains(&number(id))) {
+                if is_theirs(here, ids) {
                     return Err(refused(asked));
                 }
             }
@@ -190,7 +201,7 @@ fn check(path: &Path, followed: bool) -> io::Result<()> {
                 }
             }
         }
-        Ok(m) if m.is_dir() && id_of(&at).is_ok_and(|id| ids.theirs.contains(&number(id))) => return Err(refused(path)),
+        Ok(m) if m.is_dir() && is_theirs(&at, &ids) => return Err(refused(path)),
         _ => {}
     }
     Ok(())
@@ -211,7 +222,7 @@ fn all_of(path: &Path) -> io::Result<()> {
     allowed(path)?;
     let (ids, _) = ids();
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() && !is_link(&m) && id_of(path).is_ok_and(|id| ids.above.contains(&number(id))) => Err(refused(path)),
+        Ok(m) if m.is_dir() && !is_link(&m) && (id_of(path).is_ok_and(|id| ids.above.contains(&number(id))) || crate::programs::holds_portable_data(path)) => Err(refused(path)),
         _ => Ok(()),
     }
 }
@@ -341,6 +352,13 @@ pub(crate) fn project_io(path: &Path) -> io::Result<vrc_get_vpm::io::DefaultProj
         content(&at)?;
     }
     Ok(vrc_get_vpm::io::DefaultProjectIo::new(path.into()))
+}
+
+/// Whether that library may change the packages of the project at `path`: it makes what it installs in the project's `Temp/vrc-get`,
+/// and then removes that folder whole.
+pub(crate) fn staging(path: &Path) -> io::Result<()> {
+    content(&path.join("Temp"))?; // i18n: not shown (a folder's name)
+    tree(&path.join("Temp/vrc-get"))
 }
 
 /// The environment in `path` (Orbiters' own), for the same library.

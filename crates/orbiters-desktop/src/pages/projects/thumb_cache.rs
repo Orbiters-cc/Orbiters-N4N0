@@ -66,6 +66,7 @@ pub(super) fn save_in(dir: &Path, id: &str, sum: u64, image: &ColorImage) -> std
     if !safe(id) {
         return Ok(());
     }
+    orbiters_projects::may_write(dir)?;
     std::fs::create_dir_all(dir)?;
     let [w, h] = image.size;
     // Flattened on black: the pictures are opaque, a world's own PNG nearly always.
@@ -95,7 +96,7 @@ pub(super) fn save(id: &str, sum: u64, image: &ColorImage) {
 
 /// The picture of `id` (sum `sum`) was asked for again and is the same: fresh for another [`FRESH`].
 pub(super) fn touch_in(dir: &Path, id: &str, sum: u64) {
-    if safe(id) {
+    if safe(id) && orbiters_projects::may_write(dir).is_ok() {
         let file = dir.join(format!("{id}.{sum:016x}.jpg"));
         if let Ok(f) = std::fs::File::options().write(true).open(&file) {
             let _ = f.set_modified(SystemTime::now());
@@ -109,6 +110,10 @@ pub(super) fn touch(id: &str, sum: u64) {
 
 /// The pictures kept in `dir`, the newest first; old ones (and those past the newest [`MAX_FILES`]) are removed.
 pub(super) fn load_in(dir: &Path) -> Vec<Cached> {
+    // Its folder led into Creator Companion's: nothing there is a picture of ours, to show or to remove.
+    if orbiters_projects::may_write(dir).is_err() {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let now = SystemTime::now();
     let mut files: Vec<(SystemTime, PathBuf, String, u64)> = entries
@@ -220,6 +225,44 @@ mod tests {
 
     fn picture(shade: u8) -> ColorImage {
         ColorImage::from_rgb([8, 6], &vec![shade; 8 * 6 * 3])
+    }
+
+    /// With its folder led into Creator Companion's, nothing is kept, marked fresh or removed there.
+    #[test]
+    fn nothing_is_kept_in_creator_companions_folder() {
+        let temp = std::env::temp_dir().join(format!("orbiters-project-pictures-{}", uuid::Uuid::new_v4()));
+        let root = temp.join("VCC");
+        // (Made before it is named: what another test asked about a moment earlier stands for a moment.)
+        std::fs::create_dir_all(&root).unwrap();
+        orbiters_projects::own::dir(&root);
+        let id = "avtr_00000000-0000-4000-8000-000000000001";
+        let old = SystemTime::now() - Duration::from_secs(400 * 86_400);
+        for name in ["left.tmp".to_string(), "broken.0123456789abcdef.jpg".into(), format!("{id}.{:016x}.jpg", 1)] {
+            std::fs::write(root.join(&name), b"theirs").unwrap();
+            std::fs::File::options().write(true).open(root.join(&name)).unwrap().set_modified(old).unwrap();
+        }
+        let all = || {
+            let mut all: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| (e.file_name(), std::fs::read(e.path()).unwrap(), e.metadata().unwrap().modified().unwrap())).collect();
+            all.sort();
+            all
+        };
+        let before = all();
+        let link = temp.join("project-pictures");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&root).output().unwrap().status.success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let image = picture(40);
+        for dir in [&root, &link, &link.join("new")] {
+            assert!(save_in(dir, id, sum(&image), &image).is_err());
+            touch_in(dir, id, 1);
+            assert!(load_in(dir).is_empty());
+        }
+        assert!(before == all());
+        // And the still of a project's scene.
+        assert!(!super::super::builds::keep_still(&link.join("scene"), b"jpg", b"{}"));
+        assert!(before == all());
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

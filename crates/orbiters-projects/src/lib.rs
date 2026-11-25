@@ -22,6 +22,7 @@ mod no_write_tests;
 pub mod own;
 pub mod owned;
 pub mod preview;
+mod programs;
 mod repos;
 pub mod scene;
 pub mod setup;
@@ -118,14 +119,25 @@ pub fn vcc_app_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("ORBITERS_VCC_APP_DIR") {
         return (!dir.is_empty()).then(|| PathBuf::from(dir)).filter(|p| p.is_dir());
     }
-    uninstall_entry(|key, name| key == "{A20FE4C3-FE52-495B-B0DA-92992240BFC0}_is1" || name.starts_with("VRChat Creator Companion"))
+    uninstall_entry(is_vcc_entry)
         .and_then(|(location, _)| location)
         .filter(|p| p.is_dir())
 }
 
-/// The Windows uninstall entry `matches` picks (by its key and display name): its install folder and display icon.
-#[allow(unused_variables)]
+fn is_vcc_entry(key: &str, name: &str) -> bool {
+    key == "{A20FE4C3-FE52-495B-B0DA-92992240BFC0}_is1" || name.starts_with("VRChat Creator Companion")
+}
+
+/// The first of [`uninstall_entries`].
 fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
+    uninstall_entries(matches).into_iter().next()
+}
+
+/// The Windows uninstall entries `matches` picks (by their keys and display names): their install folders and display icons.
+#[allow(unused_variables)]
+fn uninstall_entries(matches: impl Fn(&str, &str) -> bool) -> Vec<(Option<PathBuf>, Option<PathBuf>)> {
+    #[allow(unused_mut)]
+    let mut found = vec![];
     #[cfg(windows)]
     {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -142,13 +154,13 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
                         // DisplayIcon is "path,index".
                         let icon = value("DisplayIcon")
                             .map(|s| PathBuf::from(s.rsplit_once(',').filter(|(_, i)| i.parse::<i32>().is_ok()).map_or(s.as_str(), |(p, _)| p)));
-                        return Some((value("InstallLocation").map(PathBuf::from), icon));
+                        found.push((value("InstallLocation").map(PathBuf::from), icon));
                     }
                 }
             }
         }
     }
-    None
+    found
 }
 
 /// Unity Hub's program: where VCC was told it is, else where its installer says, else its usual folder.
@@ -182,6 +194,12 @@ fn unity_hub_on_mac(configured: Option<PathBuf>) -> Option<PathBuf> {
 
 pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?)
+}
+
+/// Whether what `path` leads to may be written: nothing of Creator Companion's or ALCOM's is ([`disk`]). For what the window keeps by
+/// itself (pictures), whose folder may have been led elsewhere.
+pub fn may_write(path: &Path) -> std::io::Result<()> {
+    disk::content(path)
 }
 
 /// Atomic publication in the destination directory; no partially written JSON is visible.
@@ -227,14 +245,27 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
     c
 }
 
+/// Whether Unity has the project at `path` open, asked by reading only: never through the write guard, wherever the project is.
 pub fn unity_open(path: &Path) -> bool {
     let lock = path.join("Temp/UnityLockfile");
     #[cfg(not(unix))]
-    return lock.exists() && disk::open(std::fs::OpenOptions::new().write(true), lock).is_err();
+    return lock_held(&lock);
     // Unity's lock file is no exclusive open here: anyone can open it, and it stays behind after a crash. What tells is
     // a lock held on it, or an editor whose command line names the project.
     #[cfg(unix)]
     return lock_held(&lock) || editor::of(&editor::running(), path, false).is_some();
+}
+
+/// Whether another process has `file` open to write, or to itself alone: a read that shares the file with no writer meets it. A read
+/// refused for another reason (no right to the file) says nothing of the kind.
+#[cfg(windows)]
+fn lock_held(file: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const SHARE_READ_AND_DELETE: u32 = 1 | 4;
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+    let opened = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ_AND_DELETE).open(file);
+    opened.is_err_and(|e| matches!(e.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)))
 }
 
 /// Whether a process holds a lock on `file`. `F_GETLK` takes none itself, so asking cannot get in the way of Unity
@@ -649,6 +680,43 @@ mod open_tests {
         let args = |c: std::process::Command| (c.get_program().to_os_string(), c.get_args().map(|a| a.to_os_string()).collect::<Vec<_>>());
         assert_eq!(args(reveal_command(temp.path())), ("/usr/bin/open".into(), vec![temp.path().as_os_str().to_os_string()]));
         assert_eq!(args(reveal_command(&file)), ("/usr/bin/open".into(), vec!["-R".into(), file.as_os_str().to_os_string()]));
+    }
+
+    /// Whether Unity is open is only read: a project in Creator Companion's folder, or a lock file there is no right to, is not busy.
+    #[cfg(windows)]
+    #[test]
+    fn a_lock_file_left_behind_is_not_unity_wherever_the_project_is() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("VCC");
+        disk::companion(&root);
+        for project in [temp.path().join("Project"), root.join("Templates/Mine")] {
+            let lock = project.join("Temp/UnityLockfile");
+            std::fs::create_dir_all(project.join("Temp")).unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "no lock file");
+            std::fs::write(&lock, "").unwrap();
+            let before = std::fs::metadata(&lock).unwrap().modified().unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: left behind", project.display());
+            for share in [0, 1, 3, 7] {
+                let held = std::fs::OpenOptions::new().write(true).share_mode(share).open(&lock).unwrap();
+                assert!(unity_open(&project) && unity6::gate::unity_holds(&project), "{}: held, sharing {share}", project.display());
+                drop(held);
+            }
+            // Read-only, and then nobody's to read.
+            let mut rights = std::fs::metadata(&lock).unwrap().permissions();
+            rights.set_readonly(true);
+            std::fs::set_permissions(&lock, rights.clone()).unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: read-only", project.display());
+            #[allow(clippy::permissions_set_readonly_false)]
+            rights.set_readonly(false);
+            std::fs::set_permissions(&lock, rights).unwrap();
+            let icacls = |what: &str| hidden_command("icacls").arg(&lock).args([what, "*S-1-1-0:(R,W)"]).output().unwrap();
+            assert!(icacls("/deny").status.success());
+            assert!(std::fs::File::open(&lock).is_err(), "the fixture");
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: no right to it", project.display());
+            assert!(hidden_command("icacls").arg(&lock).args(["/remove:d", "*S-1-1-0"]).output().unwrap().status.success());
+            assert_eq!(std::fs::metadata(&lock).unwrap().modified().unwrap(), before);
+        }
     }
 
     #[cfg(unix)]

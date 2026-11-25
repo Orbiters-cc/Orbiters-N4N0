@@ -190,6 +190,7 @@ async fn environment(root: &Path) -> anyhow::Result<(DefaultEnvironmentIo, Setti
 /// Before `changes` are made in the project at `path`: none of what they touch is in Creator Companion's or ALCOM's folder, through a
 /// link either; and what those programs downloaded already of what is installed is taken.
 fn ready(root: &Path, path: &Path, changes: &vrc_get_vpm::unity_project::PendingProjectChanges<'_>) -> anyhow::Result<()> {
+    crate::disk::staging(path)?;
     for rel in affected(changes) {
         crate::disk::tree(&path.join(rel))?;
     }
@@ -373,6 +374,8 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // A Unity 6 trial keeps its packages until Creator Companion migrated it, whoever asks (the page, the bridge, the
     // Toolkit's update).
     may_change(path)?;
+    // Before anything is made, here or in Orbiters' own folder.
+    crate::disk::staging(path)?;
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let (io, _) = environment(root).await?;
     let _lock = named_lock(&io, &crate::repos::dir(root), "Global\\Orbiters.Vpm.Packages").await?;

@@ -491,6 +491,36 @@ const ACTIONS: &[Action] = &[
         let install = vpm::Change::Install { names: vec![("test.avatar".into(), Some("1.0.0".into()))], prerelease: false };
         Ok(refused(block(vpm::change(&s.root, &p, install))) && refused(block(vpm::change(&s.root, &p, vpm::Change::Resolve))))
     }),
+    ("@change a project whose temporary folder is in their folder", |s, url| {
+        with_repository(s, url);
+        // Its Temp is their folder, one of theirs, or one that is not there yet; or what the resolver keeps in it is.
+        for (i, to) in [s.root.clone(), s.root.join("Templates/Inside"), s.root.join("vrc-get")].into_iter().enumerate() {
+            let p = s.project(&format!("Temp{i}"));
+            let at = if i == 2 { p.join("Temp/vrc-get") } else { p.join("Temp") };
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            if !to.exists() {
+                continue;
+            }
+            #[cfg(windows)]
+            junction::create(&to, &at).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&to, &at).unwrap();
+        }
+    }, |s, _| {
+        let mut all = true;
+        for i in 0..3 {
+            let p = s.path(&format!("Temp{i}"));
+            if !p.join("Temp/vrc-get").exists() && !p.join("Temp").exists() || i == 2 && !p.join("Temp/vrc-get").exists() {
+                continue;
+            }
+            let install = || vpm::Change::Install { names: vec![("test.avatar".into(), Some("1.0.0".into()))], prerelease: false };
+            all &= refused(block(vpm::change(&s.root, &p, install())));
+            all &= refused(block(vpm::change(&s.root, &p, vpm::Change::Plan { install: vec![("test.avatar".into(), "1.0.0".into())], remove: vec![], prerelease: false })));
+            // Nothing of the project either.
+            all &= std::fs::read_dir(p.join("Packages"))?.count() == 2;
+        }
+        Ok(all)
+    }),
     ("@refresh with a repository in a file of theirs", nothing, |s, _| {
         let mut named = true;
         for _ in 0..2 {

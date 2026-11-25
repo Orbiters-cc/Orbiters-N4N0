@@ -1,5 +1,6 @@
-//! A group's page (REQUEST22 1): Look (its pictures, the nameplate banner, its words), Members (search, roles), Roles
-//! (create, change, delete) and Posts (write, delete; changed on vrchat.com). One scrolling region; what VRChat gives is shown as it
+//! A group's page (REQUEST22 1): its pictures, with what changes them on the pictures themselves (REQUEST28), then Look (the
+//! nameplate banner, its words), Members (search, roles), Roles (create, change, delete), Posts (write, delete; changed on
+//! vrchat.com) and Events (`super::events`, read only). One scrolling region; what VRChat gives is shown as it
 //! answered, and each control is offered only when `orbiters_core::groups::can` allows it on the data read (VRChat still
 //! decides).
 use super::{abilities_line, authority_text, failure_text, short_code, tail as id_tail, warning_text, Kind, State};
@@ -9,10 +10,10 @@ use crate::pages::Cx;
 use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui};
 use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Catalogue, FileTag, GroupCard, InventoryFile, Member, Missing, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, Visibility};
 use orbiters_core::vrchat_api::GROUP_PAGE as PAGE;
-use orbiters_i18n::tr;
+use orbiters_i18n::{mark, tr};
 use orbiters_ui::icons;
 use orbiters_ui::theme::{self, weight, Txt};
-use orbiters_ui::{paint, widgets};
+use orbiters_ui::{paint, popup, widgets};
 use std::collections::{HashMap, HashSet};
 
 /// Members and posts kept loaded at most: past this, a search narrows (Major 9).
@@ -31,6 +32,7 @@ pub(crate) enum Tab {
     Members,
     Roles,
     Posts,
+    Events,
 }
 
 #[derive(Default)]
@@ -120,6 +122,13 @@ pub(crate) enum Purpose {
     Art(ArtSlot),
 }
 
+impl Picker {
+    /// Made up for the screenshot review: read.
+    pub fn staged(slot: ArtSlot, files: Vec<InventoryFile>) -> Self {
+        Self { purpose: Purpose::Art(slot), files, offset: 0, more: false, loading: false, failed: None }
+    }
+}
+
 impl Purpose {
     fn tag(self) -> FileTag {
         match self {
@@ -137,6 +146,7 @@ pub(crate) struct Open {
     pub tab: Tab,
     pub members: MemberList,
     pub posts: PostList,
+    pub events: super::events::EventList,
     /// Heights of post cards measured when drawn: the others take their place unmeasured (Major 9).
     post_heights: HashMap<String, f32>,
     /// The row whose roles are open under it ([`row_of`]: the membership, captured at the press).
@@ -170,6 +180,7 @@ impl Open {
             tab: if composer.is_some() { Tab::Posts } else { Tab::Look },
             members: MemberList::default(),
             posts: PostList::default(),
+            events: Default::default(),
             post_heights: HashMap::new(),
             member_roles: None,
             role_editor: None,
@@ -222,6 +233,7 @@ impl Open {
                 // What was listed may have changed: read again.
                 self.members = MemberList { query: std::mem::take(&mut self.members.query), ..Default::default() };
                 self.posts = PostList::default();
+                self.events.again();
             }
             (Kind::Open(id), Reply::Failed(f)) if id == self.id => self.failed = Some(f),
             (Kind::Members { group, query, offset }, reply) if group == self.id && query == self.members.asked && offset == self.members.offset => {
@@ -265,6 +277,7 @@ impl Open {
                     _ => {}
                 }
             }
+            (Kind::Events { group, month, offset }, reply) if group == self.id => self.events.answer(month, offset, reply),
             (Kind::Inventory { tag, offset }, reply) => {
                 if let Some(picker) = self.picker.as_mut().filter(|p| p.purpose.tag() == tag && p.offset == offset) {
                     picker.loading = false;
@@ -395,7 +408,7 @@ fn role_label(sealed: &Sealed, id: &str) -> String {
     sealed.label(id).map(str::to_string).unwrap_or_else(|| format!("{} {}", tr("A role"), id_tail(id)))
 }
 
-fn line(ui: &mut Ui, label: &str, value: &str) {
+pub(super) fn line(ui: &mut Ui, label: &str, value: &str) {
     let w = ui.available_width();
     let p = ui.painter().clone();
     let galley = p.layout_job(Txt::new(value, 13.5).color(theme::FG).line_height(19.0).job(w - 150.0));
@@ -406,7 +419,7 @@ fn line(ui: &mut Ui, label: &str, value: &str) {
     p.galley(pos2(rect.left() + 150.0, rect.top()), galley, theme::FG);
 }
 
-fn note(ui: &mut Ui, text: &str, tone: Color32) {
+pub(super) fn note(ui: &mut Ui, text: &str, tone: Color32) {
     let w = ui.available_width();
     let p = ui.painter().clone();
     let galley = p.layout_job(Txt::new(text, 12.5).color(tone).line_height(18.0).job(w));
@@ -444,6 +457,12 @@ pub(crate) fn confirm_body(ui: &mut Ui, sealed: &Sealed, art: Option<&egui::Text
                 }
                 if role.management {
                     note(ui, tr("This is a management role: it lets them manage this group."), theme::WARN);
+                }
+                if !role.known {
+                    note(ui, tr("VRChat does not say what this role lets them do."), theme::WARN);
+                }
+                if *add && role.requires_two_factor {
+                    note(ui, two_factor(), theme::WARN);
                 }
             }
             note(ui, if *add { tr("They get it at once. Taking it back later is a new change of its own.") } else { tr("They lose what this role lets them do at once.") }, theme::FG_3);
@@ -551,6 +570,11 @@ fn unread(ui: &mut Ui, text: &str, salt: &str, acts: &mut Vec<Act>) {
     });
 }
 
+/// What a role that needs two-factor authentication asks of who gets it.
+fn two_factor() -> &'static str {
+    tr("This role needs two-factor authentication: VRChat may refuse it to an account that has not turned it on.")
+}
+
 /// The art a picture write sends, as the confirmation shows it.
 fn art_preview(ui: &mut Ui, art: Option<&egui::TextureHandle>) {
     let Some(t) = art else {
@@ -607,11 +631,13 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 return;
             }
+            picker(ui, cx, state, &scope, &mut acts);
             match tab {
                 Tab::Look => look(ui, cx, state, &scope, &mut acts),
                 Tab::Members => members(ui, cx, state, &scope, &mut acts),
                 Tab::Roles => roles(ui, cx, state, &mut acts),
                 Tab::Posts => posts(ui, cx, state, &scope, &mut acts),
+                Tab::Events => super::events::show(ui, cx, state, &scope, &mut acts),
             }
         });
     });
@@ -629,9 +655,14 @@ pub(crate) enum Act {
     Reload,
     Studio(Option<super::art::Target>),
     Web,
+    /// A page of the web: a calendar event's on vrchat.com, an event's on Orbiters or in Discord.
+    Url(String),
     Write(Write, Rect),
     MoreMembers,
     MorePosts,
+    /// The calendar read on from where it failed; earlier events.
+    EventsAgain,
+    EarlierEvents,
     Picker(Purpose),
     MorePictures,
     UploadIcon,
@@ -669,6 +700,12 @@ fn do_act(ctx: &egui::Context, cx: &mut Cx, state: &mut State, scope: &crate::co
                 let r = crate::controller::open_url(&url);
                 cx.run(ctx, r);
             }
+        }
+        Act::EventsAgain => state.events_again(),
+        Act::EarlierEvents => state.earlier_events(),
+        Act::Url(url) => {
+            let r = crate::controller::open_url(&url);
+            cx.run(ctx, r);
         }
         Act::Write(write, origin) => {
             if let Some(o) = state.open.as_mut() {
@@ -779,11 +816,35 @@ fn head(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
         }
     }
     paint::stroke_squircle(&p, banner, theme::squircle(theme::CARD_RADIUS), theme::hairline());
+    // What changes the group's pictures sits on them, for who may (REQUEST28).
+    let editable = state.open.as_ref().is_some_and(|o| o.page.is_some() && o.can(Action::ApplyArt).allowed());
+    let busy = state.flow.is_some();
+    if editable {
+        let at = Rect::from_min_size(pos2(banner.right() - 48.0, banner.top() + 12.0), vec2(36.0, 36.0));
+        let items = [popup::Item::new(tr("Open the banner studio")).icon(icons::SPARKLE), popup::Item::new(tr("Choose from your VRChat gallery")).icon(icons::IMAGES)];
+        match edit_button(ui, mark("Change the banner"), "banner", at, &items, busy) {
+            Some(0) => acts.push(Act::Studio(Some(super::art::Target::GroupBanner))),
+            Some(_) => acts.push(Act::Picker(Purpose::Art(ArtSlot::Banner))),
+            None => {}
+        }
+    }
     let icon = Rect::from_min_size(pos2(banner.left() + 24.0, banner.bottom() - 44.0), vec2(88.0, 88.0));
     p.circle_filled(icon.center(), 48.0, theme::INK_900);
     match state.picture(&ctx, cx.ctl, scope, &icon_url) {
         Some(t) => paint::circle_texture(&p, icon, t.id(), super::super::launcher::cover_uv(t.size_vec2(), icon.size()), Color32::WHITE),
         None => widgets::avatar(&p, icon, None, &card.name),
+    }
+    if editable {
+        let at = Rect::from_center_size(icon.center() + vec2(31.0, -31.0), vec2(32.0, 32.0));
+        let items = [popup::Item::new(tr("Choose from your icons")).icon(icons::IMAGES), popup::Item::new(tr("Upload a new icon")).icon(icons::UPLOAD_SIMPLE)];
+        match edit_button(ui, mark("Change the icon"), "icon", at, &items, busy) {
+            Some(0) => acts.push(Act::Picker(Purpose::Art(ArtSlot::Icon))),
+            Some(_) => {
+                state.origin = at;
+                acts.push(Act::UploadIcon);
+            }
+            None => {}
+        }
     }
     let tx = icon.right() + 18.0;
     let name = group.as_ref().map(|g| g.name.clone()).unwrap_or(card.name.clone());
@@ -802,12 +863,13 @@ fn head(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
     }
     sub.push(abilities_line(&card));
     widgets::text_truncated(&p, pos2(tx, banner.bottom() + 48.0), Align2::LEFT_CENTER, &Txt::new(sub.join(" · "), 13.0).color(theme::FG_3), w - tx + hero.left());
-    // The tabs: the four are always there (reading is a member's); what each offers follows the rights.
+    // The tabs are always there (reading is a member's); what each offers follows the rights.
     let options = [
         widgets::SegOption::new(Tab::Look, tr("Look")),
         widgets::SegOption::new(Tab::Members, tr("Members")),
         widgets::SegOption::new(Tab::Roles, tr("Roles")),
         widgets::SegOption::new(Tab::Posts, tr("Posts")),
+        widgets::SegOption::new(Tab::Events, tr("Events")),
     ];
     let mut chosen = tab;
     ui.horizontal(|ui| {
@@ -815,6 +877,20 @@ fn head(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
             acts.push(Act::Tab(chosen));
         }
     });
+}
+
+/// The list a picture's edit button opens, by which picture.
+pub(super) fn edit_list(which: &str) -> Id {
+    Id::unique(("group-edit-picture", which))
+}
+
+/// A small round button on a picture of the group and the list it opens; the row pressed.
+fn edit_button(ui: &mut Ui, label: &'static str, which: &'static str, at: Rect, items: &[popup::Item], busy: bool) -> Option<usize> {
+    let p = ui.painter();
+    p.circle_filled(at.center(), at.width() * 0.5 + 2.0, theme::alpha(theme::INK_900, 0.9));
+    let resp = widgets::IconButton::new(icons::PENCIL_SIMPLE, label).size(at.width(), 16.0).backdrop(theme::INK_700).id_salt(("group-edit", which)).show_at(ui, at);
+    let width = popup::list_width(ui, items);
+    popup::list_from(ui.ctx(), edit_list(which), at, !busy && widgets::activated(&resp), items, None, width)
 }
 
 /// A card of the page: its frame, a caption, then its rows.
@@ -833,11 +909,20 @@ fn card(ui: &mut Ui, glyph: &str, title: &str, body: impl FnOnce(&mut Ui)) {
     ui.allocate_exact_size(vec2(w, h), Sense::hover());
 }
 
-fn button_row(ui: &mut Ui, f: impl FnOnce(&mut Ui)) {
+pub(super) fn button_row(ui: &mut Ui, f: impl FnOnce(&mut Ui)) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         f(ui)
     });
+}
+
+/// The pictures to choose a banner or an icon from, under the group's head while one is being chosen.
+fn picker(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrchat_data::Scope, acts: &mut Vec<Act>) {
+    let Some(open) = state.open.as_ref() else { return };
+    let Some(p) = open.picker.as_ref() else { return };
+    let (group, purpose, files, more, loading, failed) = (open.id.clone(), p.purpose, p.files.clone(), p.more, p.loading, p.failed);
+    let Purpose::Art(slot) = purpose;
+    pictures_grid(ui, cx, state, scope, purpose, &files, more, loading, failed, acts, |file, rect| Act::Write(Write::ApplyArt { group: group.clone(), slot, file: file.id.clone(), back: None }, rect));
 }
 
 fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrchat_data::Scope, acts: &mut Vec<Act>) {
@@ -848,32 +933,9 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
     let group = open.page.as_ref().map(|p| p.group.clone()).unwrap_or_default();
     // Pictures uploaded for this group and not applied yet, kept with the account (Major 8).
     let uploaded = state.uploads(&open.id);
-    let picker = open.picker.as_ref().map(|p| (p.purpose, p.files.clone(), p.more, p.loading, p.failed));
     let busy = state.flow.is_some();
-    // The banner.
-    card(ui, icons::IMAGE, tr("Group banner"), |ui| {
-        note(ui, tr("Shown on the group's page in VRChat's menus and on its website."), theme::FG_3);
-        button_row(ui, |ui| {
-            if widgets::Button::new(tr("Open the banner studio")).icon(icons::SPARKLE).variant(widgets::Variant::Primary).id_salt("look-studio").show(ui).clicked() {
-                acts.push(Act::Studio(Some(super::art::Target::GroupBanner)));
-            }
-            let pick = widgets::Button::new(tr("Choose from your VRChat gallery")).icon(icons::IMAGES).enabled(art && !busy).id_salt("look-gallery");
-            let pick = match authority_text(&can_art) {
-                Some(why) => pick.hint(why),
-                None => pick,
-            };
-            if pick.show(ui).clicked() {
-                acts.push(Act::Picker(Purpose::Art(ArtSlot::Banner)));
-            }
-        });
-        unknown(ui, &can_art, "art", acts);
-        if can_art.refused().is_some() {
-            note(ui, tr("Your role cannot change the group's pictures. The studio still makes and saves banners for whoever can."), theme::FG_3);
-        }
-    });
-    if let Some((purpose @ Purpose::Art(slot), files, more, loading, failed)) = picker.clone() {
-        pictures_grid(ui, cx, state, scope, purpose, &files, more, loading, failed, acts, |file, rect| Act::Write(Write::ApplyArt { group: group.id.clone(), slot, file: file.id.clone(), back: None }, rect));
-    }
+    // Why the pictures have no edit button, when it is not the role.
+    unknown(ui, &can_art, "art", acts);
     for up in uploaded {
         let (slot, file) = (up.slot, up.file.clone());
         let thumb = state.picture(&ctx, cx.ctl, scope, &up.url());
@@ -891,27 +953,6 @@ fn look(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrch
             }
         });
     }
-    // The icon.
-    card(ui, icons::USER_CIRCLE, tr("Icon"), |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
-        let icon = Rect::from_min_size(r.min, vec2(72.0, 72.0));
-        let p = ui.painter().clone();
-        match state.picture(&ctx, cx.ctl, scope, &group.icon_url) {
-            Some(t) => paint::circle_texture(&p, icon, t.id(), super::super::launcher::cover_uv(t.size_vec2(), icon.size()), Color32::WHITE),
-            None => widgets::avatar(&p, icon, None, &group.name),
-        }
-        widgets::text_truncated(&p, pos2(icon.right() + 16.0, icon.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Square, from your VRChat icons or a picture of yours."), 13.0).color(theme::FG_3), r.width() - 100.0);
-        button_row(ui, |ui| {
-            if widgets::Button::new(tr("Choose from your icons")).icon(icons::IMAGES).enabled(art && !busy).id_salt("look-icons").show(ui).clicked() {
-                acts.push(Act::Picker(Purpose::Art(ArtSlot::Icon)));
-            }
-            let up = widgets::Button::new(tr("Upload a new icon")).icon(icons::UPLOAD_SIMPLE).enabled(art && !busy).id_salt("look-upload-icon").show(ui);
-            if up.clicked() {
-                state.origin = up.rect;
-                acts.push(Act::UploadIcon);
-            }
-        });
-    });
     // The nameplate banner: exported, never applied by this version (B4).
     card(ui, icons::TAG, tr("Nameplate banner"), |ui| {
         note(ui, tr("VRChat's new nameplate banner comes in two modes: Anchored (2048 × 385) and Centered (2048 × 472). Make both in the studio from one picture, then upload them on vrchat.com."), theme::FG_2);
@@ -965,6 +1006,11 @@ fn pictures_grid(
         Purpose::Art(ArtSlot::Banner) => tr("Your VRChat gallery"),
     };
     card(ui, icons::IMAGES, title, |ui| {
+        let m = ui.max_rect();
+        let x = Rect::from_min_size(pos2(m.right() - 32.0, m.top() - 2.0), vec2(32.0, 32.0));
+        if widgets::activated(&widgets::IconButton::new(icons::X, mark("Close")).size(32.0, 15.0).id_salt("group-picker-close").show_at(ui, x)) {
+            acts.push(Act::Picker(purpose));
+        }
         if let Some(f) = failed {
             note(ui, &failure_text(f), theme::WARN);
         }
@@ -1060,15 +1106,18 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
     let w = ui.available_width();
     let mut withheld = false;
     for row in rows {
-        let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
         let Some(o) = state.open.as_mut() else { return };
         let id = match row {
             None => me.as_ref().map(|me| me.membership_id.clone()),
             Some(i) => o.members.items.get(i).map(row_of),
         };
         let open_now = id.is_some() && open_for == id;
-        if !ui.is_rect_visible(rect.expand(120.0)) && !open_now {
-            continue;
+        if !open_now {
+            let next = Rect::from_min_size(ui.cursor().min, vec2(w, 60.0));
+            if !ui.is_rect_visible(next.expand(120.0)) {
+                ui.allocate_exact_size(next.size(), Sense::hover());
+                continue;
+            }
         }
         #[cfg(test)]
         {
@@ -1081,6 +1130,10 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         let Some(m) = member else { continue };
         let mine = row.is_none();
         let roles: Vec<Role> = o.roles().to_vec();
+        // A member's roles open in their own card, which grows with them (REQUEST28).
+        let chooser = (open_now && (m.complete() || mine) && m.roles_known && m.membership().is_some()).then(|| Chooser::of(ui, &m, &roles, w - 24.0));
+        let (card, _) = ui.allocate_exact_size(vec2(w, 60.0 + chooser.as_ref().map_or(0.0, |c| c.height)), Sense::hover());
+        let rect = Rect::from_min_size(card.min, vec2(w, 60.0));
         // Roles can be given or taken back only on a whole record that says which membership it is (its id and when it began:
         // M8, Blocker 4, verify3 Blocker 1, verify4 F1), when some role allows it.
         let membership = m.membership();
@@ -1090,7 +1143,7 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         let assignable = whole && may;
         withheld |= may && !whole;
         let p = ui.painter().clone();
-        widgets::frame(&p, rect, 14.0, theme::surface());
+        widgets::frame(&p, card, 14.0, theme::surface());
         let face = Rect::from_min_size(pos2(rect.left() + 12.0, rect.center().y - 18.0), vec2(36.0, 36.0));
         let pic = state.picture(&ctx, cx.ctl, scope, &m.icon_url);
         let name = m.display_name.clone().unwrap_or_else(|| tr("Someone VRChat does not name").to_string());
@@ -1118,10 +1171,9 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
                 }
             }
         }
-        if open_now && whole {
-            if let Some(o) = state.open.as_ref() {
-                role_chooser(ui, o, &m, &roles, busy, acts);
-            }
+        if let (Some(chooser), Some(o)) = (chooser, state.open.as_ref()) {
+            let under = Rect::from_min_max(pos2(card.left() + 12.0, rect.bottom()), card.right_bottom() - vec2(12.0, 0.0));
+            chooser.show(ui, o, &m, &roles, under, busy, acts);
         }
     }
     // Members shown whose record VRChat gave in part: their roles are left alone here, and it says why.
@@ -1149,43 +1201,72 @@ fn allowed_assign(o: &Open, r: &Role, user: &str) -> bool {
     o.can(Action::AssignRole { role: &r.id, user, membership: &g::Membership { id: "gmem_1".into(), joined_at: "2026-01-01T00:00:00Z".into() }, add: true }).allowed()
 }
 
-/// The roles a member can be given or have taken back, each a press of its own: ids taken at the press (M3).
-fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, acts: &mut Vec<Act>) {
-    let Some(membership) = m.membership() else { return };
-    let w = ui.available_width();
-    let candidates: Vec<&Role> = roles.iter().filter(|r| !r.default_role && !r.is_owner_role() && !r.requires_purchase).collect();
-    let chips: Vec<(String, f32)> = candidates.iter().map(|r| {
-        let name = g::label(&r.name, g::ROLE_NAME_MAX);
-        let label = if m.role_ids.contains(&r.id) { format!("✓ {name}") } else { name }; // i18n: not shown (a check mark before a name)
-        let width = widgets::text_size(ui, &Txt::new(&label, 13.0).weight(weight::MEDIUM)).x + 28.0;
-        (label, width)
-    }).collect();
-    let (spots, h) = widgets::flow(&chips.iter().map(|c| c.1).collect::<Vec<_>>(), w - 32.0, 32.0, 8.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(w, h + 48.0), Sense::hover());
-    let p = ui.painter().clone();
-    p.rect_filled(rect, theme::radius(14.0), theme::INK_800);
-    widgets::text(&p, pos2(rect.left() + 16.0, rect.top() + 16.0), Align2::LEFT_CENTER, &Txt::new(tr("Press a role to give it or take it back. Each press asks VRChat once."), 12.0).color(theme::FG_3));
-    for ((r, (label, cw)), at) in candidates.iter().zip(chips.iter()).zip(spots) {
-        let has = m.role_ids.contains(&r.id);
-        let verdict = o.can(Action::AssignRole { role: &r.id, user: &m.user_id, membership: &membership, add: !has });
-        let cr = Rect::from_min_size(rect.min + vec2(16.0, 32.0) + at, vec2(*cw, 30.0));
-        // Group, member, membership, role and direction are the press's: a list read again under a press that would turn
-        // "give" into "take back", or make it someone's new membership, makes it another control, which that press is not
-        // on (Major 3, verify4 F1).
-        let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), &membership, r.id.as_str(), has)), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
-        let fill = if has { theme::alpha(theme::ACCENT, 0.2) } else { theme::INK_700 };
-        p.rect_filled(cr, theme::radius(15.0), if resp.hovered() && verdict.allowed() { theme::mix(fill, theme::FG, 0.08) } else { fill });
-        let color = if verdict.allowed() { if has { theme::ACCENT } else { theme::FG } } else { theme::FG_4 };
-        widgets::text(&p, cr.center(), Align2::CENTER_CENTER, &Txt::new(label, 13.0).weight(weight::MEDIUM).color(color));
-        if let Some(why) = authority_text(&verdict) {
-            resp.clone().on_hover_text(why);
-        }
-        // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
-        // alone (Major 3, Blocker 6).
-        if verdict.allowed() && widgets::activated_fresh(&resp) {
-            acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), membership: membership.clone(), role: r.id.clone(), add: !has }, cr));
+/// The roles a member can be given or have taken back, laid out under their row in their card.
+struct Chooser {
+    /// The role (its place in the group's), its label, and its chip's width and place.
+    chips: Vec<(usize, String, f32, egui::Vec2)>,
+    height: f32,
+}
+
+impl Chooser {
+    /// What the chips start under: the hairline and what a press does.
+    const TOP: f32 = 36.0;
+
+    fn of(ui: &Ui, m: &Member, roles: &[Role], w: f32) -> Self {
+        let found: Vec<(usize, String, f32)> = roles
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.default_role && !r.is_owners_of(roles))
+            .map(|(i, r)| {
+                let name = g::label(&r.name, g::ROLE_NAME_MAX);
+                let label = if m.role_ids.contains(&r.id) { format!("✓ {name}") } else { name }; // i18n: not shown (a check mark before a name)
+                let width = widgets::text_size(ui, &Txt::new(&label, 13.0).weight(weight::MEDIUM)).x + 28.0;
+                (i, label, width.min(w))
+            })
+            .collect();
+        let (spots, h) = widgets::flow(&found.iter().map(|c| c.2).collect::<Vec<_>>(), w, 30.0, 8.0);
+        Self { chips: found.into_iter().zip(spots).map(|((i, label, cw), at)| (i, label, cw, at)).collect(), height: Self::TOP + h + 14.0 }
+    }
+
+    /// Each chip a press of its own: ids taken at the press (M3).
+    #[allow(clippy::too_many_arguments)]
+    fn show(&self, ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], rect: Rect, busy: bool, acts: &mut Vec<Act>) {
+        let Some(membership) = m.membership() else { return };
+        let p = ui.painter().clone();
+        p.hline(rect.x_range(), rect.top(), theme::hairline());
+        widgets::text_truncated(&p, pos2(rect.left(), rect.top() + 18.0), Align2::LEFT_CENTER, &Txt::new(tr("Press a role to give it or take it back. Each press asks VRChat once."), 12.0).color(theme::FG_3), rect.width());
+        for (i, label, cw, at) in &self.chips {
+            let Some(r) = roles.get(*i) else { continue };
+            let has = m.role_ids.contains(&r.id);
+            let verdict = o.can(Action::AssignRole { role: &r.id, user: &m.user_id, membership: &membership, add: !has });
+            let cr = Rect::from_min_size(rect.min + vec2(0.0, Self::TOP) + *at, vec2(*cw, 30.0));
+            // Group, member, membership, role and direction are the press's: a list read again under a press that would turn
+            // "give" into "take back", or make it someone's new membership, makes it another control, which that press is not
+            // on (Major 3, verify4 F1).
+            let resp = ui.interact(cr, Id::unique(("assign", o.id.as_str(), m.user_id.as_str(), &membership, r.id.as_str(), has)), if verdict.allowed() && !busy { Sense::click() } else { Sense::hover() });
+            let fill = if has { theme::alpha(theme::ACCENT, 0.2) } else { theme::INK_700 };
+            p.rect_filled(cr, theme::radius(15.0), if resp.hovered() && verdict.allowed() { theme::mix(fill, theme::FG, 0.08) } else { fill });
+            let color = if verdict.allowed() { if has { theme::ACCENT } else { theme::FG } } else { theme::FG_4 };
+            widgets::text(&p, cr.center(), Align2::CENTER_CENTER, &Txt::new(label, 13.0).weight(weight::MEDIUM).color(color));
+            if let Some(why) = authority_text(&verdict) {
+                resp.clone().on_hover_text(why);
+            } else if !has && r.requires_two_factor {
+                resp.clone().on_hover_text(two_factor());
+            }
+            // A click released on this chip (a press dragged off it is no choice) or a fresh key: never on the press
+            // alone (Major 3, Blocker 6).
+            if verdict.allowed() && widgets::activated_fresh(&resp) {
+                acts.push(Act::Write(Write::MemberRole { group: o.id.clone(), user: m.user_id.clone(), membership: membership.clone(), role: r.id.clone(), add: !has }, cr));
+            }
         }
     }
+}
+
+#[cfg(test)]
+fn role_chooser(ui: &mut Ui, o: &Open, m: &Member, roles: &[Role], busy: bool, acts: &mut Vec<Act>) {
+    let chooser = Chooser::of(ui, m, roles, ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), chooser.height), Sense::hover());
+    chooser.show(ui, o, m, roles, rect, busy, acts);
 }
 
 fn roles(ui: &mut Ui, cx: &mut Cx, state: &mut State, acts: &mut Vec<Act>) {
@@ -1921,7 +2002,7 @@ mod tests {
             let mut out = ctx.run_ui(input, |ui| {
                 role_chooser(ui, &o, &m, &roles, false, &mut acts);
                 // The first chip ("Moderators"): where it was drawn.
-                *chip_out = Rect::from_min_size(ui.min_rect().min + vec2(16.0, 32.0), vec2(40.0, 30.0));
+                *chip_out = Rect::from_min_size(ui.min_rect().min + vec2(0.0, Chooser::TOP), vec2(28.0, 30.0));
             });
             out.textures_delta.clear();
             acts.len()
@@ -1951,7 +2032,7 @@ mod tests {
             input.events = events;
             let mut out = ctx.run_ui(input, |ui| {
                 role_chooser(ui, &o, m, &roles, false, &mut acts);
-                *at = ui.min_rect().min + vec2(36.0, 47.0);
+                *at = ui.min_rect().min + vec2(14.0, Chooser::TOP + 15.0);
             });
             out.textures_delta.clear();
             acts.into_iter().filter_map(|a| if let Act::Write(Write::MemberRole { add, .. }, _) = a { Some(add) } else { None }).collect::<Vec<_>>()
@@ -1978,6 +2059,40 @@ mod tests {
         s.labels = vec![("group-x".to_string(), "Bad\u{202E}name".to_string())];
         assert_eq!(right_label(&s, "group-x"), "Badname");
         assert_eq!(right_label(&s, "group-unknown\u{202E}x"), "group-unknownx");
+    }
+
+    /// REQUEST28: the roles open in their member's own card, which grows with them; one member at a time; nothing else on the
+    /// page scrolls.
+    #[test]
+    fn a_members_roles_open_in_their_own_card() {
+        let mut o = open_as(&["*"], &["grol_owner"]);
+        o.page.as_mut().unwrap().group.owner_id = "usr_me".into();
+        // One whose rights VRChat left out, and one that is bought.
+        let roles = o.page.as_mut().unwrap().group.roles.as_mut().unwrap();
+        roles[1] = Role { name: "Staff".into(), known: false, permissions: vec![], ..roles[1].clone() };
+        roles.push(Role { id: "grol_paid".into(), name: "Supporter".into(), order: Some(4), requires_purchase: true, known: true, whole: true, ..Default::default() });
+        let m = Member { user_id: "usr_00000000-0000-4000-8000-000000000001".into(), membership_id: "gmem_1".into(), joined_at: Some("2026-01-01T00:00:00Z".into()), display_name: Some("Sam".into()), roles_known: true, ..Default::default() };
+        let all = o.roles().to_vec();
+        let gmem = m.membership().unwrap();
+        let verdict = |role: &str| o.can(Action::AssignRole { role, user: &m.user_id, membership: &gmem, add: true });
+        assert!(verdict("grol_mod").allowed() && verdict("grol_artist").allowed(), "the owner gives any role");
+        assert_eq!(authority_text(&verdict("grol_paid")), Some(super::super::why_text(g::Why::PaidRole)), "a bought one says that");
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            let c = Chooser::of(ui, &m, &all, 500.0);
+            assert_eq!(c.chips.len(), 3, "the owner's role is none of them");
+            assert!(c.height > Chooser::TOP + 30.0 && c.chips.iter().all(|(_, _, w, at)| at.x + w <= 500.5 && Chooser::TOP + at.y + 30.0 <= c.height));
+            let narrow = Chooser::of(ui, &m, &all, 120.0);
+            assert!(narrow.height > c.height, "a narrow card grows taller");
+            role_chooser(ui, &o, &m, &all, false, &mut Vec::new());
+        });
+        out.textures_delta.clear();
+        assert!(words(&out).contains("Staff") && words(&out).contains("Supporter"));
+        // What it says when it cannot be given never sends the person to read again what reading cannot change.
+        for m in [Missing::Roles, Missing::RoleOrder, Missing::RoleDefinition, Missing::RoleGone, Missing::Member] {
+            assert!(!super::super::missing_text(m).contains("Read the group again"), "{m:?}");
+        }
     }
 
     /// Every word painted, in order.

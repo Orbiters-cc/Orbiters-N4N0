@@ -33,6 +33,7 @@ use super::Controller;
 pub use super::groups_ledger::{Answer, By, Closing, Entry, Evidence, Key, Kind, Ledger, Not, State, Stop, Target, Warning};
 use super::groups_ledger::{known_id, FORMAT, SETTLES_AFTER_MS};
 use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Beside, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Membership, Missing, Part, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, RoleField, Why};
+use orbiters_core::group_events::{Events, Month};
 use orbiters_core::vrchat_api::{Client, GroupFailure, GroupFile, GroupInventory, Held, Leave, Members, Posts};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -86,6 +87,8 @@ pub enum Request {
     /// A page of members (`query` of three characters or more: VRChat's search).
     Members { group: String, query: String, offset: usize },
     Posts { group: String, offset: usize },
+    /// A page of a group's calendar, whole or a month of it (read only).
+    Events { group: String, month: Option<Month>, offset: usize },
     /// A page of the account's own pictures.
     Inventory { tag: FileTag, offset: usize },
     /// A picture of the page (a member's, a banner), in memory only.
@@ -515,6 +518,7 @@ pub enum Reply {
     Opened(Box<Page>),
     Members(Members),
     Posts(Posts),
+    Events(Events),
     Inventory(GroupInventory),
     Picture(#[serde(with = "super::vrchat_login::bytes_b64")] Vec<u8>),
     Prepared(Box<Sealed>),
@@ -777,6 +781,7 @@ impl Controller {
                 self.groups_read(&scope, |c| if query.chars().count() >= 3 { c.search_group_members(&group, &query, offset) } else { c.group_members(&group, offset) }).map(Reply::Members)
             }
             Request::Posts { group, offset } => self.groups_read(&scope, |c| c.group_posts(&group, offset)).map(Reply::Posts),
+            Request::Events { group, month, offset } => self.groups_read(&scope, |c| c.group_events(&group, month, offset)).map(Reply::Events),
             Request::Inventory { tag, offset } => self.groups_read(&scope, |c| c.inventory(tag, offset)).map(Reply::Inventory),
             Request::Picture { url } => self
                 .groups_read(&scope, |c| c.image(&url).map_err(|e| if e == orbiters_core::vrchat_api::Error::UnsafeUrl { GroupFailure::NotFound } else { GroupFailure::Unavailable }))

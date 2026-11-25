@@ -14,6 +14,7 @@ pub mod explorer;
 pub mod picture;
 pub mod features;
 pub mod gallery_talk;
+pub mod group_events;
 pub mod groups;
 pub mod here;
 pub mod keyframes;

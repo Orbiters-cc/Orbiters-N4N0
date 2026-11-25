@@ -680,6 +680,35 @@ fn follow_locals(state: &mut State, ui: &Ui, cx: &Cx, server: Server) {
     }
 }
 
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    let server = if cx.snap.settings.development { Server::Development } else { Server::Production };
+    follow_locals(state, ui, cx, server);
+    follow_lists(state, ui.ctx(), cx, server);
+}
+
+/// Keeps what Orbiters lists as the page shows it: the communities' galleries and the member's assets, and the feed,
+/// asked again when what is asked for changed.
+fn follow_lists(state: &mut State, ctx: &egui::Context, cx: &Cx, server: Server) {
+    // Screenshots read Orbiters' galleries and assets only from their fixtures (staged on their own).
+    if state.community.poll(ctx, cx, state.filter.communities() && !state.fixture) {
+        state.shown_key = None;
+    }
+    if state.assets.poll(ctx, cx, state.filter.assets() && !state.fixture) {
+        state.shown_key = None;
+    }
+    if state.fixture || !state.filter.own() || anim::time(ctx) - state.query_changed <= 0.3 {
+        return;
+    }
+    let query = state.query.trim();
+    if state.asked.as_ref().is_none_or(|(filter, asked)| *filter != state.filter || asked != query) {
+        state.asked = Some((state.filter, query.to_owned()));
+        state.feed = Feed::default();
+        state.shown_key = None;
+        state.fetch(ctx, server, false);
+    }
+}
+
 /// Whether the list is out of date: the watch saw (`looked`: when its look began, and the revision it saw) another
 /// revision than the one the list was made from (`listed`: when that was taken, and what it was), in a look begun after
 /// that one was taken. A look begun before says nothing: the list is the newer of the two, and the next look tells.
@@ -736,6 +765,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
     if state.pictures.is_none() {
         state.pictures = Some(crate::worlds::Pictures::new(&ctx));
     }
+    follow_lists(state, &ctx, cx, server);
     if let Some(r) = state.feed_job.take().and_then(|r| r.take_for(state.account.owner())) {
         match r {
             Ok(page) => {
@@ -756,13 +786,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         }
         state.shown_key = None;
     }
-    // Screenshots read Orbiters' galleries and assets only from their fixtures (staged on their own).
-    if state.community.poll(&ctx, cx, state.filter.communities() && !state.fixture) {
-        state.shown_key = None;
-    }
-    if state.assets.poll(&ctx, cx, state.filter.assets() && !state.fixture) {
-        state.shown_key = None;
-    }
     if let Some(r) = state.download_job.take() {
         match r {
             Ok(path) => {
@@ -772,13 +795,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
             }
             Err(e) => state.select.say(&ctx, &tr!("The picture could not be saved: {e}", e = e)),
         }
-    }
-    let requested = (state.filter, state.query.trim().to_string());
-    if !state.fixture && state.filter.own() && state.asked.as_ref() != Some(&requested) && now - state.query_changed > 0.3 {
-        state.feed = Feed::default();
-        state.shown_key = None;
-        state.asked = Some(requested);
-        state.fetch(&ctx, server, false);
     }
     if state.filter.own() && state.asked.as_ref().is_some_and(|(_, q)| q != state.query.trim()) {
         super::frame_in(&ctx, 0.3 - (now - state.query_changed));
@@ -2786,6 +2802,45 @@ mod tests {
         assert_eq!(copy_link(&e), Some((true, true)), "its window updates it, then copies the link");
         e.uploaded_edits = e.edits.clone().and_then(Result::ok);
         assert_eq!(copy_link(&e), None, "as shared: the link is copied at once");
+    }
+
+    /// DPG-29: under the splash, before the page is drawn once, its list is read (it was asked for when the splash ended,
+    /// 1.9 s after the window opened).
+    #[test]
+    fn the_list_is_read_before_the_page_shows() {
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-prepare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Sessions")).unwrap();
+        let history = root.join("visited-worlds.json");
+        orbiters_core::visited::History::default().save(&history).unwrap();
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        snap.settings.sessions_dir = root.join("Sessions");
+        // (Nothing is asked of Orbiters here.)
+        let mut state = State { sources: Some((history.clone(), None)), filter: Filter::Mine, asked: Some((Filter::Mine, String::new())), ..Default::default() };
+        state.folders.set_sources(history, None);
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut time = 0.0;
+        let mut frames = 0;
+        while state.listed.is_none() {
+            time += 1.0 / 60.0;
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| {
+                let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                prepare(ui, &cx, &mut state);
+            });
+            output.textures_delta.clear();
+            frames += 1;
+            assert!(frames > 1 || state.local_job.running() || state.listed.is_some(), "asked at the first frame");
+            assert!(std::time::Instant::now() < limit, "the list");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // The page's own first frame asks for nothing more.
+        assert!(!state.local_job.running() && !state.local_dirty);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The page over `n` pictures of this computer, ten to an instance, at rest: what a frame allocates and takes (in

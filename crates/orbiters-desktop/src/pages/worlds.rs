@@ -272,21 +272,29 @@ fn mine_of<'a>(mine: &'a Option<Arc<crate::state::MapsMine>>, id: &str) -> Optio
     mine.as_ref()?.worlds.iter().find(|w| w.world_id == id)
 }
 
-pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
-    let ctx = ui.ctx().clone();
-    let page = ui.max_rect();
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    follow_list(ui.ctx(), cx, state);
+}
 
-    // Reload when the library changes, the folder changes, or the page is entered again.
+/// Reads the worlds again when the library changes, the folder changes, or the page is entered again.
+fn follow_list(ctx: &egui::Context, cx: &Cx, state: &mut State) {
     let key = (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit);
     if state.loaded.as_ref() != Some(&key) {
         let entered = state.loaded.as_ref().is_none_or(|k| k.2 != key.2);
         state.loaded = Some(key);
         let dir = cx.snap.settings.sessions_dir.clone();
-        state.list = Job::spawn(&ctx, move || worlds::load(&dir));
+        state.list = Job::spawn(ctx, move || worlds::load(&dir));
         if entered {
             cx.ctl.request_maps();
         }
     }
+}
+
+pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
+    let ctx = ui.ctx().clone();
+    let page = ui.max_rect();
+    follow_list(&ctx, cx, state);
     if let Some(list) = state.list.take() {
         state.worlds = Some(list.into_iter().map(Arc::new).collect());
         state.shown = None;

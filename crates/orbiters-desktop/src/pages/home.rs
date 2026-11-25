@@ -235,6 +235,26 @@ fn go_home(host: &mut MenuHost) -> Vec<Effect> {
     effects
 }
 
+/// What Home shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &mut Cx, state: &mut State) {
+    let State { host, launcher, .. } = state;
+    wired(ui.ctx(), cx, host, launcher);
+    super::launcher::destinations::prepare(ui.ctx(), cx, launcher);
+}
+
+/// The launcher and the menu's host, following what the service says.
+fn wired<'h>(ctx: &egui::Context, cx: &Cx, host: &'h mut Option<MenuHost>, launcher: &mut super::launcher::State) -> &'h mut MenuHost {
+    launcher.wire(ctx, cx);
+    let host = host.get_or_insert_with(|| {
+        // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
+        let mut host = MenuHost::waking(ctx.clone()).holding(orbiters_n4n0::MenuHolder::Window);
+        host.open(cx.snap);
+        host
+    });
+    host.follow(cx.snap);
+    host
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // A group's page (or the banner studio) takes Home's place (REQUEST22).
     if state.groups.page_open() {
@@ -243,14 +263,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
     let State { host, shown, since, opened, focus, copied, states, pending, network, all_tools, music: music_watch, launcher, groups } = state;
-    launcher.wire(&ctx, cx);
-    let host = host.get_or_insert_with(|| {
-        // What it fetches (YouTube's answers, thumbnails) asks for a frame when it arrives.
-        let mut host = MenuHost::waking(ctx.clone()).holding(orbiters_n4n0::MenuHolder::Window);
-        host.open(snap);
-        host
-    });
-    host.follow(snap);
+    let host = wired(&ctx, cx, host, launcher);
     // The music card names what plays, and the music page shows it: read while one of them shows. The watch keeps
     // the readings coming between frames, and asks for one when what the page shows of them changed.
     if matches!(host.menu.page, Page::Home | Page::Music) {
@@ -1991,6 +2004,21 @@ mod tests {
         let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
         println!("YouTube's page at rest: {frames} frames a minute");
         assert!(frames <= 300, "YouTube's page, untouched: {frames} frames a minute");
+    }
+
+    /// DPG-29: under the splash nothing of the page is drawn, and what its first frame takes is there already.
+    #[test]
+    fn home_is_made_ready_under_the_splash() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        widgets::watch_controls();
+        let ctl: Ctl = Arc::new(Recorder::default());
+        let mut app = crate::app::App::offline(ctl);
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(0.0), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        assert!(app.home_mut().menu_host().is_some(), "the menu's host is made at the window's first frame");
+        assert!(widgets::control(&ctx, "All tools").is_none(), "and nothing of Home is drawn yet");
     }
 
     /// DPG-2: Home drew itself at the monitor's rate for as long as it said "Connecting to VRChat…", which lasts until

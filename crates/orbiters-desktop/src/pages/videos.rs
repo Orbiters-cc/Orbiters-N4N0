@@ -458,6 +458,11 @@ fn by_day(rows: Vec<Row>, now: u64) -> Vec<(String, Vec<Row>)> {
     groups.into_iter().map(|(_, name, rows)| (name, rows)).collect()
 }
 
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    state.refresh(ui.ctx(), cx.visit);
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();

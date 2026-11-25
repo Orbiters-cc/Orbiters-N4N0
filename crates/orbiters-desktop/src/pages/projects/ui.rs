@@ -35,6 +35,13 @@ fn now() -> u64 {
     orbiters_projects::discovery::now()
 }
 
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    state.ensure(ui.ctx());
+    // This visit's look is the one just started.
+    state.visit = cx.visit;
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     state.ensure(&ctx);

@@ -159,6 +159,8 @@ pub struct State {
     pub(super) thumb_ids: HashSet<String>,
     pub(super) thumb_versions: Arc<Mutex<HashMap<String, u64>>>,
     thumb_preload_waited: bool,
+    /// The preload was started.
+    thumb_warmed: bool,
     /// Pictures checked less than [`thumb_cache::FRESH`] ago: never asked for again meanwhile, whatever the account,
     /// VRChat session or update (only Refresh asks for them).
     pub(super) thumb_fresh: HashSet<String>,
@@ -367,7 +369,8 @@ impl Default for State {
             thumb_before: HashMap::new(),
             thumb_swaps: 0,
             // Read at the window's start, so that the page's first visit shows them; never in unit tests.
-            thumb_preload: (!cfg!(test)).then(thumb_cache::preload),
+            thumb_preload: None,
+            thumb_warmed: false,
             thumb_ids: HashSet::new(),
             thumb_versions: Arc::default(),
             thumb_preload_waited: false,
@@ -569,7 +572,15 @@ impl State {
     pub(super) fn anchor(&self, name: &str) -> Rect {
         self.anchors.get(name).copied().unwrap_or(Rect::NOTHING)
     }
+    /// Starts reading the pictures the last window kept, once (every core decodes them: not beside the window's first
+    /// frame, where the page's making started it).
+    pub fn warm(&mut self) {
+        if !std::mem::replace(&mut self.thumb_warmed, true) && !cfg!(test) {
+            self.thumb_preload = Some(thumb_cache::preload());
+        }
+    }
     pub(super) fn ensure(&mut self, ctx: &egui::Context) {
+        self.warm();
         if !self.started {
             self.started = true;
             self.refresh(ctx, false);

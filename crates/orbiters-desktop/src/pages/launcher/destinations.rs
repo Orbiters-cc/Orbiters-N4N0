@@ -823,33 +823,46 @@ pub(super) fn who(state: &State, cx: &Cx, profile_account: Option<&str>) -> Who 
     Who { me, can_create, connecting: presence == Presence::Connecting && verified.is_none(), elsewhere, log, feed }
 }
 
+/// What Where's cards are made from, read before they show (`App::prepare`).
+pub fn prepare(ctx: &egui::Context, cx: &Cx, state: &mut State) {
+    if state.shown() {
+        read_places(ctx, cx, state);
+    }
+}
+
+/// Starts the reads of what the cards are made from, where due; whether they are read here at all.
+fn read_places(ctx: &egui::Context, cx: &Cx, state: &mut State) -> bool {
+    // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
+    if state.places.staged.is_some() || cfg!(test) {
+        return false;
+    }
+    let file = orbiters_core::paths::cache_dir().join("where.json");
+    {
+        let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
+        if s.value.is_none() && s.at.is_none() && !s.busy {
+            s.value = HistoryView::before(&file);
+        }
+    }
+    refresh(&state.places.history, HISTORY_EVERY, ctx, "history", move || {
+        let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
+        let view = HistoryView::of(&history, orbiters_core::visited::now());
+        view.keep(&file);
+        Some(view)
+    });
+    // Only once who it is is known: an empty list read before would stand for theirs.
+    let server = orbiters_core::account::Server::current();
+    if let Some(member) = crate::member::reading(server).filter(|m| cx.snap.account.member.as_deref() == Some(m.key().as_str())) {
+        let _ = theirs(&state.places.events, &member.key());
+        refresh(&state.places.events, EVENTS_EVERY, ctx, "events", move || Some((member.key(), read_events(member, events_now()))));
+    }
+    true
+}
+
 /// The cards now, after the reads have been started where due.
 fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (Vec<Suggestion>, bool) {
     let ctx = ui.ctx().clone();
     let now = state.now();
-    // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
-    let reads = state.places.staged.is_none() && !cfg!(test);
-    if reads {
-        let file = orbiters_core::paths::cache_dir().join("where.json");
-        {
-            let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
-            if s.value.is_none() && s.at.is_none() && !s.busy {
-                s.value = HistoryView::before(&file);
-            }
-        }
-        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", move || {
-            let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-            let view = HistoryView::of(&history, orbiters_core::visited::now());
-            view.keep(&file);
-            Some(view)
-        });
-        // Only once who it is is known: an empty list read before would stand for theirs.
-        let server = orbiters_core::account::Server::current();
-        if let Some(member) = crate::member::reading(server).filter(|m| cx.snap.account.member.as_deref() == Some(m.key().as_str())) {
-            let _ = theirs(&state.places.events, &member.key());
-            refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some((member.key(), read_events(member, events_now()))));
-        }
-    }
+    let reads = read_places(&ctx, cx, state);
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
     let loading = match &state.places.staged {
         Some(s) => s.loading,

@@ -273,6 +273,16 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// What the page shows on its first frame, read before it (`App::prepare`).
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    if state.sessions.is_none() && !state.list.running() {
+        state.read_list_for(ui.ctx(), (cx.ctl.library_version(), cx.snap.settings.sessions_dir.clone(), cx.visit));
+    }
+    if !state.manage {
+        super::gallery::prepare(ui, cx, &mut state.gallery);
+    }
+}
+
 /// Photos & captures: its gallery, the capture element at its top (REQUEST21 5: the Capture tab's content, `capture`,
 /// with the capture kit's avatar picker of Unity projects, `projects`); or its capture files.
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::capture::State, projects: &mut super::projects::State) {

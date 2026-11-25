@@ -1813,25 +1813,32 @@ fn place(rects: &mut HashMap<String, Rect>, id: &str, rect: Rect) {
     }
 }
 
+/// What the page shows on its first frame, read before it too (`App::prepare`): read again on every visit (after a
+/// minute), and when the environment changes.
+pub fn prepare(ui: &Ui, cx: &Cx, state: &mut State) {
+    if state.fixture.is_some() {
+        return;
+    }
+    let now = anim::time(ui.ctx());
+    let development = cx.snap.settings.development;
+    state.covers.development = development;
+    state.covers.fixture.clear();
+    let stale = state.loaded.is_none_or(|(dev, visit, at)| dev != development || (visit != cx.visit && now - at > 60.0));
+    if stale && !state.list.running() {
+        state.loaded = Some((development, cx.visit, now));
+        state.fetch(ui.ctx(), if development { Server::Development } else { Server::Production }, false);
+    }
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();
-    let now_t = anim::time(&ctx);
     let development = cx.snap.settings.development;
     let server = if development { Server::Development } else { Server::Production };
     if state.pictures.is_none() {
         state.pictures = Some(Pictures::new(&ctx));
     }
-    if state.fixture.is_none() {
-        state.covers.development = development;
-        state.covers.fixture.clear();
-        // Read again on every visit (after a minute), and when the environment changes.
-        let stale = state.loaded.is_none_or(|(dev, visit, at)| dev != development || (visit != cx.visit && now_t - at > 60.0));
-        if stale && !state.list.running() {
-            state.loaded = Some((development, cx.visit, now_t));
-            state.fetch(&ctx, server, false);
-        }
-    }
+    prepare(ui, cx, state);
     if let Some(r) = state.list.take() {
         match r {
             Ok(page) => {

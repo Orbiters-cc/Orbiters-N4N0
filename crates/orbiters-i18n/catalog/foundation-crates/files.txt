@@ -41,6 +41,7 @@ crates/orbiters-openvr/src/mirror.rs
 crates/orbiters-setup/build.rs
 crates/orbiters-setup/src/install.rs
 crates/orbiters-setup/src/main.rs
+crates/orbiters-setup/src/swap.rs
 crates/orbiters-setup/src/system.rs
 crates/orbiters-setup/src/ui.rs
 crates/orbiters-smooth/src/control.rs

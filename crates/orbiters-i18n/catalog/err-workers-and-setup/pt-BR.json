@@ -108,5 +108,7 @@
   "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder} sobrou de uma instalação anterior e não pôde ser posto de lado: nada foi alterado.",
   "{path} is a link to another folder: nothing in it was removed": "{path} é um link para outra pasta: nada nela foi removido",
   "not what N4N0 keeps under this name: left as it is": "não é o que o N4N0 guarda com este nome: deixado como está",
-  "{path} is reached through a link to another folder: nothing in it was removed": "{path} é alcançado por um link para outra pasta: nada nele foi removido"
+  "{path} is reached through a link to another folder: nothing in it was removed": "{path} é alcançado por um link para outra pasta: nada nele foi removido",
+  "Another setup is at work in {folder}: nothing was changed.": "Outra instalação está em andamento em {folder}: nada foi alterado.",
+  "The start with Windows cannot be set": "Não foi possível configurar o início com o Windows"
 }

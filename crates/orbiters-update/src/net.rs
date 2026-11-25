@@ -71,12 +71,17 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
         std::fs::remove_file(&part)?;
         have = 0;
     }
+    let going = || {
+        anyhow::ensure!(!stop.load(Ordering::Relaxed), "stopped");
+        Ok(())
+    };
     let mut hasher = Sha256::new();
     if have > 0 {
         // What came before counts, hashed again: the hash covers the whole file.
         let mut file = std::fs::File::open(&part)?.take(have);
         let mut buf = vec![0u8; 1 << 20];
         loop {
+            going()?;
             let n = file.read(&mut buf)?;
             if n == 0 {
                 break;
@@ -85,6 +90,7 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
         }
     }
     progress(have, artifact.size);
+    going()?;
     if have < artifact.size {
         let mut request = agent().get(&url);
         if have > 0 {
@@ -105,7 +111,7 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
         let mut reader = response.into_body().into_with_config().limit(artifact.size - have + 1).reader();
         let mut buf = vec![0u8; 256 * 1024];
         loop {
-            anyhow::ensure!(!stop.load(Ordering::Relaxed), "stopped");
+            going()?;
             let n = reader.read(&mut buf).with_context(|| url.clone())?;
             if n == 0 {
                 break;
@@ -127,7 +133,9 @@ pub fn download(artifact: &Artifact, to: &Path, mut progress: impl FnMut(u64, u6
         let _ = std::fs::remove_file(&part);
         anyhow::bail!("{}", orbiters_i18n::tr!("{url}: not the file the release names (its SHA-256 differs)", url = url));
     }
-    let _ = std::fs::remove_file(to);
+    // Stopped: nothing is published; the whole part stays for the next time.
+    going()?;
+    // In one step: an earlier file there is replaced by this one or stays.
     std::fs::rename(&part, to)?;
     Ok(())
 }
@@ -233,6 +241,28 @@ mod tests {
         let other = dir.join("other.exe");
         assert!(download(&wrong, &other, |_, _| {}, &AtomicBool::new(false)).is_err());
         assert!(!other.exists());
+        // COR-13: stopped when everything is already here: nothing takes the name, and the part is kept for later.
+        let whole = dir.join("whole.exe");
+        std::fs::write(dir.join("whole.exe.part"), &setup).unwrap();
+        let told = std::cell::Cell::new(false);
+        assert!(download(&release.installer, &whole, |_, _| told.set(true), &AtomicBool::new(true)).is_err());
+        assert!(!told.get() && !whole.exists() && dir.join("whole.exe.part").exists());
+        // Stopped while the last of it comes.
+        let stop = AtomicBool::new(false);
+        assert!(download(&release.installer, &whole, |have, size| stop.store(have == size, Ordering::Relaxed), &stop).is_err());
+        assert!(!whole.exists() && dir.join("whole.exe.part").exists());
+        // COR-26: what was there stays while the new one cannot take its place (its part held by another program).
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(&whole, b"the one before").unwrap();
+            let held = std::fs::OpenOptions::new().read(true).share_mode(1 | 2).open(dir.join("whole.exe.part")).unwrap();
+            assert!(download(&release.installer, &whole, |_, _| {}, &AtomicBool::new(false)).is_err());
+            assert_eq!(std::fs::read(&whole).unwrap(), b"the one before");
+            drop(held);
+        }
+        download(&release.installer, &whole, |_, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(std::fs::read(&whole).unwrap(), setup);
         // Stopped: an error, the part kept for later.
         assert!(download(&release.installer, &dir.join("stopped.exe"), |_, _| {}, &AtomicBool::new(true)).is_err());
         let _ = std::fs::remove_dir_all(&dir);

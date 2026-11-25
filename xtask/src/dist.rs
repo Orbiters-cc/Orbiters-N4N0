@@ -319,9 +319,19 @@ pub(crate) fn ensure_says_version(path: &Path, bytes: &[u8], version: &str) -> a
     Ok(())
 }
 
+/// Whether a version right after `before` would be the end of a longer one: its first number goes on from digits there, or it follows a dot.
+fn longer_before(before: &[u8]) -> bool {
+    let digits = before.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    match before[before.len() - digits..].first() {
+        Some(first) => *first != b'0',
+        None => before.last() == Some(&b'.'),
+    }
+}
+
 /// Whether `bytes` hold `version` as a whole version: not as the start of a longer one (0.3.6-dev.1 in 0.3.6-dev.16,
 /// 0.3.7 in 0.3.7-dev.3) nor as the end of one (0.3.6 in 10.3.6). A letter may touch it: the compiler packs string
-/// literals end to end (the capture worker's reads `0.3.6-dev.16o…`).
+/// literals end to end (the capture worker's reads `0.3.6-dev.16o…`). So may a number that no version's could be the start of: `127.0.0.1:0` packed before 0.3.11-dev.10 in
+/// the call's, as no number of a version starts with a zero.
 fn says_version(bytes: &[u8], version: &str) -> bool {
     let needle = version.as_bytes();
     if needle.is_empty() {
@@ -329,7 +339,7 @@ fn says_version(bytes: &[u8], version: &str) -> bool {
     }
     bytes.windows(needle.len()).enumerate().any(|(at, w)| {
         w == needle
-            && !at.checked_sub(1).is_some_and(|b| matches!(bytes[b], b'0'..=b'9' | b'.'))
+            && !longer_before(&bytes[..at])
             && !bytes.get(at + needle.len()).is_some_and(|a| matches!(a, b'0'..=b'9' | b'.' | b'-' | b'+'))
     })
 }
@@ -380,6 +390,9 @@ mod tests {
         assert!(!says_version(b"\x000.3.6-dev.1\x00", "0.3.6-dev.10"));
         assert!(!says_version(b"\x000.3.7-dev.3\x00", "0.3.7"), "a development build of a stable version");
         assert!(!says_version(b"\x0010.3.6\x00", "0.3.6"));
+        assert!(!says_version(b"\x00120.3.6\x00", "0.3.6"));
+        assert!(!says_version(b"\x001.0.3.6\x00", "0.3.6"));
+        assert!(says_version(b"127.0.0.1:00.3.11-dev.10\x00", "0.3.11-dev.10"), "an address packed before it: no version's number starts with a zero");
         assert!(!says_version(b"orbiters-core-0.3.6.1\x00", "0.3.6"));
         assert!(!says_version(b"", "0.3.6"));
         assert!(!says_version(b"0.3.6", ""));

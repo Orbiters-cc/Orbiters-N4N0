@@ -182,7 +182,7 @@ impl Thumbs {
                     .and_then(|jpeg| orbiters_n4n0_core::picture::rgb_jpeg(&jpeg).ok())
                     .map(|rgb| ColorImage::from_rgb([rgb.width, rgb.height], &rgb.pixels));
                 let _ = tx.send((id, image));
-                ctx.request_repaint();
+                orbiters_ui::anim::wake(&ctx);
             });
         }
     }

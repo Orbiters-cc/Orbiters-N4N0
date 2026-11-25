@@ -543,7 +543,7 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
         s.at = Some(Instant::now());
         s.busy = false;
         drop(s);
-        ctx.request_repaint();
+        anim::wake(&ctx);
     });
     if started.is_err() {
         slot.lock().unwrap_or_else(|e| e.into_inner()).busy = false;
@@ -1495,14 +1495,13 @@ fn remote_picture(state: &mut State, world_id: &str, url: String) -> Option<egui
 /// A card while the history is read.
 fn stand_in_card(ui: &Ui, rect: Rect, pic_h: f32) {
     let p = ui.painter();
-    let t = anim::clock(ui.ctx(), 30.0) as f32;
+    let t = anim::working(ui.ctx()) as f32;
     let shimmer = 0.5 + 0.5 * (t * 2.4).sin();
     widgets::frame(p, rect, RADIUS, theme::mix(theme::surface_soft(), theme::surface_strong(), 0.2 + 0.15 * shimmer));
     let pic = Rect::from_min_size(rect.min, vec2(rect.width(), pic_h));
     paint::fill_convex(p, &paint::squircle_points(pic, theme::squircle(RADIUS)), |_| theme::white(0.03 + 0.02 * shimmer));
     p.rect_filled(Rect::from_min_size(pos2(rect.left() + 14.0, pic.bottom() + 13.0), vec2(rect.width() * 0.55, 12.0)), theme::radius(6.0), theme::white(0.06));
     p.rect_filled(Rect::from_min_size(pos2(rect.left() + 14.0, pic.bottom() + 35.0), vec2(rect.width() * 0.75, 10.0)), theme::radius(5.0), theme::white(0.04));
-    ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
 /// The place of the visited places while there are none yet: what comes there.

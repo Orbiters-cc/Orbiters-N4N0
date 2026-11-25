@@ -331,7 +331,6 @@ fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::T
     let line = if signed_in { tr("Reading your VRChat profile…") } else { waits };
     widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_3()), room);
     orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::fg_3());
-    orbiters_ui::anim::request_frame(ui.ctx());
 }
 
 /// What a part shows while its change is on the way: the change, at once.
@@ -692,7 +691,6 @@ fn saving_line(ui: &mut Ui, state: &mut State, mine: &MyProfile, rect: Rect, cx:
             let t = Txt::new(tr("Saving…"), 12.5).color(theme::fg_3());
             let r = widgets::text(&p, at, Align2::RIGHT_CENTER, &t);
             feedback::spinner(&p, pos2(r.left() - 12.0, at.y), 6.0, 2.0, theme::fg_3());
-            ui.ctx().request_repaint();
         }
         Some(Saving::Saved(_)) => {
             let Some((_, seen)) = state.mine.saved_seen else { return };
@@ -954,7 +952,6 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             if listing {
                 let c = if shown.is_empty() { body.center() } else { pos2(body.left() + (shown.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
                 feedback::spinner(&p, c, 9.0, 2.5, theme::fg_3());
-                ctx.request_repaint();
             }
         }
     }

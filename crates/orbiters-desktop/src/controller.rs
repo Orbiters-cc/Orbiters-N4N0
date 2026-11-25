@@ -813,7 +813,7 @@ impl Controller {
             pending.drain(..excess);
         }
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            orbiters_ui::anim::request_frame(ctx);
+            orbiters_ui::anim::wake(ctx);
         }
     }
 
@@ -877,7 +877,7 @@ impl Controller {
         self.publishes.fetch_add(1, Ordering::Relaxed);
         self.subscribers.lock().unwrap().retain(|m| m.post_snapshot(s.clone()));
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            orbiters_ui::anim::request_frame(ctx);
+            orbiters_ui::anim::wake(ctx);
         }
     }
 
@@ -905,7 +905,7 @@ impl Controller {
         self.notices.lock().unwrap().retain(|n| !matches!(n, Notice::Toast { message, .. } if messages.contains(message)));
         self.broadcast(|| ToClient::Notice { notice: Notice::Retract { messages: messages.clone() } });
         if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
-            orbiters_ui::anim::request_frame(ctx);
+            orbiters_ui::anim::wake(ctx);
         }
     }
 

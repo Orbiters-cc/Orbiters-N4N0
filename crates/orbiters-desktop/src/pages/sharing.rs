@@ -1057,13 +1057,10 @@ impl Dialog {
             if sent.is_some() {
                 bp.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * shown, 3.0)), theme::radius(1.5), theme::alpha(tone, running));
             } else {
-                let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
+                let k = ((anim::working(ui.ctx()) * 0.8) % 1.0) as f32;
                 let w = bar.width() * 0.35;
                 let x = bar.left() - w + k * (bar.width() + w);
                 bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::accent(), running));
-            }
-            if anim::is_live(ui.ctx()) {
-                ui.ctx().request_repaint();
             }
         }
 

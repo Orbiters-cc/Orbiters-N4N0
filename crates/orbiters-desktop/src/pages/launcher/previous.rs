@@ -400,7 +400,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         pause_before_publishing(&paused);
         ticket.answer(open, at);
         if let Some(ctx) = ctx {
-            ctx.request_repaint();
+            anim::wake(&ctx);
         }
     });
 }
@@ -500,7 +500,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 h.rows = Some(rows);
                 h.reading = false;
                 drop(h);
-                ctx2.request_repaint();
+                anim::wake(&ctx2);
             });
             if started.is_err() {
                 let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
@@ -698,7 +698,6 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         widgets::text(&p, pos2(right, y), Align2::RIGHT_CENTER, &txt);
         if *glyph == icons::HOURGLASS_MEDIUM {
             orbiters_ui::feedback::spinner(&p, pos2(right - tw - 12.0, y), 6.0, 1.6, *color);
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         } else {
             widgets::icon(&p, pos2(right - tw - 12.0, y), glyph, 13.0, *color);
         }
@@ -770,13 +769,12 @@ fn kind_choice(ui: &mut Ui, state: &mut State, right_center: Pos2, v: &Visit) ->
 /// A row while the history is read.
 fn stand_in_row(ui: &Ui, r: Rect) {
     let p = ui.painter();
-    let t = anim::clock(ui.ctx(), 30.0) as f32;
+    let t = anim::working(ui.ctx()) as f32;
     let shimmer = 0.5 + 0.5 * (t * 2.4).sin();
     p.rect_filled(r, theme::radius(RADIUS + 2.0), theme::white(0.02 + 0.02 * shimmer));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 27.0), vec2(PIC_W, 54.0)), theme::radius(RADIUS), theme::white(0.04));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + PIC_W + 22.0, r.center().y - 14.0), vec2(r.width() * 0.35, 11.0)), theme::radius(5.0), theme::white(0.06));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + PIC_W + 22.0, r.center().y + 6.0), vec2(r.width() * 0.22, 9.0)), theme::radius(4.5), theme::white(0.04));
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 /// A world's picture for this sheet: only one already kept on this computer, never fetched (verify-r21 Major 6: opening

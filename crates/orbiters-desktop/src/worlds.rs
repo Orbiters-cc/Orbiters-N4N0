@@ -285,7 +285,7 @@ fn publish_pictures(index: &visited::ShotIndex) {
 fn pictures_changed() {
     PICTURE_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     for ctx in &*PICTURE_WAKE.lock().unwrap_or_else(|e| e.into_inner()) {
-        orbiters_ui::anim::request_frame(ctx);
+        orbiters_ui::anim::wake(ctx);
     }
 }
 
@@ -506,7 +506,7 @@ impl Infos {
                         }
                     };
                     k.lock().unwrap()[env_index(server)].insert(id, info);
-                    ctx.request_repaint();
+                    orbiters_ui::anim::wake(&ctx);
                     if !fresh {
                         // Gentle on Orbiters (and on VRChat behind it).
                         std::thread::sleep(Duration::from_millis(150));
@@ -724,13 +724,13 @@ impl Pictures {
                                 // Kept, or VRCX's or VRCNext's copy: now. Else asked of VRChat; the answer comes later.
                                 let deliver = |image: Option<ColorImage>, interim: bool| {
                                     done.lock().unwrap_or_else(|e| e.into_inner()).push((picture.clone(), Ok(image), interim));
-                                    ctx.request_repaint();
+                                    orbiters_ui::anim::wake(&ctx);
                                 };
                                 let reply: profile_pictures::Reply = {
                                     let (done, ctx, picture) = (done.clone(), ctx.clone(), picture.clone());
                                     Box::new(move |image| {
                                         done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, Ok(image), false));
-                                        ctx.request_repaint();
+                                        orbiters_ui::anim::wake(&ctx);
                                     })
                                 };
                                 let via = backend.as_ref().map(|b| profile_fetch(b, scope));
@@ -757,7 +757,7 @@ impl Pictures {
                             Err(()) => Err(()),
                         };
                         done.lock().unwrap_or_else(|e| e.into_inner()).push((picture, image, false));
-                        ctx.request_repaint();
+                        orbiters_ui::anim::wake(&ctx);
                     }
                 })
                 .expect("picture loader");

@@ -243,11 +243,37 @@ pub fn time(ctx: &Context) -> f64 {
     now(ctx)
 }
 
-/// One frame for something that changed outside the interface (the service's news). `request_repaint` runs two, to let
-/// layouts settle: a window told of changes 30 times a second drew 60 frames, each one GPU time and, on the processor's
-/// integrated GPU, a copy to the graphics card that drives the monitor.
-pub fn request_frame(ctx: &Context) {
-    ctx.request_repaint_after(Duration::from_millis(1));
+/// How long a [`wake`] waits for others: what lands within it shares one frame.
+pub const WAKE: Duration = Duration::from_millis(8);
+
+/// One frame, once, for something that changed outside the interface (the service's news, a picture a worker decoded),
+/// shared with what else lands within [`WAKE`]. `request_repaint` runs two, to let layouts settle: a window told of
+/// changes 30 times a second drew 60 frames, each one GPU time and, on the processor's integrated GPU, a copy to the
+/// graphics card that drives the monitor. Never an animation's way to its next frame: that is [`clock`], a spring, or,
+/// for something in progress, [`working`].
+pub fn wake(ctx: &Context) {
+    ctx.request_repaint_after(WAKE);
+}
+
+/// Something is in progress, and the one rule for every spot that says so (a spinner, a sweep, a waiting card): what
+/// moves there reads this clock, at the decorations' shared low rate while the window is live and in use, standing
+/// still with no frame asked for otherwise. What ends it, or moves it on, brings its own frame ([`wake`]): no spot
+/// draws to look for that ([`working_read`] where nothing can say it).
+pub fn working(ctx: &Context) -> f64 {
+    clock(ctx, DECOR_FPS)
+}
+
+/// How often a window in view but not in use shows how far something it has to look at is ([`working_read`]).
+pub const READ_EVERY: Duration = Duration::from_secs(1);
+
+/// [`working`], for what is known only by looking at it (a worker's percentage, a list read by a thread that has no
+/// window to wake): while nothing is done in the window but it shows, looked at once a second.
+pub fn working_read(ctx: &Context) -> f64 {
+    let t = working(ctx);
+    if (!is_live(ctx) || is_resting(ctx)) && ctx.input(|i| i.viewport().visible()) != Some(false) {
+        ctx.request_repaint_after(READ_EVERY);
+    }
+    t
 }
 
 /// Easing curves.

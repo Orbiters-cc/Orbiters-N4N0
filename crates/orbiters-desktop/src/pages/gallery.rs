@@ -786,8 +786,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         state.asked = Some(requested);
         state.fetch(&ctx, server, false);
     }
-    if state.asked.as_ref().is_some_and(|(_, q)| q != state.query.trim()) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(320));
+    if state.filter.own() && state.asked.as_ref().is_some_and(|(_, q)| q != state.query.trim()) {
+        super::frame_in(&ctx, 0.3 - (now - state.query_changed));
     }
     let head = Rect::from_min_size(pos2(page.left() + super::PAD_X, page.top() + cx.top + 8.0), vec2(page.width() - super::PAD_X * 2.0, 72.0));
     let narrow = head.width() < 690.0;

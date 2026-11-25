@@ -314,7 +314,6 @@ pub(super) fn show(v: &mut Viewer, ui: &mut Ui, rect: Rect) -> Option<bool> {
             widgets::text(&p, s.frame.center(), Align2::CENTER_CENTER, &Txt::new(tr!("This view could not be drawn: {e}", e = e), 13.0).color(theme::DANGER));
         } else if ed.shared.lock().map(|sh| sh.stack.is_none()).unwrap_or(false) {
             orbiters_ui::feedback::spinner(&p, s.frame.center(), 12.0, 2.5, theme::accent());
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // The shutter.
         let flash = ((now - ed.flashed) / 0.35) as f32;

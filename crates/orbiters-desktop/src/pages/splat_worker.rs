@@ -220,7 +220,7 @@ fn run(shared: &Shared, ctx: &egui::Context, mut gpu: Gpu, device: &wgpu::Device
             }
         }
         last = Some(request);
-        ctx.request_repaint();
+        orbiters_ui::anim::wake(&ctx);
     }
 }
 

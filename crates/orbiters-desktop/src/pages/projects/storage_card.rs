@@ -175,7 +175,7 @@ impl State {
         if run.still {
             return;
         }
-        ctx.request_repaint_after(Duration::from_millis(200));
+        orbiters_ui::anim::working_read(ctx);
         let Some(end) = run.job.take() else { return };
         let run = self.storage.run.take().expect("just looked at");
         // Everything known about the disk and the Library has changed.

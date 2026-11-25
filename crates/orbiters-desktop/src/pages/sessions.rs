@@ -316,8 +316,8 @@ fn show_library(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if state.pending.settled(cx.snap.cleanup.as_ref(), now) && !state.list.running() {
         state.loaded = None;
         ctx.request_repaint();
-    } else if !state.pending.is_empty() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    } else if let Some(left) = state.pending.due_in(now) {
+        super::frame_in(&ctx, left);
     }
 
     // Heading and actions, fixed above the grid (drawn after it, over the cards scrolled up under them).

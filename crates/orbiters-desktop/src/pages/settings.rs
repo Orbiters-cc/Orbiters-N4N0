@@ -1980,7 +1980,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         state.saw_busy = false;
         state.code.clear();
         cx.ctl.vrchat_login(command);
-        orbiters_ui::anim::request_frame(ui.ctx());
+        orbiters_ui::anim::wake(ui.ctx());
     }
 }
 /// Folder row: label, path, Change button. True when Change was clicked.

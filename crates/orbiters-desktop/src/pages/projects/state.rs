@@ -604,7 +604,7 @@ impl State {
             ctx.request_repaint();
             let result = discovery::discover(scan, force, &cancel, |s| {
                 let _ = tx.send(ScanEvent::Update(s.clone()));
-                ctx.request_repaint();
+                orbiters_ui::anim::wake(&ctx);
             })
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(ScanEvent::Done(result));

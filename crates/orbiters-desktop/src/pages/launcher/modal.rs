@@ -207,7 +207,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
             section(ui, 104.0, &mut |ui, r| place_card(ui, cx, state, r, friend, clock));
             section(ui, 44.0, &mut |ui, r| boop_row(ui, cx, state, r, friend, clock));
             if profile.loading {
-                section(ui, 58.0, &mut |ui, r| shimmer(ui, r, clock));
+                section(ui, 58.0, &mut shimmer);
             }
             if !profile.bio.trim().is_empty() {
                 let txt = Txt::new(profile.bio.trim(), 13.5).color(theme::fg_2()).line_height(20.0);
@@ -451,15 +451,14 @@ fn emoji_tint(id: &str) -> Color32 {
     palette[id.bytes().map(usize::from).sum::<usize>() % palette.len()]
 }
 
-fn shimmer(ui: &Ui, r: Rect, clock: f64) {
+fn shimmer(ui: &mut Ui, r: Rect) {
     let p = ui.painter();
-    let t = ((clock * 0.8) % 1.0) as f32;
+    let t = ((anim::working(ui.ctx()) * 0.8) % 1.0) as f32;
     for (i, w) in [0.9f32, 0.75, 0.5].iter().enumerate() {
         let bar = Rect::from_min_size(r.left_top() + vec2(0.0, 6.0 + i as f32 * 18.0), vec2(r.width() * w, 10.0));
         let a = 0.05 + 0.04 * ((t * std::f32::consts::TAU + i as f32).sin() * 0.5 + 0.5);
         p.rect_filled(bar, theme::radius(5.0), theme::white(a));
     }
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn links(ui: &mut Ui, r: Rect, links: &[String]) {

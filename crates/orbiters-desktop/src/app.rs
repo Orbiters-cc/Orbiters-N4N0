@@ -776,7 +776,6 @@ impl App {
             Some(f) => {
                 orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::accent(), 0.3));
                 orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::accent());
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
             None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::on_accent() } else { theme::accent() }),
             None => {}

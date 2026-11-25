@@ -77,7 +77,6 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
         widgets::frame(&p, row, 12.0, theme::white(0.04));
         orbiters_ui::feedback::spinner(&p, pos2(row.left() + 18.0, row.center().y), 6.0, 2.0, theme::fg_3());
         widgets::text_truncated(&p, pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&text, 12.5).color(theme::fg_2()), row.width() - 44.0);
-        anim::request_frame(ui.ctx());
         return y + row.height() + 10.0;
     }
     let text = match (states::live(&state.data), &state.data.source) {

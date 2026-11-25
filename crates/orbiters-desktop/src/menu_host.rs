@@ -123,7 +123,7 @@ impl MenuHost {
     pub fn waking(ctx: egui::Context) -> Self {
         let woken = ctx.clone();
         let Self(host) = Self::new(ctx);
-        Self(host.with_waker(Arc::new(move || orbiters_ui::anim::request_frame(&woken))))
+        Self(host.with_waker(Arc::new(move || orbiters_ui::anim::wake(&woken))))
     }
 
     /// The same menu as `holder`'s: the QR code scanner and the friends it asks for are its own (MENU-13).

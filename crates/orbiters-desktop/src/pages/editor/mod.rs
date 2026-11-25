@@ -543,7 +543,7 @@ impl Editor {
                     Err(e) => self.error = Some(tr!("The picture could not be saved: {error}", error = e)),
                 }
             } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                anim::working_read(ctx);
             }
         }
     }

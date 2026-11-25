@@ -140,10 +140,12 @@ impl Jobs {
                 (Kind::Source(_), Reply::Picture(bytes)) => art::decode_source(bytes).ok(),
                 _ => None,
             };
+            let picture = matches!(reply, Reply::Picture(_));
             // The bytes are not kept past decoding.
-            let reply = if matches!(reply, Reply::Picture(_)) { Reply::Cancelled } else { reply };
+            let reply = if picture { Reply::Cancelled } else { reply };
             let _ = tx.send(Answer { generation, kind, reply, image, source });
-            ctx.request_repaint();
+            // A picture takes a place laid out already; an answer makes the page another one.
+            if picture { anim::wake(&ctx) } else { ctx.request_repaint() }
         });
     }
     fn take(&mut self) -> Vec<Answer> {

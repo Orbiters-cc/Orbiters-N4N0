@@ -267,9 +267,26 @@ fn read_retrying(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
 /// rather than all of `n4n0`). A UTF-8 byte order mark (some editors add one) is fine. Returns the value and the fields
 /// left out (`"n4n0.keyboard"`; `"(not JSON)"` when nothing could be read), empty when the text fit as it was.
 pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>(text: &str) -> (T, Vec<String>) {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let Ok(input) = serde_json::from_str::<serde_json::Value>(text) else { return (T::default(), vec!["(not JSON)".into()]) };
-    if let Ok(value) = serde_json::from_value::<T>(input.clone()) {
+    match parse_json(text) {
+        Some(input) => json_lenient_value(input),
+        None => (T::default(), vec!["(not JSON)".into()]),
+    }
+}
+
+/// The JSON of `text` (a UTF-8 byte order mark is fine), `None` when it is not JSON.
+pub(crate) fn parse_json(text: &str) -> Option<serde_json::Value> {
+    #[cfg(test)]
+    PARSES.with(|n| n.set(n.get() + 1));
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()
+}
+
+// The parses of this thread (tests).
+#[cfg(test)]
+thread_local!(pub(crate) static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+/// [`json_lenient`] on JSON already parsed.
+pub fn json_lenient_value<T: serde::de::DeserializeOwned + serde::Serialize + Default>(input: serde_json::Value) -> (T, Vec<String>) {
+    if let Ok(value) = serde::Deserialize::deserialize(&input) {
         return (value, Vec::new());
     }
     let (Ok(mut base), Some(fields)) = (serde_json::to_value(T::default()), input.as_object()) else { return (T::default(), vec!["(not JSON)".into()]) };

@@ -1004,14 +1004,13 @@ impl Settings {
         };
         // A later read that works does NOT end the unreadable state: what this process holds (the service's live
         // settings) is still the defaults, and a save must go onto the person's file ([`Settings::save_to`]).
-        let migrated = migrated(&text);
-        let (settings, dropped) = Self::parse(migrated.as_deref().unwrap_or(&text));
+        let (settings, dropped, migrated) = Self::parse(&text);
         known_until_unreadable(path, &settings);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
         }
-        if migrated.is_some() {
+        if migrated {
             // Written again at once under today's names: the earlier one is read this once only.
             if let Err(e) = settings.save_to(path) {
                 eprintln!("settings: {}: {e:#}", path.display());
@@ -1024,14 +1023,22 @@ impl Settings {
         Self::load_from(&crate::paths::settings_file())
     }
 
-    /// The settings in `text` as [`crate::json_lenient`] reads them, a statistics switch that did not read off, never on
-    /// by default (the person may have turned it off; PRIV-12); with the fields left out.
-    fn parse(text: &str) -> (Self, Vec<String>) {
-        let (mut settings, dropped) = crate::json_lenient::<Self>(text);
+    /// The settings in `text`, parsed once, as [`crate::json_lenient`] reads them, a statistics switch that did not read
+    /// off, never on by default (the person may have turned it off; PRIV-12); with the fields left out, and whether
+    /// something was saved under an earlier name ([`migrate`]).
+    fn parse(text: &str) -> (Self, Vec<String>, bool) {
+        let (mut settings, dropped, moved) = match crate::parse_json(text) {
+            Some(mut value) => {
+                let moved = migrate(&mut value);
+                let (settings, dropped) = crate::json_lenient_value::<Self>(value);
+                (settings, dropped, moved)
+            }
+            None => (Self::default(), vec!["(not JSON)".into()], false),
+        };
         if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
             settings.usage.enabled = false;
         }
-        (settings, dropped)
+        (settings, dropped, moved)
     }
 
     /// The language a program of its own (the call, capture and speech workers) speaks: the one these settings hold (what the account gave
@@ -1070,8 +1077,7 @@ impl Settings {
                         eprintln!("settings: {} kept as {} before the first save onto it", path.display(), aside.display());
                         set_kept_aside(path);
                     }
-                    let migrated = migrated(&text);
-                    let (on_disk, _) = Self::parse(migrated.as_deref().unwrap_or(&text));
+                    let (on_disk, _, _) = Self::parse(&text);
                     rebased = self.changes_onto(on_disk, &baseline(path));
                     &rebased
                 }
@@ -1205,8 +1211,6 @@ fn field_mut<'v>(value: &'v mut serde_json::Value, path: &[String]) -> Option<&'
 /// The key N4N0's section was saved under before the companion took its name (0.3.4-dev.8 and earlier).
 const LEGACY_N4N0_KEY: &str = "orb";
 
-/// The settings' text with N4N0's section moved from its earlier key to `n4n0` (today's wins when both are there),
-/// or `None` when the text has no earlier key (or is not a JSON object: [`crate::json_lenient`] deals with that).
 /// The settings files this process could not read when it loaded them ([`Settings::load_from`]): it holds defaults for
 /// them, which must never be saved over the real ones.
 /// For the life of the process (whatever is read afterwards): the settings it started from are not the file's. The
@@ -1220,7 +1224,7 @@ fn loaded_unreadable(path: &Path) {
 /// What this process last knew each settings file to hold: what it read while the file could still be read, then what
 /// it saved. What a save after a failed read puts on the file is what changed since then (night4, verify2: never "since
 /// the start-up defaults", which turned a switch the person turned back off on again).
-static KNOWN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, serde_json::Value>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static KNOWN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Settings>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// A read that worked: what the file holds, while it never failed to read in this process (a read after a failure is
 /// no knowledge of what this process holds).
@@ -1228,21 +1232,18 @@ fn known_until_unreadable(path: &Path, settings: &Settings) {
     if was_loaded_unreadable(path).is_some() {
         return;
     }
-    if let Ok(value) = serde_json::to_value(settings) {
-        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
-    }
+    saved(path, settings);
 }
 
 fn saved(path: &Path, settings: &Settings) {
-    if let Ok(value) = serde_json::to_value(settings) {
-        KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), value);
-    }
+    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(path.to_path_buf(), settings.clone());
 }
 
 /// What a save onto the file as it reads puts what changed from: what this process last knew it to hold, else the
 /// defaults it started from.
 fn baseline(path: &Path) -> serde_json::Value {
-    KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned().unwrap_or_else(|| serde_json::to_value(Settings::unread()).unwrap_or_default())
+    let known = KNOWN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).cloned();
+    serde_json::to_value(known.unwrap_or_else(Settings::unread)).unwrap_or_default()
 }
 
 fn set_kept_aside(path: &Path) {
@@ -1254,20 +1255,17 @@ fn was_loaded_unreadable(path: &Path) -> Option<bool> {
     LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).copied()
 }
 
-fn migrated(text: &str) -> Option<String> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let fields = value.as_object_mut()?;
+/// Moves what an earlier version saved under another name to today's (today's wins when both are there); whether
+/// anything moved (nothing in what is not a JSON object).
+fn migrate(value: &mut serde_json::Value) -> bool {
+    let Some(fields) = value.as_object_mut() else { return false };
     let legacy = fields.remove(LEGACY_N4N0_KEY);
     let moved = legacy.is_some();
     if let Some(legacy) = legacy {
         fields.entry("n4n0").or_insert(legacy);
     }
     let rendered = cfg!(target_os = "macos") && saved_on_a_mac(fields) && fields.get_mut("launch").is_some_and(earlier_render_default);
-    if !moved && !rendered {
-        return None;
-    }
-    serde_json::to_string(&value).ok()
+    moved || rendered
 }
 
 /// Whether settings were last written on a Mac, as far as they can tell: by where recordings go, a folder of the computer that
@@ -1291,6 +1289,23 @@ fn earlier_render_default(launch: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// COR-28: a load parses its file once, whatever it holds: today's settings, an earlier key, a field that does not fit.
+    #[test]
+    fn a_load_parses_its_file_once() {
+        let dir = std::env::temp_dir().join(format!("orbiters-settings-parses-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let today = serde_json::to_string_pretty(&Settings { storage_limit_gb: 7.0, ..Default::default() }).unwrap();
+        let earlier = format!("{{\"storage_limit_gb\": 7, \"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}}}");
+        for text in [today, earlier, r#"{"storage_limit_gb": 7, "capture_mode": 12}"#.into()] {
+            std::fs::write(&path, &text).unwrap();
+            let before = crate::PARSES.with(std::cell::Cell::get);
+            assert_eq!(Settings::load_from(&path).storage_limit_gb, 7.0);
+            assert_eq!(crate::PARSES.with(std::cell::Cell::get) - before, 1, "{text}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// Anyone's gun changes the avatar unless the person chose otherwise, the gun has no avatar until one is chosen, and no
     /// change happened yet; what was chosen is read back as saved.
@@ -1358,7 +1373,7 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(saved.get(LEGACY_N4N0_KEY).is_none() && saved["n4n0"]["wake_word"] == true, "{saved}");
         assert_eq!(Settings::load_from(&path), s, "and read the same way afterwards");
-        assert!(migrated(&std::fs::read_to_string(&path).unwrap()).is_none(), "nothing left to move");
+        assert!(!Settings::parse(&std::fs::read_to_string(&path).unwrap()).2, "nothing left to move");
         // Both keys (an earlier version wrote the file after a newer one): today's wins.
         let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
         std::fs::write(&path, both).unwrap();

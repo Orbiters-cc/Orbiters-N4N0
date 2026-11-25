@@ -80,7 +80,7 @@ pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect) {
 
 fn header(ui: &mut Ui, glyph: &str, color: Color32, title: &str, sub: &str) {
     let w = ui.available_width();
-    let galley = ui.painter().layout_job(Txt::new(sub, 12.0).color(theme::FG_3).line_height(17.0).job(w - 46.0));
+    let galley = ui.painter().layout_job(Txt::new(sub, 12.0).color(theme::fg_3()).line_height(17.0).job(w - 46.0));
     let h = 22.0 + galley.size().y + 8.0;
     let (r, _) = ui.allocate_exact_size(vec2(w, h.max(44.0)), Sense::hover());
     let p = ui.painter();
@@ -88,21 +88,21 @@ fn header(ui: &mut Ui, glyph: &str, color: Color32, title: &str, sub: &str) {
     p.rect_filled(tile, theme::radius(11.0), theme::alpha(color, 0.16));
     widgets::icon(p, tile.center(), glyph, 17.0, color);
     widgets::text_truncated(p, pos2(tile.right() + 12.0, r.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(title, 15.5).weight(weight::SEMIBOLD), w - 46.0);
-    p.galley(pos2(tile.right() + 12.0, r.top() + 22.0), galley, theme::FG_3);
+    p.galley(pos2(tile.right() + 12.0, r.top() + 22.0), galley, theme::fg_3());
     ui.add_space(10.0);
 }
 
 fn paragraph(ui: &mut Ui, text: &str) {
-    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::FG_3).line_height(18.0).job(ui.available_width()));
+    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::fg_3()).line_height(18.0).job(ui.available_width()));
     let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-    ui.painter().galley(r.min, g, theme::FG_3);
+    ui.painter().galley(r.min, g, theme::fg_3());
 }
 
 fn nothing(ed: &mut Editor, ui: &mut Ui) {
     if ed.live.is_some() {
-        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, tr("Edit in 3D"), tr("The layers go on every frame while you move around. Save picture writes this view and its edited copy, which opens again here."));
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::accent(), tr("Edit in 3D"), tr("The layers go on every frame while you move around. Save picture writes this view and its edited copy, which opens again here."));
     } else {
-        header(ui, icons::SLIDERS_HORIZONTAL, theme::ACCENT, tr("Edit a copy"), tr("The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here."));
+        header(ui, icons::SLIDERS_HORIZONTAL, theme::accent(), tr("Edit a copy"), tr("The picture itself is never changed: saving writes a copy beside it, with its edit, which opens again here."));
     }
     let size = ed.loaded.as_ref().map(|l| tr!("{width} × {height} pixels", width = l.full.0, height = l.full.1)).unwrap_or_else(|| tr("Reading the picture…").to_string());
     paragraph(ui, &size);
@@ -138,7 +138,7 @@ fn crop(ed: &mut Editor, ui: &mut Ui) {
     header(
         ui,
         icons::CROP,
-        theme::ACCENT,
+        theme::accent(),
         tr("Crop and rotate"),
         if cfg!(target_os = "macos") {
             tr("Drag the frame's corners or edges, or the picture under it; a pinch or two fingers zoom. The dials under the picture straighten it and set its perspective upright; AUTO levels it by its own lines.")
@@ -213,7 +213,7 @@ fn source(ed: &mut Editor, ui: &mut Ui, i: usize) {
         "ui" => tr("The interface VRChat drew over the picture, transparent elsewhere."),
         _ => tr("The picture VRChat saved with its layers, all of them in one."),
     };
-    header(ui, layers::source_glyph(&s.name), theme::FG_2, &name, about);
+    header(ui, layers::source_glyph(&s.name), theme::fg_2(), &name, about);
     w::switch(ui, ("source-visible", i), tr("Shown"), &mut s.visible);
     ui.add_space(4.0);
     w::slider(ui, ("source-opacity", i), tr("Opacity"), &mut s.opacity, 0.0..=1.0, 1.0, w::percent);
@@ -286,7 +286,7 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
             widgets::segmented(ui, ("curve-channel", lid), &mut ed.channel, &options, true);
             ui.add_space(10.0);
             let color = match ed.channel {
-                Channel::Rgb => theme::FG,
+                Channel::Rgb => theme::fg(),
                 Channel::Red => Color32::from_rgb(0xff, 0x6b, 0x6b),
                 Channel::Green => Color32::from_rgb(0x5c, 0xe0, 0x8a),
                 Channel::Blue => Color32::from_rgb(0x6b, 0x9b, 0xff),
@@ -379,10 +379,10 @@ fn layer(ed: &mut Editor, ui: &mut Ui) {
                 .desired_rows(2)
                 .desired_width(ui.available_width())
                 .font(theme::font(14.0, weight::MEDIUM))
-                .text_color(theme::FG)
+                .text_color(theme::fg())
                 .margin(egui::Margin::symmetric(10, 8))
-                .hint_text(egui::RichText::new(tr("Type something…")).color(theme::FG_4));
-            egui::Frame::NONE.fill(theme::INK_750).corner_radius(theme::radius(12.0)).show(ui, |ui| {
+                .hint_text(egui::RichText::new(tr("Type something…")).color(theme::fg_4()));
+            egui::Frame::NONE.fill(theme::ink_750()).corner_radius(theme::radius(12.0)).show(ui, |ui| {
                 ui.add(edit);
             });
             w::slider(ui, ("text-size", lid), tr("Size"), &mut t.size, photo::Text::MIN_SIZE..=photo::Text::MAX_SIZE, 0.13, |v| format!("{:.0} %", v * 100.0));
@@ -554,7 +554,7 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
     let loading = fonts.installed.as_ref().is_some_and(|j| j.running());
     let ctx = ui.ctx().clone();
     let row_h = 40.0;
-    egui::Frame::NONE.fill(theme::INK_850).corner_radius(theme::radius(12.0)).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+    egui::Frame::NONE.fill(theme::ink_850()).corner_radius(theme::radius(12.0)).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
         egui::ScrollArea::vertical().id_salt(id.with("scroll")).max_height(260.0).auto_shrink([false, true]).show_rows(ui, row_h, shown.len(), |ui, range| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut made = 0;
@@ -565,7 +565,7 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
                 let selected = *chosen == f.key;
                 let hover = orbiters_ui::anim::toggle(&ctx, rid.with("hover"), resp.hovered(), orbiters_ui::anim::Spring::SNAPPY);
                 let p = ui.painter();
-                p.rect_filled(r.shrink(1.0), theme::radius(10.0), if selected { theme::alpha(theme::ACCENT, 0.14) } else { theme::white(0.04 * hover) });
+                p.rect_filled(r.shrink(1.0), theme::radius(10.0), if selected { theme::alpha(theme::accent(), 0.14) } else { theme::white(0.04 * hover) });
                 // Made a few a frame, so scrolling never waits on many at once.
                 let preview = if fonts.previews.contains_key(&f.key) || made < 4 {
                     made += 1;
@@ -581,7 +581,7 @@ fn font_list(fonts: &mut Fonts, ui: &mut Ui, id: Id, chosen: &mut String) {
                         let k = (max_w / s.x).min((row_h - 10.0) / s.y).min(1.0);
                         let size = s * k;
                         let at = Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - size.y * 0.5), size);
-                        p.image(t.id(), at, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), if selected { theme::ACCENT } else { theme::FG });
+                        p.image(t.id(), at, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), if selected { theme::accent() } else { theme::fg() });
                     }
                     None => {
                         widgets::text_truncated(p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(&f.name, 13.0), max_w);
@@ -607,7 +607,7 @@ fn curve_editor(ui: &mut Ui, id: Id, points: &mut Vec<[f32; 2]>, color: Color32,
     let (r, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
     let resp = ui.interact(r, id, Sense::click_and_drag());
     let p = ui.painter().with_clip_rect(r.expand(8.0).intersect(ui.clip_rect()));
-    p.rect_filled(r, theme::radius(12.0), theme::INK_850);
+    p.rect_filled(r, theme::radius(12.0), theme::ink_850());
     let box_ = r.shrink(10.0);
     let to_screen = |q: [f32; 2]| pos2(box_.left() + q[0] * box_.width(), box_.bottom() - q[1] * box_.height());
     let from_screen = |s: egui::Pos2| [((s.x - box_.left()) / box_.width()).clamp(0.0, 1.0), ((box_.bottom() - s.y) / box_.height()).clamp(0.0, 1.0)];
@@ -696,7 +696,7 @@ fn curve_editor(ui: &mut Ui, id: Id, points: &mut Vec<[f32; 2]>, color: Color32,
         let c = to_screen(*q);
         let active = dragging == Some(i);
         p.circle_filled(c, if active { 6.5 } else { 5.0 }, color);
-        p.circle_stroke(c, if active { 6.5 } else { 5.0 }, egui::Stroke::new(1.5, theme::INK_900));
+        p.circle_stroke(c, if active { 6.5 } else { 5.0 }, egui::Stroke::new(1.5, theme::ink_900()));
     }
     resp.on_hover_cursor(CursorIcon::Crosshair);
 }

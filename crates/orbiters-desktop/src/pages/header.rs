@@ -150,7 +150,7 @@ impl Header<'_> {
         };
         let mut x = head.left();
         if self.busy {
-            feedback::spinner(&hp, pos2(x + 7.0, head.top() + 62.0), 6.0, 1.8, theme::ACCENT);
+            feedback::spinner(&hp, pos2(x + 7.0, head.top() + 62.0), 6.0, 1.8, theme::accent());
             x += 22.0;
         }
         widgets::sliding_value(
@@ -159,7 +159,7 @@ impl Header<'_> {
             pos2(x, head.top() + 62.0),
             Align2::LEFT_CENTER,
             self.sub,
-            &Txt::new("", 13.0).color(theme::alpha(theme::FG_3, alpha)),
+            &Txt::new("", 13.0).color(theme::alpha(theme::fg_3(), alpha)),
             (toolbar_left - x).max(40.0),
         );
 
@@ -177,7 +177,7 @@ impl Header<'_> {
                 let b = IconButton::new(if a.spinning { "" } else { a.glyph }, a.label).size(ROW_H, 17.0).backdrop(theme::control()).id_salt(a.key);
                 let resp = b.show_at(&mut tu, *r);
                 if a.spinning {
-                    feedback::spinner(tu.painter(), r.center(), 7.5, 2.0, theme::FG_2);
+                    feedback::spinner(tu.painter(), r.center(), 7.5, 2.0, theme::fg_2());
                 }
                 resp
             } else {

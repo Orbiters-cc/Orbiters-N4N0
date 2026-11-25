@@ -660,18 +660,18 @@ pub(crate) fn pause_short(snap: &crate::state::Snapshot) -> &'static str {
 /// What a card's badge says of a run on show.
 pub(crate) fn job_badge(j: &ReconstructionJob, snap: &crate::state::Snapshot) -> (String, Color32) {
     if j.paused {
-        (tr!("Paused {percent}% · {reason}", percent = format!("{:.0}", overall_progress(j) * 100.0), reason = pause_short(snap)), theme::FG_2)
+        (tr!("Paused {percent}% · {reason}", percent = format!("{:.0}", overall_progress(j) * 100.0), reason = pause_short(snap)), theme::fg_2())
     } else {
-        (tr!("Reconstructing {percent}%", percent = format!("{:.0}", overall_progress(j) * 100.0)), theme::ACCENT)
+        (tr!("Reconstructing {percent}%", percent = format!("{:.0}", overall_progress(j) * 100.0)), theme::accent())
     }
 }
 
 /// The colour of a run's progress bar: an accent while it moves, quiet while it waits.
 pub(crate) fn job_bar(j: &ReconstructionJob) -> Color32 {
     if j.paused {
-        theme::FG_3
+        theme::fg_3()
     } else {
-        theme::ACCENT
+        theme::accent()
     }
 }
 
@@ -724,21 +724,21 @@ fn splats_view(ui: &Ui, rect: Rect, tex: Option<&TextureHandle>, report: Option<
         } else {
             format!("{:.0}%", overall_progress(j) * 100.0)
         };
-        widgets::text(&p, pos2(c.x, c.y + 24.0), Align2::CENTER_CENTER, &Txt::new(detail, 12.0).color(theme::FG_3));
+        widgets::text(&p, pos2(c.x, c.y + 24.0), Align2::CENTER_CENTER, &Txt::new(detail, 12.0).color(theme::fg_3()));
         if j.paused {
-            widgets::text(&p, pos2(c.x, c.y + 44.0), Align2::CENTER_CENTER, &Txt::new(why, 12.0).color(theme::FG_2));
+            widgets::text(&p, pos2(c.x, c.y + 44.0), Align2::CENTER_CENTER, &Txt::new(why, 12.0).color(theme::fg_2()));
         }
         return;
     }
     let Some(r) = report else { return };
-    badge(&p, ui, pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 22.0), tr("A view it never trained on"), theme::black(0.55), theme::FG_2, false);
+    badge(&p, ui, pos2(rect.left() + 12.0, rect.bottom() - 12.0 - 22.0), tr("A view it never trained on"), theme::black(0.55), theme::fg_2(), false);
     let mut facts = vec![tr!("{count} splats", count = format::integer(r.gaussians as f64))];
     if let Some(q) = r.psnr_held_out {
         facts.push(tr!("{quality} dB", quality = format!("{q:.1}")));
     }
     facts.push(format::duration(r.seconds as f64));
     let line = facts.join(" · ");
-    badge(&p, ui, pos2(rect.right() - 12.0, rect.bottom() - 12.0 - 22.0), &line, theme::black(0.55), theme::FG_2, true);
+    badge(&p, ui, pos2(rect.right() - 12.0, rect.bottom() - 12.0 - 22.0), &line, theme::black(0.55), theme::fg_2(), true);
 }
 
 /// UV rect that covers `target` with an image of `image_aspect`, zoomed by `zoom` around the centre.
@@ -760,7 +760,7 @@ pub(super) fn thumb_shape(painter: &egui::Painter, rect: Rect, radius: CornerRad
         }
         None => {
             let pts = paint::squircle_points_corners(rect, [radius.nw, radius.ne, radius.se, radius.sw].map(|r| theme::squircle(r as f32)));
-            paint::fill_convex(painter, &pts, |_| theme::INK_750);
+            paint::fill_convex(painter, &pts, |_| theme::ink_750());
             let lr = Rect::from_center_size(rect.center(), logo::size_for_width(40.0));
             logo::paint(painter, lr, logo::Look::default());
         }
@@ -795,17 +795,17 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
     paint::fill_gradient(
         &p,
         &shade,
-        &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::INK_950, 0.1)), (1.0, theme::alpha(theme::INK_950, 0.9))]),
+        &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::ink_950(), 0.1)), (1.0, theme::alpha(theme::ink_950(), 0.9))]),
     );
     let w =
-        badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::FG_2, false);
+        badge(&p, ui, pos2(thumb.left() + 12.0, thumb.top() + 12.0), &format::duration(s.manifest.stats.duration_s), theme::black(0.55), theme::fg_2(), false);
     let job = cx.snap.reconstruction.as_ref().filter(|j| j.session_dir == s.dir);
     let cleaning = cx.snap.cleanup.as_ref().is_some_and(|j| j.of(&s.dir).is_some());
     let splats = match job {
         Some(j) => Some(job_badge(j, cx.snap)),
-        None if cx.snap.reconstruct_queue.contains(&s.dir) => Some((tr("Waiting to reconstruct").to_string(), theme::FG_2)),
-        None if cleaning => Some((tr("Freeing space").to_string(), theme::FG_2)),
-        None => s.reconstruction.as_ref().map(|_| (tr("Splats").to_string(), theme::ACCENT)),
+        None if cx.snap.reconstruct_queue.contains(&s.dir) => Some((tr("Waiting to reconstruct").to_string(), theme::fg_2())),
+        None if cleaning => Some((tr("Freeing space").to_string(), theme::fg_2())),
+        None => s.reconstruction.as_ref().map(|_| (tr("Splats").to_string(), theme::accent())),
     };
     if let Some((label, color)) = splats {
         badge(&p, ui, pos2(thumb.left() + 12.0 + w + 6.0, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
@@ -819,14 +819,14 @@ fn session_card(ui: &mut Ui, cx: &Cx, i: usize, s: &SessionSummary, rect: Rect, 
         // What the 3D picture is of.
         let (label, tint) = match picture.mode {
             orbiters_core::settings::PictureMode::People => (tr("People"), theme::VIOLET),
-            orbiters_core::settings::PictureMode::World => (tr("World"), theme::ACCENT),
+            orbiters_core::settings::PictureMode::World => (tr("World"), theme::accent()),
         };
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), label, theme::black(0.55), tint, true);
     }
 
     let x = r.left() + 16.0;
     widgets::text_truncated(&p, pos2(x, thumb.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(title(s), 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
-    widgets::text(&p, pos2(x, thumb.bottom() + 42.0), Align2::LEFT_CENTER, &Txt::new(crate::pages::ago(ui.ctx(), s.modified, now_secs()), 12.0).color(theme::FG_3));
+    widgets::text(&p, pos2(x, thumb.bottom() + 42.0), Align2::LEFT_CENTER, &Txt::new(crate::pages::ago(ui.ctx(), s.modified, now_secs()), 12.0).color(theme::fg_3()));
     let st = &s.manifest.stats;
     let mut px = x;
     let py = thumb.bottom() + 68.0;
@@ -886,11 +886,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(380.0);
+        let mut job = Txt::new(text, 13.0).color(theme::fg_3()).line_height(20.0).job(380.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::fg_3());
 }
 
 fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: Rect) {
@@ -926,7 +926,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
             &p,
             pos2(rect.left() + 20.0, rect.top() + 46.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr("Frames from Mixer's capture simulator, replayed through the Spout decoder."), 12.0).color(theme::FG_3),
+            &Txt::new(tr("Frames from Mixer's capture simulator, replayed through the Spout decoder."), 12.0).color(theme::fg_3()),
             width - 40.0,
         );
         let list = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 70.0), vec2(width - 16.0, list_h));
@@ -936,7 +936,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                 shimmer_card(ui, r);
             }
             Some(raws) if raws.is_empty() => {
-                widgets::text(&p, list.center(), Align2::CENTER_CENTER, &Txt::new(tr("No raw captures in the raw captures folder yet."), 12.5).color(theme::FG_4));
+                widgets::text(&p, list.center(), Align2::CENTER_CENTER, &Txt::new(tr("No raw captures in the raw captures folder yet."), 12.5).color(theme::fg_4()));
             }
             Some(raws) => {
                 let mut lu = ui.new_child(UiBuilder::new().max_rect(list).id_salt("raws"));
@@ -950,8 +950,8 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                         }
                         p.rect_filled(row, theme::radius(12.0), theme::white(0.06 * hover));
                         let tile = Rect::from_min_size(pos2(row.left() + 12.0, row.center().y - 18.0), vec2(36.0, 36.0));
-                        p.rect_filled(tile, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.12));
-                        widgets::icon(&p, tile.center(), icons::DOWNLOAD_SIMPLE, 16.0, theme::ACCENT);
+                        p.rect_filled(tile, theme::radius(10.0), theme::alpha(theme::accent(), 0.12));
+                        widgets::icon(&p, tile.center(), icons::DOWNLOAD_SIMPLE, 16.0, theme::accent());
                         let x = tile.right() + 12.0;
                         widgets::text_truncated(
                             &p,
@@ -973,7 +973,7 @@ fn import_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State, anchor: R
                             &p,
                             pos2(x, row.center().y + 10.0),
                             Align2::LEFT_CENTER,
-                            &Txt::new(info, 11.5).color(theme::FG_3),
+                            &Txt::new(info, 11.5).color(theme::fg_3()),
                             row.right() - x - 12.0,
                         );
                         if resp.clicked() {
@@ -1069,7 +1069,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             close = true;
         }
         // Gone by the time the card shows under the detail.
-        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * morph::smoothstep(0.1, 0.6, k)));
+        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::ink_950(), 0.7 * morph::smoothstep(0.1, 0.6, k)));
         ui.multiply_opacity(detail_opacity(t));
         let p = ui.painter();
         widgets::panel(p, rect, radius);
@@ -1081,7 +1081,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         paint::fill_gradient(
             p,
             &shade,
-            &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.6, theme::alpha(theme::INK_750, 0.2)), (1.0, theme::INK_750)]),
+            &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.6, theme::alpha(theme::ink_750(), 0.2)), (1.0, theme::ink_750())]),
         );
         if content <= 0.0 {
             return;
@@ -1101,7 +1101,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
             &cp,
             pos2(thumb.left() + 24.0, thumb.bottom() - 16.0 + dy),
             Align2::LEFT_CENTER,
-            &Txt::new(ident, 11.5).mono().color(theme::FG_3),
+            &Txt::new(ident, 11.5).mono().color(theme::fg_3()),
             thumb.width() - 48.0,
         );
 
@@ -1208,7 +1208,7 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         widgets::card(&cp, info, 16.0);
         for (i, (k, v)) in rows.iter().enumerate() {
             let y = info.top() + 16.0 + 11.0 + i as f32 * 22.0;
-            widgets::text(&cp, pos2(info.left() + 16.0, y), Align2::LEFT_CENTER, &Txt::new(*k, 12.5).color(theme::FG_3));
+            widgets::text(&cp, pos2(info.left() + 16.0, y), Align2::LEFT_CENTER, &Txt::new(*k, 12.5).color(theme::fg_3()));
             widgets::text_truncated(&cp, pos2(info.right() - 16.0, y), Align2::RIGHT_CENTER, &Txt::new(v, 12.5), info.width() - 120.0);
         }
         let mut y = info.bottom() + 12.0;
@@ -1288,9 +1288,9 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
         // What was done about the wearer, and a world that gave no depth, in their own words.
         let lines = session.reconstruction.as_ref().map(|r| [orbiters_core::picture::wearer_line(r), orbiters_core::picture::depth_line(r)]).unwrap_or_default();
         for line in lines.into_iter().flatten() {
-            let job = cu.painter().layout_job(Txt::new(line, 12.0).color(theme::FG_3).line_height(17.0).job(side.width() - 8.0));
+            let job = cu.painter().layout_job(Txt::new(line, 12.0).color(theme::fg_3()).line_height(17.0).job(side.width() - 8.0));
             let h = job.size().y;
-            cu.painter().galley(pos2(side.left() + 4.0, y), job, theme::FG_3);
+            cu.painter().galley(pos2(side.left() + 4.0, y), job, theme::fg_3());
             y += h + 12.0;
         }
         // Send to Mixer, and beside it Export… (what its 3D view shows, as a file for other tools).
@@ -1418,11 +1418,11 @@ fn detail(ctx: &egui::Context, cx: &mut Cx, state: &mut State, page: Rect) {
 
 pub(super) fn mini_stat(p: &egui::Painter, r: Rect, glyph: &str, label: &str, value: &str, sub: Option<&str>) {
     widgets::frame(p, r, 16.0, theme::surface_soft());
-    widgets::icon(p, pos2(r.left() + 19.0, r.top() + 20.0), glyph, 14.0, theme::FG_4);
+    widgets::icon(p, pos2(r.left() + 19.0, r.top() + 20.0), glyph, 14.0, theme::fg_4());
     widgets::text(p, pos2(r.left() + 32.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::caps(label));
     widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 44.0), Align2::LEFT_CENTER, &Txt::new(value, 18.0).weight(weight::SEMIBOLD), r.width() - 24.0);
     if let Some(sub) = sub {
-        widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 64.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_3), r.width() - 24.0);
+        widgets::text_truncated(p, pos2(r.left() + 12.0, r.top() + 64.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::fg_3()), r.width() - 24.0);
     }
 }
 

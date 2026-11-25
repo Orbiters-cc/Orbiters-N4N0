@@ -298,7 +298,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
         }
         o.events.told.follow(&ctx, cx, staged);
     }
-    note(ui, &orbiters_i18n::tr!("Times are in your time zone ({zone}).", zone = orbiters::zone()), theme::FG_3);
+    note(ui, &orbiters_i18n::tr!("Times are in your time zone ({zone}).", zone = orbiters::zone()), theme::fg_3());
     let Some(o) = state.open.as_ref() else { return };
     let (coming, mut over): (Vec<usize>, Vec<usize>) = (0..o.events.items.len()).partition(|i| !o.events.items[*i].past(now));
     over.reverse();
@@ -325,11 +325,11 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
         return;
     }
     if orbiters_failed {
-        note(ui, tr("Orbiters could not be reached: what it adds to these events does not show."), theme::FG_3);
+        note(ui, tr("Orbiters could not be reached: what it adds to these events does not show."), theme::fg_3());
     }
     heading(ui, tr("Upcoming"));
     if coming.is_empty() && failed.is_none() {
-        note(ui, if busy { tr("Reading…") } else { tr("Nothing is planned in this group's VRChat calendar.") }, theme::FG_3);
+        note(ui, if busy { tr("Reading…") } else { tr("Nothing is planned in this group's VRChat calendar.") }, theme::fg_3());
     }
     for i in coming {
         event(ui, cx, state, scope, i, now, acts);
@@ -340,7 +340,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
         event(ui, cx, state, scope, i, now, acts);
     }
     if busy {
-        note(ui, tr("Reading earlier events…"), theme::FG_3);
+        note(ui, tr("Reading earlier events…"), theme::fg_3());
     } else if more_read || !exhausted {
         if failed.is_none() {
             button_row(ui, |ui| {
@@ -350,7 +350,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
             });
         }
     } else {
-        note(ui, if any { tr("Nothing earlier was found.") } else { tr("No past events were found.") }, theme::FG_3);
+        note(ui, if any { tr("Nothing earlier was found.") } else { tr("No past events were found.") }, theme::fg_3());
     }
 }
 
@@ -391,28 +391,28 @@ fn tags(e: &CalendarEvent, roles: &HashMap<String, String>) -> Vec<(String, Colo
         out.push((tr("Draft").into(), theme::WARN));
     }
     if e.featured {
-        out.push((tr("Featured").into(), theme::ACCENT));
+        out.push((tr("Featured").into(), theme::accent()));
     }
-    out.extend(access_text(e, roles).map(|t| (t, theme::FG_2)));
+    out.extend(access_text(e, roles).map(|t| (t, theme::fg_2())));
     if !e.category.is_empty() {
-        out.push((orbiters::category_label(&e.category), theme::FG_2));
+        out.push((orbiters::category_label(&e.category), theme::fg_2()));
     }
     let platforms: Vec<&str> = [("standalonewindows", "PC"), ("android", "Android"), ("ios", "iOS")].into_iter().filter(|(k, _)| e.platforms.iter().any(|p| p == k)).map(|(_, n)| n).collect(); // i18n: not shown (platforms' own names)
     if !platforms.is_empty() {
-        out.push((platforms.join(" · "), theme::FG_2));
+        out.push((platforms.join(" · "), theme::fg_2()));
     }
     match e.repeats.as_deref() {
-        Some("daily") => out.push((tr("Every day").into(), theme::FG_2)),
-        Some("weekly") => out.push((tr("Every week").into(), theme::FG_2)),
-        Some("monthly") => out.push((tr("Every month").into(), theme::FG_2)),
-        Some("yearly") => out.push((tr("Every year").into(), theme::FG_2)),
+        Some("daily") => out.push((tr("Every day").into(), theme::fg_2())),
+        Some("weekly") => out.push((tr("Every week").into(), theme::fg_2())),
+        Some("monthly") => out.push((tr("Every month").into(), theme::fg_2())),
+        Some("yearly") => out.push((tr("Every year").into(), theme::fg_2())),
         _ => {}
     }
     if let Some(n) = e.interested {
-        out.push((tr_n("{count} person interested", "{count} people interested", n as u64), theme::FG_2));
+        out.push((tr_n("{count} person interested", "{count} people interested", n as u64), theme::fg_2()));
     }
     if e.following == Some(true) {
-        out.push((tr("You follow it").into(), theme::ACCENT));
+        out.push((tr("You follow it").into(), theme::accent()));
     }
     out
 }
@@ -456,11 +456,11 @@ fn event(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, index: usiz
     let left = shot.right() + 18.0;
     let mut side = child.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(left, inner.top()), inner.max)).layout(egui::Layout::top_down(egui::Align::Min)).id_salt("words"));
     side.spacing_mut().item_spacing = vec2(0.0, 7.0);
-    paragraph(&mut side, &e.title, 16.0, weight::SEMIBOLD, theme::FG, 22.0, 2);
-    paragraph(&mut side, &orbiters::when(e.starts_at.as_deref(), e.ends_at.as_deref()), 13.0, weight::MEDIUM, theme::FG_2, 18.0, 2);
+    paragraph(&mut side, &e.title, 16.0, weight::SEMIBOLD, theme::fg(), 22.0, 2);
+    paragraph(&mut side, &orbiters::when(e.starts_at.as_deref(), e.ends_at.as_deref()), 13.0, weight::MEDIUM, theme::fg_2(), 18.0, 2);
     chips(&mut side, &tags(&e, &roles));
     if !e.description.trim().is_empty() {
-        paragraph(&mut side, &e.description, 13.0, weight::REGULAR, theme::FG_2, 19.0, 4);
+        paragraph(&mut side, &e.description, 13.0, weight::REGULAR, theme::fg_2(), 19.0, 4);
     }
     if let Some(url) = group_events::web_page(&group, &e.id) {
         if widgets::Button::new(tr("Open on vrchat.com")).icon(icons::ARROW_SQUARE_OUT).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("event-web", e.id.as_str())).show(&mut side).clicked() {
@@ -503,7 +503,7 @@ fn chips(ui: &mut Ui, tags: &[(String, Color32)]) {
     let p = ui.painter();
     for (((text, color), cw), at) in tags.iter().zip(&widths).zip(spots) {
         let r = Rect::from_min_size(area.min + at, vec2(*cw, 22.0));
-        p.rect_filled(r, theme::radius(11.0), theme::alpha(if *color == theme::FG_2 { theme::FG_3 } else { *color }, 0.14));
+        p.rect_filled(r, theme::radius(11.0), theme::alpha(if *color == theme::fg_2() { theme::fg_3() } else { *color }, 0.14));
         widgets::text_truncated(p, pos2(r.left() + 9.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 11.5).weight(weight::MEDIUM).color(*color), cw - 14.0);
     }
 }

@@ -30,43 +30,43 @@ pub(super) fn para(ui: &mut Ui, text: &str, size: f32, color: Color32) {
 pub(super) fn item(ui: &mut Ui, glyph: &str, tint: Color32, title: &str, detail: Option<&str>) {
     let w = ui.available_width();
     let tg = ui.painter().layout_job(Txt::new(title, 13.0).weight(weight::MEDIUM).line_height(19.0).job(w - 26.0));
-    let dg = detail.map(|d| ui.painter().layout_job(Txt::new(d, 12.0).color(theme::FG_3).line_height(18.0).job(w - 26.0)));
+    let dg = detail.map(|d| ui.painter().layout_job(Txt::new(d, 12.0).color(theme::fg_3()).line_height(18.0).job(w - 26.0)));
     let h = tg.size().y + dg.as_ref().map_or(0.0, |g| g.size().y + 2.0);
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let p = ui.painter();
     widgets::icon(p, pos2(r.left() + 8.0, r.top() + 10.0), glyph, 14.0, tint);
     let th = tg.size().y;
-    p.galley(pos2(r.left() + 26.0, r.top()), tg, theme::FG);
+    p.galley(pos2(r.left() + 26.0, r.top()), tg, theme::fg());
     if let Some(g) = dg {
-        p.galley(pos2(r.left() + 26.0, r.top() + th + 2.0), g, theme::FG_3);
+        p.galley(pos2(r.left() + 26.0, r.top() + th + 2.0), g, theme::fg_3());
     }
 }
 
 /// A step of a list: its number in a disc, its text wrapped beside it.
 fn numbered(ui: &mut Ui, n: usize, text: &str) {
     let w = ui.available_width();
-    let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_2).line_height(19.0).job(w - 30.0));
+    let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_2()).line_height(19.0).job(w - 30.0));
     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y.max(20.0)), Sense::hover());
     let p = ui.painter();
     let c = pos2(r.left() + 10.0, r.top() + 10.0);
     p.circle_filled(c, 10.0, theme::white(0.07));
-    widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(n.to_string(), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2));
-    p.galley(pos2(r.left() + 30.0, r.top()), g, theme::FG_2);
+    widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(n.to_string(), 11.0).weight(weight::SEMIBOLD).color(theme::fg_2()));
+    p.galley(pos2(r.left() + 30.0, r.top()), g, theme::fg_2());
 }
 
 /// A tinted box holding a heading and a paragraph (what cannot be undone).
 pub(super) fn notice(ui: &mut Ui, tone: Tone, title: &str, text: &str) {
     let w = ui.available_width();
     let tg = ui.painter().layout_job(Txt::new(title, 13.0).weight(weight::SEMIBOLD).line_height(19.0).job(w - 52.0));
-    let dg = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_2).line_height(19.0).job(w - 52.0));
+    let dg = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_2()).line_height(19.0).job(w - 52.0));
     let h = 14.0 + tg.size().y + 4.0 + dg.size().y + 14.0;
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let p = ui.painter();
     widgets::frame(p, r, 14.0, theme::alpha(tone.color(), 0.08));
     widgets::icon(p, pos2(r.left() + 22.0, r.top() + 24.0), icons::WARNING, 15.0, tone.color());
     let th = tg.size().y;
-    p.galley(pos2(r.left() + 40.0, r.top() + 14.0), tg, theme::FG);
-    p.galley(pos2(r.left() + 40.0, r.top() + 18.0 + th), dg, theme::FG_2);
+    p.galley(pos2(r.left() + 40.0, r.top() + 14.0), tg, theme::fg());
+    p.galley(pos2(r.left() + 40.0, r.top() + 18.0 + th), dg, theme::fg_2());
 }
 
 /// A row of buttons from the left, each `(label, glyph, enabled, salt)`; the index pressed.
@@ -171,7 +171,7 @@ fn release_list(ui: &mut Ui, m: &matrix::Matrix) {
         text.push(' ');
         text.push_str(&tr!("orbiters.cc also lists SDK {sdk} on Unity {unity}: this version of Orbiters does not act on it.", sdk = r.sdk, unity = r.unity));
     }
-    para(ui, &text, 11.5, theme::FG_4);
+    para(ui, &text, 11.5, theme::fg_4());
 }
 
 /// One editor: found (verified or not), another version found, or missing with Unity Hub's link, its sizes and modules.
@@ -181,7 +181,7 @@ fn editor_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, version: &str, salt: 
     let row = m.row_of_editor(version).cloned();
     let found = state.u6.editors.get(version).cloned();
     match &found {
-        None => item(ui, icons::CIRCLE_NOTCH, theme::FG_4, &tr!("Unity {version}", version = version), Some(tr("Looking for it…"))),
+        None => item(ui, icons::CIRCLE_NOTCH, theme::fg_4(), &tr!("Unity {version}", version = version), Some(tr("Looking for it…"))),
         Some(editors::Found::Exact(c)) => {
             let detail = tr!("Installed and verified: {path}", path = c.program.display());
             item(ui, icons::CHECK_CIRCLE, theme::OK, &tr!("Unity {version}", version = version), Some(&detail));
@@ -216,7 +216,7 @@ fn editor_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, version: &str, salt: 
                     detail.push_str(&tr!("{path} was found, and not used: {why}.", path = w.program.display(), why = why));
                 }
             }
-            item(ui, icons::DOWNLOAD_SIMPLE, theme::FG_3, &tr!("Unity {version}", version = version), Some(&detail));
+            item(ui, icons::DOWNLOAD_SIMPLE, theme::fg_3(), &tr!("Unity {version}", version = version), Some(&detail));
         }
     }
     let usable = found.as_ref().is_some_and(|f| matches!(f, editors::Found::Exact(_)));
@@ -259,7 +259,7 @@ fn modules_line(ui: &mut Ui, m: editors::Modules) {
         tr("Android: not installed")
     };
     let ios = if m.ios { tr("iOS: installed") } else { tr("iOS: not installed") };
-    para(ui, &format!("{android} · {ios}"), 11.5, theme::FG_4);
+    para(ui, &format!("{android} · {ios}"), 11.5, theme::fg_4());
 }
 
 /// What a package's manifest and the release list say, for its row.
@@ -305,7 +305,7 @@ fn package_rows(ui: &mut Ui, state: &State, rows: &[compat::Row]) {
             Some(v) => format!("{} {v}", r.display),
             None => r.display.clone(),
         };
-        let tint = if r.sdk_ranges.iter().any(|s| s.admits_target == Some(compat::Admits::No)) { theme::WARN } else { theme::FG_3 };
+        let tint = if r.sdk_ranges.iter().any(|s| s.admits_target == Some(compat::Admits::No)) { theme::WARN } else { theme::fg_3() };
         item(ui, art::glyph::PACKAGE, tint, &title, Some(&lines.join("\n")));
     }
 }
@@ -331,8 +331,8 @@ fn checklist(ui: &mut Ui, list: &compat::Checklist) {
         let (title, what) = check_text(c);
         let (glyph, tint, seen) = match c.seen {
             compat::Seen::Found => (icons::WARNING_CIRCLE, theme::WARN, tr("Found in this project")),
-            compat::Seen::NotFound => (icons::CHECK, theme::FG_4, tr("Not found")),
-            compat::Seen::CannotTell => (icons::INFO, theme::FG_3, tr("Cannot tell from its files")),
+            compat::Seen::NotFound => (icons::CHECK, theme::fg_4(), tr("Not found")),
+            compat::Seen::CannotTell => (icons::INFO, theme::fg_3(), tr("Cannot tell from its files")),
         };
         let mut detail = format!("{seen}. {what}");
         if !c.at.is_empty() {
@@ -354,7 +354,7 @@ fn checklist(ui: &mut Ui, list: &compat::Checklist) {
         foot.push(' ');
         foot.push_str(tr("The look stopped before the end of its files."));
     }
-    para(ui, &foot, 11.5, theme::FG_4);
+    para(ui, &foot, 11.5, theme::fg_4());
 }
 
 /// The warning shown before a trial exists, and on a trial: the content IDs it shares with its original.
@@ -393,7 +393,7 @@ pub(super) fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Projec
                 }
             }
             if let Some(label) = state.u6.busy() {
-                para(ui, label, 12.0, theme::FG_3);
+                para(ui, label, 12.0, theme::fg_3());
             }
             match &trial {
                 Some((job, status)) => trial_body(ui, cx, state, project, &s, job, status),
@@ -414,7 +414,7 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
         Some(sdk) => tr!("Unity {editor} · SDK {sdk}", editor = s.editor.text, sdk = sdk),
         None => tr!("Unity {version}", version = s.editor.text),
     };
-    item(ui, icons::CUBE, theme::FG_3, &title, Some(&sentence(s, &m)));
+    item(ui, icons::CUBE, theme::fg_3(), &title, Some(&sentence(s, &m)));
     if let Some(t) = &target {
         let events = &state.u6.matrix().data.events;
         let mut text = match (&events.unity6_stable, t.channel) {
@@ -427,14 +427,14 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
             Some(day) => tr!("VRChat stops accepting uploads from Unity 2022 on {day}.", day = day),
             None => tr("VRChat has announced no end date for Unity 2022.").to_string(),
         });
-        para(ui, &text, 12.0, theme::FG_3);
+        para(ui, &text, 12.0, theme::fg_3());
     }
     release_list(ui, &m);
     // Its trials.
     let pairs: Vec<(PathBuf, String)> = state.u6.trials_of(&project.path).into_iter().map(|p| (p.trial.clone(), p.job.clone())).collect();
     for (trial, _) in &pairs {
         let name = trial.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        item(ui, icons::COPY, theme::ACCENT, &tr!("Unity 6 trial: {name}", name = name), Some(&trial.display().to_string()));
+        item(ui, icons::COPY, theme::accent(), &tr!("Unity 6 trial: {name}", name = name), Some(&trial.display().to_string()));
         if buttons(ui, &[(tr("Show the trial"), icons::ARROW_RIGHT, true, "show-trial")], false).is_some() {
             state.open(&ctx, trial.clone());
         }
@@ -444,7 +444,7 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
             ui,
             tr("On a Mac, Creator Companion's migration is not available: its window is for Windows. Orbiters shows where the project stands and what the guide's changes involve; the migration itself is done on Windows."),
             12.0,
-            theme::FG_3,
+            theme::fg_3(),
         );
     } else if s.state == standing::State::On2022 && target.as_ref().is_some_and(|t| m.actionable(t)) && project.registered && !project.missing {
         let anchor = ui.cursor().min;
@@ -458,7 +458,7 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
             _ if !project.registered => tr("Add the project to your list first."),
             _ => tr("A trial starts from a VRChat project on Unity 2022 with its SDK installed."),
         };
-        para(ui, why, 12.0, theme::FG_3);
+        para(ui, why, 12.0, theme::fg_3());
     }
     // The editors: its own, and Unity 6's for a project on 2022.
     let mut versions = vec![s.editor.text.clone()];
@@ -476,7 +476,7 @@ fn project_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, 
     let compat = state.u6.compat.clone().filter(|(p, _, _)| *p == project.path);
     art::caps(ui, tr("Before a try"));
     match &compat {
-        None => para(ui, tr("Reading the project's packages and files…"), 12.0, theme::FG_3),
+        None => para(ui, tr("Reading the project's packages and files…"), 12.0, theme::fg_3()),
         Some((_, rows, list)) => {
             let label = if state.u6.show_packages { tr("Hide the packages").to_string() } else { tr!("Show what its {count} packages declare", count = rows.len()) };
             if !rows.is_empty() && buttons(ui, &[(&label, art::glyph::PACKAGE, true, "packages")], false).is_some() {
@@ -584,13 +584,13 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
     item(
         ui,
         icons::COPY,
-        theme::ACCENT,
+        theme::accent(),
         &tr!("Unity 6 trial of {name}", name = job.source.name),
         Some(&tr!("Made {day}. Fixes made to the original after that day are not in the trial: before moving for good, make a fresh trial.", day = day(job.forked()))),
     );
     // The first copy, once Creator Companion's own migrated copy was taken: it stays on 2022, with nothing to open.
     if job.migrated.is_some() && orbiters_projects::discovery::key(&job.trial.path) == orbiters_projects::discovery::key(&project.path) {
-        para(ui, tr("Creator Companion's migrated copy is this trial's Unity 6 copy now; this first copy stays on Unity 2022 and is not changed from here."), 12.0, theme::FG_3);
+        para(ui, tr("Creator Companion's migrated copy is this trial's Unity 6 copy now; this first copy stays on Unity 2022 and is not changed from here."), 12.0, theme::fg_3());
         let list = [(tr("Show the migrated copy"), icons::ARROW_RIGHT, true, "migrated"), (tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal-first")];
         match buttons(ui, &list, false) {
             Some(0) => state.open(&ctx, job.unity6().path.clone()),
@@ -603,19 +603,19 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
     }
     ids_warning(ui, worlds);
     if !job.linked.is_empty() {
-        para(ui, &tr!("Links of the original whose files were copied: {links}.", links = job.linked.join(", ")), 12.0, theme::FG_3);
+        para(ui, &tr!("Links of the original whose files were copied: {links}.", links = job.linked.join(", ")), 12.0, theme::fg_3());
     }
     if !job.localized.is_empty() {
-        para(ui, &tr!("Local packages made part of the trial, named so in its Packages/manifest.json: {packages}.", packages = job.localized.join(", ")), 12.0, theme::FG_3);
+        para(ui, &tr!("Local packages made part of the trial, named so in its Packages/manifest.json: {packages}.", packages = job.localized.join(", ")), 12.0, theme::fg_3());
     }
     if state.u6.mac() {
-        para(ui, tr("On a Mac, Creator Companion's migration and opening a trial in Unity 6 from Orbiters are not available: this trial is shown for what its files say. Its migration is done on Windows."), 12.0, theme::FG_3);
+        para(ui, tr("On a Mac, Creator Companion's migration and opening a trial in Unity 6 from Orbiters are not available: this trial is shown for what its files say. Its migration is done on Windows."), 12.0, theme::fg_3());
     }
     match status {
         _ if state.u6.mac() => {}
         trial::Status::Waiting { vcc_copy } => {
             art::caps(ui, tr("Next, in Creator Companion"));
-            para(ui, tr("Orbiters does not change the trial's packages or editor version: Creator Companion migrates it, as VRChat's guide describes. Until then the trial stays on Unity 2022 and is not opened from here."), 12.0, theme::FG_3);
+            para(ui, tr("Orbiters does not change the trial's packages or editor version: Creator Companion migrates it, as VRChat's guide describes. Until then the trial stays on Unity 2022 and is not opened from here."), 12.0, theme::fg_3());
             if let Some(beside) = vcc_copy {
                 item(ui, icons::CHECK_CIRCLE, theme::OK, tr("Creator Companion made a migrated copy"), Some(&beside.display().to_string()));
                 if buttons(ui, &[(tr("Use the migrated copy"), icons::CHECK, state.u6.busy().is_none(), "adopt")], true).is_some() {
@@ -641,7 +641,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         }
         trial::Status::OnUnity6 => {
             art::caps(ui, tr("On Unity 6"));
-            para(ui, &sentence(s, &state.u6.matrix()), 12.0, theme::FG_3);
+            para(ui, &sentence(s, &state.u6.matrix()), 12.0, theme::fg_3());
             let version = s.editor.text.clone();
             state.u6.want_editors(&ctx, std::slice::from_ref(&version));
             editor_row(ui, cx, state, &version, "trial-editor");
@@ -665,7 +665,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                     }
                 }
             } else {
-                para(ui, tr("Unity has the trial open."), 12.0, theme::FG_3);
+                para(ui, tr("Unity has the trial open."), 12.0, theme::fg_3());
             }
             state.u6.want_outcomes(&ctx, job);
             for a in job.attempts.iter().rev().take(4) {
@@ -691,7 +691,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         }
         trial::Status::Unexpected(state_now) => {
             let now = standing::Standing { state: *state_now, ..s.clone() };
-            para(ui, &tr!("The trial's files show this now: {what}", what = sentence(&now, &state.u6.matrix())), 12.0, theme::FG_3);
+            para(ui, &tr!("The trial's files show this now: {what}", what = sentence(&now, &state.u6.matrix())), 12.0, theme::fg_3());
         }
         _ => {}
     }
@@ -786,9 +786,9 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 match mine.as_ref().map(|(_, p)| p.lock().unwrap().clone()) {
                     Some(p) => {
                         let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
-                        (icons::CIRCLE_NOTCH, theme::ACCENT, format!("{}{pct}", super::unity6::phase_label(&p.phase)))
+                        (icons::CIRCLE_NOTCH, theme::accent(), format!("{}{pct}", super::unity6::phase_label(&p.phase)))
                     }
-                    None => (icons::CIRCLE_NOTCH, theme::ACCENT, tr("Orbiters is working on it in another window.").to_string()),
+                    None => (icons::CIRCLE_NOTCH, theme::accent(), tr("Orbiters is working on it in another window.").to_string()),
                 }
             }
             trial::Status::Interrupted => (icons::WARNING_CIRCLE, theme::WARN, tr("The copy was interrupted. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.").to_string()),
@@ -804,8 +804,8 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
             }
             trial::Status::Unfinished => (icons::WARNING_CIRCLE, theme::WARN, job.error.clone().unwrap_or_else(|| tr("The trial is copied and compared; its last step is left.").to_string())),
             trial::Status::Uncertain(why) => (icons::PROHIBIT, theme::WARN, orbiters_projects::unity6::trial::uncertain_text(why)),
-            trial::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
-            trial::Status::Replaced => (icons::PROHIBIT, theme::FG_3, tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
+            trial::Status::Missing => (icons::HARD_DRIVE, theme::fg_3(), tr("Not found at this path: its disk may not be connected. It shows again once it is there.").to_string()),
+            trial::Status::Replaced => (icons::PROHIBIT, theme::fg_3(), tr("Another folder is at this path now: Orbiters does not act on it.").to_string()),
             _ => continue,
         };
         item(&mut inner, glyph, tint, &tr!("{name}, a Unity 6 trial of {original}", name = job.trial.name, original = job.source.name), Some(&format!("{}\n{text}", job.trial.path.display())));
@@ -887,7 +887,7 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
         let (glyph, tint, text) = match status {
             copies::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, format!("{} {said}", tr("Every file of the copy is there, but it is not on the project list."))),
             copies::Status::Incomplete => (icons::X_CIRCLE, theme::DANGER, format!("{} {said}", tr("The copy was cut short: this folder is not a project, and nothing was deleted. Remove it yourself when you no longer need it."))),
-            copies::Status::Missing => (icons::HARD_DRIVE, theme::FG_3, format!("{} {said}", tr("Not found at this path: its disk may not be connected, or another folder is there."))),
+            copies::Status::Missing => (icons::HARD_DRIVE, theme::fg_3(), format!("{} {said}", tr("Not found at this path: its disk may not be connected, or another folder is there."))),
             copies::Status::Running => continue,
         };
         let name = copy.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

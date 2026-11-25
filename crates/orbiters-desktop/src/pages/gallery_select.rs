@@ -409,8 +409,8 @@ impl Selection {
                 }
             }
             let p = ui.ctx().layer_painter(egui::LayerId::new(Order::Middle, Id::unique("gallery-band")));
-            p.rect_filled(band, theme::radius(6.0), theme::alpha(theme::ACCENT, 0.1));
-            p.rect_stroke(band, theme::radius(6.0), Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.7)), egui::StrokeKind::Inside);
+            p.rect_filled(band, theme::radius(6.0), theme::alpha(theme::accent(), 0.1));
+            p.rect_stroke(band, theme::radius(6.0), Stroke::new(1.0, theme::alpha(theme::accent(), 0.7)), egui::StrokeKind::Inside);
             if !down {
                 self.band = None;
             }
@@ -547,7 +547,7 @@ impl Selection {
         let n = self.keys.len();
         let count = Txt::new(if n == 1 { tr("1 selected").to_string() } else { tr!("{count} selected", count = n) }, 14.0).weight(weight::SEMIBOLD);
         let hint_text = said.clone().unwrap_or_else(|| tr("Drag them into Discord, a folder or any app").into());
-        let hint = Txt::new(&hint_text, 12.5).color(if said.is_some() { theme::ACCENT } else { theme::FG_3 });
+        let hint = Txt::new(&hint_text, 12.5).color(if said.is_some() { theme::accent() } else { theme::fg_3() });
         let all = Button::new(tr("Select all")).variant(Variant::Ghost).size(Size::Sm).id_salt("gallery-select-all");
         let thumbs = if any { self.keys.len().min(3) } else { 0 };
         let count_w = if any { widgets::text_size(ui, &count).x } else { 0.0 };
@@ -594,10 +594,10 @@ impl Selection {
                 x += stack_w;
             }
             if icon_w > 0.0 && coming.is_some() {
-                feedback::spinner(&p, pos2(x + 9.0, cy), 6.5, 2.0, theme::ACCENT);
+                feedback::spinner(&p, pos2(x + 9.0, cy), 6.5, 2.0, theme::accent());
                 x += icon_w;
             } else if icon_w > 0.0 {
-                widgets::icon(&p, pos2(x + 9.0, cy), icons::CHECK, 16.0, theme::ACCENT);
+                widgets::icon(&p, pos2(x + 9.0, cy), icons::CHECK, 16.0, theme::accent());
                 x += icon_w;
             }
             if count_w > 0.0 {
@@ -614,7 +614,7 @@ impl Selection {
                 let resp = ui.interact(close, id.with("clear"), Sense::click()).on_hover_text(tr("Clear the selection (Esc)"));
                 let hover = anim::toggle(&ctx, id.with("clear-hover"), resp.hovered(), Spring::SNAPPY);
                 p.circle_filled(close.center(), 16.0, theme::white(0.04 + 0.08 * hover));
-                widgets::icon(&p, close.center(), icons::X, 15.0, theme::mix(theme::FG_3, theme::FG, hover));
+                widgets::icon(&p, close.center(), icons::X, 15.0, theme::mix(theme::fg_3(), theme::fg(), hover));
                 if widgets::activated(&resp) {
                     clear = true;
                 }
@@ -644,10 +644,10 @@ pub fn paint_card(p: &egui::Painter, ctx: &egui::Context, key: &str, card: Rect,
     let vis = anim::toggle(ctx, id.with("check"), show_check || selected || hover > 0.5, Spring::SOFT);
     if s > 0.01 {
         let ring = card.expand(3.0);
-        paint::stroke_squircle(p, ring, theme::squircle(radius + 3.0), Stroke::new(2.5, theme::alpha(theme::ACCENT, s)));
+        paint::stroke_squircle(p, ring, theme::squircle(radius + 3.0), Stroke::new(2.5, theme::alpha(theme::accent(), s)));
         let whole = thumb.bottom() >= card.bottom() - 0.5;
         let corners = [radius, radius, if whole { radius } else { 0.0 }, if whole { radius } else { 0.0 }];
-        orbiters_ui::feedback::fill_corners(p, thumb, corners, theme::alpha(theme::ACCENT, 0.1 * s));
+        orbiters_ui::feedback::fill_corners(p, thumb, corners, theme::alpha(theme::accent(), 0.1 * s));
     }
     if vis > 0.01 {
         let c = pos2(thumb.left() + 12.0 + CHECK * 0.5, thumb.top() + 12.0 + CHECK * 0.5);
@@ -655,8 +655,8 @@ pub fn paint_card(p: &egui::Painter, ctx: &egui::Context, key: &str, card: Rect,
         p.circle_filled(c, r + 1.0, theme::black(0.35 * vis * (1.0 - s)));
         p.circle_stroke(c, r - 1.0, Stroke::new(2.0, theme::white(0.85 * vis * (1.0 - s))));
         if s > 0.01 {
-            p.circle_filled(c, r * (0.6 + 0.4 * ease::out_cubic(s)), theme::alpha(theme::ACCENT, s.min(1.0)));
-            widgets::icon(p, c, icons::CHECK, 14.0 * pop.clamp(0.0, 1.2), theme::alpha(theme::ON_ACCENT, s.min(1.0)));
+            p.circle_filled(c, r * (0.6 + 0.4 * ease::out_cubic(s)), theme::alpha(theme::accent(), s.min(1.0)));
+            widgets::icon(p, c, icons::CHECK, 14.0 * pop.clamp(0.0, 1.2), theme::alpha(theme::on_accent(), s.min(1.0)));
         }
     }
     vis

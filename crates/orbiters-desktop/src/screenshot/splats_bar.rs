@@ -46,13 +46,13 @@ fn paint(width: f32, actions: usize, title: &str) -> Vec<u8> {
             let rect = Rect::from_min_size(Pos2::ZERO, size);
             let p = ui.painter().clone();
             // A dark scene for the splats.
-            p.rect_filled(rect, 0.0, theme::mix(theme::INK_950, theme::ACCENT, 0.08));
+            p.rect_filled(rect, 0.0, theme::mix(theme::ink_950(), theme::accent(), 0.08));
             let bar = Rect::from_min_size(rect.min + vec2(16.0, 16.0), vec2(rect.width() - 32.0, 44.0));
             let views = 3;
             let chip = |r: Rect| p.rect_filled(r, theme::radius(r.height() * 0.5), theme::black(0.55));
             let title_t = Txt::new(title, 14.0).weight(weight::SEMIBOLD);
             let sub = orbiters_i18n::tr!("{count} splats", count = orbiters_ui::format::integer(731_469.0));
-            let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
+            let sub_t = Txt::new(sub, 11.0).color(theme::fg_3());
             let title_w = (widgets::text_size(ui, &title_t).x.max(widgets::text_size(ui, &sub_t).x) + 40.0).min(title_room(bar, views, actions));
             let title_r = Rect::from_min_size(bar.min, vec2(title_w, 44.0));
             chip(title_r);
@@ -83,13 +83,13 @@ fn paint(width: f32, actions: usize, title: &str) -> Vec<u8> {
             let label_r = Rect::from_min_size(pos2(next_r.left() - STEP_LABEL_W, bar.top() + 2.0), vec2(STEP_LABEL_W, 40.0));
             let prev_r = Rect::from_min_size(pos2(label_r.left() - STEP_W, bar.top() + 2.0), vec2(STEP_W, 40.0));
             chip(Rect::from_min_max(prev_r.min, next_r.max));
-            widgets::text(&p, label_r.center(), Align2::CENTER_CENTER, &Txt::new(orbiters_i18n::tr!("View {n} of {total}", n = 2, total = 3), 12.0).color(theme::FG_2));
+            widgets::text(&p, label_r.center(), Align2::CENTER_CENTER, &Txt::new(orbiters_i18n::tr!("View {n} of {total}", n = 2, total = 3), 12.0).color(theme::fg_2()));
             Button::new("‹").variant(Variant::Ghost).width(STEP_W).show_at(ui, prev_r);
             Button::new("›").variant(Variant::Ghost).width(STEP_W).show_at(ui, next_r);
         });
         sw.set_textures(&mut full.textures_delta);
         let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-        image = sw.paint(&prims, full.pixels_per_point, theme::INK_950).to_vec();
+        image = sw.paint(&prims, full.pixels_per_point, theme::ink_950()).to_vec();
         sw.free_textures(&mut full.textures_delta);
     }
     let (fw, w, h) = (full_size.x as usize, size.x as usize, size.y as usize);

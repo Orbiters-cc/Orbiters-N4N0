@@ -120,18 +120,18 @@ impl Look {
             Look::Plain => return None,
             Look::Exposure => (glyphs::PLUS_MINUS, rgb(0xffe6a8)),
             Look::Brightness => (icons::SUN, rgb(0xffd36b)),
-            Look::Contrast => (icons::CIRCLE_HALF, theme::FG),
+            Look::Contrast => (icons::CIRCLE_HALF, theme::fg()),
             Look::Highlights => (glyphs::SUN_DIM, rgb(0xfff1c2)),
             Look::Shadows => (glyphs::MOON, rgb(0x9aa8ff)),
-            Look::BlackPoint => (icons::CIRCLE, theme::FG_2),
+            Look::BlackPoint => (icons::CIRCLE, theme::fg_2()),
             Look::Temperature => (glyphs::THERMOMETER, along(&[rgb(0x5f95ff), rgb(0xd6dbe4), rgb(0xffa940)], t)),
             Look::Tint => (icons::DROP, along(&[rgb(0x3ddc84), rgb(0xd6dbe4), rgb(0xff5fd8)], t)),
             Look::Saturation => (glyphs::DROP_HALF, theme::mix(grey(150), rgb(0xff4d6d), t)),
             Look::Vibrance => (icons::SPARKLE, theme::mix(grey(150), rgb(0xffb340), t)),
             Look::Hue => (glyphs::RAINBOW, hue(-180.0 + 360.0 * t)),
-            Look::Vignette => (icons::APERTURE, theme::FG_2),
+            Look::Vignette => (icons::APERTURE, theme::fg_2()),
             Look::Aberration => (icons::CIRCLES_THREE, rgb(0xff6b7a)),
-            Look::Ink => (icons::PENCIL_SIMPLE, theme::FG_2),
+            Look::Ink => (icons::PENCIL_SIMPLE, theme::fg_2()),
         })
     }
 }
@@ -235,14 +235,14 @@ pub fn slider_look(
         let c = pos2(rect.left() + 8.0, rect.top() + 9.0);
         if look == Look::BlackPoint {
             p.circle_filled(c, 6.0, Color32::BLACK);
-            p.circle_stroke(c, 6.0, Stroke::new(1.4, theme::FG_2));
+            p.circle_stroke(c, 6.0, Stroke::new(1.4, theme::fg_2()));
         } else {
             widgets::icon(p, c, glyph, 15.0, color);
         }
         text_x += 22.0;
     }
-    widgets::text(p, pos2(text_x, rect.top() + 9.0), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::mix(theme::FG_2, theme::FG, hover)));
-    widgets::text(p, pos2(rect.right(), rect.top() + 9.0), Align2::RIGHT_CENTER, &Txt::new(format(*value), 12.0).color(theme::FG_3));
+    widgets::text(p, pos2(text_x, rect.top() + 9.0), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::mix(theme::fg_2(), theme::fg(), hover)));
+    widgets::text(p, pos2(rect.right(), rect.top() + 9.0), Align2::RIGHT_CENTER, &Txt::new(format(*value), 12.0).color(theme::fg_3()));
     let gradient = look.track();
     let half = if gradient.is_some() { 3.0 } else { 2.5 };
     let bar = Rect::from_min_max(pos2(track.left() + 8.0, track.center().y - half), pos2(track.right() - 8.0, track.center().y + half));
@@ -256,7 +256,7 @@ pub fn slider_look(
             // From zero when the range has both sides of it (exposure, contrast), else from its start.
             let (a, b) = if knob < from { (knob, from) } else { (from, knob) };
             if b - a > 0.5 {
-                p.rect_filled(Rect::from_min_max(pos2(a, bar.top()), pos2(b, bar.bottom())), theme::radius(2.5), theme::ACCENT);
+                p.rect_filled(Rect::from_min_max(pos2(a, bar.top()), pos2(b, bar.bottom())), theme::radius(2.5), theme::accent());
             }
         }
     }
@@ -321,7 +321,7 @@ pub fn swatches(ui: &mut Ui, id: Id, colors: &[[u8; 3]], chosen: [u8; 3]) -> Opt
         p.circle_filled(cell.center(), size * 0.5 * (0.86 + 0.06 * hover), color);
         p.circle_stroke(cell.center(), size * 0.5 * (0.86 + 0.06 * hover), egui::Stroke::new(1.0, theme::white(0.18)));
         if *c == chosen {
-            p.circle_stroke(cell.center(), size * 0.5 + 2.0, egui::Stroke::new(2.0, theme::ACCENT));
+            p.circle_stroke(cell.center(), size * 0.5 + 2.0, egui::Stroke::new(2.0, theme::accent()));
         }
         if widgets::pressed(&resp) {
             picked = Some(*c);

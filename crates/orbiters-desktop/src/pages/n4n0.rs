@@ -79,13 +79,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     tr("N4N0 sees only parameter names. Upload the avatar from Unity with Orbiters Toolkit installed to give N4N0 its menu.").to_string()
                 };
                 widgets::field(ui, tr("Menu"), Some(&menu), 140.0, |ui| {
-                    let (t, c) = if n4n0.manifest { (tr("Known by label"), theme::OK) } else if n4n0.avatar_id.is_some() { (tr("Names only"), theme::WARN) } else { ("–", theme::FG_4) };
+                    let (t, c) = if n4n0.manifest { (tr("Known by label"), theme::OK) } else if n4n0.avatar_id.is_some() { (tr("Names only"), theme::WARN) } else { ("–", theme::fg_4()) };
                     let (r, _) = ui.allocate_exact_size(vec2(130.0, 20.0), Sense::hover());
                     widgets::text(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(c));
                 });
                 if n4n0.screen && n4n0.prop_sync == Some(8) {
                     ui.add_space(6.0);
-                    note(ui, tr("N4N0's screen fills twice as fast with 16 sync values: choose 16 in Orbiters Toolkit's N4N0 settings and upload the avatar again."), theme::FG_3);
+                    note(ui, tr("N4N0's screen fills twice as fast with 16 sync values: choose 16 in Orbiters Toolkit's N4N0 settings and upload the avatar again."), theme::fg_3());
                 }
             }));
 
@@ -201,14 +201,14 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     });
                 }
                 if n4n0.videos.is_empty() && snap.vrchat.world.last_video.is_none() {
-                    note(ui, tr("Saved videos stay on this computer. Copy a link and paste it in a world's video player."), theme::FG_3);
+                    note(ui, tr("Saved videos stay on this computer. Copy a link and paste it in a world's video player."), theme::fg_3());
                     ui.add_space(8.0);
                 }
             }));
 
             m.add(8, |ui| section(ui, cx, 8, icons::CPU, tr("Footprint"), Some(tr("What Orbiters and VRChat use on this computer")), |ui| {
                 if n4n0.resources.is_empty() {
-                    note(ui, tr("Measured every few seconds while Orbiters runs."), theme::FG_3);
+                    note(ui, tr("Measured every few seconds while Orbiters runs."), theme::fg_3());
                     ui.add_space(8.0);
                 }
                 for (i, p) in n4n0.resources.iter().enumerate() {
@@ -219,7 +219,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     let painter = ui.painter();
                     widgets::text(painter, row.left_center(), Align2::LEFT_CENTER, &Txt::new(&p.name, 13.5).weight(weight::MEDIUM));
                     let usage = format!("{:.0} % CPU · {:.0} MB", p.cpu_percent, p.memory_mb);
-                    widgets::text(painter, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(usage, 12.5).color(theme::FG_2).mono());
+                    widgets::text(painter, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(usage, 12.5).color(theme::fg_2()).mono());
                 }
             }));
 
@@ -427,19 +427,19 @@ fn panel_preview(ui: &mut Ui, n4n0: &N4n0Status) {
     let width = ui.available_width().min(520.0);
     let (r, _) = ui.allocate_exact_size(vec2(width, 112.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(r, theme::radius(14.0), theme::INK_950);
+    p.rect_filled(r, theme::radius(14.0), theme::ink_950());
     match (&n4n0.panel, n4n0.prop_sync) {
         (Some(text), _) => {
             for (i, row) in text.lines().take(4).enumerate() {
-                widgets::text(p, pos2(r.left() + 18.0, r.top() + 22.0 + i as f32 * 22.0), Align2::LEFT_CENTER, &Txt::new(row, 14.0).mono().color(theme::FG));
+                widgets::text(p, pos2(r.left() + 18.0, r.top() + 22.0 + i as f32 * 22.0), Align2::LEFT_CENTER, &Txt::new(row, 14.0).mono().color(theme::fg()));
             }
         }
         (None, Some(_)) => {
-            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(tr("The panel is hidden until N4N0 speaks"), 12.5).color(theme::FG_4));
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(tr("The panel is hidden until N4N0 speaks"), 12.5).color(theme::fg_4()));
         }
         (None, None) => {
-            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(tr("No N4N0 on this avatar: add it from My Avatar's gallery"), 12.5).color(theme::FG_4));
+            widgets::text(p, r.center(), Align2::CENTER_CENTER, &Txt::new(tr("No N4N0 on this avatar: add it from My Avatar's gallery"), 12.5).color(theme::fg_4()));
         }
     }
-    widgets::text(p, pos2(r.right() - 14.0, r.bottom() - 12.0), Align2::RIGHT_CENTER, &Txt::caps(tr("Panel")).color(theme::FG_4));
+    widgets::text(p, pos2(r.right() - 14.0, r.bottom() - 12.0), Align2::RIGHT_CENTER, &Txt::caps(tr("Panel")).color(theme::fg_4()));
 }

@@ -153,15 +153,15 @@ pub fn picker(ui: &mut Ui, rect: Rect, layout: &mut GalleryLayout) -> bool {
     if let Some(active) = options.iter().position(|o| o.0 == *layout) {
         let [x] = anim::spring(ui.ctx(), id.with("pill"), [rects[active].left() - track.left()], Spring::BOUNCY);
         let x = x.clamp(4.0, track.width() - 40.0);
-        p.rect_filled(Rect::from_min_size(pos2(track.left() + x, track.top() + 4.0), vec2(36.0, 32.0)), theme::radius(16.0), theme::INK_600);
+        p.rect_filled(Rect::from_min_size(pos2(track.left() + x, track.top() + 4.0), vec2(36.0, 32.0)), theme::radius(16.0), theme::ink_600());
     }
     for (i, (value, glyph, _)) in options.iter().enumerate() {
         let target = if *value == *layout {
-            theme::FG
+            theme::fg()
         } else if hovered[i] {
-            theme::FG_2
+            theme::fg_2()
         } else {
-            theme::FG_3
+            theme::fg_3()
         };
         let color = anim::color(ui.ctx(), id.with(("c", i)), target, Spring::SNAPPY);
         widgets::icon(&p, rects[i].center(), glyph, 16.0, color);

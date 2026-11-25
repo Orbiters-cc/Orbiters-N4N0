@@ -300,7 +300,7 @@ fn draw_crop(p: &egui::Painter, rect: Rect, loaded: &Loaded, target: Target, cro
 
 fn zone_colour(z: Option<Zone>) -> Color32 {
     match z {
-        Some(Zone::Always) => theme::alpha(theme::ACCENT, 0.30),
+        Some(Zone::Always) => theme::alpha(theme::accent(), 0.30),
         Some(Zone::Expanded) => theme::white(0.16),
         Some(Zone::ShortNames | Zone::LongNames) => theme::alpha(theme::WARN, 0.34),
         Some(Zone::Bleed) => theme::alpha(theme::DANGER, 0.30),
@@ -532,7 +532,7 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
             acts.push(Act::Photos);
         }
         if !studio.loading.is_empty() {
-            ui.label(egui::RichText::new(tr("Opening the picture…")).color(theme::FG_3).size(13.0));
+            ui.label(egui::RichText::new(tr("Opening the picture…")).color(theme::fg_3()).size(13.0));
         }
     });
     if let Some(e) = &studio.error {
@@ -551,11 +551,11 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
     let resp = ui.interact(canvas, id, Sense::click_and_drag());
     match studio.source.as_ref() {
         None => {
-            p.rect_filled(canvas, theme::radius(16.0), theme::INK_800);
-            let stroke = Stroke::new(1.5, if hovering { theme::ACCENT } else { theme::alpha(theme::FG_3, 0.5) });
+            p.rect_filled(canvas, theme::radius(16.0), theme::ink_800());
+            let stroke = Stroke::new(1.5, if hovering { theme::accent() } else { theme::alpha(theme::fg_3(), 0.5) });
             p.extend(Shape::dashed_line(&[canvas.left_top(), canvas.right_top(), canvas.right_bottom(), canvas.left_bottom(), canvas.left_top()], stroke, 8.0, 6.0));
-            widgets::icon(&p, canvas.center() - vec2(0.0, 22.0), icons::IMAGE, 30.0, theme::FG_3);
-            widgets::text(&p, canvas.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(tr("Drop a picture here, or choose one above"), 14.0).color(theme::FG_2));
+            widgets::icon(&p, canvas.center() - vec2(0.0, 22.0), icons::IMAGE, 30.0, theme::fg_3());
+            widgets::text(&p, canvas.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(tr("Drop a picture here, or choose one above"), 14.0).color(theme::fg_2()));
         }
         Some(loaded) => {
             let size = loaded.size();
@@ -586,7 +586,7 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
             if resp.drag_stopped() {
                 studio.remember();
             }
-            p.rect_filled(canvas, 0.0, theme::INK_950);
+            p.rect_filled(canvas, 0.0, theme::ink_950());
             draw_crop(&p, canvas, loaded, target, crop, Color32::WHITE);
             if studio.show_zones && target != Target::GroupBanner {
                 let m = mask(&ctx, &mut studio.masks, target, 0);
@@ -606,7 +606,7 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
             let mut zoom = studio.crop().zoom;
-            ui.label(egui::RichText::new(tr("Zoom")).color(theme::FG_3).size(13.0));
+            ui.label(egui::RichText::new(tr("Zoom")).color(theme::fg_3()).size(13.0));
             if widgets::slider(ui, "studio-zoom", &mut zoom, 1.0..=art::ZOOM_MAX, 0.05, |z| format!("{:.0} %", z * 100.0)) {
                 let c = studio.crop();
                 *studio.saved.crop_mut(studio.target) = Crop { zoom, ..c }.clamped(size, studio.target);
@@ -626,14 +626,14 @@ fn body(ui: &mut Ui, cx: &Cx, studio: &mut Studio, thumbs: &HashMap<String, egui
                 let tw = widgets::text_size(ui, &Txt::new(tr("Show the zones"), 13.0)).x;
                 ui.allocate_ui_with_layout(vec2(48.0 + 10.0 + tw + 8.0, 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     widgets::toggle(ui, "studio-zones", &mut studio.show_zones);
-                    ui.label(egui::RichText::new(tr("Show the zones")).color(theme::FG_2).size(13.0));
+                    ui.label(egui::RichText::new(tr("Show the zones")).color(theme::fg_2()).size(13.0));
                 });
             }
         });
         if studio.target != Target::GroupBanner && studio.show_zones {
             legend(ui, studio.target);
         }
-        ui.label(egui::RichText::new(tr("Drag to move, scroll to zoom, double-click to start again. Each target keeps its own framing of the same picture.")).color(theme::FG_3).size(12.5));
+        ui.label(egui::RichText::new(tr("Drag to move, scroll to zoom, double-click to start again. Each target keeps its own framing of the same picture.")).color(theme::fg_3()).size(12.5));
         previews(ui, cx, studio);
     }
     export_card(ui, studio, busy, acts);
@@ -648,7 +648,7 @@ fn legend(ui: &mut Ui, target: Target) {
                 continue;
             }
             seen.push(*z);
-            let txt = Txt::new(zone_name(*z), 12.0).color(theme::FG_2);
+            let txt = Txt::new(zone_name(*z), 12.0).color(theme::fg_2());
             let tw = widgets::text_size(ui, &txt).x;
             let (r, _) = ui.allocate_exact_size(vec2(tw + 22.0, 18.0), Sense::hover());
             let p = ui.painter();
@@ -685,9 +685,9 @@ fn choosers_drawn(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egu
     if let Some((files, _, more, loading)) = &studio.gallery {
         let (tile_w, tile_h) = (176.0, 99.0);
         let cols = (((w + 10.0) / (tile_w + 10.0)).floor() as usize).max(1);
-        ui.label(egui::RichText::new(tr("Your VRChat gallery: press a picture to use it.")).color(theme::FG_2).size(13.0));
+        ui.label(egui::RichText::new(tr("Your VRChat gallery: press a picture to use it.")).color(theme::fg_2()).size(13.0));
         if files.is_empty() && !loading {
-            ui.label(egui::RichText::new(tr("Nothing here yet. VRChat+ lets you upload pictures to your gallery and icons.")).color(theme::FG_3).size(12.5));
+            ui.label(egui::RichText::new(tr("Nothing here yet. VRChat+ lets you upload pictures to your gallery and icons.")).color(theme::fg_3()).size(12.5));
         }
         let rows = files.len().div_ceil(cols);
         let (area, _) = ui.allocate_exact_size(vec2(w, (rows as f32 * (tile_h + 10.0) - 10.0).max(0.0)), Sense::hover());
@@ -700,12 +700,12 @@ fn choosers_drawn(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egu
             visible.push(f.url.clone());
             let resp = ui.interact(r, Id::unique(("studio-gallery", f.id.as_str())), Sense::click());
             let p = ui.painter();
-            widgets::frame(p, r, 12.0, theme::INK_750);
+            widgets::frame(p, r, 12.0, theme::ink_750());
             if let Some(t) = thumbs.get(&f.url) {
                 paint::squircle_texture(p, r, [theme::squircle(12.0); 4], t.id(), super::super::launcher::cover_uv(t.size_vec2(), r.size()), Color32::WHITE);
             }
             if resp.hovered() {
-                p.rect_stroke(r, theme::radius(12.0), Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+                p.rect_stroke(r, theme::radius(12.0), Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
             }
             if widgets::activated(&resp) {
                 acts.push(Act::UseInventory(f.clone()));
@@ -713,15 +713,15 @@ fn choosers_drawn(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egu
         }
         visible_out.extend(visible);
         if *loading {
-            ui.label(egui::RichText::new(tr("Loading…")).color(theme::FG_3).size(12.5));
+            ui.label(egui::RichText::new(tr("Loading…")).color(theme::fg_3()).size(12.5));
         } else if *more && widgets::Button::new(tr("Load more")).size(widgets::Size::Sm).id_salt("studio-gallery-more").show(ui).clicked() {
             acts.push(Act::MoreGallery);
         }
     }
     if let Some(photos) = &studio.photos {
-        ui.label(egui::RichText::new(tr("Your newest VRChat pictures: press one to use it.")).color(theme::FG_2).size(13.0));
+        ui.label(egui::RichText::new(tr("Your newest VRChat pictures: press one to use it.")).color(theme::fg_2()).size(13.0));
         if photos.is_empty() {
-            ui.label(egui::RichText::new(tr("No pictures found in your VRChat pictures folder.")).color(theme::FG_3).size(12.5));
+            ui.label(egui::RichText::new(tr("No pictures found in your VRChat pictures folder.")).color(theme::fg_3()).size(12.5));
         }
         let (tile_w, tile_h) = (176.0, 99.0);
         let cols = (((w + 10.0) / (tile_w + 10.0)).floor() as usize).max(1);
@@ -731,12 +731,12 @@ fn choosers_drawn(ui: &mut Ui, studio: &mut Studio, thumbs: &HashMap<String, egu
             let r = Rect::from_min_size(area.min + vec2((i % cols) as f32 * (tile_w + 10.0), (i / cols) as f32 * (tile_h + 10.0)), vec2(tile_w, tile_h));
             let resp = ui.interact(r, Id::unique(("studio-photo", i)), Sense::click());
             let p = ui.painter();
-            widgets::frame(p, r, 12.0, theme::INK_750);
+            widgets::frame(p, r, 12.0, theme::ink_750());
             if let Some(t) = &ph.texture {
                 paint::squircle_texture(p, r, [theme::squircle(12.0); 4], t.id(), super::super::launcher::cover_uv(t.size_vec2(), r.size()), Color32::WHITE);
             }
             if resp.hovered() {
-                p.rect_stroke(r, theme::radius(12.0), Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+                p.rect_stroke(r, theme::radius(12.0), Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
             }
             if widgets::activated(&resp) {
                 acts.push(Act::UsePhoto(ph.path.clone()));
@@ -764,16 +764,16 @@ fn previews(ui: &mut Ui, cx: &Cx, studio: &mut Studio) {
         let banner_h = card_w * 9.0 / 16.0;
         let (r, _) = ui.allocate_exact_size(vec2(w, banner_h + 92.0), Sense::hover());
         let card = Rect::from_min_size(r.min, vec2(card_w, banner_h + 92.0));
-        widgets::frame(&p, card, 18.0, theme::INK_800);
+        widgets::frame(&p, card, 18.0, theme::ink_800());
         let banner = Rect::from_min_size(card.min, vec2(card_w, banner_h));
         draw_crop(&p, banner, loaded, target, crop, Color32::WHITE);
         let icon = Rect::from_min_size(pos2(card.left() + 18.0, banner.bottom() - 30.0), vec2(64.0, 64.0));
-        p.circle_filled(icon.center(), 35.0, theme::INK_800);
+        p.circle_filled(icon.center(), 35.0, theme::ink_800());
         widgets::avatar(&p, icon, None, &studio.card.name);
         let name = if studio.card.name.is_empty() { tr("Your group").to_string() } else { studio.card.name.clone() };
         widgets::text_truncated(&p, pos2(icon.right() + 14.0, banner.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&name, 18.0).weight(weight::SEMIBOLD), card_w - 120.0);
         let code = super::short_code(&studio.card.short_code, &studio.card.discriminator);
-        widgets::text_truncated(&p, pos2(icon.right() + 14.0, banner.bottom() + 46.0), Align2::LEFT_CENTER, &Txt::new(code, 12.5).color(theme::FG_3), card_w - 120.0);
+        widgets::text_truncated(&p, pos2(icon.right() + 14.0, banner.bottom() + 46.0), Align2::LEFT_CENTER, &Txt::new(code, 12.5).color(theme::fg_3()), card_w - 120.0);
         return;
     }
     caps(ui, tr("Preview · nameplates (a guide: VRChat has not published where names cut off)"));
@@ -812,7 +812,7 @@ fn previews(ui: &mut Ui, cx: &Cx, studio: &mut Studio) {
             let name = Txt::new(player, size).weight(weight::BOLD).color(Color32::WHITE);
             widgets::text(&p, at + vec2(1.0, 1.5), align, &Txt::new(player, size).weight(weight::BOLD).color(theme::black(0.6)));
             widgets::text(&p, at, align, &name);
-            widgets::text(&p, pos2(r.left(), r.bottom() + 11.0), Align2::LEFT_CENTER, &Txt::new(format!("{caption} · {}", if dark { tr("dark world") } else { tr("light world") }), 11.5).color(theme::FG_3));
+            widgets::text(&p, pos2(r.left(), r.bottom() + 11.0), Align2::LEFT_CENTER, &Txt::new(format!("{caption} · {}", if dark { tr("dark world") } else { tr("light world") }), 11.5).color(theme::fg_3()));
         }
     }
 }
@@ -822,7 +822,7 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
     let (tw, th) = studio.target.size();
     let has = studio.source.is_some();
     let exporting = studio.exporting.is_some();
-    ui.label(egui::RichText::new(orbiters_i18n::tr!("Lossless PNG at {w} × {h}, sRGB, transparency kept; a new file every time, nothing replaced.", w = tw, h = th)).color(theme::FG_3).size(12.5));
+    ui.label(egui::RichText::new(orbiters_i18n::tr!("Lossless PNG at {w} × {h}, sRGB, transparency kept; a new file every time, nothing replaced.", w = tw, h = th)).color(theme::fg_3()).size(12.5));
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         if widgets::Button::new(tr("Export this one")).icon(icons::DOWNLOAD_SIMPLE).variant(widgets::Variant::Primary).enabled(has && !exporting).id_salt("studio-export").show(ui).clicked() {
@@ -832,14 +832,14 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
             acts.push(Act::Export(true));
         }
         if exporting {
-            ui.label(egui::RichText::new(tr("Exporting…")).color(theme::FG_3).size(13.0));
+            ui.label(egui::RichText::new(tr("Exporting…")).color(theme::fg_3()).size(13.0));
         }
     });
     let exported = studio.exported.clone();
     for (t, path, bytes) in exported.iter().rev().take(6) {
         ui.horizontal(|ui| {
             ui.set_width(w);
-            ui.label(egui::RichText::new(format!("{} · {} · {}", label(*t), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), orbiters_ui::format::bytes(*bytes as f64))).color(theme::FG_2).size(12.5));
+            ui.label(egui::RichText::new(format!("{} · {} · {}", label(*t), path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), orbiters_ui::format::bytes(*bytes as f64))).color(theme::fg_2()).size(12.5));
             if widgets::Button::new(tr("Show in folder")).icon(icons::FOLDER_OPEN).variant(widgets::Variant::Ghost).size(widgets::Size::Sm).id_salt(("studio-reveal", path.to_string_lossy().to_string())).show(ui).clicked() {
                 acts.push(Act::Reveal(path.clone()));
             }
@@ -849,7 +849,7 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
     if studio.target == Target::GroupBanner {
         let art = studio.card.abilities().art;
         if !art {
-            ui.label(egui::RichText::new(tr("Your role cannot change the group's banner: export it for someone who can.")).color(theme::FG_3).size(12.5));
+            ui.label(egui::RichText::new(tr("Your role cannot change the group's banner: export it for someone who can.")).color(theme::fg_3()).size(12.5));
         }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
@@ -869,10 +869,10 @@ fn export_card(ui: &mut Ui, studio: &mut Studio, busy: bool, acts: &mut Vec<Act>
         if studio.upload_matches() {
             ui.label(egui::RichText::new(tr("Uploaded to your VRChat gallery. The group is unchanged until you apply it.")).color(theme::WARN).size(12.5));
         } else if studio.uploaded.is_some() {
-            ui.label(egui::RichText::new(tr("The art changed since its upload: upload it again to apply it here. The earlier upload can be applied from the group's Look tab, where it is shown.")).color(theme::FG_3).size(12.5));
+            ui.label(egui::RichText::new(tr("The art changed since its upload: upload it again to apply it here. The earlier upload can be applied from the group's Look tab, where it is shown.")).color(theme::fg_3()).size(12.5));
         }
         if studio.applied {
-            ui.label(egui::RichText::new(tr("The group's banner is changed.")).color(theme::ACCENT).size(12.5));
+            ui.label(egui::RichText::new(tr("The group's banner is changed.")).color(theme::accent()).size(12.5));
         }
     } else {
         if !orbiters_core::groups::NameplateApply::current().can_apply() {

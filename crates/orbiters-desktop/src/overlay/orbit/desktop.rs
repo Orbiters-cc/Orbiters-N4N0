@@ -1920,21 +1920,21 @@ pub(crate) fn paint_corner(p: &egui::Painter, noted: Option<crate::mismatch::Kin
     for (i, kind) in crate::mismatch::Kind::ALL.into_iter().enumerate() {
         let r = egui::Rect::from_min_size(pos2(0.0, i as f32 * (Corner::ROW + Corner::GAP)), vec2(Corner::SIZE.x, Corner::ROW));
         let is_noted = noted == Some(kind);
-        p.rect_filled(r, r.height() / 2.0, if is_noted { theme::mix(theme::INK_950, theme::ACCENT, 0.35) } else { theme::alpha(theme::INK_950, 0.9) });
-        p.rect_stroke(r, r.height() / 2.0, egui::Stroke::new(1.0, if is_noted { theme::ACCENT } else { theme::white(0.16) }), egui::StrokeKind::Inside);
+        p.rect_filled(r, r.height() / 2.0, if is_noted { theme::mix(theme::ink_950(), theme::accent(), 0.35) } else { theme::alpha(theme::ink_950(), 0.9) });
+        p.rect_stroke(r, r.height() / 2.0, egui::Stroke::new(1.0, if is_noted { theme::accent() } else { theme::white(0.16) }), egui::StrokeKind::Inside);
         let dot = pos2(r.left() + 15.0, r.center().y);
         if is_noted {
-            p.line_segment([dot + vec2(-5.0, 0.0), dot + vec2(-1.5, 4.0)], egui::Stroke::new(2.2, theme::ACCENT));
-            p.line_segment([dot + vec2(-1.5, 4.0), dot + vec2(6.0, -4.5)], egui::Stroke::new(2.2, theme::ACCENT));
+            p.line_segment([dot + vec2(-5.0, 0.0), dot + vec2(-1.5, 4.0)], egui::Stroke::new(2.2, theme::accent()));
+            p.line_segment([dot + vec2(-1.5, 4.0), dot + vec2(6.0, -4.5)], egui::Stroke::new(2.2, theme::accent()));
         } else if kind == crate::mismatch::Kind::MenuShouldBeOff {
-            p.circle_stroke(dot, 5.5, egui::Stroke::new(1.6, theme::FG_3));
-            p.line_segment([dot + vec2(-4.0, 4.0), dot + vec2(4.0, -4.0)], egui::Stroke::new(1.6, theme::FG_3));
+            p.circle_stroke(dot, 5.5, egui::Stroke::new(1.6, theme::fg_3()));
+            p.line_segment([dot + vec2(-4.0, 4.0), dot + vec2(4.0, -4.0)], egui::Stroke::new(1.6, theme::fg_3()));
         } else {
-            p.circle_filled(dot, 5.5, theme::ACCENT);
+            p.circle_filled(dot, 5.5, theme::accent());
         }
         let keys = format!("Alt+F{}", kind.function_key());
-        let caps = orbiters_ui::widgets::text(p, pos2(r.right() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, &Txt::new(&keys, 10.5).color(theme::FG_3));
-        let (words, colour) = if is_noted { (orbiters_i18n::tr(crate::mismatch::NOTED_WORDS), theme::ACCENT) } else { (orbiters_i18n::tr(kind.words()), theme::FG) };
+        let caps = orbiters_ui::widgets::text(p, pos2(r.right() - 12.0, r.center().y), egui::Align2::RIGHT_CENTER, &Txt::new(&keys, 10.5).color(theme::fg_3()));
+        let (words, colour) = if is_noted { (orbiters_i18n::tr(crate::mismatch::NOTED_WORDS), theme::accent()) } else { (orbiters_i18n::tr(kind.words()), theme::fg()) };
         let room = caps.left() - dot.x - 20.0;
         let size = crate::mismatch::fitting(p, words, &[13.0, 12.5, 12.0, 11.5, 11.0], room);
         orbiters_ui::widgets::text_truncated(p, pos2(dot.x + 13.0, r.center().y), egui::Align2::LEFT_CENTER, &Txt::new(words, size).weight(weight::SEMIBOLD).color(colour), room + 2.0);

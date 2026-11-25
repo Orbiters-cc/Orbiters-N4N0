@@ -45,15 +45,15 @@ pub fn on_hand() -> Matrix34 {
 /// seen, and what to film next (or what the colours mean). Painted for the overlay and for the desktop panel alike.
 pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
     let p = ui.painter().clone();
-    widgets::frame(&p, rect, 26.0, theme::INK_950);
+    widgets::frame(&p, rect, 26.0, theme::ink_950());
     let c = &snap.capture;
     let pad = 18.0;
     let top = rect.top() + 26.0;
     let (label, tone) = if c.state == CaptureState::Paused { (tr("PAUSED"), Tone::Warn) } else { (tr("REC"), Tone::Rec) };
     widgets::status_dot(&p, pos2(rect.left() + pad + 6.0, top), tone, c.state == CaptureState::Recording);
     let elapsed = c.stats.as_ref().map(|s| format::duration(s.elapsed_s)).unwrap_or_default();
-    widgets::text(&p, pos2(rect.left() + pad + 20.0, top), Align2::LEFT_CENTER, &Txt::new(format!("{label}  {elapsed}"), 18.0).color(theme::FG));
-    widgets::text(&p, pos2(rect.right() - pad, top), Align2::RIGHT_CENTER, &Txt::caps(tr("Camera path")).color(theme::FG_3));
+    widgets::text(&p, pos2(rect.left() + pad + 20.0, top), Align2::LEFT_CENTER, &Txt::new(format!("{label}  {elapsed}"), 18.0).color(theme::fg()));
+    widgets::text(&p, pos2(rect.right() - pad, top), Align2::RIGHT_CENTER, &Txt::caps(tr("Camera path")).color(theme::fg_3()));
     let hint_h = 50.0;
     let map = Rect::from_min_max(pos2(rect.left() + pad, rect.top() + 48.0), pos2(rect.right() - pad, rect.bottom() - pad - hint_h));
     let coverage = c.coverage.as_ref().map(|m| trail::Coverage {
@@ -82,17 +82,17 @@ pub fn paint_panel(ui: &mut Ui, rect: Rect, snap: &Snapshot) {
     match c.coverage.as_ref().and_then(|m| m.hints.first()) {
         Some(hint) => {
             p.circle_filled(pos2(hints.left() + 5.0, hints.top() + 12.0), 4.0, theme::WARN);
-            let galley = p.layout(hint.clone(), egui::FontId::proportional(16.0), theme::FG, hints.width() - 18.0);
-            p.galley(pos2(hints.left() + 16.0, hints.top()), galley, theme::FG);
+            let galley = p.layout(hint.clone(), egui::FontId::proportional(16.0), theme::fg(), hints.width() - 18.0);
+            p.galley(pos2(hints.left() + 16.0, hints.top()), galley, theme::fg());
         }
         None => {
             let y = hints.top() + 14.0;
             let mut x = hints.left();
-            widgets::text(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 15.0).color(theme::FG_3));
+            widgets::text(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 15.0).color(theme::fg_3()));
             x += 80.0;
             for (directions, label) in [(1u8, mark("1–2 directions")), (3, mark("3–5")), (6, mark("6 or more"))] {
                 p.rect_filled(Rect::from_center_size(pos2(x + 6.0, y), vec2(12.0, 12.0)), 3.0, theme::alpha(trail::coverage_colour(directions), 0.7));
-                let r = widgets::text(&p, pos2(x + 18.0, y), Align2::LEFT_CENTER, &Txt::new(tr(label), 15.0).color(theme::FG_3));
+                let r = widgets::text(&p, pos2(x + 18.0, y), Align2::LEFT_CENTER, &Txt::new(tr(label), 15.0).color(theme::fg_3()));
                 x = r.right() + 16.0;
             }
         }

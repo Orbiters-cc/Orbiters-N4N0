@@ -10,8 +10,11 @@ use crate::command::{Stamp, Surface};
 use crate::platform::VoiceWorker;
 use crate::runtime::{N4n0, Shared, Source};
 use crate::status::{NoticeKind, N4n0Who, VoiceStatus};
+use orbiters_core::settings::N4n0Settings;
 use orbiters_core::voice::{self, VoiceCommand, VoiceEvent};
 use orbiters_i18n::tr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// The app gives up on a sentence after this (the worker ends its own sooner).
@@ -32,6 +35,39 @@ const DLL_NOT_FOUND: u32 = 0xC000_0135;
 /// What the worker says before it loads the recogniser: a worker that stops with this as its last line stopped while
 /// loading the models.
 const LOADING_LINE: &str = "loading the speech recogniser"; // i18n: not shown
+
+/// What wakes the ears' thread.
+#[derive(Default)]
+pub(crate) struct Bell {
+    rung: Mutex<bool>,
+    bell: Condvar,
+    /// The assistant was on when they last looked: once off, they look once more, to stop.
+    was_on: AtomicBool,
+}
+
+impl Bell {
+    pub(crate) fn ring(&self) {
+        *self.rung.lock().unwrap() = true;
+        self.bell.notify_all();
+    }
+
+    /// Until it rings, or `due`.
+    pub(crate) fn wait(&self, due: Option<Instant>) {
+        let mut rung = self.rung.lock().unwrap();
+        while !std::mem::take(&mut *rung) {
+            rung = match due.map(|due| due.saturating_duration_since(Instant::now())) {
+                Some(Duration::ZERO) => return,
+                Some(left) => self.bell.wait_timeout(rung, left).unwrap().0,
+                None => self.bell.wait(rung).unwrap(),
+            };
+        }
+    }
+}
+
+/// The settings the ears follow: none of them while the assistant is off.
+pub(crate) fn followed(s: &N4n0Settings) -> Option<(&str, bool, &[String])> {
+    (s.enabled && s.assistant).then_some((s.mic_device.as_str(), s.wake_word, s.wake_words.as_slice()))
+}
 
 /// A running worker, and what it was started with.
 struct Worker {
@@ -237,7 +273,7 @@ impl N4n0 {
         self.talk_admitted(down, Source::Overlay, admitted);
     }
 
-    /// Called by the runtime watcher, independently of page paint and audio callbacks.
+    /// Called by the ears' thread, independently of page paint and audio callbacks.
     pub(crate) fn ask_follow(self: &Shared) {
         let _lifecycle = self.voice_lifecycle.lock();
         let ready = self.voice_readiness() == crate::status::VoiceReadiness::Ready;
@@ -261,6 +297,14 @@ impl N4n0 {
             if !ready { rt.voice.automatic = false; }
         }
         if arm { self.voice_listen(Source::AskAuto, None); }
+    }
+
+    /// N4N0's state changed: the ears look at it, while the assistant is on.
+    pub(crate) fn ears_look(&self, readiness: crate::status::VoiceReadiness) {
+        let on = readiness != crate::status::VoiceReadiness::AssistantOff;
+        if self.ears.was_on.swap(on, Ordering::Relaxed) || on {
+            self.ears.ring();
+        }
     }
 
     /// Whether the speech models are on this device.
@@ -287,8 +331,9 @@ impl N4n0 {
 
     /// Starts the voice worker when N4N0 should be able to hear (VRChat runs, or a sentence was asked for meanwhile;
     /// the assistant is on, the models are here), stops it otherwise, and passes on a changed microphone or wake
-    /// word (without loading anything again). Called once a second.
-    pub(crate) fn voice_follow(self: &Shared) {
+    /// word (without loading anything again). When to look again whatever changes: a worker kept for a while, or not started again
+    /// yet.
+    pub(crate) fn voice_follow(self: &Shared) -> Option<Instant> {
         let _lifecycle = self.voice_lifecycle.lock();
         let settings = self.with_settings(|s| s.n4n0.clone());
         // Turned off anywhere (Settings' switch included): an answer under way or a sentence it listens to stops too.
@@ -315,8 +360,10 @@ impl N4n0 {
                 drop(handle);
                 self.voice_status(|v| v.running = false);
             }
-            return;
+            return None;
         }
+        // Without VRChat it stays for its lease only.
+        let lease_ends = rt.lease_until.filter(|_| !vrchat);
         let wake_word = settings.wake_word && !rt.ask_owned;
         if let Some(handle) = rt.handle.as_mut() {
             if handle.mic != settings.mic_device {
@@ -329,16 +376,19 @@ impl N4n0 {
                 handle.wake_words = settings.wake_words.clone();
                 let _ = handle.inner.send(&VoiceCommand::WakeWord { on: wake_word, words: settings.wake_words.clone() });
             }
-            return;
+            return lease_ends;
         }
         // A worker that keeps stopping on its own is started less and less often, then only for a press of Talk.
         if rt.crashes >= CRASHES_MOST && !leased {
-            return;
+            return None;
         }
-        if rt.ended_at.is_some_and(|t| t.elapsed() < rt.restart_delay()) {
-            return;
+        let again = |rt: &VoiceRuntime| rt.ended_at.map(|t| t + rt.restart_delay()).filter(|at| Instant::now() < *at);
+        let mut wait = again(&rt);
+        if wait.is_none() {
+            self.voice_start(&mut rt, &settings.mic_device, wake_word, &settings.wake_words);
+            wait = again(&rt).filter(|_| rt.handle.is_none());
         }
-        self.voice_start(&mut rt, &settings.mic_device, wake_word, &settings.wake_words);
+        [wait, lease_ends].into_iter().flatten().min()
     }
 
     fn voice_start(self: &Shared, rt: &mut VoiceRuntime, mic: &str, wake_word: bool, wake_words: &[String]) {

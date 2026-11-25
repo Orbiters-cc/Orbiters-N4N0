@@ -137,7 +137,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
                 ui,
                 tr("Orbiters makes a copy of the project for the trial: the original stays on Unity 2022 and stays as it is. Creator Companion then migrates the copy, as VRChat's guide describes. Orbiters cannot stop an upload made from the VRChat SDK's own panel."),
                 12.5,
-                theme::FG_2,
+                theme::fg_2(),
             );
             note(ui, tr("To test online, give the trial a test ID of its own first: in the trial's scene, detach the blueprint ID in its Pipeline Manager and upload it as a new private avatar or world. Orbiters does not change Pipeline Managers."));
         }
@@ -146,7 +146,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
                 ui,
                 tr("VRChat's guide asks to check the project in Unity 2022 first: open it, look at Unity's Console and at the VRChat SDK's Builder for errors. A trial of a project that does not build in 2022 says little about Unity 6."),
                 12.5,
-                theme::FG_2,
+                theme::fg_2(),
             );
             let label = tr("It builds in Unity 2022 today");
             let mut confirmed = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(("u6-baseline", &project.path)))).unwrap_or(false);
@@ -187,7 +187,7 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
                 inline_warning(ui, &e.to_string());
             }
             match state.u6.sheet.checked.clone() {
-                None => para(ui, tr("Measuring the copy and the room on each disk…"), 12.0, theme::FG_3),
+                None => para(ui, tr("Measuring the copy and the room on each disk…"), 12.0, theme::fg_3()),
                 Some((_, Err(e))) => inline_warning(ui, &e),
                 Some((_, Ok(found))) => {
                     budget_view(ui, &found.plan);
@@ -209,15 +209,15 @@ pub(super) fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, path: &Path) {
             let w = ui.available_width();
             let (r, _) = ui.allocate_exact_size(vec2(w, 92.0), Sense::hover());
             let pt = ui.painter();
-            widgets::frame(pt, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
-            orbiters_ui::feedback::spinner(pt, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::ACCENT);
+            widgets::frame(pt, r, 14.0, theme::alpha(theme::accent(), 0.07));
+            orbiters_ui::feedback::spinner(pt, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::accent());
             let pct = if p.total > 0 { format!(" · {:.0}%", 100.0 * p.copied as f32 / p.total as f32) } else { String::new() };
             widgets::text(pt, pos2(r.left() + 42.0, r.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(format!("{}{pct}", super::unity6::phase_label(&p.phase)), 13.5));
             let bar = Rect::from_min_size(pos2(r.left() + 16.0, r.top() + 50.0), vec2(r.width() - 32.0, 6.0));
             pt.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
             let f = if p.total > 0 { p.copied as f32 / p.total as f32 } else { 0.0 };
-            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
-            widgets::text_truncated(pt, pos2(r.left() + 16.0, r.top() + 74.0), Align2::LEFT_CENTER, &Txt::new(p.file, 11.5).color(theme::FG_3), r.width() - 32.0);
+            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
+            widgets::text_truncated(pt, pos2(r.left() + 16.0, r.top() + 74.0), Align2::LEFT_CENTER, &Txt::new(p.file, 11.5).color(theme::fg_3()), r.width() - 32.0);
             note(ui, tr("Orbiters recorded this trial before copying: if the copy is cut short, the gallery shows it under Unity 6 trials with its folder and what can be done."));
         }
         Step::Done => match state.u6.sheet.done.clone() {

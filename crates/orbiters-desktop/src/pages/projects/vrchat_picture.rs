@@ -240,10 +240,10 @@ fn progress(ui: &Ui, rect: Rect, radii: [f32; 4], k: Option<f32>) {
     match k {
         Some(k) => {
             paint::ring(painter, rect.center(), radius, width, theme::white(0.18));
-            paint::arc(painter, rect.center(), radius, -FRAC_PI_2, TAU * k.clamp(0.02, 1.0), width, theme::ACCENT);
+            paint::arc(painter, rect.center(), radius, -FRAC_PI_2, TAU * k.clamp(0.02, 1.0), width, theme::accent());
             anim::request_frame(ui.ctx());
         }
-        None => feedback::spinner(painter, rect.center(), radius, width, theme::ACCENT),
+        None => feedback::spinner(painter, rect.center(), radius, width, theme::accent()),
     }
 }
 

@@ -205,7 +205,7 @@ fn paint_panel(snap: &Snapshot, page: TabPage, laser_at: Pos2) -> Vec<u8> {
         let mut full = ctx.run_ui(input, |ui| state.show_in(ui, snap, &backend, &mut body, Surface::Floating));
         sw.set_textures(&mut full.textures_delta);
         let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-        image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+        image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::ink_950()).to_vec();
         sw.free_textures(&mut full.textures_delta);
     }
     image

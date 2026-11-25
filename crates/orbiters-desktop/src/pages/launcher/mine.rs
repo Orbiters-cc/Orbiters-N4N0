@@ -289,13 +289,13 @@ fn sign_in(ui: &mut Ui, rect: Rect) -> bool {
     paint::stroke_squircle(&p, rect, theme::squircle(theme::CARD_RADIUS), theme::hairline());
     let c = pos2(rect.left() + PAD + 24.0, rect.center().y);
     p.circle_filled(c, 24.0, theme::control());
-    widgets::icon(&p, c, icons::USER_CIRCLE, 24.0, theme::FG_3);
+    widgets::icon(&p, c, icons::USER_CIRCLE, 24.0, theme::fg_3());
     let x = c.x + 40.0;
     let b = widgets::Button::new(tr("Sign in to VRChat")).icon(icons::SIGN_IN).variant(widgets::Variant::Primary).size(widgets::Size::Sm).id_salt("mine-sign-in");
     let bw = b.desired_width(ui);
     let room = rect.right() - PAD - bw - 16.0 - x;
     widgets::text_truncated(&p, pos2(x, rect.center().y - 11.0), Align2::LEFT_CENTER, &Txt::new(tr("Your VRChat profile"), 15.0).weight(weight::SEMIBOLD), room);
-    widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(tr("Sign in to change your status, bio, picture and banner from here."), 12.5).color(theme::FG_3), room);
+    widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(tr("Sign in to change your status, bio, picture and banner from here."), 12.5).color(theme::fg_3()), room);
     b.show_at(ui, Rect::from_min_size(pos2(rect.right() - PAD - bw, rect.center().y - 16.0), vec2(bw, 32.0))).clicked()
 }
 
@@ -320,7 +320,7 @@ fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::T
     match (face, name) {
         (None, None) => {
             p.circle_filled(c, 24.0, theme::control());
-            widgets::icon(&p, c, icons::USER_CIRCLE, 24.0, theme::FG_3);
+            widgets::icon(&p, c, icons::USER_CIRCLE, 24.0, theme::fg_3());
         }
         _ => widgets::avatar(&p, Rect::from_center_size(c, vec2(48.0, 48.0)), face, name.unwrap_or_default()),
     }
@@ -329,8 +329,8 @@ fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::T
     let title = name.map_or_else(|| tr("Your VRChat profile").to_string(), str::to_string);
     widgets::text_truncated(&p, pos2(x, rect.center().y - 11.0), Align2::LEFT_CENTER, &Txt::new(&title, 15.0).weight(weight::SEMIBOLD), room);
     let line = if signed_in { tr("Reading your VRChat profile…") } else { waits };
-    widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), room);
-    orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::FG_3);
+    widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_3()), room);
+    orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::fg_3());
     orbiters_ui::anim::request_frame(ui.ctx());
 }
 
@@ -379,17 +379,17 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
             let c = Color32::from_rgb(r, g, b);
             paint::fill_convex(&p, &paint::squircle_points_corners(banner, radii), |at| {
                 let t = ((at.x - banner.left()) / banner.width() * 0.7 + (at.y - banner.top()) / banner.height() * 0.3).clamp(0.0, 1.0);
-                theme::mix(c, theme::mix(c, theme::INK_900, 0.55), t)
+                theme::mix(c, theme::mix(c, theme::ink_900(), 0.55), t)
             });
         }
     }
     // A veil at its foot, so the picture and the name read over any banner.
     paint::fill_convex(&p, &[banner.left_top(), banner.right_top(), banner.right_bottom(), banner.left_bottom()], |at| theme::black(0.32 * ((at.y - banner.top()) / banner.height()).powi(2) + 0.12 * banner_hover));
-    let change = Txt::new(tr("Change banner"), 12.0).weight(weight::MEDIUM).color(theme::FG);
+    let change = Txt::new(tr("Change banner"), 12.0).weight(weight::MEDIUM).color(theme::fg());
     let cw = widgets::text_size(ui, &change).x + 36.0;
     let change_rect = Rect::from_min_size(pos2(banner.right() - 12.0 - cw, banner.top() + 12.0), vec2(cw, 26.0));
     p.rect_filled(change_rect, theme::radius(13.0), theme::black(0.45 + 0.2 * banner_hover));
-    widgets::icon(&p, pos2(change_rect.left() + 14.0, change_rect.center().y), icons::IMAGE, 13.0, theme::FG);
+    widgets::icon(&p, pos2(change_rect.left() + 14.0, change_rect.center().y), icons::IMAGE, 13.0, theme::fg());
     widgets::text(&p, pos2(change_rect.left() + 26.0, change_rect.center().y), Align2::LEFT_CENTER, &change);
     if widgets::activated(&banner_resp) {
         state.mine.picker = Some((Picker::Banner, change_rect, clock));
@@ -426,7 +426,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         p.circle_filled(pic.center(), ICON * 0.5, theme::black(0.45 * pic_hover));
         let mut hp = p.clone();
         hp.multiply_opacity(pic_hover);
-        widgets::icon(&hp, pic.center(), icons::PENCIL_SIMPLE, 20.0, theme::FG);
+        widgets::icon(&hp, pic.center(), icons::PENCIL_SIMPLE, 20.0, theme::fg());
     }
     // Its status dot at its foot.
     let status = match pending_of(state, ProfilePart::Status) {
@@ -457,7 +457,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
     p.rect_filled(status_rect, theme::radius(14.0), theme::mix(theme::alpha(status_color(status), 0.14), theme::alpha(status_color(status), 0.26), sh));
     p.circle_filled(pos2(status_rect.left() + 15.0, status_rect.center().y), 4.5, status_color(status));
     widgets::text(&p, pos2(status_rect.left() + 26.0, status_rect.center().y), Align2::LEFT_CENTER, &st);
-    widgets::icon(&p, pos2(status_rect.right() - 13.0, status_rect.center().y), icons::CARET_DOWN, 11.0, theme::FG_2);
+    widgets::icon(&p, pos2(status_rect.right() - 13.0, status_rect.center().y), icons::CARET_DOWN, 11.0, theme::fg_2());
     widgets::note_control(&ctx, status_label, status_rect, true);
     let items = status_items();
     let selected = SETTABLE_STATUSES.iter().position(|s| *s == status);
@@ -495,7 +495,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         _ => {
             let placeholder = shown_text.trim().is_empty();
             let line = if placeholder { tr("Add a status text").to_string() } else { shown_text.clone() };
-            if editable(ui, Id::unique("mine-status-text-idle"), text_rect, &Txt::new(line, 13.5).color(if placeholder { theme::FG_4 } else { theme::FG_2 }), tr("Change your status text")) {
+            if editable(ui, Id::unique("mine-status-text-idle"), text_rect, &Txt::new(line, 13.5).color(if placeholder { theme::fg_4() } else { theme::fg_2() }), tr("Change your status text")) {
                 state.mine.editing = Some(Editing::StatusText(shown_text));
             }
         }
@@ -517,7 +517,7 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
             let field = Rect::from_min_size(bio_rect.min, vec2(bio_rect.width(), BIO_EDIT_H));
             let done = bio_editor(ui, field, &mut draft);
             let by = field.bottom() + 8.0;
-            let count = Txt::new(format!("{} / {BIO_MAX}", draft.chars().count()), 12.0).color(theme::FG_4);
+            let count = Txt::new(format!("{} / {BIO_MAX}", draft.chars().count()), 12.0).color(theme::fg_4());
             widgets::text(ui.painter(), pos2(bio_rect.left() + 4.0, by + BUTTONS_H * 0.5), Align2::LEFT_CENTER, &count);
             let save = widgets::Button::new(tr("Save")).icon(icons::CHECK).variant(widgets::Variant::Primary).size(widgets::Size::Sm).id_salt("mine-bio-save");
             let sw = save.desired_width(ui);
@@ -538,22 +538,22 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
         }
         // As it was last read, shown while it is read again: not changed from here meanwhile.
         _ if !mine.loaded && !shown_bio.trim().is_empty() => {
-            let mut job = Txt::new(shown_bio.trim(), 13.0).color(theme::FG_2).line_height(BIO_LINE).job(bio_rect.width() - 16.0 - 24.0);
+            let mut job = Txt::new(shown_bio.trim(), 13.0).color(theme::fg_2()).line_height(BIO_LINE).job(bio_rect.width() - 16.0 - 24.0);
             job.wrap.max_rows = BIO_ROWS_IDLE;
             let galley = ui.painter().layout_job(job);
-            p.galley(bio_rect.min + vec2(8.0, 6.0), galley, theme::FG_2);
+            p.galley(bio_rect.min + vec2(8.0, 6.0), galley, theme::fg_2());
             let mut hp = p.clone();
             hp.multiply_opacity(0.35);
-            widgets::icon(&hp, pos2(bio_rect.right() - 14.0, bio_rect.top() + 16.0), icons::PENCIL_SIMPLE, 14.0, theme::FG_3);
+            widgets::icon(&hp, pos2(bio_rect.right() - 14.0, bio_rect.top() + 16.0), icons::PENCIL_SIMPLE, 14.0, theme::fg_3());
         }
         _ if !mine.loaded => {
             // Not read yet (or the read failed): its bio is not known, so it is not offered for editing.
-            let line = Txt::new(tr("Your bio shows once your profile is read. Read again in the friends list asks VRChat now."), 13.0).color(theme::FG_4);
+            let line = Txt::new(tr("Your bio shows once your profile is read. Read again in the friends list asks VRChat now."), 13.0).color(theme::fg_4());
             widgets::text_truncated(&p, pos2(bio_rect.left() + 8.0, bio_rect.top() + 6.0 + BIO_LINE * 0.5), Align2::LEFT_CENTER, &line, bio_rect.width() - 16.0);
         }
         _ => {
             let empty = shown_bio.trim().is_empty();
-            let txt = if empty { Txt::new(tr("Write a few words about you"), 13.0).color(theme::FG_4) } else { Txt::new(shown_bio.trim(), 13.0).color(theme::FG_2).line_height(BIO_LINE) };
+            let txt = if empty { Txt::new(tr("Write a few words about you"), 13.0).color(theme::fg_4()) } else { Txt::new(shown_bio.trim(), 13.0).color(theme::fg_2()).line_height(BIO_LINE) };
             let id = Id::unique("mine-bio");
             let resp = ui.interact(bio_rect, id, Sense::click());
             let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
@@ -561,10 +561,10 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
             let mut job = txt.job(bio_rect.width() - 16.0 - 24.0);
             job.wrap.max_rows = BIO_ROWS_IDLE;
             let galley = ui.painter().layout_job(job);
-            p.galley(bio_rect.min + vec2(8.0, 6.0), galley, theme::FG_2);
+            p.galley(bio_rect.min + vec2(8.0, 6.0), galley, theme::fg_2());
             let mut hp = p.clone();
             hp.multiply_opacity(0.35 + 0.65 * hover);
-            widgets::icon(&hp, pos2(bio_rect.right() - 14.0, bio_rect.top() + 16.0), icons::PENCIL_SIMPLE, 14.0, theme::FG_3);
+            widgets::icon(&hp, pos2(bio_rect.right() - 14.0, bio_rect.top() + 16.0), icons::PENCIL_SIMPLE, 14.0, theme::fg_3());
             if widgets::activated(&resp) {
                 state.mine.editing = Some(Editing::Bio(shown_bio));
             }
@@ -583,7 +583,7 @@ fn editable(ui: &mut Ui, id: Id, rect: Rect, txt: &Txt, hint: &str) -> bool {
     let r = widgets::text_truncated(p, pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, txt, rect.width() - 40.0);
     let mut hp = p.clone();
     hp.multiply_opacity(0.35 + 0.65 * hover);
-    widgets::icon(&hp, pos2((r.right() + 16.0).min(rect.right() - 14.0), rect.center().y), icons::PENCIL_SIMPLE, 13.0, theme::FG_3);
+    widgets::icon(&hp, pos2((r.right() + 16.0).min(rect.right() - 14.0), rect.center().y), icons::PENCIL_SIMPLE, 13.0, theme::fg_3());
     let pressed = widgets::activated(&resp);
     resp.on_hover_cursor(CursorIcon::Text).on_hover_text(hint);
     pressed
@@ -593,9 +593,9 @@ fn editable(ui: &mut Ui, id: Id, rect: Rect, txt: &Txt, hint: &str) -> bool {
 /// or ✓), `Some(false)` put away (Escape or ×), `None` still typing.
 fn text_editor(ui: &mut Ui, id: Id, rect: Rect, draft: &mut String, hint: &str, max: usize) -> Option<bool> {
     let p = ui.painter().clone();
-    p.rect_filled(rect, theme::radius(10.0), theme::INK_750);
-    p.rect_stroke(rect, theme::radius(10.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.8)), egui::StrokeKind::Outside);
-    let count = Txt::new(format!("{} / {max}", draft.chars().count()), 11.5).color(theme::FG_4);
+    p.rect_filled(rect, theme::radius(10.0), theme::ink_750());
+    p.rect_stroke(rect, theme::radius(10.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.8)), egui::StrokeKind::Outside);
+    let count = Txt::new(format!("{} / {max}", draft.chars().count()), 11.5).color(theme::fg_4());
     let count_w = widgets::text_size(ui, &count).x;
     let ok = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(26.0, 26.0));
     let no = ok.translate(vec2(-30.0, 0.0));
@@ -609,8 +609,8 @@ fn text_editor(ui: &mut Ui, id: Id, rect: Rect, draft: &mut String, hint: &str, 
             .frame(egui::Frame::NONE)
             .char_limit(max)
             .font(font.clone())
-            .text_color(theme::FG)
-            .hint_text(egui::RichText::new(hint).color(theme::FG_4).font(font))
+            .text_color(theme::fg())
+            .hint_text(egui::RichText::new(hint).color(theme::fg_4()).font(font))
             .desired_width(field.width())
             .min_size(field.size()),
     );
@@ -633,8 +633,8 @@ fn text_editor(ui: &mut Ui, id: Id, rect: Rect, draft: &mut String, hint: &str, 
 /// The bio's field: several lines, at most [`BIO_MAX`] characters; Ctrl+Enter saves, Escape puts it away.
 fn bio_editor(ui: &mut Ui, rect: Rect, draft: &mut String) -> Option<bool> {
     let p = ui.painter().clone();
-    p.rect_filled(rect, theme::radius(12.0), theme::INK_750);
-    p.rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.8)), egui::StrokeKind::Outside);
+    p.rect_filled(rect, theme::radius(12.0), theme::ink_750());
+    p.rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.8)), egui::StrokeKind::Outside);
     let inner = rect.shrink2(vec2(10.0, 8.0));
     let mut child = ui.new_child(UiBuilder::new().max_rect(inner));
     let font = theme::font(13.0, weight::REGULAR);
@@ -649,8 +649,8 @@ fn bio_editor(ui: &mut Ui, rect: Rect, draft: &mut String) -> Option<bool> {
                     .frame(egui::Frame::NONE)
                     .char_limit(BIO_MAX)
                     .font(font.clone())
-                    .text_color(theme::FG)
-                    .hint_text(egui::RichText::new(tr("Write a few words about you")).color(theme::FG_4).font(font))
+                    .text_color(theme::fg())
+                    .hint_text(egui::RichText::new(tr("Write a few words about you")).color(theme::fg_4()).font(font))
                     .desired_width(inner.width())
                     .desired_rows(4),
             )
@@ -689,9 +689,9 @@ fn saving_line(ui: &mut Ui, state: &mut State, mine: &MyProfile, rect: Rect, cx:
     let _ = cx;
     match &mine.saving {
         _ if waiting => {
-            let t = Txt::new(tr("Saving…"), 12.5).color(theme::FG_3);
+            let t = Txt::new(tr("Saving…"), 12.5).color(theme::fg_3());
             let r = widgets::text(&p, at, Align2::RIGHT_CENTER, &t);
-            feedback::spinner(&p, pos2(r.left() - 12.0, at.y), 6.0, 2.0, theme::FG_3);
+            feedback::spinner(&p, pos2(r.left() - 12.0, at.y), 6.0, 2.0, theme::fg_3());
             ui.ctx().request_repaint();
         }
         Some(Saving::Saved(_)) => {
@@ -703,8 +703,8 @@ fn saving_line(ui: &mut Ui, state: &mut State, mine: &MyProfile, rect: Rect, cx:
             let k = anim::toggle(ui.ctx(), Id::unique("mine-saved"), left > 0.4, Spring::SOFT).clamp(0.0, 1.0);
             let mut fp = p.clone();
             fp.multiply_opacity(k);
-            let r = widgets::text(&fp, at, Align2::RIGHT_CENTER, &Txt::new(tr("Saved"), 12.5).weight(weight::MEDIUM).color(theme::ACCENT));
-            widgets::icon(&fp, pos2(r.left() - 11.0, at.y), icons::CHECK_CIRCLE, 14.0, theme::ACCENT);
+            let r = widgets::text(&fp, at, Align2::RIGHT_CENTER, &Txt::new(tr("Saved"), 12.5).weight(weight::MEDIUM).color(theme::OK));
+            widgets::icon(&fp, pos2(r.left() - 11.0, at.y), icons::CHECK_CIRCLE, 14.0, theme::OK);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
         _ => {}
@@ -727,7 +727,7 @@ fn failed_line(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, why: &str, c
         }
         right -= aw + 6.0;
     }
-    let t = Txt::new(why, 12.5).color(theme::mix(theme::DANGER, theme::FG, 0.35));
+    let t = Txt::new(why, 12.5).color(theme::mix(theme::DANGER, theme::fg(), 0.35));
     let r = widgets::text_truncated(&p, pos2(rect.left() + 30.0, rect.center().y), Align2::LEFT_CENTER, &t, right - rect.left() - 34.0);
     ui.interact(r.expand(4.0), Id::unique("mine-failed"), Sense::hover()).on_hover_text(why);
 }
@@ -803,7 +803,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     };
     let tabs_h = if kind == Picker::Banner { 44.0 } else { 0.0 };
     let note = picker_note(kind, tab, &mine, list.as_ref());
-    let note_galley = ui.painter().layout_job(Txt::new(note, 12.0).color(theme::FG_3).line_height(16.0).job(w - 32.0));
+    let note_galley = ui.painter().layout_job(Txt::new(note, 12.0).color(theme::fg_3()).line_height(16.0).job(w - 32.0));
     let note_h = note_galley.size().y.max(16.0);
     let h = 16.0 + 26.0 + 10.0 + tabs_h + body_h + 12.0 + note_h + 16.0;
     let below = anchor.bottom() + 8.0;
@@ -859,7 +859,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let current = mine.banner == BannerChoice::Colour && mine.banner_colour == Some([*r, *g, *b]);
                 p.rect_filled(sw.shrink(2.0 * (1.0 - hv)), theme::radius(10.0), Color32::from_rgb(*r, *g, *b));
                 if current {
-                    p.rect_stroke(sw.expand(2.0), theme::radius(12.0), egui::Stroke::new(2.0, theme::FG), egui::StrokeKind::Outside);
+                    p.rect_stroke(sw.expand(2.0), theme::radius(12.0), egui::Stroke::new(2.0, theme::fg()), egui::StrokeKind::Outside);
                     widgets::icon(&p, sw.center(), icons::CHECK, 16.0, Color32::WHITE);
                 }
                 if widgets::activated(&resp) {
@@ -900,7 +900,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let page = state.mine.picker_page.min(pages - 1);
             let shown = page_of(items.len(), per_page, page);
             if pages > 1 {
-                let label = Txt::new(format!("{} / {pages}", page + 1), 12.0).color(theme::FG_3);
+                let label = Txt::new(format!("{} / {pages}", page + 1), 12.0).color(theme::fg_3());
                 let y = inner.top() + 13.0;
                 let next = Rect::from_center_size(pos2(inner.right() - 48.0, y), vec2(26.0, 26.0));
                 let prev = next.translate(vec2(-64.0, 0.0));
@@ -925,7 +925,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 if kind == Picker::Picture {
                     widgets::avatar(&p, rr, texture.as_ref(), "");
                     if *current {
-                        p.circle_stroke(r.center(), r.width() * 0.5 + 2.0, egui::Stroke::new(2.0, theme::ACCENT));
+                        p.circle_stroke(r.center(), r.width() * 0.5 + 2.0, egui::Stroke::new(2.0, theme::accent()));
                     }
                 } else {
                     match texture {
@@ -933,11 +933,11 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                         None => widgets::frame(&p, rr, 8.0, theme::control()),
                     }
                     if *current {
-                        p.rect_stroke(r.expand(1.0), theme::radius(9.0), egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Outside);
+                        p.rect_stroke(r.expand(1.0), theme::radius(9.0), egui::Stroke::new(2.0, theme::accent()), egui::StrokeKind::Outside);
                     }
                 }
                 if url.is_empty() {
-                    let tag = Txt::new(tr("Avatar"), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
+                    let tag = Txt::new(tr("Avatar"), 10.5).weight(weight::SEMIBOLD).color(theme::fg());
                     let tw = widgets::text_size(&over, &tag).x + 12.0;
                     let tr_ = Rect::from_center_size(pos2(r.center().x, r.bottom() - 8.0), vec2(tw, 16.0));
                     p.rect_filled(tr_, theme::radius(8.0), theme::black(0.65));
@@ -953,7 +953,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             }
             if listing {
                 let c = if shown.is_empty() { body.center() } else { pos2(body.left() + (shown.len() % per_row) as f32 * (cell + gap) + cell * 0.5, body.top() + cell_h * 0.5) };
-                feedback::spinner(&p, c, 9.0, 2.5, theme::FG_3);
+                feedback::spinner(&p, c, 9.0, 2.5, theme::fg_3());
                 ctx.request_repaint();
             }
         }
@@ -972,7 +972,7 @@ fn picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 state.mine_listed.push(kind_failed);
             }
         }
-        None => p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::FG_3),
+        None => p.galley(pos2(inner.left(), body.bottom() + 12.0), note_galley, theme::fg_3()),
     }
     if let Some(edit) = chosen {
         send(state, cx, clock, edit);

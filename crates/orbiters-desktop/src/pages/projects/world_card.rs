@@ -120,9 +120,9 @@ pub(super) fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Projec
         |ui| {
             if project.worlds.is_empty() {
                 let text = tr("No uploaded world yet. Upload it from the VRChat SDK panel, save its scene, and it shows up here.");
-                let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(ui.available_width()));
+                let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_3()).line_height(19.0).job(ui.available_width()));
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
-                ui.painter().galley(r.min, g, theme::FG_3);
+                ui.painter().galley(r.min, g, theme::fg_3());
                 return;
             }
             for (i, w) in project.worlds.iter().enumerate() {
@@ -153,7 +153,7 @@ fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, w: &Avata
     let p = ui.painter();
     widgets::text_truncated(p, pos2(x, thumb.top() + 11.0), Align2::LEFT_CENTER, &Txt::new(&name, 14.5).weight(weight::SEMIBOLD), tw);
     let scene = if w.scene.is_empty() { w.id.clone() } else { w.scene.clone() };
-    widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(scene, 11.5).color(theme::FG_3), tw);
+    widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(scene, 11.5).color(theme::fg_3()), tw);
     // What Orbiters has of it, in one pill (all of it on hover).
     let py = thumb.top() + 52.0;
     let on = mine.map(on_orbiters).unwrap_or_default();
@@ -226,7 +226,7 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
         name = name,
         world = VIEWER_WORLD
     );
-    let g = ui.painter().layout_job(Txt::new(&text, 12.5).color(theme::FG_3).line_height(19.0).job(inner));
+    let g = ui.painter().layout_job(Txt::new(&text, 12.5).color(theme::fg_3()).line_height(19.0).job(inner));
 
     // The controls, in a flow that wraps on narrow panels.
     let captures: Vec<&Capture> = here.map(|h| h.captures.iter().filter(|c| c.splats.is_some()).collect()).unwrap_or_default();
@@ -262,7 +262,7 @@ fn add(ui: &mut Ui, cx: &mut Cx, state: &mut State, w: &Avatar, name: &str, here
     widgets::frame(&p, well, 14.0, theme::white(0.035));
     let text_at = pos2(well.left() + 14.0, well.top() + 12.0);
     let text_h = g.size().y;
-    p.galley(text_at, g, theme::FG_3);
+    p.galley(text_at, g, theme::fg_3());
     let top = text_at.y + text_h + 10.0;
     let at = |k: usize| Rect::from_min_size(pos2(well.left() + 14.0, top) + places[k], vec2(widths[k], 32.0));
     let mut bu = ui.new_child(UiBuilder::new().max_rect(well).id_salt(("world-add", &w.id)));
@@ -362,23 +362,23 @@ fn status_line(ui: &Ui, r: Rect, s: &Status, name: &str) {
     };
     match s {
         Status::Starting => {
-            feedback::spinner(p, icon_at, 6.0, 1.8, theme::ACCENT);
-            line(tr("Sending to Orbiters…"), theme::FG_2);
+            feedback::spinner(p, icon_at, 6.0, 1.8, theme::accent());
+            line(tr("Sending to Orbiters…"), theme::fg_2());
         }
         Status::Running(u) => {
-            feedback::spinner(p, icon_at, 6.0, 1.8, theme::ACCENT);
+            feedback::spinner(p, icon_at, 6.0, 1.8, theme::accent());
             let what = match u.kind {
                 UploadKind::Preview => tr("the 3D capture").to_string(),
                 UploadKind::Pictures => tr_n("{count} picture", "{count} pictures", u.paths.len() as u64),
             };
             match u.state {
-                UploadState::Preparing => line(tr("Preparing the 3D capture for Orbiters…"), theme::FG_2),
+                UploadState::Preparing => line(tr("Preparing the 3D capture for Orbiters…"), theme::fg_2()),
                 _ => {
                     let f = anim::spring_from(ui.ctx(), Id::unique(("world-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
-                    line(&tr!("Sharing {what} · {percent}%", what = what, percent = format!("{:.0}", f * 100.0)), theme::FG_2);
+                    line(&tr!("Sharing {what} · {percent}%", what = what, percent = format!("{:.0}", f * 100.0)), theme::fg_2());
                     let bar = Rect::from_min_size(pos2(text_at.x, r.bottom() - 4.0), vec2(r.right() - text_at.x, 3.0));
                     p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
-                    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(3.0), 3.0)), theme::radius(1.5), theme::ACCENT);
+                    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(3.0), 3.0)), theme::radius(1.5), theme::accent());
                 }
             }
         }
@@ -389,12 +389,12 @@ fn status_line(ui: &Ui, r: Rect, s: &Status, name: &str) {
                 (UploadState::Failed { message }, _) => (icons::WARNING, theme::DANGER, tr!("Not added: {message}", message = message), tr!("Not added to {name}: {message}", name = name, message = message)),
                 (UploadState::Done { .. }, UploadKind::Preview) => (
                     icons::CHECK_CIRCLE,
-                    theme::ACCENT,
+                    theme::accent(),
                     tr("3D capture shared").to_string(),
                     tr!("Your 3D capture is {name}'s 3D preview on Orbiters", name = name),
                 ),
                 (UploadState::Done { added: 0, .. }, UploadKind::Pictures) => {
-                    (icons::CHECK_CIRCLE, theme::FG_3, tr("Already on Orbiters").to_string(), tr!("These pictures of {name} were on Orbiters already", name = name))
+                    (icons::CHECK_CIRCLE, theme::fg_3(), tr("Already on Orbiters").to_string(), tr!("These pictures of {name} were on Orbiters already", name = name))
                 }
                 (UploadState::Done { added, skipped }, UploadKind::Pictures) => {
                     let (short, whole) = if *skipped > 0 {
@@ -405,12 +405,12 @@ fn status_line(ui: &Ui, r: Rect, s: &Status, name: &str) {
                     } else {
                         (tr!("{pictures} added", pictures = pictures(*added)), tr!("{pictures} added to {name} on Orbiters", pictures = pictures(*added), name = name))
                     };
-                    (icons::CHECK_CIRCLE, theme::ACCENT, short, whole)
+                    (icons::CHECK_CIRCLE, theme::OK, short, whole)
                 }
                 _ => return,
             };
             widgets::icon(p, icon_at, glyph, 14.0, color);
-            line(&short, if color == theme::ACCENT { theme::FG_2 } else { color });
+            line(&short, if color == theme::accent() { theme::fg_2() } else { color });
             let _ = ui.interact(r, Id::unique(("world-upload-result", u.id)), Sense::hover()).on_hover_text(whole);
         }
     }

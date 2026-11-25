@@ -637,12 +637,12 @@ pub(super) const PURPOSE: &str = mark("For cleaning up: select floaters or stray
 
 /// [`PURPOSE`] in a chip over the middle of the view, its bottom at `bottom`.
 fn purpose_line(p: &egui::Painter, ui: &Ui, rect: Rect, bottom: f32) {
-    let t = Txt::new(tr(PURPOSE), 12.5).color(theme::FG);
+    let t = Txt::new(tr(PURPOSE), 12.5).color(theme::fg());
     let room = rect.width() - 32.0 - 56.0;
     let tw = widgets::text_size(ui, &t).x.min(room);
     let r = Rect::from_center_size(pos2(rect.center().x, bottom - 20.0), vec2(tw + 56.0, 40.0));
     p.rect_filled(r, theme::radius(20.0), theme::black(0.72));
-    widgets::icon(p, pos2(r.left() + 24.0, r.center().y), icons::SPARKLE, 15.0, theme::ACCENT);
+    widgets::icon(p, pos2(r.left() + 24.0, r.center().y), icons::SPARKLE, 15.0, theme::accent());
     widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &t, tw);
 }
 
@@ -1000,7 +1000,7 @@ impl Viewer {
                         p.circle_filled(c, r, theme::alpha(SELECTION, 0.12));
                         p.circle_stroke(c, r, egui::Stroke::new(1.5, SELECTION));
                         p.circle_filled(c, 3.0, SELECTION);
-                        let label = Txt::new(tr!("{size} across", size = metres(2.0 * r3)), 12.0).color(theme::FG);
+                        let label = Txt::new(tr!("{size} across", size = metres(2.0 * r3)), 12.0).color(theme::fg());
                         let size = widgets::text_size(ui, &label);
                         let lr = Rect::from_center_size(c + vec2(0.0, -r - 18.0), size + vec2(20.0, 10.0));
                         p.rect_filled(lr, theme::radius(lr.height() * 0.5), theme::black(0.6));
@@ -1126,10 +1126,10 @@ impl Viewer {
         let counts = tr!("{hidden} hidden · {deleted} deleted", hidden = format::integer(e.hidden() as f64), deleted = format::integer(e.deleted() as f64));
         let (state, tone) = match (&e.save_error, e.drawing.is_some()) {
             (Some(_), _) => (tr("Not saved"), theme::DANGER),
-            (None, true) => (tr("Saved · drawing its picture again…"), theme::FG_3),
-            (None, false) => (tr("Saved beside the splats"), theme::FG_3),
+            (None, true) => (tr("Saved · drawing its picture again…"), theme::fg_3()),
+            (None, false) => (tr("Saved beside the splats"), theme::fg_3()),
         };
-        let t1 = Txt::new(counts, 12.5).color(theme::FG);
+        let t1 = Txt::new(counts, 12.5).color(theme::fg());
         let t2 = Txt::new(state, 11.0).color(tone);
         let retry = e.save_error.is_some();
         let extra = 40.0 + if retry { 84.0 } else { 0.0 };
@@ -1186,7 +1186,7 @@ impl Viewer {
         let whole_w = widths.iter().sum::<f32>() + 6.0 * (widths.len() as f32 - 1.0) + 12.0;
 
         // The tools: a segmented control, and the brush's size in the room left beside what works on the whole capture.
-        let label = Txt::new(tr_ctx("tool", "Select"), 12.0).color(theme::FG_3);
+        let label = Txt::new(tr_ctx("tool", "Select"), 12.0).color(theme::fg_3());
         let label_w = widgets::text_size(ui, &label).x;
         let options = [
             SegOption::new(Tool::Pick, tr("Pick")).hint(tr("Click the splats under the cursor (1)")),
@@ -1229,9 +1229,9 @@ impl Viewer {
         // Above the tools: the hint, or what there is to say (the geometry still being read, why not, nothing there).
         let (text, color) = match (&self.select.error, ready, &self.select.notice) {
             (Some(e), _, _) => (tr!("The splats cannot be selected: {e}", e = e), theme::DANGER),
-            (None, false, _) => (tr("Getting the splats ready to select…").to_string(), theme::FG_2),
+            (None, false, _) => (tr("Getting the splats ready to select…").to_string(), theme::fg_2()),
             (None, true, Some((n, _))) => (n.clone(), theme::WARN),
-            (None, true, None) => (self.select.tool.hint().to_string(), theme::FG_2),
+            (None, true, None) => (self.select.tool.hint().to_string(), theme::fg_2()),
         };
         let hint = Txt::new(text, 11.5).color(color);
         // Not under the chip at the right when that came up to this row.
@@ -1241,7 +1241,7 @@ impl Viewer {
         chip(hint_r);
         widgets::text_truncated(p, hint_r.center(), Align2::CENTER_CENTER, &hint, hint_w - 28.0);
         if self.select.loading.is_some() {
-            orbiters_ui::feedback::spinner(p, pos2(hint_r.right() + 18.0, hint_r.center().y), 8.0, 2.0, theme::ACCENT);
+            orbiters_ui::feedback::spinner(p, pos2(hint_r.right() + 18.0, hint_r.center().y), 8.0, 2.0, theme::accent());
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
@@ -1304,7 +1304,7 @@ impl Viewer {
     pub(super) fn problem_chip(&mut self, ui: &mut Ui, p: &egui::Painter, rect: Rect, title_r: Rect) -> bool {
         let Some(e) = self.loaded.as_mut().and_then(|l| l.edits.as_mut()) else { return false };
         let Some(problem) = e.problem.as_ref().map(Problem::text) else { return false };
-        let t = Txt::new(&problem, 12.5).color(theme::FG);
+        let t = Txt::new(&problem, 12.5).color(theme::fg());
         let tw = widgets::text_size(ui, &t).x.min(rect.width() - 260.0);
         let b = Button::new(tr("Discard them")).icon(icons::TRASH).variant(Variant::Danger).size(Size::Sm).id_salt("splat-edits-discard");
         let bw = b.desired_width(ui);

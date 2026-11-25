@@ -588,7 +588,7 @@ impl Editor {
         let alpha = enter.min(leave);
         // Over the page: nothing under it takes the pointer.
         let _ = ui.interact(rect, self.id.with("backdrop"), Sense::click_and_drag());
-        ui.painter().rect_filled(rect, 0.0, theme::alpha(theme::INK_950, alpha));
+        ui.painter().rect_filled(rect, 0.0, theme::alpha(theme::ink_950(), alpha));
         let rect = rect.translate(vec2(0.0, 14.0 * (1.0 - enter)));
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt(self.id.with("ui")));
         ui.set_clip_rect(rect.intersect(ui.clip_rect()));
@@ -743,7 +743,7 @@ impl Editor {
         if let Some(k) = saving {
             let track = Rect::from_min_max(pos2(r.left() + 16.0, r.bottom() - 5.0), pos2(r.right() - 16.0, r.bottom() - 3.0));
             p.rect_filled(track, 1.0, theme::black(0.25));
-            p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, track.height())), 1.0, theme::ON_ACCENT);
+            p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * k, track.height())), 1.0, theme::on_accent());
         }
         // Looks, Save this view (live) or Edit in 3D (a copy made there), left of it.
         let msg_right = self.more_buttons(ui, r) - 12.0;
@@ -878,11 +878,11 @@ fn tint(kind: orbiters_ui::photo::Kind) -> Color32 {
         Kind::Light => theme::WARN,
         Kind::Color => theme::VIOLET,
         Kind::Curves => theme::CYAN,
-        Kind::Vignette => theme::FG_2,
+        Kind::Vignette => theme::fg_2(),
         Kind::Aberration => theme::DANGER,
         Kind::Comic => theme::BLUE,
         Kind::Blur => theme::INDIGO,
-        Kind::Text => theme::ACCENT,
+        Kind::Text => theme::accent(),
     }
 }
 

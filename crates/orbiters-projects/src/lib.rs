@@ -196,6 +196,12 @@ pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?)
 }
 
+/// Whether what `path` leads to may be written: nothing of Creator Companion's or ALCOM's is ([`disk`]). For what the window keeps by
+/// itself (pictures), whose folder may have been led elsewhere.
+pub fn may_write(path: &Path) -> std::io::Result<()> {
+    disk::content(path)
+}
+
 /// Atomic publication in the destination directory; no partially written JSON is visible.
 pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write;

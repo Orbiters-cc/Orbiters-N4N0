@@ -394,11 +394,15 @@ fn draw_still(
     let rgb: Vec<u8> = img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut bytes = Vec::new();
     if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 88).encode(&rgb, STILL.0, STILL.1, image::ExtendedColorType::Rgb8).is_ok() {
-        let _ = orbiters_core::write_atomic(&jpg, &bytes);
-        let _ = orbiters_core::write_atomic(&dir.join("cover.json"), &serde_json::to_vec(&record).unwrap_or_default());
+        keep_still(&dir, &bytes, &serde_json::to_vec(&record).unwrap_or_default());
     }
     eprintln!("project still of {}: {:.0} ms", project.display(), start.elapsed().as_secs_f64() * 1000.0);
     Some(Some(ColorImage::from_rgb([STILL.0 as usize, STILL.1 as usize], &rgb)))
+}
+
+/// A still kept in `dir`, with what it was drawn from.
+pub(super) fn keep_still(dir: &Path, jpeg: &[u8], record: &[u8]) -> bool {
+    orbiters_projects::may_write(dir).is_ok() && orbiters_core::write_atomic(&dir.join("cover.jpg"), jpeg).is_ok() && orbiters_core::write_atomic(&dir.join("cover.json"), record).is_ok()
 }
 
 #[cfg(test)]

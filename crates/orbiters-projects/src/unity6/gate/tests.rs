@@ -577,7 +577,7 @@ const READS: &[&str] = &[
     // This app's own, which read.
     "crate::owned::FileId", "crate::owned::id_of", "crate::owned::id_of_file", "crate::owned::is_same", "crate::owned::is_link", "crate::owned",
     "crate::discovery::key", "crate::discovery::is_project", "crate::discovery::now", "crate::discovery::parse_version", "crate::discovery::is_link", "crate::discovery::Project", "crate::discovery::database_editors", "crate::discovery::editor_hints",
-    "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
+    "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::size::Need", "crate::size::Need::", "crate::size::unit", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
     "crate::templates::Keep", "crate::templates::Keep::", "crate::templates::left_out", "crate::templates::retarget_with", "crate::templates::packages_only_in_library", "crate::templates::installed_dependencies_complete",
     "crate::templates::dependencies_complete", "crate::templates::Marker", "crate::templates::Marker::", "crate::templates::INCOMPLETE", "crate::templates::Progress", "crate::templates::SharedProgress", "crate::templates::validate_name",
     "crate::builtin_templates::", "crate::copying", "crate::copying::", "crate::copies::", "crate::unity6::", "crate::find_editors", "crate::network::", "orbiters_core::app_version", "orbiters_core::account::", "orbiters_update::",

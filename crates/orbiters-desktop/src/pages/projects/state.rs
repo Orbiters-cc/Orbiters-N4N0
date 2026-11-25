@@ -42,14 +42,14 @@ pub(super) enum Modal {
 #[derive(Default)]
 pub(super) struct Dup {
     /// The project measured, with Library or not, and what a copy of it takes.
-    pub measured: Option<(PathBuf, bool, Result<u64, String>)>,
-    pub measure: Job<(PathBuf, bool, Result<u64, String>)>,
+    pub measured: Option<(PathBuf, bool, Result<size::Need, String>)>,
+    pub measure: Job<(PathBuf, bool, Result<size::Need, String>)>,
     pub name: String,
     pub location: String,
     pub library: bool,
     /// The (location, name) last checked: whether that folder exists already, and the room on its disk.
-    pub checked: Option<(String, String, bool, Option<u64>)>,
-    pub check: Job<((String, String, bool, Option<u64>), Option<String>)>,
+    pub checked: Option<(String, String, bool, Option<size::Room>)>,
+    pub check: Job<((String, String, bool, Option<size::Room>), Option<String>)>,
     /// Why no copy can be made at the place last checked (a share, inside another project).
     pub refused: Option<String>,
     /// The folder dialog of its location.
@@ -1975,7 +1975,7 @@ impl State {
                     name: copy.into(),
                     location: STAND_IN_PROJECTS.into(),
                     library: name == "projects-duplicate-library",
-                    checked: Some((STAND_IN_PROJECTS.into(), copy.into(), name == "projects-duplicate-taken", Some(412_000_000_000))),
+                    checked: Some((STAND_IN_PROJECTS.into(), copy.into(), name == "projects-duplicate-taken", Some(size::Room { free: 412_000_000_000, unit: 4096 }))),
                     ..Default::default()
                 };
                 if name == "projects-duplicate-copying" {

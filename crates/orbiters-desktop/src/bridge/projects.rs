@@ -1610,8 +1610,10 @@ impl Projects {
         let keep = templates::Keep { library: args["library"].as_bool().unwrap_or(false) };
         // What the tab's dialog checks before it lets Duplicate be pressed (the copy checks again before copying).
         let exists = location.join(&name).exists();
-        let needed = templates::duplication_bytes(&project.path, keep).map_err(|e| failed("measure_failed", e, "Try again."))?;
-        let free = size::free_space(&location);
+        let need = templates::duplication_need(&project.path, keep, &AtomicBool::new(false)).map_err(|e| failed("measure_failed", e, "Try again."))?.unwrap_or_default();
+        let room = size::room(&location);
+        // What it takes on that disk, with what must stay free there.
+        let (needed, free) = (need.room(room.map_or(4096, |r| r.unit)), room.map(|r| r.free));
         let check = json!({ "copy_at": location.join(&name), "exists": exists, "bytes_needed": needed, "bytes_free": free, "library": keep.library });
         let problem = if exists {
             Some(format!("{} has a folder named {name} already.", location.display()))

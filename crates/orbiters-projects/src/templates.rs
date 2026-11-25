@@ -374,7 +374,9 @@ async fn make(
     gate::apart(&[&app, root], &payload.protected)?;
     let place = Destination::check(parent, name, &payload.protected, Parents::Make)?;
     let free = place.free().with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
-    anyhow::ensure!(free >= payload.bytes, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = payload.bytes.saturating_sub(free)));
+    // What its files and folders take on that disk, whose units count (PRJ-4), and some left free: of the very list that is copied.
+    let required = payload.need.room(crate::size::unit(parent).unwrap_or(4096));
+    anyhow::ensure!(free >= required, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free)));
     // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
     let mut record = crate::copies::Held::begin(&app, source, &destination)?;
     let filled = fill(&payload, place, &destination, cancel, progress, true, &mut |new| record.made(new.id));
@@ -574,35 +576,24 @@ impl Drop for Stage {
     }
 }
 
-/// Fresh copy estimate using the same exclusions and link traversal as the copier, including local packages.
+/// What a copy of `source` takes, of the very list the copier would copy (its local packages, those only its Library holds). `None`
+/// when stopped.
+pub fn duplication_need(source: &Path, keep: Keep, cancel: &AtomicBool) -> anyhow::Result<Option<crate::size::Need>> {
+    let how = Making { keep, own: Some(Own { name: "", from: None, guid: "" }), installed: !keep.library, ..Default::default() };
+    let payload = match payload::scan(source_folder(source)?, how, cancel) {
+        Ok(payload) => payload,
+        Err(_) if cancel.load(Ordering::Relaxed) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if let Some((name, path)) = payload.missing.first() {
+        bail!("{}", tr!("Required local package {name} is unavailable at {path}", name = name, path = path.display()));
+    }
+    Ok(Some(payload.need))
+}
+
+/// The bytes of [`duplication_need`]'s files.
 pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
-    fn bytes(path: &Path, keep: Keep, project: bool) -> anyhow::Result<u64> {
-        let mut total = 0u64;
-        for e in walkdir::WalkDir::new(path).follow_links(true).into_iter()
-            .filter_entry(|e| !left_out(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), keep, project)) {
-            let e = e?;
-            if e.file_type().is_file() { total = total.saturating_add(e.metadata()?.len()); }
-        }
-        Ok(total)
-    }
-    let mut total = bytes(source, keep, true)?;
-    let manifest = source.join("Packages/manifest.json");
-    if manifest.is_file() {
-        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest)?)?;
-        for (name, value) in manifest["dependencies"].as_object().into_iter().flatten() {
-            if let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) {
-                let at = source.join("Packages").join(local);
-                let path = at.canonicalize().with_context(|| tr!("Required local package {name} is unavailable at {path}", name = name, path = at.display()))?;
-                // As the copier does: a folder unless the project has one of that name already, an archive always.
-                if path.is_file() {
-                    total = total.saturating_add(std::fs::metadata(&path)?.len());
-                } else if !source.join("Packages").join(name).exists() {
-                    total = total.saturating_add(bytes(&path, Keep::default(), false)?);
-                }
-            }
-        }
-    }
-    Ok(total)
+    Ok(duplication_need(source, keep, &AtomicBool::new(false))?.unwrap_or_default().bytes)
 }
 
 /// The Unity packages of `project` that only its Library holds (PROJECTS-22): those `Packages/packages-lock.json` takes
@@ -930,6 +921,28 @@ mod tests {
         drop(held);
         assert_eq!(made_from(temp.path(), &source, "Copy"), Ok(copy.clone()), "its name is free again");
         assert!(crate::discovery::is_project(&copy) && !copy.join(INCOMPLETE).exists());
+    }
+
+    /// PRJ-4, PRJ-5: what a copy takes is asked of the list that is copied, folders and the disk's units counted; a Stop pressed while
+    /// the project is looked at stops it.
+    #[test]
+    fn the_room_is_that_of_what_is_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({ "my.tool": "file:../../External" }));
+        std::fs::create_dir_all(temp.path().join("External/Sub")).unwrap();
+        std::fs::write(temp.path().join("External/package.json"), r#"{"name":"my.tool","version":"1.0.0"}"#).unwrap();
+        for i in 0..40 {
+            std::fs::write(source.join(format!("Assets/{i}.txt")), "x").unwrap();
+        }
+        let need = duplication_need(&source, Keep::default(), &AtomicBool::new(false)).unwrap().unwrap();
+        // The 40, the project's 3, the package's; Assets, ProjectSettings, Packages, the package and its folder.
+        assert_eq!((need.files, need.folders), (44, 5));
+        assert!(need.bytes < 4096 && need.on(4096) >= 44 * 4096 + 5 * 4096 && need.room(4096) > need.on(4096));
+        assert_eq!(duplication_need(&source, Keep::default(), &AtomicBool::new(true)).unwrap(), None);
+        let copy = made_from(temp.path(), &source, "Copy").unwrap();
+        let files = walkdir::WalkDir::new(&copy).into_iter().flatten().filter(|e| e.file_type().is_file()).count();
+        assert_eq!(files as u64, need.files);
     }
 
     /// What was put in the copy while it ran is not the copy's: it stays, named, when the copy fails.

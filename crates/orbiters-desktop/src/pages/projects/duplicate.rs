@@ -57,9 +57,11 @@ fn problem(state: &State, project: &Project) -> Option<String> {
         return Some(tr!("{location} has a folder named {name} already: choose another name.", location = d.location.trim(), name = name));
     }
     if let Some((_, _, Err(error))) = d.measured.as_ref().filter(|(p, l, _)| *p == project.path && *l == d.library) { return Some(error.clone()); }
-    let Some(need) = needed(state, project) else { return Some(tr("Checking required disk space…").into()); };
-    if free.is_none() { return Some(tr("Cannot check free space. Choose an accessible destination.").into()); }
-    free.filter(|f| *f < need).map(|f| tr!("The copy needs about {need}, and that disk has {free} left. Free some space or choose another disk.", need = format::bytes(need as f64), free = format::bytes(f as f64)))
+    let Some(room) = *free else { return Some(tr("Cannot check free space. Choose an accessible destination.").into()) };
+    let Some(need) = needed(state, project, room) else { return Some(tr("Checking required disk space…").into()); };
+    // With what must stay free on that disk.
+    let need = need.saturating_add(size::RESERVE);
+    (room.free < need).then(|| tr!("The copy needs about {need}, and that disk has {free} left. Free some space or choose another disk.", need = format::bytes(need as f64), free = format::bytes(room.free as f64)))
 }
 
 /// Starts looking, on workers, at what a copy of `project` at `state.dup`'s place takes: its size (with Library or not)
@@ -70,8 +72,8 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
     if !state.fixture && !state.dup.measure.running() && state.dup.measured.as_ref().is_none_or(|(p, l, _)| *p != project.path || *l != library) {
         let source = project.path.clone();
         state.dup.measure = Job::spawn(ctx, move || {
-            let size = templates::duplication_bytes(&source, templates::Keep { library }).map_err(|e| e.to_string());
-            (source, library, size)
+            let need = templates::duplication_need(&source, templates::Keep { library }, &AtomicBool::new(false)).map(Option::unwrap_or_default);
+            (source, library, need.map_err(|e| e.to_string()))
         });
     }
     let key = (state.dup.location.trim().to_string(), state.dup.name.clone());
@@ -81,9 +83,9 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
         state.dup.check = Job::spawn(ctx, move || {
             let dir = PathBuf::from(&location);
             let exists = !name.is_empty() && dir.join(&name).exists();
-            let free = size::free_space(&dir);
+            let room = size::room(&dir);
             let refused = templates::refused_place(&dir, &name);
-            ((location, name, exists, free), refused)
+            ((location, name, exists, room), refused)
         });
     }
 }
@@ -131,10 +133,11 @@ pub(super) fn place_problem(ctx: &egui::Context, state: &mut State) -> Option<St
     None
 }
 
-/// About what the copy takes, once the project was measured.
-fn needed(state: &State, project: &Project) -> Option<u64> {
+/// About what the copy takes on the disk of `room`, once the project was measured.
+fn needed(state: &State, project: &Project, room: size::Room) -> Option<u64> {
     if !state.fixture {
-        return state.dup.measured.as_ref().filter(|(p, library, _)| *p == project.path && *library == state.dup.library).and_then(|(_, _, size)| size.as_ref().ok()).copied();
+        let measured = state.dup.measured.as_ref().filter(|(p, library, _)| *p == project.path && *library == state.dup.library);
+        return measured.and_then(|(_, _, need)| need.as_ref().ok()).map(|need| need.on(room.unit));
     }
     let s = state.sizes.get(&project.path)?;
     Some(if state.dup.library { s.total } else { s.without_library() })
@@ -215,10 +218,11 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
     widgets::field(ui, tr("Copy Library too"), Some(&description), 48.0, |ui| {
         widgets::toggle(ui, "dup-library", &mut state.dup.library);
     });
-    if let (Some(need), Some((_, _, _, Some(free)))) = (needed(state, &project), state.dup.checked.as_ref()) {
+    let room = state.dup.checked.as_ref().and_then(|(_, _, _, room)| *room);
+    if let Some((need, free)) = room.and_then(|room| Some((needed(state, &project, room)?, room.free))) {
         let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
         widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::HARD_DRIVE, 13.0, theme::fg_4());
-        let room = tr!("About {need} to copy · {free} free on that disk", need = format::bytes(need as f64), free = format::bytes(*free as f64));
+        let room = tr!("About {need} to copy · {free} free on that disk", need = format::bytes(need as f64), free = format::bytes(free as f64));
         widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(room, 12.0).color(theme::fg_3()), w - 22.0);
     }
     note(

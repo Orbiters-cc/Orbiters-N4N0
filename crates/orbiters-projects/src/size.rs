@@ -187,9 +187,129 @@ pub fn free_space(path: &Path) -> Option<u64> {
     }
 }
 
+/// The room on a disk, and the size of the units it gives it out in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Room {
+    pub free: u64,
+    pub unit: u64,
+}
+
+/// What nearly every disk has.
+pub const UNIT: u64 = 4096;
+
+/// The [`Room`] of the disk that holds `path` (or the nearest folder above it that exists). A unit that cannot be asked is [`UNIT`].
+pub fn room(path: &Path) -> Option<Room> {
+    Some(Room { free: free_space(path)?, unit: unit(path).unwrap_or(UNIT) })
+}
+
+/// The size of the units the disk that holds `path` gives its room out in.
+pub fn unit(path: &Path) -> Option<u64> {
+    let dir = path.ancestors().find(|p| p.exists())?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceW, GetVolumePathNameW};
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        // The disk's root (or the folder a disk is mounted at): never longer than the path it is the start of.
+        let mut root = vec![0u16; wide.len().max(260) + 2];
+        let (mut sectors, mut bytes) = (0u32, 0u32);
+        // SAFETY: a null-terminated path, and a buffer whose length is given with it.
+        unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut root) }.ok()?;
+        // SAFETY: the null-terminated root just written, and valid out pointers.
+        unsafe { GetDiskFreeSpaceW(PCWSTR(root.as_ptr()), Some(&mut sectors), Some(&mut bytes), None, None) }.ok()?;
+        Some(u64::from(sectors) * u64::from(bytes))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        // SAFETY: a valid C string and a statvfs to fill; all zeros is a valid value of one.
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        (unsafe { libc::statvfs(path.as_ptr(), &mut s) } == 0).then_some(s.f_frsize as u64)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// What files and folders take, wherever they are put: a disk gives its room out in units (4 KiB on most, up to 128 KiB on an external
+/// exFAT drive), so many small files take more than their lengths (PRJ-4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Need {
+    pub files: u64,
+    pub folders: u64,
+    /// The files' lengths.
+    pub bytes: u64,
+    /// The same, each rounded up to the unit `512 << i`.
+    rounded: [u64; UNITS],
+}
+/// Units of 512 bytes to 2 MiB.
+const UNITS: usize = 13;
+/// What a file's or a folder's own entry takes, about (NTFS's are 1 KiB).
+const ENTRY: u64 = 1024;
+/// Left free on the disk a copy goes to: Unity, and the system, need some to go on.
+pub const RESERVE: u64 = 1024 * 1024 * 1024;
+
+impl Need {
+    pub fn file(&mut self, length: u64) {
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(length);
+        for (i, sum) in self.rounded.iter_mut().enumerate() {
+            *sum = sum.saturating_add(length.div_ceil(512 << i).saturating_mul(512 << i));
+        }
+    }
+    pub fn folder(&mut self) {
+        self.folders += 1;
+    }
+    pub fn add(&mut self, other: &Need) {
+        self.files += other.files;
+        self.folders += other.folders;
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        for (sum, more) in self.rounded.iter_mut().zip(&other.rounded) {
+            *sum = sum.saturating_add(*more);
+        }
+    }
+    /// What it takes on a disk of this unit.
+    pub fn on(&self, unit: u64) -> u64 {
+        let i = (0..UNITS).find(|i| 512u64 << i >= unit).unwrap_or(UNITS - 1);
+        let entries = (self.files + self.folders).saturating_mul(ENTRY);
+        self.rounded[i].saturating_add(entries).saturating_add(self.folders.saturating_mul(unit.max(4096)))
+    }
+    /// What must be free on a disk of this unit for it to be put there.
+    pub fn room(&self, unit: u64) -> u64 {
+        self.on(unit).saturating_add(RESERVE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRJ-4: many small files on a disk of large units take far more than their lengths.
+    #[test]
+    fn small_files_take_whole_units() {
+        let mut need = Need::default();
+        for _ in 0..100_000 {
+            need.file(3000);
+        }
+        need.file(0);
+        need.folder();
+        assert_eq!((need.files, need.bytes), (100_001, 300_000_000));
+        let entries = 100_002 * ENTRY;
+        assert_eq!(need.on(4096), 100_000 * 4096 + entries + 4096);
+        assert_eq!(need.on(128 * 1024), 100_000 * 128 * 1024 + entries + 128 * 1024, "13 GB for 300 MB");
+        assert_eq!(need.on(512), 100_000 * 3072 + entries + 4096);
+        assert_eq!(need.room(4096), need.on(4096) + RESERVE);
+        let mut twice = need.clone();
+        twice.add(&need);
+        assert_eq!((twice.on(4096), twice.files), (2 * need.on(4096), 200_002));
+        // This computer's own disk has some unit.
+        let room = room(&std::env::temp_dir()).unwrap();
+        assert!(room.free > 0 && room.unit >= 512 && room.unit.is_power_of_two(), "{room:?}");
+    }
 
     fn project(root: &Path) {
         for (file, len) in [("Assets/a.png", 1000), ("Assets/Sub/b.fbx", 500), ("Library/ArtifactDB", 4000), ("ProjectSettings/ProjectVersion.txt", 24)] {

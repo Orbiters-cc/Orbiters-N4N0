@@ -10,22 +10,31 @@
 use egui::epaint::{ClippedPrimitive, ImageData, Primitive, TextureId, Vertex};
 use egui::{Color32, ColorImage, TextureFilter, TextureWrapMode, TexturesDelta};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The side of the square tiles frames are compared in (pixels).
 const TILE: usize = 32;
 /// More separate changed areas than this are painted as the one rectangle around them.
 const MAX_AREAS: usize = 8;
+/// The side of the square cells a texture's partial changes are told apart in (texels). A new glyph is written beside the ones before it: a cell
+/// about as large as a glyph leaves every letter but its neighbours as they were.
+const CELL: usize = 32;
 
 struct Texture {
     width: usize,
     height: usize,
-    texels: Vec<Color32>,
+    /// Its texels: the very ones it was given, shared with whoever else keeps them, until it is written in part.
+    image: Arc<ColorImage>,
+    /// Which picture this is: another number each time it is set whole.
+    version: u32,
+    /// Since it was set, what was changed in part: a number per [`CELL`] (row by row), another each time some texel in it changed. None until one does.
+    cells: Vec<u32>,
     /// The nearest texel rather than four blended, where texels are larger than pixels (magnified) and smaller.
     nearest_magnified: bool,
     nearest_minified: bool,
     wrap: TextureWrapMode,
     /// What it was before the picture look, while one is on and this is a picture.
-    plain: Option<(usize, usize, Vec<Color32>)>,
+    plain: Option<Arc<ColorImage>>,
 }
 
 /// How pictures are drawn instead of as they are.
@@ -39,22 +48,77 @@ impl Texture {
 
     /// In `look`, from what it was.
     fn look(&mut self, look: PictureLook) {
-        let (width, height, texels) = self.plain.take().unwrap_or_else(|| (self.width, self.height, std::mem::take(&mut self.texels)));
-        let plain = ColorImage { size: [width, height], source_size: egui::vec2(width as f32, height as f32), pixels: texels };
-        let shown = look(&plain);
-        (self.width, self.height, self.texels) = (shown.size[0], shown.size[1], shown.pixels);
-        self.plain = Some((width, height, plain.pixels));
+        let plain = self.plain.take().unwrap_or_else(|| self.image.clone());
+        self.show(Arc::new(look(&plain)));
+        self.plain = Some(plain);
+    }
+
+    fn show(&mut self, image: Arc<ColorImage>) {
+        [self.width, self.height] = image.size;
+        self.image = image;
+        // Of another size from now on; everything is painted again ([`Software::set_picture_look`]).
+        self.cells.clear();
     }
 
     /// As it was.
     fn unlook(&mut self) {
-        if let Some((width, height, texels)) = self.plain.take() {
-            (self.width, self.height, self.texels) = (width, height, texels);
+        if let Some(plain) = self.plain.take() {
+            self.show(plain);
         }
     }
 }
 
 impl Texture {
+    /// Writes `image` at `px`, `py`, what lies beyond the edges left out; the cells where a texel became another one take the number `version`.
+    fn write(&mut self, [px, py]: [usize; 2], image: &ColorImage, version: u32) {
+        if px >= self.width {
+            // Wholly beyond the right edge: nothing of it lands in the texture.
+            return;
+        }
+        let n = image.size[0].min(self.width - px);
+        let cols = self.width.div_ceil(CELL);
+        let texels = &mut Arc::make_mut(&mut self.image).pixels;
+        for row in 0..image.size[1].min(self.height.saturating_sub(py)) {
+            let y = py + row;
+            let from = &image.pixels[row * image.size[0]..row * image.size[0] + n];
+            let to = &mut texels[y * self.width + px..y * self.width + px + n];
+            if from == &*to {
+                continue;
+            }
+            // The atlas's changed part is the rectangle around all its new letters: most of it is what it was. Only what differs counts.
+            for (x, (from, to)) in from.iter().zip(to.iter_mut()).enumerate() {
+                if from != to {
+                    *to = *from;
+                    if self.cells.is_empty() {
+                        self.cells = vec![0; cols * self.height.div_ceil(CELL)];
+                    }
+                    self.cells[y / CELL * cols + (px + x) / CELL] = version;
+                }
+            }
+        }
+    }
+
+    /// What a triangle with the corners `uv` can sample of it, as a number: another one once any texel of that is another.
+    fn seen_at(&self, uv: [[f32; 2]; 3]) -> u64 {
+        if self.cells.is_empty() || self.width == 0 || self.height == 0 {
+            return self.version as u64;
+        }
+        let cols = self.width.div_ceil(CELL);
+        // Two texels around what its corners span: bilinear reads one past, and a run's steps may drift off its edge.
+        let span = |axis: usize, n: usize| -> Option<(usize, usize)> {
+            let (lo, hi) = uv.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v[axis]), hi.max(v[axis])));
+            let (lo, hi) = (lo * n as f32 - 2.5, hi * n as f32 + 2.5);
+            // A wrapping or broken coordinate: any of it.
+            (self.wrap == TextureWrapMode::ClampToEdge && lo.is_finite() && hi.is_finite()).then(|| ((lo.max(0.0) as usize).min(n - 1) / CELL, (hi.max(0.0) as usize).min(n - 1) / CELL))
+        };
+        let whole = || (0..cols, 0..self.height.div_ceil(CELL));
+        let (across, down) = match (span(0, self.width), span(1, self.height)) {
+            (Some((x0, x1)), Some((y0, y1))) => (x0..x1 + 1, y0..y1 + 1),
+            _ => whole(),
+        };
+        down.fold(self.version as u64, |h, row| self.cells[row * cols + across.start..row * cols + across.end].iter().filter(|cell| **cell != 0).fold(h, |h, cell| mix(h, *cell as u64)))
+    }
+
     /// Premultiplied texel at normalised `uv`, as 0–255 floats: bilinear or nearest as the texture asks for
     /// `minified` (texels smaller than pixels there) or magnified texels, beyond the edges as its wrap mode says.
     /// Nothing from a texture without texels.
@@ -65,7 +129,7 @@ impl Texture {
         let x = u * self.width as f32 - 0.5;
         let y = v * self.height as f32 - 0.5;
         let get = |x: i32, y: i32| {
-            let c = self.texels[wrap(y, self.height, self.wrap) * self.width + wrap(x, self.width, self.wrap)];
+            let c = self.image.pixels[wrap(y, self.height, self.wrap) * self.width + wrap(x, self.width, self.wrap)];
             [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32]
         };
         if if minified { self.nearest_minified } else { self.nearest_magnified } {
@@ -88,13 +152,15 @@ pub struct Software {
     /// Painted under every frame instead of a plain colour (a backdrop that never changes is copied, not redrawn).
     backdrop: Option<Vec<[u8; 4]>>,
     textures: HashMap<TextureId, Texture>,
+    /// The last number given to a texture's change ([`Texture::version`], [`Texture::cells`]).
+    texture_changes: u32,
     /// How pictures are drawn, where not as they are.
     picture_look: Option<PictureLook>,
     /// What covered each tile of the last frame: a hash of the triangles over it, in painting order (row by row).
     tiles: Vec<u64>,
     /// The same for the frame being painted (kept to reuse its memory).
     next_tiles: Vec<u64>,
-    /// The next frame is painted whole: nothing was painted yet, a texture or the backdrop changed, or asked for.
+    /// The next frame is painted whole: nothing was painted yet, the backdrop or every picture's look changed, or asked for.
     stale: bool,
     /// The colour the last frame was cleared to.
     clear: Option<Color32>,
@@ -111,6 +177,7 @@ impl Software {
             pixels: Vec::new(),
             backdrop: None,
             textures: HashMap::new(),
+            texture_changes: 0,
             picture_look: None,
             tiles: Vec::new(),
             next_tiles: Vec::new(),
@@ -168,7 +235,6 @@ impl Software {
         self.damage
     }
 
-    /// Applies new and changed textures (before painting); takes them out of `delta`.
     /// Draws pictures through `look` from now on, those it has as well; `None`, as they are.
     pub fn set_picture_look(&mut self, look: Option<PictureLook>) {
         if self.picture_look.is_some() == look.is_some() {
@@ -180,10 +246,7 @@ impl Software {
             match look {
                 None => texture.unlook(),
                 Some(look) => {
-                    let plain = ColorImage { size: [texture.width, texture.height], source_size: egui::vec2(texture.width as f32, texture.height as f32), pixels: std::mem::take(&mut texture.texels) };
-                    let picture = Texture::is_picture(*id, &plain);
-                    texture.texels = plain.pixels;
-                    if picture {
+                    if Texture::is_picture(*id, &texture.image) {
                         texture.look(look);
                     }
                 }
@@ -191,20 +254,22 @@ impl Software {
         }
     }
 
+    /// Applies new and changed textures (before painting); takes them out of `delta`. What shows them is painted again: the tiles whose triangles read a
+    /// texel that became another one, and no others ([`Texture::seen_at`]). A letter drawn for the first time, or a picture that arrives, repaints its own place.
     pub fn set_textures(&mut self, delta: &mut TexturesDelta) {
-        if !delta.set.is_empty() {
-            // Triangles over a changed texture look different with the same vertices.
-            self.stale = true;
-        }
         for (id, deltas) in delta.set.drain() {
             for d in deltas {
                 let ImageData::Color(image) = &d.image;
+                self.texture_changes = self.texture_changes.wrapping_add(1).max(1);
+                let version = self.texture_changes;
                 match d.pos {
                     None => {
                         let mut texture = Texture {
                             width: image.size[0],
                             height: image.size[1],
-                            texels: image.pixels.clone(),
+                            image: image.clone(),
+                            version,
+                            cells: Vec::new(),
                             nearest_magnified: d.options.magnification == TextureFilter::Nearest,
                             nearest_minified: d.options.minification == TextureFilter::Nearest,
                             wrap: d.options.wrap_mode,
@@ -215,19 +280,9 @@ impl Software {
                         }
                         self.textures.insert(id, texture);
                     }
-                    Some([px, py]) => {
-                        let Some(t) = self.textures.get_mut(&id) else { continue };
-                        if px >= t.width {
-                            // Wholly beyond the right edge: nothing of it lands in the texture.
-                            continue;
-                        }
-                        for row in 0..image.size[1] {
-                            let (dst_y, src) = (py + row, &image.pixels[row * image.size[0]..(row + 1) * image.size[0]]);
-                            if dst_y >= t.height {
-                                break;
-                            }
-                            let n = image.size[0].min(t.width.saturating_sub(px));
-                            t.texels[dst_y * t.width + px..dst_y * t.width + px + n].copy_from_slice(&src[..n]);
+                    Some(at) => {
+                        if let Some(texture) = self.textures.get_mut(&id) {
+                            texture.write(at, image, version);
                         }
                     }
                 }
@@ -325,10 +380,12 @@ impl Software {
             };
             let place = clip.iter().fold(0u64, |h, &c| (h << 16) | (c as u64 & 0xffff));
             let base = mix(mix(scale, texture), place);
+            // What it shows of its texture: nothing while the texture has not come.
+            let seen = self.textures.get(&mesh.texture_id);
             for t in mesh.indices.as_chunks::<3>().0 {
                 let v = [&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]];
                 let Some([x0, y0, x1, y1]) = bounds(v.map(|v| [v.pos.x * ppp, v.pos.y * ppp]), clip) else { continue };
-                let h = v.iter().fold(base, |h, v| vertex_hash(h, v));
+                let h = v.iter().fold(mix(base, seen.map_or(0, |t| t.seen_at(v.map(|v| [v.uv.x, v.uv.y])))), |h, v| vertex_hash(h, v));
                 for row in y0 / TILE..=(y1 - 1) / TILE {
                     for tile in &mut next[row * cols + x0 / TILE..=row * cols + (x1 - 1) / TILE] {
                         *tile = mix(*tile, h);
@@ -730,12 +787,104 @@ mod tests {
         let (whole, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(200.0));
         assert_eq!(damage, Some([0, 0, 256, 128]));
         assert!(moved.iter().zip(&whole).all(|(a, b)| a.abs_diff(*b) <= 2));
-        // New glyphs change the font texture: everything is painted again.
-        let (_, damage) = frame(&ctx, &mut sw, [256.0, 128.0], |ui| {
-            scene(200.0)(ui);
-            ui.painter().text(pos2(4.0, 4.0), egui::Align2::LEFT_TOP, "Orbiters", egui::FontId::proportional(18.0), Color32::WHITE);
-        });
-        assert_eq!(damage, Some([0, 0, 256, 128]));
+    }
+
+    /// VRR-21, DOV-4: a letter drawn for the first time writes into the font texture, and any change of any texture painted (and handed on) the whole frame.
+    /// Only its own place is; the pixels are those of a frame painted whole.
+    #[test]
+    fn new_letters_paint_their_own_place() {
+        let ctx = egui::Context::default();
+        let (mut sw, mut whole) = (Software::new(512, 256), Software::new(512, 256));
+        let mut painted = 0;
+        for n in 1..=24u32 {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(512.0, 256.0))), ..Default::default() };
+            let mut full = ctx.run_ui(input, |ui| {
+                let p = ui.painter();
+                p.rect_filled(Rect::from_min_max(pos2(0.0, 0.0), pos2(512.0, 256.0)), 0.0, Color32::from_rgb(20, 30, 40));
+                p.text(pos2(8.25, 8.5), egui::Align2::LEFT_TOP, "Orbiters", egui::FontId::proportional(22.0), Color32::WHITE);
+                // Each frame a word of letters and a size not drawn before, in a place of its own.
+                for k in 1..n {
+                    let at = pos2(10.0 + 120.0 * (k % 4) as f32, 50.0 + 30.0 * (k / 4) as f32);
+                    let word: String = (0..3).map(|i| char::from(b'A' + ((k * 3 + i) % 26) as u8)).collect();
+                    p.text(at, egui::Align2::LEFT_TOP, word, egui::FontId::proportional(12.0 + k as f32 * 0.5), Color32::LIGHT_GREEN);
+                }
+            });
+            let sets = full.textures_delta.set.clone();
+            let atlas_whole = sets.values().flatten().any(|d| d.pos.is_none());
+            whole.set_textures(&mut full.textures_delta.clone());
+            sw.set_textures(&mut full.textures_delta);
+            let prims = ctx.tessellate(full.shapes, full.pixels_per_point);
+            let out = sw.paint(&prims, full.pixels_per_point, Color32::BLACK).to_vec();
+            whole.invalidate();
+            assert!(out == whole.paint(&prims, full.pixels_per_point, Color32::BLACK), "frame {n}: painted in part, the same to the last bit as painted whole");
+            let area = sw.damage().map_or(0, |d| (d[2] - d[0]) * (d[3] - d[1]));
+            if !sets.is_empty() && !atlas_whole && n > 1 {
+                painted += 1;
+                // Its tiles, and those of letters whose texels lie beside the new ones in the atlas.
+                assert!(area > 0 && area <= 512 * 256 / 6, "frame {n}: {:?} painted for one word", sw.damage());
+            }
+        }
+        assert!(painted >= 10, "the atlas took new letters in part {painted} times");
+    }
+
+    /// A picture that arrives, changes or goes repaints where it is drawn, and nothing else; one drawn over it counts too.
+    #[test]
+    fn a_changed_picture_paints_its_own_place() {
+        let ctx = egui::Context::default();
+        let mut sw = Software::new(256, 128);
+        let mut texture = ctx.load_texture("picture", ColorImage::filled([40, 40], Color32::RED), egui::TextureOptions::LINEAR);
+        let scene = |id: TextureId| {
+            move |ui: &mut egui::Ui| {
+                ui.painter().rect_filled(Rect::from_min_max(pos2(0.0, 0.0), pos2(256.0, 128.0)), 0.0, Color32::from_rgb(20, 30, 40));
+                ui.painter().image(id, Rect::from_min_max(pos2(160.0, 40.0), pos2(200.0, 80.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        };
+        frame(&ctx, &mut sw, [256.0, 128.0], scene(texture.id()));
+        let px = |img: &[u8], x: usize, y: usize| img[(y * 256 + x) * 4..(y * 256 + x) * 4 + 4].to_vec();
+        texture.set(ColorImage::filled([40, 40], Color32::BLUE), egui::TextureOptions::LINEAR);
+        let (img, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(texture.id()));
+        assert_eq!((damage, px(&img, 180, 60)), (Some([160, 32, 224, 96]), vec![0, 0, 255, 255]));
+        // In part: the corner written is seen.
+        texture.set_partial([0, 0], ColorImage::filled([4, 4], Color32::GREEN), egui::TextureOptions::LINEAR);
+        let (img, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(texture.id()));
+        assert_eq!((damage, px(&img, 161, 41)), (Some([160, 32, 224, 96]), vec![0, 255, 0, 255]));
+        // The same texels written again change nothing.
+        texture.set_partial([0, 0], ColorImage::filled([4, 4], Color32::GREEN), egui::TextureOptions::LINEAR);
+        let (_, damage) = frame(&ctx, &mut sw, [256.0, 128.0], scene(texture.id()));
+        assert_eq!(damage, None);
+    }
+
+    /// Letters written over others where the atlas is full: the triangles that showed the old ones are painted again.
+    #[test]
+    fn letters_written_over_others_are_painted_again() {
+        let mut sw = Software::new(128, 64);
+        let delta = |pos: Option<[usize; 2]>, image: ColorImage| {
+            let mut d = TexturesDelta::default();
+            let image = ImageData::Color(std::sync::Arc::new(image));
+            let options = egui::TextureOptions::LINEAR;
+            let delta = match pos {
+                None => egui::epaint::ImageDelta::full(image, options),
+                Some(at) => egui::epaint::ImageDelta::partial(at, image, options),
+            };
+            d.set.entry(TextureId::default()).or_default().push(delta);
+            d
+        };
+        let glyph = |x: f32, u: f32| {
+            let mut mesh = egui::Mesh::with_texture(TextureId::default());
+            mesh.add_rect_with_uv(Rect::from_min_size(pos2(x, 10.0), vec2(16.0, 16.0)), Rect::from_min_max(pos2(u, 0.0), pos2(u + 0.125, 0.125)), Color32::WHITE);
+            ClippedPrimitive { clip_rect: Rect::EVERYTHING, primitive: Primitive::Mesh(mesh) }
+        };
+        let scene = [glyph(8.0, 0.0), glyph(90.0, 0.5)];
+        sw.set_textures(&mut delta(None, ColorImage::filled([128, 128], Color32::RED)));
+        sw.paint(&scene, 1.0, Color32::BLACK);
+        sw.set_textures(&mut delta(Some([64, 0]), ColorImage::filled([16, 16], Color32::BLUE)));
+        let out = sw.paint(&scene, 1.0, Color32::BLACK).to_vec();
+        assert_eq!(sw.damage(), Some([64, 0, 128, 32]), "the letter whose texels changed");
+        assert_eq!(out[(18 * 128 + 98) * 4..][..4], [0, 0, 255, 255]);
+        // Free space taken by a letter nothing showed: nothing to paint.
+        sw.set_textures(&mut delta(Some([0, 64]), ColorImage::filled([16, 16], Color32::GREEN)));
+        sw.paint(&scene, 1.0, Color32::BLACK);
+        assert_eq!(sw.damage(), None);
     }
 
     #[test]
@@ -846,7 +995,7 @@ mod tests {
     }
     #[test]
     fn review_triangle_redraw_is_independent_of_damage_clip() {
-        let texture = Texture { width: 64, height: 64, texels: (0..4096).map(|n| Color32::from_rgb((n * 37 % 256) as u8, (n * 73 % 256) as u8, (n * 19 % 256) as u8)).collect(), nearest_magnified: false, nearest_minified: false, wrap: TextureWrapMode::ClampToEdge, plain: None };
+        let texture = Texture { version: 1, cells: Vec::new(), width: 64, height: 64, image: Arc::new(ColorImage::new([64, 64], (0..4096).map(|n| Color32::from_rgb((n * 37 % 256) as u8, (n * 73 % 256) as u8, (n * 19 % 256) as u8)).collect())), nearest_magnified: false, nearest_minified: false, wrap: TextureWrapMode::ClampToEdge, plain: None };
         let vertices = [
             Vertex { pos: pos2(3.3, 2.2), uv: pos2(0.0013, 0.0024), color: Color32::WHITE },
             Vertex { pos: pos2(510.8, 8.1), uv: pos2(0.982, 0.2), color: Color32::WHITE },

@@ -30,14 +30,14 @@ pub(super) fn me(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer
             person_picture(&p, pic, picture.as_ref(), frame.as_ref(), me, column_fill());
             widgets::text_truncated(&p, pos2(text_x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&me.name, 15.0).weight(weight::SEMIBOLD), max_w);
             let line = if me.status_text.is_empty() { status_name(me.status).to_string() } else { me.status_text.clone() };
-            widgets::text_truncated(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_2), max_w);
+            widgets::text_truncated(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::fg_2()), max_w);
         }
         None => {
             p.circle_filled(pic.center(), 21.0, theme::control());
-            widgets::icon(&p, pic.center(), icons::USER, 19.0, theme::FG_3);
+            widgets::icon(&p, pic.center(), icons::USER, 19.0, theme::fg_3());
             widgets::text(&p, pos2(text_x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(tr("Friends"), 15.0).weight(weight::SEMIBOLD));
             let line = if state.data.loading { tr("Reading your friends…") } else { "VRChat" };
-            widgets::text(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3));
+            widgets::text(&p, pos2(text_x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::fg_3()));
         }
     }
     let mut x = rect.right() - 20.0;
@@ -75,8 +75,8 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
         let row = Rect::from_min_size(pos2(inner.left() + 2.0, y), vec2(inner.width() - 4.0, 36.0));
         let p = ui.painter().clone();
         widgets::frame(&p, row, 12.0, theme::white(0.04));
-        orbiters_ui::feedback::spinner(&p, pos2(row.left() + 18.0, row.center().y), 6.0, 2.0, theme::FG_3);
-        widgets::text_truncated(&p, pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&text, 12.5).color(theme::FG_2), row.width() - 44.0);
+        orbiters_ui::feedback::spinner(&p, pos2(row.left() + 18.0, row.center().y), 6.0, 2.0, theme::fg_3());
+        widgets::text_truncated(&p, pos2(row.left() + 34.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&text, 12.5).color(theme::fg_2()), row.width() - 44.0);
         anim::request_frame(ui.ctx());
         return y + row.height() + 10.0;
     }
@@ -96,7 +96,7 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
         _ => (tr("Your friends will show here").to_string(), tr("Sign in to VRChat in N4N0, or keep VRCX or VRCNext on this computer: N4N0 reads their copy.").to_string()),
     };
     let w = inner.width() - 4.0;
-    let body = Txt::new(&text.1, 12.0).color(theme::FG_2).line_height(16.0);
+    let body = Txt::new(&text.1, 12.0).color(theme::fg_2()).line_height(16.0);
     let galley = ui.painter().layout_job(body.job(w - 28.0));
     let h = 14.0 + 18.0 + galley.size().y + 12.0 + 32.0 + 12.0;
     let card = Rect::from_min_size(pos2(inner.left() + 2.0, y), vec2(w, h));
@@ -105,7 +105,7 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
     paint::stroke_squircle(&p, card, theme::squircle(14.0), egui::Stroke::new(1.0, theme::alpha(theme::BLUE, 0.22)));
     widgets::icon(&p, pos2(card.left() + 22.0, card.top() + 23.0), icons::INFO, 15.0, theme::BLUE);
     widgets::text_truncated(&p, pos2(card.left() + 36.0, card.top() + 23.0), Align2::LEFT_CENTER, &Txt::new(&text.0, 13.0).weight(weight::SEMIBOLD), w - 48.0);
-    p.galley(pos2(card.left() + 14.0, card.top() + 14.0 + 18.0 + 4.0), galley, theme::FG_2);
+    p.galley(pos2(card.left() + 14.0, card.top() + 14.0 + 18.0 + 4.0), galley, theme::fg_2());
     let button = Rect::from_min_size(pos2(card.left() + 14.0, card.bottom() - 12.0 - 32.0), vec2(0.0, 32.0));
     let b = widgets::Button::new(tr("Sign in to VRChat")).icon(icons::SIGN_IN).variant(widgets::Variant::Primary).size(widgets::Size::Sm).id_salt("launcher-sign-in");
     let bw = b.desired_width(ui);
@@ -138,16 +138,16 @@ fn got_head(ui: &Ui, rect: Rect, count: usize, boops: usize) {
     };
     let p = ui.painter();
     let cy = rect.center().y + 1.0;
-    widgets::icon(p, pos2(rect.left() + 16.0, cy), icons::HAND_WAVING, 13.0, theme::ACCENT);
+    widgets::icon(p, pos2(rect.left() + 16.0, cy), icons::HAND_WAVING, 13.0, theme::accent());
     let t = widgets::text_truncated(p, pos2(rect.left() + 29.0, cy), Align2::LEFT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD), rect.width() - 80.0);
-    widgets::text(p, pos2(t.right() + 7.0, cy), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
+    widgets::text(p, pos2(t.right() + 7.0, cy), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::fg_4()));
 }
 
 /// One received row at `rect`: who, what and when; Boop back on a boop; its put-away cross.
 fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clock: f64, now: i64) {
     let p = ui.painter().clone();
     let accent = matches!(g, Got::Boop { .. });
-    widgets::frame(&p, rect, 14.0, if accent { theme::alpha(theme::ACCENT, 0.09) } else { theme::surface_soft() });
+    widgets::frame(&p, rect, 14.0, if accent { theme::alpha(theme::accent(), 0.09) } else { theme::surface_soft() });
     let (name, icon, at, id) = match g {
         Got::Boop { name, icon, at, id, .. } | Got::Request { name, icon, at, id } => (name.clone(), icon.clone(), *at, id.clone()),
     };
@@ -157,8 +157,8 @@ fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clo
     if accent {
         // A little hand on the picture's corner says what this is at a glance.
         let c = pic.right_bottom() - vec2(3.0, 3.0);
-        p.circle_filled(c, 9.0, theme::INK_900);
-        widgets::icon(&p, c, icons::HAND_WAVING, 11.0, theme::ACCENT);
+        p.circle_filled(c, 9.0, theme::ink_900());
+        widgets::icon(&p, c, icons::HAND_WAVING, 11.0, theme::accent());
     }
     let what = if accent { tr("booped you") } else { tr("asks for an invite") };
     let x = pic.right() + 10.0;
@@ -167,7 +167,7 @@ fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clo
     let room = rect.right() - x - if accent { back_w + 46.0 } else { 40.0 };
     widgets::text_truncated(&p, pos2(x, rect.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::SEMIBOLD), room);
     let when = super::super::ago(ui.ctx(), at.max(0) as u64, now.max(0) as u64);
-    widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::FG_3), room);
+    widgets::text_truncated(&p, pos2(x, rect.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(format!("{what} · {when}"), 11.5).color(theme::fg_3()), room);
     let close = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
     if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(28.0, 13.0).id_salt(("launcher-got-x", &id)).show_at(ui, close)) {
         state.act(cx, clock, Action::Dismiss { id: id.clone() });
@@ -198,7 +198,7 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
         Reach::Waiting => {
             let p = ui.painter();
             p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::white(0.07));
-            pill_content(p, rect, glyph, label, theme::FG_3);
+            pill_content(p, rect, glyph, label, theme::fg_3());
             false
         }
         Reach::Ready => {
@@ -209,8 +209,8 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
             let down = anim::toggle(ui.ctx(), id.with("down"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
             let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.05 * down));
             let p = ui.painter();
-            p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover));
-            pill_content(p, r, glyph, label, theme::ON_ACCENT);
+            p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(theme::accent(), theme::accent_hover(), hover));
+            pill_content(p, r, glyph, label, theme::on_accent());
             resp.on_hover_cursor(CursorIcon::PointingHand);
             pressed
         }
@@ -218,10 +218,10 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
             // The press lands: the pill fills with a light green and its check pops in.
             let t = sent_at.map_or(1.0, |at| ((clock - at) / 0.35).clamp(0.0, 1.0) as f32);
             let p = ui.painter();
-            p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::alpha(theme::ACCENT, 0.16));
+            p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::alpha(theme::accent(), 0.16));
             let pop = 1.0 + 0.25 * (1.0 - t) * (t * std::f32::consts::PI).sin();
             let r = Rect::from_center_size(rect.center(), rect.size() * pop.min(1.08));
-            pill_content(p, r, icons::CHECK, tr_ctx("sent", "Sent"), theme::ACCENT);
+            pill_content(p, r, icons::CHECK, tr_ctx("sent", "Sent"), theme::OK);
             if t < 1.0 {
                 ui.ctx().request_repaint();
             }
@@ -231,7 +231,7 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
         Reach::Cooling(left) => {
             let p = ui.painter();
             p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::white(0.05));
-            pill_content(p, rect, icons::HOURGLASS_MEDIUM, &orbiters_i18n::tr!("{n} s", n = left), theme::FG_3);
+            pill_content(p, rect, icons::HOURGLASS_MEDIUM, &orbiters_i18n::tr!("{n} s", n = left), theme::fg_3());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(1000));
             let resp = ui.interact(rect, id.with("cool"), Sense::hover());
             resp.on_hover_text(orbiters_i18n::tr!("Again in {n} s", n = left));
@@ -266,16 +266,16 @@ pub(super) fn boop_button(ui: &mut Ui, center: egui::Pos2, size: f32, salt: (&st
             widgets::note_control(&ctx, orbiters_i18n::mark("Boop"), rect, true);
             let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
             resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Boop"));
-            (theme::mix(theme::white(0.1), theme::alpha(theme::ACCENT, 0.3), hover), theme::mix(theme::FG, theme::ACCENT, hover))
+            (theme::mix(theme::white(0.1), theme::alpha(theme::accent(), 0.3), hover), theme::mix(theme::fg(), theme::accent(), hover))
         }
-        Reach::Sent => (theme::alpha(theme::ACCENT, 0.2), theme::ACCENT),
+        Reach::Sent => (theme::alpha(theme::OK, 0.2), theme::OK),
         Reach::Cooling(left) => {
             let resp = ui.interact(rect, id.with("cool"), Sense::hover());
             resp.on_hover_text(orbiters_i18n::tr!("Boop again in {n} s", n = left));
             ctx.request_repaint_after(std::time::Duration::from_millis(1000));
-            (theme::white(0.05), theme::FG_4)
+            (theme::white(0.05), theme::fg_4())
         }
-        Reach::Waiting => (theme::white(0.05), theme::FG_4),
+        Reach::Waiting => (theme::white(0.05), theme::fg_4()),
         Reach::NotNow | Reach::SignIn => return false,
     };
     let p = ui.painter().clone();
@@ -300,7 +300,7 @@ pub(super) fn burst(p: &egui::Painter, center: egui::Pos2, t: f32, emoji: Option
         let reach = 18.0 + 22.0 * e + (k % 2) as f32 * 6.0 * e;
         let at = center + egui::Vec2::angled(a) * reach - vec2(0.0, 6.0 * e);
         let fade = (1.0 - t).powf(1.4);
-        let color = if k % 3 == 0 { theme::alpha(theme::REC, fade) } else { theme::alpha(theme::ACCENT, fade) };
+        let color = if k % 3 == 0 { theme::alpha(theme::REC, fade) } else { theme::alpha(theme::accent(), fade) };
         let mut q = p.clone();
         q.set_opacity(fade);
         orbiters_ui::widgets::icon_fill(&q, at, glyph, 9.0 + 3.0 * (k % 3) as f32 * (1.0 - t), color);
@@ -372,8 +372,8 @@ fn empty(ui: &mut Ui, state: &State, rect: Rect) {
     } else {
         return;
     };
-    widgets::icon(p, c, glyph, 22.0, theme::FG_4);
-    widgets::text_truncated(p, pos2(c.x, c.y + 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), rect.width() - 32.0);
+    widgets::icon(p, c, glyph, 22.0, theme::fg_4());
+    widgets::text_truncated(p, pos2(c.x, c.y + 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::fg_3()), rect.width() - 32.0);
 }
 
 /// A section's header: what it is (the mark the counts line gives it), its name and count; a press folds or opens it
@@ -398,30 +398,30 @@ fn header(ui: &mut Ui, state: &mut State, rect: Rect, group: &str, section: Sect
             widgets::icon_fill(p, mark, icons::STAR, if nested { 10.0 } else { 11.0 }, theme::alpha(theme::WARN, if nested { 0.75 } else { 1.0 }))
         }
         Section::InGame => {
-            p.circle_filled(mark, 4.0, theme::ACCENT);
+            p.circle_filled(mark, 4.0, theme::OK);
         }
         Section::Website => {
-            p.circle_stroke(mark, 3.3, egui::Stroke::new(1.6, theme::ACCENT));
+            p.circle_stroke(mark, 3.3, egui::Stroke::new(1.6, theme::OK));
         }
         Section::Offline => {
-            p.circle_filled(mark, 4.0, theme::FG_4);
+            p.circle_filled(mark, 4.0, theme::fg_4());
         }
     }
     let x = x + 16.0;
     let title = match section {
-        Section::Favourites => Txt::caps(tr_ctx("friends section", "Favourites")).color(theme::FG_2),
-        Section::FavouriteGroup => Txt::new(name, 12.5).weight(weight::SEMIBOLD).color(theme::FG),
-        Section::OtherFavourites => Txt::new(tr_ctx("favourite group", "Other"), 12.5).weight(weight::SEMIBOLD).color(theme::FG),
-        Section::InGame => Txt::caps(tr_ctx("friends section", "In game")).color(theme::FG_2),
-        Section::Website => Txt::caps(tr_ctx("friends section", "On the website")).color(theme::FG_2),
-        Section::Offline => Txt::caps(tr_ctx("friends section", "Offline")).color(theme::FG_2),
+        Section::Favourites => Txt::caps(tr_ctx("friends section", "Favourites")).color(theme::fg_2()),
+        Section::FavouriteGroup => Txt::new(name, 12.5).weight(weight::SEMIBOLD).color(theme::fg()),
+        Section::OtherFavourites => Txt::new(tr_ctx("favourite group", "Other"), 12.5).weight(weight::SEMIBOLD).color(theme::fg()),
+        Section::InGame => Txt::caps(tr_ctx("friends section", "In game")).color(theme::fg_2()),
+        Section::Website => Txt::caps(tr_ctx("friends section", "On the website")).color(theme::fg_2()),
+        Section::Offline => Txt::caps(tr_ctx("friends section", "Offline")).color(theme::fg_2()),
     };
     let t = widgets::text_truncated(p, pos2(x, y), Align2::LEFT_CENTER, &title, rect.width() - 90.0);
-    widgets::text(p, pos2(t.right() + 7.0, y), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::FG_4));
+    widgets::text(p, pos2(t.right() + 7.0, y), Align2::LEFT_CENTER, &Txt::new(count.to_string(), 11.5).weight(weight::MEDIUM).color(theme::fg_4()));
     // The caret turns as the section folds.
     let c = pos2(rect.right() - 20.0, y);
     let glyph = if open > 0.5 { icons::CARET_DOWN } else { icons::CARET_RIGHT };
-    widgets::icon(p, c, glyph, 12.0, theme::mix(theme::FG_4, theme::FG_2, hover));
+    widgets::icon(p, c, glyph, 12.0, theme::mix(theme::fg_4(), theme::fg_2(), hover));
     if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
         state.fold(group);
     }
@@ -439,7 +439,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let hover = anim::toggle(&ctx, id.with("hover"), inside, Spring::SNAPPY);
     let open = state.modal.as_ref().is_some_and(|m| m.id == friend.id && m.closing.is_none());
     let p = ui.painter().clone();
-    let fill = theme::mix(column_fill(), theme::INK_800, hover.max(if open { 1.0 } else { 0.0 }));
+    let fill = theme::mix(column_fill(), theme::ink_800(), hover.max(if open { 1.0 } else { 0.0 }));
     widgets::frame(&p, card, 14.0, fill);
     super::backdrop(&p, card, 14.0, state, &friend.look, fill, 0.32, 0.9);
     let offline = friend.presence == Presence::Offline;
@@ -473,7 +473,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     let x = pic.right() + 12.0;
     let room = card.right() - x - 10.0 - actions_w * reveal;
 
-    let name_color = if offline { theme::mix(rank_color(friend.look.rank), theme::FG_3, 0.45) } else { rank_color(friend.look.rank) };
+    let name_color = if offline { theme::mix(rank_color(friend.look.rank), theme::fg_3(), 0.45) } else { rank_color(friend.look.rank) };
     widgets::text_truncated(&p, pos2(x, card.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&friend.name, 13.5).weight(weight::SEMIBOLD).color(name_color), room);
     let seen = friend.last_seen.filter(|_| friend.presence == Presence::Offline).map(|at| super::super::ago(&ctx, at.max(0) as u64, now.max(0) as u64));
     second_line(&p, &friend, pos2(x, card.center().y + 10.0), room, booped.as_ref().filter(|b| clock - b.0 < states::SENT_FOR).is_some(), seen);
@@ -522,11 +522,11 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
 /// moment after a boop.
 fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, booped: bool, seen: Option<String>) {
     if booped {
-        widgets::icon(p, pos2(at.x + 6.0, at.y), icons::HAND_WAVING, 12.0, theme::ACCENT);
-        widgets::text_truncated(p, pos2(at.x + 17.0, at.y), Align2::LEFT_CENTER, &Txt::new(tr("Booped!"), 12.0).weight(weight::SEMIBOLD).color(theme::ACCENT), room - 17.0);
+        widgets::icon(p, pos2(at.x + 6.0, at.y), icons::HAND_WAVING, 12.0, theme::accent());
+        widgets::text_truncated(p, pos2(at.x + 17.0, at.y), Align2::LEFT_CENTER, &Txt::new(tr("Booped!"), 12.0).weight(weight::SEMIBOLD).color(theme::accent()), room - 17.0);
         return;
     }
-    let small = |t: &str| Txt::new(t, 12.0).color(theme::FG_3);
+    let small = |t: &str| Txt::new(t, 12.0).color(theme::fg_3());
     let in_world = matches!(friend.whereabouts, Whereabouts::World(_) | Whereabouts::Private | Whereabouts::Traveling);
     if !in_world && !friend.status_text.is_empty() {
         widgets::text_truncated(p, at, Align2::LEFT_CENTER, &small(&friend.status_text), room);
@@ -534,10 +534,10 @@ fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, bo
     }
     let mut x = at.x;
     if let Whereabouts::World(place) = &friend.whereabouts {
-        widgets::icon(p, pos2(x + 6.0, at.y), super::access_icon(place.access), 12.0, theme::FG_3);
+        widgets::icon(p, pos2(x + 6.0, at.y), super::access_icon(place.access), 12.0, theme::fg_3());
         x += 16.0;
         if !place.region.is_empty() {
-            let tag = Txt::new(super::region_tag(&place.region), 9.5).weight(weight::BOLD).tracking(0.04).color(theme::FG_2);
+            let tag = Txt::new(super::region_tag(&place.region), 9.5).weight(weight::BOLD).tracking(0.04).color(theme::fg_2());
             let w = p.layout_job(tag.job(f32::INFINITY)).size().x + 8.0;
             let chip = Rect::from_min_size(pos2(x, at.y - 7.5), vec2(w, 15.0));
             p.rect_filled(chip, theme::radius(4.0), theme::white(0.08));
@@ -545,12 +545,12 @@ fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, bo
             x += w + 6.0;
         }
         let world = if place.world_name.is_empty() { tr("A world").to_string() } else { place.world_name.clone() };
-        widgets::text_truncated(p, pos2(x, at.y), Align2::LEFT_CENTER, &small(&world).color(theme::FG_2), room - (x - at.x));
+        widgets::text_truncated(p, pos2(x, at.y), Align2::LEFT_CENTER, &small(&world).color(theme::fg_2()), room - (x - at.x));
         return;
     }
     match where_line(friend) {
         Some((glyph, line)) => {
-            widgets::icon(p, pos2(x + 6.0, at.y), glyph, 12.0, theme::FG_4);
+            widgets::icon(p, pos2(x + 6.0, at.y), glyph, 12.0, theme::fg_4());
             widgets::text_truncated(p, pos2(x + 16.0, at.y), Align2::LEFT_CENTER, &small(&line), room - 16.0);
         }
         None => {
@@ -560,7 +560,7 @@ fn second_line(p: &egui::Painter, friend: &Friend, at: egui::Pos2, room: f32, bo
                 (true, Some(when)) => orbiters_i18n::tr!("Last seen {when}", when = when),
                 (true, None) => status_name(friend.status).to_string(),
             };
-            widgets::text_truncated(p, at, Align2::LEFT_CENTER, &small(&line).color(theme::FG_4), room);
+            widgets::text_truncated(p, at, Align2::LEFT_CENTER, &small(&line).color(theme::fg_4()), room);
         }
     }
 }
@@ -579,7 +579,7 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     let resp = ui.interact(top, id, Sense::click());
     let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
     p.circle_filled(top.center(), 22.0, theme::mix(theme::white(0.07), theme::white(0.14), hover));
-    widgets::icon(&p, top.center(), icons::USERS, 20.0, theme::FG);
+    widgets::icon(&p, top.center(), icons::USERS, 20.0, theme::fg());
     if in_game + web > 0 {
         widgets::count_badge(&p, top.right_top() + vec2(-4.0, 6.0), in_game + web);
     }
@@ -589,8 +589,8 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     if got {
         let c = top.left_bottom() + vec2(6.0, -6.0);
         p.circle_filled(c, 10.0, column_fill());
-        p.circle_filled(c, 8.0, theme::ACCENT);
-        widgets::icon(&p, c, icons::HAND_WAVING, 10.0, theme::ON_ACCENT);
+        p.circle_filled(c, 8.0, theme::accent());
+        widgets::icon(&p, c, icons::HAND_WAVING, 10.0, theme::on_accent());
     }
     widgets::note_control(&ctx, orbiters_i18n::mark("Friends"), top, true);
     if widgets::activated(&resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Friends"))) {
@@ -626,7 +626,7 @@ pub(super) fn rail(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         let r = Rect::from_center_size(c, vec2(40.0, 40.0));
         let resp = ui.interact(r, Id::unique("launcher-rail-more"), Sense::click());
         p.circle_filled(c, 20.0, theme::white(if resp.hovered() { 0.12 } else { 0.06 }));
-        widgets::text(&p, c, Align2::CENTER_CENTER, &Txt::new(format!("+{more}"), 12.0).weight(weight::SEMIBOLD).color(theme::FG_2));
+        widgets::text(&p, c, Align2::CENTER_CENTER, &Txt::new(format!("+{more}"), 12.0).weight(weight::SEMIBOLD).color(theme::fg_2()));
         if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
             state.open_drawer(&ctx);
         }
@@ -647,7 +647,7 @@ pub(super) fn put_away(ui: &mut Ui, state: &State, rect: Rect, side: super::Side
     };
     let c = pos2(rect.center().x, rect.top() + 64.0);
     p.circle_filled(c, 24.0, theme::white(0.06));
-    widgets::icon(&p, c, glyph, 22.0, theme::FG_3);
+    widgets::icon(&p, c, glyph, 22.0, theme::fg_3());
     if matches!(side, super::Side::Rail) {
         // The rail: the sign alone, its words on hover.
         ui.interact(Rect::from_center_size(c, vec2(48.0, 48.0)), Id::unique("launcher-put-away"), Sense::hover()).on_hover_text(format!("{title}\n{body}"));
@@ -655,11 +655,11 @@ pub(super) fn put_away(ui: &mut Ui, state: &State, rect: Rect, side: super::Side
     }
     widgets::text(&p, pos2(rect.center().x, c.y + 44.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
     let w = rect.width() - 48.0;
-    let mut job = Txt::new(body, 12.5).color(theme::FG_3).line_height(17.0).job(w);
+    let mut job = Txt::new(body, 12.5).color(theme::fg_3()).line_height(17.0).job(w);
     // Each line centred under the title.
     job.halign = egui::Align::Center;
     let galley = p.layout_job(job);
-    p.galley(pos2(rect.center().x, c.y + 64.0), galley, theme::FG_3);
+    p.galley(pos2(rect.center().x, c.y + 64.0), galley, theme::fg_3());
 }
 
 #[cfg(test)]

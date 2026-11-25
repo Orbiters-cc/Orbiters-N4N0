@@ -264,7 +264,7 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     let bold = [14.0, 12.5]
         .into_iter()
         .map(|size| look::font(size, weight::BOLD))
-        .find(|f| p.layout_no_wrap(first.to_string(), f.clone(), look::LABEL).size().x <= room)
+        .find(|f| p.layout_no_wrap(first.to_string(), f.clone(), look::label()).size().x <= room)
         .unwrap_or_else(|| look::font(12.5, weight::BOLD));
     let small = look::font(12.0, weight::SEMIBOLD);
     let tinted = theme::mix(tint, Color32::WHITE, 0.35);
@@ -273,15 +273,15 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     let second = second.map(|w| p.layout(w.to_string(), small.clone(), tinted, room));
     let second_h = second.as_ref().map_or(0.0, |g| g.size().y.min(second_max) + 3.0);
     // The third (where the member stands, "37.5 to Navigator") may take two lines too.
-    let third = third.map(|w| p.layout(w.to_string(), small.clone(), look::MUTED, room));
+    let third = third.map(|w| p.layout(w.to_string(), small.clone(), look::muted(), room));
     let third_h = third.as_ref().map_or(0.0, |g| g.size().y.min(32.0) + 3.0);
     // The title on two lines when even smaller it does not fit.
-    let title = p.layout(first.to_string(), bold, look::LABEL, room);
+    let title = p.layout(first.to_string(), bold, look::label(), room);
     let title_h = title.size().y.min(34.0);
     let tall = title_h + 2.0 + second_h + third_h;
     let top = (rect.center().y - tall / 2.0 - if line.is_some() { 3.0 } else { 0.0 }).max(rect.top() + 8.0);
     widgets::icon(p, pos2(x + 9.0, top + 9.0), icon, 18.0, tint);
-    p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 34.0))).galley(pos2(x + 28.0, top), title, look::LABEL);
+    p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 34.0))).galley(pos2(x + 28.0, top), title, look::label());
     let mut y = top + title_h + 2.0;
     if let Some(g) = second {
         let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, second_max));
@@ -290,7 +290,7 @@ fn card(p: &Painter, rect: Rect, icon: &str, tint: Color32, first: &str, second:
     }
     if let Some(g) = third {
         let clip = Rect::from_min_size(pos2(x + 28.0, y), vec2(room, 32.0));
-        p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, look::MUTED);
+        p.with_clip_rect(clip).galley(pos2(x + 28.0, y), g, look::muted());
     }
     if let Some(k) = line {
         let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 7.0), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
@@ -307,7 +307,7 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
     match step {
         Step::Idle => {
             button_back(p, rect, hovered, pressed, public);
-            let ink = if public { look::on_accent() } else { look::LABEL };
+            let ink = if public { look::on_accent() } else { look::label() };
             if public {
                 let hint = would_earn_words(offer);
                 face(p, rect, icons::GLOBE, tr(SHARE_PUBLICLY), hint.as_deref(), ink, theme::alpha(ink, 0.8));
@@ -329,7 +329,7 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
         Step::Done(done) if public => {
             let (second, third) = done_lines(done);
             let line = done.after.as_ref().map(|a| a.progress());
-            let tint = if done.earned.is_some_and(|e| e > 0.0) { good } else { theme::FG_3 };
+            let tint = if done.earned.is_some_and(|e| e > 0.0) { good } else { theme::fg_3() };
             card(p, rect, icons::CHECK_CIRCLE, tint, tr(ex::SHARED_PUBLICLY), Some(&second).filter(|s| !s.is_empty()).map(|s| s.as_str()), third.as_deref(), line);
         }
         Step::Done(done) => {
@@ -348,11 +348,11 @@ fn slot(p: &Painter, rect: Rect, view: &ShareView, public: bool, hovered: bool, 
             let x = rect.left() + 14.0;
             let small = look::font(12.0, weight::SEMIBOLD);
             let room = rect.width() - 52.0;
-            let why = p.layout(message.to_string(), small.clone(), look::LABEL, room);
+            let why = p.layout(message.to_string(), small.clone(), look::label(), room);
             let why_h = why.size().y.min(48.0);
             let top = rect.center().y - (why_h + 4.0 + 16.0) / 2.0;
             widgets::icon(p, pos2(x + 9.0, top + 8.0), icons::WARNING, 18.0, theme::DANGER);
-            p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 48.0))).galley(pos2(x + 28.0, top), why, look::LABEL);
+            p.with_clip_rect(Rect::from_min_size(pos2(x + 28.0, top), vec2(room, 48.0))).galley(pos2(x + 28.0, top), why, look::label());
             p.text(pos2(x + 28.0, top + why_h + 4.0 + 8.0), Align2::LEFT_CENTER, fit(p, tr(TRY_AGAIN), &small, room), small, theme::mix(theme::DANGER, Color32::WHITE, 0.4));
         }
     }
@@ -366,7 +366,7 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
         Look::ShareDismiss => {
             let round = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, round, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::PANEL });
-            widgets::icon(p, rect.center(), icons::X, 18.0, if hovered { look::LABEL } else { look::MUTED });
+            widgets::icon(p, rect.center(), icons::X, 18.0, if hovered { look::label() } else { look::muted() });
         }
         Look::ShareQuestion => {
             let round = look::radius(14.0);
@@ -374,13 +374,13 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
             widgets::icon(p, pos2(rect.left() + 22.0, rect.center().y), icons::GLOBE, 18.0, theme::WARN);
             let words = tr(ASK_PUBLIC);
             let font = look::font(12.5, weight::SEMIBOLD);
-            let galley = p.layout(words.to_string(), font, look::LABEL, rect.width() - 52.0);
+            let galley = p.layout(words.to_string(), font, look::label(), rect.width() - 52.0);
             let at = pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
-            p.galley(at, galley, look::LABEL);
+            p.galley(at, galley, look::label());
         }
         Look::ShareCancel => {
             button_back(p, rect, hovered, pressed, false);
-            face(p, rect, icons::X, tr(CANCEL), None, look::LABEL, look::LABEL);
+            face(p, rect, icons::X, tr(CANCEL), None, look::label(), look::label());
         }
         Look::ShareYes => {
             button_back(p, rect, hovered, pressed, true);
@@ -393,22 +393,22 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
             p.rect_stroke(rect.shrink(0.5), round, Stroke::new(1.0, theme::white(0.12)), egui::StrokeKind::Middle);
             widgets::icon(p, pos2(rect.left() + 28.0, rect.top() + 32.0), icons::USERS, 20.0, look::accent());
             let head = look::font(17.0, weight::BOLD);
-            p.text(pos2(rect.left() + 48.0, rect.top() + 32.0), Align2::LEFT_CENTER, fit(p, tr(CHOOSE_TITLE), &head, rect.width() - 130.0), head, look::LABEL);
+            p.text(pos2(rect.left() + 48.0, rect.top() + 32.0), Align2::LEFT_CENTER, fit(p, tr(CHOOSE_TITLE), &head, rect.width() - 130.0), head, look::label());
             let middle = pos2(rect.center().x, rect.top() + 66.0 + 3.0 * 62.0 - 30.0);
             if c.loading {
-                widgets::icon(p, middle - vec2(0.0, 24.0), icons::CIRCLE_NOTCH, 26.0, look::MUTED);
-                text(p, middle + vec2(0.0, 12.0), Align2::CENTER_CENTER, tr(LOADING), 14.0, weight::SEMIBOLD, look::MUTED);
+                widgets::icon(p, middle - vec2(0.0, 24.0), icons::CIRCLE_NOTCH, 26.0, look::muted());
+                text(p, middle + vec2(0.0, 12.0), Align2::CENTER_CENTER, tr(LOADING), 14.0, weight::SEMIBOLD, look::muted());
             } else if let Some(error) = c.error.as_deref() {
                 widgets::icon(p, middle - vec2(0.0, 40.0), icons::WARNING, 26.0, theme::WARN);
-                let galley = p.layout(error.to_string(), look::font(13.0, weight::SEMIBOLD), look::LABEL, rect.width() - 60.0);
-                p.galley(pos2(rect.center().x - galley.size().x / 2.0, middle.y - 14.0), galley, look::LABEL);
+                let galley = p.layout(error.to_string(), look::font(13.0, weight::SEMIBOLD), look::label(), rect.width() - 60.0);
+                p.galley(pos2(rect.center().x - galley.size().x / 2.0, middle.y - 14.0), galley, look::label());
             } else if c.rows.is_empty() {
-                text(p, middle, Align2::CENTER_CENTER, tr(NONE_YET), 14.0, weight::SEMIBOLD, look::MUTED);
+                text(p, middle, Align2::CENTER_CENTER, tr(NONE_YET), 14.0, weight::SEMIBOLD, look::muted());
             }
             if c.pages > 1 {
                 let foot = rect.bottom() - 12.0 - 28.0;
                 let words = orbiters_i18n::tr!("{page} of {pages}", page = c.page + 1, pages = c.pages);
-                text(p, pos2(rect.left() + 12.0 + 56.0 + 32.0, foot), Align2::CENTER_CENTER, &words, 13.0, weight::SEMIBOLD, look::MUTED);
+                text(p, pos2(rect.left() + 12.0 + 56.0 + 32.0, foot), Align2::CENTER_CENTER, &words, 13.0, weight::SEMIBOLD, look::muted());
             }
         }
         Look::ChooserRow(n) => {
@@ -439,7 +439,7 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
             let tag_font = look::font(11.5, weight::BOLD);
             let tag_w = here.map_or(0.0, |h| p.layout_no_wrap(h.to_string(), tag_font.clone(), Color32::WHITE).size().x + 20.0);
             let name_font = look::font(16.0, weight::SEMIBOLD);
-            p.text(pos2(rect.left() + 54.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &row.name, &name_font, rect.width() - 70.0 - tag_w), name_font, look::LABEL);
+            p.text(pos2(rect.left() + 54.0, rect.center().y), Align2::LEFT_CENTER, fit(p, &row.name, &name_font, rect.width() - 70.0 - tag_w), name_font, look::label());
             if let Some(here) = here {
                 let tag = Rect::from_min_size(pos2(rect.right() - 12.0 - tag_w, rect.center().y - 11.0), vec2(tag_w, 22.0));
                 p.rect_filled(tag, look::radius(11.0), theme::alpha(theme::VIOLET, 0.25));
@@ -450,7 +450,7 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
             let on = item.action != Action::Idle;
             let round = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, round, if !on { look::PANEL } else if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
-            widgets::icon(p, rect.center(), if next { icons::CARET_RIGHT } else { icons::CARET_LEFT }, 20.0, if on { look::LABEL } else { theme::FG_4 });
+            widgets::icon(p, rect.center(), if next { icons::CARET_RIGHT } else { icons::CARET_LEFT }, 20.0, if on { look::label() } else { theme::fg_4() });
         }
         Look::ChooserSend => {
             let n = view.chooser.as_ref().map_or(0, |c| c.chosen);
@@ -465,7 +465,7 @@ pub fn draw(p: &Painter, item: &Item, view: &ShareView, hovered: bool, pressed: 
                 1 => tr(SEND_ONE).to_string(),
                 _ => orbiters_i18n::tr!("Share with {count} friends", count = n),
             };
-            let ink = if on { look::on_accent() } else { theme::FG_4 };
+            let ink = if on { look::on_accent() } else { theme::fg_4() };
             face(p, rect, icons::PAPER_PLANE_TILT, &words, None, ink, ink);
         }
         _ => {}

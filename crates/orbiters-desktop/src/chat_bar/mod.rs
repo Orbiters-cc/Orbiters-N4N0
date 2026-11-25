@@ -55,16 +55,18 @@ fn backdrop_layer() -> LayerId {
 
 /// The page behind the open chat: blurred (gaussian sigma, points) next to the chat, 40 % of that far from it, and
 /// darker.
-const BEHIND: orbiters_ui::backdrop::Look = orbiters_ui::backdrop::Look {
-    strength: 0.0,
-    blur: 16.0,
-    dim: 0.30,
-    focus: Rect::NOTHING,
-    radius: layout::PANEL_RADIUS,
-    reach: 420.0,
-    far: 0.4,
-    base: theme::INK_950,
-};
+fn behind() -> orbiters_ui::backdrop::Look {
+    orbiters_ui::backdrop::Look {
+        strength: 0.0,
+        blur: 16.0,
+        dim: 0.30,
+        focus: Rect::NOTHING,
+        radius: layout::PANEL_RADIUS,
+        reach: 420.0,
+        far: 0.4,
+        base: theme::ink_950(),
+    }
+}
 
 /// Whether N4N0 can answer here, and if not, why (what the bar and the chat say, quietly, and where they lead).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,7 +384,7 @@ impl ChatBar {
         let mut close = false;
         orbiters_ui::front::area(ctx, backdrop_layer().id, Order::Middle, false).fixed_pos(body.min).interactable(true).constrain(false).show(ctx, |ui| {
             let resp = ui.allocate_rect(body, Sense::click());
-            let look = orbiters_ui::backdrop::Look { strength, focus, radius, ..BEHIND };
+            let look = orbiters_ui::backdrop::Look { strength, focus, radius, ..behind() };
             let blurred = gpu.is_some_and(|gpu| {
                 orbiters_ui::backdrop::behind(ui.painter(), behind_id(), &gpu.textures, LayerId::background(), egui::layers::ShapeIdx(0), body, look)
             });
@@ -392,7 +394,7 @@ impl ChatBar {
             // Without the window's GPU (a test), or for the one frame a new backdrop meets a changing font atlas, there
             // is nothing to blur with: the page only darkens.
             if !blurred {
-                ui.painter().rect_filled(body, 0.0, theme::black(BEHIND.dim * strength));
+                ui.painter().rect_filled(body, 0.0, theme::black(behind().dim * strength));
             }
             close = resp.clicked() && self.morph.is_open();
         });
@@ -427,7 +429,7 @@ impl ChatBar {
             let k = smoothstep(0.0, 1.0, open_k);
             let composer = Rect::from_min_max(bar.min + (composer_end.min - bar.min) * k, bar.max + (composer_end.max - bar.max) * k);
             if open_k > 0.0 && !matches!(strip.bar, Bar::Icon(_)) || open_k > 0.3 {
-                let well = theme::alpha(theme::INK_750, smoothstep(0.0, 0.25, open_k));
+                let well = theme::alpha(theme::ink_750(), smoothstep(0.0, 0.25, open_k));
                 inner.painter().rect_filled(composer, theme::radius(egui::lerp(layout::BAR_RADIUS..=20.0, k)), well);
             }
             if chat_alpha > 0.0 {
@@ -470,15 +472,15 @@ impl ChatBar {
         if let Bar::Icon(_) = bar {
             panel::n4n0_face(&p, rect.center(), 9.0);
             if unread {
-                p.circle_filled(rect.center() + vec2(8.0, -7.0), 3.5, theme::ACCENT);
-                p.circle_stroke(rect.center() + vec2(8.0, -7.0), 3.5, egui::Stroke::new(1.5, theme::INK_900));
+                p.circle_filled(rect.center() + vec2(8.0, -7.0), 3.5, theme::accent());
+                p.circle_stroke(rect.center() + vec2(8.0, -7.0), 3.5, egui::Stroke::new(1.5, theme::ink_900()));
             }
             let _ = shape.clone().on_hover_text(tr!("Talk to N4N0 ({shortcut})", shortcut = shortcut_text())).on_hover_cursor(CursorIcon::PointingHand);
             return;
         }
         panel::n4n0_face(&p, pos2(rect.left() + 15.0, rect.center().y), 8.0);
         if unread {
-            p.circle_filled(pos2(rect.left() + 21.0, rect.center().y - 6.5), 3.0, theme::ACCENT);
+            p.circle_filled(pos2(rect.left() + 21.0, rect.center().y - 6.5), 3.0, theme::accent());
         }
         let mut right = rect.right() - 6.0;
         if gate(snap) == Gate::Ready && snap.n4n0.voice.installed {
@@ -490,7 +492,7 @@ impl ChatBar {
             right = mic.left() - 4.0;
         }
         if rect.width() >= layout::BAR_MIN + 50.0 {
-            let key = Txt::new(shortcut_text(), 10.5).weight(weight::MEDIUM).color(theme::FG_4);
+            let key = Txt::new(shortcut_text(), 10.5).weight(weight::MEDIUM).color(theme::fg_4());
             let size = widgets::text_size(ui, &key);
             let cap = Rect::from_min_size(pos2(right - size.x - 12.0, rect.center().y - 9.0), vec2(size.x + 12.0, 18.0));
             p.rect_filled(cap, theme::radius(6.0), theme::white(0.05));
@@ -508,7 +510,7 @@ impl ChatBar {
                 Gate::Ready => tr("Talk to N4N0"),
             };
             let field = bar_field(bar, snap);
-            let color = if unread { theme::FG_2 } else { theme::FG_3 };
+            let color = if unread { theme::fg_2() } else { theme::fg_3() };
             widgets::text_truncated(&p, pos2(field.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(hint, 13.0).color(color), field.width());
         }
         if gate(snap) == Gate::Ready && self.morph.closed() {
@@ -527,8 +529,8 @@ impl ChatBar {
         let mut p = ui.painter().clone();
         p.multiply_opacity(alpha);
         let live = self.talking;
-        p.circle_filled(rect.center(), rect.width() / 2.0, if live { theme::alpha(theme::ACCENT, 0.9) } else { theme::white(0.08 * hover) });
-        widgets::icon(&p, rect.center(), icons::MICROPHONE, glyph, if live { theme::ON_ACCENT } else { theme::mix(theme::FG_3, theme::FG, hover) });
+        p.circle_filled(rect.center(), rect.width() / 2.0, if live { theme::alpha(theme::accent(), 0.9) } else { theme::white(0.08 * hover) });
+        widgets::icon(&p, rect.center(), icons::MICROPHONE, glyph, if live { theme::on_accent() } else { theme::mix(theme::fg_3(), theme::fg(), hover) });
         if held == self.talking {
             return None;
         }
@@ -588,7 +590,7 @@ impl ChatBar {
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
             .font(font)
-            .text_color(theme::FG)
+            .text_color(theme::fg())
             .desired_width(at.width())
             .desired_rows(rows)
             .interactive(ready && !self.modal)
@@ -616,7 +618,7 @@ impl ChatBar {
                 Gate::SigningIn => signing_in(snap),
                 Gate::Off => tr("N4N0's assistant is off"),
             };
-            let hint = Txt::new(hint, 14.0).color(theme::FG_4);
+            let hint = Txt::new(hint, 14.0).color(theme::fg_4());
             let mut p = ui.painter().clone();
             p.multiply_opacity(chat_alpha);
             widgets::text_truncated(&p, pos2(at.left(), at.top() + 9.5), Align2::LEFT_CENTER, &hint, at.width());
@@ -694,14 +696,14 @@ fn paint_surface(ui: &Ui, rect: Rect, radius: f32, k: f32, focused: bool, hovere
         p.add(shadow.as_shape(rect, theme::radius(radius)));
     }
     let rest = theme::mix(theme::white(0.055), theme::white(0.085), hover.max(ring));
-    let open = theme::alpha(theme::INK_850, 0.94);
+    let open = theme::alpha(theme::ink_850(), 0.94);
     p.rect_filled(rect, theme::radius(radius), theme::mix(rest, open, smoothstep(0.0, 0.5, k)));
     // A hairline of light along the glass's top edge.
     if k > 0.0 {
         p.rect_stroke(rect, theme::radius(radius), egui::Stroke::new(1.0, theme::white(0.06 * k)), egui::StrokeKind::Inside);
     }
     if ring > 0.01 {
-        p.rect_stroke(rect, theme::radius(radius), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.75 * ring)), egui::StrokeKind::Outside);
+        p.rect_stroke(rect, theme::radius(radius), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.75 * ring)), egui::StrokeKind::Outside);
     }
 }
 

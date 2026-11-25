@@ -38,7 +38,7 @@ pub fn coverage_colour(directions: u8) -> Color32 {
         0 => Color32::TRANSPARENT,
         1 | 2 => theme::DANGER,
         3..=5 => theme::WARN,
-        _ => theme::ACCENT,
+        _ => theme::accent(),
     }
 }
 
@@ -106,7 +106,7 @@ pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Optio
             let (x, z) = (c.x0 + (i % c.width as usize) as f32 * c.cell, c.z0 + (i / c.width as usize) as f32 * c.cell);
             let r = Rect::from_two_pos(to_screen(x, z), to_screen(x + c.cell, z + c.cell));
             let colour =
-                if c.cells[2 * i + 1] & c.obstacle != 0 { theme::alpha(theme::FG_3, 0.55) } else { theme::alpha(coverage_colour(c.cells[2 * i]), 0.32) };
+                if c.cells[2 * i + 1] & c.obstacle != 0 { theme::alpha(theme::fg_3(), 0.55) } else { theme::alpha(coverage_colour(c.cells[2 * i]), 0.32) };
             p.rect_filled(r, 0.0, colour);
         }
     }
@@ -118,7 +118,7 @@ pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Optio
         let colour = move |x: f32, a: f32| {
             let t = if hi - lo > 1.0 { (x - lo) / (hi - lo) } else { 0.5 };
             // Older parts of the path fade to grey, the latest is Orbiters green.
-            theme::alpha(theme::mix(theme::FG_4, theme::ACCENT, t), a)
+            theme::alpha(theme::mix(theme::fg_4(), theme::accent(), t), a)
         };
         p.add(PathShape::line(pts, PathStroke::new_uv(2.4, move |_r: Rect, pt: Pos2| colour(pt.x, 1.0))));
     }
@@ -132,20 +132,20 @@ pub fn show_with(ui: &Ui, rect: Rect, id: Id, trail: &Trail<'_>, coverage: Optio
             let t = anim::clock(ui.ctx(), 30.0);
             let k = ((t % 1.6) / 1.6) as f32;
             let e = anim::ease::out_cubic(k);
-            p.circle_stroke(at, 4.0 + 11.0 * e, Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.7 * (1.0 - e))));
+            p.circle_stroke(at, 4.0 + 11.0 * e, Stroke::new(1.5, theme::alpha(theme::accent(), 0.7 * (1.0 - e))));
         }
         p.circle_filled(at, 4.4, Color32::WHITE);
-        p.circle_stroke(at, 4.4, Stroke::new(1.6, theme::ACCENT));
+        p.circle_stroke(at, 4.4, Stroke::new(1.6, theme::accent()));
     }
 
     if trail.points.is_empty() {
-        widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(trail.empty_text, 12.5).color(theme::FG_4));
+        widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(trail.empty_text, 12.5).color(theme::fg_4()));
     }
 
     // Scale legend.
     let ly = rect.bottom() - 14.0;
-    p.hline((rect.left() + 12.0)..=(rect.left() + 12.0 + 32.0), ly, Stroke::new(1.0, theme::FG_4));
-    widgets::text(&p, pos2(rect.left() + 52.0, ly), Align2::LEFT_CENTER, &Txt::new(grid_label(grid), 10.5).color(theme::FG_4));
+    p.hline((rect.left() + 12.0)..=(rect.left() + 12.0 + 32.0), ly, Stroke::new(1.0, theme::fg_4()));
+    widgets::text(&p, pos2(rect.left() + 52.0, ly), Align2::LEFT_CENTER, &Txt::new(grid_label(grid), 10.5).color(theme::fg_4()));
 }
 
 /// The grid's step for a view `span` metres across: 1, 2 or 5 times a power of ten, about a twentieth of the view
@@ -173,13 +173,13 @@ fn grid_label(grid: f32) -> String {
 fn cone(p: &egui::Painter, at: Pos2, heading: f32, length: f32) {
     let half = 0.42;
     let mut mesh = Mesh::default();
-    mesh.colored_vertex(at, theme::alpha(theme::ACCENT, 0.4));
+    mesh.colored_vertex(at, theme::alpha(theme::accent(), 0.4));
     let n = 12;
     // Direction: 0 = up the screen (+Z), clockwise.
     for i in 0..=n {
         let a = heading - half + 2.0 * half * i as f32 / n as f32;
         let dir = vec2(a.sin(), -a.cos());
-        mesh.colored_vertex(at + dir * length * 0.5, theme::alpha(theme::ACCENT, 0.15));
+        mesh.colored_vertex(at + dir * length * 0.5, theme::alpha(theme::accent(), 0.15));
         mesh.colored_vertex(at + dir * length, Color32::TRANSPARENT);
     }
     for i in 0..n as u32 {

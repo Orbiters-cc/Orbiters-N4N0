@@ -9,8 +9,10 @@ pub mod autoscroll;
 pub mod blender_logo;
 pub mod discord_logo;
 pub mod backdrop;
+pub mod background;
 pub mod blur;
 pub mod dialog;
+pub mod faces;
 pub mod feedback;
 pub mod fonts;
 pub mod format;
@@ -19,6 +21,7 @@ pub mod glow;
 pub mod icons;
 pub mod layout;
 pub mod logo;
+pub mod look;
 pub mod morph;
 pub mod n4n0_face;
 pub mod n4n0_logo;
@@ -54,10 +57,18 @@ pub struct RenderTarget {
     pub msaa_samples: u32,
 }
 
+/// To call each frame of a context that can live through a change of language, of font or of colours: it takes them up.
+pub fn follow(ctx: &egui::Context) {
+    fonts::follow_language(ctx);
+    fonts::follow_face(ctx);
+    theme::follow(ctx);
+}
+
 /// GPU pipelines for a renderer drawing to `format` (once per renderer).
 pub fn install_wgpu(device: &egui_wgpu::wgpu::Device, format: egui_wgpu::wgpu::TextureFormat, msaa_samples: u32, resources: &mut egui_wgpu::CallbackResources) {
     resources.insert(RenderTarget { format, msaa_samples });
     glow::install(device, format, msaa_samples, resources);
     blur::install(device, format, msaa_samples, resources);
     backdrop::install(device, format, msaa_samples, resources);
+    background::install(device, format, msaa_samples, resources);
 }

@@ -75,7 +75,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Sett
             format!("{} {}", tr_n("{count} report on this computer,", "{count} reports on this computer,", all as u64), tr_n("{count} not sent yet.", "{count} not sent yet.", unsent as u64))
         };
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
-        widgets::text_truncated(ui.painter(), row.left_center(), Align2::LEFT_CENTER, &Txt::new(&words, 12.5).color(theme::FG_2), row.width());
+        widgets::text_truncated(ui.painter(), row.left_center(), Align2::LEFT_CENTER, &Txt::new(&words, 12.5).color(theme::fg_2()), row.width());
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -96,7 +96,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Sett
             if Button::new(tr("Delete all")).icon(icons::TRASH).variant(Variant::Secondary).size(Size::Sm).enabled(all > 0 && !sending).confirm(ui) {
                 let gone = crate::mismatch::delete_all();
                 state.counted = None;
-                state.said = Some((tr_n("{count} report deleted.", "{count} reports deleted.", gone as u64), theme::FG_2));
+                state.said = Some((tr_n("{count} report deleted.", "{count} reports deleted.", gone as u64), theme::fg_2()));
             }
         });
         if let Some((said, colour)) = &state.said {

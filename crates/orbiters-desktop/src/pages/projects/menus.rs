@@ -208,7 +208,7 @@ pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Projec
         RowAct::ChangePicture => super::vrchat_picture::change(&ctx, cx, state, a),
         RowAct::AddN4n0 | RowAct::MyAvatar => {
             let n4n0 = acts[k].2 == RowAct::AddN4n0;
-            state.modal_fill = if n4n0 { theme::control() } else { theme::INK_850 };
+            state.modal_fill = if n4n0 { theme::control() } else { theme::ink_850() };
             state.install(&ctx, project.clone(), a.clone(), n4n0, server(cx), row.rect);
         }
         RowAct::Blender(i) => super::blend::open(&ctx, state, &links[i]),

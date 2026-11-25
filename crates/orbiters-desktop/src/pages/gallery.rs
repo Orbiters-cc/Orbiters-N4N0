@@ -1805,15 +1805,15 @@ fn group_header(ui: &mut Ui, first: &Entry, last: &Entry, count: usize) -> (Rect
     let mut x = r.left();
     let y = r.top() + 36.0;
     if let Some(kind) = first.instance.as_deref().map(|i| instance_parts(i).1) {
-        let t = Txt::new(tr_ctx("instance", kind), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
+        let t = Txt::new(tr_ctx("instance", kind), 11.0).weight(weight::SEMIBOLD).color(theme::fg_2());
         let tw = widgets::text_size(ui, &t).x;
         let pill = Rect::from_min_size(pos2(x, y - 10.0), vec2(tw + 30.0, 20.0));
         p.rect_filled(pill, theme::radius(10.0), theme::white(0.06));
-        widgets::icon(&p, pos2(pill.left() + 11.0, pill.center().y), instance_glyph(kind), 11.0, theme::FG_3);
+        widgets::icon(&p, pos2(pill.left() + 11.0, pill.center().y), instance_glyph(kind), 11.0, theme::fg_3());
         widgets::text(&p, pos2(pill.left() + 21.0, pill.center().y), Align2::LEFT_CENTER, &t);
         x = pill.right() + 10.0;
     }
-    widgets::text_truncated(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(format!("{span} · {items}"), 12.0).color(theme::FG_3), br.left() - x - 16.0);
+    widgets::text_truncated(&p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(format!("{span} · {items}"), 12.0).color(theme::fg_3()), br.left() - x - 16.0);
     let resp = b.show_at(ui, br);
     (br, sharing::pressed(resp))
 }
@@ -1873,7 +1873,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     let (thumb, corners) = if tile {
         (r, [TILE_RADIUS; 4])
     } else {
-        widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+        widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
         (Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)), [20.0, 20.0, 0.0, 0.0])
     };
     let radius = CornerRadius { nw: corners[0] as u8, ne: corners[1] as u8, se: corners[2] as u8, sw: corners[3] as u8 };
@@ -1892,10 +1892,10 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         &Gradient::vertical(
             thumb,
             &[
-                (0.0, theme::alpha(theme::INK_950, 0.25)),
+                (0.0, theme::alpha(theme::ink_950(), 0.25)),
                 (0.3, Color32::TRANSPARENT),
                 (if tile { 0.55 } else { 0.6 }, Color32::TRANSPARENT),
-                (1.0, theme::alpha(theme::INK_950, bottom.min(0.85))),
+                (1.0, theme::alpha(theme::ink_950(), bottom.min(0.85))),
             ],
         ),
     );
@@ -1907,11 +1907,11 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     };
     let queued = matches!(&e.local, Some(controller::Local::Session(d)) if cx.snap.reconstruct_queue.contains(d));
     let (kind_label, kind_color) = if e.is_picture() {
-        (tr("Picture"), theme::FG_2)
+        (tr("Picture"), theme::fg_2())
     } else if e.no_keyframes {
         (tr("No 3D"), theme::DANGER)
     } else {
-        ("3D", theme::ACCENT)
+        ("3D", theme::accent())
     };
     // The check on its corner; the badges step aside for it.
     let card_radius = if tile { TILE_RADIUS } else { theme::CARD_RADIUS };
@@ -1929,11 +1929,11 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         let (label, color) = super::sessions::job_badge(j, cx.snap);
         super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), &label, theme::black(0.55), color, false);
     } else if queued {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Waiting to reconstruct"), theme::black(0.55), theme::FG_2, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Waiting to reconstruct"), theme::black(0.55), theme::fg_2(), false);
     } else if look.updating {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Updating…"), theme::black(0.55), theme::ACCENT, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Updating…"), theme::black(0.55), theme::accent(), false);
     } else if look.sharing {
-        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Sharing…"), theme::black(0.55), theme::ACCENT, false);
+        super::sessions::badge(&p, ui, pos2(x, thumb.top() + 12.0), tr("Sharing…"), theme::black(0.55), theme::accent(), false);
     }
     if let Some(item) = e.remote.as_ref().filter(|i| i.mine) {
         if item.public {
@@ -1945,7 +1945,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
                 pos2(thumb.right() - 12.0, thumb.top() + 12.0),
                 &tr!("Shared · {count}", count = item.grants.len()),
                 theme::black(0.55),
-                theme::FG_2,
+                theme::fg_2(),
                 true,
             );
         }
@@ -1983,7 +1983,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
         tile_caption(&p, ui, thumb, title, &time, from.map(|f| (f.name.as_str(), look.from)), hover);
         return (thumb, resp.filter(|_| look.interactive));
     }
-    let tt = Txt::new(&time, 12.0).color(theme::FG_3);
+    let tt = Txt::new(&time, 12.0).color(theme::fg_3());
     let tw = widgets::text_size(ui, &tt).x;
     widgets::text(&p, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
     widgets::text_truncated(&p, pos2(bx, thumb.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD), r.width() - 48.0 - tw);
@@ -1995,7 +1995,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
             &p,
             pos2(ar.right() + 7.0, line_y),
             Align2::LEFT_CENTER,
-            &Txt::new(tr!("from {name}", name = from.name), 12.0).weight(weight::MEDIUM).color(theme::FG_2),
+            &Txt::new(tr!("from {name}", name = from.name), 12.0).weight(weight::MEDIUM).color(theme::fg_2()),
             r.right() - ar.right() - 23.0,
         );
     } else {
@@ -2012,12 +2012,12 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
                 (icons::CLOUD_ARROW_UP, label.to_string(), theme::WARN)
             }
             Some(i) if i.public => (icons::GLOBE, tr("Public on Orbiters").to_string(), theme::OK),
-            Some(i) if !i.grants.is_empty() => (icons::USERS, tr!("Shared with {count}", count = i.grants.len()), theme::FG_2),
-            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::FG_3),
-            None if look.about.is_some() => (icons::TAG, look.about.as_ref().map(|a| a.1.clone()).unwrap_or_default(), theme::ACCENT),
+            Some(i) if !i.grants.is_empty() => (icons::USERS, tr!("Shared with {count}", count = i.grants.len()), theme::fg_2()),
+            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::fg_3()),
+            None if look.about.is_some() => (icons::TAG, look.about.as_ref().map(|a| a.1.clone()).unwrap_or_default(), theme::accent()),
             None if e.no_keyframes => (icons::WARNING, tr("Recorded without the capture strip: nothing to make 3D from").to_string(), theme::DANGER),
-            None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, tr("Reconstruct it to share it").to_string(), theme::FG_3),
-            None => (icons::HARD_DRIVE, tr("On this computer").to_string(), theme::FG_3),
+            None if !e.ready && !e.is_picture() => (icons::MAGIC_WAND, tr("Reconstruct it to share it").to_string(), theme::fg_3()),
+            None => (icons::HARD_DRIVE, tr("On this computer").to_string(), theme::fg_3()),
         };
         widgets::icon(&p, pos2(bx + 7.0, line_y), glyph, 13.0, color);
         widgets::text_truncated(&p, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(label, 12.0).color(color), r.width() - 52.0);
@@ -2029,10 +2029,10 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
 fn tile_caption(p: &egui::Painter, ui: &Ui, thumb: Rect, title: &str, time: &str, from: Option<(&str, Option<&TextureHandle>)>, hover: f32) {
     let y = thumb.bottom() - 12.0 - 11.0;
     let mut left = thumb.left() + 12.0;
-    let tt = Txt::new(time, 11.5).weight(weight::MEDIUM).color(theme::FG_2);
+    let tt = Txt::new(time, 11.5).weight(weight::MEDIUM).color(theme::fg_2());
     let tw = widgets::text_size(ui, &tt).x;
     if let Some((name, tex)) = from {
-        let t = Txt::new(tr!("from {name}", name = name), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let t = Txt::new(tr!("from {name}", name = name), 11.5).weight(weight::SEMIBOLD).color(theme::fg());
         let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
         let pill = Rect::from_min_size(pos2(left, y - 11.0), vec2(w, 22.0));
         p.rect_filled(pill, theme::radius(11.0), theme::black(0.55));
@@ -2084,11 +2084,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, filter: Filter, searching: bool, height: f3
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(400.0);
+        let mut job = Txt::new(text, 13.0).color(theme::fg_3()).line_height(20.0).job(400.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::fg_3());
 }
 
 /// The instance a group was taken in, in a popover that grows out of its button.
@@ -2160,8 +2160,8 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         let x = rect.left() + 20.0;
         let (number, kind, region) = e.instance.as_deref().map(instance_parts).unwrap_or(("", mark("Instance not recorded"), ""));
         let tile = Rect::from_min_size(pos2(x, y + 2.0), vec2(40.0, 40.0));
-        p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-        widgets::icon(&p, tile.center(), instance_glyph(kind), 19.0, theme::ACCENT);
+        p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::accent(), 0.12));
+        widgets::icon(&p, tile.center(), instance_glyph(kind), 19.0, theme::accent());
         widgets::text_truncated(
             &p,
             pos2(tile.right() + 14.0, y + 12.0),
@@ -2180,14 +2180,14 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
             &p,
             pos2(tile.right() + 14.0, y + 32.0),
             Align2::LEFT_CENTER,
-            &Txt::new(meta.join(" · "), 12.0).color(theme::FG_3),
+            &Txt::new(meta.join(" · "), 12.0).color(theme::fg_3()),
             inner - 54.0,
         );
         y += 44.0 + 16.0;
         widgets::text(&p, pos2(x, y + 7.0), Align2::LEFT_CENTER, &Txt::caps(if current { tr("Here now") } else { tr("Who was there") }));
         y += 14.0 + 10.0;
         if people.is_empty() {
-            widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(tr("Not recorded: VRCX keeps who was there"), 12.5).color(theme::FG_3));
+            widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(tr("Not recorded: VRCX keeps who was there"), 12.5).color(theme::fg_3()));
         } else {
             for (n, name) in people.iter().enumerate() {
                 let cr = Rect::from_min_size(pos2(x, y) + at[n], vec2(widths[n].min(inner), widgets::CHIP_H));
@@ -2215,7 +2215,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
         } else {
             widgets::status_dot(&p, pos2(x + 5.0, y + 11.0), dot, dot == Tone::Ok);
         }
-        widgets::text_truncated(&p, pos2(x + 18.0, y + 11.0), Align2::LEFT_CENTER, &Txt::new(status, 12.5).color(theme::FG_2), inner - 18.0);
+        widgets::text_truncated(&p, pos2(x + 18.0, y + 11.0), Align2::LEFT_CENTER, &Txt::new(status, 12.5).color(theme::fg_2()), inner - 18.0);
         y += 22.0 + 16.0;
         if let Some(err) = &state.instance_error {
             widgets::text_truncated(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &Txt::new(err, 12.0).color(theme::DANGER), inner - 110.0);
@@ -2266,7 +2266,7 @@ fn instance_popover(ctx: &egui::Context, cx: &mut Cx, state: &mut State) {
 }
 
 fn person_txt(name: &str) -> Txt {
-    Txt::new(name, 12.5).weight(weight::MEDIUM).color(theme::FG_2)
+    Txt::new(name, 12.5).weight(weight::MEDIUM).color(theme::fg_2())
 }
 
 /// Runs of pictures of one instance, or of one world (or gallery) and day; `whole` groups (an event's gallery) span days.

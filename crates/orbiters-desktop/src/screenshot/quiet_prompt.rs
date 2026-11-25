@@ -155,11 +155,11 @@ mod before {
         let all = Rect::from_min_size(pos2(0.0, 0.0), vec2(VR_PX[0] as f32, VR_PX[1] as f32));
         let band = all.shrink(6.0);
         let radius = 36.0;
-        let fill = if hover { theme::mix(theme::INK_950, theme::FG, 0.14) } else { theme::alpha(theme::INK_950, 0.94) };
+        let fill = if hover { theme::mix(theme::ink_950(), theme::fg(), 0.14) } else { theme::alpha(theme::ink_950(), 0.94) };
         p.rect_filled(band, radius, fill);
-        p.rect_stroke(band, radius, egui::Stroke::new(3.0, if hover { theme::ACCENT } else { theme::white(0.16) }), egui::StrokeKind::Inside);
+        p.rect_stroke(band, radius, egui::Stroke::new(3.0, if hover { theme::accent() } else { theme::white(0.16) }), egui::StrokeKind::Inside);
         let mark = Rect::from_center_size(pos2(band.left() + 30.0 + 24.0, band.top() + 60.0), n4n0_logo::size_for_width(48.0));
-        n4n0_logo::paint(p, mark, theme::MARK);
+        n4n0_logo::paint(p, mark, theme::mark());
         let words = mark.right() + 20.0;
         let room = band.right() - 30.0 - words;
         let title = tr(NOTICE_TITLE);
@@ -167,16 +167,16 @@ mod before {
         widgets::text_truncated(p, pos2(words, band.top() + 42.0), Align2::LEFT_CENTER, &Txt::new(title, size).weight(weight::SEMIBOLD), room + 4.0);
         let why = why_of(earns_one);
         let size = crate::mismatch::fitting(p, why, &[22.0, 20.0, 18.0, 16.5], room);
-        widgets::text_truncated(p, pos2(words, band.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(why, size).color(theme::FG_3), room + 4.0);
+        widgets::text_truncated(p, pos2(words, band.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(why, size).color(theme::fg_3()), room + 4.0);
         // The action, a pill across the band's foot.
         let pill = Rect::from_min_max(pos2(band.left() + 26.0, band.bottom() - 26.0 - 64.0), pos2(band.right() - 26.0, band.bottom() - 26.0));
-        p.rect_filled(pill, 32.0, if hover { theme::mix(theme::ACCENT, theme::FG, 0.2) } else { theme::ACCENT });
+        p.rect_filled(pill, 32.0, if hover { theme::mix(theme::accent(), theme::fg(), 0.2) } else { theme::accent() });
         let take = tr(TAKE);
         let size = crate::mismatch::fitting(p, take, &[28.0, 26.0, 24.0, 22.0], pill.width() - 110.0);
-        let wide = p.layout_no_wrap(take.to_string(), egui::FontId::proportional(size), theme::INK_950).size().x + 40.0;
+        let wide = p.layout_no_wrap(take.to_string(), egui::FontId::proportional(size), theme::ink_950()).size().x + 40.0;
         let from = pill.center().x - wide / 2.0;
-        widgets::icon(p, pos2(from + 14.0, pill.center().y), icons::CUBE, 28.0, theme::INK_950);
-        widgets::text_truncated(p, pos2(from + 40.0, pill.center().y), Align2::LEFT_CENTER, &Txt::new(take, size).weight(weight::SEMIBOLD).color(theme::INK_950), pill.width() - 100.0);
+        widgets::icon(p, pos2(from + 14.0, pill.center().y), icons::CUBE, 28.0, theme::ink_950());
+        widgets::text_truncated(p, pos2(from + 40.0, pill.center().y), Align2::LEFT_CENTER, &Txt::new(take, size).weight(weight::SEMIBOLD).color(theme::ink_950()), pill.width() - 100.0);
         let track = Rect::from_min_max(pos2(band.left() + radius, band.bottom() - 11.0), pos2(band.right() - radius, band.bottom() - 7.0));
         p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * left.clamp(0.0, 1.0), track.height())), 2.0, theme::white(0.35));
     }

@@ -56,9 +56,9 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut S
                 changed = true;
             }
         }
-        wrapped(ui, booster::level_line(draft.booster.level), 13.0, theme::FG_2, false);
+        wrapped(ui, booster::level_line(draft.booster.level), 13.0, theme::fg_2(), false);
         if state.asking {
-            wrapped(ui, booster::avatars_question(), 13.0, theme::FG, true);
+            wrapped(ui, booster::avatars_question(), 13.0, theme::fg(), true);
             ui.horizontal(|ui| {
                 if Button::new(tr("Show me how")).size(Size::Sm).id_salt("booster-show").show(ui).clicked() {
                     draft.booster.level = Level::Avatars;
@@ -74,41 +74,41 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut S
             });
         }
         widgets::separator(ui);
-        wrapped(ui, booster::status_line(snap), 14.0, theme::FG, true);
+        wrapped(ui, booster::status_line(snap), 14.0, theme::fg(), true);
 
         // Before and after, only from a comparison that ran to its end.
         let report = &status.overlay.report;
         match report.comparisons.first() {
             Some(comparison) => {
                 let said = booster::before_after(comparison);
-                wrapped(ui, said.title, 12.0, theme::FG_3, false);
-                wrapped(ui, &said.figures, 18.0, theme::FG, true);
-                wrapped(ui, said.said, 12.0, theme::FG_2, false);
-                wrapped(ui, &said.filled, 12.0, theme::FG_3, false);
+                wrapped(ui, said.title, 12.0, theme::fg_3(), false);
+                wrapped(ui, &said.figures, 18.0, theme::fg(), true);
+                wrapped(ui, said.said, 12.0, theme::fg_2(), false);
+                wrapped(ui, &said.filled, 12.0, theme::fg_3(), false);
             }
             None => {
                 if let Some(now) = booster::right_now(snap) {
-                    wrapped(ui, &now, 13.0, theme::FG_2, false);
+                    wrapped(ui, &now, 13.0, theme::fg_2(), false);
                 }
             }
         }
         if status.overlay.streamer {
-            wrapped(ui, booster::streamer_line(), 12.0, theme::FG_3, false);
+            wrapped(ui, booster::streamer_line(), 12.0, theme::fg_3(), false);
         }
 
         // Step 3's list, one item at a time.
         if draft.booster.level == Level::Avatars {
             widgets::separator(ui);
             if !report.guide.likely {
-                wrapped(ui, tr("Nothing here is likely to help right now."), 13.0, theme::FG_2, false);
+                wrapped(ui, tr("Nothing here is likely to help right now."), 13.0, theme::fg_2(), false);
             }
             if let Some(item) = report.guide.item() {
-                wrapped(ui, booster::item_name(item), 13.0, theme::FG, true);
-                wrapped(ui, &booster::item_now(item, snap), 12.0, theme::FG_3, false);
+                wrapped(ui, booster::item_name(item), 13.0, theme::fg(), true);
+                wrapped(ui, &booster::item_now(item, snap), 12.0, theme::fg_3(), false);
                 guide_buttons(ui, ctl, item, report.guide.measuring.is_some());
             }
             if let Some((_, left)) = report.guide.measuring {
-                wrapped(ui, &orbiters_i18n::tr!("Measuring for {seconds} more seconds.", seconds = left.ceil() as u32), 12.0, theme::FG_3, false);
+                wrapped(ui, &orbiters_i18n::tr!("Measuring for {seconds} more seconds.", seconds = left.ceil() as u32), 12.0, theme::fg_3(), false);
             }
             for m in report.guide.results.iter().rev().take(4) {
                 wrapped(
@@ -119,7 +119,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut S
                         booster::measured_words(m)
                     ),
                     12.0,
-                    theme::FG_2,
+                    theme::fg_2(),
                     false,
                 );
             }
@@ -127,9 +127,9 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut S
         // Leaving step 3 shows what the person changed in VRChat, until it is back.
         if draft.booster.level != Level::Avatars && !status.to_put_back.is_empty() {
             widgets::separator(ui);
-            wrapped(ui, tr("Put these back in VRChat's menu if you want them as they were:"), 13.0, theme::FG, true);
+            wrapped(ui, tr("Put these back in VRChat's menu if you want them as they were:"), 13.0, theme::fg(), true);
             for item in &status.to_put_back {
-                wrapped(ui, &booster::put_back_words(item), 12.0, theme::FG_2, false);
+                wrapped(ui, &booster::put_back_words(item), 12.0, theme::fg_2(), false);
             }
             if button(ui, tr("I've put them back"), "booster-put-back-done") {
                 ctl.booster(Command::PutBackDone);
@@ -166,13 +166,13 @@ fn details(ui: &mut Ui, cx: &Cx) {
     let status = &snap.booster;
     let changed = booster::changed_now(snap);
     if changed.is_empty() {
-        wrapped(ui, tr("Nothing is changed right now."), 12.0, theme::FG_3, false);
+        wrapped(ui, tr("Nothing is changed right now."), 12.0, theme::fg_3(), false);
     }
     for line in &changed {
-        wrapped(ui, line, 12.0, theme::FG_2, false);
+        wrapped(ui, line, 12.0, theme::fg_2(), false);
     }
     if let Some(times) = booster::times_words(snap) {
-        wrapped(ui, &times, 12.0, theme::FG_3, false);
+        wrapped(ui, &times, 12.0, theme::fg_3(), false);
     }
     ui.horizontal_wrapped(|ui| {
         if button(ui, tr("Test sharpness anyway"), "booster-test-sharpness") {
@@ -195,7 +195,7 @@ fn details(ui: &mut Ui, cx: &Cx) {
         }
     });
     if status.test_tools {
-        wrapped(ui, tr("For testing"), 12.0, theme::FG_3, true);
+        wrapped(ui, tr("For testing"), 12.0, theme::fg_3(), true);
         ui.horizontal_wrapped(|ui| {
             let holding = status.overlay.sharpness.is_some();
             if button(ui, if holding { tr("Let go of the test change") } else { tr("Hold a test change") }, "booster-hold") {
@@ -212,7 +212,7 @@ fn details(ui: &mut Ui, cx: &Cx) {
             }
         });
         if let Some(path) = &status.test_report {
-            wrapped(ui, &path.display().to_string(), 12.0, theme::FG_3, false);
+            wrapped(ui, &path.display().to_string(), 12.0, theme::fg_3(), false);
         }
     }
 }

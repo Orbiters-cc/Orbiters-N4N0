@@ -123,10 +123,10 @@ pub(super) fn draw_tracking(p: &Painter, facts: &Facts) {
         let y = row(i);
         // Whole before its slider, smaller where a language's name is long ("Mosaicos en el menú rápido" ran into it).
         let (name, font) = fitted(p, name, 20.0, weight::BOLD, X - 26.0 - 10.0, 15.0);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, X - 40.0);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::label());
+        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::label(), X - 40.0);
         job.wrap.max_rows = 2;
-        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
+        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::label());
     };
     if facts.tracking.is_some() {
         named(0, tr("Smooth tracking"), tr("SteamVR's devices, at once"));
@@ -141,7 +141,7 @@ pub(super) fn draw_tracking(p: &Painter, facts: &Facts) {
     let left = if reset_done(facts) { 26.0 } else { RESET.right() + 18.0 };
     if !note.is_empty() {
         let font = look::font(16.0, weight::MEDIUM);
-        p.text(pos2(left, row(ROWS.len() + 1) + 12.0), Align2::LEFT_CENTER, fit(p, tr(note), &font, 1000.0 - left), font, look::MUTED);
+        p.text(pos2(left, row(ROWS.len() + 1) + 12.0), Align2::LEFT_CENTER, fit(p, tr(note), &font, 1000.0 - left), font, look::muted());
     }
 }
 
@@ -155,11 +155,11 @@ pub(super) fn draw_smoothing_bar(p: &Painter, rect: Rect, which: Smoothed, facts
     if ms > 0 {
         p.rect_filled(Rect::from_min_max(bar.min, pos2(x + 12.0, bar.bottom())), look::radius(15.0), theme::mix(look::TILE, look::accent(), 0.55));
     }
-    p.circle_filled(pos2(x, bar.center().y), 12.0, look::LABEL);
+    p.circle_filled(pos2(x, bar.center().y), 12.0, look::label());
     let words = if ms == 0 { tr("Off").to_string() } else { orbiters_i18n::tr!("{ms} ms", ms = ms) };
     // In its column after the slider: "Desactivado" ran onto the slider's end.
     let (words, font) = fitted(p, &words, 20.0, weight::SEMIBOLD, VALUE_WIDTH - 12.0, 14.0);
-    p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, words, font, look::LABEL);
+    p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, words, font, look::label());
 }
 
 /// What this sheet's things do, where they are pointed at.

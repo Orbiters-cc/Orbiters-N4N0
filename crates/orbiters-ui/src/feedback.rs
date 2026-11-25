@@ -64,7 +64,7 @@ pub fn fill_corners(painter: &Painter, rect: Rect, radii: [f32; 4], color: Color
 pub fn banner(ui: &mut Ui, id: Id, tone: Tone, text: &str, dismiss: bool) -> bool {
     let w = ui.available_width();
     let text_w = w - 16.0 - 28.0 - if dismiss { 40.0 } else { 16.0 };
-    let galley = ui.painter().layout_job(Txt::new(text, 13.0).color(theme::FG).line_height(19.0).job(text_w));
+    let galley = ui.painter().layout_job(Txt::new(text, 13.0).color(theme::fg()).line_height(19.0).job(text_w));
     let full_h = galley.size().y.max(19.0) + 24.0;
     let k = anim::spring_from(ui.ctx(), id.with("in"), [0.0], [1.0], Spring::SOFT)[0];
     let (rect, _) = ui.allocate_exact_size(vec2(w, full_h * k.clamp(0.0, 1.0)), Sense::hover());
@@ -80,7 +80,7 @@ pub fn banner(ui: &mut Ui, id: Id, tone: Tone, text: &str, dismiss: bool) -> boo
         Tone::Info | Tone::Off => icons::INFO,
     };
     widgets::icon(&p, pos2(r.left() + 24.0, r.top() + 21.5), glyph, 16.0, c);
-    p.galley(pos2(r.left() + 44.0, r.top() + 12.0), galley, theme::FG);
+    p.galley(pos2(r.left() + 44.0, r.top() + 12.0), galley, theme::fg());
     if dismiss {
         let b = Rect::from_center_size(pos2(r.right() - 22.0, r.top() + 21.5), vec2(28.0, 28.0));
         let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(b).id_salt(id.with("dismiss")));
@@ -121,7 +121,7 @@ pub fn activity(ui: &mut Ui, id: Id, area: Rect, activity: Option<&Activity<'_>>
         None => return false,
     };
     let label_t = Txt::new(&label, 13.0).weight(weight::MEDIUM);
-    let detail_t = detail.as_ref().map(|d| Txt::new(d, 11.5).color(theme::FG_3));
+    let detail_t = detail.as_ref().map(|d| Txt::new(d, 11.5).color(theme::fg_3()));
     let text_w = widgets::text_size(ui, &label_t).x.max(detail_t.as_ref().map(|t| widgets::text_size(ui, t).x.min(320.0)).unwrap_or(0.0));
     let bar_w = if fraction.is_some() { 140.0 } else { 0.0 };
     let cancel_b = Button::new(orbiters_i18n::tr("Cancel")).variant(Variant::Ghost).size(Size::Sm);
@@ -135,7 +135,7 @@ pub fn activity(ui: &mut Ui, id: Id, area: Rect, activity: Option<&Activity<'_>>
     p.multiply_opacity(k.clamp(0.0, 1.0));
     paint::shadow(&p, r, h * 0.5, vec2(0.0, 10.0), 26.0, -6.0, theme::black(0.45));
     p.rect_filled(r, theme::radius(h * 0.5), theme::surface_strong());
-    spinner(&p, pos2(r.left() + 16.0 + 11.0, r.center().y), 8.0, 2.2, theme::ACCENT);
+    spinner(&p, pos2(r.left() + 16.0 + 11.0, r.center().y), 8.0, 2.2, theme::accent());
     let x = r.left() + 16.0 + 22.0 + 12.0;
     let text_max = r.right() - 16.0 - cancel_w - if bar_w > 0.0 { bar_w + 16.0 } else { 0.0 } - x;
     match &detail_t {
@@ -152,7 +152,7 @@ pub fn activity(ui: &mut Ui, id: Id, area: Rect, activity: Option<&Activity<'_>>
         p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
         let f = anim::value(&ctx, id.with("fraction"), f.clamp(0.0, 1.0), Spring::SOFT).clamp(0.0, 1.0);
         if f > 0.0 {
-            p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), bar.height())), theme::radius(3.0), theme::ACCENT);
+            p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), bar.height())), theme::radius(3.0), theme::accent());
         }
     }
     // Clicks on the capsule stop there.

@@ -119,11 +119,11 @@ impl RecordButton {
         let r_a = 118.0 * s;
         paint::ring(p, c, r_a, 1.0, theme::white(0.06));
         let dot_a = c + Vec2::angled(spin.orbit_a - FRAC_PI_2) * r_a;
-        p.circle_filled(dot_a, 4.0 * s, theme::mix(theme::FG_3, theme::REC, rec_k));
+        p.circle_filled(dot_a, 4.0 * s, theme::mix(theme::fg_3(), theme::REC, rec_k));
         let r_b = 100.0 * s;
         paint::dashed_circle(p, c, r_b, [2.0 * s, 7.0 * s], 1.0, theme::white(0.05), spin.orbit_b);
         let dot_b = c + Vec2::angled(spin.orbit_b) * r_b;
-        p.circle_filled(dot_b, 3.0 * s, theme::mix(theme::FG_4, theme::alpha(theme::REC, 0.6), rec_k));
+        p.circle_filled(dot_b, 3.0 * s, theme::mix(theme::fg_4(), theme::alpha(theme::REC, 0.6), rec_k));
 
         // Decode health arc.
         let [sweep, arc_alpha] =
@@ -147,12 +147,12 @@ impl RecordButton {
         let disabled_k = anim::toggle(&ctx, id.with("disabled"), self.disabled, Spring::SOFT);
 
         // The face: flat, a step lighter on hover, ringed in red while recording.
-        let face = theme::mix(theme::mix(theme::INK_800, theme::INK_750, hover), theme::mix(theme::INK_800, theme::REC, 0.12), rec_k);
+        let face = theme::mix(theme::mix(theme::ink_800(), theme::ink_750(), hover), theme::mix(theme::ink_800(), theme::REC, 0.12), rec_k);
         let mut face_painter = p.clone();
         // On top of the card's entrance and the page's fade (set_opacity would replace them: the disc popped in).
         face_painter.multiply_opacity(1.0 - 0.5 * disabled_k);
         face_painter.circle_filled(c, 70.0 * scale, face);
-        paint::ring(&face_painter, c, 69.0 * scale, 2.0 * scale, theme::mix(theme::INK_600, theme::REC, rec_k));
+        paint::ring(&face_painter, c, 69.0 * scale, 2.0 * scale, theme::mix(theme::ink_600(), theme::REC, rec_k));
 
         // Glyph: dot ↔ square, or a spinner while busy.
         let busy_k = anim::toggle(&ctx, id.with("busy"), busy, Spring::SNAPPY).clamp(0.0, 1.0);
@@ -173,7 +173,7 @@ impl RecordButton {
                 theme::REC
             };
             // Disabled, the glyph greys with its face: a bright red dot read as a button that works (the dashboard with nothing to stop, F15).
-            let color = theme::mix(anim::color(&ctx, id.with("glyph-color"), target, Spring::MORPH), theme::FG_4, disabled_k);
+            let color = theme::mix(anim::color(&ctx, id.with("glyph-color"), target, Spring::MORPH), theme::fg_4(), disabled_k);
             let k = 1.0 - busy_k;
             let g = Rect::from_center_size(c, Vec2::splat(size * scale * (0.4 + 0.6 * k)));
             p.rect_filled(g, theme::radius(radius * scale * (0.4 + 0.6 * k)), theme::alpha(color, k));

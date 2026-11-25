@@ -84,19 +84,19 @@ pub(super) fn draw_settings(p: &Painter, facts: &Facts) {
     for (i, name, about) in rows {
         let y = settings_row(i);
         let font = look::font(20.0, weight::BOLD);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, SETTINGS_X - 40.0);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::label());
+        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::label(), SETTINGS_X - 40.0);
         job.wrap.max_rows = 2;
-        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
+        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::label());
     }
 }
 
 /// The name in the row of the sound device, or of the language.
 pub(super) fn draw_stepper_name(p: &Painter, rect: Rect, icon: &str, name: &str) {
     p.rect_filled(rect, look::radius(14.0), look::TILE);
-    widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icon, 24.0, look::LABEL);
+    widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icon, 24.0, look::label());
     let font = look::font(19.0, weight::SEMIBOLD);
-    p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, name, &font, rect.width() - 70.0), font, look::LABEL);
+    p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, name, &font, rect.width() - 70.0), font, look::label());
 }
 
 pub(super) fn sound_name(facts: &Facts) -> &str {

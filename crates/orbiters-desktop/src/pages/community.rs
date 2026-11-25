@@ -41,7 +41,7 @@ fn gallery_of(e: &Entry) -> Option<u64> {
 fn visibility(g: Option<&Gallery>) -> (&'static str, &'static str, Color32) {
     match g.map(|g| g.visibility.as_str()) {
         Some("public") => (icons::GLOBE, tr("Public"), theme::OK),
-        Some("private") => (icons::LOCK_SIMPLE, tr("Yours"), theme::FG_3),
+        Some("private") => (icons::LOCK_SIMPLE, tr("Yours"), theme::fg_3()),
         _ => (icons::USERS_THREE, tr("Members"), theme::CYAN),
     }
 }
@@ -370,7 +370,7 @@ impl State {
         );
         let (glyph, label, color) = visibility(g.as_ref());
         let y = r.top() + 36.0;
-        let t = Txt::new(label, 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
+        let t = Txt::new(label, 11.0).weight(weight::SEMIBOLD).color(theme::fg_2());
         let tw = widgets::text_size(ui, &t).x;
         let pill = Rect::from_min_size(pos2(r.left(), y - 10.0), vec2(tw + 30.0, 20.0));
         p.rect_filled(pill, theme::radius(10.0), theme::white(0.06));
@@ -380,7 +380,7 @@ impl State {
             &p,
             pos2(pill.right() + 10.0, y),
             Align2::LEFT_CENTER,
-            &Txt::new(format!("{span} · {items}"), 12.0).color(theme::FG_3),
+            &Txt::new(format!("{span} · {items}"), 12.0).color(theme::fg_3()),
             br.left() - pill.right() - 26.0,
         );
         if sharing::pressed(b.show_at(ui, br)) {
@@ -434,14 +434,14 @@ impl State {
         let (thumb, corners) = if tile {
             (r, [super::gallery::TILE_RADIUS; 4])
         } else {
-            widgets::frame(&pa, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+            widgets::frame(&pa, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
             (Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0)), [20.0, 20.0, 0.0, 0.0])
         };
         match &tex {
             Some(t) => feedback::cover(&pa, thumb, corners, t, 1.0 + 0.06 * ease::out_cubic(hover), 1.0),
             None => {
-                feedback::fill_corners(&pa, thumb, corners, theme::INK_800);
-                widgets::icon(&pa, thumb.center(), icons::IMAGE, 28.0, theme::FG_4);
+                feedback::fill_corners(&pa, thumb, corners, theme::ink_800());
+                widgets::icon(&pa, thumb.center(), icons::IMAGE, 28.0, theme::fg_4());
             }
         }
         let shade = paint::rounded_rect_points_corners(thumb, corners.map(theme::squircle));
@@ -451,10 +451,10 @@ impl State {
             &Gradient::vertical(
                 thumb,
                 &[
-                    (0.0, theme::alpha(theme::INK_950, 0.25)),
+                    (0.0, theme::alpha(theme::ink_950(), 0.25)),
                     (0.3, Color32::TRANSPARENT),
                     (0.6, Color32::TRANSPARENT),
-                    (1.0, theme::alpha(theme::INK_950, 0.75)),
+                    (1.0, theme::alpha(theme::ink_950(), 0.75)),
                 ],
             ),
         );
@@ -470,11 +470,11 @@ impl State {
             pos2(x, thumb.top() + 12.0),
             if p.event.is_some() { tr("Event") } else { label },
             theme::black(0.55),
-            if p.event.is_some() { theme::ACCENT } else { color },
+            if p.event.is_some() { theme::accent() } else { color },
             false,
         ) + 6.0;
         if p.reaction_count > 0 {
-            let t = Txt::new(p.reaction_count.to_string(), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let t = Txt::new(p.reaction_count.to_string(), 10.5).weight(weight::SEMIBOLD).color(theme::fg());
             let tw = widgets::text_size(ui, &t).x;
             // Under a badge that reaches it (French's "ÉVÉNEMENT", on a narrow card).
             let left = thumb.right() - 12.0 - tw - 34.0;
@@ -486,7 +486,7 @@ impl State {
         // A tile: who posted it, over its bottom.
         if tile {
             let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| tr("Someone").into());
-            let t = Txt::new(&name, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let t = Txt::new(&name, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
             let w = (widgets::text_size(ui, &t).x + 34.0).min(thumb.width() - 24.0);
             let pill = Rect::from_min_size(pos2(thumb.left() + 12.0, thumb.bottom() - 12.0 - 22.0), vec2(w, 22.0));
             pa.rect_filled(pill, theme::radius(11.0), theme::black(0.55));
@@ -499,7 +499,7 @@ impl State {
         let bx = r.left() + 16.0;
         let time = super::local_time(&controller::iso(e.taken));
         let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
-        let tt = Txt::new(&time, 12.0).color(theme::FG_3);
+        let tt = Txt::new(&time, 12.0).color(theme::fg_3());
         let tw = widgets::text_size(ui, &tt).x;
         widgets::text(&pa, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
         let name = p.author.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| tr("Someone").into());
@@ -516,16 +516,16 @@ impl State {
         let words = p.message.as_ref().map(|m| m.text()).map(|t| t.lines().next().unwrap_or_default().to_string()).filter(|t| !t.trim().is_empty());
         match words {
             Some(w) => {
-                widgets::icon(&pa, pos2(bx + 7.0, line_y), icons::CHAT_CENTERED_TEXT, 13.0, theme::FG_3);
-                widgets::text_truncated(&pa, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_2), r.width() - 52.0);
+                widgets::icon(&pa, pos2(bx + 7.0, line_y), icons::CHAT_CENTERED_TEXT, 13.0, theme::fg_3());
+                widgets::text_truncated(&pa, pos2(bx + 20.0, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::fg_2()), r.width() - 52.0);
             }
             None => {
-                widgets::icon(&pa, pos2(bx + 7.0, line_y), icons::IMAGES_SQUARE, 13.0, theme::FG_3);
+                widgets::icon(&pa, pos2(bx + 7.0, line_y), icons::IMAGES_SQUARE, 13.0, theme::fg_3());
                 widgets::text_truncated(
                     &pa,
                     pos2(bx + 20.0, line_y),
                     Align2::LEFT_CENTER,
-                    &Txt::new(tr!("In {world}", world = e.world_name), 12.0).color(theme::FG_3),
+                    &Txt::new(tr!("In {world}", world = e.world_name), 12.0).color(theme::fg_3()),
                     r.width() - 52.0,
                 );
             }
@@ -602,7 +602,7 @@ impl State {
                 let mut options: Vec<(Option<u64>, String, &'static str, Option<Color32>)> = vec![(None, tr("All galleries").into(), icons::IMAGES_SQUARE, None)];
                 for g in galleries.all() {
                     let (glyph, _, color) = visibility(Some(g));
-                    let (glyph, color) = if g.event.is_some() { (icons::CALENDAR_DOTS, theme::ACCENT) } else { (glyph, color) };
+                    let (glyph, color) = if g.event.is_some() { (icons::CALENDAR_DOTS, theme::accent()) } else { (glyph, color) };
                     options.push((Some(g.id), g.name.clone(), glyph, Some(color)));
                 }
                 // Each as wide as when chosen (its check), so choosing one never moves the others.
@@ -748,11 +748,11 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
     let landing = morph::bounce(&ctx, cover);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.01 * press) * landing);
     let p = ui.painter().clone();
-    widgets::frame(&p, r, 24.0, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(&p, r, 24.0, theme::mix(theme::surface(), theme::ink_800(), hover));
     let cover = Rect::from_min_size(r.min + vec2(10.0, 10.0), vec2(128.0, r.height() - 20.0));
     events::paint_cover(&p, cover, [16.0; 4], tex, &e.id, 1.0 + 0.05 * hover, 1.0);
     let x = cover.right() + 16.0;
-    let go_t = Txt::new(tr("Event details"), 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let go_t = Txt::new(tr("Event details"), 13.0).weight(weight::SEMIBOLD).color(theme::accent());
     let go_w = widgets::text_size(ui, &go_t).x + 40.0;
     let narrow = r.width() < 560.0;
     let room = if narrow { r.right() - x - 52.0 } else { r.right() - x - go_w - 24.0 };
@@ -764,9 +764,9 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
     let ph = events::phase(e.status.as_deref(), e.starts_at.as_deref(), e.ends_at.as_deref(), false, events::now());
     let (fg, bg) = match ph {
         Phase::Live => (theme::REC, theme::alpha(theme::REC, 0.14)),
-        Phase::Soon(_) => (theme::ACCENT, theme::alpha(theme::ACCENT, 0.14)),
+        Phase::Soon(_) => (theme::accent(), theme::alpha(theme::accent(), 0.14)),
         Phase::Cancelled => (theme::DANGER, theme::alpha(theme::DANGER, 0.12)),
-        _ => (theme::FG_3, theme::white(0.07)),
+        _ => (theme::fg_3(), theme::white(0.07)),
     };
     let st = Txt::new(events::phase_label(ph), 11.0).weight(weight::SEMIBOLD).color(fg);
     let sw = widgets::text_size(ui, &st).x;
@@ -784,17 +784,17 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
     let mut fx = x;
     let facts_end = x + room;
     let when = events::when(e.starts_at.as_deref(), e.ends_at.as_deref());
-    widgets::icon(&p, pos2(fx + 6.0, fy), icons::CALENDAR_BLANK, 12.5, theme::FG_3);
-    let wr = widgets::text_truncated(&p, pos2(fx + 19.0, fy), Align2::LEFT_CENTER, &Txt::new(when, 12.5).color(theme::FG_3), (facts_end - fx - 19.0).max(40.0));
+    widgets::icon(&p, pos2(fx + 6.0, fy), icons::CALENDAR_BLANK, 12.5, theme::fg_3());
+    let wr = widgets::text_truncated(&p, pos2(fx + 19.0, fy), Align2::LEFT_CENTER, &Txt::new(when, 12.5).color(theme::fg_3()), (facts_end - fx - 19.0).max(40.0));
     fx = wr.right() + 14.0;
     if let Some(w) = e.world.as_ref().and_then(|w| w.name.as_ref()) {
         if facts_end - fx > 60.0 {
-            widgets::icon(&p, pos2(fx + 6.0, fy), icons::GLOBE, 12.5, theme::FG_3);
+            widgets::icon(&p, pos2(fx + 6.0, fy), icons::GLOBE, 12.5, theme::fg_3());
             let wr = widgets::text_truncated(
                 &p,
                 pos2(fx + 19.0, fy),
                 Align2::LEFT_CENTER,
-                &Txt::new(w, 12.5).color(theme::FG_3),
+                &Txt::new(w, 12.5).color(theme::fg_3()),
                 (facts_end - fx - 19.0).min(180.0),
             );
             fx = wr.right() + 14.0;
@@ -808,24 +808,24 @@ fn event_card(ui: &mut Ui, e: &Card, rect: Rect, tex: Option<&TextureHandle>, li
                 &p,
                 pos2(ar.right() + 6.0, fy),
                 Align2::LEFT_CENTER,
-                &Txt::new(&h.name, 12.5).color(theme::FG_3),
+                &Txt::new(&h.name, 12.5).color(theme::fg_3()),
                 facts_end - ar.right() - 6.0,
             );
         }
     }
-    widgets::text_truncated(&p, pos2(x, r.bottom() - 8.0 - 2.0), Align2::LEFT_CENTER, &Txt::new(line, 11.5).color(theme::FG_4), room);
+    widgets::text_truncated(&p, pos2(x, r.bottom() - 8.0 - 2.0), Align2::LEFT_CENTER, &Txt::new(line, 11.5).color(theme::fg_4()), room);
     // Event details.
     let go = if narrow {
         Rect::from_center_size(pos2(r.right() - 30.0, r.center().y), vec2(36.0, 36.0))
     } else {
         Rect::from_min_size(pos2(r.right() - 16.0 - go_w, r.center().y - 17.0), vec2(go_w, 34.0))
     };
-    p.rect_filled(go, theme::radius(17.0), theme::alpha(theme::ACCENT, 0.12 + 0.06 * hover));
+    p.rect_filled(go, theme::radius(17.0), theme::alpha(theme::accent(), 0.12 + 0.06 * hover));
     if narrow {
-        widgets::icon(&p, go.center(), icons::CARET_RIGHT, 16.0, theme::ACCENT);
+        widgets::icon(&p, go.center(), icons::CARET_RIGHT, 16.0, theme::accent());
     } else {
         widgets::text(&p, pos2(go.left() + 14.0, go.center().y), Align2::LEFT_CENTER, &go_t);
-        widgets::icon(&p, pos2(go.right() - 16.0 + 3.0 * hover, go.center().y), icons::CARET_RIGHT, 14.0, theme::ACCENT);
+        widgets::icon(&p, pos2(go.right() - 16.0 + 3.0 * hover, go.center().y), icons::CARET_RIGHT, 14.0, theme::accent());
     }
     (interactive && sharing::pressed(resp)).then_some(cover)
 }
@@ -1044,7 +1044,7 @@ impl PictureWindow {
             }
             let mut np = pa.with_clip_rect(picture.intersect(pa.clip_rect()));
             if lift > 0.001 {
-                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::INK_750, lift.clamp(0.0, 1.0)));
+                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::ink_750(), lift.clamp(0.0, 1.0)));
                 np.multiply_opacity(1.0 - 0.35 * lift.clamp(0.0, 1.0));
             }
             let at = picture.translate(vec2(28.0 * self.nav.1 * (1.0 - k), 0.0));
@@ -1053,8 +1053,8 @@ impl PictureWindow {
             match (&thumb, &large) {
                 (Some(t), _) if shown_large < 0.99 => feedback::cover(&np, at, radii, t, 1.0, k),
                 (None, None) => {
-                    feedback::fill_corners(&np, at, radii, theme::alpha(theme::INK_750, k));
-                    widgets::icon(&np, at.center(), icons::IMAGE, 40.0, theme::alpha(theme::FG_4, k));
+                    feedback::fill_corners(&np, at, radii, theme::alpha(theme::ink_750(), k));
+                    widgets::icon(&np, at.center(), icons::IMAGE, 40.0, theme::alpha(theme::fg_4(), k));
                 }
                 _ => {}
             }
@@ -1070,12 +1070,12 @@ impl PictureWindow {
             }
             // What it is, over the picture.
             let about = self.about.get(self.index);
-            let (vg, vl, vc) = if about.is_some() { (icons::TAG, "", theme::ACCENT) } else { visibility(gallery.as_ref()) };
+            let (vg, vl, vc) = if about.is_some() { (icons::TAG, "", theme::accent()) } else { visibility(gallery.as_ref()) };
             let label = match about {
                 Some(a) => a.title.clone(),
                 None => gallery.as_ref().map(|g| g.name.clone()).unwrap_or_else(|| tr("Community gallery").into()),
             };
-            let t = Txt::new(&label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let t = Txt::new(&label, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
             let tw = widgets::text_size(&cu, &t).x.min(picture.width() - 120.0);
             let badge = Rect::from_min_size(picture.min + vec2(16.0, 16.0), vec2(tw + 38.0, 28.0));
             let cp = cu.painter().clone();
@@ -1238,8 +1238,8 @@ fn details(
     let face = if stand_ins.is_empty() { avatar_of(p.author.as_ref()).and_then(|a| pictures.get(&ctx, &a)) } else { None };
     let ar = Rect::from_min_size(pos2(row.left(), row.top() + 4.0), vec2(36.0, 36.0));
     if about.is_some() {
-        pa.rect_filled(ar, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.13));
-        widgets::icon(&pa, ar.center(), icons::TAG, 17.0, theme::ACCENT);
+        pa.rect_filled(ar, theme::radius(12.0), theme::alpha(theme::accent(), 0.13));
+        widgets::icon(&pa, ar.center(), icons::TAG, 17.0, theme::accent());
     } else {
         widgets::avatar(&pa, ar, face.as_ref(), &name);
     }
@@ -1265,7 +1265,7 @@ fn details(
         Some(a) => a.line.clone(),
         None => p.posted_at.as_deref().map(super::local_time).map(|t| tr!("Posted {time}", time = t)).unwrap_or_default(),
     };
-    widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(posted, 12.0).color(theme::FG_3), room);
+    widgets::text_truncated(&pa, pos2(ar.right() + 12.0, ar.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(posted, 12.0).color(theme::fg_3()), room);
     if about.is_some() {
         return;
     }
@@ -1279,19 +1279,19 @@ fn details(
         &pa,
         pos2(grow.left() + 21.0, grow.center().y),
         Align2::LEFT_CENTER,
-        &Txt::new(format!("{gname} · {vl}"), 12.5).color(theme::FG_2),
+        &Txt::new(format!("{gname} · {vl}"), 12.5).color(theme::fg_2()),
         w - 21.0,
     );
     // Its words.
     if let Some(text) = p.message.as_ref().map(|m| m.text()).filter(|t| !t.trim().is_empty()) {
         ui.add_space(12.0);
         let g = ui.painter().layout_job({
-            let mut job = Txt::new(text.trim(), 14.0).color(theme::FG).line_height(21.0).job(w);
+            let mut job = Txt::new(text.trim(), 14.0).color(theme::fg()).line_height(21.0).job(w);
             job.wrap.max_rows = 6;
             job
         });
         let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
-        ui.painter().galley(r.min, g, theme::FG);
+        ui.painter().galley(r.min, g, theme::fg());
     }
     // Its reactions, who reacted on hover ([`super::community_talk`]; its replies come after the event).
     super::community_talk::reactions(ui, wid, p, talk, pictures, development);
@@ -1305,8 +1305,8 @@ fn details(
         let pa = ui.painter().clone();
         widgets::frame(&pa, r, 16.0, theme::mix(theme::white(0.04), theme::white(0.08), hover));
         let tile = Rect::from_min_size(pos2(r.left() + 10.0, r.top() + 10.0), vec2(40.0, 40.0));
-        pa.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.13));
-        widgets::icon(&pa, tile.center(), icons::CALENDAR_DOTS, 18.0, theme::ACCENT);
+        pa.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::accent(), 0.13));
+        widgets::icon(&pa, tile.center(), icons::CALENDAR_DOTS, 18.0, theme::accent());
         let tx = tile.right() + 12.0;
         let room = r.right() - tx - 34.0;
         widgets::text(&pa, pos2(tx, r.top() + 15.0), Align2::LEFT_CENTER, &Txt::caps(tr("Taken at")));
@@ -1315,10 +1315,10 @@ fn details(
             &pa,
             pos2(tx, r.top() + 47.0),
             Align2::LEFT_CENTER,
-            &Txt::new(events::when(e.starts_at.as_deref(), e.ends_at.as_deref()), 11.5).color(theme::FG_3),
+            &Txt::new(events::when(e.starts_at.as_deref(), e.ends_at.as_deref()), 11.5).color(theme::fg_3()),
             room,
         );
-        widgets::icon(&pa, pos2(r.right() - 18.0 + 3.0 * hover, r.center().y), icons::CARET_RIGHT, 15.0, theme::FG_3);
+        widgets::icon(&pa, pos2(r.right() - 18.0 + 3.0 * hover, r.center().y), icons::CARET_RIGHT, 15.0, theme::fg_3());
         if sharing::pressed(resp) {
             *event_pressed = Some((e.clone(), tile));
         }

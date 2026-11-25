@@ -1,6 +1,7 @@
 //! Shared logic of Orbiters - N4N0, used by the app and its workers.
 
 pub mod account;
+pub mod appearance;
 pub mod assets;
 pub mod bundle;
 pub mod call;

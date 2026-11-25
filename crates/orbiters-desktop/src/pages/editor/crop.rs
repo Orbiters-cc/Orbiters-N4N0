@@ -626,7 +626,7 @@ fn paint_picture(ed: &mut Editor, ui: &mut Ui, frame: Rect, clip: Rect, c: Crop)
         (None, _) => feedback::shimmer(&p, crop_rect(frame, c), 4.0),
     }
     if ed.preview.as_ref().is_some_and(|pv| pv.busy()) {
-        feedback::spinner(&p, pos2(clip.right() - 22.0, clip.top() + 18.0), 7.0, 2.0, theme::FG_3);
+        feedback::spinner(&p, pos2(clip.right() - 22.0, clip.top() + 18.0), 7.0, 2.0, theme::fg_3());
         ui.ctx().request_repaint();
     }
 }
@@ -640,13 +640,13 @@ fn tool(ui: &mut Ui, id: Id, r: Rect, label: &str, on: bool, enabled: bool, draw
     let p = ui.painter();
     let c = r.center();
     let rad = r.width() * 0.5 * (1.0 - 0.08 * press);
-    p.circle_filled(c, rad, if on { theme::alpha(theme::ACCENT, 0.16 + 0.06 * hover) } else { theme::white(0.04 + 0.06 * hover) });
+    p.circle_filled(c, rad, if on { theme::alpha(theme::accent(), 0.16 + 0.06 * hover) } else { theme::white(0.04 + 0.06 * hover) });
     let color = if !enabled {
-        theme::FG_4
+        theme::fg_4()
     } else if on {
-        theme::ACCENT
+        theme::accent()
     } else {
-        theme::mix(theme::FG_2, theme::FG, hover)
+        theme::mix(theme::fg_2(), theme::fg(), hover)
     };
     draw(p, c, color);
     // `label` is the English key: control notes find a control by it, the tip says it in the language.
@@ -779,11 +779,11 @@ fn tools_row(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect, size: (f32, f32)) {
     {
         let p = ui.painter();
         let pill = Rect::from_center_size(auto_r.center(), vec2(auto_w - 6.0, 24.0));
-        p.rect_filled(pill, theme::radius(12.0), theme::mix(theme::white(0.04 + 0.05 * hover), theme::ACCENT, lit));
+        p.rect_filled(pill, theme::radius(12.0), theme::mix(theme::white(0.04 + 0.05 * hover), theme::accent(), lit));
         if lit < 0.99 {
-            p.rect_stroke(pill, theme::radius(12.0), Stroke::new(1.2, theme::alpha(if found.is_some() { theme::FG_2 } else { theme::FG_4 }, 1.0 - lit)), egui::StrokeKind::Inside);
+            p.rect_stroke(pill, theme::radius(12.0), Stroke::new(1.2, theme::alpha(if found.is_some() { theme::fg_2() } else { theme::fg_4() }, 1.0 - lit)), egui::StrokeKind::Inside);
         }
-        let color = theme::mix(if found.is_some() { theme::FG } else { theme::FG_4 }, theme::ON_ACCENT, lit);
+        let color = theme::mix(if found.is_some() { theme::fg() } else { theme::fg_4() }, theme::on_accent(), lit);
         widgets::text(p, pill.center(), Align2::CENTER_CENTER, &Txt::new(tr("AUTO"), 11.5).weight(weight::BOLD).tracking(0.06).color(color));
     }
     let resp = resp.on_hover_text(label);
@@ -862,13 +862,13 @@ fn dials(ed: &mut Editor, ui: &mut Ui, id: Id, r: Rect) {
                     c + vec2(a.cos(), a.sin()) * rad
                 })
                 .collect();
-            p.add(Shape::line(pts, Stroke::new(3.0, theme::alpha(theme::ACCENT, 0.55 + 0.45 * on))));
+            p.add(Shape::line(pts, Stroke::new(3.0, theme::alpha(theme::accent(), 0.55 + 0.45 * on))));
         }
         let rounded = value.round() as i32;
         if chosen && rounded != 0 {
-            widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(format!("{rounded}"), 14.0).weight(weight::SEMIBOLD).color(theme::FG));
+            widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(format!("{rounded}"), 14.0).weight(weight::SEMIBOLD).color(theme::fg()));
         } else {
-            let color = if value.abs() >= 0.05 { theme::ACCENT } else { theme::mix(theme::FG_2, theme::FG, on.max(hover)) };
+            let color = if value.abs() >= 0.05 { theme::accent() } else { theme::mix(theme::fg_2(), theme::fg(), on.max(hover)) };
             dial_icon(p, c, *dial, color);
         }
         let resp = resp.on_hover_text(tr(dial.about())).on_hover_cursor(CursorIcon::PointingHand);
@@ -997,7 +997,7 @@ fn ruler(ui: &mut Ui, st: &mut Ruler, id: Id, r: Rect, value: &mut f32) {
     if tick > 0.0 {
         ctx.request_repaint();
     }
-    let lit = if value.abs() >= 0.05 { theme::ACCENT } else { Color32::WHITE };
+    let lit = if value.abs() >= 0.05 { theme::accent() } else { Color32::WHITE };
     p.line_segment([pos2(c.x, c.y - 9.0 - 3.0 * tick), pos2(c.x, c.y + 15.0 + 3.0 * tick)], Stroke::new(2.0 + 1.2 * tick, lit));
     if resp.hovered() || resp.dragged() {
         ctx.set_cursor_icon(if resp.dragged() { CursorIcon::Grabbing } else { CursorIcon::ResizeHorizontal });

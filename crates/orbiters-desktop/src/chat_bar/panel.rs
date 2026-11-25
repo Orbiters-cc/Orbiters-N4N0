@@ -189,7 +189,7 @@ fn head(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, panel: Rect)
         }
         right -= w + 8.0;
     }
-    widgets::text_truncated(&p, pos2(panel.left() + 50.0, y + 9.0), Align2::LEFT_CENTER, &Txt::new(status_line(snap), 11.5).color(theme::FG_3), (right - panel.left() - 58.0).max(40.0));
+    widgets::text_truncated(&p, pos2(panel.left() + 50.0, y + 9.0), Align2::LEFT_CENTER, &Txt::new(status_line(snap), 11.5).color(theme::fg_3()), (right - panel.left() - 58.0).max(40.0));
 }
 
 /// Why N4N0 cannot answer here, and the one thing that changes it.
@@ -207,12 +207,12 @@ fn gated(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, g: Gate) {
     };
     let c = thread.center() - vec2(0.0, 24.0);
     let p = ui.painter().clone();
-    p.circle_filled(c - vec2(0.0, 52.0), 26.0, theme::alpha(theme::ACCENT, 0.12));
-    widgets::icon(&p, c - vec2(0.0, 52.0), glyph, 22.0, theme::ACCENT);
+    p.circle_filled(c - vec2(0.0, 52.0), 26.0, theme::alpha(theme::accent(), 0.12));
+    widgets::icon(&p, c - vec2(0.0, 52.0), glyph, 22.0, theme::accent());
     widgets::text(&p, c - vec2(0.0, 10.0), Align2::CENTER_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD));
-    let g2 = p.layout_job(Txt::new(body, 13.0).color(theme::FG_3).line_height(19.0).job(380.0f32.min(thread.width() - 64.0)));
+    let g2 = p.layout_job(Txt::new(body, 13.0).color(theme::fg_3()).line_height(19.0).job(380.0f32.min(thread.width() - 64.0)));
     let body_rect = Rect::from_center_size(c + vec2(0.0, 12.0 + g2.size().y / 2.0), g2.size());
-    p.galley(pos2(c.x - g2.size().x / 2.0, body_rect.top()), g2.clone(), theme::FG_3);
+    p.galley(pos2(c.x - g2.size().x / 2.0, body_rect.top()), g2.clone(), theme::fg_3());
     if action.is_empty() {
         return;
     }
@@ -284,7 +284,7 @@ fn empty(ui: &mut Ui, thread: Rect) {
     widgets::text(&p, c + vec2(0.0, 6.0), Align2::CENTER_CENTER, &Txt::new(tr("Talk to N4N0"), 16.0).weight(weight::SEMIBOLD));
     let g = p.layout_job(
         Txt::new(tr("“Nano, put my hoodie on.” “Nano, plan a movie night Saturday.” “Nano, save this video.”"), 12.5)
-            .color(theme::FG_3)
+            .color(theme::fg_3())
             .line_height(19.0)
             .job(420.0f32.min(thread.width() - 64.0)),
     );
@@ -292,7 +292,7 @@ fn empty(ui: &mut Ui, thread: Rect) {
     for r in &g.rows {
         job_w = job_w.max(r.size.x);
     }
-    p.galley(pos2(c.x - job_w / 2.0, c.y + 24.0), g, theme::FG_3);
+    p.galley(pos2(c.x - job_w / 2.0, c.y + 24.0), g, theme::fg_3());
 }
 
 /// One step of the thread in the column `ui`.
@@ -302,12 +302,12 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
     match item {
         Item::You(line) => {
             let max = (width * 0.85).min(520.0);
-            let g = ui.painter().layout_job(Txt::new(&line.text, 14.0).color(theme::FG).line_height(20.0).job(max - 28.0));
+            let g = ui.painter().layout_job(Txt::new(&line.text, 14.0).color(theme::fg()).line_height(20.0).job(max - 28.0));
             let size = g.size() + vec2(28.0, 20.0);
             let (row, _) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
             let bubble = Rect::from_min_size(pos2(row.right() - size.x, row.top()), size);
             ui.painter().rect_filled(bubble, CornerRadius { nw: 18, ne: 18, sw: 18, se: 6 }, theme::white(0.075));
-            ui.painter().galley(bubble.min + vec2(14.0, 10.0), g, theme::FG);
+            ui.painter().galley(bubble.min + vec2(14.0, 10.0), g, theme::fg());
             // Its copy button beside it, while it is pointed at: nothing moves when it shows.
             let at = Rect::from_center_size(pos2(bubble.left() - 18.0, bubble.bottom() - 15.0), vec2(26.0, 26.0));
             let near = ui.rect_contains_pointer(row);
@@ -317,17 +317,17 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             if *first {
                 let (r, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
                 n4n0_face(ui.painter(), pos2(r.left() + 9.0, r.center().y), 9.0);
-                widgets::text(ui.painter(), pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &Txt::new("N4N0", 12.5).weight(weight::SEMIBOLD).color(theme::FG_2));
+                widgets::text(ui.painter(), pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &Txt::new("N4N0", 12.5).weight(weight::SEMIBOLD).color(theme::fg_2()));
             }
             let shown = bar.revealed(ui.ctx(), line);
-            let g = ui.painter().layout_job(Txt::new(&shown, 14.0).color(theme::FG).line_height(21.0).job(width));
+            let g = ui.painter().layout_job(Txt::new(&shown, 14.0).color(theme::fg()).line_height(21.0).job(width));
             let (r, resp) = ui.allocate_exact_size(vec2(width, g.size().y.max(21.0)), Sense::hover());
             let end = r.min + g.rows.last().map(|row| vec2(row.rect().right(), row.rect().center().y)).unwrap_or(vec2(0.0, 10.5));
-            ui.painter().galley(r.min, g, theme::FG);
+            ui.painter().galley(r.min, g, theme::fg());
             if line.streaming || shown.len() < line.text.len() {
                 // The website's streaming mark: a pulsing dot where the text ends.
                 let k = (anim::time(ui.ctx()) * 6.0).sin() as f32 * 0.5 + 0.5;
-                ui.painter().circle_filled(end + vec2(8.0, 0.0), 3.0 + 0.8 * k, theme::alpha(theme::ACCENT, 0.55 + 0.45 * k));
+                ui.painter().circle_filled(end + vec2(8.0, 0.0), 3.0 + 0.8 * k, theme::alpha(theme::accent(), 0.55 + 0.45 * k));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
             } else {
                 let (row, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
@@ -337,17 +337,17 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             }
         }
         Item::Note(text) => {
-            let g = ui.painter().layout_job(Txt::new(*text, 12.5).color(theme::FG_3).line_height(18.0).job(width - 26.0));
+            let g = ui.painter().layout_job(Txt::new(*text, 12.5).color(theme::fg_3()).line_height(18.0).job(width - 26.0));
             let (r, _) = ui.allocate_exact_size(vec2(width, g.size().y.max(18.0)), Sense::hover());
-            widgets::icon(ui.painter(), pos2(r.left() + 8.0, r.top() + 9.0), icons::CHECK_CIRCLE, 13.0, theme::alpha(theme::ACCENT, 0.8));
-            ui.painter().galley(pos2(r.left() + 24.0, r.top()), g, theme::FG_3);
+            widgets::icon(ui.painter(), pos2(r.left() + 8.0, r.top() + 9.0), icons::CHECK_CIRCLE, 13.0, theme::alpha(theme::OK, 0.8));
+            ui.painter().galley(pos2(r.left() + 24.0, r.top()), g, theme::fg_3());
         }
         Item::Error { text, failure } => {
             let g = ui.painter().layout_job(Txt::new(*text, 13.0).color(theme::DANGER).line_height(19.0).job(width - 52.0));
             // An administrator's detail, small; nobody else is sent one.
             let detail = failure
                 .and_then(|f| f.admin_detail.as_deref())
-                .map(|d| ui.painter().layout_job(Txt::new(d, 11.0).color(theme::FG_3).line_height(15.0).job(width - 52.0)));
+                .map(|d| ui.painter().layout_job(Txt::new(d, 11.0).color(theme::fg_3()).line_height(15.0).job(width - 52.0)));
             let detail_h = detail.as_ref().map_or(0.0, |d| d.size().y + 6.0);
             let retry = failure.filter(|f| f.retry);
             let foot = if retry.is_some() { 44.0 } else { 0.0 };
@@ -357,7 +357,7 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             let text_h = g.size().y;
             ui.painter().galley(pos2(r.left() + 38.0, r.top() + 10.0), g, theme::DANGER);
             if let Some(d) = detail {
-                ui.painter().galley(pos2(r.left() + 38.0, r.top() + 10.0 + text_h + 6.0), d, theme::FG_3);
+                ui.painter().galley(pos2(r.left() + 38.0, r.top() + 10.0 + text_h + 6.0), d, theme::fg_3());
             }
             if let Some(f) = retry {
                 retry_button(bar, ui, ctl, f, pos2(r.left() + 38.0, r.bottom() - 10.0 - 32.0), now_ms);
@@ -370,14 +370,14 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             if let Item::Listening(level) = item {
                 let track = Rect::from_min_size(pos2(r.left() + 28.0, r.center().y - 3.0), vec2(120.0, 6.0));
                 ui.painter().rect_filled(track, theme::radius(3.0), theme::white(0.08));
-                ui.painter().rect_filled(Rect::from_min_size(track.min, vec2((track.width() * level.clamp(0.0, 1.0)).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
-                widgets::text(ui.painter(), pos2(track.right() + 12.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Listening…"), 12.5).color(theme::FG_3));
+                ui.painter().rect_filled(Rect::from_min_size(track.min, vec2((track.width() * level.clamp(0.0, 1.0)).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
+                widgets::text(ui.painter(), pos2(track.right() + 12.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Listening…"), 12.5).color(theme::fg_3()));
             } else {
                 for i in 0..3 {
                     let phase = ((t * 2.2 - i as f64 * 0.22).sin() * 0.5 + 0.5) as f32;
-                    ui.painter().circle_filled(pos2(r.left() + 30.0 + i as f32 * 11.0, r.center().y - 2.0 * phase), 3.0, theme::alpha(theme::ACCENT, 0.45 + 0.55 * phase));
+                    ui.painter().circle_filled(pos2(r.left() + 30.0 + i as f32 * 11.0, r.center().y - 2.0 * phase), 3.0, theme::alpha(theme::accent(), 0.45 + 0.55 * phase));
                 }
-                widgets::text(ui.painter(), pos2(r.left() + 66.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("N4N0 is thinking…"), 12.5).color(theme::FG_3));
+                widgets::text(ui.painter(), pos2(r.left() + 66.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("N4N0 is thinking…"), 12.5).color(theme::fg_3()));
             }
             // Dots and a level meter: 30 frames a second, not the monitor's rate.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
@@ -386,9 +386,9 @@ fn item_ui(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, item: &Item<'_>, index: us
             let (r, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
             let t = anim::time(ui.ctx()) as f32;
             let c = pos2(r.left() + 9.0, r.center().y);
-            orbiters_ui::paint::ring(ui.painter(), c, 6.0, 2.0, theme::alpha(theme::ACCENT, 0.25));
-            orbiters_ui::paint::arc(ui.painter(), c, 6.0, t * 5.0, 1.8, 2.0, theme::ACCENT);
-            widgets::text_truncated(ui.painter(), pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr!("Doing: {what}", what = what), 12.5).color(theme::FG_2), width - 28.0);
+            orbiters_ui::paint::ring(ui.painter(), c, 6.0, 2.0, theme::alpha(theme::accent(), 0.25));
+            orbiters_ui::paint::arc(ui.painter(), c, 6.0, t * 5.0, 1.8, 2.0, theme::accent());
+            widgets::text_truncated(ui.painter(), pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr!("Doing: {what}", what = what), 12.5).color(theme::fg_2()), width - 28.0);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
         Item::Confirm(c) => confirm(bar, ui, ctl, c, width),
@@ -401,14 +401,14 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     let title = if c.title.is_empty() { tr("Needs your approval").to_string() } else { c.title.clone() };
     let fallback = if local { tr("N4N0 asks before it does this. Say or type no to leave it.") } else { tr("Waiting for your approval on Orbiters.") };
     let summary = if c.summary.is_empty() { fallback } else { c.summary.as_str() };
-    let g = ui.painter().layout_job(Txt::new(summary, 13.0).color(theme::FG_2).line_height(19.0).job(width - 40.0));
+    let g = ui.painter().layout_job(Txt::new(summary, 13.0).color(theme::fg_2()).line_height(19.0).job(width - 40.0));
     let h = 16.0 + 22.0 + g.size().y + 14.0 + 34.0 + 16.0;
     let (card, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
     let p = ui.painter().clone();
-    p.rect_filled(card, theme::radius(18.0), theme::alpha(theme::ACCENT, 0.08));
-    widgets::icon(&p, pos2(card.left() + 28.0, card.top() + 27.0), icons::SHIELD_CHECK, 15.0, theme::ACCENT);
+    p.rect_filled(card, theme::radius(18.0), theme::alpha(theme::accent(), 0.08));
+    widgets::icon(&p, pos2(card.left() + 28.0, card.top() + 27.0), icons::SHIELD_CHECK, 15.0, theme::accent());
     widgets::text(&p, pos2(card.left() + 44.0, card.top() + 27.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD));
-    p.galley(pos2(card.left() + 20.0, card.top() + 16.0 + 26.0), g, theme::FG_2);
+    p.galley(pos2(card.left() + 20.0, card.top() + 16.0 + 26.0), g, theme::fg_2());
     let foot = card.bottom() - 16.0 - 34.0;
     let id = Id::unique(("chat-confirm", &c.id));
     let question = c.local_question();
@@ -429,7 +429,7 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
     if local && question.is_some() && bar.answered == question {
         // Answered from here: it says so until the question is gone (or, answered late, N4N0 says it was no longer the
         // one waiting).
-        let sent = Txt::new(tr("Answer sent"), 12.5).weight(weight::MEDIUM).color(theme::FG_3);
+        let sent = Txt::new(tr("Answer sent"), 12.5).weight(weight::MEDIUM).color(theme::fg_3());
         widgets::text(&p, pos2(card.right() - 20.0, foot + 17.0), Align2::RIGHT_CENTER, &sent);
     } else if let (true, Some(question)) = (local, question) {
         let yes = Button::new(tr("Yes, do it")).icon(icons::CHECK).variant(Variant::Primary).size(Size::Sm).enabled(whole).id_salt(id.with("yes"));
@@ -438,7 +438,7 @@ fn confirm(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, c: &N4n0Confirmation, widt
         let no = Button::new(tr("No, leave it")).icon(icons::X).variant(Variant::Ghost).size(Size::Sm).enabled(whole).id_salt(id.with("no"));
         let nw = no.desired_width(ui);
         if !whole {
-            let hint = Txt::new(tr("Scroll up to read all of it first"), 12.5).color(theme::FG_3);
+            let hint = Txt::new(tr("Scroll up to read all of it first"), 12.5).color(theme::fg_3());
             widgets::text_truncated(&p, pos2(card.left() + 20.0, foot + 17.0), Align2::LEFT_CENTER, &hint, (yes_rect.left() - 8.0 - nw - card.left() - 32.0).max(0.0));
         }
         // Each names its question (a late press answers nothing newer: verify-r21 1), and only a pointer, an
@@ -511,27 +511,27 @@ fn log(ui: &mut Ui, snap: &Snapshot, now_ms: u64) {
         ui.add_space(8.0);
         if rows.is_empty() {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 60.0), Sense::hover());
-            widgets::text(ui.painter(), r.center(), Align2::CENTER_CENTER, &Txt::new(tr("Nothing yet: what N4N0 does for you is listed here."), 12.5).color(theme::FG_3));
+            widgets::text(ui.painter(), r.center(), Align2::CENTER_CENTER, &Txt::new(tr("Nothing yet: what N4N0 does for you is listed here."), 12.5).color(theme::fg_3()));
         }
         for row in &rows {
             let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 0.0), Sense::hover());
             let left = line.center().x - column / 2.0;
             let (tone_fg, tone_bg) = match row.tone {
-                TalkTone::Done => (theme::ACCENT, theme::alpha(theme::ACCENT, 0.12)),
+                TalkTone::Done => (theme::OK, theme::alpha(theme::OK, 0.12)),
                 TalkTone::Waiting => (theme::WARN, theme::alpha(theme::WARN, 0.12)),
                 TalkTone::Wrong => (theme::DANGER, theme::alpha(theme::DANGER, 0.12)),
-                TalkTone::Declined => (theme::FG_3, theme::white(0.06)),
+                TalkTone::Declined => (theme::fg_3(), theme::white(0.06)),
             };
             let chip = Txt::new(&row.outcome, 11.0).weight(weight::SEMIBOLD).color(tone_fg);
             let chip_w = widgets::text_size(ui, &chip).x + 18.0;
-            let said = ui.painter().layout_job(Txt::new(&row.said, 13.5).color(theme::FG).line_height(19.0).job(column - chip_w - 40.0));
-            let detail = ui.painter().layout_job(Txt::new(&row.detail, 11.5).color(theme::FG_3).line_height(16.0).job(column - chip_w - 40.0));
+            let said = ui.painter().layout_job(Txt::new(&row.said, 13.5).color(theme::fg()).line_height(19.0).job(column - chip_w - 40.0));
+            let detail = ui.painter().layout_job(Txt::new(&row.detail, 11.5).color(theme::fg_3()).line_height(16.0).job(column - chip_w - 40.0));
             let h = said.size().y + detail.size().y + 24.0;
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h + 8.0), Sense::hover());
             let card = Rect::from_min_size(pos2(left, r.top()), vec2(column, h));
             ui.painter().rect_filled(card, theme::radius(14.0), theme::white(0.04));
-            ui.painter().galley(pos2(card.left() + 16.0, card.top() + 12.0), said.clone(), theme::FG);
-            ui.painter().galley(pos2(card.left() + 16.0, card.top() + 12.0 + said.size().y + 2.0), detail, theme::FG_3);
+            ui.painter().galley(pos2(card.left() + 16.0, card.top() + 12.0), said.clone(), theme::fg());
+            ui.painter().galley(pos2(card.left() + 16.0, card.top() + 12.0 + said.size().y + 2.0), detail, theme::fg_3());
             let pill = Rect::from_min_size(pos2(card.right() - 14.0 - chip_w, card.top() + 12.0), vec2(chip_w, 22.0));
             ui.painter().rect_filled(pill, theme::radius(11.0), tone_bg);
             widgets::text(ui.painter(), pill.center(), Align2::CENTER_CENTER, &chip);
@@ -553,7 +553,7 @@ fn dock(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, composer: Re
     } else {
         // No ears yet (or no assistant): the microphone shows where it will be, and says why it waits.
         let r = ui.interact(mic, Id::unique("chat-talk-off"), Sense::hover());
-        widgets::icon(&p, mic.center(), icons::MICROPHONE, 16.0, theme::FG_4);
+        widgets::icon(&p, mic.center(), icons::MICROPHONE, 16.0, theme::fg_4());
         if ready {
             let _ = r.on_hover_text(tr("Install N4N0's ears to talk instead of typing."));
         }
@@ -564,9 +564,9 @@ fn dock(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, composer: Re
     widgets::note_control(ui.ctx(), mark("Send (Enter)"), send, can);
     let hover = anim::toggle(ui.ctx(), Id::unique("chat-send-hover"), can && resp.hovered(), anim::Spring::SNAPPY);
     let on = anim::toggle(ui.ctx(), Id::unique("chat-send-on"), can, anim::Spring::SNAPPY);
-    let fill = theme::mix(theme::white(0.08), theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), on);
+    let fill = theme::mix(theme::white(0.08), theme::mix(theme::accent(), theme::accent_hover(), hover), on);
     p.circle_filled(send.center(), 16.0, fill);
-    widgets::icon(&p, send.center(), icons::ARROW_UP, 16.0, theme::mix(theme::FG_4, theme::ON_ACCENT, on));
+    widgets::icon(&p, send.center(), icons::ARROW_UP, 16.0, theme::mix(theme::fg_4(), theme::on_accent(), on));
     if can && widgets::activated_fresh(&resp) {
         bar.send(ctl, snap);
     }
@@ -577,15 +577,15 @@ fn dock(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, composer: Re
     } else {
         tr("Enter to send · Shift+Enter for a new line").to_string()
     };
-    widgets::text(&p, pos2(composer.center().x, composer.bottom() + HINT_H / 2.0 + 1.0), Align2::CENTER_CENTER, &Txt::new(hint, 11.0).color(theme::FG_4));
+    widgets::text(&p, pos2(composer.center().x, composer.bottom() + HINT_H / 2.0 + 1.0), Align2::CENTER_CENTER, &Txt::new(hint, 11.0).color(theme::fg_4()));
 }
 
 /// N4N0's little face: a green disc with two eyes.
 pub fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
-    p.circle_filled(center, radius, theme::ACCENT);
+    p.circle_filled(center, radius, theme::accent());
     let k = radius / 11.0;
     for dx in [-3.6f32, 3.6] {
-        p.rect_filled(Rect::from_center_size(center + vec2(dx * k, -0.5 * k), vec2(2.4 * k, 5.0 * k)), theme::radius(1.2 * k), theme::ON_ACCENT);
+        p.rect_filled(Rect::from_center_size(center + vec2(dx * k, -0.5 * k), vec2(2.4 * k, 5.0 * k)), theme::radius(1.2 * k), theme::on_accent());
     }
 }
 

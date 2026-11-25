@@ -524,7 +524,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
     panel.set_clip_rect(rect.intersect(ui.clip_rect()));
     paint::shadow(panel.painter(), rect, 22.0, vec2(0.0, 18.0), 44.0, -6.0, theme::black(0.55));
     // Opaque under its surface: nothing of Home shows through the list.
-    widgets::frame(panel.painter(), rect, 22.0, theme::INK_900);
+    widgets::frame(panel.painter(), rect, 22.0, theme::ink_900());
     widgets::frame(panel.painter(), rect, 22.0, theme::surface());
     paint::stroke_squircle(panel.painter(), rect, theme::squircle(22.0), theme::hairline());
     let inner = rect.shrink2(vec2(22.0, 20.0));
@@ -537,7 +537,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         Some(rows) if !rows.is_empty() => tr_n("{count} instance you were in, newest first", "{count} instances you were in, newest first", rows.len() as u64),
         _ => tr("Instances you were in").into(),
     };
-    widgets::text_truncated(&p, pos2(inner.left(), inner.top() + 40.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), inner.width() - 60.0);
+    widgets::text_truncated(&p, pos2(inner.left(), inner.top() + 40.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()), inner.width() - 60.0);
     let close_r = Rect::from_min_size(pos2(inner.right() - 32.0, inner.top() - 2.0), vec2(32.0, 32.0));
     let close = widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Close")).size(32.0, 14.0).id_salt("where-previous-close").show_at(&mut panel, close_r));
 
@@ -562,8 +562,8 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         None
     };
     if let Some(note) = note {
-        widgets::icon(&p, pos2(inner.left() + 8.0, y + 10.0), icons::INFO, 14.0, theme::FG_3);
-        widgets::text_truncated(&p, pos2(inner.left() + 24.0, y + 10.0), Align2::LEFT_CENTER, &Txt::new(note, 12.5).color(theme::FG_2), inner.width() - 24.0);
+        widgets::icon(&p, pos2(inner.left() + 8.0, y + 10.0), icons::INFO, 14.0, theme::fg_3());
+        widgets::text_truncated(&p, pos2(inner.left() + 24.0, y + 10.0), Align2::LEFT_CENTER, &Txt::new(note, 12.5).color(theme::fg_2()), inner.width() - 24.0);
         y += 30.0;
     }
 
@@ -587,9 +587,9 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 (tr("No world of that name"), tr("Search another name, or clear the search to see every instance."))
             };
             let c = pos2(list.center().x, list.top() + 80.0);
-            widgets::icon(&p, c, icons::GLOBE, 26.0, theme::FG_4);
+            widgets::icon(&p, c, icons::GLOBE, 26.0, theme::fg_4());
             widgets::text(&p, c + vec2(0.0, 34.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
-            widgets::text(&p, c + vec2(0.0, 56.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::FG_3));
+            widgets::text(&p, c + vec2(0.0, 56.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::fg_3()));
         }
         Some(_) => {
             let mut scroll = egui::ScrollArea::vertical().id_salt("where-previous-rows").auto_shrink([false, false]);
@@ -642,10 +642,10 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
     let picked = (selection.destination().visit() == Some(v)).then(|| (selection.verified().clone(), selection.instance().is_none()));
     let chosen = picked.is_some() && selection.proven(state.places.desk.asker());
     let p = ui.painter().clone();
-    let fill = if chosen { theme::alpha(theme::ACCENT, 0.10) } else { theme::white(0.03 + 0.04 * hover) };
+    let fill = if chosen { theme::alpha(theme::accent(), 0.10) } else { theme::white(0.03 + 0.04 * hover) };
     p.rect_filled(r, theme::radius(RADIUS + 2.0), fill);
     if chosen {
-        p.rect_stroke(r, theme::radius(RADIUS + 2.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.8)), egui::StrokeKind::Inside);
+        p.rect_stroke(r, theme::radius(RADIUS + 2.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.8)), egui::StrokeKind::Inside);
     }
     // The picture, the world's (Where's cards' own), else the name's colour with a globe.
     let pic = Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 27.0), vec2(PIC_W, 54.0));
@@ -655,9 +655,9 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
             let c = widgets::name_color(&name);
             paint::fill_convex(&p, &paint::squircle_points(pic, theme::squircle(RADIUS)), |at| {
                 let t = ((at.x - pic.left()) / pic.width() + (at.y - pic.top()) / pic.height()) * 0.5;
-                theme::mix(theme::alpha(c, 0.32), theme::INK_800, t)
+                theme::mix(theme::alpha(c, 0.32), theme::ink_800(), t)
             });
-            widgets::icon(&p, pic.center(), icons::GLOBE_HEMISPHERE_WEST, 20.0, theme::alpha(theme::FG, 0.55));
+            widgets::icon(&p, pic.center(), icons::GLOBE_HEMISPHERE_WEST, 20.0, theme::alpha(theme::fg(), 0.55));
         }
     }
     // The right: what it is now.
@@ -670,14 +670,14 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         None => None,
         Some((_, true)) => {
             let kind = super::destinations::kind_for(state, &v.world_id, state.places.previous.can_create);
-            Some((orbiters_i18n::tr!("New {kind} instance · chosen", kind = access_name(kind_access(kind))), theme::ACCENT, icons::CHECK))
+            Some((orbiters_i18n::tr!("New {kind} instance · chosen", kind = access_name(kind_access(kind))), theme::accent(), icons::CHECK))
         }
-        Some((Verified::Open { .. }, _)) => Some((tr("Open · chosen").into(), theme::ACCENT, icons::CHECK)),
+        Some((Verified::Open { .. }, _)) => Some((tr("Open · chosen").into(), theme::accent(), icons::CHECK)),
         Some((Verified::Closed, _)) => Some((tr("Closed now").into(), theme::WARN, icons::WARNING_CIRCLE)),
-        Some((Verified::Unverified, _)) if nobody && connecting => Some((state.places.previous.connecting_text().into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
+        Some((Verified::Unverified, _)) if nobody && connecting => Some((state.places.previous.connecting_text().into(), theme::fg_3(), icons::HOURGLASS_MEDIUM)),
         Some((Verified::Unverified | Verified::Unknown, _)) if nobody => Some((tr("Not signed in").into(), theme::WARN, icons::WARNING_CIRCLE)),
         Some((Verified::Unknown, _)) => Some((tr("VRChat did not say").into(), theme::WARN, icons::WARNING_CIRCLE)),
-        Some((Verified::Unverified | Verified::Checking { .. }, _)) => Some((tr("Asking VRChat…").into(), theme::FG_3, icons::HOURGLASS_MEDIUM)),
+        Some((Verified::Unverified | Verified::Checking { .. }, _)) => Some((tr("Asking VRChat…").into(), theme::fg_3(), icons::HOURGLASS_MEDIUM)),
     };
     let offer_new = picked.is_some() && alternatives(&state.places);
     if offer_new {
@@ -704,7 +704,7 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         }
         right -= tw + 26.0;
     } else if hover > 0.01 && picked.is_none() {
-        let txt = Txt::new(tr("Choose"), 12.5).weight(weight::MEDIUM).color(theme::alpha(theme::FG_2, hover));
+        let txt = Txt::new(tr("Choose"), 12.5).weight(weight::MEDIUM).color(theme::alpha(theme::fg_2(), hover));
         let tw = widgets::text_size(ui, &txt).x;
         widgets::text(&p, pos2(right, r.center().y), Align2::RIGHT_CENTER, &txt);
         right -= tw + 16.0;
@@ -723,8 +723,8 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         meta = format!("{meta} · {}", region_tag(&region));
     }
     meta = format!("{meta} · {}", crate::pages::ago(&ctx, v.at, now));
-    widgets::icon(&p, pos2(x + 6.0, r.center().y + 12.0), access_icon(access), 12.0, theme::FG_3);
-    widgets::text_truncated(&p, pos2(x + 18.0, r.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(meta, 12.0).color(theme::FG_3), room - 18.0);
+    widgets::icon(&p, pos2(x + 6.0, r.center().y + 12.0), access_icon(access), 12.0, theme::fg_3());
+    widgets::text_truncated(&p, pos2(x + 18.0, r.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(meta, 12.0).color(theme::fg_3()), room - 18.0);
     let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
     if took_new {
         return Some(true);
@@ -740,7 +740,7 @@ fn kind_choice(ui: &mut Ui, state: &mut State, right_center: Pos2, v: &Visit) ->
     let can = state.places.previous.can_create;
     let kind = super::destinations::kind_for(state, &v.world_id, can);
     let access = kind_access(kind);
-    let txt = Txt::new(access_name(access), 12.0).weight(weight::SEMIBOLD).color(theme::FG);
+    let txt = Txt::new(access_name(access), 12.0).weight(weight::SEMIBOLD).color(theme::fg());
     let w = widgets::text_size(ui, &txt).x + if can { 46.0 } else { 32.0 };
     let r = Rect::from_min_size(pos2(right_center.x - w, right_center.y - 14.0), vec2(w, 28.0));
     let id = Id::unique(("where-previous-kind", v.location()));
@@ -749,13 +749,13 @@ fn kind_choice(ui: &mut Ui, state: &mut State, right_center: Pos2, v: &Visit) ->
     let hover = anim::toggle(&ctx, id.with("hover"), can && (resp.hovered() || popup::is_open(&ctx, list)), Spring::SNAPPY);
     let p = ui.painter();
     p.rect_filled(r, theme::radius(14.0), theme::mix(theme::white(0.05), theme::white(0.1), hover));
-    widgets::icon(p, pos2(r.left() + 13.0, r.center().y), access_icon(access), 12.0, theme::FG_2);
+    widgets::icon(p, pos2(r.left() + 13.0, r.center().y), access_icon(access), 12.0, theme::fg_2());
     widgets::text(p, pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &txt);
     if !can {
         resp.on_hover_text(tr("Sign in to VRChat in Settings to open Friends+, Friends or Invite instances: without it a new instance is public."));
         return r;
     }
-    widgets::icon(p, pos2(r.right() - 13.0, r.center().y), icons::CARET_DOWN, 10.0, theme::FG_2);
+    widgets::icon(p, pos2(r.right() - 13.0, r.center().y), icons::CARET_DOWN, 10.0, theme::fg_2());
     widgets::note_control(&ctx, tr("Who can join the new instance"), r, true);
     let items: Vec<popup::Item> = kinds().iter().map(|(_, a, says)| popup::Item::new(access_name(*a)).detail(says).icon(access_icon(*a))).collect();
     let selected = kinds().iter().position(|k| k.0 == kind);

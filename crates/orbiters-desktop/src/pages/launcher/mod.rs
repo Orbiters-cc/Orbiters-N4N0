@@ -43,7 +43,7 @@ const RAIL_W: f32 = 64.0;
 pub const GAP: f32 = 16.0;
 /// The column's fill: rows fade their banners into it.
 pub fn column_fill() -> Color32 {
-    theme::INK_900
+    theme::ink_900()
 }
 
 /// What the page beside Home's content shows at a width.
@@ -590,10 +590,10 @@ fn save_folded(folded: &HashSet<String>) {
 pub fn status_color(status: Status) -> Color32 {
     match status {
         Status::JoinMe => theme::BLUE,
-        Status::Active => theme::ACCENT,
+        Status::Active => theme::accent(),
         Status::AskMe => theme::WARN,
         Status::Busy => theme::DANGER,
-        Status::Offline => theme::FG_4,
+        Status::Offline => theme::fg_4(),
     }
 }
 
@@ -610,13 +610,13 @@ pub fn status_name(status: Status) -> &'static str {
 /// A trust rank's colour on the name, softened to sit with the rest.
 pub fn rank_color(rank: Rank) -> Color32 {
     let c = match rank {
-        Rank::Visitor => theme::FG_2,
+        Rank::Visitor => theme::fg_2(),
         Rank::NewUser => Color32::from_rgb(0x5a, 0x9b, 0xff),
         Rank::User => Color32::from_rgb(0x4c, 0xd9, 0x7b),
         Rank::KnownUser => Color32::from_rgb(0xff, 0x96, 0x5c),
         Rank::TrustedUser => Color32::from_rgb(0xb3, 0x86, 0xff),
     };
-    theme::mix(theme::FG, c, 0.8)
+    theme::mix(theme::fg(), c, 0.8)
 }
 
 pub fn rank_name(rank: Rank) -> &'static str {
@@ -701,7 +701,7 @@ pub fn person_picture(p: &egui::Painter, rect: Rect, picture: Option<&egui::Text
             p.circle_stroke(c, r - 1.0, egui::Stroke::new(2.2, color));
         }
         Presence::Offline => {
-            p.circle_stroke(c, r - 1.0, egui::Stroke::new(2.0, theme::FG_4));
+            p.circle_stroke(c, r - 1.0, egui::Stroke::new(2.0, theme::fg_4()));
         }
         Presence::InGame => {
             p.circle_filled(c, r, color);
@@ -847,20 +847,20 @@ fn column(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool)
                 }
                 x += 13.0;
             }
-            let r = widgets::text(p, pos2(x, cy), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::FG_2));
+            let r = widgets::text(p, pos2(x, cy), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::fg_2()));
             x = r.right() + 14.0;
         };
         // A copy knows nobody's presence now: only how many.
         if states::live(&state.data) == states::Live::SignedIn {
-            part(p, Some((theme::ACCENT, true)), orbiters_i18n::tr!("{n} in game", n = in_game));
-            part(p, Some((theme::ACCENT, false)), orbiters_i18n::tr!("{n} on the website", n = web));
+            part(p, Some((theme::accent(), true)), orbiters_i18n::tr!("{n} in game", n = in_game));
+            part(p, Some((theme::accent(), false)), orbiters_i18n::tr!("{n} on the website", n = web));
         }
         // The list last on show, not read again yet: as of when, quietly, where the count is (no spinner over what is there).
         let total = match state.data.kept {
             Some(at) => orbiters_i18n::tr!("as of {when}", when = as_of(at, state.now())),
             _ => orbiters_i18n::tr!("{n} friends", n = all),
         };
-        widgets::text(p, pos2(inner.right() - 8.0, cy), Align2::RIGHT_CENTER, &Txt::new(total, 12.0).color(theme::FG_4));
+        widgets::text(p, pos2(inner.right() - 8.0, cy), Align2::RIGHT_CENTER, &Txt::new(total, 12.0).color(theme::fg_4()));
         y += 16.0 + 10.0;
     }
     // The one line about what needs the sign-in.

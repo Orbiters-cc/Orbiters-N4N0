@@ -36,11 +36,11 @@ impl Look {
     pub fn window() -> Self {
         Self {
             track: theme::white(0.09),
-            fill: theme::alpha(theme::ACCENT, 0.85),
+            fill: theme::alpha(theme::accent(), 0.85),
             thumb: Color32::WHITE,
-            accent: theme::ACCENT,
-            label: theme::FG_3,
-            label_on: theme::FG,
+            accent: theme::accent(),
+            label: theme::fg_3(),
+            label_on: theme::fg(),
             font: theme::font(12.5, weight::MEDIUM),
             font_on: theme::font(12.5, weight::SEMIBOLD),
             track_h: 6.0,

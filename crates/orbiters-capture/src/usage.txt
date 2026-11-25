@@ -10,3 +10,4 @@ orbiters-capture: the capture worker of Orbiters - N4N0
   verify <raw capture folder> [--frames N]
                                 decode a raw capture and compare it with its ground truth
   list-sources                  list Spout senders and microphones
+  --host <folder>               with record and list-sources on a Mac: the host folder of the engine that runs VRChat

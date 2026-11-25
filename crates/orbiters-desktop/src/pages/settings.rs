@@ -846,7 +846,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             if here.around() {
                 apply |= place(&mut m, c, 1, registry::CARD_AROUND, |ui| {
                     let mut apply = false;
-                    let beside = if here.camera_frames { tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera") } else { tr("Orbiters beside VRChat's Quick Menu and its wheel") };
+                    let beside = if orbiters_core::here::camera_frames() { tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera") } else { tr("Orbiters beside VRChat's Quick Menu and its wheel") };
                     section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(beside), |ui| {
                         apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset, &mut allow);
                     });
@@ -946,7 +946,7 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
     let snap = cx.snap;
     let mut apply = false;
     section(ui, cx, index, icons::GAUGE, tr("Capture"), Some(tr("How frames become a session")), |ui| {
-        if orbiters_core::here::HERE.camera_frames {
+        if orbiters_core::here::camera_frames() {
             let kf = &mut draft.keyframes;
             widgets::field(ui, tr("Keyframe distance"), Some(tr("A new lossless keyframe after the camera moves this far.")), 284.0, |ui| {
                 apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
@@ -1042,6 +1042,10 @@ fn osc_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
             },
         );
         if !orbiters_core::here::HERE.vrchat_runs {
+            if orbiters_core::here::camera_frames() {
+                widgets::separator(ui);
+                camera_rows(ui, draft, &mut apply);
+            }
             return;
         }
         widgets::separator(ui);
@@ -2024,7 +2028,7 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr(registry::AROUND_WHEEL)), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
-    if here.camera_frames {
+    if orbiters_core::here::camera_frames() {
         orbit_camera(ui, snap, orbit, &mut apply);
     }
     if here.vr_overlay {

@@ -565,6 +565,9 @@ pub struct LauncherState {
     /// VRChat bridge started (that one is the agent's, and it clicks there).
     #[serde(default)]
     pub desktop_game: Option<u32>,
+    /// On a Mac: the engine there gives VRChat's stream camera ([`crate::here::camera_frames`]).
+    #[serde(default)]
+    pub camera: bool,
 }
 
 /// A private place on its way to a VRChat that was started without it ([`LauncherState::joining`]): its world's name alone.
@@ -789,6 +792,7 @@ pub fn sample() -> LauncherState {
         several_profiles: true,
         joining: None,
         desktop_game: None,
+        camera: false,
         log_trouble: None,
         mine: Some(MyProfile {
             loaded: true,

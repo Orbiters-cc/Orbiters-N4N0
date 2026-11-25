@@ -22,5 +22,5 @@ anyhow = { workspace = true }
 crossbeam-channel = { workspace = true }
 uuid = { workspace = true }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 orbiters-spout = { workspace = true }

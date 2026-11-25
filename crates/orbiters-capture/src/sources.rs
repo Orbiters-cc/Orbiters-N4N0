@@ -106,12 +106,12 @@ pub fn strip_probe(width: u32, height: u32) -> Vec<[u32; 4]> {
 // ---------------------------------------------------------------- Spout
 
 /// Reconnection pauses: the first, and the longest while it keeps failing.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const RETRY_FIRST: Duration = Duration::from_millis(500);
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const RETRY_MOST: Duration = Duration::from_secs(5);
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub struct SpoutSource {
     receiver: orbiters_spout::Receiver,
     wanted: String,
@@ -126,7 +126,7 @@ pub struct SpoutSource {
     trouble: Option<String>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl SpoutSource {
     pub fn new(name: &str) -> anyhow::Result<Self> {
         Ok(Self {
@@ -195,13 +195,13 @@ impl SpoutSource {
 }
 
 /// A Spout frame being read back.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 struct SpoutFrame<'a, 'r> {
     reader: &'a mut orbiters_spout::FrameReader<'r>,
     seen_ns: u64,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn view_of(frame: orbiters_spout::Frame<'_>) -> anyhow::Result<ImageView<'_>> {
     let order = match frame.order {
         orbiters_spout::ChannelOrder::Rgba => PixelOrder::Rgba,
@@ -210,7 +210,7 @@ fn view_of(frame: orbiters_spout::Frame<'_>) -> anyhow::Result<ImageView<'_>> {
     Ok(ImageView::try_new(frame.width, frame.height, frame.stride, frame.data, order)?)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl FrameAccess for SpoutFrame<'_, '_> {
     fn width(&self) -> u32 {
         self.reader.width()
@@ -233,7 +233,7 @@ impl FrameAccess for SpoutFrame<'_, '_> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl FrameSource for SpoutSource {
     fn describe(&self) -> String {
         format!("Spout: {}", self.pinned.as_deref().unwrap_or(if self.wanted.is_empty() { "waiting for a sender" } else { &self.wanted })) // i18n: not shown (a name saved with the session and used in its folder name, not a text for a window)

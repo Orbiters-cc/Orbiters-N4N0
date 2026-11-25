@@ -417,7 +417,7 @@ impl super::Controller {
 
     /// Other players in the instance, as VRChat's log says.
     pub(super) fn others_here(&self) -> usize {
-        self.snapshot.lock().unwrap().vrchat.world.others()
+        self.world_of_captures().others()
     }
 
     /// Reads Remote User back after a while: VRChat keeping it on leaves nothing to put back.

@@ -30,6 +30,37 @@ The display cache is kept and counted with the 3D view. Original captured frame 
 and reconstruction. A missing/unreadable original frame size leaves an older thumbnail unchanged because its data
 regions cannot be positioned reliably.
 
+## VRChat's camera on a Mac
+
+Spout is Windows'. Where VRChat runs on Obelisk's engine (obelisk-cli 0.1.15), the engine's render server publishes each
+texture the game shares for Spout to programs of the same user, outside the game, in the session's host folder
+(`obelisk::host_folder`, named after the record's `game.pid`): `shared/<worker>.sock` says each texture's token, size and
+format and hands over read-only memory its finished pictures are copied into (Neptune's `docs/shared-textures.md`).
+`orbiters-spout`'s `mac.rs` reads it with the same `Receiver` as on Windows, so the capture worker, the QR scanner and
+the list of senders are the same code:
+
+- **Whose**: the game Home started (`LauncherState::desktop_game`), told by the service to its own receiver and to the
+  capture worker (`WorkerCommand::Host`) at each change; with none, there is no sender. Never one looked for.
+- **Names**: Spout's own named memory, which this Wine keeps as plain files while a sender lives (`lkd-<uid>/tmp/.wine-*/
+  server-*/tmpmap-*`): the names, and one info block a sender whose first word is the published token. One name and one
+  block are certain; several go together in the order their blocks were made. Without those files the textures are named as
+  VRChat names its streams, in the order it made them. Listing connects to nothing: while nobody is connected the engine
+  copies no picture.
+- **Frames**: whole ones by the sequence lock, the rows asked for copied, `frame_count` the engine's. A slot written
+  meanwhile gives the newest picture instead, or ends the frame if rows of it were lent already. Formats, the 8K limit and
+  the conversion of 16-bit float are Windows'. Waiting for a frame is one read of memory every 1 to 8 ms.
+- **Gone, made anew, ended**: `closed`, the socket's end or another session loses the sender; a new texture under its name
+  is opened again, at its own size (the recording splits as on Windows).
+
+What needs the camera asks `here::camera_frames()`: on a Mac, the engine's release (`obelisk::HOST_FEATURES`), or a running
+session that publishes. A capture's world is what that game's own log says, for captures alone (`controller/mac_game.rs`).
+OSC goes to that game on the Mac's loopback (`controller/lan.rs`): VRChat's port 9000 (Settings), and back to 9001, VRChat's
+default; its OSCQuery service is the one its log names where the network does not show it. Still Windows' alone: the voice,
+VRChat's sound and the trackers of a recording (Performance), and the VRChat bridge's 3D pictures.
+
+`tools/mac-spout/check.py` runs the capture worker on the engine's own Direct3D with an owned Spout sender: two sizes,
+closed and opened again, ended; with no game, no Steam and no window.
+
 ## Layouts
 
 The three icons left of Requests (under the filters on a narrow window) choose how each group is laid out

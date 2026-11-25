@@ -50,6 +50,7 @@ crates/orbiters-smooth/src/install.rs
 crates/orbiters-sound/src/coreaudio.rs
 crates/orbiters-sound/src/device.rs
 crates/orbiters-spout/src/win.rs
+crates/orbiters-spout/src/mac.rs
 crates/orbiters-ui/src/blur.rs
 crates/orbiters-ui/src/dialog.rs
 crates/orbiters-ui/src/feedback.rs

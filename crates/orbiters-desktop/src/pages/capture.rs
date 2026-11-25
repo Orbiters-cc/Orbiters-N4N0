@@ -199,7 +199,7 @@ pub(super) fn flight_labels() -> [&'static str; 3] {
 
 /// Whether N4N0 is missing from the avatar worn (an avatar is known, VRChat can be captured here, the notice was accepted).
 fn kit_missing(snap: &crate::state::Snapshot) -> bool {
-    orbiters_core::here::HERE.camera_frames
+    orbiters_core::here::camera_frames()
         && snap.vrchat.running
         && snap.settings.consent_acknowledged
         && snap.n4n0.avatar_id.is_some()
@@ -431,7 +431,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
     right = more_r.left() - 8.0;
     let x = tile.right() + 14.0;
     let consent = snap.settings.consent_acknowledged;
-    let here = orbiters_core::here::HERE.camera_frames;
+    let here = orbiters_core::here::camera_frames();
     if capturing && !open {
         let stop = match c.state {
             CaptureState::Stopping => tr("Saving…"),
@@ -530,11 +530,14 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
             let name = state.finished.as_ref().and_then(|f| name_of(&f.dir)).unwrap_or_else(|| tr("Session").into());
             (orbiters_i18n::tr!("Saved · {name}", name = name), theme::OK)
         }
+        None if !here && cfg!(target_os = "macos") => (tr("VRChat's camera comes to a Mac with Obelisk's engine 0.1.15 or later. Captures made elsewhere open here, in Photos & captures.").into(), theme::fg_3()),
         None if !here => (tr("VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures.").into(), theme::fg_3()),
         None if !consent => (tr("Read the capture notice before your first capture").into(), theme::fg_3()),
         None if !snap.vrchat.running => (tr("Start VRChat first: its camera takes the picture").into(), theme::fg_3()),
         None => match world.world_name.clone().filter(|_| world.in_world) {
             Some(name) => (orbiters_i18n::tr!("Ready · {world}", world = name), theme::fg_2()),
+            // (a Mac's own game's world is given to its captures, and shown nowhere else)
+            None if snap.launcher.desktop_game.is_some() => (tr("Ready: a capture is tagged with the world you are in").into(), theme::fg_2()),
             None => (tr("VRChat is running; join a world to tag captures with it.").into(), theme::fg_3()),
         },
     };
@@ -572,12 +575,13 @@ fn options(
     chips(ui, cx, projects);
     tops.push((Part::Recording, ui.cursor().top()));
     // A recording's numbers and what it records: chosen and read where recording happens, the test pattern's aside.
-    let here = orbiters_core::here::HERE.camera_frames;
+    let here = orbiters_core::here::camera_frames();
     if here || cx.snap.is_capturing() {
         grid(ui, cx);
         camera_path(ui, cx);
     }
-    if here {
+    // (the voice, VRChat's sound and the trackers: Windows')
+    if orbiters_core::here::HERE.camera_frames {
         performance(ui, cx);
     }
 }
@@ -723,7 +727,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, upload: &mut Option<(String, Option<bool>)>
     if snap.is_capturing() || snap.capture.state == CaptureState::Stopping {
         return under_way(ui, cx);
     }
-    if !orbiters_core::here::HERE.camera_frames {
+    if !orbiters_core::here::camera_frames() {
         return recording_elsewhere(ui, cx);
     }
     // The worn avatar's upload, read once per avatar: a picture of the world says beforehand that it would show.
@@ -1099,7 +1103,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
 fn vrchat_picker(ui: &mut Ui, cx: &mut Cx) {
     let snap = cx.snap;
     let runs = &snap.vrchat.runs;
-    if runs.len() < 2 || !orbiters_core::here::HERE.camera_frames {
+    if runs.len() < 2 || !orbiters_core::here::camera_frames() {
         return;
     }
     let target = runs.iter().find(|r| r.target);
@@ -1258,7 +1262,7 @@ fn chips(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
             let (text, tone) = super::network::sidebar_status(&snap.lan);
             (icons::MONITOR_PLAY, "VRChat", text, tone)
         },
-        if orbiters_core::here::HERE.camera_frames {
+        if orbiters_core::here::camera_frames() {
             (
                 icons::BROADCAST,
                 tr("Spout source"),

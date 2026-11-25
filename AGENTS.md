@@ -1,8 +1,12 @@
 # Working on Orbiters - N4N0
 
-- **Windows and macOS (Apple silicon only) are both shipped.** Whatever VRChat gives on the same computer (Spout, SteamVR,
-  its log) has nothing to read on a Mac (`orbiters_core::osc::VRCHAT_RUNS_HERE`), and a new feature that needs it is hidden
-  there; one that goes over OSC talks with the VRChat on the network (`orbiters_core::lan`). Native code goes behind
+- **Windows and macOS (Apple silicon only) are both shipped.** Whatever VRChat gives on the same computer (SteamVR, its log)
+  has nothing to read on a Mac (`orbiters_core::osc::VRCHAT_RUNS_HERE`), and a new feature that needs it is hidden
+  there; one that goes over OSC talks with the VRChat Home started on that Mac (on its loopback, `controller/lan.rs`), else with
+  the one on the network (`orbiters_core::lan`). **Its stream camera is the exception**: from obelisk-cli 0.1.15 on the engine
+  publishes it (`orbiters-spout`'s `mac.rs`, `docs/photos-and-captures.md`), and what needs it asks `here::camera_frames()`, never
+  the build: with an engine from before all of it is hidden. It reads the session Home started alone, read-only, and connects
+  only while something consumes (`tools/mac-spout/check.py` runs it on the engine's own Direct3D with no game). Native code goes behind
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
   `target/dist/<version>/Orbiters-N4N0-<version>-macos-arm64.dmg` is the build to give (see `docs/releasing.md`).
   VRChat itself does run on a Mac, one game at a time on the profile chosen on Home (`vrchat_launch::SEVERAL_HERE`; every start of
@@ -27,8 +31,8 @@
   read-only channel (`desktop_mac/channel.rs`), and the ring round the wheel, which holds the mouse, is picked by pushing past its rim
   (`gesture.rs`: its thresholds keep ordinary use of the wheel from ever picking ours; never let a click confirm). The game keeps its
   keyboard but while a text field of ours is up. Left Option is for an engine from before only. Screen Recording is the one
-  permission (Input Monitoring only if macOS hides the keys without it). Hidden there: 3D pictures, the camera's column,
-  translation, the corner's cards and mismatch buttons. `tools/mac-overlay/check.py` runs it over the engine's real window server
+  permission (Input Monitoring only if macOS hides the keys without it). Hidden there: translation, the corner's cards and
+  mismatch buttons (and 3D pictures and the camera's column with an engine that does not give VRChat's camera). `tools/mac-overlay/check.py` runs it over the engine's real window server
   with no game, only while nobody uses the Mac.
 - **The VRChat bridge on a Mac observes and travels only** (`docs/vrchat-bridge.md`, "On a Mac"). What a computer's bridge can
   do is `bridge/caps.rs`, never `cfg` in shared logic: Windows has every capability (keep it so: its tools, guide and tests are

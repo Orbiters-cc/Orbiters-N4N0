@@ -157,6 +157,10 @@ pub trait Machine: Send + Sync {
     fn desktop_game(&self, _running: &[u32]) -> Option<u32> {
         None
     }
+    /// The engine there gives VRChat's stream camera (a Mac's; elsewhere it is VRChat's own Spout); `game`: the process of the person's own VRChat that runs.
+    fn camera(&self, _game: Option<u32>) -> bool {
+        false
+    }
     /// Why the last start failed after `start` returned, told once.
     fn start_failure(&self) -> Option<String> {
         None
@@ -584,6 +588,12 @@ impl Machine for MacMachine {
     fn desktop_game(&self, running: &[u32]) -> Option<u32> {
         // (before the engine's record names the game, a launch is known by its program alone: not the bridge's either)
         running.iter().copied().find(|pid| !self.bridges(*pid) && !(self.play.program() == Some(*pid) && self.newest_is_the_bridges()))
+    }
+
+    fn camera(&self, game: Option<u32>) -> bool {
+        // By its release; or by a session that publishes what its game shares, whatever started it.
+        self.program().is_some_and(|p| orbiters_core::obelisk::has_host_features(&p))
+            || game.is_some_and(|g| orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), g).join("shared").is_dir())
     }
 
     fn newest_launch(&self) -> Option<(u64, Option<u32>)> {
@@ -1739,6 +1749,8 @@ impl Controller {
         let trouble = if here { machine.start_trouble() } else { None };
         let picture_lost = if here { machine.picture_lost() } else { None };
         let desktop_game = if here { machine.desktop_game(&running.iter().map(|(pid, _)| *pid).collect::<Vec<_>>()) } else { None };
+        let camera = here && machine.camera(desktop_game);
+        orbiters_core::here::engine_gives_camera(camera);
         let repairing = self.launcher.lock().unwrap().repairing;
         let engine_trouble = if here { machine.engine_problem() } else { None }.map(|p| orbiters_core::launcher::EngineTrouble { paths: p.paths, action: p.action, repairing: repairing.is_some(), percent: repairing.flatten() });
         // A start that failed after it was asked for (the game's own start, far from the press): said, and over.
@@ -1826,6 +1838,7 @@ impl Controller {
             m.log_trouble = log_trouble;
             m.picture_lost = picture_lost;
             m.desktop_game = desktop_game;
+            m.camera = camera;
             m.engine_trouble = engine_trouble;
             m.unresolved = unresolved;
             m.start_trouble = trouble;

@@ -358,5 +358,6 @@
   "This capture was reconstructed again while the file was made: nothing was saved. Try again to export the new splats.": "Esta captura se reconstruyó de nuevo mientras se creaba el archivo: no se guardó nada. Inténtalo de nuevo para exportar los nuevos splats.",
   "its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to export it": "su última reconstrucción solo se guardó en parte (un archivo estaba abierto en otro programa): vuelve a reconstruirla para exportarla",
   "Point and click, with no key: VRChat's Quick Menu leaves you the mouse. Around its wheel, push past the edge to a tool, then scroll one notch or rest on it.": "Apunta y haz clic, sin ninguna tecla: el menú rápido de VRChat te deja el ratón. Alrededor de su rueda, empuja más allá del borde hacia una herramienta y gira la rueda del ratón un paso o quédate sobre ella.",
-  "Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed.": "Mantén Opción izquierda para apuntar: el motor con el que se inició este VRChat se queda con el ratón. Desde el motor de Obelisk 0.1.15 no hace falta ninguna tecla."
+  "Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed.": "Mantén Opción izquierda para apuntar: el motor con el que se inició este VRChat se queda con el ratón. Desde el motor de Obelisk 0.1.15 no hace falta ninguna tecla.",
+  "VRChat on this Mac": "VRChat en este Mac"
 }

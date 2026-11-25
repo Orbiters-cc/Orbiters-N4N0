@@ -15,18 +15,18 @@ use std::time::Duration;
 /// The time between two looks at the camera.
 pub const EVERY: Duration = Duration::from_millis(330);
 /// VRChat's camera's Spout sender.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const VRCHAT_SENDER: &str = "VRCSender1";
 /// No frame for this long (from the start, or since the last): the camera is said to send none.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NO_PICTURE_AFTER: Duration = Duration::from_millis(2500);
 /// ...and only after as many looks without one as fit in that time. The scanner runs below normal priority, so a busy
 /// computer (VRChat itself, or the whole test suite) can leave it without a turn for seconds: the time alone then said the
 /// camera sent nothing when the scanner had not looked.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NO_PICTURE_LOOKS: u32 = (NO_PICTURE_AFTER.as_millis() / EVERY.as_millis()) as u32;
 /// How often what the scanner saw is noted.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const NOTE_EVERY: Duration = Duration::from_secs(10);
 
 /// The texts of the QR codes in a grey picture (every way [`orbiters_qr::read`] has).
@@ -86,7 +86,7 @@ impl Glimpses {
 
 /// One decoding of a picture any world can show, its panic contained: `None` for that picture (the scan goes on with the
 /// next), noted in the log the first time and every hundredth after (`panics` counts them).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn contained<T>(panics: &mut u32, decode: impl FnOnce() -> T) -> Option<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)) {
         Ok(v) => Some(v),
@@ -114,7 +114,7 @@ impl Drop for Scan {
 
 /// Starts reading `wanted` (Settings' Spout sender; empty: VRChat's) for QR codes, telling `events` what it sees.
 pub fn start(wanted: String, events: QrEvents) -> Result<Box<dyn QrScan>, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
@@ -131,12 +131,16 @@ pub fn start(wanted: String, events: QrEvents) -> Result<Box<dyn QrScan>, String
             .map_err(|e| tr!("The scanner could not start: {error}", error = e))?;
         Ok(Box::new(Scan(stop)))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (wanted, events);
         Err(tr("Reading VRChat's camera needs Spout, on Windows").into())
     }
 }
+
+/// Below normal priority: VRChat's frames come first. (A Mac's scheduler is left as it is.)
+#[cfg(target_os = "macos")]
+fn lower_priority() {}
 
 /// Below normal priority: VRChat's frames come first.
 #[cfg(windows)]
@@ -147,14 +151,14 @@ fn lower_priority() {
 }
 
 /// The sender to read: `wanted` when it sends, else VRChat's camera's.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn sender(wanted: &str) -> Option<String> {
     let senders = orbiters_spout::list_senders();
     [wanted, VRCHAT_SENDER].into_iter().filter(|n| !n.is_empty()).find(|n| senders.iter().any(|s| s == n)).map(str::to_string)
 }
 
 /// The scanner's thread, until `stop`.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
     use std::time::Instant;
     let mut receiver = match orbiters_spout::Receiver::new() {
@@ -265,7 +269,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
 
 /// What the scanner saw over [`NOTE_EVERY`], for `vr-test.log`: Enzo's session must say what the reader was given and
 /// what it made of it (his two codes of 2026-11-14 left no trace).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Default)]
 struct Note {
     since: Option<std::time::Instant>,
@@ -278,7 +282,7 @@ struct Note {
     unclear: u32,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl Note {
     fn looked(&mut self, look: orbiters_qr::Look, size: (usize, usize), took: Duration, reading: &orbiters_qr::Reading) {
         let k = match look {
@@ -327,11 +331,11 @@ mod tests {
     use super::*;
 
     /// Scans (by their sender's name) whose decoder panics on its next pictures, and how many times.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     static PANICS_FOR: std::sync::Mutex<Vec<(String, u32)>> = std::sync::Mutex::new(Vec::new());
 
     /// The decoder of the scan reading `wanted` panics here when a test asked for it (SWEEP-14: as a crafted grid could).
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub(super) fn maybe_panic(wanted: &str) {
         let mut all = PANICS_FOR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(left) = all.iter_mut().find(|(w, n)| w == wanted && *n > 0) {

@@ -290,5 +290,6 @@
   "a damaged PNG chunk": "un bloc PNG endommagé",
   "a PNG chunk this copy cannot keep": "un bloc PNG que cette copie ne peut pas garder",
   "the key file is being written: try again": "le fichier de la clé est en cours d’écriture : réessaie",
-  "the key file could not be read: try again": "le fichier de clé n’a pas pu être lu : réessayez"
+  "the key file could not be read: try again": "le fichier de clé n’a pas pu être lu : réessayez",
+  "the frame was gone before it was read": "l’image avait disparu avant d’être lue"
 }

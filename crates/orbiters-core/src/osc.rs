@@ -1305,6 +1305,11 @@ fn vrchat_client_port(addr: SocketAddr) -> Option<u16> {
     vrchat_client_port_within(addr, Duration::from_secs(1))
 }
 
+/// Whether the OSCQuery service at `addr` answers as VRChat's.
+pub fn answers_as_vrchat(addr: SocketAddr) -> bool {
+    vrchat_client_port(addr).is_some()
+}
+
 /// [`vrchat_client_port`] with its answer waited for up to `limit`: a test's stand-in on a busy machine can take longer
 /// than the second VRChat is given, which is not what the test is about.
 fn vrchat_client_port_within(addr: SocketAddr, limit: Duration) -> Option<u16> {

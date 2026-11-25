@@ -4522,6 +4522,7 @@ dependencies = [
 name = "orbiters-spout"
 version = "0.3.10"
 dependencies = [
+ "libc",
  "orbiters-contracts",
  "orbiters-i18n",
  "qrcode",

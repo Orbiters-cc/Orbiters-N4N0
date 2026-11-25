@@ -577,6 +577,7 @@ struct Held {
 
 impl Held {
     fn follow_smoothing(&mut self) {
+        orbiters_core::here::engine_gives_camera(self.service.launcher.camera);
         let revision = self.service.smoothing_revision;
         self.smoothing.retain(|p| p.2.is_none_or(|ack| revision < ack));
         if self.smoothing.is_empty() {

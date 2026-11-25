@@ -224,8 +224,8 @@ never cut by it. Settings › About has **Look now**.
 ### On a Mac
 
 There are development builds for Macs with Apple silicon (a `.dmg` on some `-dev` pre-releases). VRChat has no Mac
-version, so what reads VRChat on the same computer has nothing to read there (the camera over Spout, 3D pictures and
-recordings, the log, SteamVR features). The rest works: Unity projects, Photos & captures and their reconstruction, the
+version, so what reads VRChat on the same computer has nothing to read there (SteamVR features, the log). VRChat's
+camera, with the 3D pictures and recordings that need it, is there with `obelisk-cli` 0.1.15 or later. The rest works: Unity projects, Photos & captures and their reconstruction, the
 3D view and editors, Events, N4N0 and its menu, and OSC with VRChat on another device of the network (a Quest, a Pico,
 a phone or a PC on the same Wi-Fi). Play can also start VRChat on the Mac, one at a time, on the VRChat profile you pick,
 through `obelisk-cli`, a separate GPL-3.0 program from the [Orbiters-cc/Obelisk](https://github.com/Orbiters-cc/Obelisk)
@@ -342,7 +342,7 @@ sandbox), and the other notes in [docs/](docs/).
 | `crates/orbiters-booster` | The FPS booster's logic and its undo journal |
 | `crates/orbiters-qr`, `orbiters-translate`, `orbiters-web` | QR reading, live translation (OCR and placement), private off-screen web pages |
 | `crates/orbiters-projects` | Unity projects, VPM packages, templates, avatar setup |
-| `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11) |
+| `crates/orbiters-spout` | Spout2 receiver and test sender (Direct3D 11); on a Mac, a receiver of what the engine publishes of VRChat's |
 | `crates/orbiters-setup`, `orbiters-update`, `orbiters-version` | The setup and uninstaller, signed releases and updates, the version |
 | `xtask/` | Release tooling: `cargo xtask keygen / bump / dist / publish / release / github` |
 | `contracts/` | Submodule: formats shared with Mixer (private, see [Building](#building-from-source)) |

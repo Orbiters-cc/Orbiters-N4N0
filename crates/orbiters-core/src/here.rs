@@ -3,7 +3,8 @@
 //! stream of the Linux port turns its own on in [`Here::LINUX`] when it lands, and nothing else asks about it.
 //!
 //! A capability is about this build on this system, never about this moment: whether SteamVR runs, VRChat is installed
-//! or a device is there is asked elsewhere.
+//! or a device is there is asked elsewhere. One is not: on a Mac VRChat's stream camera is given by the engine that runs
+//! VRChat there, from a release of it on ([`camera_frames`]).
 
 /// What the build for one system can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +28,8 @@ pub struct Here {
     pub driver: bool,
     /// What the headset's eyes see can be read (translation in VR, the camera tiles).
     pub eye_picture: bool,
-    /// VRChat's stream camera can be read (Spout): 3D pictures, captures, the QR scanner.
+    /// VRChat's stream camera can be read (Spout): 3D pictures, captures, the QR scanner. By the build alone: ask
+    /// [`camera_frames`], which knows of a Mac's engine too.
     pub camera_frames: bool,
     /// N4N0's panels show over VRChat's window on the desktop.
     pub desktop_panels: bool,
@@ -163,6 +165,19 @@ pub const HERE: Here = if cfg!(target_os = "macos") {
     Here::WINDOWS
 };
 
+/// On a Mac: the engine that runs VRChat gives its stream camera's frames.
+static ENGINE_GIVES_CAMERA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether VRChat's stream camera can be read here now: what everything that takes a picture or reads a code asks.
+pub fn camera_frames() -> bool {
+    HERE.camera_frames || (cfg!(target_os = "macos") && ENGINE_GIVES_CAMERA.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// What the service says of it, in each of the app's processes ([`crate::launcher::LauncherState::camera`]). Nothing but a Mac asks an engine.
+pub fn engine_gives_camera(gives: bool) {
+    ENGINE_GIVES_CAMERA.store(gives, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether this build is Linux's (the phone's Android is not). For the words and looks that are a third kind beside Windows'
 /// and the Mac's; what the app can do asks [`HERE`].
 pub const LINUX: bool = cfg!(target_os = "linux");
@@ -182,6 +197,16 @@ mod tests {
         };
         assert_eq!(HERE, expected);
         assert_eq!(LINUX, cfg!(target_os = "linux"));
+    }
+
+    /// VRChat's stream camera: Windows' build reads it, whatever an engine says; a Mac's once its engine gives it, and no more once it does not.
+    #[test]
+    fn a_mac_s_camera_is_its_engine_s() {
+        assert_eq!(camera_frames(), HERE.camera_frames);
+        engine_gives_camera(true);
+        assert_eq!(camera_frames(), HERE.camera_frames || cfg!(target_os = "macos"));
+        engine_gives_camera(false);
+        assert_eq!(camera_frames(), HERE.camera_frames);
     }
 
     /// Windows has everything, as it always had: adding a capability there as `false` would take a feature away.

@@ -94,6 +94,7 @@ pub(super) struct MachineParts {
     pub(super) start_trouble: Option<StartTrouble>,
     pub(super) picture_lost: Option<String>,
     pub(super) desktop_game: Option<u32>,
+    pub(super) camera: bool,
     pub(super) engine_trouble: Option<EngineTrouble>,
     pub(super) engine_setup: Option<EngineSetup>,
     pub(super) several_profiles: bool,
@@ -110,6 +111,7 @@ impl MachineParts {
             start_trouble: l.start_trouble.clone(),
             picture_lost: l.picture_lost.clone(),
             desktop_game: l.desktop_game,
+            camera: l.camera,
             engine_trouble: l.engine_trouble.clone(),
             engine_setup: l.engine_setup.clone(),
             several_profiles: l.several_profiles,
@@ -125,6 +127,7 @@ impl MachineParts {
         l.start_trouble = self.start_trouble;
         l.picture_lost = self.picture_lost;
         l.desktop_game = self.desktop_game;
+        l.camera = self.camera;
         l.engine_trouble = self.engine_trouble;
         l.engine_setup = self.engine_setup;
         l.several_profiles = self.several_profiles;

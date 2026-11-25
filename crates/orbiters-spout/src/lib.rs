@@ -6,10 +6,19 @@
 //!
 //! [`Receiver`] reads any Spout sender (VRChat's Stream camera, OBS, …) into CPU memory, only the rows asked for
 //! ([`FrameReader`]); [`Sender`] publishes frames, used by tests and the test-pattern source.
+//!
+//! On a Mac the same [`Receiver`] reads VRChat's stream camera from Obelisk's engine, which publishes what the game it runs
+//! shares for Spout ([`mac`]'s own words): nothing of Spout's is there but what that game says.
 
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(any(windows, target_os = "macos"))]
+mod pixels;
 #[cfg(windows)]
 mod win;
 
+#[cfg(target_os = "macos")]
+pub use mac::{active_sender, list_senders, sender_info, session, set_session, FrameReader, Receiver, Session};
 #[cfg(windows)]
 pub use win::{active_sender, list_senders, sender_info, FrameReader, Receiver, Sender};
 

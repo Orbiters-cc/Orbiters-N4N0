@@ -57,6 +57,7 @@ fn main() {
         Some("send-test") => cli_send_test(&args[1..]),
         Some("verify") => cli_verify(&args[1..]),
         Some("list-sources") => {
+            follow_host(flag(&args, "--host").map(PathBuf::from));
             for s in list_sources() {
                 println!("{}  {}x{}  DXGI {}  {}", s.name, s.width, s.height, s.format, s.description);
             }
@@ -80,8 +81,16 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
 
+/// The senders of the VRChat whose engine's host folder this is (a Mac's).
+fn follow_host(folder: Option<PathBuf>) {
+    #[cfg(target_os = "macos")]
+    orbiters_spout::set_session(folder.map(|f| orbiters_spout::Session::of(&f)));
+    #[cfg(not(target_os = "macos"))]
+    let _ = folder;
+}
+
 fn list_sources() -> Vec<SpoutSourceInfo> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         orbiters_spout::list_senders()
             .into_iter()
@@ -89,7 +98,7 @@ fn list_sources() -> Vec<SpoutSourceInfo> {
             .map(|i| SpoutSourceInfo { name: i.name, width: i.width, height: i.height, format: i.format, description: i.description })
             .collect()
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Vec::new()
     }
@@ -108,16 +117,14 @@ fn check_pattern(width: u32, height: u32, fps: f32) -> anyhow::Result<()> {
 
 fn open_source(spec: &SourceSpec) -> anyhow::Result<Box<dyn FrameSource>> {
     Ok(match spec {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         SourceSpec::Spout { name, extra } if extra.is_empty() => Box::new(sources::SpoutSource::new(name)?),
         // VRChat's camera dolly's other streams beside its camera.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         SourceSpec::Spout { name, extra } => {
             let others = extra.iter().map(|n| Ok(Box::new(sources::SpoutSource::new(n)?) as Box<dyn FrameSource>)).collect::<anyhow::Result<Vec<_>>>()?;
             Box::new(sources::MultiSource::new(Box::new(sources::SpoutSource::new(name)?), others))
         }
-        #[cfg(target_os = "macos")]
-        SourceSpec::Spout { .. } => anyhow::bail!("{}", orbiters_i18n::tr("VRChat's camera reaches this app through Spout, which only Windows has: a Mac opens and reconstructs captures but does not record them")),
         #[cfg(not(any(windows, target_os = "macos")))]
         SourceSpec::Spout { .. } => anyhow::bail!("{}", orbiters_i18n::tr("Spout is only available on Windows; use the PipeWire source on Linux")),
         SourceSpec::RawSequence { path, realtime } => Box::new(RawSequenceSource::open(path, *realtime)?),
@@ -198,6 +205,7 @@ fn run_session(source: &mut dyn FrameSource, session: &mut CaptureSession, max_f
 }
 
 fn cli_record(args: &[String]) -> anyhow::Result<()> {
+    follow_host(flag(args, "--host").map(PathBuf::from));
     let mut source_spec = parse_source(flag(args, "--source").unwrap_or("spout"))?;
     if let (SourceSpec::Spout { extra, .. }, Some(names)) = (&mut source_spec, flag(args, "--extra")) {
         *extra = names.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect();
@@ -515,6 +523,7 @@ fn run_worker() -> anyhow::Result<()> {
                         r.session.set_world(world);
                     }
                 }
+                WorkerCommand::Host { folder } => follow_host(folder),
                 WorkerCommand::GameAudio { pid } => {
                     if let Some(r) = current.as_mut() {
                         r.session.game_audio(pid);

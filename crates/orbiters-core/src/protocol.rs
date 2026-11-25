@@ -35,6 +35,12 @@ pub enum WorkerCommand {
     GameAudio {
         pid: u32,
     },
+    /// On a Mac: the folder in which the engine of the person's own VRChat gives its stream camera to programs outside
+    /// it (`obelisk::host_folder`); none while it does not run. Nothing elsewhere.
+    Host {
+        #[serde(default)]
+        folder: Option<PathBuf>,
+    },
     Quit,
 }
 

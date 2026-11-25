@@ -571,15 +571,17 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
 }
 
 /// This person's temporary folder, whatever the environment says: where the engine makes its sessions' folders.
-#[cfg(target_os = "macos")]
 pub fn user_tmp() -> PathBuf {
-    let mut buffer = [0u8; 1024];
-    // SAFETY: the buffer is this call's own and its size is said; what comes back is a C string within it.
-    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
-    match buffer.iter().position(|b| *b == 0) {
-        Some(end) if n > 1 && end > 0 => PathBuf::from(String::from_utf8_lossy(&buffer[..end]).into_owned()),
-        _ => std::env::temp_dir(),
+    #[cfg(target_os = "macos")]
+    {
+        let mut buffer = [0u8; 1024];
+        // SAFETY: the buffer is this call's own and its size is said; what comes back is a C string within it.
+        let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if let Some(end) = buffer.iter().position(|b| *b == 0).filter(|end| n > 1 && *end > 0) {
+            return PathBuf::from(String::from_utf8_lossy(&buffer[..end]).into_owned());
+        }
     }
+    std::env::temp_dir()
 }
 
 /// The folder of the session whose engine's launcher is `launcher` (its record's `game.pid`) for programs outside the engine (obelisk-cli 0.1.15): what the engine says of the

@@ -358,5 +358,6 @@
   "This capture was reconstructed again while the file was made: nothing was saved. Try again to export the new splats.": "ファイルの作成中にこのキャプチャが再構築されたため、何も保存されませんでした。もう一度試すと、新しいスプラットを書き出せます。",
   "its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to export it": "前回の再構築は一部しか保存されていません（ファイルが別のプログラムで開かれていました）。書き出すには、もう一度再構築してください",
   "Point and click, with no key: VRChat's Quick Menu leaves you the mouse. Around its wheel, push past the edge to a tool, then scroll one notch or rest on it.": "キーなしで、指してクリックできます。VRChatのクイックメニューではマウスを自由に使えます。ホイールの周りでは、縁を越えてツールまで動かし、1目盛りスクロールするか、その上で止めます。",
-  "Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed.": "左Optionを押している間だけ指せます。このVRChatを起動したエンジンがマウスを離さないためです。Obeliskのエンジン0.1.15以降では、キーは要りません。"
+  "Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed.": "左Optionを押している間だけ指せます。このVRChatを起動したエンジンがマウスを離さないためです。Obeliskのエンジン0.1.15以降では、キーは要りません。",
+  "VRChat on this Mac": "このMacのVRChat"
 }

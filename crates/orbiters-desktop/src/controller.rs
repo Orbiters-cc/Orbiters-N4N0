@@ -146,6 +146,8 @@ pub struct Controller {
     osc: Mutex<Option<OscService>>,
     /// VRChat on the network, where it does not run on this computer.
     lan: lan::Runtime,
+    #[cfg(target_os = "macos")]
+    mac_game: mac_game::Runtime,
     osc_values: Mutex<OscValues>,
     worker_log: Mutex<VecDeque<String>>,
     notices: Mutex<Vec<Notice>>,
@@ -549,6 +551,8 @@ mod groups_ledger;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
+#[cfg(target_os = "macos")]
+mod mac_game;
 #[cfg(target_os = "linux")]
 mod linux_vrchat;
 pub mod launcher;
@@ -606,6 +610,8 @@ impl Controller {
             worker: Mutex::new(None),
             osc: Mutex::new(None),
             lan: Default::default(),
+            #[cfg(target_os = "macos")]
+            mac_game: Default::default(),
             osc_values: Mutex::new(OscValues::default()),
             worker_log: Mutex::new(VecDeque::new()),
             notices: Mutex::new(Vec::new()),
@@ -970,6 +976,13 @@ impl Controller {
         let handle = WorkerHandle::spawn(on_event, on_log, on_exit).inspect_err(|e| {
             self.update(|s| s.worker.error = Some(e.to_string()));
         })?;
+        // A Mac's is told first whose frames it reads.
+        #[cfg(target_os = "macos")]
+        let handle = {
+            let mut handle = handle;
+            let _ = handle.send(&self.worker_host());
+            handle
+        };
         *guard = Some(handle);
         Ok(())
     }
@@ -1256,14 +1269,22 @@ impl Controller {
         }
     }
 
+    /// The world VRChat is in: a Mac's own game's, where one runs, which is said for captures alone.
+    pub(super) fn world_of_captures(&self) -> orbiters_core::vrchat_log::WorldState {
+        #[cfg(target_os = "macos")]
+        if self.own_game() {
+            return self.mac_world();
+        }
+        (*self.snapshot.lock().unwrap().vrchat.world).clone()
+    }
+
     fn current_world(&self) -> Option<WorldInfo> {
-        let s = self.snapshot.lock().unwrap();
-        let w = &s.vrchat.world;
+        let w = self.world_of_captures();
         (w.in_world && (w.world_id.is_some() || w.world_name.is_some())).then(|| WorldInfo {
-            id: w.world_id.clone(),
-            name: w.world_name.clone(),
+            id: w.world_id,
+            name: w.world_name,
             author_name: None,
-            instance: w.instance.clone(),
+            instance: w.instance,
         })
     }
 
@@ -2668,6 +2689,12 @@ impl Controller {
         self.settings().reconstruct_while_playing == WhilePlaying::AfterVrchat && self.snapshot.lock().unwrap().vrchat.runs_here() && !self.headset_on_break()
     }
 
+    /// The person's own VRChat runs on this Mac, through the engine (elsewhere its process is seen).
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn own_game(&self) -> bool {
+        false
+    }
+
     /// Whether VRChat runs on this very Mac, through the engine: what looks at the Mac now and then does so less often beside it
     /// (its CPU, its GPU and N4N0 share one budget of power and heat, docs/mac-performance.md).
     pub(crate) fn game_on_this_mac(&self) -> bool {
@@ -3411,6 +3438,8 @@ fn spawn_watchers(ctl: Shared) {
             let mut log = vrchats::TargetLog::new(None, ctl.sides.clone());
             // Every VRChat running, and which the app follows (controller/vrchats.rs).
             let mut roster = vrchats::Roster::seeing(ctl.launcher_machine_now().vrchats_seen().unwrap_or_default());
+            #[cfg(target_os = "macos")]
+            let (mut own_game, library) = (mac_game::OwnGame::default(), orbiters_core::paths::roots().is_none().then(|| orbiters_core::obelisk::library(&orbiters_core::obelisk::home())));
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
             let history_file = visited::history_file();
@@ -3478,8 +3507,9 @@ fn spawn_watchers(ctl: Shared) {
                     let was = running;
                     // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs
                     // this computer nothing.
-                    let remote = pid.is_none() && ctl.lan.alive();
-                    running = pid.is_some() || remote;
+                    let own = ctl.own_game();
+                    let remote = pid.is_none() && !own && ctl.lan.alive();
+                    running = pid.is_some() || own || remote;
                     vrchat_since = if running { vrchat_since.or(Some(Instant::now())) } else { None };
                     let mut started = None;
                     ctl.update_if(|s| {
@@ -3551,6 +3581,11 @@ fn spawn_watchers(ctl: Shared) {
                     changed
                 });
                 split.read(&events, log.live(), Instant::now());
+                #[cfg(target_os = "macos")]
+                if let Some(library) = &library {
+                    let (events, live) = own_game.turn(&ctl, library, tick);
+                    split.read(&events, live, Instant::now());
+                }
                 // A world joined: the avatar's default state goes back once it loaded there.
                 ctl.n4n0.states_log(&events, log.live());
                 let (state, split_session) = {
@@ -3582,8 +3617,10 @@ fn spawn_watchers(ctl: Shared) {
                 ctl.check_stopping();
                 ctl.check_pausing();
 
-                // Spout senders, every 2 s.
-                #[cfg(windows)]
+                // Spout senders, every 2 s: on a Mac, those of the VRChat Home started, through its engine.
+                #[cfg(target_os = "macos")]
+                ctl.follow_camera_host();
+                #[cfg(any(windows, target_os = "macos"))]
                 if tick.is_multiple_of(2) {
                     let sources: Vec<_> = orbiters_spout::list_senders()
                         .into_iter()

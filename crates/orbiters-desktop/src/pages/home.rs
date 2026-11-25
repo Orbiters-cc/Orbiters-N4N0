@@ -76,13 +76,13 @@ fn home_tiles() -> impl Iterator<Item = (Target, Icon, Text, Tint)> {
 }
 
 /// Whether a feature can work here: fast walk moves SteamVR's play space, Tracking smooths SteamVR's devices through its
-/// driver, and a 3D picture and the QR code scanner read VRChat's camera over Spout. Everything else goes over OSC or the web.
+/// driver, and a 3D picture and the QR code scanner read VRChat's camera over Spout (on a Mac, once its engine gives it). Everything else goes over OSC or the web.
 fn available(target: Target) -> bool {
     use orbiters_core::here::HERE;
     match target {
         Target::FastWalk => HERE.steam_vr,
         Target::Tracking => HERE.driver,
-        Target::Photo | Target::Qr => HERE.camera_frames,
+        Target::Photo | Target::Qr => orbiters_core::here::camera_frames(),
         _ => true,
     }
 }

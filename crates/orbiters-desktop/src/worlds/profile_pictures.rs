@@ -27,7 +27,7 @@ use orbiters_contracts::qoi;
 use orbiters_core::picture_sources::OtherCaches;
 pub use orbiters_core::vrchat_store::{picture_key, Account, Kept, Size};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -148,6 +148,7 @@ fn decode(body: &[u8]) -> Option<RgbaImage> {
 }
 
 impl Store {
+    #[cfg(test)]
     pub fn at(dir: PathBuf, cap: u64) -> Self {
         Self { pictures: orbiters_core::vrchat_store::Pictures::at(dir, cap), before: None }
     }
@@ -609,6 +610,7 @@ impl Profiles {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::path::Path;
     use std::time::SystemTime;
 
     const A: &str = "usr_00000000-0000-4000-8000-00000000000a";

@@ -20,6 +20,9 @@ pub enum Reach {
     Cooling(i64),
     /// Not for this person now (an invite from someone not in the game, in a private instance).
     NotNow,
+    /// The account is on its way back (the list last on show, its session being restored): drawn where it will be, not
+    /// pressable (REQUEST28: nothing jumps when VRChat answers).
+    Waiting,
     /// Needs the VRChat sign-in (database only): the page says it once, the button is not drawn.
     SignIn,
 }
@@ -37,7 +40,9 @@ fn cooling(ready_at: Option<i64>, now: i64) -> Option<i64> {
 /// The request-invite button for `friend`.
 pub fn request(state: &LauncherState, friend: &Friend, sent_at: Option<f64>, clock: f64, now: i64) -> Reach {
     if !state.possible.request_invite {
-        return Reach::SignIn;
+        // (Only who can be asked will have it.)
+        let there = friend.presence == Presence::InGame && !matches!(friend.whereabouts, Whereabouts::Website | Whereabouts::Offline);
+        return if state.kept.is_none() { Reach::SignIn } else if there { Reach::Waiting } else { Reach::NotNow };
     }
     if sent_at.is_some_and(|at| clock - at < SENT_FOR) || notice_sent(state, friend, SentKind::RequestInvite) {
         return Reach::Sent;
@@ -55,7 +60,7 @@ pub fn request(state: &LauncherState, friend: &Friend, sent_at: Option<f64>, clo
 /// The boop button for `friend`: anyone, online or not, while signed in.
 pub fn boop(state: &LauncherState, friend: &Friend, sent_at: Option<f64>, clock: f64, now: i64) -> Reach {
     if !state.possible.boop {
-        return Reach::SignIn;
+        return if state.kept.is_some() { Reach::Waiting } else { Reach::SignIn };
     }
     if sent_at.is_some_and(|at| clock - at < SENT_FOR) {
         return Reach::Sent;
@@ -238,6 +243,16 @@ mod tests {
         assert_eq!(request(&s, friend(&s, "Pixel Fox"), None, 0.0, NOW), Reach::Ready, "a private instance can be asked for");
         assert_eq!(request(&s, friend(&s, "Lumen"), None, 0.0, NOW), Reach::NotNow);
         assert_eq!(request(&s, friend(&s, "Quiet Kite"), None, 0.0, NOW), Reach::NotNow);
+    }
+
+    #[test]
+    fn what_reaches_a_person_waits_in_its_place_while_the_account_is_on_its_way_back() {
+        let mut s = sample();
+        (s.kept, s.possible) = (Some(1), Possible { live_status: true, ..Possible::default() });
+        assert_eq!(request(&s, friend(&s, "Nova Sample"), None, 0.0, NOW), Reach::Waiting);
+        assert_eq!(request(&s, friend(&s, "Quiet Kite"), None, 0.0, NOW), Reach::NotNow);
+        assert_eq!(boop(&s, friend(&s, "Quiet Kite"), None, 0.0, NOW), Reach::Waiting);
+        assert!(!Reach::Waiting.pressable());
     }
 
     #[test]

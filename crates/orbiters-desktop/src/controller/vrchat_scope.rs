@@ -254,6 +254,15 @@ impl Controller {
         Some((Api::new(server), token, Stamp { epoch: self.identity_epoch(), owner }))
     }
 
+    /// Pictures of the page: what the state is about to say of VRChat is the member `member`'s (a digest), who is the one
+    /// signed in to Orbiters here.
+    pub(crate) fn stand_in_vrchat_member(&self, member: &str) {
+        let stamp = Stamp { epoch: self.identity_epoch(), owner: Owner { member: member.to_string() } };
+        let mut rt = self.vrchat_login.lock().unwrap();
+        rt.at_launch = Some(stamp.owner.clone());
+        (rt.status_for, rt.list_for) = (Some(stamp.clone()), Some(stamp));
+    }
+
     /// The VRChat session signed in and allowed for the Orbiters member now, and whose it is.
     pub(super) fn vrchat_session(&self) -> Option<Session> {
         let (client, stamp) = self.vrchat_granted()?;

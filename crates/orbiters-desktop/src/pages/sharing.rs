@@ -590,6 +590,11 @@ impl Dialog {
         let shareable = self.entry.ready && self.entry.remote.as_ref().is_none_or(|i| i.can_share && i.hidden.is_none());
         if !self.fixture_active && (self.picker || shareable) && !self.friends_requested {
             self.friends_requested = true;
+            // Those Home's list has show at once; VRChat's answer takes their place.
+            self.friends_list = crate::controller::vrchat_data::friends_here(cx.snap)
+                .into_iter()
+                .map(|f| Friend { id: f.id.clone(), name: f.name.clone(), image: (!f.look.icon.is_empty()).then(|| f.look.icon.clone()) })
+                .collect();
             let backend = cx.ctl.clone();
             self.friends = Job::spawn(&ctx, move || {
                 use crate::controller::vrchat_data::{Request, Response};

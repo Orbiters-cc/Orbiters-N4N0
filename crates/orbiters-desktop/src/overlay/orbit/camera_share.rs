@@ -34,7 +34,9 @@ pub struct Chooser {
 impl Chooser {
     /// Opened for picture `offer`: its friends asked of the service on a thread of their own.
     pub fn open(offer: u64, backend: &Ctl, snap: &Snapshot) -> Self {
-        let mut c = Self { offer, friends: Vec::new(), coming: None, error: None, chosen: BTreeSet::new(), page: 0 };
+        // Those Home's list has show at once; VRChat's answer takes their place.
+        let friends = crate::controller::vrchat_data::friends_here(snap).into_iter().map(|f| Friend { id: f.id.clone(), name: f.name.clone() }).collect();
+        let mut c = Self { offer, friends, coming: None, error: None, chosen: BTreeSet::new(), page: 0 };
         c.load(backend, snap);
         c
     }
@@ -122,7 +124,7 @@ impl Chooser {
             .take(share_sheet::ROWS)
             .map(|(f, here)| ChooserRow { key: share_sheet::person_key(&f.id), name: f.name.clone(), here: *here, chosen: self.chosen.contains(&f.id) })
             .collect();
-        ChooserView { rows, page, pages: self.pages(), chosen: self.chosen.len(), loading: self.coming.is_some(), error: self.error.clone() }
+        ChooserView { rows, page, pages: self.pages(), chosen: self.chosen.len(), loading: self.coming.is_some() && self.friends.is_empty(), error: self.error.clone() }
     }
 }
 

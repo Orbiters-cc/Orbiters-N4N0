@@ -83,7 +83,8 @@ impl Account {
         &self.user
     }
     fn folder(&self) -> String {
-        Sha256::digest(format!("vrchat store\n{}\n{}", self.member, self.user).as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
+        let whose = format!("vrchat store\n{}\n{}", self.member, self.user); // i18n: not shown (a folder's name)
+        Sha256::digest(whose.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect()
     }
     pub fn dir(&self, root: &Path) -> PathBuf {
         root.join(self.folder())

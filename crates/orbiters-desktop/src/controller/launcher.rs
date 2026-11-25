@@ -1468,7 +1468,7 @@ impl Controller {
     }
 
     /// One look: is the source still the one read, is a read due, is the game running.
-    fn launcher_tick(self: &Shared) {
+    pub(super) fn launcher_tick(self: &Shared) {
         // The VRChat session waits for Orbiters (the environment or account just changed, Orbiters out of reach): the list
         // on show stays as it is, neither cleared nor replaced by the local copy, and nothing is read until it is back (r20).
         let session = self.launcher_client();
@@ -2187,7 +2187,9 @@ impl Controller {
     }
 
     fn launcher_read_local(&self) {
-        let Ok(mut state) = orbiters_core::launcher_local::read_now() else {
+        // (Tests never look at the person's own VRCX or VRCNext.)
+        let read = if cfg!(test) { Ok(orbiters_core::launcher_local::nothing()) } else { orbiters_core::launcher_local::read_now() };
+        let Ok(mut state) = read else {
             // Caught while VRCX / VRCNext write their copy: the list on show stays if it is a local copy; again in a few
             // seconds. A list read with a VRChat sign-in that is over goes at once (its private details with it).
             {

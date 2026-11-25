@@ -190,7 +190,21 @@ fn kept_picture(account: Option<&orbiters_core::vrchat_store::Account>, url: &st
 /// What was last read of the groups of `scope`'s account: of `kind`, under `id`.
 pub(crate) fn kept<T: serde::de::DeserializeOwned>(scope: &Scope, kind: &str, id: &str) -> Option<T> {
     use orbiters_core::vrchat_store as store;
-    Some(store::Store::read(&store::root(), &scope.account()?)?.get::<T>(kind, id)?.value)
+    Some(store::Store::read(&kept_root(), &scope.account()?)?.get::<T>(kind, id)?.value)
+}
+
+#[cfg(not(test))]
+fn kept_root() -> std::path::PathBuf {
+    orbiters_core::vrchat_store::root()
+}
+/// Tests: a folder of the test's own.
+#[cfg(test)]
+fn kept_root() -> std::path::PathBuf {
+    KEPT_ROOT.with(|r| r.borrow().clone()).unwrap_or_else(|| orbiters_core::paths::cache_dir().join("no-vrchat-store"))
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static KEPT_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 enum Pic {
@@ -440,6 +454,20 @@ impl State {
             None => {}
         }
         self.token += 1;
+    }
+    /// Pictures of the page: how many cards show, and the page of one opened as a press on its card opens it.
+    pub fn kept_cards(&self) -> Option<usize> {
+        match &self.discovery {
+            Discovery::Ready(cards, _) => Some(cards.len()),
+            _ => None,
+        }
+    }
+    pub fn open_kept(&mut self, i: usize) {
+        let (Discovery::Ready(cards, _), Some(scope)) = (&self.discovery, self.scope.clone()) else { return };
+        let Some(card) = cards.get(i).cloned() else { return };
+        let mut open = page::Open::new(card, &self.drafts);
+        open.as_kept(&scope);
+        self.open = Some(open);
     }
     /// Back to Home (the sidebar's Home). The new post being written is kept on disk first.
     pub fn close(&mut self) {

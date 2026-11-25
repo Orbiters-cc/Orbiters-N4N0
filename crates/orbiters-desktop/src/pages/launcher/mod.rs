@@ -733,13 +733,12 @@ pub(super) fn backdrop(p: &egui::Painter, rect: Rect, radius: f32, state: &mut S
     }
 }
 
-/// When the list was last live: the time today, the day and time before.
+/// When the list was last live: the time today, the day before that.
 fn as_of(at: i64, now: i64) -> String {
     let at = time::OffsetDateTime::from_unix_timestamp(at).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
     let offset = time::UtcOffset::local_offset_at(at).unwrap_or(time::UtcOffset::UTC);
     let (local, today) = (at.to_offset(offset), time::OffsetDateTime::from_unix_timestamp(now).unwrap_or(at).to_offset(offset).date());
-    let clock = format!("{:02}:{:02}", local.hour(), local.minute());
-    if local.date() == today { clock } else { format!("{:04}-{:02}-{:02} {clock}", local.year(), u8::from(local.month()), local.day()) }
+    if local.date() == today { format!("{:02}:{:02}", local.hour(), local.minute()) } else { format!("{:04}-{:02}-{:02}", local.year(), u8::from(local.month()), local.day()) }
 }
 
 /// Whether `data` is the list last on show, kept on this computer, of the very account (and Orbiters member) whose saved
@@ -851,9 +850,9 @@ fn column(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, drawer: bool)
             part(p, Some((theme::ACCENT, true)), orbiters_i18n::tr!("{n} in game", n = in_game));
             part(p, Some((theme::ACCENT, false)), orbiters_i18n::tr!("{n} on the website", n = web));
         }
-        // The list last on show, not read again yet: as of when, quietly (no spinner over what is there).
+        // The list last on show, not read again yet: as of when, quietly, where the count is (no spinner over what is there).
         let total = match state.data.kept {
-            Some(at) if !state.stale() => orbiters_i18n::tr!("{n} friends · as of {when}", n = all, when = as_of(at, state.now())),
+            Some(at) => orbiters_i18n::tr!("as of {when}", when = as_of(at, state.now())),
             _ => orbiters_i18n::tr!("{n} friends", n = all),
         };
         widgets::text(p, pos2(inner.right() - 8.0, cy), Align2::RIGHT_CENTER, &Txt::new(total, 12.0).color(theme::FG_4));
@@ -971,6 +970,52 @@ mod tests {
         // Unwired (pictures of the page, tests) or a local copy: never stale.
         state.login = None;
         assert!(!state.stale());
+    }
+
+    /// REQUEST28: the list last on show is shown while that very account's session is being restored, and nothing else of
+    /// it: no press of it goes to VRChat, and any doubt of whose it is puts it away.
+    #[test]
+    fn a_list_kept_from_before_shows_for_its_own_account_only_and_takes_no_press() {
+        use crate::controller::vrchat_login::Status as Login;
+        use orbiters_core::launcher::{Source, VerifiedFor};
+        let of = |member: &str, user: &str| Some(VerifiedFor { epoch: 1, member: member.into(), user: Some(user.into()) });
+        let known = |id: &str| Some(orbiters_core::vrchat_api::User { id: id.into(), ..Default::default() });
+        let mut data = orbiters_core::launcher::sample();
+        data.source = Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
+        (data.kept, data.verified_for) = (Some(5), of("m", "usr_a"));
+        let login = Login { restoring: true, known: known("usr_a"), verified_for: of("m", "usr_a"), ..Login::default() };
+        assert!(held(&data, &login));
+        assert!(held(&data, &Login { restoring: false, waiting: true, ..login.clone() }));
+        let not = [
+            (data.clone(), Login { verified_for: of("other", "usr_a"), ..login.clone() }),
+            (data.clone(), Login { verified_for: of("m", "usr_b"), known: known("usr_b"), ..login.clone() }),
+            (data.clone(), Login { verified_for: None, ..login.clone() }),
+            (data.clone(), Login { known: None, ..login.clone() }),
+            (data.clone(), Login { restoring: false, ..login.clone() }),
+            (data.clone(), Login { user: known("usr_a"), allowed: true, ..login.clone() }),
+            (LauncherState { kept: None, ..data.clone() }, login.clone()),
+            (LauncherState { verified_for: None, ..data.clone() }, login.clone()),
+            (LauncherState { source: Source::Nothing, ..data.clone() }, login.clone()),
+        ];
+        assert!(not.iter().all(|(d, l)| !held(d, l)));
+        let mut state = State { data: Arc::new(data), login: Some(Some("usr_a".into())), held: true, ..Default::default() };
+        assert!(!state.stale() && !list::rows(&state.data, "", &HashSet::new()).is_empty());
+        let to = state.data.friends[0].id.clone();
+        let mut sent = Vec::new();
+        for action in [Action::Boop { to: to.clone(), emoji: None }, Action::RequestInvite { to: to.clone() }, Action::Dismiss { id: "not_1".into() }, Action::OpenProfile { id: to.clone() }, Action::Refresh] {
+            state.press(1.0, action, |a| {
+                sent.push(a);
+                true
+            });
+        }
+        assert!(sent.is_empty() && state.booped.is_empty() && state.requested.is_empty() && state.dismissed.is_empty());
+        // What this computer does alone still goes.
+        let play = Action::PlayOn { mode: orbiters_core::launcher::LaunchMode::Vr, profile: 0 };
+        state.press(1.0, play.clone(), |a| {
+            sent.push(a);
+            true
+        });
+        assert_eq!(sent.len(), 1);
     }
 
     #[test]

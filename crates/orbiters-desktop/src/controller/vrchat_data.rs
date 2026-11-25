@@ -69,6 +69,20 @@ impl Scope {
         self.allowed && self.user.is_some()
     }
 }
+
+/// The friends of the account signed in, by name, as Home's list has them now: shown at once where friends are chosen, until
+/// [`Request::Friends`] answers. None of a list kept from before and not read since, or of any account but that one.
+pub fn friends_here(s: &Snapshot) -> Vec<&orbiters_core::launcher::Friend> {
+    let login = &s.vrchat_login;
+    let theirs = matches!((&s.launcher.source, &login.user), (orbiters_core::launcher::Source::SignedIn { user_id, .. }, Some(u)) if *user_id == u.id);
+    if !theirs || !login.allowed || s.launcher.kept.is_some() || s.launcher.verified_for.is_none() || s.launcher.verified_for != login.verified_for {
+        return Vec::new();
+    }
+    let mut friends: Vec<_> = s.launcher.friends.iter().collect();
+    friends.sort_by_cached_key(|f| f.name.to_lowercase());
+    friends
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     WorldDetails { world: String },

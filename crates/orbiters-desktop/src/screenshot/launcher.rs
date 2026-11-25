@@ -469,7 +469,7 @@ fn more_people(state: &mut LauncherState) {
 }
 
 /// The page's data for a scenario.
-fn data(name: &str) -> LauncherState {
+pub(super) fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
     // REQUEST20 2: the invite's world is the sketch's "Chill House"; signed out of VRChat, Play alone and no list's places.
@@ -614,7 +614,7 @@ fn data(name: &str) -> LauncherState {
 }
 
 /// A made-up picture for a `sample://` URL: a round-headed creature on its colour, a banner of soft lights, a world.
-fn picture(url: &str) -> ColorImage {
+pub(super) fn picture(url: &str) -> ColorImage {
     let seed: u32 = url.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let hue = (seed as f32 * 0.137).fract();
     let rgb = |h: f32, s: f32, v: f32| -> [f32; 3] {

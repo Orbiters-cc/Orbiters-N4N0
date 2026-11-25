@@ -25,6 +25,8 @@ pub struct Settings {
     pub keyframes: KeyframeSettings,
     /// Disk space (GB) the session library may use; capture stops when it is reached. 0 = unlimited.
     pub storage_limit_gb: f64,
+    /// Disk space (MB) VRChat's pictures of an account may take on this computer (`vrchat_store`).
+    pub vrchat_pictures_mb: u32,
     pub osc: OscSettings,
     pub performance: PerformanceSettings,
     /// Start a new session automatically when VRChat changes world while recording.
@@ -890,6 +892,7 @@ impl Default for Settings {
             spout_sender: String::new(),
             keyframes: KeyframeSettings::default(),
             storage_limit_gb: 200.0,
+            vrchat_pictures_mb: 256,
             osc: OscSettings::default(),
             performance: PerformanceSettings::default(),
             split_on_world_change: true,

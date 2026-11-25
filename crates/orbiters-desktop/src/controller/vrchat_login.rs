@@ -292,6 +292,12 @@ impl Runtime {
     fn allowed_for(&self, identity: &(String, String)) -> bool {
         self.identity.as_ref() == Some(identity) && self.gate.allowed() && self.grants.get(identity).is_some_and(|g| g.allowed(Instant::now()))
     }
+    /// The saved session is read back at the next look (tests).
+    #[cfg(test)]
+    pub(super) fn test_restore_now(&mut self) {
+        self.restored = false;
+        self.restore_again = None;
+    }
     fn saved(&mut self) -> bool {
         if self.saved.is_none() {
             self.saved = self.client.try_lock().ok().map(|c| c.session_saved());

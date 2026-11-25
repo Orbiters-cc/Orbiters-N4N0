@@ -1530,3 +1530,90 @@ fn the_matrix_of_every_write_and_every_failure() {
     assert!(failed.is_empty(), "{} of {} cells:\n{}", failed.len(), rows.len(), failed.join("\n"));
 }
 
+
+/// REQUEST28: what was last read of the groups shows at the next window's first frame, while the session is still being
+/// restored too, for that very account alone; it changes in place when VRChat answers, and stays when it does not.
+#[test]
+fn the_groups_show_as_they_were_and_change_in_place() {
+    use orbiters_core::vrchat_store as store;
+    let root = orbiters_core::paths::cache_dir().join(format!("groups-kept-{}", uuid::Uuid::new_v4()));
+    KEPT_ROOT.with(|r| *r.borrow_mut() = Some(root.clone()));
+    let service = service();
+    service.ctl.kept_at_for_tests(root.clone());
+    let world: Shown = Arc::new(Mutex::new(World::default()));
+    let sent = service.ctl.test_vrchat_routed(route(world.clone()));
+    let (client, _between) = linked_through(&service, Role::Window);
+    let snap = service.ctl.view();
+    let mut w = Window::new(Arc::new(Remote(client)), snap.clone());
+    w.settle();
+    assert!(matches!(w.state.discovery, Discovery::Idle), "nothing kept: nothing shown");
+    // As the service keeps the account's groups (its own test: `vrchat_kept`); the page and its lists through it.
+    let account = Scope::of(&snap).account().expect("signed in");
+    let card = GroupCard { id: G.into(), name: "Made-up Makers".into(), named: true, owner: true, permissions: vec!["*".into()], ..Default::default() };
+    let cards = vec![card.clone()];
+    assert!(store::begin(&root, &account));
+    assert!(store::Store::open(&root, &account).unwrap().write(&[store::Change::put(store::kind::GROUPS, store::ONLY, 1, "", &cards).unwrap()]));
+    let ask = |r: Request| w.ctl.groups(Scope::of(&w.snap), r);
+    let Reply::Opened(page) = ask(Request::Open { group: G.into() }) else { panic!("opened") };
+    let Reply::Members(members) = ask(Request::Members { group: G.into(), query: String::new(), offset: 0 }) else { panic!("members") };
+    assert!(matches!(ask(Request::Posts { group: G.into(), offset: 0 }), Reply::Posts(_)));
+    assert!(!members.items.is_empty());
+    // Another window, as at the next start: there at its first frame, before anything is asked of VRChat.
+    let connect = || Arc::new(Remote(crate::ipc::Client::connect(&service.endpoint_for_tests(), Role::Window).unwrap()));
+    let asked = || sent.lock().unwrap().len();
+    let (before, n) = (cards.clone(), asked());
+    let mut next = Window::new(connect(), snap.clone());
+    let shown = |w: &Window| match &w.state.discovery {
+        Discovery::Ready(cards, _) => cards.clone(),
+        _ => Vec::new(),
+    };
+    assert_eq!(shown(&next), before);
+    next.state.open = Some(page::Open::new(card.clone(), &Drafts::default()));
+    let scope = Scope::of(&snap);
+    let open = next.state.open.as_mut().unwrap();
+    open.as_kept(&scope);
+    assert_eq!(open.page.as_ref(), Some(&*page));
+    assert_eq!(open.members.items, members.items);
+    assert_eq!(asked(), n, "from this computer alone");
+    // VRChat's page comes: the members stay until theirs do, which take their place.
+    open.answer(Kind::Open(G.into()), Reply::Opened(page.clone()));
+    assert_eq!(open.members.items, members.items, "nothing blanks");
+    let fewer = orbiters_core::vrchat_api::Members { items: members.items[..1].to_vec(), raw: 1, total: None };
+    open.answer(Kind::Members { group: G.into(), query: String::new(), offset: 0 }, Reply::Members(fewer.clone()));
+    assert_eq!(open.members.items, fewer.items);
+    // A read that fails leaves what shows.
+    let failed = Answer { generation: next.state.jobs.generation, kind: Kind::Discover, reply: Reply::Failed(Failure::Offline), image: None, source: None };
+    next.state.jobs.tx.send(failed).unwrap();
+    next.frame();
+    assert_eq!(shown(&next), before);
+    // The session being restored, as that account: shown, nothing asked; then signed in: the same, read again.
+    let mut connecting = (*snap).clone();
+    let me = connecting.vrchat_login.user.take();
+    (connecting.vrchat_login.known, connecting.vrchat_login.restoring, connecting.vrchat_login.allowed) = (me, true, false);
+    let n = asked();
+    let mut held = Window::new(connect(), Arc::new(connecting.clone()));
+    held.drawn(3, vec![], home_section);
+    assert!(held.state.held && shown(&held) == before && held.state.jobs.running.is_empty());
+    held.prepare(Write::DeleteRole { group: G.into(), role: "grol_x".into() });
+    assert!(held.state.flow.is_none() && held.state.said.is_some(), "nothing is sealed for an account not signed in");
+    held.state.open_kept(0);
+    assert!(held.state.open.as_ref().is_some_and(|o| o.page.is_some()));
+    assert_eq!(asked(), n);
+    held.snap = snap.clone();
+    held.frame();
+    assert!(!held.state.held && shown(&held) == before && held.state.open.as_ref().is_some_and(|o| o.page.is_some()), "nothing went");
+    held.state.close();
+    held.drawn(1, vec![], home_section);
+    assert!(held.state.jobs.running(&Kind::Discover), "and it is read now");
+    // Another member's window, or another account's: nothing.
+    for change in [|v: &mut orbiters_core::launcher::VerifiedFor| v.member = "0123456789abcdef0123456789abcdef".into(), |v: &mut orbiters_core::launcher::VerifiedFor| v.user = Some("usr_other".into())] {
+        let mut other = connecting.clone();
+        change(other.vrchat_login.verified_for.as_mut().unwrap());
+        let mut w = Window::new(connect(), Arc::new(other));
+        w.drawn(2, vec![], home_section);
+        assert!(shown(&w).is_empty());
+    }
+    assert!(store::size(&root) > 0);
+    KEPT_ROOT.with(|r| *r.borrow_mut() = None);
+    let _ = std::fs::remove_dir_all(root);
+}

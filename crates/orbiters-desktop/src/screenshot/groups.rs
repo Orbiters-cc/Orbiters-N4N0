@@ -116,7 +116,7 @@ fn s(v: &[&str]) -> Vec<String> {
 }
 
 /// Made-up art: a soft landscape, a sun, a few shapes; `seed` changes its colours.
-fn landscape(w: u32, h: u32, seed: u32) -> image::RgbaImage {
+pub(super) fn landscape(w: u32, h: u32, seed: u32) -> image::RgbaImage {
     let palettes = [([38, 24, 92], [255, 140, 110], [255, 214, 120]), ([10, 40, 70], [60, 190, 200], [210, 250, 220]), ([60, 20, 40], [230, 90, 140], [255, 200, 220]), ([20, 30, 30], [120, 200, 90], [240, 240, 160])];
     let (top, mid, sun) = palettes[(seed % 4) as usize];
     image::RgbaImage::from_fn(w, h, |x, y| {
@@ -149,7 +149,7 @@ fn color_image(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw())
 }
 
-fn icon(seed: u32) -> image::RgbaImage {
+pub(super) fn icon(seed: u32) -> image::RgbaImage {
     let colours = [[0, 218, 109], [116, 102, 255], [255, 107, 122], [72, 230, 255], [245, 183, 79]];
     let c = colours[(seed % 5) as usize];
     image::RgbaImage::from_fn(128, 128, |x, y| {
@@ -177,7 +177,7 @@ fn card(i: u32, name: &str, code: &str, owner: bool, rights: &[&str], members: u
     }
 }
 
-fn cards() -> Vec<GroupCard> {
+pub(super) fn cards() -> Vec<GroupCard> {
     vec![
         card(1, "Made-up Makers", "MAKE", true, &["*"], 1240),
         card(2, "Night Painters Club", "PAINT", false, &["group-roles-manage", "group-roles-assign", "group-members-manage", "group-announcement-manage"], 312),
@@ -212,7 +212,7 @@ fn catalogue() -> Vec<PermissionInfo> {
     ]
 }
 
-fn page(owner: bool) -> GroupPage {
+pub(super) fn page(owner: bool) -> GroupPage {
     let c = &cards()[0];
     let (rights, mine) = if owner { (s(&["*"]), s(&["grol_owner"])) } else { (s(&["group-instance-moderate", "group-bans-manage"]), s(&["grol_mod"])) };
     GroupPage {
@@ -240,7 +240,7 @@ fn page(owner: bool) -> GroupPage {
     }
 }
 
-fn members() -> Vec<Member> {
+pub(super) fn members() -> Vec<Member> {
     let names = [("Nova Lumen", &["grol_admin"][..]), ("Kite", &["grol_mod", "grol_artist"]), ("Sam Juniper", &[]), ("Sam Juniper", &["grol_events"]), ("Orla Finch", &["grol_artist"]), ("Pip", &[]), ("Teodor Vance", &["grol_events", "grol_staff"])];
     names
         .iter()
@@ -258,7 +258,7 @@ fn members() -> Vec<Member> {
         .collect()
 }
 
-fn posts() -> Vec<Post> {
+pub(super) fn posts() -> Vec<Post> {
     vec![
         Post { id: "gpos_1".into(), title: "Saturday showcase".into(), text: "Bring what you made this week: worlds, avatars, props. We start at 20:00 in the gallery world.".into(), visibility: Visibility::Group, created_at: Some("2026-11-21T19:00:00Z".into()), complete: true, ..Default::default() },
         Post { id: "gpos_2".into(), title: "New role for artists".into(), text: "Artists of the month now get their own role and colour.".into(), visibility: Visibility::Public, created_at: Some("2026-11-18T10:30:00Z".into()), complete: true, ..Default::default() },

@@ -177,6 +177,7 @@ fn got_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, g: &Got, clo
         let reach = match &friend {
             Some(f) => states::boop(&state.data, f, state.booped.get(from).map(|b| b.0), clock, now),
             None if state.data.possible.boop => Reach::Ready,
+            None if state.data.kept.is_some() => Reach::Waiting,
             None => Reach::SignIn,
         };
         let at = Rect::from_min_size(pos2(close.left() - 4.0 - back_w, rect.center().y - 15.0), vec2(back_w, 30.0));
@@ -194,6 +195,12 @@ pub(super) fn reach_pill(ui: &mut Ui, rect: Rect, salt: (&str, &str), reach: Rea
     let id = Id::unique(salt);
     match reach {
         Reach::NotNow | Reach::SignIn => false,
+        Reach::Waiting => {
+            let p = ui.painter();
+            p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::white(0.07));
+            pill_content(p, rect, glyph, label, theme::FG_3);
+            false
+        }
         Reach::Ready => {
             let resp = ui.interact(rect, id, Sense::click());
             let pressed = widgets::pressed_fresh(&resp);
@@ -268,6 +275,7 @@ pub(super) fn boop_button(ui: &mut Ui, center: egui::Pos2, size: f32, salt: (&st
             ctx.request_repaint_after(std::time::Duration::from_millis(1000));
             (theme::white(0.05), theme::FG_4)
         }
+        Reach::Waiting => (theme::white(0.05), theme::FG_4),
         Reach::NotNow | Reach::SignIn => return false,
     };
     let p = ui.painter().clone();
@@ -453,7 +461,7 @@ fn person(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect, group: &str, 
     // get the wider one's room, so a row never jumps between them.
     let select = (request == Reach::Ready).then(|| super::previous::friend_selectable(state, &friend)).flatten();
     let request_w = match request {
-        Reach::Ready => pill_width(ui, tr_ctx("request invite, short", "Request")).max(pill_width(ui, tr_ctx("choose an instance", "Select"))),
+        Reach::Ready | Reach::Waiting => pill_width(ui, tr_ctx("request invite, short", "Request")).max(pill_width(ui, tr_ctx("choose an instance", "Select"))),
         Reach::Sent => pill_width(ui, tr_ctx("sent", "Sent")),
         Reach::Cooling(_) => 74.0,
         _ => 0.0,

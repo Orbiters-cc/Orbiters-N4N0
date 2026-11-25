@@ -28,16 +28,24 @@ struct Budget {
     spent: Duration,
 }
 
-fn budget() -> std::sync::MutexGuard<'static, Budget> {
+#[cfg(not(test))]
+fn budget<R>(f: impl FnOnce(&mut Budget) -> R) -> R {
     static BUDGET: Mutex<Budget> = Mutex::new(Budget { frame: f64::NEG_INFINITY, frames: 0, spent: Duration::ZERO });
-    BUDGET.lock().unwrap_or_else(|e| e.into_inner())
+    f(&mut BUDGET.lock().unwrap_or_else(|e| e.into_inner()))
+}
+/// Tests draw on many threads at once: each has its own.
+#[cfg(test)]
+fn budget<R>(f: impl FnOnce(&mut Budget) -> R) -> R {
+    thread_local! {
+        static BUDGET: std::cell::RefCell<Budget> = const { std::cell::RefCell::new(Budget { frame: f64::NEG_INFINITY, frames: 0, spent: Duration::ZERO }) };
+    }
+    BUDGET.with(|b| f(&mut b.borrow_mut()))
 }
 
 /// `f`, when the frame of `now` (egui's clock) has time left for it; `first_only`: only in the first frames (what decodes
 /// in milliseconds, not in a fraction of one).
 pub fn read<T>(now: f64, first_only: bool, f: impl FnOnce() -> T) -> Option<T> {
-    {
-        let mut b = budget();
+    let left = budget(|b| {
         if b.frame != now {
             b.frame = now;
             b.frames = b.frames.saturating_add(1);
@@ -46,19 +54,21 @@ pub fn read<T>(now: f64, first_only: bool, f: impl FnOnce() -> T) -> Option<T> {
             }
         }
         let first = b.frames <= FIRST_FRAMES;
-        if b.spent >= if first { FIRST } else { EACH } || (first_only && !first) {
-            return None;
-        }
+        b.spent < if first { FIRST } else { EACH } && (first || !first_only)
+    });
+    if !left {
+        return None;
     }
     let from = Instant::now();
     let out = f();
-    budget().spent += from.elapsed();
+    let took = from.elapsed();
+    budget(|b| b.spent += took);
     Some(out)
 }
 
 /// The next frames are a window's first again (tests, pictures of the page: each stands for a start).
 pub fn start_again() {
-    *budget() = Budget { frame: f64::NEG_INFINITY, ..Budget::default() };
+    budget(|b| *b = Budget { frame: f64::NEG_INFINITY, ..Budget::default() });
     textures().clear();
 }
 
@@ -173,14 +183,64 @@ mod tests {
     #[test]
     fn the_first_frames_read_a_screen_and_later_ones_a_little() {
         start_again();
-        let slow = |ms| move || std::thread::sleep(Duration::from_millis(ms));
-        assert!(read(1.0, true, slow(60)).is_some() && read(1.0, true, slow(1)).is_some(), "a first frame reads all it shows");
-        assert!(read(2.0, false, slow(70)).is_some(), "asked while there was time");
-        assert!(read(2.0, false, slow(1)).is_none() && read(3.0, false, slow(1)).is_none(), "the first frames' time is over");
-        let _ = read(4.0, false, slow(1));
-        assert!(read(5.0, true, slow(1)).is_none(), "what takes long is the loaders' from here on");
-        assert!(read(5.0, false, slow(6)).is_some() && read(5.0, false, slow(1)).is_none());
-        assert!(read(6.0, false, slow(1)).is_some(), "each frame has its own");
+        // What a read takes, made up.
+        let took = |ms: u64| budget(|b| b.spent += Duration::from_millis(ms));
+        let read = |now: f64, first_only: bool| super::read(now, first_only, || ()).is_some();
+        assert!(read(1.0, true), "a first frame reads all it shows");
+        took(60);
+        assert!(read(1.0, true) && read(2.0, false), "while there is time");
+        took(70);
+        assert!(!read(2.0, false) && !read(3.0, false), "the first frames' time is over");
+        let _ = read(4.0, false);
+        assert!(!read(5.0, true), "what takes long is the loaders' from here on");
+        assert!(read(5.0, false));
+        took(6);
+        assert!(!read(5.0, false));
+        assert!(read(6.0, false), "each frame has its own");
+        start_again();
+    }
+
+    /// A picture kept is in the very frame that asks, for every page and whatever the sign-in's state is by then.
+    #[test]
+    fn a_kept_picture_is_in_the_frame_that_asks() {
+        use crate::controller::vrchat_data::Scope;
+        use orbiters_core::vrchat_store as store;
+        use orbiters_core::launcher::VerifiedFor;
+        let member = uuid::Uuid::new_v4().simple().to_string();
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        snap.vrchat_login.restoring = true;
+        snap.vrchat_login.verified_for = Some(VerifiedFor { epoch: 1, member, user: Some("usr_test".into()) });
+        let connecting = Scope::of(&snap);
+        let account = connecting.account().expect("on its way back as that account");
+        let url = |n: u32| format!("https://api.vrchat.cloud/api/1/file/file_00000000-0000-4000-8000-00000028{n:04}/1/file");
+        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([9, 200, 90, 255]));
+        let picture = |scope: &Scope, n: u32| Picture::Profile { scope: scope.clone(), url: url(n), user: None };
+        let of = Profiles::of(Some(&account));
+        assert!(!of.keep(&url(1), None, &image), "nothing of an account is kept before VRChat said it is there");
+        assert!(store::begin(&store::root(), &account));
+        assert!((0..30).all(|n| of.keep(&url(n), None, &image)) && of.keep_sent(&url(40), Size::Wide, &image, b"sent"));
+        start_again();
+        let ctx = egui::Context::default();
+        let textures = PaintTextures::of(&ctx);
+        let mut page = super::super::Pictures::new(&ctx);
+        for n in 0..30 {
+            assert!(page.get_at(&textures, 1.0, &picture(&connecting, n)).is_some(), "{n}");
+        }
+        assert!(!page.started() && !page.loading(), "no loader was needed");
+        // Signed in (another scope), and another page: the same texture.
+        snap.vrchat_login.user = Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), ..Default::default() });
+        (snap.vrchat_login.allowed, snap.vrchat_login.revision) = (true, 7);
+        let signed_in = Scope::of(&snap);
+        let first = page.get_at(&textures, 1.0, &picture(&connecting, 3)).unwrap().id();
+        let mut other = super::super::Pictures::new(&ctx);
+        assert_eq!(page.get_at(&textures, 9.0, &picture(&signed_in, 3)).map(|t| t.id()), Some(first));
+        assert_eq!(other.get_at(&textures, 9.0, &picture(&signed_in, 3)).map(|t| t.id()), Some(first));
+        // Another account's: not there.
+        snap.vrchat_login.verified_for = Some(VerifiedFor { epoch: 1, member: uuid::Uuid::new_v4().simple().to_string(), user: Some("usr_test".into()) });
+        let stranger = Scope::of(&snap);
+        assert!(other.get_at(&textures, 10.0, &picture(&stranger, 3)).is_none());
+        assert!(matches!(wide(&ctx, &connecting, &url(40)), Wide::Ready(_)) && matches!(wide(&ctx, &stranger, &url(40)), Wide::No) && matches!(wide(&ctx, &connecting, &url(41)), Wide::No));
+        assert!(store::forget(&store::root(), Some("usr_test")) || !store::there(&store::root(), &account));
         start_again();
     }
 }

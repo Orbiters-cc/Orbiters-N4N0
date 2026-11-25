@@ -5646,6 +5646,9 @@ mod tests {
         let base = Facts { desktop: true, digits: true, ..Default::default() };
         let states = [
             Facts { hint: Some(("Hold Left Alt, then click a tool", "Or press its number, 1 to 6, from the top clockwise")), ..base.clone() },
+            // A Mac's with the mouse its engine lets go.
+            Facts { hint: Some(("Push past the wheel's edge to a tool", "Scroll one notch or rest on it to open it")), mac: true, ..base.clone() },
+            Facts { hint: Some(("Push past the edge, or a number", "")), mac: true, ..base.clone() },
             Facts { hint: Some(("Hold Left Option, then click a tool", "Or press its number, 1 to 5, from the top clockwise")), mac: true, ..base.clone() },
             Facts { pointed: Some(Action::Pictures), ..base.clone() },
             base.clone(),

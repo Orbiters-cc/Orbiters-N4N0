@@ -50,6 +50,9 @@ pub struct OrbitStatus {
     /// On a Mac: what macOS must allow first, which Settings offers to ask for.
     #[serde(default)]
     pub needs: Option<OrbitNeeds>,
+    /// On a Mac, with the game in sight: how the parts are pointed at.
+    #[serde(default)]
+    pub pointing: Option<OrbitPointing>,
     /// SteamVR's "Experimental overlay input overrides": `None` where it is not known (no SteamVR).
     pub steamvr_overrides: Option<bool>,
     /// Why the tiles around VRChat's camera cannot show, in words, as `note`.
@@ -58,6 +61,25 @@ pub struct OrbitStatus {
     pub camera_provisional: bool,
     pub camera_panel_seen_ns: Option<u64>,
     pub camera_scale_measured: bool,
+}
+
+/// How the parts around VRChat's menus are pointed at on a Mac, which its engine decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrbitPointing {
+    /// The engine lets the mouse go in VRChat's menus and says so: with no key.
+    Free,
+    /// An engine from before, or one whose word of the mouse is not there: Left Option.
+    LeftOption,
+}
+
+impl OrbitPointing {
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Free => orbiters_i18n::mark("Point and click, with no key: VRChat's Quick Menu leaves you the mouse. Around its wheel, push past the edge to a tool, then scroll one notch or rest on it."),
+            Self::LeftOption => orbiters_i18n::mark("Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed."),
+        }
+    }
 }
 
 /// What live translation in VR is doing (the orbit menu's Translation and Settings show it).

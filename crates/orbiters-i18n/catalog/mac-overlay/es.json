@@ -10,10 +10,13 @@
   "Allow Input Monitoring": "Permitir la monitorización de entrada",
   "Orbiters around VRChat's menus.": "Orbiters alrededor de los menús de VRChat.",
   "Orbiters beside VRChat's Quick Menu and its wheel": "Orbiters junto al menú rápido de VRChat y su rueda",
-  "Orbiters around VRChat's own wheel, opened with R. Hold Left Option to point at it, or press its number: the rest of the time the mouse is VRChat's.": "Orbiters alrededor de la rueda de VRChat, que se abre con R. Mantén Opción izquierda para señalarlo, o pulsa su número: el resto del tiempo el ratón es de VRChat.",
-  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.": "Orbiters junto al menú rápido de VRChat, que se abre con Esc, en pantalla completa o en una ventana. En un Mac, VRChat se queda con el ratón mientras sus menús están abiertos: mantén Opción izquierda para señalar Orbiters.",
   "The color of Orbiters' panels beside VRChat's menus. Their own is picked there, on the panels' settings.": "El color de los paneles de Orbiters junto a los menús de VRChat. El suyo se elige allí, en los ajustes de los paneles.",
   "Keep a picture when a menu is not found": "Guardar una imagen cuando no se encuentra un menú",
   "To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.": "Para averiguar por qué los elementos de Orbiters no aparecen alrededor de los menús de VRChat. Tras Esc o R sin menú encontrado, la imagen de VRChat en ese momento se queda en este Mac, en la carpeta de registros de Orbiters, las 12 más recientes. No se envía nada. Desactivado por defecto.",
-  "diagnostic log wheel ring missing picture frame": "diagnóstico registro rueda anillo falta imagen"
+  "diagnostic log wheel ring missing picture frame": "diagnóstico registro rueda anillo falta imagen",
+  "Scroll one notch or rest on it to open it": "Gira un paso o quédate sobre ella para abrirla",
+  "Scroll one notch to open it": "Gira un paso para abrirla",
+  "Rest on it to open it": "Quédate sobre ella para abrirla",
+  "Push past the wheel's edge to a tool": "Empuja más allá del borde, hacia una herramienta",
+  "Push past the edge, or a number": "Más allá del borde, o un número"
 }

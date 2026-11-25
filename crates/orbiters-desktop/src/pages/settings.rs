@@ -2038,6 +2038,21 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
     });
     if cfg!(target_os = "macos") {
+        use orbiters_core::settings::{OrbitSettings, WheelPick};
+        widgets::separator(ui);
+        let picks = [SegOption::new(WheelPick::Both, tr("Scroll or rest")), SegOption::new(WheelPick::Scroll, tr("Scroll")), SegOption::new(WheelPick::Rest, tr("Rest"))];
+        widgets::field(ui, tr("Open a tool around the wheel"), Some(tr(registry::WHEEL_PICK)), 300.0, |ui| {
+            apply |= widgets::segmented(ui, "orbit-wheel-pick", &mut orbit.wheel_pick, &picks, true);
+        });
+        widgets::separator(ui);
+        let (least, most) = (*OrbitSettings::WHEEL_REST_MS.start() as f32, *OrbitSettings::WHEEL_REST_MS.end() as f32);
+        let mut rest = orbit.wheel_rest_ms as f32;
+        widgets::field(ui, tr("How long a rest opens it"), Some(tr(registry::WHEEL_REST)), 300.0, |ui| {
+            if widgets::slider(ui, "orbit-wheel-rest", &mut rest, least..=most, 50.0, |v| format!("{:.2} s", v / 1000.0)) {
+                orbit.wheel_rest_ms = rest.round() as u32;
+                apply = true;
+            }
+        });
         widgets::separator(ui);
         widgets::field(ui, tr("Keep a picture when a menu is not found"), Some(tr(registry::KEEP_LOOKS)), 48.0, |ui| {
             apply |= widgets::toggle(ui, "orbit-keep-looks", &mut orbit.keep_looks);
@@ -2070,7 +2085,8 @@ fn orbit_now(snap: &Snapshot) -> (Option<String>, Option<crate::state::OrbitNeed
         // The panels' own word while a game runs; with none, whether macOS would let them see one is asked here, at most every two seconds.
         static ASKED: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
         if snap.launcher.desktop_game.is_some() {
-            return (snap.orbit.note.as_ref().map(|note| tr(note).to_string()), snap.orbit.needs);
+            let now = snap.orbit.note.as_deref().or(snap.orbit.pointing.map(crate::state::OrbitPointing::words));
+            return (now.map(|now| tr(now).to_string()), snap.orbit.needs);
         }
         let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
         let allowed = match *asked {

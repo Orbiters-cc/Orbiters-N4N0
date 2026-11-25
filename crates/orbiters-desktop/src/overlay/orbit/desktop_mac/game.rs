@@ -31,6 +31,19 @@ impl Game {
         Self { window, scale: scale.max(0.5), title: crate::bridge::mac::title_points(&window, display) }
     }
 
+    /// The same, its picture where the engine says it is (`frame`, in points of macOS's global coordinates): in the window, as wide as it, at its foot. Anything else it says
+    /// is of another moment than the window's.
+    pub fn told(self, frame: [f64; 4]) -> Self {
+        let [x, y, width, height] = frame;
+        let title = self.window.height - height;
+        let off = [x - self.window.x, y - self.window.y - title, width - self.window.width];
+        if (0.0..=80.0).contains(&title) && height >= 1.0 && off.iter().all(|d| d.abs() <= 1.0) {
+            Self { title, ..self }
+        } else {
+            self
+        }
+    }
+
     /// The size of its picture in the display's pixels: what the parts' places are in, as VRChat's client area is on Windows. (What the game itself draws is smaller
     /// below a render percent of 100: macOS stretches it over this.)
     pub fn client(&self) -> Vec2 {
@@ -127,13 +140,26 @@ impl Finder {
         self.server
     }
 
-    /// The game's window now, as macOS lists it; `launcher` is the service's word. With no window, asked anew at most twice a second.
-    pub fn find(&mut self, launcher: Option<u32>) -> Option<Game> {
+    /// The game's window now, as macOS lists it; `launcher` is the service's word, `told` the engine's of its window and where its picture lies, when it gives it. With no
+    /// window, asked anew at most twice a second.
+    pub fn find(&mut self, launcher: Option<u32>, told: Option<(u32, [f64; 4])>) -> Option<Game> {
+        let found = self.listed(launcher, told.map(|(window, _)| window));
+        match told {
+            Some((window, frame)) => found.map(|g| if g.window.id == window { g.told(frame) } else { g }),
+            None => found,
+        }
+    }
+
+    fn listed(&mut self, launcher: Option<u32>, told: Option<u32>) -> Option<Game> {
         if self.launcher != launcher {
             *self = Self { launcher, ..Self::default() };
         }
         let launcher = launcher?;
         let now = std::time::Instant::now();
+        // The engine's word of which window is its game's: that one, no other of its server's.
+        if told.is_some_and(|id| id != 0 && self.last.is_some_and(|l| l.window.id != id)) {
+            (self.last, self.looked) = (None, None);
+        }
         if let Some(last) = self.last {
             // The one window, asked alone: far less than the whole list.
             match crate::bridge::mac::window(last.window.id).filter(|w| Some(w.owner) == self.server && w.on_screen) {
@@ -159,7 +185,9 @@ impl Finder {
             self.server = window_server(launcher);
         }
         let server = self.server?;
-        self.last = pick(&crate::bridge::mac::windows(), server).map(measured);
+        let windows = crate::bridge::mac::windows();
+        let named = told.filter(|id| *id != 0).and_then(|id| windows.iter().find(|w| w.id == id)).and_then(|w| pick(&[*w], server));
+        self.last = named.or_else(|| pick(&windows, server)).map(measured);
         self.last
     }
 }
@@ -205,6 +233,21 @@ mod tests {
         assert_eq!(titled.point(pos2(10.0, 20.0)), (-1790.0, 152.0));
         assert_eq!(titled.pixel((-1790.0, 152.0)), pos2(10.0, 20.0));
         assert!(Game::of(window(1, 0, 0.0, 0.0, 640.0, 392.0), 0.0, None).scale > 0.0, "a scale that could not be read divides nothing by zero");
+    }
+
+    /// The engine says where its picture is: taken where it fits the window macOS lists, and left where it is another moment's (the window moved since, or is being resized).
+    #[test]
+    fn the_engine_s_word_of_where_its_picture_is_goes_over_the_title_bar_s_guess() {
+        let display = Some((0.0, 0.0, 1470.0, 956.0));
+        let game = Game::of(window(1, 0, 50.0, 60.0, 640.0, 388.0), 2.0, display);
+        assert_eq!(game.title, 32.0, "a title bar's usual height");
+        let told = game.told([50.0, 88.0, 640.0, 360.0]);
+        assert_eq!((told.title, told.client(), told.origin()), (28.0, vec2(1280.0, 720.0), (50.0, 88.0)));
+        for other in [[50.0, 60.0, 640.0, 0.0], [80.0, 88.0, 640.0, 360.0], [50.0, 88.0, 800.0, 360.0], [50.0, 200.0, 640.0, 248.0], [0.0; 4]] {
+            assert_eq!(game.told(other), game, "{other:?}");
+        }
+        let full = Game::of(window(1, 25, 0.0, 0.0, 1470.0, 956.0), 2.0, display);
+        assert_eq!(full.told([0.0, 0.0, 1470.0, 956.0]), full);
     }
 
     /// The picture asked for: the window's own pixels up to 1080 of the game's rows, its shape kept, its title bar cut off.

@@ -372,6 +372,8 @@ pub static ENTRIES: &[Entry] = &[
         .needs("vr.camera", |s| (!s.settings.orbit.camera_tiles).then_some(mark("Shown when Around the camera is on"))).controls(&["orbit-camera-pattern"]),
     e("vr.turn", Vr, CARD_AROUND, mark("Turn around in a 3D capture"), mark("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to."), mark("turning stick snap smooth rotate")).gate(Gate::Headset).controls(&["orbit-immersive-turn"]),
     e("vr.quick-menu", Vr, CARD_AROUND, mark("Around the Quick Menu"), AROUND_QUICK_MENU, mark("Quick Menu side tiles Esc")).gate(Gate::Around).controls(&["orbit-quick-menu"]),
+    e("vr.wheel-pick", Vr, CARD_AROUND, mark("Open a tool around the wheel"), WHEEL_PICK, mark("scroll notch rest dwell hover push mouse no key")).gate(Gate::MacLooks).controls(&["orbit-wheel-pick"]),
+    e("vr.wheel-rest", Vr, CARD_AROUND, mark("How long a rest opens it"), WHEEL_REST, mark("dwell time delay hover milliseconds")).gate(Gate::MacLooks).controls(&["orbit-wheel-rest"]),
     e("vr.keep-looks", Vr, CARD_AROUND, mark("Keep a picture when a menu is not found"), KEEP_LOOKS, mark("diagnostic log wheel ring missing picture frame")).gate(Gate::MacLooks).controls(&["orbit-keep-looks"]),
     e("vr.size", Vr, CARD_AROUND, mark("Panels' size in VR"), mark("If they sit too near or too far from VRChat's menu in your headset."), mark("scale bigger smaller distance")).gate(Gate::Headset).controls(&["orbit-vr-size"]),
     e("vr.motion", Vr, CARD_AROUND, mark("How they follow your hand in VR"), mark("The tiles around VRChat's menus each follow your hand on a little spring of their own."), mark("spring rigid follow hand")).gate(Gate::Headset).controls(&["orbit-vr-motion"]),
@@ -492,15 +494,17 @@ pub static ENTRIES: &[Entry] = &[
     e("app.log", App, mark("Log"), mark("Log"), mark("Every notice, warning and error N4N0 showed, kept here"), mark("notices errors warnings history messages")).whole(),
 ];
 
-/// What the panels around VRChat's two menus are: on a Mac with how they are pointed at, as VRChat keeps the mouse there for as long as it is in front.
+/// What the panels around VRChat's two menus are: on a Mac with how they are pointed at (with an engine from before, "Right now" says Left Option).
 pub const AROUND_WHEEL: &str = if cfg!(target_os = "macos") {
-    mark("Orbiters around VRChat's own wheel, opened with R. Hold Left Option to point at it, or press its number: the rest of the time the mouse is VRChat's.")
+    mark("Orbiters around VRChat's own wheel, opened with R. Push the mouse past the wheel's edge to a tool, then scroll one notch or rest on it, or press its number: a click stays VRChat's.")
 } else {
     mark("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR.")
 };
+pub const WHEEL_PICK: &str = mark("VRChat holds the mouse while its wheel is open, and a click presses its own slice. A tool lit past the wheel's edge opens with one notch of the scroll wheel, or when you rest on it; back inside the edge, nothing does.");
+pub const WHEEL_REST: &str = mark("A ring round the pointer closes meanwhile. Any movement starts it again.");
 pub const KEEP_LOOKS: &str = mark("To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.");
 pub const AROUND_QUICK_MENU: &str = if cfg!(target_os = "macos") {
-    mark("Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.")
+    mark("Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. Point and click, with no key.")
 } else {
     mark("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR.")
 };

@@ -166,5 +166,13 @@
   "{count} matching setting": "一致する設定：{count}件",
   "{count} matching settings": "一致する設定：{count}件",
   "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ で移動、Enter で開く、Esc で消去",
-  "resolution render scale pixels sharp fast Mac": "解像度 レンダースケール ピクセル 鮮明 高速 Mac"
+  "resolution render scale pixels sharp fast Mac": "解像度 レンダースケール ピクセル 鮮明 高速 Mac",
+  "Open a tool around the wheel": "ホイールの周りのツールを開く",
+  "scroll notch rest dwell hover push mouse no key": "スクロール 目盛り 静止 待つ マウス キーなし",
+  "How long a rest opens it": "開くまでの静止時間",
+  "dwell time delay hover milliseconds": "静止 時間 待ち ミリ秒",
+  "Orbiters around VRChat's own wheel, opened with R. Push the mouse past the wheel's edge to a tool, then scroll one notch or rest on it, or press its number: a click stays VRChat's.": "Rで開くVRChatのホイールの周りにOrbitersを表示します。縁を越えてツールまでマウスを動かし、1目盛りスクロールするか止めるか、番号キーを押します。クリックはVRChatのものです。",
+  "VRChat holds the mouse while its wheel is open, and a click presses its own slice. A tool lit past the wheel's edge opens with one notch of the scroll wheel, or when you rest on it; back inside the edge, nothing does.": "VRChatのホイールが開いている間はVRChatがマウスを使い、クリックはその項目を押します。縁の外で光ったツールは、1目盛りのスクロールか、その上で止めると開きます。縁の内側に戻れば何も開きません。",
+  "A ring round the pointer closes meanwhile. Any movement starts it again.": "その間、ポインターの周りの輪が閉じていきます。動かすと最初からになります。",
+  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. Point and click, with no key.": "Escで開くVRChatのクイックメニューの横にOrbitersを表示します。全画面でもウィンドウでも、キーなしで指してクリックできます。"
 }

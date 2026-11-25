@@ -324,6 +324,27 @@ pub enum VrMotion {
     Matched,
 }
 
+/// What opens the tool lit around VRChat's wheel on a Mac, where the mouse is pushed to it with no key held and a click is VRChat's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelPick {
+    /// A notch of the scroll wheel, or resting on it.
+    #[default]
+    Both,
+    Scroll,
+    Rest,
+}
+
+impl WheelPick {
+    pub fn scrolls(self) -> bool {
+        self != WheelPick::Rest
+    }
+
+    pub fn rests(self) -> bool {
+        self != WheelPick::Scroll
+    }
+}
+
 /// Where the panels around the Quick Menu lie.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -373,9 +394,19 @@ pub struct OrbitSettings {
     pub retro_pictures: bool,
     /// On a Mac: a look at VRChat's picture that found no menu leaves that picture in the logs' folder, to find out why. Off unless switched on.
     pub keep_looks: bool,
+    /// On a Mac: what opens the tool lit around VRChat's wheel, and how long a rest on it does, in milliseconds ([`OrbitSettings::wheel_rest`]).
+    pub wheel_pick: WheelPick,
+    pub wheel_rest_ms: u32,
 }
 
 impl OrbitSettings {
+    pub const WHEEL_REST_MS: std::ops::RangeInclusive<u32> = 400..=1500;
+
+    /// How long a rest opens a tool, in seconds.
+    pub fn wheel_rest(&self) -> f64 {
+        f64::from(self.wheel_rest_ms.clamp(*Self::WHEEL_REST_MS.start(), *Self::WHEEL_REST_MS.end())) / 1000.0
+    }
+
     pub const VR_SIZES: [f32; 3] = [0.8, 1.0, 1.25];
 
     /// The wheel's panels are wanted.
@@ -423,7 +454,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], accent_own: false, retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, keep_looks: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], accent_own: false, retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, keep_looks: false, wheel_pick: WheelPick::Both, wheel_rest_ms: 600, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 

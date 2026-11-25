@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """The Mac's overlay (overlay/orbit/desktop_mac) over the engine's real window server, with no game, no Steam and no person.
 
-    tools/mac-overlay/check.py [--render-percent N] [--force] [--pictures FOLDER] [--wsd PATH] [--headers PATH] [--app PATH]
+    tools/mac-overlay/check.py [--render-percent N] [--force] [--pictures FOLDER] [--wsd PATH] [--no-channel] [--headers PATH] [--app PATH]
+
+With a `wsd` that lets the pointer go where its game does (obelisk-cli 0.1.15), the parts are clicked with no key, as that engine's are, and the ring round the wheel is picked by
+the mouse's movement; with one from before, or with --no-channel, by Left Option.
 
 It opens a bundle of its own around the engine's `wsd`, has game.c show a full-screen window there as VRChat's is (holding the pointer, its cursor hidden, real frames of VRChat's
 menus stretched by the render percent), and turns the app's own loop over it (`orbiters-desktop --orbit-lab desk`) with a keyboard made up here. It covers the screen for about a
@@ -35,7 +38,29 @@ class Mouse:
         cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, self.Point, ctypes.c_uint32]
         cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
         cg.CGPreflightPostEventAccess.restype = ctypes.c_bool
+        cg.CGEventSetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64]
+        cg.CGCursorIsVisible.restype = ctypes.c_bool
         self.allowed, self.at = cg.CGPreflightPostEventAccess(), 0.0
+    def where(self):
+        p = self.cg.CGEventGetLocation(self.cg.CGEventCreate(None))
+        return p.x, p.y
+    def move(self, x, y, dx=0, dy=0):
+        """The mouse's own movement: to a place, or (where the game holds the pointer) by so much."""
+        self.at = time.time()
+        e = self.cg.CGEventCreateMouseEvent(None, 5, self.Point(x, y), 0)
+        self.cg.CGEventSetIntegerValueField(e, 4, int(dx))
+        self.cg.CGEventSetIntegerValueField(e, 5, int(dy))
+        self.cg.CGEventPost(0, e)
+    def push(self, dx, dy, seconds=0.12):
+        """A stroke of the mouse while the game holds the pointer."""
+        n = max(1, int(seconds / 0.008))
+        x, y = self.where()
+        done = [0, 0]
+        for i in range(1, n + 1):
+            step = [int(round(v * i / n)) - d for v, d in zip((dx, dy), done)]
+            done = [d + s for d, s in zip(done, step)]
+            self.move(x, y, *step)
+            time.sleep(0.008)
     def post(self, kind):
         self.at = time.time()
         at = self.cg.CGEventGetLocation(self.cg.CGEventCreate(None))
@@ -100,7 +125,14 @@ class Check:
         self.dir = self.tmp / "wsd"
         self.dir.mkdir(mode=0o700)
         self.log = self.tmp / "wsd.log"
-        subprocess.run(["open", "-n", "--stderr", str(self.log), "--stdout", str(self.log), str(self.app), "--args", "--dir", str(self.dir)] + (["--render-percent", str(self.a.render_percent)] if self.a.render_percent < 100 else []), check=True)
+        # An engine that lets the pointer go, and says so: with the options the launcher gives it for VRChat.
+        self.host = self.tmp / "h"
+        self.host.mkdir(mode=0o700)
+        frees = b"--free-unconfined-pointer" in pathlib.Path(wsd).read_bytes()
+        self.free = frees and not self.a.no_channel
+        options = (["--free-unconfined-pointer"] if frees else []) + (["--pointer-socket", str(self.host / "pointer.sock")] if self.free else [])
+        self.note("the engine", "lets the pointer go" + ("" if self.free else ", its word of it not given") if frees else "holds the pointer")
+        subprocess.run(["open", "-n", "--stderr", str(self.log), "--stdout", str(self.log), str(self.app), "--args", "--dir", str(self.dir)] + options + (["--render-percent", str(self.a.render_percent)] if self.a.render_percent < 100 else []), check=True)
         sock = self.dir / "wsd.sock"
         for _ in range(100):
             if sock.exists():
@@ -118,7 +150,11 @@ class Check:
         self.note("the game draws", f"{self.size[0]} x {self.size[1]}")
         subprocess.run([self.a.app, "--orbit-lab", "frames", str(TESTDATA), str(frames), str(self.size[0]), str(self.size[1])], check=True, stdout=subprocess.DEVNULL)
         self.game.say("ready")
-        return self.ok("the game's window has the keyboard, full screen", bool(self.game.wait(lambda l: l == "focus 1", 10)) and bool(self.wait_log("relative mouse on", 5)), self.tail())
+        there = self.ok("the game's window has the keyboard, full screen", bool(self.game.wait(lambda l: l == "focus 1", 10)) and bool(self.wait_log("relative mouse on", 5)), self.tail())
+        if frees:
+            self.game.say("lock")
+            there = there and self.ok("the engine holds the pointer, as while playing", self.wait_log("pointer held by the game", 3), self.tail())
+        return there
 
     def tail(self):
         return self.log.read_text()[-400:] if hasattr(self, "log") and self.log.exists() else ""
@@ -132,7 +168,7 @@ class Check:
         return False
 
     def start_desk(self):
-        self.desk = Lines([self.a.app, "--orbit-lab", "desk", str(self.wsd_pid)], stderr=open(self.tmp / "desk.err", "a"))
+        self.desk = Lines([self.a.app, "--orbit-lab", "desk", str(self.wsd_pid)] + ([str(self.host)] if self.free else []), stderr=open(self.tmp / "desk.err", "a"))
 
     # ---- what the overlay does
     def doing(self, good, seconds=3.0, since=None):
@@ -208,6 +244,7 @@ class Check:
 
     def close_menu(self):
         self.game.say("show none")
+        self.game.say("lock")
         return self.doing(lambda d: d["open"] is None and not d["looking"] and not d["shown"], 5)
 
     def click(self):
@@ -218,6 +255,27 @@ class Check:
         self.tell("button down"); self.mouse.post(1); time.sleep(0.08)
         self.tell("button up"); self.mouse.post(2)
 
+    def over(self, zone, action=None):
+        """The pointer over a part, or the control of it that does `action`: by the mouse itself where it is the person's."""
+        if not self.free:
+            return self.answer(f"point {zone}" if action is None else f"control {zone} {action}", "pointed")
+        # (the parts move a little as they come)
+        place = None
+        for _ in range(20):
+            now = self.answer("place " + zone + (f" {action}" if action else ""), "place")
+            if now and now == place:
+                break
+            place = now
+            time.sleep(0.05)
+        if not place:
+            return False
+        x, y = self.mouse.where()
+        for i in range(1, 9):
+            self.mouse.move(x + (place[0] - x) * i / 8, y + (place[1] - y) * i / 8, (place[0] - x) / 8, (place[1] - y) / 8)
+            time.sleep(0.01)
+        time.sleep(0.1)
+        return True
+
     def page_shows(self, name):
         """A short time after a press, with no input since: the page's own panel has a picture on the screen (macOS's, not ours), and nothing of ours hides it."""
         time.sleep(0.5)
@@ -225,6 +283,7 @@ class Check:
         self.ok(f"{name}: its page is on the screen, painted, with nothing of ours over it", bool(seen) and seen["opaque"] > 0.9 and seen["spread"] > 4 and not seen["over"], str(seen))
 
     def open_wheel(self, name="wheel"):
+        self.game.say("lock")
         self.game.say(f"show {name}")
         time.sleep(0.15)
         since = len(self.desk.lines)
@@ -268,6 +327,102 @@ class Check:
         self.ok("wsd never says its window is not shown", "not shown by macOS" not in self.log.read_text())
         self.note("processor with the ring up, % of a core", round(self.cpu(6), 2))
 
+        if self.free:
+            self.gesture(base)
+        else:
+            self.option_on_the_wheel(base)
+
+        # A page, opened by its number: the keyboard with no key held.
+        self.page_from_the_wheel(base)
+        rests, seen = self.close_menu()
+        self.ok("VRChat's menu gone: the parts go, and no picture runs", rests is not None, str(seen))
+        self.quick_menu()
+        self.desk.end()
+        self.start_desk()
+        self.game.say("show none")
+        time.sleep(2.5)
+        self.game.say("quit")
+        gone, seen = self.doing(lambda d: not d["shown"] and not d["looking"], 4)
+        self.ok("the game ended: nothing shows, and the overlay is alive", gone is not None and self.desk.p.poll() is None, str(seen))
+        self.note("processor with no game, % of a core", round(self.cpu(5), 2))
+        self.tell("quit")
+
+    def gesture(self, base):
+        """The ring picked by the mouse's movement alone, while the game holds the pointer."""
+        radius = 0.139 * self.client_high() / self.scale()
+        at, heard = len(self.log.read_text()), len(self.game.lines)
+        self.mouse.push(1.5 * radius, 0)
+        time.sleep(1.6)
+        still, seen = self.doing(lambda d: d["lit"] is None and d["open"] == "Wheel" and not d["sheet"], 1)
+        self.ok("a flick to VRChat's rim lights none of ours, however long one stays", still is not None and not still["held"], str(seen))
+        for dx, dy in ((0, 2.0), (-2.6, 0.4), (0, -3.0), (2.2, 0)):
+            self.mouse.push(dx * radius, dy * radius, 0.15)
+            time.sleep(0.5)
+        lit = [l for _, l in self.desk.lines if '"lit":"' in l]
+        self.ok("nor does going from slice to slice, as fast as one likes", not lit, str(lit[:1]))
+        # Straight out to the right, twice: YouTube's cell (30 to 90 degrees) is there, a little up.
+        self.mouse.push(-1.0 * radius, 0)
+        self.tell("pick scroll 600")
+        time.sleep(0.4)
+        self.mouse.push(1.5 * radius, -0.5 * radius)
+        time.sleep(0.4)
+        since = len(self.desk.lines)
+        self.mouse.push(1.0 * radius, -0.35 * radius)
+        lit, seen = self.doing(lambda d: d["lit"] == "WheelYouTube", 2, since)
+        self.ok("a push past the rim lights the cell there", lit is not None and not lit["held"] and lit["catching"] == 0, str(seen))
+        self.save("pushed")
+        time.sleep(1.2)
+        still, _ = self.doing(lambda d: d["lit"] == "WheelYouTube" and not d["sheet"], 1)
+        self.ok("with the scroll wheel chosen, a rest opens nothing", still is not None, str(_))
+        self.note("processor with a cell lit, % of a core", round(self.cpu(3), 2))
+        since = len(self.desk.lines)
+        self.mouse.push(-1.1 * radius, 0.3 * radius)
+        out, seen = self.doing(lambda d: d["lit"] is None, 2, since)
+        self.ok("back inside the rim, it is out", out is not None, str(seen))
+        # A click is VRChat's: what is lit goes out, and opens nothing.
+        self.tell("pick both 600")
+        time.sleep(0.4)
+        self.mouse.push(1.5 * radius, -0.5 * radius)
+        time.sleep(0.4)
+        self.mouse.push(1.0 * radius, -0.35 * radius)
+        self.doing(lambda d: d["lit"] == "WheelYouTube", 2)
+        self.tell("button down")
+        time.sleep(0.1)
+        self.tell("button up")
+        time.sleep(1.2)
+        still, seen = self.doing(lambda d: d["lit"] is None and not d["sheet"], 1)
+        self.ok("a click opens none of ours", still is not None, str(seen))
+        # A notch.
+        self.mouse.push(1.0 * radius, -0.35 * radius)
+        lit, seen = self.doing(lambda d: d["lit"] == "WheelYouTube", 2)
+        time.sleep(0.15)
+        self.tell("scroll")
+        page, took = self.doing(lambda d: d["sheet"], 2)
+        self.ok("one notch of the scroll wheel opens it", lit is not None and page is not None, f"{seen} {took}")
+        self.ok("the game was sent every move, and no button, all along", not any(l.startswith("button") for _, l in self.game.lines[heard:]))
+        self.close_menu()
+        time.sleep(0.4)
+        # And a rest.
+        if self.ok("the wheel again, for a rest", self.open_wheel()[0] is not None):
+            time.sleep(0.5)
+            self.mouse.push(0, 1.5 * radius)
+            time.sleep(0.4)
+            self.mouse.push(0, 1.0 * radius)
+            lit, _ = self.doing(lambda d: d["lit"] is not None, 2)
+            began = time.time()
+            page, seen = self.doing(lambda d: d["sheet"] and d["keyboard"], 3)
+            self.ok("a rest on it opens it, and its page has the mouse", lit is not None and page is not None, str(seen))
+            self.note("from lit to open by a rest of 0.6 s, seconds", round(time.time() - began, 2))
+        self.close_menu()
+        time.sleep(0.4)
+        self.ok("the wheel again", self.open_wheel()[0] is not None)
+        rate, zero = self.shown_rate(2)
+        self.ok("the game's frames go on", rate > 0.9 * base and zero == 0, f"{rate} of {base}")
+
+    def scale(self):
+        return self.answer("scale", "scale") or 2.0
+
+    def option_on_the_wheel(self, base):
         at, heard = len(self.log.read_text()), len(self.game.lines)
         self.tell("press option")
         points, took = self.doing(lambda d: d["held"] and d["keyboard"] and d["pointing"], 2)
@@ -285,7 +440,7 @@ class Check:
         back, _ = self.doing(lambda d: not d["held"] and d["catching"] == 0, 2)
         self.ok("let go, the game has its mouse again at once", back is not None and self.wait_log("focus back, relative mouse resumed", 2, at) and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)))
 
-        # A page, opened by its number: the keyboard with no key held.
+    def page_from_the_wheel(self, base):
         self.tap("2")
         page, _ = self.doing(lambda d: d["sheet"] and d["keyboard"] and d["pointing"], 4)
         self.ok("a number opens its page, which keeps the mouse with no key held", page is not None)
@@ -313,7 +468,7 @@ class Check:
             at = len(self.log.read_text())
             self.tell("type 53")
             gone, _ = self.doing(lambda d: not d["sheet"] and not d["held"], 3)
-            self.ok("Esc closes the page, and the game has its keyboard again", gone is not None and self.wait_log("relative mouse resumed", 2, at))
+            self.ok("Esc closes the page, and the game has its keyboard again", gone is not None and self.wait_log("pointer held by the game (focus back" if self.free else "relative mouse resumed", 2, at))
         self.close_menu()
         # VRChat's wheel a little off its place, and smaller: found where it is, with the ring round it there.
         time.sleep(0.5)
@@ -327,10 +482,9 @@ class Check:
             moved = ((beside[0] - place[0]) / radius, (beside[1] - place[1]) / radius)
             self.note("that wheel's ring moved, in radii (it lies -0.06, +0.04 off)", (round(moved[0], 3), round(moved[1], 3)))
             self.ok("and the ring lies round it", abs(moved[0] + 0.06) < 0.035 and abs(moved[1] - 0.04) < 0.035, str(moved))
-        rests, seen = self.close_menu()
-        self.ok("VRChat's menu gone: the parts go, and no picture runs", rests is not None, str(seen))
-
+    def quick_menu(self):
         self.game.say("show qm")
+        self.game.say("free")
         time.sleep(0.15)
         since = len(self.desk.lines)
         self.tap("esc")
@@ -339,10 +493,19 @@ class Check:
             self.note("from Esc to the wing, seconds", round(took, 3))
             time.sleep(0.6)
             self.save("wing")
-            self.tell("press option")
-            points, _ = self.doing(lambda d: d["pointing"] and d["keyboard"], 2)
-            self.ok("Left Option points at the wing", points is not None)
-            self.ok("a tile is under the pointer", self.answer("point WingAll", "pointed") is True and self.doing(lambda d: d["catching"] == 1, 2)[0] is not None)
+            heard, at = len(self.game.lines), len(self.log.read_text())
+            if self.free:
+                points, seen = self.doing(lambda d: d["mouse"] and d["pointer"] == "Free" and not d["held"] and not d["keyboard"], 2)
+                self.ok("the mouse is the person's, with no key, and the keyboard the game's", points is not None, str(seen))
+            else:
+                self.tell("press option")
+                points, _ = self.doing(lambda d: d["pointing"] and d["keyboard"], 2)
+                self.ok("Left Option points at the wing", points is not None)
+            self.ok("a tile is under the pointer", self.over("WingAll") is True and self.doing(lambda d: d["catching"] == 1, 2)[0] is not None)
+            if self.free:
+                time.sleep(0.3)
+                self.ok("macOS shows its own arrow over it", self.mouse.cg.CGCursorIsVisible())
+                self.note("processor with the mouse still over a tile, % of a core", round(self.cpu(4), 2))
             if not self.mouse.allowed:
                 self.note("macOS does not let this program click", "the clicks are events of our own, which raise no window")
             self.click()
@@ -350,21 +513,56 @@ class Check:
             self.ok("a click on a tile opens its page", page is not None)
             self.page_shows("All tools' tile")
             for zone in ("WingYouTube", "WingInstances", "WingTalk", "WingWorlds"):
-                if self.answer(f"point {zone}", "pointed") is True:
+                if self.over(zone) is True:
                     time.sleep(0.15); self.click()
                     self.page_shows(zone)
             # The tabs are on the page's head, which is the panel behind the page: a click raises it.
             tabs = 0
             for action in ("Pictures", "Page(Instances)", "Page(YouTube)", "Talk", "Worlds", "All"):
-                if self.answer(f"control SheetBack {action}", "pointed") is True:
+                if self.over("SheetBack", action) is True:
                     tabs += 1
                     time.sleep(0.15); self.click()
                     self.page_shows(f"the tab {action}")
             self.ok("the page's head has its tabs", tabs >= 3, str(tabs))
-            self.tell("let go option")
-            time.sleep(0.4)
-            page, _ = self.doing(lambda d: d["sheet"] and d["keyboard"], 1)
-            self.ok("the page keeps the mouse once the key is let go", page is not None)
+            if self.free:
+                self.ok("no click of these reached the game", not any(l.startswith("button") for _, l in self.game.lines[heard:]), str([l for _, l in self.game.lines[heard:] if l.startswith("button")][:3]))
+                # YouTube's page is typed in as it opens, and only it takes the keyboard. (All tools is up, the last tab clicked.)
+                away, seen = self.doing(lambda d: d["sheet"] and d["mouse"] and not d["held"], 3)
+                self.ok("a page with nothing to type in leaves the game its keyboard", away is not None, str(seen))
+                time.sleep(0.5)
+                heard, at = len(self.game.lines), len(self.log.read_text())
+                self.ok("YouTube's tile is there", self.over("WingYouTube") is True)
+                self.click()
+                page, seen = self.doing(lambda d: d["sheet"] and d["keyboard"], 3)
+                self.ok("a text field takes the keyboard", page is not None and bool(self.game.wait(lambda l: l == "focus 0", 2, heard)), str(seen))
+                since = len(self.desk.lines)
+                self.tell("type 0")
+                self.ok("what is typed goes there", bool(self.desk.wait(lambda l: '"typed Text' in l, 2, since)))
+                heard = len(self.game.lines)
+                self.over("WingWorlds"); self.click()
+                away, seen = self.doing(lambda d: d["sheet"] and d["mouse"] and not d["held"], 3)
+                self.ok("left, the game has its keyboard again at once, the page still up", away is not None and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)), str(seen))
+                self.ok("YouTube's again", self.over("WingYouTube") is True)
+                self.click()
+                self.doing(lambda d: d["keyboard"], 3)
+                # A click on the game, beside everything of ours: its keyboard, at once, the field still up.
+                heard = len(self.game.lines)
+                w, h = self.answer("client", "client")
+                x, y = self.mouse.where()
+                self.mouse.move(8, h / self.scale() - 8, 8 - x, 8 - y)
+                time.sleep(0.15)
+                self.click()
+                back, seen = self.doing(lambda d: d["sheet"] and not d["keyboard"] and not d["held"], 3)
+                self.ok("a click on the game gives it the keyboard, with the field still up", back is not None and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)), str(seen))
+                self.ok("the game heard that click", bool(self.game.wait(lambda l: l == "button 0 1" or l.startswith("button"), 2, heard)))
+                self.over("Takeover"); self.click()
+                again, seen = self.doing(lambda d: d["sheet"] and d["keyboard"], 3)
+                self.ok("and a press on the page takes it again", again is not None, str(seen))
+            else:
+                self.tell("let go option")
+                time.sleep(0.4)
+                page, _ = self.doing(lambda d: d["sheet"] and d["keyboard"], 1)
+                self.ok("the page keeps the mouse once the key is let go", page is not None)
             time.sleep(0.5)
             self.save("page")
 
@@ -401,8 +599,11 @@ class Check:
             self.start_desk()
             back, took = self.doing(lambda d: d["open"] == "QuickMenu" and d["shown"], 6)
             self.ok("started again (as the service does), it finds the menu that is up", back is not None, str(took))
-            self.tell("press option")
-            self.doing(lambda d: d["keyboard"], 2)
+            if self.free:
+                self.over("WingYouTube"); self.click()
+            else:
+                self.tell("press option")
+            self.ok("the keyboard is ours", self.doing(lambda d: d["keyboard"], 3)[0] is not None)
             heard = len(self.game.lines)
             self.tell("hang")
             began = time.time()
@@ -424,15 +625,6 @@ class Check:
             self.tell("hide-menus")
             off, _ = self.doing(lambda d: not d["shown"], 3)
             self.ok("turned off in Settings: the parts go", off is not None)
-        self.desk.end()
-        self.start_desk()
-        self.game.say("show none")
-        time.sleep(2.5)
-        self.game.say("quit")
-        gone, seen = self.doing(lambda d: not d["shown"] and not d["looking"], 4)
-        self.ok("the game ended: nothing shows, and the overlay is alive", gone is not None and self.desk.p.poll() is None, str(seen))
-        self.note("processor with no game, % of a core", round(self.cpu(5), 2))
-        self.tell("quit")
 
     def end(self):
         for p in (self.desk, self.game):
@@ -462,6 +654,7 @@ def main():
     p.add_argument("--idle", type=int, default=120, help="seconds nobody must have used this Mac for")
     p.add_argument("--keep", action="store_true")
     p.add_argument("--pictures", help="a folder for pictures of the parts as they lie")
+    p.add_argument("--no-channel", action="store_true", help="as if the engine's word of the pointer were not there")
     p.add_argument("--wsd")
     p.add_argument("--headers", default=os.path.expanduser("~/.orbiters-forks/src/voile-lkd/wsd"))
     p.add_argument("--app", default=str(REPO / "target/debug/orbiters-desktop"))

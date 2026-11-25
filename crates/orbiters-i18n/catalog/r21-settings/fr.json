@@ -166,5 +166,13 @@
   "{count} matching setting": "{count} paramètre correspondant",
   "{count} matching settings": "{count} paramètres correspondants",
   "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ pour se déplacer, Entrée pour ouvrir, Échap pour effacer",
-  "resolution render scale pixels sharp fast Mac": "résolution échelle de rendu pixels net rapide Mac"
+  "resolution render scale pixels sharp fast Mac": "résolution échelle de rendu pixels net rapide Mac",
+  "Open a tool around the wheel": "Ouvrir un outil autour de la roue",
+  "scroll notch rest dwell hover push mouse no key": "molette cran repos attente survol pousser souris sans touche",
+  "How long a rest opens it": "Durée du repos qui l’ouvre",
+  "dwell time delay hover milliseconds": "durée attente délai survol millisecondes",
+  "Orbiters around VRChat's own wheel, opened with R. Push the mouse past the wheel's edge to a tool, then scroll one notch or rest on it, or press its number: a click stays VRChat's.": "Orbiters autour de la roue de VRChat, ouverte avec R. Pousse la souris au-delà du bord de la roue vers un outil, puis tourne la molette d’un cran ou reste dessus, ou appuie sur son numéro : un clic reste à VRChat.",
+  "VRChat holds the mouse while its wheel is open, and a click presses its own slice. A tool lit past the wheel's edge opens with one notch of the scroll wheel, or when you rest on it; back inside the edge, nothing does.": "VRChat garde la souris tant que sa roue est ouverte, et un clic presse sa propre tranche. Un outil allumé au-delà du bord s’ouvre d’un cran de molette, ou quand tu restes dessus ; revenu à l’intérieur du bord, rien ne s’ouvre.",
+  "A ring round the pointer closes meanwhile. Any movement starts it again.": "Un anneau autour du pointeur se ferme pendant ce temps. Tout mouvement le fait recommencer.",
+  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. Point and click, with no key.": "Orbiters à côté du menu rapide de VRChat, ouvert avec Esc, en plein écran ou dans une fenêtre. Pointe et clique, sans aucune touche."
 }

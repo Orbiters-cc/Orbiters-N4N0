@@ -1,8 +1,8 @@
 //! `--orbit-lab`: the Mac's overlay with no game, no service and no person, for `tools/mac-overlay/check.py`. Everything it does is in a private folder ([`crate::harness`]).
 //!
 //! - `frames <testdata> <out> <width> <height>` writes `wheel.bgra`, `qm.bgra` and `none.bgra`: pictures of that size with the real frames of VRChat's menus in their places.
-//! - `desk <launcher's process>` turns the overlay's loop over the window of that process's window server, with a keyboard read from its standard input: `press esc|r|option|1..9`,
-//!   `let go ...`, `button down|up`, `point <zone>` (the pointer over that part, while the keyboard is ours), `click`, `type <code>`, `say`, `cpu`, `quit`. Each change of what it
+//! - `desk <launcher's process> [<the engine's host folder>]` turns the overlay's loop over the window of that process's window server, with a keyboard read from its standard input: `press esc|r|option|1..9`,
+//!   `let go ...`, `button down|up`, `scroll` (a notch of the wheel), `point <zone>` (the pointer over that part, while the keyboard is ours), `click`, `type <code>`, `say`, `cpu`, `quit`. Each change of what it
 //!   does, and each `say`, is a line of JSON on its standard output.
 //! - `picture <window> <process> <width> <height> <out.png>`: one look's picture of a window.
 
@@ -27,7 +27,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["frames", data, out, w, h] => frames(Path::new(data), Path::new(out), w.parse()?, h.parse()?),
-        ["desk", launcher, ..] => desk(launcher.parse()?),
+        ["desk", launcher] => desk(launcher.parse()?, None),
+        ["desk", launcher, host, ..] => desk(launcher.parse()?, Some(PathBuf::from(host))),
         _ => bail!("--orbit-lab frames <testdata> <out> <width> <height> | desk <process>"), // i18n: not shown (a developer's command)
     }
 }
@@ -238,6 +239,7 @@ struct Pressed {
     held: Rc<RefCell<Vec<u16>>>,
     downs: Rc<Cell<u32>>,
     button: Rc<Cell<bool>>,
+    scrolls: Rc<Cell<u32>>,
 }
 
 impl Source for Pressed {
@@ -249,6 +251,12 @@ impl Source for Pressed {
     }
     fn button(&self) -> bool {
         self.button.get()
+    }
+    fn any_button(&self) -> bool {
+        self.button.get()
+    }
+    fn scrolls(&self) -> u32 {
+        self.scrolls.get()
     }
     fn r(&self) -> u16 {
         0x0f
@@ -279,7 +287,7 @@ fn cpu() -> f64 {
     }
 }
 
-fn desk(launcher: u32) -> anyhow::Result<()> {
+fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
     let mtm = MainThreadMarker::new().context("not on the main thread")?; // i18n: not shown
     super::stay_awake();
     let mut snap = Snapshot::new(orbiters_core::settings::Settings::default());
@@ -287,6 +295,7 @@ fn desk(launcher: u32) -> anyhow::Result<()> {
     let stub = Arc::new(Stub { view: Mutex::new(Arc::new(snap)), said: Mutex::default() });
     let keys = Pressed::default();
     let mut desk = Desk::new(mtm, stub.clone(), Box::new(keys.clone()));
+    desk.host = host;
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in crate::worker::log_lines(std::io::stdin()) {
@@ -317,8 +326,19 @@ fn desk(launcher: u32) -> anyhow::Result<()> {
                     keys.held.borrow_mut().retain(|held| *held != code);
                 }
                 ["button", to] => keys.button.set(*to == "down"),
+                ["scroll"] => keys.scrolls.set(keys.scrolls.get() + 1),
+                ["pick", how, rest] => {
+                    let mut view = stub.view.lock().unwrap();
+                    let orbit = &mut Arc::make_mut(&mut view).settings.orbit;
+                    orbit.wheel_pick = serde_json::from_value(serde_json::json!(how))?;
+                    orbit.wheel_rest_ms = rest.parse()?;
+                }
                 ["point", zone] => println!("{}", serde_json::json!({ "pointed": point(&mut desk, zone) })),
+                // Where a part, or the control of one that does `action`, is on the screen: for the person's own pointer.
+                ["place", zone] => println!("{}", serde_json::json!({ "place": place(&desk, zone, None) })),
+                ["place", zone, action] => println!("{}", serde_json::json!({ "place": place(&desk, zone, Some(action)) })),
                 ["spot", zone] => println!("{}", serde_json::json!({ "spot": desk.windows.list.iter().find(|(z, w)| format!("{z:?}") == *zone && w.shown()).and_then(|(_, w)| w.spot()) })),
+                ["scale"] => println!("{}", serde_json::json!({ "scale": desk.last.map(|g| g.scale) })),
                 ["client"] => println!("{}", serde_json::json!({ "client": desk.last.map(|g| [g.client().x, g.client().y]) })),
                 // The pointer over the control of a part that does `action`, as macOS' own pointer goes.
                 ["control", zone, action] => println!("{}", serde_json::json!({ "pointed": control(&mut desk, zone, action) })),
@@ -383,6 +403,9 @@ fn desk(launcher: u32) -> anyhow::Result<()> {
             "held": doing.held,
             "keyboard": doing.keyboard,
             "pointing": doing.pointing,
+            "mouse": doing.mouse,
+            "pointer": doing.pointer.map(|p| format!("{p:?}")),
+            "lit": doing.lit.map(|z| format!("{z:?}")),
             "sheet": doing.sheet,
             "looking": doing.looking.0,
             "left_out": doing.left_out.map(|z| format!("{z:?}")),
@@ -422,21 +445,27 @@ fn save(desk: &Desk, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where the middle of the part named is, or of its control that does `action` (its name's start), in points of the screen.
+fn place(desk: &Desk, zone: &str, action: Option<&str>) -> Option<(f64, f64)> {
+    let p = desk.panels.all().find(|p| format!("{:?}", p.zone) == zone && p.shown)?;
+    let at = match action {
+        None => middle(p.zone, p.placed),
+        Some(action) => {
+            let item = p.items.iter().find(|i| format!("{:?}", i.action).starts_with(action))?;
+            p.placed.rect.min + item.rect.center().to_vec2() / p.logical * p.placed.rect.size()
+        }
+    };
+    Some(desk.last?.point(at))
+}
+
 /// The pointer over the middle of the part named, while the keyboard is ours.
 fn point(desk: &mut Desk, zone: &str) -> bool {
-    let Some(game) = desk.last else { return false };
-    let Some(at) = desk.panels.all().find(|p| format!("{:?}", p.zone) == zone && p.shown).map(|p| middle(p.zone, p.placed)) else { return false };
-    panel::put_pointer(&desk.hold, game.point(at))
+    place(desk, zone, None).is_some_and(|at| panel::put_pointer(&desk.hold, at))
 }
 
 /// The pointer over the control that does `action` (its name's start) on the part in `zone`.
 fn control(desk: &mut Desk, zone: &str, action: &str) -> bool {
-    let Some(game) = desk.last else { return false };
-    let at = desk.panels.all().find(|p| format!("{:?}", p.zone) == zone && p.shown).and_then(|p| {
-        let item = p.items.iter().find(|i| format!("{:?}", i.action).starts_with(action))?;
-        Some(p.placed.rect.min + item.rect.center().to_vec2() / p.logical * p.placed.rect.size())
-    });
-    at.is_some_and(|at| panel::put_pointer(&desk.hold, game.point(at)))
+    place(desk, zone, Some(action)).is_some_and(|at| panel::put_pointer(&desk.hold, at))
 }
 
 fn seen_of(desk: &Desk, zone: &str) -> serde_json::Value {

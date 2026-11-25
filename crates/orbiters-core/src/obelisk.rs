@@ -570,6 +570,38 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
+/// This person's temporary folder, whatever the environment says: where the engine makes its sessions' folders.
+#[cfg(target_os = "macos")]
+pub fn user_tmp() -> PathBuf {
+    let mut buffer = [0u8; 1024];
+    // SAFETY: the buffer is this call's own and its size is said; what comes back is a C string within it.
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
+    match buffer.iter().position(|b| *b == 0) {
+        Some(end) if n > 1 && end > 0 => PathBuf::from(String::from_utf8_lossy(&buffer[..end]).into_owned()),
+        _ => std::env::temp_dir(),
+    }
+}
+
+/// The folder of the session whose engine's launcher is `launcher` (its record's `game.pid`) for programs outside the engine (obelisk-cli 0.1.15): what the engine says of the
+/// mouse, and the textures its game shares. The game does not see it.
+pub fn host_folder(tmp: &Path, launcher: u32) -> PathBuf {
+    tmp.join(format!("obelisk-engine-{launcher}.host"))
+}
+
+/// Where the engine says who has the mouse (voile-lkd's `wsd/wsd_pointer.h`), in a session's host folder.
+pub fn pointer_channel(host: &Path) -> PathBuf {
+    host.join("pointer.sock")
+}
+
+/// The first obelisk-cli whose engine lets the mouse go in VRChat's menus and says so, and gives its stream camera's frames.
+pub const HOST_FEATURES: (u32, u32, u32) = (0, 1, 15);
+
+/// Whether the obelisk-cli at `program` has [`HOST_FEATURES`], by its release folder's name (one that names no release: not known to).
+pub fn has_host_features(program: &Path) -> bool {
+    let version = program.parent().and_then(|f| f.file_name()).and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("obelisk-cli-")?.strip_suffix("-arm64"));
+    version.and_then(numbers).is_some_and(|v| v >= vec![HOST_FEATURES.0, HOST_FEATURES.1, HOST_FEATURES.2])
+}
+
 /// The first obelisk-cli N4N0 starts VRChat with (0.1.14: a paused thread resumes where it stopped, which crashed VRChat under heavy
 /// loading; 0.1.13: `steam play --no-saved-arguments`, which every start is made with: the profile it names is the only one the game is given; 0.1.12: a lock file that cannot be written is held all the same, a release that
 /// lost its Wine says so; 0.1.11: one lock for the whole library between every launch and every change
@@ -794,6 +826,16 @@ mod tests {
         assert_eq!(effective_percent(25, (1920, 1080), (1920, 1080)), 44);
         assert_eq!(render_size(25, backing, panel), (738, 480));
         assert_eq!(render_size(58, (1920, 1080), (1920, 1080)), (1114, 626), "above the floor: as asked");
+    }
+
+    /// The mouse and the camera of the engine from 0.1.15 on: an older one, and one whose folder says nothing, are as before.
+    #[test]
+    fn what_the_engine_gives_the_mac_s_side_is_known_by_its_release() {
+        let program = |v: &str| PathBuf::from(format!("/tools/obelisk-cli-{v}-arm64/obelisk-cli"));
+        for (v, has) in [("0.1.14", false), ("0.1.15", true), ("0.1.16", true), ("0.2.0", true), ("0.1.9", false), ("dev", false)] {
+            assert_eq!(has_host_features(&program(v)), has, "{v}");
+        }
+        assert!(!has_host_features(Path::new("/elsewhere/obelisk-cli")));
     }
 
     #[test]
@@ -1101,6 +1143,7 @@ mod tests {
         assert!(renderer_lost("neptune: ring fatal error\nclient: VTEST_CLIENT_ERROR_CONTEXT_LOST\n"));
         assert!(renderer_lost("Nov 22 20:53:33  virgl_render_server[19563] <Debug>: npt: destroying Neptune context 1"));
         assert!(!renderer_lost("wsd: window 1 overlay: frame held 100.0 ms"));
+        assert_eq!(pointer_channel(&host_folder(Path::new("/var/folders/x/T"), 12777)), PathBuf::from("/var/folders/x/T/obelisk-engine-12777.host/pointer.sock"));
         assert_eq!(window_server_socket(Path::new("/var/folders/x/T"), 12777), PathBuf::from("/var/folders/x/T/obelisk-engine-12777/wsd.sock"));
         assert!(vrchat_log_dir(Path::new("/L")).ends_with("users/crossover/AppData/LocalLow/VRChat/VRChat"));
     }

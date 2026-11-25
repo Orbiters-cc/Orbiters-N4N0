@@ -636,5 +636,9 @@
   "Paused until you resume here.": "En pause jusqu'à ce que vous repreniez ici.",
   "Screen recording": "Enregistrement de l'écran",
   "macOS does not let Orbiters - N4N0 see VRChat's window yet, so the agent cannot look at it. Allow it, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0.": "macOS ne laisse pas encore Orbiters - N4N0 voir la fenêtre de VRChat, l'agent ne peut donc pas la regarder. Autorisez-le, activez Orbiters - N4N0 dans Réglages Système si macOS les ouvre, puis quittez et rouvrez Orbiters - N4N0.",
-  "Reset the token": "Réinitialiser le jeton"
+  "Reset the token": "Réinitialiser le jeton",
+  "Scroll or rest": "Molette ou repos",
+  "Rest": "Repos",
+  "Open a tool around the wheel": "Ouvrir un outil autour de la roue",
+  "How long a rest opens it": "Durée du repos qui l’ouvre"
 }

@@ -3,7 +3,8 @@
  * stretches over the screen as it does a game's.
  *
  * Usage: game SOCKET FOLDER      FOLDER has wheel.bgra, qm.bgra, none.bgra, beside.bgra of that size (the first line said is "size W H").
- * Commands on its standard input: show wheel|qm|none|beside, stop (no more frames), go, window X Y W H (in pixels of the server), quit.
+ * Commands on its standard input: show wheel|qm|none|beside, lock (the pointer confined to one pixel, as while playing and in the wheel), free (to nothing: the whole window, as
+ * in the Quick Menu), stop (no more frames), go, window X Y W H (in pixels of the server), quit.
  * It says what it hears: focus 0|1, deactivated, key CODE DOWN, button N DOWN, resize W H, and every half second "shown N zero M" (frames macOS showed, and did not).
  * Built with the header of the engine's sources: cc -I <voile-lkd>/wsd. Nothing of it is in this repository.
  */
@@ -115,10 +116,18 @@ static void each(uint32_t type, const uint8_t *d, uint32_t n) {
   }
 }
 
+/* What Wine's driver asks for a full-screen game that locks its cursor in the middle, and for one that lets it go. */
+static void clip(int locked) {
+  struct wsd_cursor_clip c = {WIN, 1, locked ? (int32_t)width / 2 : 0, locked ? (int32_t)height / 2 : 0, locked ? 1 : width, locked ? 1 : height};
+  say(WSD_CURSOR_CLIP, &c, sizeof c, -1);
+}
+
 static int command(char *line) {
   char name[16];
   int x, y, w, h;
   if (sscanf(line, "show %15s", name) == 1) now_shown = !strcmp(name, "wheel") ? 0 : !strcmp(name, "qm") ? 1 : !strcmp(name, "beside") ? 3 : 2;
+  else if (!strncmp(line, "lock", 4)) clip(1);
+  else if (!strncmp(line, "free", 4)) clip(0);
   else if (!strncmp(line, "stop", 4)) going = 0;
   else if (!strncmp(line, "go", 2)) going = 1;
   else if (!strncmp(line, "hide", 4)) flag(WSD_WINDOW_MINIMIZE, 1);

@@ -154,7 +154,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // The shell says someone is in exclusive full screen, for the whole system: VRChat only when it is the one in front (a game on another screen is not).
         let exclusive = exclusive_said.0 && found.is_some_and(front_is);
-        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), needs: None, steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
+        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), needs: None, pointing: None, steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
             said = Some(status);

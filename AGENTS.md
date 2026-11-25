@@ -23,7 +23,10 @@
   `desk_shared.rs`, and check with `cargo check --target x86_64-pc-windows-gnu -p orbiters-desktop --tests`). Ordinary panels of ours over
   the engine's window, and nothing else: no event tap, no Accessibility, nothing sent to the game or `wsd`, no pointer warp while
   the game holds it, and **never windows that together cover all of the game's** (macOS stops showing it: `panel::uncovering`).
-  **Left Option** points, around the wheel and the Quick Menu alike (VRChat keeps the mouse on a Mac); Screen Recording is the one
+  **No key points** with obelisk-cli 0.1.15 or later: its engine lets the mouse go where VRChat does (the Quick Menu) and says so on a
+  read-only channel (`desktop_mac/channel.rs`), and the ring round the wheel, which holds the mouse, is picked by pushing past its rim
+  (`gesture.rs`: its thresholds keep ordinary use of the wheel from ever picking ours; never let a click confirm). The game keeps its
+  keyboard but while a text field of ours is up. Left Option is for an engine from before only. Screen Recording is the one
   permission (Input Monitoring only if macOS hides the keys without it). Hidden there: 3D pictures, the camera's column,
   translation, the corner's cards and mismatch buttons. `tools/mac-overlay/check.py` runs it over the engine's real window server
   with no game, only while nobody uses the Mac.

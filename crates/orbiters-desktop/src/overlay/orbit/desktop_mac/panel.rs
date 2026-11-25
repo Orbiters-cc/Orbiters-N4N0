@@ -466,6 +466,67 @@ impl Arrow {
     }
 }
 
+/// How much of a rest on a tool has passed ([`super::gesture`]): a ring round the arrow that closes as it does.
+#[derive(Default)]
+pub struct RestRing {
+    window: Option<PanelWindow>,
+    look: Option<([u8; 3], u32, u32)>,
+}
+
+/// Its size, in points, and in how many steps it closes.
+const REST_RING: f64 = 46.0;
+const REST_STEPS: f32 = 40.0;
+
+impl RestRing {
+    /// Round `at` (pixels of the game's picture), `passed` of it closed; none of it shows none.
+    pub fn show(&mut self, mtm: MainThreadMarker, game: &Game, at: Pos2, passed: f32, level: isize) {
+        if passed <= 0.0 {
+            return self.hide();
+        }
+        let accent = super::super::panels::look::accent();
+        let px = (REST_RING * game.scale).round() as u32;
+        let step = (passed.min(1.0) * REST_STEPS).round() as u32;
+        let look = ([accent.r(), accent.g(), accent.b()], px, step);
+        if self.window.as_ref().is_some_and(|w| w.px() != [px, px]) {
+            self.window = None;
+        }
+        let window = self.window.get_or_insert_with(|| PanelWindow::new(mtm, [px, px], game.scale));
+        if self.look != Some(look) {
+            self.look = Some(look);
+            window.picture(&rest_ring(px, step as f32 / REST_STEPS, accent), [0, 0, px, px]);
+        }
+        let spot = at - vec2(px as f32, px as f32) / 2.0;
+        if window.place(game, [spot.x.round() as i32, spot.y.round() as i32], 255, false) {
+            window.panel.setLevel(level + ARROW_RANK);
+            window.panel.orderFrontRegardless();
+        }
+    }
+
+    pub fn hide(&mut self) {
+        if let Some(w) = self.window.as_mut() {
+            w.hide();
+        }
+    }
+}
+
+/// The ring in a square of `px` pixels, `passed` (0 to 1) of it closed clockwise from the top, RGBA premultiplied.
+fn rest_ring(px: u32, passed: f32, colour: egui::Color32) -> Vec<u8> {
+    let mut canvas = crate::overlay::Canvas::new(px, px);
+    canvas.paint(0.0, |p| {
+        let (middle, radius, width) = (pos2(px as f32 / 2.0, px as f32 / 2.0), px as f32 * 0.38, px as f32 * 0.09);
+        p.circle_stroke(middle, radius, egui::Stroke::new(width + px as f32 * 0.03, egui::Color32::from_black_alpha(150)));
+        let n = (64.0 * passed).ceil().max(1.0) as usize;
+        let points: Vec<Pos2> = (0..=n)
+            .map(|i| {
+                let angle = std::f32::consts::TAU * passed * i as f32 / n as f32;
+                middle + vec2(angle.sin(), -angle.cos()) * radius
+            })
+            .collect();
+        p.add(egui::Shape::line(points, egui::Stroke::new(width, colour)));
+    });
+    canvas.pixels().to_vec()
+}
+
 /// Whether a press at `at` (pixels of the game's picture) is on a painted pixel of a part that takes presses.
 pub fn part_at<'a>(parts: impl Iterator<Item = (&'a Zone, &'a PanelWindow)>, at: Pos2) -> Option<Zone> {
     parts
@@ -478,6 +539,28 @@ pub fn part_at<'a>(parts: impl Iterator<Item = (&'a Zone, &'a PanelWindow)>, at:
 mod tests {
     use super::super::super::zones::{self, Around};
     use super::*;
+
+    /// The ring round the arrow closes from the top, clockwise.
+    #[test]
+    fn the_rest_shows_as_a_ring_that_closes() {
+        let px = 92u32;
+        let colour = egui::Color32::from_rgb(0, 218, 109);
+        let lit = |passed: f32| {
+            let pixels = rest_ring(px, passed, colour);
+            assert_eq!(pixels.len(), (px * px * 4) as usize);
+            (0..24)
+                .filter(|i| {
+                    let angle = std::f32::consts::TAU * (*i as f32 + 0.5) / 24.0;
+                    let at = pos2(46.0, 46.0) + vec2(angle.sin(), -angle.cos()) * (px as f32 * 0.38);
+                    let p = (at.y as usize * px as usize + at.x as usize) * 4;
+                    pixels[p + 1] > 150 && pixels[p + 3] > 200
+                })
+                .collect::<Vec<usize>>()
+        };
+        assert_eq!(lit(0.5), (0..12).collect::<Vec<_>>());
+        assert_eq!(lit(0.25), (0..6).collect::<Vec<_>>());
+        assert_eq!(lit(1.0).len(), 24);
+    }
 
     #[test]
     fn rectangles_that_leave_a_pixel_in_sight_do_not_cover() {

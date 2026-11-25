@@ -10,10 +10,13 @@
   "Allow Input Monitoring": "入力監視を許可",
   "Orbiters around VRChat's menus.": "VRChat のメニューの周りの Orbiters。",
   "Orbiters beside VRChat's Quick Menu and its wheel": "VRChat のクイックメニューとホイールの横の Orbiters",
-  "Orbiters around VRChat's own wheel, opened with R. Hold Left Option to point at it, or press its number: the rest of the time the mouse is VRChat's.": "Rで開くVRChatのホイールの周りにOrbitersを表示します。左Optionを押している間だけ指せます。番号キーでも選べます。それ以外のとき、マウスはVRChatのものです。",
-  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.": "Escで開くVRChatのクイックメニューの横にOrbitersを表示します。フルスクリーンでもウィンドウでも使えます。Macではメニューが開いている間もマウスはVRChatのものなので、Orbitersを指すには左Optionを押し続けます。",
   "The color of Orbiters' panels beside VRChat's menus. Their own is picked there, on the panels' settings.": "VRChat のメニューの横にある Orbiters パネルの色です。独自の色はそこで、パネルの設定から選びます。",
   "Keep a picture when a menu is not found": "メニューが見つからないときの画像を残す",
   "To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.": "OrbitersのパネルがVRChatのメニューのまわりに出ない原因を調べるためのものです。EscまたはRを押してメニューが見つからなかったとき、その瞬間のVRChatの画像をこのMacのOrbitersのログフォルダーに残します（新しい12枚）。何も送信しません。初期設定はオフです。",
-  "diagnostic log wheel ring missing picture frame": "診断 ログ ホイール リング 出ない 画像"
+  "diagnostic log wheel ring missing picture frame": "診断 ログ ホイール リング 出ない 画像",
+  "Scroll one notch or rest on it to open it": "1目盛りスクロールするか、止めると開きます",
+  "Scroll one notch to open it": "1目盛りスクロールで開きます",
+  "Rest on it to open it": "その上で止めると開きます",
+  "Push past the wheel's edge to a tool": "縁を越えてツールまで動かす",
+  "Push past the edge, or a number": "縁を越えるか、番号キー"
 }

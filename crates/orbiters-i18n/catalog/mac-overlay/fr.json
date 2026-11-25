@@ -10,10 +10,13 @@
   "Allow Input Monitoring": "Autoriser la surveillance de l’entrée",
   "Orbiters around VRChat's menus.": "Orbiters autour des menus de VRChat.",
   "Orbiters beside VRChat's Quick Menu and its wheel": "Orbiters à côté du menu rapide de VRChat et de sa roue",
-  "Orbiters around VRChat's own wheel, opened with R. Hold Left Option to point at it, or press its number: the rest of the time the mouse is VRChat's.": "Orbiters autour de la roue de VRChat, ouverte avec R. Maintiens Option gauche pour le pointer, ou appuie sur son numéro : le reste du temps, la souris est à VRChat.",
-  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.": "Orbiters à côté du menu rapide de VRChat, ouvert avec Esc, en plein écran ou dans une fenêtre. Sur un Mac, VRChat garde la souris pendant que ses menus sont ouverts : maintiens Option gauche pour pointer Orbiters.",
   "The color of Orbiters' panels beside VRChat's menus. Their own is picked there, on the panels' settings.": "La couleur des panneaux d'Orbiters à côté des menus de VRChat. La leur se choisit là-bas, dans les réglages des panneaux.",
   "Keep a picture when a menu is not found": "Garder une image quand un menu n’est pas trouvé",
   "To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.": "Pour savoir pourquoi les éléments d’Orbiters ne viennent pas autour des menus de VRChat. Après Esc ou R sans menu trouvé, l’image de VRChat à cet instant reste sur ce Mac, dans le dossier des journaux d’Orbiters, les 12 plus récentes. Rien n’est envoyé. Désactivé par défaut.",
-  "diagnostic log wheel ring missing picture frame": "diagnostic journal roue anneau absent image"
+  "diagnostic log wheel ring missing picture frame": "diagnostic journal roue anneau absent image",
+  "Scroll one notch or rest on it to open it": "Un cran de molette, ou reste dessus, pour l’ouvrir",
+  "Scroll one notch to open it": "Un cran de molette pour l’ouvrir",
+  "Rest on it to open it": "Reste dessus pour l’ouvrir",
+  "Push past the wheel's edge to a tool": "Pousse au-delà du bord, vers un outil",
+  "Push past the edge, or a number": "Au-delà du bord, ou un numéro"
 }

@@ -166,5 +166,13 @@
   "{count} matching setting": "{count} configuração correspondente",
   "{count} matching settings": "{count} configurações correspondentes",
   "↑ ↓ to move, Enter to open, Esc to clear": "↑ ↓ para mover, Enter para abrir, Esc para limpar",
-  "resolution render scale pixels sharp fast Mac": "resolução escala de renderização pixels nítido rápido Mac"
+  "resolution render scale pixels sharp fast Mac": "resolução escala de renderização pixels nítido rápido Mac",
+  "Open a tool around the wheel": "Abrir uma ferramenta ao redor da roda",
+  "scroll notch rest dwell hover push mouse no key": "rolar passo parar espera passar empurrar mouse sem tecla",
+  "How long a rest opens it": "Quanto tempo parado para abrir",
+  "dwell time delay hover milliseconds": "tempo espera atraso passar milissegundos",
+  "Orbiters around VRChat's own wheel, opened with R. Push the mouse past the wheel's edge to a tool, then scroll one notch or rest on it, or press its number: a click stays VRChat's.": "Orbiters ao redor da roda do VRChat, aberta com R. Empurre o mouse além da borda da roda até uma ferramenta e role um passo ou pare sobre ela, ou aperte o número dela: um clique continua sendo do VRChat.",
+  "VRChat holds the mouse while its wheel is open, and a click presses its own slice. A tool lit past the wheel's edge opens with one notch of the scroll wheel, or when you rest on it; back inside the edge, nothing does.": "O VRChat fica com o mouse enquanto a roda dele está aberta, e um clique aperta a própria fatia. Uma ferramenta acesa além da borda abre com um passo de rolagem, ou quando você para sobre ela; de volta para dentro da borda, nada abre.",
+  "A ring round the pointer closes meanwhile. Any movement starts it again.": "Um anel ao redor do ponteiro se fecha enquanto isso. Qualquer movimento recomeça.",
+  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. Point and click, with no key.": "Orbiters ao lado do Menu Rápido do VRChat, aberto com Esc, em tela cheia ou em uma janela. Aponte e clique, sem nenhuma tecla."
 }

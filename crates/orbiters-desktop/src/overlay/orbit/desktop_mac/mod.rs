@@ -7,13 +7,18 @@
 //! - **A menu is known to be open** by looking at that window's own picture (ScreenCaptureKit, [`capture`]), only just after Esc or R and while a menu shows. It needs macOS's
 //!   Screen Recording; without it nothing shows and Settings says so.
 //! - **The keys** are read by asking for their state ([`keyboard`]), only while the game is in front: no event tap, no Accessibility.
-//! - **The mouse is VRChat's for as long as it is in front, its Quick Menu included** (the engine holds the pointer of a full-screen game). Holding Left Option, or a page of
-//!   ours being up, takes the keyboard for a moment without coming in front ([`pointing`], [`panel::Hold`]): the engine then lets the pointer go and releases the keys the
-//!   game held, and takes it back by itself as soon as ours goes. The keyboard is then ours too: a page can be typed in, and Esc closes it.
+//! - **The mouse is VRChat's while it holds it, and the person's in its Quick Menu**, as on Windows: the engine (obelisk-cli 0.1.15) lets it go where the game does and says so
+//!   ([`channel`]). The wing and the pages there are clicked as any window is, and the game keeps its keyboard. VRChat's wheel holds the mouse: the ring round it is picked by
+//!   pushing past the wheel's rim ([`gesture`]), with no key and nothing taken from the game.
+//! - **The keyboard is ours only where that is needed** ([`pointing`], [`panel::Hold`]): while something of ours is typed in, and for a page opened from the wheel. It is taken
+//!   without coming in front: the engine then lets the pointer go and releases the keys the game held, and takes it back by itself as soon as ours goes.
+//! - **With an engine from before**, which holds the mouse for as long as its game is in front, Left Option does what it did: it takes the keyboard while held.
 //! - **Not here**: the 3D pictures cell and the camera's column (Spout), translation, the corner's cards and the mismatch buttons.
 
 pub mod capture;
+pub mod channel;
 pub mod game;
+pub mod gesture;
 pub mod keyboard;
 pub mod lab;
 pub mod panel;
@@ -26,11 +31,13 @@ use super::zones::{self, Around, Zone};
 use super::Panels;
 use crate::backend::Ctl;
 use crate::ipc::{Client, Endpoint, Role};
-use crate::state::{OrbitNeeds, OrbitStatus, Snapshot};
+use crate::state::{OrbitNeeds, OrbitPointing, OrbitStatus, Snapshot};
 use anyhow::Context as _;
 use capture::{Answer, Ask, Looker, Search, Trouble};
+use channel::{Channel, Pointer};
 use egui::{pos2, vec2, Pos2, Vec2};
 use game::{Finder, Game, Shot};
+use gesture::{Gesture, Moved};
 use keyboard::{Keys, Source};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -38,9 +45,9 @@ use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEventMask, NSEventModifierFlags, NSEventType, NSWorkspace};
 use objc2_foundation::{NSActivityOptions, NSDate, NSDefaultRunLoopMode, NSNotification, NSProcessInfo};
 use orbiters_i18n::mark;
-use panel::{Arrow, Hold, Layer, PanelWindow};
+use panel::{Arrow, Hold, Layer, PanelWindow, RestRing};
 use wheel::{Fit, Scores};
-use pointing::{Pointing, Turn};
+use pointing::{Pointing, Turn, Who};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -63,6 +70,10 @@ const ALLOWED_EVERY: Duration = Duration::from_secs(10);
 const ALLOWED_AT_A_KEY: Duration = Duration::from_secs(1);
 /// How long the engine takes at most to let the pointer go once ours has the keyboard (3 to 7 ms were measured).
 const LETS_GO: Duration = Duration::from_millis(40);
+/// With the mouse the person's, its movement keeps the loop at [`TURN`] for this long.
+const MOVED_FOR: Duration = Duration::from_millis(300);
+/// How long macOS's pointer is waited for over a part, with the mouse the person's, before ours is drawn there (the engine looks 30 times a second where it is).
+const SHOWS_WITHIN: Duration = Duration::from_millis(250);
 /// The keyboard macOS did not give ours this long after it was asked for went to another window.
 const KEYBOARD_WITHIN: Duration = Duration::from_millis(200);
 /// A mouse button still down is waited for this long at most before the game has its mouse back: it must not hear half a click.
@@ -375,6 +386,22 @@ pub struct Desk {
     hints: Hints,
     pointing: Pointing,
     hold: Hold,
+    /// The engine's word of the mouse, and the folder it is in when that is not the game's own (the lab's).
+    channel: Channel,
+    host: Option<std::path::PathBuf>,
+    was_pointer: Option<Pointer>,
+    /// The mouse is the person's: the parts are clicked, the keyboard the game's.
+    mouse: bool,
+    /// Where it was last turn, when it last moved, and since when macOS hides its pointer over a part.
+    was_at: Option<Pos2>,
+    moved: Option<Instant>,
+    hidden_since: Option<Instant>,
+    /// The ring round VRChat's wheel, picked by the mouse's movement: since when it is, whether the key that opens the wheel began it, and the scroll wheel's count.
+    gesture: Gesture,
+    begun: bool,
+    scrolls: Option<u32>,
+    rest_ring: RestRing,
+    was_lit: bool,
     /// Since when ours has the keyboard, and whether the pointer was put on the parts since.
     held_since: Option<Instant>,
     put: bool,
@@ -401,7 +428,7 @@ pub struct Desk {
     wheel_at: Option<Fit>,
     /// The fit of the last frame, before it opens anything.
     fit_seen: Option<Fit>,
-    logged: (Option<Seen>, bool, Option<Zone>),
+    logged: (Option<Seen>, bool, Option<Zone>, Option<Pointer>),
     started: Instant,
     last_turn: Instant,
     meter: crate::perf::TurnMeter,
@@ -440,6 +467,18 @@ impl Desk {
             hints: Hints::default(),
             pointing: Pointing::default(),
             hold: Hold::new(mtm),
+            channel: Channel::default(),
+            host: None,
+            was_pointer: None,
+            mouse: false,
+            was_at: None,
+            moved: None,
+            hidden_since: None,
+            gesture: Gesture::default(),
+            begun: false,
+            scrolls: None,
+            rest_ring: RestRing::default(),
+            was_lit: false,
             held_since: None,
             put: false,
             leaving: None,
@@ -458,7 +497,7 @@ impl Desk {
             saw: LookSaw::new(0, None, now),
             wheel_at: None,
             fit_seen: None,
-            logged: (None, false, None),
+            logged: (None, false, None, None),
             started: now,
             last_turn: now,
             meter: crate::perf::TurnMeter::new("orbit-desktop", now),
@@ -533,7 +572,7 @@ impl Desk {
         }
     }
 
-    /// The game has its mouse and keyboard again, at once.
+    /// The game has its keyboard again, at once (and its mouse, where it holds it).
     fn let_go(&mut self) {
         self.hold.give_back();
         self.held_since = None;
@@ -557,7 +596,8 @@ impl Desk {
         };
         let failed = self.trouble.is_some_and(|t| now.duration_since(t) < TROUBLE_SAID);
         let note = needs.map(OrbitNeeds::words).or(failed.then_some(PICTURE_FAILED));
-        let status = OrbitStatus { note: note.map(str::to_string), needs, ..OrbitStatus::default() };
+        let pointing = self.last.map(|_| if self.channel.state().is_some() { OrbitPointing::Free } else { OrbitPointing::LeftOption });
+        let status = OrbitStatus { note: note.map(str::to_string), needs, pointing, ..OrbitStatus::default() };
         if self.said.as_ref() != Some(&status) {
             self.backend.orbit_status(status.clone());
             self.said = Some(status);
@@ -642,9 +682,18 @@ impl Desk {
         let due = self.asked_window.is_none_or(|t| now.duration_since(t) >= if resting { WINDOW_EVERY } else { WINDOW_EVERY_UP });
         if due || back || keys.menu.is_some() || keys.unknown {
             self.asked_window = Some(now);
-            self.last = self.finder.find(snap.launcher.desktop_game);
+            self.last = self.finder.find(snap.launcher.desktop_game, self.channel.state().map(|s| (s.window, s.frame)));
         }
         let found = self.last;
+        // The engine's word of the mouse, of this very game's.
+        let path = snap.launcher.desktop_game.map(|game| {
+            let host = self.host.clone().unwrap_or_else(|| orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), game));
+            orbiters_core::obelisk::pointer_channel(&host)
+        });
+        let moves = self.channel.turn(path.as_deref(), self.finder.server(), now);
+        let pointer = self.channel.state().map(|s| s.pointer);
+        let freed = self.was_pointer == Some(Pointer::Held) && pointer == Some(Pointer::Free);
+        self.was_pointer = pointer;
         // Back in front, or its window back on the screen (or this just started): a menu may be open that nobody pressed a key for since.
         let there = found.is_some();
         self.look_due = front && (self.look_due || back || there && !self.was_there);
@@ -684,6 +733,8 @@ impl Desk {
             if holding {
                 self.let_go();
             }
+            self.mouse = false;
+            self.gesture_over();
             self.panels.serve_menu(&snap);
             return self.end(now, REST);
         };
@@ -692,7 +743,8 @@ impl Desk {
             if let Some(key) = keys.menu {
                 self.new_look(Some(key), now);
                 self.watcher.pressed(key, now);
-            } else if (keys.unknown || self.look_due) && self.watcher.seen() == Seen::Resting {
+            } else if (keys.unknown || self.look_due || freed && front) && self.watcher.seen() == Seen::Resting {
+                // (the mouse let go: a menu of VRChat's opened, whatever opened it)
                 self.new_look(None, now);
                 self.watcher.pressed(MenuKey::Esc, now);
             }
@@ -760,6 +812,8 @@ impl Desk {
             if holding {
                 self.let_go();
             }
+            self.mouse = false;
+            self.follow_wheel(&game, seen, &keys, front, pointer, &moves, None, now);
             self.windows.hide_all();
             return self.end(now, if looking { TURN } else { REST });
         }
@@ -767,14 +821,27 @@ impl Desk {
         self.panels.menu_turn(&snap);
         self.panels.step_springs(dt);
         let at = game.pixel(panel::pointer_at());
-        self.point(&game, open, &keys, front, at, now);
-        let active = self.put;
-        self.panels.set_pointing(active && !self.panels.sheet_open(), !snap.settings.reduce_motion);
+        if self.was_at.replace(at) != Some(at) {
+            self.moved = Some(now);
+        }
+        let pressed = heard.iter().any(|h| matches!(h, Heard::Button(true)));
+        self.point(&game, open, &keys, front, pointer, pressed, at, now);
+        // Around the wheel, what the mouse's own movement points at; everywhere else, where the pointer is.
+        let pushed = self.follow_wheel(&game, seen, &keys, front, pointer, &moves, open, now);
+        let active = self.put || self.mouse;
+        let at = pushed.unwrap_or(at);
+        self.panels.set_pointing((self.put || pushed.is_some()) && !self.panels.sheet_open(), !snap.settings.reduce_motion);
         self.panels.set_key_caps(front && keys.option);
-        let on = active.then(|| hit(&self.panels, at)).flatten();
+        let on = (active || pushed.is_some()).then(|| hit(&self.panels, at)).flatten();
         self.panels.hover(on);
-        self.hints.follow(open, active);
-        self.panels.set_hint(self.hints.now_on_a_mac(open, active));
+        let opens = self.rest_on(&game, &snap, pushed, on.is_some_and(|(i, _)| self.panels.all().nth(i).is_some_and(|p| !p.zone.passes_clicks())), now);
+        self.hints.follow(open, self.put || pushed.is_some());
+        let keyless = pointer.is_some().then_some(snap.settings.orbit.wheel_pick);
+        self.panels.set_hint(self.hints.now_on_a_mac(open, self.put || pushed.is_some(), keyless));
+        if opens {
+            self.press(true, &snap);
+            self.press(false, &snap);
+        }
         for event in heard {
             match event {
                 // (on a pixel of a part, whose window took it)
@@ -782,7 +849,7 @@ impl Desk {
                     self.windows.clicked = true;
                     self.press(down, &snap);
                 }
-                Heard::Wheel(notches) if active => self.panels.wheel(notches),
+                Heard::Wheel(notches) if active && pushed.is_none() => self.panels.wheel(notches),
                 Heard::Wheel(_) => {}
                 Heard::Key { code, down, command, control, modifiers } => self.key(code, down, command, control, modifiers),
             }
@@ -799,20 +866,24 @@ impl Desk {
         let layer = if front { Layer::Above(panel::level(&game, true)) } else { Layer::With(game.window.id) };
         self.windows.show(self.mtm, &mut self.panels, &snap, &game, layer, now);
         if !self.source.button() {
-            self.windows.catch_at(active.then_some(at));
+            self.windows.catch_at((active && pushed.is_none()).then_some(at));
         }
-        let quick = self.hold.held() || looking && self.watcher.look_every(now).is_zero() || self.panels.busy();
+        let moving = self.mouse && self.moved.is_some_and(|t| now.duration_since(t) < MOVED_FOR);
+        let quick = self.hold.held() || looking && self.watcher.look_every(now).is_zero() || self.panels.busy() || moving || pushed.is_some() || !moves.is_empty() && open == Some(Around::Wheel);
         self.end(now, if quick { TURN } else { REST })
     }
 
     /// Takes the keyboard or gives it back as [`Pointing`] says, and puts the pointer on the parts once the engine let it go.
-    fn point(&mut self, game: &Game, open: Option<Around>, keys: &keyboard::Said, front: bool, at: Pos2, now: Instant) {
+    #[allow(clippy::too_many_arguments)]
+    fn point(&mut self, game: &Game, open: Option<Around>, keys: &keyboard::Said, front: bool, pointer: Option<Pointer>, pressed: bool, at: Pos2, now: Instant) {
         let sheet = self.panels.sheet_open() && !self.panels.peek;
         let lost = self.held_since.is_some_and(|t| now.duration_since(t) >= KEYBOARD_WITHIN) && !self.hold.has_keyboard();
         let given_back = std::mem::take(&mut self.given_back);
-        let wanted = self.pointing.turn(Turn { front, open, sheet, option: keys.option, lost, given_back });
+        let typing = self.panels.typing();
+        let who = self.pointing.turn(Turn { front, open, sheet, typing, option: keys.option, pointer, pressed, lost, given_back });
+        self.mouse = who == Who::Mouse;
         let level = panel::level(game, true);
-        if !wanted {
+        if who != Who::Parts {
             if self.hold.held() {
                 // Not in the middle of a click, whose end the game would hear alone.
                 let since = *self.leaving.get_or_insert(now);
@@ -821,16 +892,34 @@ impl Desk {
                     self.let_go();
                 }
             }
+            // The mouse the person's, macOS shows its pointer over ours by itself, the engine permitting.
+            let over = self.mouse && hit(&self.panels, at).is_some() && !panel::pointer_shows();
+            let since = if over { Some(*self.hidden_since.get_or_insert(now)) } else { None };
+            self.hidden_since = since;
+            if since.is_some_and(|t| now.duration_since(t) >= SHOWS_WITHIN) {
+                self.arrow.show(self.mtm, game, at, level);
+            } else {
+                self.arrow.hide();
+            }
             return;
         }
+        self.hidden_since = None;
         self.leaving = None;
         if !self.hold.held() {
             self.hold.take(game, level);
             self.held_since = Some(now);
-            self.put = false;
+            // The mouse was the person's already: where it is, is where they have it.
+            self.put = matches!(pointer, Some(Pointer::Free | Pointer::Plain));
             return;
         }
-        if !self.put && self.hold.has_keyboard() && self.held_since.is_some_and(|t| now.duration_since(t) >= LETS_GO) {
+        let held_for = self.held_since.map_or(Duration::ZERO, |t| now.duration_since(t));
+        let gone = match pointer {
+            // (its own word that it let go, and not waited for beyond any time it may take)
+            Some(Pointer::Held) => held_for >= LETS_GO * 5,
+            Some(_) => true,
+            None => held_for >= LETS_GO,
+        };
+        if !self.put && self.hold.has_keyboard() && gone {
             // Where the game left it, if that is on a part already; else on the first of them.
             let on_a_part = hit(&self.panels, at).is_some();
             if let Some(first) = self.first_point(open, game.client()).filter(|_| !on_a_part) {
@@ -843,6 +932,72 @@ impl Desk {
         } else {
             self.arrow.hide();
         }
+    }
+
+    /// The mouse's movement, where VRChat's wheel holds it: where it points on the ring, in pixels of the game's picture, once it was pushed past the wheel's rim.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_wheel(&mut self, game: &Game, seen: Seen, keys: &keyboard::Said, front: bool, pointer: Option<Pointer>, moves: &[channel::Move], open: Option<Around>, now: Instant) -> Option<Pos2> {
+        let clock = now.duration_since(self.started).as_secs_f64();
+        if keys.menu == Some(MenuKey::R) {
+            // VRChat's pointer is in its wheel's middle as it opens, some time before it is seen here.
+            self.gesture.begin(clock);
+            self.begun = true;
+        }
+        let up = seen == Seen::Open(Around::Wheel);
+        let coming = seen == Seen::Looking && self.begun;
+        let ours = front && pointer == Some(Pointer::Held) && !self.hold.held() && !(self.panels.sheet_open() && !self.panels.peek);
+        if !(up || coming) || !ours {
+            self.gesture_over();
+            return None;
+        }
+        if !self.begun {
+            self.gesture.begin(clock);
+            self.begun = true;
+        }
+        let (center, radius) = self.wheel_at.map_or_else(|| zones::wheel(game.client()), |fit| fit.circle(game.client()));
+        let moved: Vec<Moved> = moves.iter().map(|(x, y)| Moved { by: vec2(*x, *y), at: clock }).collect();
+        self.gesture.moves(&moved, radius / game.scale as f32, open == Some(Around::Wheel), self.panels.second_ring());
+        self.gesture.at().map(|at| center + gesture::shown_at(at, radius))
+    }
+
+    fn gesture_over(&mut self) {
+        self.gesture.end();
+        self.begun = false;
+        self.scrolls = None;
+        self.was_lit = false;
+        self.rest_ring.hide();
+    }
+
+    /// What is pointed at by pushing past the rim: its arrow, the rest on it as it passes, and whether it opens now.
+    fn rest_on(&mut self, game: &Game, snap: &Snapshot, pushed: Option<Pos2>, pressable: bool, now: Instant) -> bool {
+        if !self.begun {
+            return false;
+        }
+        let scrolls = self.source.scrolls();
+        let scrolled = self.scrolls.replace(scrolls).is_some_and(|was| was != scrolls);
+        let orbit = &snap.settings.orbit;
+        let told = gesture::Now { at: now.duration_since(self.started).as_secs_f64(), scrolled, button: self.source.any_button(), pressable: pressable && pushed.is_some() };
+        let (opens, passed) = self.gesture.turn(&told, orbit.wheel_pick, orbit.wheel_rest());
+        let lit = self.gesture.at().is_some();
+        if opens || lit != self.was_lit {
+            // What the thresholds of the gesture are judged by after a real session.
+            super::super::vr_log::line(&format!("desk: the ring {} at {:?} radii (wheel's radius {:.0} points), {} moves so far, opens {opens} (scroll wheel {scrolled})", if lit { "lit" } else { "out" }, self.gesture.at().map(|a| (a.x, a.y)), zones::wheel(game.client()).1 / game.scale as f32, self.gesture.counted())); // i18n: not shown (a log's line)
+        }
+        self.was_lit = lit;
+        let level = panel::level(game, true);
+        match pushed.filter(|_| self.gesture.at().is_some()) {
+            Some(at) => {
+                self.rest_ring.show(self.mtm, game, at, passed, level);
+                self.arrow.show(self.mtm, game, at, level);
+            }
+            None => {
+                self.rest_ring.hide();
+                if pushed.is_some() {
+                    self.arrow.hide();
+                }
+            }
+        }
+        opens
     }
 
     /// A key pressed while the keyboard is ours: typed in a page that takes it; Esc, let go, closes the page or gives the game its keyboard back. (As it is let go: held, it
@@ -875,12 +1030,12 @@ impl Desk {
     /// What it does, in `vr-test.log`, as it changes: what a report of something wrong with it starts from. Numbers alone: no picture, no name, no key but Esc and R.
     fn log(&mut self, now: Instant) {
         let seen = self.watcher.seen();
-        let is = (Some(seen), self.hold.held(), self.windows.left_out);
+        let is = (Some(seen), self.hold.held(), self.windows.left_out, self.was_pointer);
         if is != self.logged {
             let after = now.saturating_duration_since(self.saw.began).as_millis();
             let (game, frames) = (self.last.map(|g| (g.window.id, g.window.layer, g.client(), g.scale)), self.looker.running());
             let key = self.saw.key;
-            super::super::vr_log::line(&format!("desk: {seen:?}, {after} ms after the look {} began (key {key:?}); in front {}; keyboard held {}; window {game:?}; picture (runs, frames) {frames:?}; left out {:?}", self.saw.number, self.was_front, is.1, is.2)); // i18n: not shown (a log's line)
+            super::super::vr_log::line(&format!("desk: {seen:?}, {after} ms after the look {} began (key {key:?}); in front {}; mouse {:?}; keyboard held {}; window {game:?}; picture (runs, frames) {frames:?}; left out {:?}", self.saw.number, self.was_front, is.3, is.1, is.2)); // i18n: not shown (a log's line)
             match (self.logged.0, seen) {
                 (Some(Seen::Looking), Seen::Resting) => {
                     if let Some(game) = self.last {
@@ -918,6 +1073,9 @@ impl Desk {
             held: self.hold.held(),
             keyboard: self.hold.has_keyboard(),
             pointing: self.put,
+            mouse: self.mouse,
+            pointer: self.was_pointer,
+            lit: self.gesture.at().is_some().then(|| self.panels.all().find(|p| p.hover.is_some()).map(|p| p.zone)).flatten(),
             sheet: self.panels.sheet_open(),
             looking: self.looker.running(),
             painted: self.windows.painted,
@@ -938,6 +1096,11 @@ pub struct Doing {
     pub held: bool,
     pub keyboard: bool,
     pub pointing: bool,
+    /// The mouse is the person's, the keyboard the game's.
+    pub mouse: bool,
+    pub pointer: Option<Pointer>,
+    /// The part lit by pushing past VRChat's wheel's rim.
+    pub lit: Option<Zone>,
     pub sheet: bool,
     pub looking: (bool, u64),
     pub painted: u64,

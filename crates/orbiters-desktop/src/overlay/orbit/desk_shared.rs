@@ -71,10 +71,27 @@ impl Hints {
         }
     }
 
-    /// The same on a Mac, where VRChat holds the mouse for as long as it is in front, its Quick Menu included: what nobody can guess there is the key that frees it, around
-    /// both menus. Its ring has five cells ([`super::Panels::on_a_mac`]).
+    /// The same on a Mac. `keyless`: its engine lets the mouse go in the Quick Menu, and the ring round the wheel is picked by pushing past the wheel's edge, opened as it says;
+    /// `None`: an engine that holds the mouse for as long as VRChat is in front, its Quick Menu included, where nobody can guess the key that frees it. Its ring has as many
+    /// cells as VRChat's camera gives it ([`super::Panels::on_a_mac`]).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(super) fn now_on_a_mac(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
+    pub(super) fn now_on_a_mac(&self, open: Option<Around>, pointing: bool, keyless: Option<orbiters_core::settings::WheelPick>) -> Option<(&'static str, &'static str)> {
+        use orbiters_core::settings::WheelPick;
+        if let Some(pick) = keyless {
+            let opens = match pick {
+                WheelPick::Both => mark("Scroll one notch or rest on it to open it"),
+                WheelPick::Scroll => mark("Scroll one notch to open it"),
+                WheelPick::Rest => mark("Rest on it to open it"),
+            };
+            return match open {
+                Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((opens, "")),
+                Some(Around::Wheel) if pointing => None,
+                Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Push past the wheel's edge to a tool"), opens)),
+                Some(Around::Wheel) => Some((mark("Push past the edge, or a number"), "")),
+                Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),
+                _ => None,
+            };
+        }
         match open {
             Some(Around::Wheel | Around::QuickMenu) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
             Some(Around::Wheel | Around::QuickMenu) if pointing => None,

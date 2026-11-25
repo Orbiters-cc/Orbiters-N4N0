@@ -2081,6 +2081,12 @@ impl Panels {
         self.all().enumerate().find(|(_, p)| p.zone == zone && p.shown).and_then(|(i, p)| p.items.first().map(|item| (i, item.rect.center())))
     }
 
+    /// A second ring is out past a cell of the wheel's.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn second_ring(&self) -> bool {
+        self.facts.bloomed.is_some()
+    }
+
     /// A number key on the wheel: as a press on that cell, clockwise from the top.
     pub fn press_cell(&mut self, cell: usize, snap: &Snapshot) -> Pressed {
         const CELLS: [Zone; 8] = [Zone::WheelWorlds, Zone::WheelYouTube, Zone::WheelPlaying, Zone::WheelAll, Zone::WheelInstances, Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld];

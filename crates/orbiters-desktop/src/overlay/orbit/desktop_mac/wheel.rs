@@ -59,7 +59,7 @@ pub struct Fit {
 
 impl Fit {
     /// Centre and radius in a window of `client`.
-    fn circle(&self, client: Vec2) -> (Pos2, f32) {
+    pub fn circle(&self, client: Vec2) -> (Pos2, f32) {
         let (center, radius) = zones::wheel(client);
         (center + self.off * client.y, radius * self.size)
     }

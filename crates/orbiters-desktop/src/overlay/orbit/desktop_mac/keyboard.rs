@@ -1,5 +1,5 @@
 //! The keys of a Mac, read and never taken: VRChat's own keys (Esc, R), the numbers and Left Option, by asking macOS for their state each turn
-//! (`CGEventSourceKeyState`), only while the game is in front. No event tap, no hot key (which would keep the key from the game), no Accessibility. And what a key types
+//! (`CGEventSourceKeyState`), only while the game is in front; and how often the scroll wheel turned, which macOS counts, while VRChat's wheel is up. No event tap, no hot key (which would keep the key from the game), no Accessibility. And what a key types
 //! in a page of ours, in the person's layout, for the keys macOS gives our own window while it holds the keyboard.
 
 use super::super::detect::MenuKey;
@@ -38,8 +38,9 @@ extern "C" {
 
 /// `kCGEventSourceStateHIDSystemState`: what the keyboard itself says, whatever any program posts.
 const HID: i32 = 1;
-/// `kCGEventKeyDown`.
+/// `kCGEventKeyDown`, `kCGEventScrollWheel`.
 const KEY_DOWN: u32 = 10;
+const SCROLL: u32 = 22;
 /// Virtual key codes (`HIToolbox/Events.h`), the same places on every keyboard.
 pub const ESC: u16 = 0x35;
 pub const LEFT_OPTION: u16 = 0x3a;
@@ -57,6 +58,10 @@ pub trait Source {
     fn downs(&self) -> u32;
     /// The left mouse button.
     fn button(&self) -> bool;
+    /// Any button of the mouse.
+    fn any_button(&self) -> bool;
+    /// How many times the scroll wheel turned since the Mac started (macOS counts it; which way it keeps to itself).
+    fn scrolls(&self) -> u32;
     /// Where the key that types "r" is.
     fn r(&self) -> u16;
     /// Whether macOS said this app may hear the keyboard (Input Monitoring).
@@ -88,6 +93,16 @@ impl Source for Native {
     fn button(&self) -> bool {
         // SAFETY: a plain query.
         unsafe { CGEventSourceButtonState(HID, 0) }
+    }
+
+    fn any_button(&self) -> bool {
+        // SAFETY: plain queries.
+        (0..3).any(|b| unsafe { CGEventSourceButtonState(HID, b) })
+    }
+
+    fn scrolls(&self) -> u32 {
+        // SAFETY: a plain query.
+        unsafe { CGEventSourceCounterForEventType(HID, SCROLL) }
     }
 
     fn r(&self) -> u16 {
@@ -315,6 +330,12 @@ pub(super) mod tests {
         }
         fn button(&self) -> bool {
             self.button.get()
+        }
+        fn any_button(&self) -> bool {
+            self.button.get()
+        }
+        fn scrolls(&self) -> u32 {
+            0
         }
         fn r(&self) -> u16 {
             R

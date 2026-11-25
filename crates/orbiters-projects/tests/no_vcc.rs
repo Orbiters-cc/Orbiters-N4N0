@@ -22,7 +22,8 @@ fn the_page_works_from_an_empty_vpm_folder() {
         // Nothing there yet: no project, no error.
         assert!(gallery::listed(&root).projects.is_empty());
         // VRChat's repositories are left out here (no network in tests): the listing is empty but readable.
-        orbiters_projects::write_json(&root.join("vrc-get/settings.json"), &json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true})).unwrap();
+        std::fs::create_dir_all(root.join("vrc-get")).unwrap();
+        std::fs::write(root.join("vrc-get/settings.json"), json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true}).to_string()).unwrap();
         let view = vpm::view(&root, None, false).await.unwrap();
         assert!(view.repos.is_empty() && view.packages.is_empty());
         assert!(view.default_path.is_absolute());

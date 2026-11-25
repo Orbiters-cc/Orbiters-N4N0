@@ -398,10 +398,11 @@ fn open_of(snap: &Snapshot, gpu_integrated: Option<bool>) -> Open {
     // As `vrchat_account` decides to draw its card (a saved session being restored shows too).
     let connecting = status.presence() == crate::controller::vrchat_login::Presence::Connecting && status.methods.is_empty();
     Open {
-        bridge: snap.bridge.allowed,
+        bridge: snap.bridge.allowed && orbiters_core::here::HERE.bridge,
         vrchat_login: (status.allowed || status.waiting || connecting) && orbiters,
         gpu_choice: gpu_integrated.is_some(),
         gpu_split: gpu_integrated == Some(false),
+        avatar_gun: snap.settings.avatar_gun.changed_once,
     }
 }
 
@@ -791,7 +792,7 @@ fn place(m: &mut super::Masonry, cards: &mut Vec<(&'static str, Rect)>, key: usi
 fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draft: &mut Settings, asked: &mut Asked) -> Vec<(&'static str, Rect)> {
     let ctx = ui.ctx().clone();
     let snap = cx.snap;
-    let vrchat_here = orbiters_core::osc::VRCHAT_RUNS_HERE;
+    let here = orbiters_core::here::HERE;
     let mut cards = Vec::new();
     let mut m = super::Masonry::new(ui, &format!("settings-{}", state.group.id()));
     let c = &mut cards;
@@ -811,6 +812,10 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             apply |= place(&mut m, c, 1, "N4N0", |ui| super::settings_n4n0::n4n0_card(ui, cx, 1, base, draft, &mut state.texts));
             apply |= place(&mut m, c, 2, mark("N4N0's menu"), |ui| super::settings_n4n0::menu_card(ui, cx, 2, draft));
             apply |= place(&mut m, c, 3, mark("Calls"), |ui| super::settings_n4n0::calls_card(ui, cx, 3, draft));
+            // Only once a gun changed this avatar (its notice said so): it comes in then with its entrance, under the others.
+            if open_here(cx).lets(registry::Gate::AvatarGunChanged) {
+                apply |= place(&mut m, c, 4, super::avatar_gun::TITLE, |ui| super::settings_n4n0::avatar_gun_card(ui, cx, 4, draft));
+            }
         }
         Group::Voice => {
             apply |= place(&mut m, c, 1, mark("Assistant"), |ui| super::settings_n4n0::assistant_card(ui, cx, 1, draft));
@@ -825,7 +830,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
         }
         Group::Vr => {
             let mut smoothing_reset = false;
-            if vrchat_here {
+            if here.around() {
                 apply |= place(&mut m, c, 1, registry::CARD_AROUND, |ui| {
                     let mut apply = false;
                     section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera")), |ui| {
@@ -836,24 +841,32 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
                 if smoothing_reset {
                     cx.toasts.push(&ctx, toast::Kind::Info, tr("Smoothing back to the values measured to match VRChat"));
                 }
+            }
+            if here.steam_vr {
                 apply |= place(&mut m, c, 2, registry::CARD_HEADSET, |ui| headset_card(ui, cx, 2, draft));
+            }
+            if here.steam_vr && here.sound {
                 apply |= place(&mut m, c, 3, mark("When SteamVR starts"), |ui| super::vr_audio::show(ui, cx, 3, &mut state.vr_audio, &mut draft.vr_audio));
             }
         }
         Group::Capture => {
             apply |= place(&mut m, c, 1, mark("Capture"), |ui| capture_card(ui, cx, 1, base, draft, &mut state.texts));
             apply |= place(&mut m, c, 2, mark("VRChat and OSC"), |ui| osc_card(ui, cx, 2, draft));
-            if vrchat_here {
+            if here.camera_frames {
                 apply |= place(&mut m, c, 3, mark("Performance"), |ui| performance_card(ui, cx, 3, draft, &mut state.mic));
             }
             apply |= place(&mut m, c, 4, mark("Storage"), |ui| storage_card(ui, cx, 4, &ctx, draft, state, asked));
         }
         Group::Vrchat => {
-            if vrchat_here {
+            if here.steam_vr {
                 // One control someone comes for, first.
                 apply |= place(&mut m, c, 1, mark("FPS booster"), |ui| super::booster_card::card(ui, cx, 1, &mut state.booster, draft));
+            }
+            if here.vrchat_runs && here.starts_vrchat {
                 // How Home's Play buttons start VRChat.
                 apply |= place(&mut m, c, 2, mark("Play VRChat"), |ui| super::launch_card::card(ui, cx, 2, draft));
+            }
+            if here.performance {
                 place(&mut m, c, 3, mark("Performance report"), |ui| {
                     section(ui, cx, 3, icons::GAUGE, tr("Performance report"), Some(tr("What N4N0 measured, for when VRChat or your computer lags")), |ui| {
                         // A hint's row is named by what it advises: not a setting of its own.
@@ -864,7 +877,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             }
             // Only for an account the server says has it: nobody else sees a trace of it. On a Mac too, where VRChat runs
             // under Obelisk's engine: what it can do there is its capabilities' to say (bridge/caps.rs).
-            if snap.bridge.allowed {
+            if snap.bridge.allowed && here.bridge {
                 apply |= place(&mut m, c, 4, mark("Experimental"), |ui| super::experimental::show(ui, cx, 4, &mut state.experimental, &mut draft.experimental));
             }
             // A Mac: how Home's Play starts VRChat there (its picture detail).
@@ -873,28 +886,31 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
                 apply |= place(&mut m, c, 2, mark("Play VRChat"), |ui| super::launch_card::card(ui, cx, 2, draft));
             }
             // What VRChat on this very computer gives (Spout, its log, SteamVR) has no settings where it cannot run.
-            if !vrchat_here {
+            if !here.vrchat_runs {
                 apply |= place(&mut m, c, 5, mark("VRChat on your network"), |ui| widgets::unrecorded(|| super::network::card(ui, cx, 5, &mut state.network, draft)));
             }
         }
         Group::Language => {
             apply |= place(&mut m, c, 1, mark("Language"), |ui| super::language_card::card(ui, cx, 1, draft));
-            if vrchat_here {
+            if here.reads() {
                 apply |= place(&mut m, c, 2, mark("Translation in VR"), |ui| super::translate_card::card(ui, cx, 2, draft));
             }
         }
         Group::Privacy => {
-            if vrchat_here {
-                apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
+            // (The statistics are counted wherever the app runs; the rest is of VRChat on this computer.)
+            apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
+            if here.around() {
                 apply |= place(&mut m, c, 2, mark("Beta feedback"), |ui| super::beta_feedback::card(ui, cx, 2, &mut state.beta, draft));
             }
         }
         Group::App => {
             apply |= place(&mut m, c, 1, mark("Interface"), |ui| interface_card(ui, cx, 1, draft));
-            place(&mut m, c, 2, mark("Start"), |ui| {
-                start_card(ui, cx, 2, state, &ctx);
-                false
-            });
+            if here.autostart {
+                place(&mut m, c, 2, mark("Start"), |ui| {
+                    start_card(ui, cx, 2, state, &ctx);
+                    false
+                });
+            }
             apply |= place(&mut m, c, 3, mark("About"), |ui| about_card(ui, cx, 3, draft, state, asked));
             place(&mut m, c, 4, mark("Log"), |ui| {
                 let shown = &mut state.log_shown;
@@ -912,7 +928,7 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
     let snap = cx.snap;
     let mut apply = false;
     section(ui, cx, index, icons::GAUGE, tr("Capture"), Some(tr("How frames become a session")), |ui| {
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.camera_frames {
             let kf = &mut draft.keyframes;
             widgets::field(ui, tr("Keyframe distance"), Some(tr("A new lossless keyframe after the camera moves this far.")), 284.0, |ui| {
                 apply |= widgets::slider(ui, "kf-distance", &mut kf.min_translation, 0.05..=2.0, 0.05, |v| format!("{v:.2} m"));
@@ -952,6 +968,8 @@ fn capture_card(ui: &mut Ui, cx: &Cx, index: usize, base: &Settings, draft: &mut
                 ui.add_space(8.0);
             }
             widgets::separator(ui);
+        }
+        if orbiters_core::here::HERE.vrchat_runs {
             let places = [
                 SegOption::new(WhilePlaying::GraphicsCard, tr("Graphics card"))
                     .hint(tr("Fastest; in VR it trains in the time VRChat's frames leave idle, on the desktop on at most a third of the card, so slower while the game runs")),
@@ -1005,42 +1023,14 @@ fn osc_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
                 apply |= widgets::toggle(ui, "osc", &mut draft.osc.enabled);
             },
         );
-        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if !orbiters_core::here::HERE.vrchat_runs {
             return;
         }
         widgets::separator(ui);
-        widgets::field(
-            ui,
-            tr("Stream camera"),
-            Some(tr("While recording, open VRChat's camera in Stream mode with Spout Stream on (the picture comes from it), then put it back.")),
-            48.0,
-            |ui| {
-                apply |= widgets::toggle(ui, "osc-camera", &mut draft.osc.drive_camera);
-            },
-        );
-        widgets::separator(ui);
-        let every = [SegOption::new(RigViews::Off, tr("Off")), SegOption::new(RigViews::Every2s, "2 s"), SegOption::new(RigViews::Every3s, "3 s"), SegOption::new(RigViews::Every5s, "5 s")];
-        widgets::field(
-            ui,
-            tr("Six more views while recording"),
-            Some(tr("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along.")),
-            // As wide as its four small segments, so that the description keeps the row.
-            180.0,
-            |ui| {
-                apply |= widgets::segmented(ui, "rig-views", &mut draft.rig_views, &every, true);
-            },
-        );
-        widgets::separator(ui);
-        widgets::field(
-            ui,
-            tr("Camera dolly streams (experimental)"),
-            Some(tr("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once.")),
-            48.0,
-            |ui| {
-                apply |= widgets::toggle(ui, "dolly-streams", &mut draft.dolly_streams);
-            },
-        );
-        widgets::separator(ui);
+        if orbiters_core::here::HERE.camera_frames {
+            camera_rows(ui, draft, &mut apply);
+            widgets::separator(ui);
+        }
         let log_desc = snap.vrchat.world.log_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| {
             if snap.vrchat.log_found {
                 tr("Found, waiting for VRChat").into()
@@ -1055,6 +1045,41 @@ fn osc_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
         });
     });
     apply
+}
+
+/// The VRChat and OSC card's rows about VRChat's stream camera.
+fn camera_rows(ui: &mut Ui, draft: &mut Settings, apply: &mut bool) {
+    widgets::field(
+        ui,
+        tr("Stream camera"),
+        Some(tr("While recording, open VRChat's camera in Stream mode with Spout Stream on (the picture comes from it), then put it back.")),
+        48.0,
+        |ui| {
+            *apply |= widgets::toggle(ui, "osc-camera", &mut draft.osc.drive_camera);
+        },
+    );
+    widgets::separator(ui);
+    let every = [SegOption::new(RigViews::Off, tr("Off")), SegOption::new(RigViews::Every2s, "2 s"), SegOption::new(RigViews::Every3s, "3 s"), SegOption::new(RigViews::Every5s, "5 s")];
+    widgets::field(
+        ui,
+        tr("Six more views while recording"),
+        Some(tr("This often, N4N0's camera rig takes six views around your camera (left, front, right, back, up, down) wherever it has not yet, so the reconstruction sees what you did not film. VRChat draws the world six more times for those moments; 3D pictures and scans take theirs all along.")),
+        // As wide as its four small segments, so that the description keeps the row.
+        180.0,
+        |ui| {
+            *apply |= widgets::segmented(ui, "rig-views", &mut draft.rig_views, &every, true);
+        },
+    );
+    widgets::separator(ui);
+    widgets::field(
+        ui,
+        tr("Camera dolly streams (experimental)"),
+        Some(tr("VRC+: a 3D picture flies four cameras with VRChat's camera dolly, one left, one right and one above yours, all looking where yours does, and recordings also read the dolly's other streams. In VRChat, set Camera › Dolly › Streaming to Multi once.")),
+        48.0,
+        |ui| {
+            *apply |= widgets::toggle(ui, "dolly-streams", &mut draft.dolly_streams);
+        },
+    );
 }
 
 /// What a session records besides the frames: parameters, voice, VRChat's sound, body tracking.
@@ -1258,16 +1283,18 @@ fn storage_card(ui: &mut Ui, cx: &Cx, index: usize, ctx: &egui::Context, draft: 
 fn privacy_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
     let mut apply = false;
     section(ui, cx, index, icons::SHIELD_CHECK, tr(registry::CARD_PRIVACY), Some(tr("What leaves this computer, and only when it is on")), |ui| {
-        widgets::field(
-            ui,
-            tr("Share my frame rate per world"),
-            Some(tr("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer.")),
-            48.0,
-            |ui| {
-                apply |= widgets::toggle(ui, "world-performance", &mut draft.world_performance);
-            },
-        );
-        widgets::separator(ui);
+        if orbiters_core::here::HERE.steam_vr {
+            widgets::field(
+                ui,
+                tr("Share my frame rate per world"),
+                Some(tr("In VR, a summary a minute: the world, your FPS, your avatar, how many people were there and the names of their avatars, never who they are, plus your graphics card, processor and headset. It shows which worlds run well on the Map explorer.")),
+                48.0,
+                |ui| {
+                    apply |= widgets::toggle(ui, "world-performance", &mut draft.world_performance);
+                },
+            );
+            widgets::separator(ui);
+        }
         widgets::field(
             ui,
             tr("Beta usage statistics"),
@@ -1288,7 +1315,7 @@ fn interface_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> b
             apply |= widgets::toggle(ui, "reduce-motion", &mut draft.reduce_motion);
         });
         // Minimised for long while VRChat runs, the window closes to the tray after a countdown (window_rest).
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.vrchat_runs && orbiters_core::here::HERE.tray {
             widgets::separator(ui);
             widgets::field(ui, crate::window_rest::setting_label(), Some(crate::window_rest::setting_hint()), 48.0, |ui| {
                 apply |= widgets::toggle(ui, "close-minimized-window", &mut draft.close_minimized_window);
@@ -1340,7 +1367,7 @@ fn start_card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, ctx: &egui:
                 state.windows_job = Some(Job::spawn(ctx, move || crate::startup::set_start_with_windows(windows).map_err(|e| e.to_string())));
             }
         });
-        if !vrchat_here {
+        if !orbiters_core::here::HERE.steam_vr {
             return;
         }
         widgets::separator(ui);
@@ -1789,7 +1816,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         } else if connecting {
             state.picture = None;
             ui.add_space(6.0);
-            super::sharing::working(ui, tr("Connecting to VRChat…"));
+            super::sharing::working(ui, cx.snap.account.connecting());
         } else if let Some(user) = &status.user {
             if let Some(picture) = &status.picture {
                 if state.picture.as_ref().is_none_or(|(id, revision, _)| id != &user.id || *revision != status.revision) {

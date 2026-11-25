@@ -7,6 +7,7 @@
 //! control, direction and zero-width characters, and Orbiters - N4N0's own lines say what it is. The controls come
 //! last with a budget of their own, so a long title never pushes them out.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Characters of a link in the context.
@@ -88,31 +89,78 @@ pub struct Needs {
     pub world: bool,
     /// The last video played.
     pub video: bool,
-    /// The avatar's name and its controls' labels.
+    /// The avatar's controls.
     pub avatar: bool,
+    /// The avatar's name.
+    pub name: bool,
     /// What was said and read earlier, where others' text was.
     pub earlier: bool,
 }
 
 impl Needs {
-    pub const ALL: Needs = Needs { world: true, video: true, avatar: true, earlier: true };
+    pub const ALL: Needs = Needs { world: true, video: true, avatar: true, name: true, earlier: true };
+
+    /// Whether what was said where `taint` was read goes with it.
+    pub fn takes(&self, taint: Taint) -> bool {
+        match taint {
+            Taint::None => true,
+            Taint::Labels => self.avatar || self.earlier,
+            Taint::Others => self.earlier,
+        }
+    }
 }
 
-/// What Orbiters - N4N0 did or heard, for the assistant's next turn: `others` when it quotes what other people wrote (an
-/// avatar's labels, names).
+/// Whose words a turn read, beside the owner's: once any are someone else's, it changes nothing without the owner's yes.
+/// The worn avatar's own labels are told apart: with nothing else read, the one control a request names may still be set
+/// (owner's decision of 2026-11-24).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Taint {
+    #[default]
+    None,
+    /// The labels of the avatar worn (its menu's, its maker's).
+    Labels,
+    /// Anything else other people wrote: names, titles, worlds, messages, what a server read.
+    Others,
+}
+
+impl Taint {
+    pub fn any(self) -> bool {
+        self != Taint::None
+    }
+
+    /// Others' text, when it is (`reads`).
+    pub fn others(reads: bool) -> Self {
+        if reads { Taint::Others } else { Taint::None }
+    }
+
+    /// The avatar's labels, when they are (`reads`).
+    pub fn labels(reads: bool) -> Self {
+        if reads { Taint::Labels } else { Taint::None }
+    }
+}
+
+/// What both read.
+impl std::ops::BitOrAssign for Taint {
+    fn bitor_assign(&mut self, other: Self) {
+        *self = (*self).max(other);
+    }
+}
+
+/// What Orbiters - N4N0 did or heard, for the assistant's next turn, and whose words it quotes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Note {
     pub text: String,
-    pub others: bool,
+    pub taint: Taint,
 }
 
-/// What a turn is told, and whether any of it was written by other people (it then changes nothing without a yes).
+/// What a turn is told, and whose words are in it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Told {
     pub text: String,
-    pub others: bool,
-    /// How many of the notes it carries.
-    pub notes: usize,
+    pub taint: Taint,
+    /// Which of the notes it carries.
+    pub notes: Vec<usize>,
 }
 
 /// UTF-16 units of `text`, as the server counts them.
@@ -160,12 +208,7 @@ pub struct Moment {
     /// What Orbiters - N4N0 did or heard since the assistant's last answer (the owner's yes to an action, a turn that
     /// failed after its tools ran), in its own words: lines that quote other text quote it with [`quoted`].
     pub notes: Vec<Note>,
-    /// The controls the owner's own words name, each by a number of this turn: the words, and how it stands. Nothing the
-    /// avatar's maker wrote is in them, and no other label comes with them.
-    pub named: Vec<String>,
 }
-
-const NAMED_NOTE: &str = "Avatar controls the owner's words name (give the number, as \"#1\", for control): the owner's words, kind, state, tags:\n"; // i18n: not shown
 
 impl Moment {
     /// Everything (tests, and what measures it).
@@ -175,7 +218,7 @@ impl Moment {
 
     /// What a request that needs `needs` is told.
     pub fn told(&self, needs: Needs) -> Told {
-        let mut others = false;
+        let mut taint = Taint::None;
         // Orbiters - N4N0's own words first.
         let mut out = String::new();
         if !self.vrchat_running {
@@ -198,17 +241,17 @@ impl Moment {
         if self.saved_videos > 0 {
             out.push_str(&format!("The owner has {} saved videos.\n", self.saved_videos)); // i18n: not shown
         }
-        // In order, so that what is told is never told again: up to the first one this request does without.
-        let notes = self.notes.iter().take_while(|n| needs.earlier || !n.others).count();
-        for note in &self.notes[..notes] {
-            others |= note.others;
+        // Those this request may hear; the others wait for one that may.
+        let notes: Vec<usize> = (0..self.notes.len()).filter(|i| needs.takes(self.notes[*i].taint)).collect();
+        for note in notes.iter().map(|i| &self.notes[*i]) {
+            taint |= note.taint;
             out.push_str(note.text.trim_end());
             out.push('\n');
         }
         // What other people chose, as data. Keys go in in alphabetical order: serde_json keeps insertion order in the
         // app (vrc-get-vpm turns on its preserve_order) and sorts them elsewhere, and both must read the same.
         let mut block = serde_json::Map::new();
-        if let Some(avatar) = self.avatar_name.as_ref().filter(|_| needs.avatar && self.named.is_empty()) {
+        if let Some(avatar) = self.avatar_name.as_ref().filter(|_| needs.name) {
             block.insert("avatar".into(), Value::String(data(avatar, NAME_CHARS)));
         }
         if let Some((url, title)) = self.last_video.as_ref().filter(|_| needs.video) {
@@ -223,29 +266,23 @@ impl Moment {
             block.insert("world".into(), Value::String(data(world, NAME_CHARS)));
         }
         if !block.is_empty() {
-            others = true;
+            taint |= Taint::Others;
             out.push_str(DATA_NOTE);
             out.push_str(&Value::Object(block).to_string());
             out.push('\n');
         }
-        // The controls last, in what is left: those the owner's words name by their numbers, else all of them by their
-        // maker's labels.
-        if needs.avatar && !self.named.is_empty() {
-            out.push_str(NAMED_NOTE);
-            for (i, named) in self.named.iter().enumerate() {
-                out.push_str(&format!("#{} {named}\n", i + 1));
-            }
-        } else if needs.avatar && !self.controls.is_empty() {
+        // The controls last, in what is left, each by its place in the avatar's menu.
+        if needs.avatar && !self.controls.is_empty() {
             let note = if self.controls_from_manifest { CONTROLS_NOTE } else { PARAMETERS_NOTE };
             let budget = crate::assistant::SUMMARY_UNITS.saturating_sub(units(&out) + units(note));
             let controls = lines_within(&self.controls, budget);
             if !controls.is_empty() {
-                others = true;
+                taint |= Taint::Labels;
                 out.push_str(note);
                 out.push_str(&controls);
             }
         }
-        Told { text: crate::assistant::utf16_prefix(&out, crate::assistant::SUMMARY_UNITS).to_string(), others, notes }
+        Told { text: crate::assistant::utf16_prefix(&out, crate::assistant::SUMMARY_UNITS).to_string(), taint, notes }
     }
 }
 
@@ -314,29 +351,41 @@ mod tests {
             last_video: Some(("https://v".into(), Some("V".into()))),
             controls: "\"L\" (toggle, off)\n".into(),
             controls_from_manifest: true,
-            notes: vec![Note { text: "own".into(), others: false }, Note { text: "quotes \"N\"".into(), others: true }, Note { text: "later".into(), others: false }],
+            notes: vec![
+                Note { text: "own".into(), taint: Taint::None },
+                Note { text: "quotes \"N\"".into(), taint: Taint::Others },
+                Note { text: "wore \"M\"".into(), taint: Taint::Labels },
+                Note { text: "later".into(), taint: Taint::None },
+            ],
             ..Default::default()
         };
         let none = m.told(Needs::default());
-        assert!(!none.others && none.notes == 1, "{none:?}");
-        for text in ["\"W\"", "\"A\"", "https://v", "\"L\"", "\"N\"", "later"] {
+        // Its own notes, past one that waits (verify5-r21 m10).
+        assert!(!none.taint.any() && none.notes == [0, 3], "{none:?}");
+        for text in ["\"W\"", "\"A\"", "https://v", "\"L\"", "\"N\"", "\"M\""] {
             assert!(!none.text.contains(text), "{text}: {}", none.text);
         }
-        assert!(none.text.contains("own") && none.text.contains("in a world"));
-        for (needs, text) in [
-            (Needs { world: true, ..Default::default() }, "\"W\""),
-            (Needs { video: true, ..Default::default() }, "https://v"),
-            (Needs { avatar: true, ..Default::default() }, "\"L\""),
-            (Needs { earlier: true, ..Default::default() }, "\"N\""),
+        assert!(none.text.contains("own") && none.text.contains("later") && none.text.contains("in a world"));
+        for (needs, text, taint) in [
+            (Needs { world: true, ..Default::default() }, "\"W\"", Taint::Others),
+            (Needs { video: true, ..Default::default() }, "https://v", Taint::Others),
+            (Needs { name: true, ..Default::default() }, "\"A\"", Taint::Others),
+            (Needs { avatar: true, ..Default::default() }, "\"L\"", Taint::Labels),
+            (Needs { avatar: true, ..Default::default() }, "\"M\"", Taint::Labels),
+            (Needs { earlier: true, ..Default::default() }, "\"N\"", Taint::Others),
         ] {
             let told = m.told(needs);
-            assert!(told.others && told.text.contains(text), "{needs:?}: {told:?}");
+            assert!(told.taint == taint && told.text.contains(text), "{needs:?}: {told:?}");
         }
         // Nothing there to tell: nothing of others.
-        assert!(!Moment::default().told(Needs::ALL).others);
-        // The controls the owner's own words name come by number, and nothing of their maker's with them.
-        let named = Moment { named: vec!["\"hoodie\" (toggle, off)".into()], ..m.clone() }.told(Needs { avatar: true, ..Default::default() });
-        assert!(!named.others && named.text.contains("#1 \"hoodie\"") && !named.text.contains("\"L\"") && !named.text.contains("\"A\""), "{named:?}");
+        assert!(!Moment::default().told(Needs::ALL).taint.any());
+        // Both read: the stricter of the two.
+        let mut both = Taint::Labels;
+        both |= Taint::None;
+        assert_eq!(both, Taint::Labels);
+        both |= Taint::Others;
+        both |= Taint::Labels;
+        assert_eq!(both, Taint::Others);
     }
 
     #[test]

@@ -1050,17 +1050,9 @@ return "playing" & separator & my field("Sóng “x”") & separator & my field(
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-mod platform {
-    /// No media controls to read.
-    pub struct Media;
-
-    impl Media {
-        pub fn new() -> orbiters_n4n0::media::NoMedia {
-            orbiters_n4n0::media::NoMedia
-        }
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "linux/media.rs"]
+mod platform;
 
 #[cfg(test)]
 mod tests {

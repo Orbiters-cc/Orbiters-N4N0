@@ -446,7 +446,7 @@ pub const STOPPED: &str = "stopped";
 /// build is kept): the desktop's worker, for a build that panicked, so that it is not tried again in a loop.
 pub fn keep_failure(project: &Path, scene: &SceneInfo, why: &str) {
     let dir = cache_dir(project);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::disk::create_dir_all(&dir);
     let mut files: Vec<PathBuf> = vec![scene.path.clone(), prefab::meta_path(&scene.path)];
     for manifest in ["Packages/manifest.json", "Packages/vpm-manifest.json", "ProjectSettings/ProjectSettings.asset"] {
         files.push(project.join(manifest));
@@ -468,7 +468,7 @@ pub fn keep_failure(project: &Path, scene: &SceneInfo, why: &str) {
 /// or why there is none.
 pub fn build_scene(project: &Path, scene: &SceneInfo, limits: &Limits) -> Result<preview::Entry, Failure> {
     let dir = cache_dir(project);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = crate::disk::create_dir_all(&dir);
     let start = Instant::now();
     // The scene's own times as they were before it was read: a save in Unity during the build (the preview is of the
     // file before it) then shows as a change, and the scene is built again.
@@ -544,7 +544,7 @@ fn short(e: &str) -> String {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    orbiters_core::write_atomic(path, bytes)
+    crate::disk::write_atomic(path, bytes)
 }
 
 /// The cache stays under [`CACHE_BYTES`]: the previews used least recently go first.
@@ -554,7 +554,7 @@ const CACHE_BYTES: u64 = 1536 << 20;
 /// The preview's own time is left alone: the app reloads a preview whose time changed.
 pub fn touch(project: &Path, guid: &str) {
     let record = cache_dir(project).join(format!("{guid}.json"));
-    if let Ok(f) = std::fs::File::options().write(true).open(&record) {
+    if let Ok(f) = crate::disk::open(std::fs::File::options().write(true), &record) {
         let _ = f.set_modified(SystemTime::now());
     }
 }
@@ -588,8 +588,8 @@ fn trim_to(root: &Path, limit: u64) {
         if total <= limit {
             break;
         }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("json"));
+        let _ = crate::disk::remove_file(&path);
+        let _ = crate::disk::remove_file(path.with_extension("json"));
         total = total.saturating_sub(size);
         // A project's own folder only (`<root>/<project>/`), never the root itself (`ORBITERS_PREVIEW_CACHE` may name
         // any folder).
@@ -598,7 +598,7 @@ fn trim_to(root: &Path, limit: u64) {
             if !left {
                 let rest: u64 =
                     walkdir::WalkDir::new(dir).into_iter().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
-                if std::fs::remove_dir_all(dir).is_ok() {
+                if crate::disk::remove_dir_all(dir).is_ok() {
                     total = total.saturating_sub(rest);
                 }
             }

@@ -1,5 +1,5 @@
-//! Fetching a channel's release and downloading its setup. Everything goes over HTTPS with Windows' own TLS and
-//! certificate store (ureq's native TLS, as everywhere in the app; on Android, rustls with Mozilla's roots, as
+//! Fetching a channel's release and downloading its setup. Everything goes over HTTPS with the system's own TLS and
+//! certificate store (ureq's native TLS, as everywhere in the app; on Linux and Android, rustls with Mozilla's roots, as
 //! `orbiters_core::http_tls` there); plain HTTP is allowed to this computer only (a test feed). The release is trusted
 //! for its signature, the setup for the size and SHA-256 the release gives.
 
@@ -16,7 +16,7 @@ const MAX_RELEASE: u64 = 256 * 1024;
 
 fn agent() -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-    let tls = if cfg!(target_os = "android") {
+    let tls = if cfg!(any(target_os = "android", target_os = "linux")) {
         TlsConfig::builder().provider(TlsProvider::Rustls).root_certs(RootCerts::WebPki).build()
     } else {
         TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build()
@@ -206,7 +206,7 @@ mod tests {
             installer: Artifact { url: "1.2.3/OrbitersSetup-1.2.3.exe".into(), sha256: hex(&Sha256::digest(&setup)), size: setup.len() as u64 },
         };
         let signed = serde_json::to_vec(&SignedRelease::sign(&release, &private).unwrap()).unwrap();
-        let feed_file = if crate::PLATFORM_FOLDER.is_empty() { "/desktop/stable.json" } else { "/desktop/macos/stable.json" };
+        let feed_file: &'static str = format!("/desktop/{}stable.json", crate::PLATFORM_FOLDER).leak();
         let base = serve(vec![(feed_file, signed), ("/desktop/1.2.3/OrbitersSetup-1.2.3.exe", setup.clone())]);
         // The only test here that reads the feed.
         std::env::set_var("ORBITERS_UPDATE_FEED", format!("{base}/desktop"));

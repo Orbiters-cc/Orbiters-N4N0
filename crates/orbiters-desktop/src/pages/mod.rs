@@ -1,5 +1,6 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
+pub mod avatar_gun;
 mod beta_feedback;
 mod booster_card;
 mod launch_card;
@@ -11,6 +12,7 @@ pub mod editor;
 pub mod events;
 pub mod experimental;
 pub mod form;
+pub mod groups;
 pub mod header;
 pub mod home;
 pub mod language_card;

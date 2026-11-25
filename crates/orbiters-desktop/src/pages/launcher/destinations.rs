@@ -537,10 +537,19 @@ fn refresh<T: Send + 'static>(slot: &Shared<T>, every: Duration, ctx: &egui::Con
     }
 }
 
-/// The member's events on now or soon, from Orbiters (signed in there; nothing otherwise).
-fn read_events(server: orbiters_core::account::Server, member: Option<crate::member::Member>, now: i64) -> Vec<EventSoon> {
-    let _ = server;
-    let Some((api, token)) = member.map(|m| m.api()) else { return Vec::new() };
+/// What was read for `member`: nothing that was for another (verify5-r21 m4), which is read again at once.
+fn theirs<T: Clone>(slot: &Shared<(String, T)>, member: &str) -> Option<T> {
+    let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if s.value.as_ref().is_some_and(|(whose, _)| whose != member) {
+        s.value = None;
+        s.at = None;
+    }
+    s.value.as_ref().map(|(_, value)| value.clone())
+}
+
+/// The member's events on now or soon, from Orbiters.
+fn read_events(member: crate::member::Member, now: i64) -> Vec<EventSoon> {
+    let (api, token) = member.api();
     let Ok(cards) = api.events(0) else { return Vec::new() };
     let mut out = Vec::new();
     // The few on now or soon: an answer each about the member's invites, one more for the live instance.
@@ -588,7 +597,8 @@ pub fn event_location(o: &orbiters_core::community::Overview) -> Option<String> 
 #[derive(Default)]
 pub struct Places {
     history: Shared<HistoryView>,
-    events: Shared<Vec<EventSoon>>,
+    /// The member's events on now or soon, and whose they are ([`crate::state::AccountStatus::member`]).
+    events: Shared<(String, Vec<EventSoon>)>,
     /// Whether the last instance is open: its location, whom it was asked for, what VRChat said and when.
     open: Shared<(String, Asker, Option<bool>, Instant)>,
     /// Where's destination and everything known of it: one value, its one owner ([`super::selection`]).
@@ -630,7 +640,7 @@ impl Places {
         let loading = history.is_none();
         let at = Some(Instant::now());
         *self.history.lock().unwrap() = Read { value: history, at, busy: false };
-        *self.events.lock().unwrap() = Read { value: Some(events), at, busy: false };
+        *self.events.lock().unwrap() = Read { value: Some((String::new(), events)), at, busy: false };
         let location = self.history.lock().unwrap().value.as_ref().and_then(|h| h.last.as_ref()).map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
         *self.open.lock().unwrap() = Read { value: Some((location, Asker::default(), last_open, Instant::now())), at, busy: false };
         self.staged = Some(Staged { signed_in, loading });
@@ -725,7 +735,7 @@ impl Places {
         match s.verified() {
             Verified::Unverified | Verified::Unknown if self.previous.log.is_some() => Some(tr("VRChat's log cannot be read")),
             Verified::Closed => Some(tr("Closed now")),
-            Verified::Unverified if self.previous.connecting => Some(tr("Connecting to VRChat…")),
+            Verified::Unverified if self.previous.connecting => Some(self.previous.connecting_text()),
             Verified::Unverified | Verified::Unknown if self.desk.asker().account.is_none() => Some(tr("Not signed in")),
             _ => None,
         }
@@ -811,18 +821,21 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
             Some(HistoryView::of(&history, orbiters_core::visited::now()))
         });
+        // Only once who it is is known: an empty list read before would stand for theirs.
         let server = orbiters_core::account::Server::current();
-        refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", {
-            let member = crate::member::reading(server);
-            move || Some(read_events(server, member, events_now()))
-        });
+        if let Some(member) = crate::member::reading(server).filter(|m| cx.snap.account.member.as_deref() == Some(m.key().as_str())) {
+            let _ = theirs(&state.places.events, &member.key());
+            refresh(&state.places.events, EVENTS_EVERY, &ctx, "events", move || Some((member.key(), read_events(member, events_now()))));
+        }
     }
     let history = state.places.history.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
     let loading = match &state.places.staged {
         Some(s) => s.loading,
         None => history.is_none(),
     };
-    let events = state.places.events.lock().unwrap_or_else(|e| e.into_inner()).value.clone().unwrap_or_default();
+    // (Pictures of the page: nobody's in particular.)
+    let whose = if state.places.staged.is_some() { "" } else { cx.snap.account.member.as_deref().unwrap_or_default() };
+    let events = theirs(&state.places.events, whose).unwrap_or_default();
     // Whether the last instance is open: asked of VRChat (the overlay's own read) while a rejoin could be offered.
     let last = history.as_ref().and_then(|h| h.last.clone());
     let location = last.as_ref().map(|l| format!("{}:{}", l.world_id, l.instance)).unwrap_or_default();
@@ -903,6 +916,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     state.places.previous.signed_in_elsewhere = who.elsewhere;
     state.places.previous.log = who.log.clone();
     state.places.previous.connecting = who.connecting;
+    state.places.previous.unreadable = cx.snap.account.unreadable;
     // The account and the profile chosen now first: an answer for another counts for nothing.
     state.places.desk.set_asker(Asker { account: me.clone(), profile });
     state.places.desk.drawn(ctx.cumulative_pass_nr());
@@ -1076,7 +1090,7 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
             Some((orbiters_i18n::tr!("Invites and Friends+ instances are for {name}: choose their profile to use them.", name = name), Tone::Quiet))
         }
         // r21: a saved session being restored (or its list on the way) is not "signed out".
-        (_, false) if connecting => Some((tr("Connecting to VRChat…").into(), Tone::Busy)),
+        (_, false) if connecting => Some((state.places.previous.connecting_text().into(), Tone::Busy)),
         (_, false) => Some((tr("Sign in to VRChat to see invites here and open Friends+ instances.").into(), Tone::Quiet)),
         _ => None,
     }
@@ -1647,6 +1661,17 @@ mod tests {
 
     fn keys(cards: &[Suggestion]) -> Vec<String> {
         cards.iter().map(|c| c.key.clone()).collect()
+    }
+
+    /// Verify5-r21 m4: the last member's events are nobody else's, and are read again at once for the next.
+    #[test]
+    fn events_are_the_members_they_were_read_for() {
+        let at = Some(Instant::now());
+        let slot: Shared<(String, Vec<EventSoon>)> = Arc::new(Mutex::new(Read { value: Some(("production/1".into(), vec![EventSoon::default()])), at, busy: false }));
+        assert_eq!(theirs(&slot, "production/1").map(|e| e.len()), Some(1));
+        assert!(theirs(&slot, "production/2").is_none());
+        assert!(slot.lock().unwrap().at.is_none(), "due now");
+        assert!(theirs(&slot, "production/1").is_none(), "gone");
     }
 
     fn inputs<'a>(invites: &'a [Invite], events: &'a [EventSoon], history: Option<&'a HistoryView>, last_open: Option<bool>, me: Option<&'a str>) -> Inputs<'a> {

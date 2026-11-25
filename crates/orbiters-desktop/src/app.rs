@@ -32,6 +32,8 @@ pub struct App {
     show_splash: bool,
     sidebar_since: Option<f64>,
     toasts: toast::Toasts,
+    /// The avatar gun card's picture of the avatar (`crate::avatar_gun_ui`), made at its first card.
+    gun_pictures: Option<crate::worlds::Pictures>,
     home: pages::home::State,
     capture: pages::capture::State,
     projects: pages::projects::State,
@@ -107,6 +109,7 @@ impl App {
             show_splash: true,
             sidebar_since: None,
             toasts: toast::Toasts::default(),
+            gun_pictures: None,
             home: Default::default(),
             capture: Default::default(),
             projects: Default::default(),
@@ -191,6 +194,11 @@ impl App {
             self.open_capture(pages::capture::Part::Actions, now);
             return true;
         }
+        if name == GROUPS_SECTION {
+            self.set_page(Page::Home, now);
+            self.home_mut().open_groups();
+            return true;
+        }
         match page_named(name) {
             Some(page) => {
                 self.set_page(page, now);
@@ -214,6 +222,10 @@ impl App {
 
     pub fn settings_mut(&mut self) -> &mut pages::settings::State {
         &mut self.settings
+    }
+
+    pub fn n4n0_mut(&mut self) -> &mut pages::n4n0::State {
+        &mut self.n4n0
     }
 
     pub fn home_mut(&mut self) -> &mut pages::home::State {
@@ -369,6 +381,16 @@ impl App {
         let shared_up = snap.shared_view.offer.as_ref().is_some_and(|o| o.until_ms > crate::wake_offer::now_ms());
         let lift = if talk_up { crate::wake_offer::HEIGHT + 12.0 } else { 0.0 } + if shared_up { crate::shared_view_ui::HEIGHT + 12.0 } else { 0.0 };
         crate::world_notice::window(&ctx, &self.ctl, snap.explorer.notice.as_ref(), lift);
+        // The avatar gun's question or notice (`crate::avatar_gun_ui`), over all of them.
+        let notice_up = snap.explorer.notice.as_ref().is_some_and(|n| n.up(crate::controller::explorer::now_ms()));
+        let lift = lift + if notice_up { crate::world_notice::CARD.y * 1.1 + 12.0 } else { 0.0 };
+        let gun_card = snap.avatar_gun.card.as_ref().filter(|c| c.up(crate::controller::unix_ms()));
+        let picture = gun_card.filter(|c| !c.thumbnail.is_empty()).and_then(|c| {
+            let scope = crate::controller::vrchat_data::Scope::of(&snap);
+            let pictures = self.gun_pictures.get_or_insert_with(|| crate::worlds::Pictures::with_backend(&ctx, Some(self.ctl.clone())));
+            pictures.get(&ctx, &crate::worlds::Picture::Avatar { scope, avatar_id: c.avatar_id.clone(), url: c.thumbnail.clone() }).map(|t| t.id())
+        });
+        crate::avatar_gun_ui::window(&ctx, &self.ctl, gun_card, lift, picture);
         if splash_on {
             splash(&ctx, full, splash_t);
         }
@@ -1196,6 +1218,9 @@ impl PartialEq for Told {
 /// place in Photos & captures (REQUEST21 5).
 const CAPTURE_PAGE: &str = "Capture"; // i18n: not shown (the window's own page names)
 
+/// Home's Groups section, as N4N0's assistant names it (REQUEST22 1): Home opens on it.
+const GROUPS_SECTION: &str = "Groups"; // i18n: not shown (the window's own page names)
+
 /// The page of a name [`App::follow_rest`] saved (its `Debug` name).
 fn page_named(name: &str) -> Option<Page> {
     PAGES.into_iter().find(|p| format!("{p:?}") == name)
@@ -1286,6 +1311,25 @@ mod tests {
         assert_eq!(app.page, Page::Videos);
         assert!(!app.capture.is_open());
         assert!(!app.go_named("Nowhere", 1.0));
+    }
+
+    /// verify-r22 Minor 4: N4N0's assistant's "open my groups" opens Home on its Groups section, and nothing more: the
+    /// page's name carries no group and no write.
+    #[test]
+    fn the_assistant_opens_the_groups_section_and_nothing_more() {
+        use orbiters_n4n0_core::intents::Page as AssistantPage;
+        assert!(AssistantPage::AppGroups.on_window());
+        assert_eq!(AssistantPage::of_key("app_groups"), Some(AssistantPage::AppGroups));
+        let page = format!("page:{}", AssistantPage::AppGroups.window_name().unwrap());
+        assert_eq!(crate::controller::assistant::window_page(&page), Some(GROUPS_SECTION));
+        let ctl: Ctl = Arc::new(pages::capture::tests::Recorder::default());
+        let mut app = App::offline(ctl);
+        app.set_page(Page::Videos, 0.5);
+        assert!(app.go_named(GROUPS_SECTION, 1.0));
+        assert_eq!(app.page, Page::Home);
+        let groups = app.home_mut().groups_mut();
+        assert!(groups.reveal, "the section comes into view");
+        assert!(groups.open.is_none() && groups.studio.is_none() && groups.flow.is_none(), "no group, no write");
     }
 }
 

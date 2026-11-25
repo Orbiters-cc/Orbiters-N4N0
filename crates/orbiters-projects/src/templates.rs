@@ -332,6 +332,8 @@ async fn make(
     if !parent.is_absolute() {
         bail!("{}", tr("Choose an absolute destination folder."));
     }
+    // Never in Creator Companion's or ALCOM's folder, however it is said, nor making a folder on the way there.
+    crate::disk::companion(root);
     let app = crate::data_dir();
     if copy.is_some() {
         use crate::unity6::authority::{allow, Action};
@@ -1077,7 +1079,6 @@ mod tests {
         let dst = temp.path().join("Copy2");
         let said = made_from(temp.path(), &source, "Copy2").unwrap_err();
         assert!(said.contains("my.archive.tgz") && said.contains("listed"), "{said}");
-        let rt = crate::runtime().unwrap();
         assert!(is_registered(&temp.path().join("vcc"), &dst), "the copy is in the gallery's list");
         assert_eq!(std::fs::read_to_string(dst.join("Packages/my.archive.tgz")).unwrap(), "something else");
         // Gone: named with where it was looked for.

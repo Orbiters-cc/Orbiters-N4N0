@@ -32,6 +32,27 @@ impl Scope {
             revision: s.vrchat_login.revision,
         }
     }
+    /// Who it is for good (the environment, the Orbiters account, the VRChat account): not the sign-in's revision, which
+    /// changes while the account does not.
+    pub(crate) fn lasting(&self) -> Option<(bool, Option<&str>, &str)> {
+        Some((self.development, self.member.as_deref(), self.user.as_deref()?))
+    }
+    /// The Orbiters member the VRChat account is verified for, by the id Orbiters gives them (hashed), when it is known.
+    pub(crate) fn orbiters_member(&self) -> Option<&str> {
+        self.verified_for.as_ref().map(|v| v.member.as_str()).filter(|m| !m.is_empty())
+    }
+    /// The identity's epoch it was verified in (controller/identity.rs).
+    pub(crate) fn epoch(&self) -> Option<u64> {
+        self.verified_for.as_ref().map(|v| v.epoch)
+    }
+    /// Verified for the Orbiters member signed in by `now`, at the same time of theirs.
+    pub(super) fn verified_by(&self, now: &super::vrchat_scope::Stamp) -> bool {
+        self.verified_for.as_ref().is_some_and(|v| v.epoch == now.epoch && v.member == now.owner.member && v.user == self.user)
+    }
+    /// The signed-in VRChat account this scope was taken under.
+    pub fn vrchat_user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
 
     /// Whether a VRChat account is signed in and may be used: what is asked with it can be answered.
     pub fn signed_in(&self) -> bool {
@@ -91,6 +112,35 @@ pub enum Request {
         world: String,
         instance: String,
     },
+    /// The signed-in VRChat account's avatar favourite groups (the avatar gun's picker), answered as
+    /// [`Response::AvatarGroups`] or [`Response::ListError`]. With its groups asked one by one ([`Request::AvatarFavorites`]),
+    /// a picker shows each group as it arrives.
+    AvatarFavoriteGroups,
+    /// The public avatars of one avatar favourite group (its tag), every page: [`Response::AvatarList`] or
+    /// [`Response::ListError`].
+    AvatarFavorites {
+        group: String,
+    },
+}
+
+/// Why a list of the account's own could not be read: no personal session, VRChat's rate limit (for this long), or
+/// anything else, in its words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ListError {
+    SignInRequired,
+    RateLimited { seconds: u64 },
+    Failed(String),
+}
+
+impl ListError {
+    fn of(e: &anyhow::Error) -> Self {
+        use orbiters_core::vrchat_api::Error;
+        match e.downcast_ref::<Error>() {
+            Some(Error::Unauthorized | Error::Disabled) => ListError::SignInRequired,
+            Some(Error::RateLimited(wait)) => ListError::RateLimited { seconds: wait.as_secs().max(1) },
+            _ => ListError::Failed(e.to_string()),
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -108,6 +158,11 @@ pub enum Response {
     Worlds(orbiters_core::maps::FoundWorlds),
     Invited,
     Went(super::travel::Went),
+    /// Avatar favourite groups: tag and name, in VRChat's order.
+    AvatarGroups(Vec<(String, String)>),
+    /// A group's public avatars.
+    AvatarList(Vec<orbiters_core::vrchat_api::Avatar>),
+    ListError(ListError),
 }
 
 /// Structured failures for WorldDetails, WorldInstances, CreateInstance and InviteSelf. No UI wording here.
@@ -283,6 +338,14 @@ impl Controller {
                     }
                     Response::Worlds(source.worlds(&list, page)?)
                 }
+                Request::AvatarFavoriteGroups => match source.favorite_avatar_groups() {
+                    Ok(groups) => Response::AvatarGroups(groups),
+                    Err(e) => Response::ListError(ListError::of(&e)),
+                },
+                Request::AvatarFavorites { group } => match source.favorite_avatars(&group) {
+                    Ok(avatars) => Response::AvatarList(avatars),
+                    Err(e) => Response::ListError(ListError::of(&e)),
+                },
                 Request::WorldDetails { .. } | Request::WorldInstances { .. } | Request::WorldInstancesNext { .. } | Request::CreateInstance { .. } | Request::InviteSelf { .. } | Request::GoThere { .. } => unreachable!(),
             })
         })()

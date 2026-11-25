@@ -426,6 +426,20 @@ pub struct AccountStatus {
     /// while nobody is, or who it is is not known.
     #[serde(default)]
     pub member: Option<String>,
+    /// The saved account's file, read before, cannot be read now: who is signed in is not known until it can.
+    #[serde(default)]
+    pub unreadable: bool,
+}
+
+impl AccountStatus {
+    /// What a surface says while VRChat's account waits to be known again.
+    pub fn connecting(&self) -> &'static str {
+        if self.unreadable {
+            orbiters_i18n::tr("Your Orbiters account can't be read here: trying again…")
+        } else {
+            orbiters_i18n::tr("Connecting to VRChat…")
+        }
+    }
 }
 
 /// How Fast walk carries the person now, as the SteamVR overlay says it.
@@ -774,6 +788,10 @@ pub struct Snapshot {
     /// small view to, the share this side makes, an offer to look at a friend's, the friend's view being looked at.
     #[serde(default)]
     pub shared_view: Slice<SharedViewStatus>,
+    /// The avatar gun (controller/avatar_gun.rs): whether the worn avatar has it or a receiver, whether it is loaded, the
+    /// picker asked for, and the hit player's card.
+    #[serde(default)]
+    pub avatar_gun: crate::controller::avatar_gun::Status,
 }
 
 /// The shared 3D view as the service holds it: looking at the same capture together, each copy in front of its own viewer.
@@ -901,7 +919,7 @@ pub struct WindowRest {
 }
 
 orbiters_core::parts!(Snapshot {
-    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, explorer, projects_changed, window_rest],
+    plain: [smoothing_revision, version, reconstruction, vrchat_login, cleanup, bridge, worn_kit, camera_open_said, vrchat_wrists, vrchat_wrists_ns, camera_tools, explorer, projects_changed, window_rest, avatar_gun],
     slices: [sources, mics, osc, lan, capture, settings, storage, worker, steamvr, reconstruct_queue, account, uploads, update, vr_audio, orbit, booster, translate, perf, launcher, shared_view],
     identity: [capture_shares],
     nested: [vrchat, n4n0],
@@ -951,6 +969,7 @@ impl Snapshot {
             launcher: Default::default(),
             window_rest: Default::default(),
             shared_view: Default::default(),
+            avatar_gun: Default::default(),
             version: orbiters_core::app_version().into(),
             vrchat: VrchatStatus {
                 running: false,

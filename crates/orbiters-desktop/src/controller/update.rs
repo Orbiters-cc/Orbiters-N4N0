@@ -124,7 +124,7 @@ pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()
 
 /// Starts `setup` to update the install in `dir` once this app has quit, then start it again (`hidden`: in the tray,
 /// as it was). Not in the service's job: it outlives the app.
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()> {
     let mut cmd = std::process::Command::new(setup);
     cmd.arg("--update").arg("--dir").arg(dir).arg("--relaunch");
@@ -135,9 +135,18 @@ pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()
     cmd.spawn().map(drop)
 }
 
+/// Not yet on Linux, and never Windows' setup.
+#[cfg(target_os = "linux")]
+pub fn start_setup(setup: &Path, dir: &Path, hidden: bool) -> std::io::Result<()> {
+    crate::linux::update::start(setup, dir, hidden)
+}
+
 impl Controller {
     /// Starts looking for updates, for an app the setup installed.
     pub(super) fn start_updates(self: &Shared) {
+        if !orbiters_core::here::HERE.updates {
+            return;
+        }
         let Some((dir, record)) = InstallRecord::of_this_program() else { return };
         if orbiters_update::public_key().is_none() {
             eprintln!("updates: this build has no release key; it does not update itself");

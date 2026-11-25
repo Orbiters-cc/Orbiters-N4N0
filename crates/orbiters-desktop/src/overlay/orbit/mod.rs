@@ -96,7 +96,7 @@ fn usage_name(action: &Action) -> String {
 /// says it is in desktop mode: the person is at the screen, verify2-r15 S5), and the settings say so: a menu around VRChat's, its camera's
 /// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::osc::VRCHAT_RUNS_HERE
+    orbiters_core::here::HERE.desktop_panels
         && snap.vrchat.running
         && !snap.vrchat.remote
         && (!snap.steamvr.running || snap.n4n0.desktop_mode)
@@ -997,6 +997,14 @@ pub struct Panels {
     pub(super) history: panels::history_sheet::Store,
     history_copied: Option<(usize, Instant)>,
     history_asked: Option<Vec<String>>,
+    /// The avatar gun's picker (`crate::avatar_gun_picker`): its lists, read while its page shows; the avatar pressed here
+    /// and when (ringed until the settings say it back); the pictures of its avatars; the `AvatarGun/Choose` press seen
+    /// last, and one waiting for the panels to come up.
+    gun_store: crate::avatar_gun_picker::Store,
+    gun_picked: Option<(String, Instant)>,
+    gun_pictures: Option<crate::worlds::Pictures>,
+    gun_choose_seen: Option<u64>,
+    gun_choose_wait: Option<(u64, Instant)>,
     /// A press on a list, which may yet be a drag; where the pointer is on the sheet; and what it turned out to press.
     drag: Option<Drag>,
     sheet_pointer: Option<Pos2>,
@@ -1134,6 +1142,11 @@ impl Panels {
             history: if cfg!(test) { panels::history_sheet::Store::default() } else { panels::history_sheet::Store::app() },
             history_copied: None,
             history_asked: None,
+            gun_store: crate::avatar_gun_picker::Store::default(),
+            gun_picked: None,
+            gun_pictures: None,
+            gun_choose_seen: None,
+            gun_choose_wait: None,
             talk_had: 0,
             talk_foot: 0.0,
             seeking: None,
@@ -1742,7 +1755,7 @@ impl Panels {
 
     /// What opens a screen of the sheet, for the way back. What brought them there is what brings them back: everything else about it is kept by [`Panels::keep_screen`].
     fn opens_a_screen(action: Action) -> bool {
-        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_) | Action::VideoHistory)
+        matches!(action, Action::Worlds | Action::All | Action::Pictures | Action::Talk | Action::Settings | Action::Page(_) | Action::WorldInfo(_) | Action::VideoHistory | Action::AvatarGun)
     }
 
     /// Before leaving a screen, or showing another of the same name: what it has.
@@ -2452,6 +2465,17 @@ impl Panels {
                 panel.dirty = panel.dirty || read || self.stage.host.dirty;
             }
         }
+        // The avatar gun's picker: its lists read while its page shows, as they come.
+        if self.facts.sheet == Some(Sheet::AvatarGun) {
+            let came = self.gun_store.follow(Some(&self.backend), snap);
+            // Pressed here and said back by the settings (or long ago): the settings ring it.
+            if self.gun_picked.as_ref().is_some_and(|(id, at)| at.elapsed() > Duration::from_secs(5) || snap.settings.avatar_gun.loaded.as_ref().is_some_and(|l| l.id == *id)) {
+                self.gun_picked = None;
+            }
+            if let Some(panel) = self.takeover.as_mut() {
+                panel.dirty = panel.dirty || came || self.gun_pictures.as_ref().is_some_and(|p| p.loading());
+            }
+        }
         // The conversation keeps its newest in view as it grows: at each new line, and as an answer arrives, unless the
         // person scrolled up to read.
         if self.facts.sheet == Some(Sheet::Talk) {
@@ -2649,6 +2673,8 @@ impl Panels {
             tracking: snap.n4n0.tracking.as_ref().map(|t| (snap.settings.tracking.enabled, snap.settings.tracking.ms, t.note.clone())),
             tracking_note: snap.n4n0.tracking_note.clone(),
             smoothing_held: self.smoothing_held,
+            avatar_gun: if self.facts.sheet == Some(Sheet::AvatarGun) { panels::avatar_gun_sheet::facts(&self.gun_store, snap, self.gun_picked.as_ref().map(|(id, _)| id.as_str())) } else { Default::default() },
+            can_avatar_gun: snap.avatar_gun.gun,
             booster: if self.facts.sheet == Some(Sheet::Booster) { panels::BoosterFacts::of(snap, self.booster_details, self.booster_asking, self.booster_held) } else { Default::default() },
             translate: panels::TranslateFacts {
                 // On the desktop it is on once turned on there (verify2-r15 S3).
@@ -3609,6 +3635,25 @@ impl Panels {
                     self.backend.show_page(&format!("session:{}", loaded.key.display())); // i18n: not shown (a page's name for the app)
                 }
             }
+            Action::AvatarGun => {
+                self.open_sheet(Sheet::AvatarGun, panels::avatar_gun_sheet::TITLE, snap);
+                // Its lists read again (VRChat's answers are kept a minute by the service).
+                self.gun_store.again();
+            }
+            Action::AvatarGunRetry => self.gun_store.again(),
+            // Loaded at once: ringed here before the settings say it back, and the page stays.
+            Action::AvatarGunPick(i) => {
+                let id = self.action_facts().avatar_gun.tiles.get(i).map(|t| t.id.clone());
+                if let Some(pick) = id.as_deref().and_then(|id| self.gun_store.find(id)) {
+                    let mut changed = snap.settings.clone();
+                    changed.avatar_gun.loaded = Some(pick.loaded());
+                    self.backend.save_changes(&snap.settings, &changed);
+                    self.gun_picked = Some((pick.id.clone(), Instant::now()));
+                    if let Some(panel) = self.takeover.as_mut() {
+                        panel.dirty = true;
+                    }
+                }
+            }
             Action::Booster => {
                 // Its Details page stays as it was left, as every sheet's state does; only its one question starts over.
                 self.booster_asking = false;
@@ -4385,6 +4430,24 @@ impl Panels {
                         let ctx = &ctx;
                         facts.art = Some(panel.pictures.entry(key.clone()).or_insert_with(|| ctx.load_texture("art", image.clone(), TextureOptions::LINEAR)).id());
                     }
+                    // The avatar gun's avatars in view, and the one loaded: their pictures, read through the service.
+                    if sheet == Sheet::AvatarGun {
+                        let pictures = self.gun_pictures.get_or_insert_with(|| crate::worlds::Pictures::with_backend(&ctx, Some(self.backend.clone())));
+                        let gun = &mut facts.avatar_gun;
+                        if let Some(scope) = gun.scope.clone() {
+                            let picture = |id: &str, url: &str, pictures: &mut crate::worlds::Pictures| {
+                                (!url.is_empty()).then(|| pictures.get(&ctx, &crate::worlds::Picture::Avatar { scope: scope.clone(), avatar_id: id.to_string(), url: url.to_string() }).map(|t| t.id())).flatten()
+                            };
+                            for i in panels::avatar_gun_sheet::shown(gun, facts.gallery_scroll) {
+                                let (id, url) = (gun.tiles[i].id.clone(), gun.tiles[i].url.clone());
+                                gun.tiles[i].picture = picture(&id, &url, pictures);
+                            }
+                            if let (Some(loaded), Some(chosen)) = (gun.loaded.as_mut(), snap.settings.avatar_gun.loaded.as_ref()) {
+                                let shown = gun.tiles.iter().find(|t| t.loaded).map(|t| (t.id.clone(), t.url.clone())).unwrap_or_else(|| (chosen.id.clone(), chosen.thumbnail.clone()));
+                                loaded.1 = picture(&shown.0, &shown.1, pictures);
+                            }
+                        }
+                    }
                     let (hover, pressed) = (panel.hover, panel.pressed);
                     // Results captured the current host data; later arrivals set this flag again.
                     if sheet == Sheet::Results { stage.host.dirty = false; }
@@ -4501,6 +4564,34 @@ impl Panels {
             self.serving = false;
         }
         self.report_menu();
+    }
+
+    /// `AvatarGun/Choose` pressed on the avatar: the picker opens here, once. While these panels are not up (VRChat's menu
+    /// closed) it waits for them a little, as a page the assistant asked for does.
+    pub fn serve_avatar_gun(&mut self, snap: &Snapshot) {
+        const WAITS: std::time::Duration = std::time::Duration::from_secs(45);
+        let asked = snap.avatar_gun.choose;
+        let Some(seen) = self.gun_choose_seen else {
+            self.gun_choose_seen = Some(asked);
+            return;
+        };
+        if seen == asked || !orbiters_core::osc::VRCHAT_RUNS_HERE {
+            return;
+        }
+        if self.open.is_none() || self.takeover_place.is_none() {
+            match self.gun_choose_wait {
+                Some((n, since)) if n == asked && since.elapsed() > WAITS => self.gun_choose_seen = Some(asked),
+                Some((n, _)) if n == asked => {}
+                _ => self.gun_choose_wait = Some((asked, Instant::now())),
+            }
+            return;
+        }
+        self.gun_choose_seen = Some(asked);
+        self.gun_choose_wait = None;
+        if self.facts.sheet != Some(Sheet::AvatarGun) {
+            let mut out = Pressed::default();
+            self.act(Action::AvatarGun, snap, &mut out);
+        }
     }
 
     /// The assistant asked for a page (REQUEST20 6): it opens here as its own press opens it ([`Panels::act`]), once. While
@@ -5136,7 +5227,7 @@ mod desktop_wanted_tests {
         snap.settings.translate.enabled = true;
         snap.settings.translate.window_on = true;
         if menus_off {
-            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::osc::VRCHAT_RUNS_HERE, "translation on, menus off");
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::here::HERE.desktop_panels, "translation on, menus off");
             snap.settings.translate.enabled = false;
             assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
         }
@@ -5146,7 +5237,7 @@ mod desktop_wanted_tests {
     /// overlay's menu; VRChat in desktop mode, with SteamVR running or not, the desktop's panels, whose process then runs.
     #[test]
     fn the_menu_request_has_one_host_by_vrchat_s_mode() {
-        if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if !orbiters_core::here::HERE.desktop_panels {
             return;
         }
         let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());

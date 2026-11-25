@@ -181,7 +181,7 @@ impl Failure {
         match self {
             Failure::Edits(why) => tr!("{why} Discard them to export every splat as trained: Select splats in its 3D view can remove them again.", why = why),
             Failure::NoRoom { needed, free, folder } => {
-                let system = if cfg!(target_os = "macos") { "macOS" } else { "Windows" };
+                let system = crate::words::SYSTEM;
                 tr!(
                     "Not enough room: the {format} takes {size}, and {folder} has {free} left, with {kept} to leave free for {system} and other programs. Choose another place, or free up space there.",
                     format = format.label(),

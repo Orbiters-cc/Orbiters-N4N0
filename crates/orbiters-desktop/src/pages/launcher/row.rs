@@ -68,6 +68,7 @@ pub(super) fn sign_in_note(ui: &mut Ui, cx: &mut Cx, state: &mut State, inner: R
         let name = cx.snap.vrchat_login.shown_user().map(|u| u.display_name.clone()).filter(|n| !n.trim().is_empty());
         let text = match (vrchat, name) {
             (crate::controller::vrchat_login::Presence::SignedIn, _) => tr("Reading your friends from VRChat…").to_string(),
+            _ if cx.snap.account.unreadable => cx.snap.account.connecting().to_string(),
             (_, Some(name)) => orbiters_i18n::tr!("Connecting to VRChat as {name}…", name = name),
             (_, None) => tr("Connecting to VRChat…").to_string(),
         };

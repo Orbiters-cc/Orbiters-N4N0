@@ -79,6 +79,11 @@ pub struct Service {
 }
 
 impl Service {
+    /// Where a test's second link connects.
+    #[cfg(test)]
+    pub(crate) fn endpoint_for_tests(&self) -> Endpoint {
+        self.endpoint.clone()
+    }
     /// A service around `ctl`, which clients find at `endpoint` and which starts its processes from `exe`: as [`run`]
     /// makes it. `--link-smoke` and the tests make one around a controller that is never started.
     pub(crate) fn around(ctl: controller::Shared, endpoint: Endpoint, exe: PathBuf) -> Arc<Self> {
@@ -203,7 +208,7 @@ impl Service {
     /// Once per SteamVR session: SteamVR is told a start with it chosen while it was not running, or else what it says
     /// is kept in the settings (its own settings may have changed it): [`crate::startup`]. It is asked only while it runs.
     fn keep_steamvr_start(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        if self.quitting.load(Ordering::Relaxed) || !orbiters_core::here::HERE.steam_vr {
             return;
         }
         let snap = self.ctl.view();
@@ -273,7 +278,7 @@ impl Service {
 
     /// Starts the SteamVR overlay process while SteamVR runs (and the setting allows it); closes it otherwise.
     fn keep_overlay(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        if self.quitting.load(Ordering::Relaxed) || !orbiters_core::here::HERE.vr_overlay {
             return;
         }
         let snap = self.ctl.view();
@@ -536,6 +541,28 @@ impl Service {
                     });
                 }
             }
+            // VRChat groups: the window's alone (M10), answered to its link alone (M9).
+            ToService::Groups { id, scope, request } => {
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
+                if let Some(mailbox) = mailbox {
+                    use crate::controller::groups::{Failure, Reply};
+                    if !crate::controller::groups::allowed_from(role) {
+                        crate::controller::groups::not_taken_in(&request);
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::NotHere) });
+                    } else if let Some(admitted) = ctl.groups_admit() {
+                        // Taken in before its thread starts: a few at once, the rest told to wait (verify-r22 Major 9).
+                        let ctl = ctl.clone();
+                        std::thread::spawn(move || {
+                            let _admitted = admitted;
+                            let reply = ctl.groups(link, scope, request);
+                            mailbox.post(ToClient::Groups { id, reply });
+                        });
+                    } else {
+                        crate::controller::groups::not_taken_in(&request);
+                        mailbox.post(ToClient::Groups { id, reply: Reply::Failed(Failure::Busy) });
+                    }
+                }
+            }
             ToService::Member { id, epoch, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 if let Some(mailbox) = mailbox {
@@ -616,6 +643,7 @@ impl Service {
             }
             ToService::N4n0 { command } => ctl.n4n0_command(command),
             ToService::Explorer { command, epoch } => ctl.explorer_command(command, epoch),
+            ToService::AvatarGun { command } => ctl.avatar_gun_command(command),
             ToService::OscReconnect => ctl.osc_rediscover(),
             ToService::Updates { action } => ctl.update_action(action),
             // Quickly, on this thread: Stop is the person taking control back.
@@ -746,6 +774,9 @@ impl Service {
         self.usage.collecting(self.ctl.usage_stamp());
         self.usage.unlinked(id, self.ctl.view().settings.usage.enabled);
         self.links.lock().unwrap().retain(|l| l.id != id);
+        if role == Role::Window {
+            self.ctl.groups_link_closed(id);
+        }
         let still_there = self.links.lock().unwrap().iter().any(|l| l.role == role);
         if role == Role::Window && !still_there {
             // Its offer to close went with it.
@@ -782,7 +813,7 @@ impl Service {
         }
         drop(talk);
         // Without a tray (Linux for now) nothing would bring the window back: closing it quits.
-        if role == Role::Window && cfg!(not(any(windows, target_os = "macos"))) {
+        if role == Role::Window && !orbiters_core::here::HERE.tray {
             self.quit();
         }
     }
@@ -1089,6 +1120,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         }
     }));
     service.lend_pages();
+    crate::controller::member::empty_spool();
 
     service.usage.open(crate::usage::spool::folder());
     crate::usage::spool::set_current(service.usage.clone());
@@ -1136,8 +1168,8 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         })?;
         crate::mac::run_service(service.clone())?;
     }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = quit_rx.recv();
+    #[cfg(target_os = "linux")]
+    crate::linux::tray::run(&service, &quit_rx);
 
     // Let the windows read their Close before the process goes.
     #[cfg(not(target_os = "macos"))]

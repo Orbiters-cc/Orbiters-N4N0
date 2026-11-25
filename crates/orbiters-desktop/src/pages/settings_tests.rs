@@ -102,6 +102,8 @@ impl Harness {
         s.performance.record_mic = true;
         s.launch.performance = true;
         s.translate.provider = orbiters_core::settings::TranslateProvider::Address;
+        // A gun changed the avatar once: Who can change my avatar shows.
+        s.avatar_gun.changed_once = true;
         let mut snap = Snapshot::new(s);
         // An AI server that offers models (the translator's Model row).
         snap.translate.set(crate::state::TranslateStatus { models: vec!["made-up-model".into()], ..Default::default() });
@@ -164,7 +166,7 @@ impl Harness {
 }
 
 /// The gates the harness opens: no window GPU to choose here.
-const HERE: Open = Open { bridge: true, vrchat_login: true, gpu_choice: false, gpu_split: false };
+const HERE: Open = Open { bridge: true, vrchat_login: true, gpu_choice: false, gpu_split: false, avatar_gun: true };
 
 impl Harness {
     /// Every switch and choice that hides another off, signed out of nothing else: the other conditional state.
@@ -334,6 +336,30 @@ fn a_hidden_setting_says_what_it_needs_and_lights_its_switch() {
     let mut h = Harness::new();
     h.open("n4n0.direct-calls");
     assert_eq!(h.state.jump.map(|j| j.id), Some("n4n0.direct-calls"));
+}
+
+/// Who can change my avatar is not in Settings, nor found by its search, until a gun first changed the avatar (Enzo,
+/// 2026-11-24: the surprise is the default, its first notice says it can be turned off); from then on it is, its
+/// segments drawn, and it comes in with its entrance while the page is open.
+#[test]
+fn the_avatar_gun_setting_shows_once_a_gun_changed_the_avatar() {
+    if !orbiters_core::here::HERE.vrchat_runs {
+        return;
+    }
+    let mut h = Harness::new();
+    let mut s = (*h.snap.settings).clone();
+    s.avatar_gun.changed_once = false;
+    h.snap.settings = s.clone().into();
+    h.open("n4n0");
+    let gun = |h: &Harness| h.state.seen_controls.iter().any(|(card, key, _)| *card == super::super::avatar_gun::TITLE && key == "avatar-gun-allow");
+    assert!(!gun(&h), "not drawn before the first change");
+    assert!(registry::search("who can change my avatar", &super::open_of(&h.snap, None)).iter().all(|f| f.entry.id != "n4n0.avatar-gun"), "not found either");
+    // The first change, Settings open: it comes in.
+    s.avatar_gun.changed_once = true;
+    h.snap.settings = s.into();
+    h.settle();
+    assert!(gun(&h), "drawn from then on");
+    assert_eq!(registry::search("who can change my avatar", &super::open_of(&h.snap, None))[0].entry.id, "n4n0.avatar-gun");
 }
 
 /// N4N0's settings are no longer drawn on the N4N0 page: each is in Settings once.

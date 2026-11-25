@@ -49,7 +49,7 @@ const ZOOM_SIDE: u32 = 960;
 /// Whether VRChat's window is read at all: translation on, and turned on on the desktop itself (`window_on`), whoever translates: nothing is read or sent
 /// before (verify2-r15 S3).
 pub(crate) fn reads_window(settings: &TranslateSettings) -> bool {
-    settings.enabled && settings.window_on && orbiters_core::osc::VRCHAT_RUNS_HERE
+    settings.enabled && settings.window_on && orbiters_core::here::HERE.desktop_panels
 }
 
 /// The view a picture of `size` pixels is read through: an eye at the origin looking along -Z, VRChat's field of view, square pixels.
@@ -1021,7 +1021,7 @@ mod tests {
         for provider in [TranslateProvider::ThisComputer, TranslateProvider::Address, TranslateProvider::Orbiters] {
             let upgraded = TranslateSettings { enabled: true, provider, server: "http://192.168.1.20:1234".into(), orbiters_agreed: true, ..Default::default() };
             assert!(!reads_window(&upgraded), "{provider:?}: on for VR only");
-            assert_eq!(reads_window(&TranslateSettings { window_on: true, ..upgraded.clone() }), orbiters_core::osc::VRCHAT_RUNS_HERE, "{provider:?}: on on the desktop");
+            assert_eq!(reads_window(&TranslateSettings { window_on: true, ..upgraded.clone() }), orbiters_core::here::HERE.desktop_panels, "{provider:?}: on on the desktop");
             assert!(!reads_window(&TranslateSettings { enabled: false, window_on: true, ..upgraded }), "{provider:?}: off");
         }
     }

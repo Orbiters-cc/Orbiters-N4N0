@@ -526,7 +526,11 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod imp;
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::{AudioSource, Device, Ended, Format, Options, Packet};
     use std::sync::atomic::AtomicBool;

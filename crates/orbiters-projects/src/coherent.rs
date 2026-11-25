@@ -9,7 +9,6 @@ use orbiters_i18n::tr;
 use crate::updates::Step;
 use std::collections::HashMap;
 use std::path::Path;
-use vrc_get_vpm::io::DefaultProjectIo;
 use vrc_get_vpm::unity_project::pending_project_changes::PackageChange;
 use vrc_get_vpm::unity_project::AddPackageOperation;
 use vrc_get_vpm::version::{PrereleaseAcceptance, Version, VersionRange};
@@ -269,6 +268,6 @@ pub async fn solve(root: &Path, path: &Path, requested: &[(String, String)], rem
     crate::vpm::may_change(path)?;
     anyhow::ensure!(crate::vpm::loads_unchanged(path)?, "{}", tr("Its package list uses an old range spelling; change a package once to check for updates."));
     let (_, packages) = crate::vpm::collection(root, false).await?;
-    let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+    let project = UnityProject::load(crate::disk::project_io(path)?).await?;
     Ok(solve_with(&project, &packages, requested, remove, prerelease).await)
 }

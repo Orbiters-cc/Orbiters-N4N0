@@ -22,6 +22,7 @@ use crate::command::{Stamp, Surface};
 use crate::runtime::N4n0;
 use crate::status::{N4n0Who, SignedAs};
 use orbiters_i18n::tr;
+use orbiters_n4n0_core::context::Taint;
 use orbiters_n4n0_core::tools::Action;
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use std::collections::VecDeque;
@@ -102,6 +103,13 @@ impl Fence<'_> {
     pub(crate) fn permit(&self, action: &Action, tainted: bool) -> Option<Permit> {
         let effect = action.effect();
         (!(tainted && effect.changes) && !effect.from_account && !effect.asks).then_some(Permit(()))
+    }
+
+    /// [`Fence::permit`] for a tool call of a turn that read `taint`. The owner's decision of 2026-11-24: where the worn avatar's
+    /// labels are all it read of others, the one control it names may be set (the caller saw that it names exactly one).
+    pub(crate) fn permit_tool(&self, action: &Action, taint: Taint) -> Option<Permit> {
+        let labels_only = taint == Taint::Labels && matches!(action, Action::SetControl { .. });
+        self.permit(action, taint.any() && !labels_only)
     }
 
     /// The owner said yes to `action`: the account's actions still need their switch now.
@@ -237,6 +245,19 @@ impl N4n0 {
             }
         }
         Ok((fence, stamp))
+    }
+
+    /// A press on a surface's Hang up or Mute: whoever is signed in by then, or while that is not known, it is the person's
+    /// own call it ends or mutes (verify5-r21 M1). Which call it names says which: a member leaving ends theirs, and no
+    /// other call has its number.
+    pub(crate) fn let_in_call(self: &Arc<Self>, stamp: Option<Stamp>) -> Option<Fence<'_>> {
+        let Some(stamp) = stamp else {
+            self.refused(Refusal::Unstamped);
+            return None;
+        };
+        let fence = self.fence(&Ticket::input(self.host.identity_epoch()))?;
+        let taken = fence.n4n0.lock().unwrap().inputs.take(&stamp);
+        taken.then_some(fence)
     }
 
     fn refused(&self, why: Refusal) {

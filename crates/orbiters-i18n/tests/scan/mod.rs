@@ -28,7 +28,7 @@ pub const ERRORS: &[&str] = &["anyhow!", "bail!", "ensure!", "context", "with_co
 
 /// Names that are the same in every language, as the glossary has them: a text of nothing but these needs no translation.
 pub const NAMES: &[&str] = &[
-    "Orbiters", "N4N0", "VRChat", "SteamVR", "Steam", "Unity", "YouTube", "Discord", "Windows", "macOS", "Blender", "GitHub", "Spout", "OSC", "My Avatar", "Orbiters - N4N0", "Orbiters N4N0", "Orbiters Toolkit", "Mixer", "ReFit", "Creator Companion", "VPM", "VCC", "Quest", "Android", "iOS", "PC", "OK", "Fable", "Claude", "Opus", "Sonnet", "Haiku", "OpenAI", "Gemini",
+    "Orbiters", "N4N0", "VRChat", "SteamVR", "Steam", "Unity", "YouTube", "Discord", "Windows", "macOS", "Linux", "Blender", "GitHub", "Spout", "OSC", "My Avatar", "Orbiters - N4N0", "Orbiters N4N0", "Orbiters Toolkit", "Mixer", "ReFit", "Creator Companion", "VPM", "VCC", "Quest", "Android", "iOS", "PC", "OK", "Fable", "Claude", "Opus", "Sonnet", "Haiku", "OpenAI", "Gemini",
 ];
 
 pub struct Literal {

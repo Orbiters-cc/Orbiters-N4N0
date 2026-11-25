@@ -527,38 +527,9 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-mod imp {
-    use super::{AudioEndpoint, Flow, Role};
-
-    pub fn list(_: Flow) -> Result<Vec<AudioEndpoint>, &'static str> {
-        Ok(Vec::new())
-    }
-
-    pub fn defaults(_: Flow) -> [Option<AudioEndpoint>; 3] {
-        Default::default()
-    }
-
-    pub struct Meter;
-
-    impl Meter {
-        pub fn open(_: &str) -> Option<Self> {
-            None
-        }
-
-        pub fn peak(&self) -> Option<f32> {
-            None
-        }
-    }
-
-    pub fn set_default(_: &str, _: Role) -> Result<(), &'static str> {
-        Err(orbiters_i18n::tr("only on Windows"))
-    }
-
-    pub fn play_test(_: &str) -> Result<(), &'static str> {
-        Err(orbiters_i18n::tr("only on Windows"))
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "linux/audio_devices.rs"]
+mod imp;
 
 #[cfg(test)]
 mod tests {

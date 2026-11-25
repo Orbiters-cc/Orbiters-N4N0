@@ -152,6 +152,8 @@ const PICK_BIT: u64 = 1 << 61;
 const STEPS: f32 = 60.0;
 /// And the world notices' ([`crate::world_notice`], REQUEST13), which count from 1 too.
 const NOTICE_BIT: u64 = 1 << 60;
+/// And the avatar gun's cards (`crate::avatar_gun_ui`), after the share picker and before Keep open.
+const GUN_BIT: u64 = 1 << 59;
 
 /// What has the band, one at a time, in this order when several are up: "Talk with N4N0?", a friend's offer to look at a
 /// 3D picture together, the share chip's friend picker, Keep open (the window's countdown), then the world notice.
@@ -162,6 +164,7 @@ enum BandOffer {
     Pick(u64),
     Rest(u64),
     Notice(u64),
+    Gun(u64),
 }
 
 impl BandOffer {
@@ -178,6 +181,7 @@ impl BandOffer {
             Self::Pick(id) => id | PICK_BIT,
             Self::Rest(id) => id | REST_BIT,
             Self::Notice(id) => id | NOTICE_BIT,
+            Self::Gun(id) => id | GUN_BIT,
         }
     }
 }
@@ -282,10 +286,13 @@ impl Floating {
         let shared = cx.snap.shared_view.arc();
         let share_offer = shared.offer.clone().filter(|o| offer.is_none() && self.prompt.is_some() && o.until_ms > now_ms);
         let pick = crate::shared_view_ui::picking(now_ms).filter(|_| offer.is_none() && share_offer.is_none() && self.prompt.is_some() && shared.outgoing.is_none() && !shared.targets.is_empty());
+        // Or, the band free, the avatar gun's question or notice (`crate::avatar_gun_ui`): the question before the eyes, the
+        // notice low and to the right as the world notice.
+        let gun = cx.snap.avatar_gun.card.clone().filter(|c| c.up(crate::controller::unix_ms()) && offer.is_none() && share_offer.is_none() && pick.is_none() && self.prompt.is_some());
         // Or, the band free, "Orbiters - N4N0 will minimize to save memory" with Keep open (`crate::window_rest`).
-        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && share_offer.is_none() && pick.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
-        // The band's ids: a wake offer's, a share offer's, a picker's, or a rest offer's, each kind with its top bit (all count from 1).
-        let band = BandOffer::first(offer.map(|o| o.id), share_offer.as_ref().map(|o| o.id), pick.map(|p| p.id), rest.map(|o| o.id), None).map(BandOffer::id);
+        let rest = cx.snap.window_rest.offer.filter(|o| offer.is_none() && share_offer.is_none() && pick.is_none() && gun.is_none() && self.prompt.is_some() && cx.snap.window_rest.kept != Some(o.id));
+        // The band's ids: a wake offer's, a share offer's, a picker's, the gun's card, or a rest offer's, each kind with its top bit (all count from 1).
+        let band = BandOffer::first(offer.map(|o| o.id), share_offer.as_ref().map(|o| o.id), pick.map(|p| p.id), rest.map(|o| o.id), None).or(gun.as_ref().map(|c| BandOffer::Gun(crate::avatar_gun_ui::shown_id(c)))).map(BandOffer::id);
         // Or, the band still free, "No 3D picture of this world yet" (REQUEST13), never over a menu, our panel or SteamVR's
         // dashboard: held back while one is up (its time waits, a little).
         let notice = cx.snap.explorer.notice.clone().filter(|n| n.up(crate::controller::explorer::now_ms()) && band.is_none() && self.prompt.is_some());
@@ -301,6 +308,8 @@ impl Floating {
         // The band at the size of what it shows: the world notice is taller; every other face is "Talk with N4N0?"'s size.
         if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
             p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0), on: None });
+        } else if let (Some(p), Some(c)) = (self.prompt.as_mut(), gun.as_ref()) {
+            p.fit(cx.overlay, prompt::Face::Gun { ask: c.kind == crate::controller::avatar_gun::CardKind::Ask, tall: c.hinted() });
         } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
             p.fit(cx.overlay, prompt::Face::Talk);
         }
@@ -457,6 +466,16 @@ impl Floating {
                 }
             }
         }
+        // The avatar gun's card: Allow, Not now, Undo or its cross, on the release, on its part.
+        if let (Some(c), Some(uv)) = (gun.as_ref(), outcome.prompt_release) {
+            if let Some(part) = crate::avatar_gun_ui::part_at_uv(c, uv) {
+                clicked = true;
+                cx.backend.avatar_gun(crate::avatar_gun_ui::command(c, part));
+                if let Some(p) = self.prompt.as_mut() {
+                    p.pressed(cx.overlay, BandOffer::Gun(crate::avatar_gun_ui::shown_id(c)).id());
+                }
+            }
+        }
         // "Take a 3D picture" (the picture waits for VRChat's camera), or its cross. Unlike the two above it acts when let go
         // on the band, and a band gone or changed under the held trigger does nothing (verify-vr: presses on release).
         let held = cx.actions.triggers().iter().any(|t| *t);
@@ -524,6 +543,11 @@ impl Floating {
             let left = pk.left(now_ms);
             let look = prompt::look_of((pk.id, &names, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
             p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::shared_view_ui::paint_pick(painter, &names, hover, left));
+        } else if let (Some(p), Some(c)) = (self.prompt.as_mut(), gun.as_ref()) {
+            let hover = outcome.prompt_at.and_then(|uv| crate::avatar_gun_ui::part_at_uv(c, uv));
+            let left = c.left(crate::controller::unix_ms());
+            let look = prompt::look_of((c.id, format!("{:?}{:?}", c.kind, c.hint), &c.from, &c.avatar, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
+            p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::avatar_gun_ui::paint_vr(painter, c, hover, left));
         } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));
         } else if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {

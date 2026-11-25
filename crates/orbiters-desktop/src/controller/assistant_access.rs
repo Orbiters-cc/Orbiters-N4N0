@@ -1,6 +1,6 @@
 //! The switch of what N4N0's assistant does from an account (`orbiters_core::features::N4N0_ASSISTANT_ACTIONS`): asked of Orbiters
 //! for the member signed in, kept for their identity's epoch only, and held only while the server said yes lately. Anything
-//! else (nobody, not known yet, out of reach for a quarter of an hour, a no) is off: those intents are not offered, not done,
+//! else (nobody, not known yet, a refresh that failed, a no) is off: those intents are not offered, not done,
 //! and the page where the person does it opens instead; what waits to be done (a question, a share for the next capture) is
 //! dropped as it goes off.
 
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 /// How often it is asked again, so that a switch an administrator made reaches a running app.
 const ASK_EVERY: Duration = Duration::from_secs(5 * 60);
-/// How long a yes holds without another (Orbiters out of reach; verify4-r21 P11).
+/// How long a yes holds without another, whatever keeps the next answer (a refresh that fails ends it at once: verify5-r21 m1).
 const GOOD_FOR: Duration = Duration::from_secs(15 * 60);
 
 pub(super) struct AssistantAccess {
@@ -46,7 +46,8 @@ impl AssistantAccess {
         }
         let before = self.grant.allowed(now);
         self.asking = false;
-        self.grant.answered(answer, now);
+        // No answer is no yes, for this one: what it lets be done goes out as the person.
+        self.grant.answered(&Ok(matches!(answer, Ok(true))), now);
         before != self.grant.allowed(now)
     }
 
@@ -130,9 +131,10 @@ mod tests {
         assert!(!a.allowed(3, now), "no answer is not a yes");
         assert!(a.answered(3, &Ok(true), now));
         assert!(a.allowed(3, now) && !a.allowed(4, now), "another member's epoch");
-        a.answered(3, &Err(anyhow::anyhow!("offline")), now);
-        assert!(a.allowed(3, now) && a.allowed(3, now + GOOD_FOR - Duration::from_secs(1)));
-        assert!(!a.allowed(3, now + GOOD_FOR), "an old yes ends");
+        assert!(a.allowed(3, now + GOOD_FOR - Duration::from_secs(1)) && !a.allowed(3, now + GOOD_FOR), "an old yes ends");
+        assert!(a.answered(3, &Err(anyhow::anyhow!("offline")), now) && !a.allowed(3, now), "no answer is not a yes, held or not");
+        assert!(a.grant.due(now + Duration::from_secs(31)), "asked again soon");
+        a.answered(3, &Ok(true), now);
         assert!(a.answered(3, &Ok(false), now) && !a.allowed(3, now));
         a.answered(3, &Ok(true), now);
         a.follow(4);
@@ -140,10 +142,10 @@ mod tests {
         assert!(!a.answered(3, &Ok(true), now) && !a.allowed(4, now), "the last member's answer, late");
     }
 
-    /// Verify4-r21 P11: a failed refresh keeps a yes fifteen minutes, not three hours; a no ends it at once; and what went off is said
-    /// once (N4N0 drops what waits).
+    /// Verify4-r21 P11, verify5-r21 m1: a failed refresh, like a no, ends a yes at once; one nothing was said about since ends by
+    /// itself; and what went off is said once (N4N0 drops what waits).
     #[test]
-    fn an_old_yes_ends_after_a_quarter_of_an_hour() {
+    fn a_yes_ends_with_a_failed_refresh() {
         let now = Instant::now();
         let minutes = |m: u64| now + Duration::from_secs(m * 60);
         let mut a = AssistantAccess::default();
@@ -152,44 +154,33 @@ mod tests {
         assert!(!a.went_off(now));
         assert!(a.grant.due(minutes(5)), "asked again");
         a.answered(3, &Err(anyhow::anyhow!("offline")), minutes(5));
-        assert!(a.allowed(3, minutes(14)) && !a.went_off(minutes(14)));
-        assert!(!a.allowed(3, minutes(16)), "held on an old yes");
-        assert!(a.went_off(minutes(16)) && !a.went_off(minutes(17)), "said once");
-        a.answered(3, &Ok(true), minutes(20));
-        assert!(!a.went_off(minutes(20)));
-        a.answered(3, &Ok(false), minutes(21));
-        assert!(!a.allowed(3, minutes(21)) && a.went_off(minutes(21)), "a no, at once");
+        assert!(!a.allowed(3, minutes(5)), "held on an old yes");
+        assert!(a.went_off(minutes(5)) && !a.went_off(minutes(6)), "said once");
+        a.answered(3, &Ok(true), minutes(6));
+        assert!(!a.went_off(minutes(6)) && a.allowed(3, minutes(20)) && !a.allowed(3, minutes(22)));
+        assert!(a.went_off(minutes(22)));
+        a.answered(3, &Ok(true), minutes(23));
+        assert!(!a.went_off(minutes(23)));
+        a.answered(3, &Ok(false), minutes(24));
+        assert!(!a.allowed(3, minutes(24)) && a.went_off(minutes(24)), "a no, at once");
     }
 
-    /// P11 through the controller: what N4N0 asked of the account goes as the server says no, and as an old yes ends.
+    /// P11 through the controller: what N4N0 asked of the account goes as the server says no, and as it says nothing.
     #[test]
     fn what_waits_goes_with_the_yes() {
-        for old in [false, true] {
+        for answer in [Ok(false), Err(anyhow::anyhow!("offline"))] {
             let ctl = Controller::new(orbiters_core::settings::Settings::default());
             ctl.sign_in_for_test("1");
             ctl.update(|s| {
                 s.launcher.source = orbiters_core::launcher::Source::SignedIn { user_id: "usr_a".into(), name: String::new() };
             });
-            let then = Instant::now().checked_sub(GOOD_FOR * 2).unwrap_or_else(Instant::now);
             ctl.assistant_actions_for_test(true);
             let stamp = orbiters_n4n0::Stamp { epoch: ctl.identity_epoch(), question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() };
             ctl.n4n0_command(crate::ipc::N4n0Command::Ask { text: "put me in orange".into(), stamp: Some(stamp) });
             let asked = || ctl.view().n4n0.confirmations.iter().any(|c| c.is_local());
             assert!(asked(), "{:?}", ctl.view().n4n0.lines);
-            if old {
-                // (As if the yes had been given long ago and nothing answered since.)
-                ctl.assistant_access.lock().unwrap().grant = {
-                    let mut g = Grant::new(ASK_EVERY, GOOD_FOR);
-                    g.answered(&Ok(true), then);
-                    g
-                };
-                ctl.assistant_access_changed();
-            } else {
-                ctl.assistant_actions_for_test(false);
-            }
-            if !old || then + GOOD_FOR <= Instant::now() {
-                assert!(!asked(), "old {old}");
-            }
+            ctl.assistant_answer_for_test(&answer, Instant::now());
+            assert!(!asked(), "{answer:?}");
         }
     }
 

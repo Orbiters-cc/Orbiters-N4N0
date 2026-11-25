@@ -1,4 +1,5 @@
-//! Owner-gated, local VRChat session. Only the feature check goes to Orbiters.
+//! The local VRChat session, held for the Orbiters member who owns it, offered as the server's `n4n0-vrchat-login` says
+//! (open to every member). Only the feature check goes to Orbiters.
 use super::vrchat_scope::{enforce, Stamp};
 pub(super) use super::vrchat_scope::Owner;
 use super::{Controller, Shared};
@@ -2084,6 +2085,38 @@ impl Controller {
         rt.restored = false;
         rt.saved = Some(true);
         rt.ask = Arc::new(ask);
+    }
+    /// [`Self::test_vrchat`] over a [`orbiters_core::vrchat_api::scripted_client`]: bodies recorded, drops possible.
+    pub(crate) fn test_vrchat_routed(&self, route: Arc<dyn Fn(&orbiters_core::vrchat_api::Sent) -> orbiters_core::vrchat_api::Routed + Send + Sync>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::routed_client(gate, route, false))
+    }
+    pub(crate) fn test_vrchat_routed_paced(&self, route: Arc<dyn Fn(&orbiters_core::vrchat_api::Sent) -> orbiters_core::vrchat_api::Routed + Send + Sync>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::routed_client(gate, route, true))
+    }
+    /// The waits VRChat asked the client for are over.
+    pub(crate) fn groups_forget_waits_for_tests(&self) {
+        let client = self.vrchat_login.lock().unwrap().client.clone();
+        client.lock().unwrap().forget_waits();
+    }
+    pub(crate) fn test_vrchat_scripted(&self, replies: Vec<orbiters_core::vrchat_api::Scripted>) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_vrchat_with(|gate| orbiters_core::vrchat_api::scripted_client(gate, replies))
+    }
+    fn test_vrchat_with(&self, make: impl FnOnce(Arc<orbiters_core::vrchat_api::Gate>) -> (Client, Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>>)) -> Arc<Mutex<Vec<orbiters_core::vrchat_api::Sent>>> {
+        self.test_account_with_user("1");
+        let identity = self.vrchat_identity().unwrap();
+        let mut rt = self.vrchat_login.lock().unwrap();
+        assert!(rt.grant(Duration::from_secs(3600)));
+        let id = (identity.0.url(""), identity.1);
+        rt.identity = Some(id.clone());
+        rt.grants.entry(id).or_insert_with(new_grant).answered(&Ok(true), Instant::now());
+        rt.restored = true;
+        let (client, sent) = make(rt.gate.clone());
+        rt.client = Arc::new(Mutex::new(client));
+        drop(rt);
+        // As a sign-in publishes it: verified for the member signed in, at this time of theirs.
+        let stamp = self.vrchat_now().unwrap();
+        assert!(self.publish_login(&stamp, |st, _| (st.allowed, st.user) = (true, Some(User { id: "usr_test".into(), ..Default::default() }))));
+        sent
     }
     /// VRChat's session is this Orbiters member's grant and shows as signed in, as after a look.
     pub(super) fn test_signed_in(&self) {

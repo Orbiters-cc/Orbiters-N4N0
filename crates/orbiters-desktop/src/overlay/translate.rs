@@ -234,7 +234,7 @@ impl TranslateHost {
         let measuring = cfg!(debug_assertions) && std::env::var_os("ORBITERS_TRANSLATE_ON_FILE").is_some();
         let forced = cfg!(debug_assertions)
             && (std::env::var_os("ORBITERS_TRANSLATE_ON").is_some() || std::env::var_os("ORBITERS_TRANSLATE_ON_FILE").is_some_and(|f| std::path::Path::new(&f).exists()));
-        let on = (settings.enabled || forced) && orbiters_core::osc::VRCHAT_RUNS_HERE;
+        let on = (settings.enabled || forced) && orbiters_core::here::HERE.eye_picture;
         self.watch_frames(cx.frames, on, on || measuring);
         if !on {
             if self.thread.is_some() {
@@ -1142,7 +1142,12 @@ fn vrchat_player_height() -> Option<f32> {
     status.is_ok().then(|| f64::from_bits(value) as f32)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn vrchat_player_height() -> Option<f32> {
+    orbiters_core::proton::vrchat()?.prefix.vrchat_registry().f64("PlayerHeight_h2758831273").map(|v| v as f32)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn vrchat_player_height() -> Option<f32> {
     None
 }

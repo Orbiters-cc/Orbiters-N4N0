@@ -31,6 +31,10 @@ struct Shared {
     damaged: AtomicU64,
     sockets: Mutex<Vec<TcpStream>>,
     over: AtomicBool,
+    /// The service's next lines that start with one of these are lost on the way, once each.
+    lose: Mutex<VecDeque<Vec<u8>>>,
+    /// Lines lost so far.
+    lost: AtomicU64,
 }
 
 pub struct Between {
@@ -95,6 +99,19 @@ impl Between {
                             }
                             due
                         };
+                        // A line lost on the way (a reply the client never gets).
+                        let lost = {
+                            let mut lose = shared.lose.lock().unwrap();
+                            let hit = lose.front().is_some_and(|p| line.starts_with(p));
+                            if hit {
+                                lose.pop_front();
+                            }
+                            hit
+                        };
+                        if lost {
+                            shared.lost.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                         if damage {
                             // Cut short on its way: its first half, and the line's end, so the lines after it are whole.
                             line.truncate((line.len() / 2).max(1));
@@ -134,6 +151,16 @@ impl Between {
     /// Lines of the service passed on to a client so far, and how many of them were damaged.
     pub fn passed(&self) -> (u64, u64) {
         (self.shared.passed.load(Ordering::Relaxed), self.shared.damaged.load(Ordering::Relaxed))
+    }
+
+    /// The service's next line that starts with `prefix` is lost on its way to the client.
+    pub fn lose(&self, prefix: &str) {
+        self.shared.lose.lock().unwrap().push_back(prefix.as_bytes().to_vec());
+    }
+
+    /// Lines lost so far.
+    pub fn lost(&self) -> u64 {
+        self.shared.lost.load(Ordering::Relaxed)
     }
 
     /// Drops every connection, both ways.

@@ -22,6 +22,26 @@ pub struct Answered {
     pub content_type: Option<String>,
     pub retry_after: Option<String>,
     pub body: Vec<u8>,
+    /// Instead of `body`, when it is large: the file it was put in, removed once it is read.
+    pub file: Option<std::path::PathBuf>,
+}
+
+/// A large answer, read from the file it was put in, which goes with it.
+struct Spooled {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl std::io::Read for Spooled {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Drop for Spooled {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Where the requests go; an error says why nothing was sent.
@@ -41,8 +61,8 @@ impl std::fmt::Display for NotSent {
 
 impl std::error::Error for NotSent {}
 
-/// The largest request body relayed (nothing a page asks is near it).
-const BODY_MOST: u64 = 4 << 20;
+/// The largest request body relayed (nothing a page asks is near it; the link carries it in base64, 4 MB at most).
+const BODY_MOST: u64 = 2 << 20;
 
 /// The client's middleware: no credential leaves this process, and the requests under `root` are the relay's.
 fn relaying(root: String, relay: Arc<dyn Relay>) -> impl ureq::middleware::Middleware {
@@ -70,7 +90,15 @@ fn relaying(root: String, relay: Arc<dyn Relay>) -> impl ureq::middleware::Middl
             response = response.header(ureq::http::header::RETRY_AFTER, after);
         }
         let mime = answered.content_type.unwrap_or_else(|| "application/octet-stream".into());
-        response.body(ureq::Body::builder().mime_type(mime).data(answered.body)).map_err(ureq::Error::Http)
+        let body = ureq::Body::builder().mime_type(mime);
+        let body = match answered.file {
+            Some(path) => {
+                let file = std::fs::File::open(&path).map_err(ureq::Error::Io)?;
+                body.reader(Spooled { file, path })
+            }
+            None => body.data(answered.body),
+        };
+        response.body(body).map_err(ureq::Error::Http)
     }
 }
 
@@ -113,7 +141,7 @@ mod tests {
     /// The API's own functions work as they are; no credential is in what is relayed, whatever the caller gave.
     #[test]
     fn the_apis_functions_go_through_the_relay_without_a_credential() {
-        let kept = Arc::new(Kept(Mutex::default(), Ok(Answered { status: 200, content_type: Some("application/json".into()), retry_after: None, body: br#"{"items":{"s1":"sent"},"reasons":{}}"#.to_vec() })));
+        let kept = Arc::new(Kept(Mutex::default(), Ok(Answered { status: 200, content_type: Some("application/json".into()), retry_after: None, body: br#"{"items":{"s1":"sent"},"reasons":{}}"#.to_vec(), file: None })));
         let api = Api::relayed("https://api.invalid/v1", kept.clone());
         let invites = api.my_invites("whatever", "ev1").unwrap();
         assert_eq!(invites.items.get("s1").map(String::as_str), Some("sent"));
@@ -125,6 +153,21 @@ mod tests {
         assert_eq!((asked[1].method.as_str(), asked[1].path.as_str()), ("POST", "a/b?c=d"));
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&asked[1].body).unwrap()["x"], 1);
         assert!(!format!("{asked:?}").contains("secret") && !format!("{asked:?}").contains("whatever"));
+    }
+
+    /// Verify5-r21 m5: a large answer comes in a file, read as any answer is, and gone once it was; a body too large for the link
+    /// is refused here.
+    #[test]
+    fn a_large_answer_comes_in_a_file() {
+        let path = std::env::temp_dir().join(format!("orbiters-relay-{}", std::process::id()));
+        std::fs::write(&path, vec![7u8; 5 << 20]).unwrap();
+        let api = Api::relayed("https://api.invalid/v1", Arc::new(Kept(Mutex::default(), Ok(Answered { status: 200, content_type: Some("image/png".into()), file: Some(path.clone()), ..Default::default() }))));
+        let mut response = api.agent().get(&api.url("a")).call().unwrap();
+        let read = response.body_mut().with_config().limit(64 << 20).read_to_vec().unwrap();
+        assert!(read.len() == 5 << 20 && read.iter().all(|b| *b == 7));
+        drop(response);
+        assert!(!path.exists());
+        assert!(api.agent().post(&api.url("a")).send(&vec![0u8; (BODY_MOST + 1) as usize][..]).is_err());
     }
 
     /// A refusal is the request's error, in its words; nothing is asked of anyone.

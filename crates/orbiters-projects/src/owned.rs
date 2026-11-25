@@ -10,6 +10,29 @@ use std::path::Path;
 pub struct FileId {
     pub volume: u64,
     pub index: u64,
+    /// Linux: what tells an inode from the next one of its number ([`stamp`]). 0 elsewhere, where a number is not given again
+    /// (and then not written).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub born: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// ext4 gives a removed file's inode number to the next file made, at once: device and inode alone would take a substitute for
+/// the original. The inode's generation (another one each time the number is given; ext4, btrfs, XFS and F2FS say it of an open
+/// file) and its birth time (wherever statx has it) tell them apart. 0 where the file system says neither; one that could be
+/// read once and not now differs, so what asks takes it for another: kept, never deleted.
+#[cfg(target_os = "linux")]
+fn stamp(meta: &std::fs::Metadata, file: Option<&std::fs::File>) -> u64 {
+    use std::os::unix::io::AsRawFd;
+    let born = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+    let mut generation: libc::c_long = 0;
+    // SAFETY: an open descriptor and an out-parameter at least as large as the kernel writes (an int).
+    let said = file.is_some_and(|f| unsafe { libc::ioctl(f.as_raw_fd(), libc::FS_IOC_GETVERSION, &mut generation) } == 0);
+    let generation = if said { generation as u32 as u64 } else { 0 };
+    born ^ generation.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 /// Whether `meta` (from `symlink_metadata`) is a link, a junction or another reparse point.
@@ -40,11 +63,23 @@ pub fn id_of(path: &Path) -> std::io::Result<FileId> {
             .open(path)?;
         id_of_file(&file)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let m = std::fs::symlink_metadata(path)?;
+        if m.is_file() || m.is_dir() {
+            // Opened for its generation: whatever answers is then that very file. (Never a pipe or a device, which could wait.)
+            if let Ok(file) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+                return id_of_file(&file);
+            }
+        }
+        Ok(FileId { volume: m.dev(), index: m.ino(), born: stamp(&m, None) })
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::symlink_metadata(path)?;
-        Ok(FileId { volume: m.dev(), index: m.ino() })
+        Ok(FileId { volume: m.dev(), index: m.ino(), born: 0 })
     }
 }
 
@@ -57,13 +92,17 @@ pub fn id_of_file(file: &std::fs::File) -> std::io::Result<FileId> {
         use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.map_err(std::io::Error::other)?;
-        Ok(FileId { volume: info.dwVolumeSerialNumber as u64, index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64 })
+        Ok(FileId { volume: info.dwVolumeSerialNumber as u64, index: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64, born: 0 })
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let m = file.metadata()?;
-        Ok(FileId { volume: m.dev(), index: m.ino() })
+        #[cfg(target_os = "linux")]
+        let born = stamp(&m, Some(file));
+        #[cfg(not(target_os = "linux"))]
+        let born = 0;
+        Ok(FileId { volume: m.dev(), index: m.ino(), born })
     }
 }
 
@@ -85,6 +124,7 @@ pub struct Pinned {
 impl Pinned {
     /// `path`, when it is a real folder (not a link), held.
     pub fn open(path: &Path) -> std::io::Result<Pinned> {
+        crate::disk::allowed(path)?;
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
@@ -128,7 +168,7 @@ impl Pinned {
                 return Err(std::io::Error::other("the folder was replaced")); // i18n: not shown (an error chained under a message)
             }
             let _ = &self.file;
-            std::fs::remove_dir(&self.path)
+            crate::disk::remove_dir(&self.path)
         }
     }
 }
@@ -148,6 +188,7 @@ fn delete_by_handle(file: &std::fs::File) -> std::io::Result<()> {
 /// Removes the file at `path` when it is the very file `id` names (not a link, not a file put in its place): opened
 /// once, its identity read from that handle, deleted through it. False when it is another (left as it is).
 pub fn delete_file_if(path: &Path, id: FileId) -> std::io::Result<bool> {
+    crate::disk::allowed(path)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -167,7 +208,7 @@ pub fn delete_file_if(path: &Path, id: FileId) -> std::io::Result<bool> {
         if !is_same(path, id) || std::fs::symlink_metadata(path)?.is_dir() {
             return Ok(false);
         }
-        std::fs::remove_file(path)?;
+        crate::disk::remove_file(path)?;
         Ok(true)
     }
 }
@@ -191,6 +232,28 @@ mod tests {
         assert!(!is_same(&a, id));
         let file = std::fs::File::create(temp.path().join("f")).unwrap();
         assert_eq!(id_of_file(&file).unwrap(), id_of(&temp.path().join("f")).unwrap());
+    }
+
+    /// An identity as a record keeps it: read back it is the same, and one kept before `born` was there is still read.
+    #[test]
+    fn an_identity_is_read_back_as_it_was_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = id_of(temp.path()).unwrap();
+        let kept = serde_json::to_value(id).unwrap();
+        assert_eq!(serde_json::from_value::<FileId>(kept.clone()).unwrap(), id);
+        assert_eq!(kept.get("born").is_some(), cfg!(target_os = "linux"));
+        let old: FileId = serde_json::from_value(serde_json::json!({ "volume": 1, "index": 2 })).unwrap();
+        assert_eq!(old, FileId { volume: 1, index: 2, born: 0 });
+        #[cfg(target_os = "linux")]
+        {
+            // What was written into it since, and another name for it, change nothing.
+            let file = temp.path().join("f");
+            std::fs::write(&file, "a").unwrap();
+            let id = id_of(&file).unwrap();
+            std::fs::write(&file, "another").unwrap();
+            std::fs::rename(&file, temp.path().join("g")).unwrap();
+            assert_eq!(id_of(&temp.path().join("g")).unwrap(), id);
+        }
     }
 
     /// A pinned folder can be neither renamed nor replaced while held (Windows), and is removed through its handle; a file

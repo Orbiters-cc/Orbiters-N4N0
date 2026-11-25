@@ -371,8 +371,42 @@ pub fn run_with<C: Messages>(
     Ended::Stopped
 }
 
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+type Tls = native_tls::TlsStream<std::net::TcpStream>;
+#[cfg(target_os = "linux")]
+type Tls = rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>;
+
+/// TLS to `host` over `tcp`, the certificate checked: the system's own (`crate::TLS_STACK`).
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn secure(tcp: std::net::TcpStream, host: &str) -> Option<Tls> {
+    native_tls::TlsConnector::new().ok()?.connect(host, tcp).ok()
+}
+
+/// TLS to `host` over `tcp`, the certificate checked against Mozilla's roots, as every other address there (`crate::tls_config`).
+#[cfg(target_os = "linux")]
+fn secure(mut tcp: std::net::TcpStream, host: &str) -> Option<Tls> {
+    let mut connection = rustls::ClientConnection::new(linux_tls()?, rustls::pki_types::ServerName::try_from(host.to_string()).ok()?).ok()?;
+    // The whole handshake here, as native TLS does it: a refused certificate is a refused connection, not a read error later.
+    while connection.is_handshaking() {
+        connection.complete_io(&mut tcp).ok()?;
+    }
+    Some(rustls::StreamOwned::new(connection, tcp))
+}
+
+/// The client's TLS: ring by name, for another crate of the same program may bring rustls another provider.
+#[cfg(target_os = "linux")]
+fn linux_tls() -> Option<std::sync::Arc<rustls::ClientConfig>> {
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .ok()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Some(std::sync::Arc::new(config))
+}
+
 #[cfg(not(target_os = "android"))]
-fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::TcpStream>>, Refusal> {
+fn connect(token: &str) -> Result<Connection<Tls>, Refusal> {
     use std::net::ToSocketAddrs;
     // Every address the name gives (an IPv6 one first may have no route here), within one overall deadline.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -390,7 +424,7 @@ fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::Tcp
     let tcp = tcp.ok_or(Refusal::from(None))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|_| Refusal::from(None))?;
     tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|_| Refusal::from(None))?;
-    let tls = native_tls::TlsConnector::new().map_err(|_| Refusal::from(None))?.connect(HOST, tcp).map_err(|_| Refusal::from(None))?;
+    let tls = secure(tcp, HOST).ok_or(Refusal::from(None))?;
     let path = format!("/?authToken={}", crate::vrchat_api::encode(token));
     Connection::open(tls, HOST, &path, &crate::vrchat_api::user_agent())
 }
@@ -398,6 +432,17 @@ fn connect(token: &str) -> Result<Connection<native_tls::TlsStream<std::net::Tcp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pipeline's TLS against a real server: its certificate is taken for its own name and for no other
+    /// (`cargo test -p orbiters-core this_system_s_tls -- --ignored`, the network needed).
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    #[ignore]
+    fn this_system_s_tls_takes_a_certificate_for_its_own_name_only() {
+        let dial = || std::net::TcpStream::connect(("orbiters.cc", 443)).expect("the network");
+        assert!(secure(dial(), "orbiters.cc").is_some());
+        assert!(secure(dial(), "not-orbiters.example").is_none(), "another name's certificate");
+    }
 
     #[test]
     fn the_opening_asks_for_a_websocket_and_reads_the_switch() {

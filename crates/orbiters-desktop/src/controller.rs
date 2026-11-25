@@ -248,6 +248,8 @@ pub struct Controller {
     rig: Mutex<rig::RigRuntime>,
     /// Calls with VRChat friends (controller/calls.rs).
     calls: Mutex<calls::CallsRuntime>,
+    /// The avatar gun: its parameters, the event stream, shots, hits and the change (controller/avatar_gun.rs).
+    avatar_gun: Mutex<avatar_gun::Runtime>,
     shared_view: Mutex<shared_view::SharedRuntime>,
     /// Updates of an installed app (controller/update.rs).
     updates: Mutex<update::UpdateRuntime>,
@@ -257,6 +259,10 @@ pub struct Controller {
     lend_gate: Mutex<()>,
     /// The instances Go and Invite may send the person to (controller/vrchat_data.rs).
     instance_permits: Mutex<vrchat_data::InstancePermits>,
+    /// VRChat groups' prepared writes and what is being written (REQUEST22; never in the snapshot).
+    groups: Mutex<groups::Runtime>,
+    /// Groups requests the service is running now (admitted before their thread starts, verify-r22 Major 9).
+    groups_admitted: Arc<std::sync::atomic::AtomicUsize>,
     /// The thread that writes the settings, the newest only ([`Controller::queue_save`]).
     settings_writer: Mutex<SettingsWriter>,
     /// The highest settings revision written to disk, by the writing thread or after it closed (CTL-1).
@@ -497,6 +503,7 @@ fn publish_log(line: &str) {
 }
 
 mod account;
+pub mod avatar_gun;
 pub mod assistant;
 mod assistant_access;
 mod around;
@@ -512,11 +519,16 @@ mod burst;
 mod pause_tests;
 mod calls;
 mod calls_access;
+mod event_stream;
 mod cleanup;
 mod dolly;
+pub mod groups;
+mod groups_ledger;
 pub(crate) mod hide_self;
 pub use hide_self::{upload_can_hide, uploaded_avatar_name};
 mod lan;
+#[cfg(target_os = "linux")]
+mod linux_vrchat;
 pub mod launcher;
 mod obelisk_cli;
 mod identity;
@@ -524,7 +536,7 @@ mod incident;
 mod picture;
 mod language;
 mod maps;
-mod member;
+pub mod member;
 pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;
@@ -628,7 +640,9 @@ impl Controller {
             world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
-            calls: Mutex::new(calls::CallsRuntime::default()),
+            // (Counted on from the moment it starts: a press that waited in a window since before is for no call of now.)
+            calls: Mutex::new(calls::CallsRuntime::from(if cfg!(test) { 0 } else { orbiters_n4n0::unix_ms() })),
+            avatar_gun: Mutex::new(avatar_gun::Runtime::default()),
             shared_view: Mutex::new(shared_view::SharedRuntime::default()),
             updates: Mutex::new(update::UpdateRuntime::default()),
             cleanup: Mutex::new(cleanup::CleanupRuntime::default()),
@@ -639,6 +653,8 @@ impl Controller {
             #[cfg(test)]
             test_settings_failing: Arc::default(),
             instance_permits: Mutex::default(),
+            groups: Mutex::default(),
+            groups_admitted: Arc::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
             pending_start: Mutex::new(None),
@@ -708,6 +724,7 @@ impl Controller {
         self.start_n4n0();
         self.start_perf();
         self.start_calls();
+        self.start_avatar_gun();
         self.start_shared_view();
         self.start_updates();
     }
@@ -1891,6 +1908,7 @@ impl Controller {
                     // Face tracking's flood skips N4N0's buttons (none is one of its parameters).
                     if !face_tracking(&name) {
                         self.n4n0.on_parameter(&name, &value);
+                        self.avatar_gun_parameter(&name, &value);
                     }
                     if name == record_parameter {
                         self.record_toggled(value.truthy());
@@ -1903,6 +1921,7 @@ impl Controller {
                     self.on_avatar_changed();
                     // N4N0 reads the parameters the last avatar held before they go (`on_osc`).
                     self.n4n0.on_avatar(id.clone());
+                    self.avatar_gun_avatar(&id);
                     messages.push((AVATAR_CHANGE.to_string(), vec![OscValue::Text(id)]));
                 }
                 OscEvent::Values { address, values } => {
@@ -2501,6 +2520,7 @@ impl Controller {
         // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
         self.n4n0.shutdown();
         self.calls_stop();
+        self.stop_avatar_gun();
         self.put_vrchat_back();
         // Stopped outside the lock: stopping waits for the receiving thread.
         let osc = self.osc.lock().unwrap().take();
@@ -3142,14 +3162,19 @@ fn move_to_bin(dir: &Path) -> Result<(), trash::Error> {
 
 /// Opens a folder in the platform's file manager.
 pub fn open_path(dir: &Path) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    let mut cmd = std::process::Command::new("explorer");
     #[cfg(target_os = "linux")]
-    let mut cmd = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    cmd.arg(dir).spawn()?;
-    Ok(())
+    {
+        crate::linux::open::path(dir)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        let mut cmd = std::process::Command::new("explorer");
+        #[cfg(target_os = "macos")]
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg(dir).spawn()?;
+        Ok(())
+    }
 }
 
 fn inside(root: &Path, dir: &Path) -> bool {
@@ -3235,20 +3260,11 @@ fn refresh_storage(ctl: &Shared) {
     });
 }
 
-/// Free bytes on the disk that holds `dir`: one question to Windows for that folder, not a list of every volume
-/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, another system).
+/// Free bytes on the disk that holds `dir`: one question to the system for that folder, not a list of every volume
+/// (LIGHT-DESKTOP-9); sysinfo's list where that cannot answer (the folder does not exist yet, a Mac).
 fn free_space(dir: &Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetDiskFreeSpaceExW(dir: *const u16, available: *mut u64, total: *mut u64, free: *mut u64) -> i32;
-        }
-        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
-        let mut available = 0u64;
-        // SAFETY: a NUL-terminated path and one out-parameter; the totals are not asked for.
-        if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } != 0 {
+    if cfg!(not(target_os = "macos")) {
+        if let Some(available) = orbiters_core::disk::free_space(dir) {
             return Some(available);
         }
     }
@@ -3340,6 +3356,7 @@ fn spawn_watchers(ctl: Shared) {
             let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
+            #[cfg(not(target_os = "linux"))]
             let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut storage_sweep = StorageSweep::default();
@@ -3354,9 +3371,16 @@ fn spawn_watchers(ctl: Shared) {
                     // Names only: the default refresh also reads every process's command line and environment. On a Mac
                     // nothing of VRChat or SteamVR runs under those names (its VRChat is the engine's, known by its
                     // records): a look now and then.
+                    // On Linux from /proc: Wine's threads have VRChat's name too, and sysinfo counts threads.
+                    #[cfg(target_os = "linux")]
+                    let system = orbiters_core::processes::all();
+                    #[cfg(target_os = "linux")]
+                    let named = |names: &[&str]| system.iter().find(|p| names.iter().any(|n| p.is(n))).map(|p| p.pid);
+                    #[cfg(not(target_os = "linux"))]
                     if orbiters_core::osc::VRCHAT_RUNS_HERE || tick.is_multiple_of(30) {
                         system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
                     }
+                    #[cfg(not(target_os = "linux"))]
                     let named = |names: &[&str]| {
                         system
                             .processes()

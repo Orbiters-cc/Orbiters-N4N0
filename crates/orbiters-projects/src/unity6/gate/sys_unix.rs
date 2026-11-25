@@ -202,7 +202,7 @@ pub fn list(dir: &File) -> io::Result<Vec<Listed>> {
 /// object meant goes back to where it was (or, when its name was taken again meanwhile, stays there, whole).
 pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Result<bool> {
     let before = open_at(dir, name, Want::Delete { dir: is_dir }, false)?.metadata()?;
-    if (FileId { volume: before.dev(), index: before.ino() }) != id {
+    if (before.dev(), before.ino()) != (id.volume, id.index) {
         return Ok(false);
     }
     let own = OsString::from(format!(".orbiters-removing-{}", uuid::Uuid::new_v4().simple()));
@@ -219,7 +219,7 @@ pub fn remove_at(dir: &File, name: &OsStr, id: FileId, is_dir: bool) -> io::Resu
             return Err(e);
         }
         let moved = open_at(&room, OsStr::new("x"), Want::Delete { dir: is_dir }, false).and_then(|f| f.metadata());
-        let mine = moved.is_ok_and(|m| (FileId { volume: m.dev(), index: m.ino() }) == id);
+        let mine = moved.is_ok_and(|m| (m.dev(), m.ino()) == (id.volume, id.index));
         let gone = mine && libc::unlinkat(room.as_raw_fd(), inner.as_ptr(), if is_dir { libc::AT_REMOVEDIR } else { 0 }) == 0;
         let failed = (mine && !gone).then(io::Error::last_os_error);
         if !gone {

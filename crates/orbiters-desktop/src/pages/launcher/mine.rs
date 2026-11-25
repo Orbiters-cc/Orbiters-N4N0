@@ -201,7 +201,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
     let face = face(ui, state, &cx.snap.vrchat_login);
     super::super::block(ui, cx, index, h, |ui, rect| {
         if signed_in(state).is_none() && vrchat != Presence::SignedOut {
-            connecting(ui, rect, shown.as_deref(), face.as_ref(), vrchat == Presence::SignedIn);
+            connecting(ui, rect, shown.as_deref(), face.as_ref(), vrchat == Presence::SignedIn, cx.snap.account.connecting());
         } else if signed_in(state).is_none() {
             go = sign_in(ui, rect);
         } else {
@@ -311,7 +311,7 @@ fn face(ui: &Ui, state: &mut State, login: &crate::controller::vrchat_login::Sta
 
 /// The card while the saved VRChat session is restored (r21): the account's last known name and picture and a quiet
 /// spinner, never a sign-in. `signed_in`: VRChat said yes, the profile itself is on its way.
-fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::TextureHandle>, signed_in: bool) {
+fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::TextureHandle>, signed_in: bool, waits: &str) {
     let p = ui.painter().clone();
     widgets::frame(&p, rect, theme::CARD_RADIUS, theme::surface());
     paint::stroke_squircle(&p, rect, theme::squircle(theme::CARD_RADIUS), theme::hairline());
@@ -327,7 +327,7 @@ fn connecting(ui: &mut Ui, rect: Rect, name: Option<&str>, face: Option<&egui::T
     let room = rect.right() - PAD - 40.0 - x;
     let title = name.map_or_else(|| tr("Your VRChat profile").to_string(), str::to_string);
     widgets::text_truncated(&p, pos2(x, rect.center().y - 11.0), Align2::LEFT_CENTER, &Txt::new(&title, 15.0).weight(weight::SEMIBOLD), room);
-    let line = if signed_in { tr("Reading your VRChat profile…") } else { tr("Connecting to VRChat…") };
+    let line = if signed_in { tr("Reading your VRChat profile…") } else { waits };
     widgets::text_truncated(&p, pos2(x, rect.center().y + 11.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), room);
     orbiters_ui::feedback::spinner(&p, pos2(rect.right() - PAD - 12.0, rect.center().y), 8.0, 2.0, theme::FG_3);
     orbiters_ui::anim::request_frame(ui.ctx());

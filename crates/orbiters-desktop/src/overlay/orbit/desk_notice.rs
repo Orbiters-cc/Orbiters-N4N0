@@ -1,4 +1,4 @@
-//! "No 3D picture of this world yet" in desktop mode (Request20): the card of [`crate::world_notice`] in the bottom right
+//! "No 3D picture of this world yet" in desktop mode (Request20), and the avatar gun's card the same way (`crate::avatar_gun_ui`): the card of [`crate::world_notice`] in the bottom right
 //! corner of VRChat's window (VRChat's own hints are in its top corners, the menu mismatch corner in its bottom left), a
 //! window of its own as the panels are: it never takes the focus, and only its card's pixels take the mouse, everything
 //! around it goes to the game. It shows only with nothing in its way: not while one of our pages is open, nor VRChat's
@@ -18,12 +18,17 @@ use windows::Win32::Foundation::POINT;
 /// Its margin from the window's edges, in its units.
 const MARGIN: f32 = 14.0;
 
-/// Where it lies in a VRChat window of `client` pixels (window pixels), and its zoom (pixels a unit): in the bottom right
-/// corner, by the window's height and a little smaller than the panels (1.35 at 1080 high), so that with VRChat's Quick
-/// Menu open it lies right of the menu's foot and under our wing in every shape of window (`tests`).
+/// Where the world notice lies in a VRChat window of `client` pixels (window pixels), and its zoom (pixels a unit): in
+/// the bottom right corner, by the window's height and a little smaller than the panels (1.35 at 1080 high), so that with
+/// VRChat's Quick Menu open it lies right of the menu's foot and under our wing in every shape of window (`tests`).
 pub(crate) fn rect(client: Vec2) -> (Rect, f32) {
+    rect_of(client, CARD)
+}
+
+/// [`rect`] for a card of `card` units (the avatar gun's is a little larger).
+pub(crate) fn rect_of(client: Vec2, card: Vec2) -> (Rect, f32) {
     let zoom = (client.y / 800.0).min(client.x / 1100.0).clamp(0.7, 2.0);
-    let size = CARD * zoom;
+    let size = card * zoom;
     let m = MARGIN * zoom;
     (Rect::from_min_size(pos2(client.x - m - size.x, client.y - m - size.y), size), zoom)
 }
@@ -41,22 +46,109 @@ pub(crate) fn clear(card: Rect, parts: &[Rect]) -> bool {
     !parts.iter().any(|p| p.intersects(card.expand(4.0)))
 }
 
-#[derive(Default)]
-pub(crate) struct Card {
+/// What a corner card shows: the world notice, the avatar gun's card. Its face, its parts and what a press on one asks.
+pub(crate) trait Shown {
+    type Part: Copy + PartialEq + std::fmt::Debug + std::hash::Hash;
+    /// What it is now (a new one, or a new state of it, is a new id).
+    fn id(&self) -> u64;
+    fn up(&self, now_ms: u64) -> bool;
+    /// Its size in its units.
+    fn size(&self) -> Vec2;
+    fn part_at(&self, p: Pos2) -> Option<Self::Part>;
+    /// A digest of what its picture shows besides its part under the pointer and the language.
+    fn look(&self, now_ms: u64) -> u64;
+    fn paint(&self, p: &egui::Painter, zoom: f32, hover: Option<Self::Part>, now_ms: u64);
+    fn press(&self, backend: &Ctl, part: Self::Part);
+    /// It could not show (something lies on its place): the service keeps its time.
+    fn held(&self, _backend: &Ctl) {}
+    fn opacity(&self, now_ms: u64) -> f32;
+}
+
+impl Shown for WorldNotice {
+    type Part = Part;
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn up(&self, now_ms: u64) -> bool {
+        WorldNotice::up(self, now_ms)
+    }
+    fn size(&self) -> Vec2 {
+        CARD
+    }
+    fn part_at(&self, p: Pos2) -> Option<Part> {
+        world_notice::part_at(p)
+    }
+    fn look(&self, _now_ms: u64) -> u64 {
+        u64::from(self.earns == Some(1.0))
+    }
+    fn paint(&self, p: &egui::Painter, zoom: f32, hover: Option<Part>, _now_ms: u64) {
+        world_notice::paint_card(p, Pos2::ZERO, zoom, world_notice::GROUND, self.earns == Some(1.0), hover);
+    }
+    fn press(&self, backend: &Ctl, part: Part) {
+        backend.explorer(match part {
+            Part::Take => Command::NoticeTake { id: self.id },
+            Part::Close => Command::NoticeDismiss { id: self.id },
+        });
+    }
+    fn held(&self, backend: &Ctl) {
+        backend.explorer(Command::NoticeHeld { id: self.id });
+    }
+    fn opacity(&self, now_ms: u64) -> f32 {
+        world_notice::opacity(self, now_ms)
+    }
+}
+
+impl Shown for crate::controller::avatar_gun::Card {
+    type Part = crate::avatar_gun_ui::Part;
+    fn id(&self) -> u64 {
+        crate::avatar_gun_ui::shown_id(self)
+    }
+    fn up(&self, now_ms: u64) -> bool {
+        crate::controller::avatar_gun::Card::up(self, now_ms)
+    }
+    fn size(&self) -> Vec2 {
+        crate::avatar_gun_ui::size(self)
+    }
+    fn part_at(&self, p: Pos2) -> Option<Self::Part> {
+        crate::avatar_gun_ui::part_at(self, p)
+    }
+    fn look(&self, now_ms: u64) -> u64 {
+        // Its words, and its line of time left in sixty steps.
+        super::super::floating::prompt::look_of((&self.from, &self.avatar, (self.left(now_ms) * 60.0).ceil() as u32))
+    }
+    fn paint(&self, p: &egui::Painter, zoom: f32, hover: Option<Self::Part>, now_ms: u64) {
+        crate::avatar_gun_ui::paint_card(p, Pos2::ZERO, zoom, world_notice::GROUND, self, None, hover, self.left(now_ms));
+    }
+    fn press(&self, backend: &Ctl, part: Self::Part) {
+        backend.avatar_gun(crate::avatar_gun_ui::command(self, part));
+    }
+    fn opacity(&self, now_ms: u64) -> f32 {
+        crate::avatar_gun_ui::opacity(self, now_ms)
+    }
+}
+
+/// A card in the bottom right corner of VRChat's window, a window of its own.
+pub(crate) struct Card<T: Shown> {
     pub(super) window: Option<PanelWindow>,
     canvas: Option<crate::overlay::Canvas>,
     px: [u32; 2],
-    /// What its picture shows: the notice, the part under the pointer, whether it says the point, the language.
-    drawn: Option<(u64, Option<Part>, bool, orbiters_i18n::Language)>,
-    /// A button went down on this part of this notice's card.
-    down: Option<(u64, Part)>,
-    /// The notice pressed here: it goes at once, before the service's word.
+    /// What its picture shows: what it is, its look, the part under the pointer, the language.
+    drawn: Option<(u64, u64, Option<T::Part>, orbiters_i18n::Language)>,
+    /// A button went down on this part of this card.
+    down: Option<(u64, T::Part)>,
+    /// The card pressed here: it goes at once, before the service's word.
     gone: Option<u64>,
     /// When the service last heard that it is held back.
     held_said: Option<Instant>,
 }
 
-impl Card {
+impl<T: Shown> Default for Card<T> {
+    fn default() -> Self {
+        Self { window: None, canvas: None, px: [0, 0], drawn: None, down: None, gone: None, held_said: None }
+    }
+}
+
+impl<T: Shown> Card<T> {
     pub(super) fn owns(&self, id: isize) -> bool {
         self.window.as_ref().is_some_and(|w| w.id() == id)
     }
@@ -74,46 +166,43 @@ impl Card {
         }
     }
 
-    /// One turn: `notice` the service's, `in_the_way` one of our pages or VRChat's wheel or camera panel, `parts` what else
+    /// One turn: `shown` the service's, `in_the_way` one of our pages or VRChat's wheel or camera panel, `parts` what else
     /// lies over VRChat's window now (its Quick Menu, parts of ours), VRChat's window at `origin` (screen pixels) of `client`
     /// pixels, `clicks` the card window's buttons since the last turn (down or up), the pointer at `cursor`. Says whether a
     /// press acted.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn update(&mut self, backend: &Ctl, notice: Option<&WorldNotice>, in_the_way: bool, parts: &[Rect], origin: Pos2, client: Vec2, clicks: &[bool], cursor: (i32, i32), now: Instant) -> bool {
-        let now_ms = crate::controller::explorer::now_ms();
-        let Some(n) = notice.filter(|n| n.up(now_ms) && self.gone != Some(n.id)) else {
+    pub(super) fn update(&mut self, backend: &Ctl, shown: Option<&T>, in_the_way: bool, parts: &[Rect], origin: Pos2, client: Vec2, clicks: &[bool], cursor: (i32, i32), now: Instant) -> bool {
+        let now_ms = crate::controller::unix_ms();
+        let Some(n) = shown.filter(|n| n.up(now_ms) && self.gone != Some(n.id())) else {
             self.hide();
             return false;
         };
-        let (rect, zoom) = rect(client);
+        let (rect, zoom) = rect_of(client, n.size());
         if in_the_way || !clear(rect, parts) {
             self.hide();
             if self.held_said.is_none_or(|at| now.duration_since(at) >= Duration::from_secs(1)) {
                 self.held_said = Some(now);
-                backend.explorer(Command::NoticeHeld { id: n.id });
+                n.held(backend);
             }
             return false;
         }
         let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
         if self.px != px || self.window.is_none() {
-            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("world notice window: {e}")).ok(); // i18n: not shown (a log's line)
+            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("corner card window: {e}")).ok(); // i18n: not shown (a log's line)
             self.canvas = Some(crate::overlay::Canvas::new(px[0], px[1]));
             self.px = px;
             self.drawn = None;
         }
         let screen = rect.translate(origin.to_vec2());
         let c = pos2(cursor.0 as f32, cursor.1 as f32);
-        let over = screen.contains(c).then(|| world_notice::part_at(((c - screen.min) / zoom).to_pos2())).flatten();
+        let over = screen.contains(c).then(|| n.part_at(((c - screen.min) / zoom).to_pos2())).flatten();
         let mut acted = false;
         for &down in clicks {
             if down {
-                self.down = over.map(|p| (n.id, p));
+                self.down = over.map(|p| (n.id(), p));
             } else if let Some((id, part)) = self.down.take() {
-                if id == n.id && over == Some(part) {
-                    backend.explorer(match part {
-                        Part::Take => Command::NoticeTake { id },
-                        Part::Close => Command::NoticeDismiss { id },
-                    });
+                if id == n.id() && over == Some(part) {
+                    n.press(backend, part);
                     self.gone = Some(id);
                     acted = true;
                 }
@@ -124,17 +213,16 @@ impl Card {
             return true;
         }
         let (Some(window), Some(canvas)) = (self.window.as_mut(), self.canvas.as_mut()) else { return false };
-        let earns_one = n.earns == Some(1.0);
-        let look = (n.id, over, earns_one, orbiters_i18n::language());
+        let look = (n.id(), n.look(now_ms), over, orbiters_i18n::language());
         if self.drawn != Some(look) {
             // The first paint loads the fonts.
             for _ in 0..if self.drawn.is_none() { 2 } else { 1 } {
-                canvas.paint(0.0, |p| world_notice::paint_card(p, Pos2::ZERO, zoom, world_notice::GROUND, earns_one, over));
+                canvas.paint(0.0, |p| n.paint(p, zoom, over, now_ms));
             }
             window.picture(canvas.pixels(), [0, 0, px[0], px[1]]);
             self.drawn = Some(look);
         }
-        let alpha = (world_notice::opacity(n, now_ms) * 255.0).round() as u8;
+        let alpha = (n.opacity(now_ms) * 255.0).round() as u8;
         window.place_if_changed(POINT { x: screen.min.x.round() as i32, y: screen.min.y.round() as i32 }, alpha);
         false
     }

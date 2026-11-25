@@ -24,6 +24,9 @@ pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
 
 /// Watches the service's state and shows the panel while [`wanted_on_desktop`].
 pub fn start(ctl: crate::controller::Shared) {
+    if orbiters_core::here::LINUX && !orbiters_core::here::HERE.desktop_panels {
+        return;
+    }
     let spawned = std::thread::Builder::new().name("coverage-window".into()).spawn(move || {
         let started = Instant::now();
         let mut window: Option<win::Panel> = None;
@@ -209,7 +212,11 @@ mod win {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "linux/coverage.rs"]
+mod win;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod win {
     pub struct Panel;
 

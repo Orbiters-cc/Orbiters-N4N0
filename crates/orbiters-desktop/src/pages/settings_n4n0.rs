@@ -128,7 +128,7 @@ pub fn menu_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bo
         tr("Opens in the SteamVR overlay, in front of you")
     };
     section(ui, cx, index, icons::STACK, tr("N4N0's menu"), Some(menu_sub), |ui| {
-        if orbiters_core::osc::VRCHAT_RUNS_HERE {
+        if orbiters_core::here::HERE.around() {
             use orbiters_core::settings::MenuDisplay;
             // Two different things, each whole without the other (moved from Settings' Performance card).
             let ways = [SegOption::new(MenuDisplay::AvatarScreen, tr("Avatar's screen")), SegOption::new(MenuDisplay::Floating, tr("Floating"))];
@@ -200,6 +200,20 @@ pub fn menu_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bo
             use orbiters_core::settings::ScreenSize as S;
             let options = [SegOption::new(S::Small, tr("Small")), SegOption::new(S::Medium, tr("Medium")), SegOption::new(S::Large, tr("Large")), SegOption::new(S::Larger, tr("Larger"))];
             apply |= widgets::segmented(ui, "n4n0-screen-size", &mut draft.n4n0.menu.screen_size, &options, true);
+        });
+    });
+    apply
+}
+
+/// The avatar gun: who may change this player's avatar with one (contracts `Docs/avatar-gun.md`). The gun itself, its
+/// picker and how it works, are on the N4N0 page.
+pub fn avatar_gun_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
+    let mut apply = false;
+    section(ui, cx, index, icons::CROSSHAIR, tr(super::avatar_gun::TITLE), Some(tr(super::avatar_gun::SUB)), |ui| {
+        let options = super::avatar_gun::allow_options();
+        let width = widgets::segmented_width(ui, &options, true);
+        widgets::field(ui, tr(super::avatar_gun::WHO), Some(tr(super::avatar_gun::WHO_WHY)), width, |ui| {
+            apply |= widgets::segmented(ui, "avatar-gun-allow", &mut draft.avatar_gun.allow, &options, true);
         });
     });
     apply

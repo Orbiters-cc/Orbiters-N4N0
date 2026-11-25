@@ -306,9 +306,9 @@ fn write_cache(path: &Path, entries: &HashMap<String, (i64, String)>) {
         out.push_str(&format!("{t}\t{g}\t{rel}\n"));
     }
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::disk::create_dir_all(dir);
     }
-    let _ = orbiters_core::write_atomic(path, out.as_bytes());
+    let _ = crate::disk::write_atomic(path, out.as_bytes());
 }
 
 /// Unity's asset database (`Library/SourceAssetDB`, an LMDB file), read without LMDB: the current B-tree of its

@@ -140,6 +140,20 @@ impl Source {
             None => Err(Error::Unauthorized.into()),
         }
     }
+    /// The signed-in VRChat account's avatar favourite groups: tag and name, in VRChat's order. Needs the personal session.
+    pub fn favorite_avatar_groups(&self) -> anyhow::Result<Vec<(String, String)>> {
+        match self.direct(|c| c.favorite_avatar_groups()) {
+            Some(r) => r,
+            None => Err(Error::Unauthorized.into()),
+        }
+    }
+    /// The public avatars of the account's avatar favourite group `tag`, every page. Needs the personal session.
+    pub fn favorite_avatars(&self, tag: &str) -> anyhow::Result<Vec<Avatar>> {
+        match self.direct(|c| c.favorite_avatars(tag)) {
+            Some(r) => r,
+            None => Err(Error::Unauthorized.into()),
+        }
+    }
     /// A new private instance of `world`, owned by the signed-in account. Needs the personal session.
     pub fn create_private_instance(&self, world: &str, region: &str) -> anyhow::Result<String> {
         match self.direct(|c| c.create_private_instance(world, region)) {

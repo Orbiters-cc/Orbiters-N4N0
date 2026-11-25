@@ -21,7 +21,7 @@ use orbiters_core::call::{self, CallCommand, CallEvent, EndReason, IceCandidate,
 use orbiters_core::vrchat_accounts::{self, LocalVrchat};
 use orbiters_i18n::{fill, tr, tr_latin};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -332,6 +332,11 @@ pub struct CallsRuntime {
 }
 
 impl CallsRuntime {
+    /// Its calls numbered from `numbered` on.
+    pub(super) fn from(numbered: u64) -> Self {
+        Self { numbered, ..Self::default() }
+    }
+
     fn current(&mut self, number: u64) -> Option<&mut Call> {
         self.call.as_mut().filter(|c| c.number == number)
     }
@@ -702,123 +707,6 @@ pub fn pick(value: f32, count: usize) -> usize {
         return 0;
     }
     ((value.clamp(0.0, 1.0) * count as f32) as usize).min(count - 1)
-}
-
-/// Server-sent events, a line at a time.
-#[derive(Default)]
-struct Sse {
-    event: String,
-    data: String,
-    too_big: bool,
-}
-
-impl Sse {
-    /// The event a blank line completes: its name and data. Comments (`: ping`) and other fields give nothing; an
-    /// event whose data passes [`EVENT_MOST`] is dropped.
-    fn line(&mut self, line: &str) -> Option<(String, String)> {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.is_empty() {
-            let done = (!self.event.is_empty() && !self.too_big).then(|| (std::mem::take(&mut self.event), std::mem::take(&mut self.data)));
-            self.event.clear();
-            self.data.clear();
-            self.too_big = false;
-            return done;
-        }
-        if let Some(v) = line.strip_prefix("event:") {
-            self.event = v.trim().to_string();
-        } else if let Some(v) = line.strip_prefix("data:") {
-            if !self.data.is_empty() {
-                self.data.push('\n');
-            }
-            self.data.push_str(v.strip_prefix(' ').unwrap_or(v));
-            if self.data.len() > EVENT_MOST {
-                self.data.clear();
-                self.too_big = true;
-            }
-        }
-        None
-    }
-}
-
-/// One line of `input` into `line` (without its end), at most `most` bytes: a longer one is skipped whole (false).
-/// `None` at the end.
-fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, most: usize) -> std::io::Result<Option<bool>> {
-    line.clear();
-    let (mut any, mut skipped) = (false, false);
-    loop {
-        let buf = match input.fill_buf() {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        if buf.is_empty() {
-            return Ok(any.then_some(!skipped));
-        }
-        any = true;
-        let newline = buf.iter().position(|&b| b == b'\n');
-        let chunk = &buf[..newline.unwrap_or(buf.len())];
-        if !skipped && line.len() + chunk.len() <= most {
-            line.extend_from_slice(chunk);
-        } else {
-            skipped = true;
-            line.clear();
-        }
-        let used = newline.map_or(buf.len(), |i| i + 1);
-        input.consume(used);
-        if newline.is_some() {
-            return Ok(Some(!skipped));
-        }
-    }
-}
-
-/// An HTTP client whose reads give up after `idle` without a byte: a connection that died without a word ends
-/// instead of waiting forever. (ureq has only overall timeouts; this wraps its transport.)
-fn idle_agent(connect: Duration, idle: Duration) -> ureq::Agent {
-    use ureq::unversioned::resolver::DefaultResolver;
-    use ureq::unversioned::transport::{Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport};
-
-    #[derive(Debug)]
-    struct Idle(Duration);
-
-    #[derive(Debug)]
-    struct IdleTransport<T> {
-        inner: T,
-        idle: Duration,
-    }
-
-    impl<In: Transport> Connector<In> for Idle {
-        type Out = IdleTransport<In>;
-
-        fn connect(&self, _: &ConnectionDetails, chained: Option<In>) -> Result<Option<Self::Out>, ureq::Error> {
-            Ok(chained.map(|inner| IdleTransport { inner, idle: self.0 }))
-        }
-    }
-
-    impl<T: Transport> Transport for IdleTransport<T> {
-        fn buffers(&mut self) -> &mut dyn Buffers {
-            self.inner.buffers()
-        }
-
-        fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
-            self.inner.transmit_output(amount, timeout)
-        }
-
-        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
-            let idle = NextTimeout { after: self.idle.into(), reason: ureq::Timeout::RecvBody };
-            self.inner.await_input(if idle.after < timeout.after { idle } else { timeout })
-        }
-
-        fn is_open(&mut self) -> bool {
-            self.inner.is_open()
-        }
-
-        fn is_tls(&self) -> bool {
-            self.inner.is_tls()
-        }
-    }
-
-    let config = ureq::Agent::config_builder().middleware(orbiters_core::origin::guard).tls_config(orbiters_core::http_tls()).timeout_connect(Some(connect)).build();
-    ureq::Agent::with_parts(config, DefaultConnector::new().chain(Idle(idle)), DefaultResolver::default())
 }
 
 /// A request about a call, its answer as JSON (`null` when it has none).
@@ -1238,34 +1126,19 @@ impl super::Controller {
     /// Reads the server's event stream until it ends, fails, stays silent past [`STREAM_IDLE`] or is replaced. True
     /// when it delivered something.
     fn calls_events(self: &Shared, api: &Api, token: &str, number: u64) -> anyhow::Result<bool> {
-        let agent = idle_agent(Duration::from_secs(15), STREAM_IDLE);
-        let response =
-            agent.get(&api.url("n4n0/calls/events")).header("Authorization", &format!("Bearer {token}")).header("Accept", "text/event-stream").call()?;
-        let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
-        let mut sse = Sse::default();
-        let mut line = Vec::new();
-        let mut delivered = false;
-        while let Some(whole) = read_line(&mut reader, &mut line, EVENT_MOST)? {
-            delivered = true;
-            {
-                let rt = self.calls.lock().unwrap();
-                if rt.stop || rt.streaming.as_ref().is_none_or(|(n, _)| *n != number) {
-                    break;
-                }
+        let still = || {
+            let rt = self.calls.lock().unwrap();
+            !rt.stop && rt.streaming.as_ref().is_some_and(|(n, _)| *n == number)
+        };
+        super::event_stream::follow(&api.url("n4n0/calls/events"), token, STREAM_IDLE, EVENT_MOST, still, |event, data| {
+            // A stream of the account before (switched since): it ends here, its events reach nobody.
+            if !self.calls_current(&(api.url(""), token.to_string())) {
+                return false;
             }
-            if !whole {
-                continue;
-            }
-            if let Some((event, data)) = sse.line(&String::from_utf8_lossy(&line)) {
-                // A stream of the account before (switched since): it ends here, its events reach nobody.
-                if !self.calls_current(&(api.url(""), token.to_string())) {
-                    break;
-                }
-                let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
-                self.on_call_event(&event, value, token);
-            }
-        }
-        Ok(delivered)
+            let value: Value = serde_json::from_str(data).unwrap_or(Value::Null);
+            self.on_call_event(event, value, token);
+            true
+        })
     }
 
     /// One event of the server's stream.
@@ -2078,39 +1951,52 @@ mod tests {
         ctl
     }
 
-    /// Verify4-r21 P2, through the real commands: Hang up and Unmute are for the call their button showed, and for the member who
-    /// saw it; a delayed one for another call, or after another member signed in, does nothing.
+    /// Verify4-r21 P2, verify5-r21 M1, through the real commands: Hang up and Mute end and mute the call their button showed,
+    /// whoever Orbiters takes the person for by then; for another call, or the one of a member who left, they do nothing.
     #[test]
-    fn a_hang_up_for_another_call_or_member_ends_nothing() {
+    fn a_hang_up_is_for_the_call_it_showed() {
         use crate::ipc::N4n0Command;
+        let server = orbiters_core::account::Server::Production;
         let ctl = signed_in_as_a_in_a_call();
         ctl.sign_in_for_test("1");
-        ctl.calls.lock().unwrap().call.as_mut().unwrap().muted = true;
         let shown = ctl.snapshot.lock().unwrap().n4n0.calls.call.as_ref().map(|c| c.number).unwrap();
         let at = |epoch: u64| Some(orbiters_n4n0::Stamp { epoch, question: None, surface: orbiters_n4n0::Surface::Window, seq: orbiters_n4n0::next_input() });
         let a = ctl.identity_epoch();
         let settle = || std::thread::sleep(Duration::from_millis(100));
-        let untouched = || {
-            settle();
-            ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted)
-        };
-        for (call, stamp) in [(Some(shown + 1), at(a)), (None, at(a)), (Some(shown), at(a + 1)), (Some(shown), None)] {
-            ctl.n4n0_command(N4n0Command::MuteCall { on: false, call, stamp });
+        for (call, stamp) in [(Some(shown + 1), at(a)), (None, at(a)), (Some(shown), None)] {
+            ctl.n4n0_command(N4n0Command::MuteCall { on: true, call, stamp });
             ctl.n4n0_command(N4n0Command::EndCall { call, stamp });
-            assert!(untouched(), "{call:?} {stamp:?}");
-        }
-        // B signs in (here their own call has the same number).
-        let delayed = at(a);
-        ctl.sign_in_for_test("2");
-        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: delayed });
-        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: delayed });
-        assert!(untouched(), "A's press, after B");
-        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: at(ctl.identity_epoch()) });
-        let until = Instant::now() + Duration::from_secs(3);
-        while ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| c.muted) {
-            assert!(Instant::now() < until, "B's own press");
             settle();
+            assert!(ctl.calls.lock().unwrap().call.as_ref().is_some_and(|c| !c.muted), "{call:?} {stamp:?}");
         }
+        // The account's file cannot be read: nobody is known, the call goes on, and is muted and left all the same, by what a
+        // window showed before or since.
+        ctl.account_runtime.lock().unwrap().read = Some((server, None));
+        ctl.read_account_with(server, None, false, || Err(anyhow::anyhow!("being written")), |_| unreachable!());
+        assert_eq!(ctl.signed_as(), orbiters_n4n0::status::SignedAs::Unknown);
+        let muted = || ctl.calls.lock().unwrap().call.as_ref().map(|c| c.muted);
+        ctl.n4n0_command(N4n0Command::MuteCall { on: true, call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        settle();
+        assert_eq!(muted(), Some(true));
+        ctl.n4n0_command(N4n0Command::MuteCall { on: false, call: Some(shown), stamp: at(a) });
+        settle();
+        assert_eq!(muted(), Some(false));
+        let late = at(a);
+        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        settle();
+        assert_eq!(muted(), None, "left");
+        // Another call since: a press that comes late is not for it.
+        {
+            let mut rt = ctl.calls.lock().unwrap();
+            rt.numbered += 1;
+            let mut call = Call::new(rt.numbered, "c_2".into(), "Nova".into(), false, Instant::now());
+            call.phase = CallPhase::Connected;
+            rt.call = Some(call);
+        }
+        ctl.n4n0_command(N4n0Command::MuteCall { on: true, call: Some(shown), stamp: at(ctl.identity_epoch()) });
+        ctl.n4n0_command(N4n0Command::EndCall { call: Some(shown), stamp: late });
+        settle();
+        assert_eq!(muted(), Some(false));
     }
 
     fn in_a_call(ctl: &crate::controller::Shared) -> bool {
@@ -2565,74 +2451,5 @@ mod tests {
         let n = calling(&mut rt, now);
         assert!(rt.worker_event(CallEvent::Levels { call: n, mic: 0.31, remote: 0.0 }, now).publish);
         assert!(!rt.worker_event(CallEvent::Levels { call: n, mic: 0.32, remote: 0.01 }, now).publish);
-    }
-
-    #[test]
-    fn server_sent_events_are_read_line_by_line() {
-        let mut sse = Sse::default();
-        let mut events = Vec::new();
-        for line in [": ping", "", "event: incoming", "data: {\"call\":", "data: \"k_1\"}", "", "event: ended\r", "data: {}\r", "\r"] {
-            events.extend(sse.line(line));
-        }
-        assert_eq!(events, vec![("incoming".to_string(), "{\"call\":\n\"k_1\"}".to_string()), ("ended".to_string(), "{}".to_string())]);
-        // An event too big to be one is dropped whole.
-        let big = format!("data: {}", "x".repeat(EVENT_MOST + 1));
-        for line in ["event: candidates", big.as_str()] {
-            assert!(sse.line(line).is_none());
-        }
-        assert!(sse.line("").is_none());
-        assert_eq!(sse.line("event: declined").or(sse.line("")), Some(("declined".to_string(), String::new())));
-    }
-
-    #[test]
-    fn a_silent_event_stream_gives_up() {
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        // The server stays silent until the test is done, so that only the idle timeout can end the read.
-        let (done, wait) = std::sync::mpsc::channel::<()>();
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0u8; 1024];
-            let _ = socket.read(&mut request);
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n: ping\n\n").unwrap();
-            // Then nothing, as from a server behind a connection that died.
-            let _ = wait.recv_timeout(Duration::from_secs(30));
-        });
-        let agent = idle_agent(Duration::from_secs(2), Duration::from_millis(300));
-        let response = agent.get(&format!("http://127.0.0.1:{port}/n4n0/calls/events")).call().unwrap();
-        let mut reader = BufReader::new(response.into_body().into_with_config().limit(u64::MAX).reader());
-        let mut line = Vec::new();
-        assert_eq!(read_line(&mut reader, &mut line, EVENT_MOST).unwrap(), Some(true));
-        assert_eq!(line, b": ping");
-        let started = Instant::now();
-        let mut ended = false;
-        for _ in 0..3 {
-            match read_line(&mut reader, &mut line, EVENT_MOST) {
-                Ok(Some(_)) => continue,
-                Ok(None) | Err(_) => {
-                    ended = true;
-                    break;
-                }
-            }
-        }
-        // 300 ms of silence ends it; the bound leaves room for a busy computer.
-        let waited = started.elapsed();
-        let _ = done.send(());
-        server.join().unwrap();
-        assert!(ended && waited < Duration::from_secs(10), "the read gave up after {waited:?}");
-    }
-
-    #[test]
-    fn long_lines_are_skipped_whole() {
-        let text = format!("a\n{}\nb", "x".repeat(40));
-        let mut reader = std::io::BufReader::with_capacity(8, text.as_bytes());
-        let mut line = Vec::new();
-        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(true));
-        assert_eq!(line, b"a");
-        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(false));
-        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), Some(true));
-        assert_eq!(line, b"b");
-        assert_eq!(read_line(&mut reader, &mut line, 16).unwrap(), None);
     }
 }

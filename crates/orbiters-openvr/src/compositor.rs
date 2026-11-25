@@ -13,9 +13,10 @@ pub enum Eye {
     Right = 1,
 }
 
-/// `Compositor_FrameTiming` (192 bytes): one frame of the scene application.
+/// `Compositor_FrameTiming` (192 bytes; 188 on Linux, where Valve's header packs it to 4): one frame of the scene application.
 #[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
+#[cfg_attr(not(target_os = "linux"), repr(C))]
+#[cfg_attr(target_os = "linux", repr(C, packed(4)))]
 pub struct FrameTiming {
     pub size: u32,
     pub frame_index: u32,
@@ -152,7 +153,12 @@ mod tests {
     }
     #[test]
     fn frame_timing_matches_openvr() {
-        assert_eq!(std::mem::size_of::<super::FrameTiming>(), 192);
+        use super::FrameTiming;
+        // Linux's, from a program compiled there with Valve's openvr.h (2026-11-24).
+        assert_eq!(std::mem::size_of::<FrameTiming>(), if cfg!(target_os = "linux") { 188 } else { 192 });
+        assert_eq!(std::mem::offset_of!(FrameTiming, system_time_s), 24);
+        assert_eq!(std::mem::offset_of!(FrameTiming, hmd_pose), 96);
+        assert_eq!(std::mem::offset_of!(FrameTiming, num_vsyncs_ready_for_use), 176);
         assert_eq!(std::mem::offset_of!(super::FrameTiming, system_time_s), 24);
         assert_eq!(std::mem::offset_of!(super::FrameTiming, client_frame_interval_ms), 56);
         assert_eq!(std::mem::offset_of!(super::FrameTiming, hmd_pose), 96);

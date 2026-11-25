@@ -566,6 +566,9 @@ pub enum Picture {
     World { scope: crate::controller::vrchat_data::Scope, world_id: String, url: String },
     /// A world's thumbnail only if it is already kept on this computer: never fetched (verify-r21 Major 6).
     RemoteKept { world_id: String, url: String },
+    /// An avatar's thumbnail at the address VRChat gave for it (the avatar gun's picker, its cards): kept on this computer
+    /// once read, read through the service with the session of `scope` (no cookie leaves it), as [`Picture::World`] is.
+    Avatar { scope: crate::controller::vrchat_data::Scope, avatar_id: String, url: String },
     /// An event's cover on Orbiters, read with the account's credential when signed in (members-only covers need it).
     EventCover { development: bool, id: String },
     /// Another picture a few pixels wide, to draw large and soft as its light (behind an event, its window).
@@ -725,6 +728,8 @@ impl Pictures {
                                     .unwrap_or(None)
                             } else if let Picture::World { scope, world_id, url } = &picture {
                                 Some(world_picture(backend.as_ref(), scope, world_id, url))
+                            } else if let Picture::Avatar { scope, avatar_id, url } = &picture {
+                                Some(avatar_picture(backend.as_ref(), scope, avatar_id, url))
                             } else {
                                 // The environment of the moment, for each picture (one chosen since the loader started is
                                 // the one asked; CORE2-13).
@@ -1074,6 +1079,7 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
         }
         // (Read with a session, by the loader itself.)
         Picture::World { world_id, url, .. } => kept_world(world_id, url),
+        Picture::Avatar { avatar_id, url, .. } => kept_avatar(avatar_id, url),
         Picture::RemoteKept { world_id, url } => {
             let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
             let (w, h, rgba) = decode_image(&std::fs::read(&file).ok()?)?;
@@ -1102,6 +1108,40 @@ fn world_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controlle
     };
     let (w, h, rgba) = decode_image(&bytes)?;
     let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
+    if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
+        let _ = orbiters_core::write_atomic(&file, &bytes);
+    }
+    Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+}
+
+fn avatar_file(avatar_id: &str, url: &str) -> PathBuf {
+    cache_dir().join("avatars").join(remote_file_name(avatar_id, url, false))
+}
+
+fn kept_avatar(avatar_id: &str, url: &str) -> Option<ColorImage> {
+    if !orbiters_contracts::avatar_gun::is_avatar_id(avatar_id) {
+        return None;
+    }
+    let (w, h, rgba) = decode_image(&std::fs::read(avatar_file(avatar_id, url)).ok()?)?;
+    Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
+}
+
+/// [`Picture::Avatar`], on a loader thread: kept, or read through the service (VRChat's image hosts with the person's
+/// session) and kept; without one, as any public picture.
+fn avatar_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controller::vrchat_data::Scope, avatar_id: &str, url: &str) -> Option<ColorImage> {
+    if let Some(kept) = kept_avatar(avatar_id, url) {
+        return Some(kept);
+    }
+    if !orbiters_contracts::avatar_gun::vrchat_picture(url) || !orbiters_contracts::avatar_gun::is_avatar_id(avatar_id) {
+        return None;
+    }
+    let bytes = match backend.filter(|_| scope.signed_in()) {
+        Some(backend) => profile_fetch(backend, scope)(url).ok()?,
+        None if cfg!(test) => return None,
+        None => public_api().0.image(url).ok()?,
+    };
+    let (w, h, rgba) = decode_image(&bytes)?;
+    let file = avatar_file(avatar_id, url);
     if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
         let _ = orbiters_core::write_atomic(&file, &bytes);
     }

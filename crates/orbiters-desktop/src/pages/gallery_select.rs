@@ -268,6 +268,10 @@ impl Selection {
     /// The drag picks up the card, or the whole selection when the card is in it; what is only on Orbiters starts
     /// coming.
     fn lift(&mut self, ctx: &egui::Context, e: &Entry, order: &[Entry]) {
+        // Nothing can be handed to another program by a drag: the press stays a press.
+        if !orbiters_core::here::HERE.drag_out {
+            return;
+        }
         let keys: Vec<String> =
             if self.keys.contains(&e.key) { order.iter().filter(|o| self.keys.contains(&o.key)).map(|o| o.key.clone()).collect() } else { vec![e.key.clone()] };
         let entries = by_keys(order, &keys);

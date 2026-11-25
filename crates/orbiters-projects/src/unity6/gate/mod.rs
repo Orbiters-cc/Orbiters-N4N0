@@ -259,6 +259,8 @@ pub enum Refused {
     Unreadable(String),
     /// The original links to a folder Orbiters keeps its own files in (or a duplicate's, Creator Companion).
     Own(PathBuf),
+    /// In Creator Companion's or ALCOM's folder.
+    Theirs(String),
 }
 
 impl Refused {
@@ -270,7 +272,7 @@ impl Refused {
             Refused::Shared(p) => tr!("The original uses {path}: a copy there would change it. Choose a folder the original does not use.", path = p.display()),
             Refused::InsideProject(p) => tr!("{project} is a Unity project: choose a folder outside any Unity project.", project = p.display()),
             Refused::Exists(p) => tr!("{path} exists already: choose another name.", path = p.display()),
-            Refused::Name(why) => why.clone(),
+            Refused::Name(why) | Refused::Theirs(why) => why.clone(),
             Refused::Own(p) => tr!("The original links to {path}, where Orbiters or Creator Companion keeps its own files: working on a copy of it would write in what it links to.", path = p.display()),
             Refused::Unreadable(why) => tr!("This place cannot be checked: {why}", why = why),
         }
@@ -299,6 +301,8 @@ impl Destination {
         if !plain || parent.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(Refused::NotLocal);
         }
+        // What is made here is written through its held folder: that it is none of theirs is asked once, of the place.
+        crate::disk::tree(&parent.join(name)).map_err(|e| Refused::Theirs(e.to_string()))?;
         // The nearest folder of it that is there; what is missing below it are plain names.
         let (mut existing, mut missing) = (parent, vec![]);
         while parents == Parents::Make && !existing.exists() {
@@ -365,7 +369,7 @@ impl Destination {
     /// relative to the handle of the one above.
     pub fn make(self) -> io::Result<NewFolder> {
         let path = self.path();
-        let mut made = NewFolder { id: FileId { volume: 0, index: 0 }, path, parent: self.parent, chain: vec![] };
+        let mut made = NewFolder { id: FileId { volume: 0, index: 0, born: 0 }, path, parent: self.parent, chain: vec![] };
         for name in self.missing.iter().chain([&self.name]) {
             let above = made.chain.last().map_or(&made.parent.dir, |c| &c.dir);
             let step = (|| -> io::Result<Link> {
@@ -508,6 +512,7 @@ impl WriteRoot {
         if !allowed || !apart {
             return Err(not_it());
         }
+        crate::disk::content(&place.path)?;
         let held = sys::open_root(&place.path, false).map_err(|_| not_it())?;
         let now = id_of_file(&held)?;
         if sys::is_link(&held)? || now != recorded || !held.metadata()?.is_dir() {
@@ -658,12 +663,13 @@ impl Drop for Lock {
 impl AppRoot {
     /// `dir`, made when it is not there.
     pub fn open(dir: &Path) -> io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
+        crate::disk::create_dir_all(dir)?;
         Self::existing(dir)
     }
 
     /// `dir`, when it is there.
     pub fn existing(dir: &Path) -> io::Result<Self> {
+        crate::disk::content(dir)?;
         Ok(Self { dir: sys::open_root(dir, true)? })
     }
 

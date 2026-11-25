@@ -102,14 +102,14 @@ fn c(text: &str) -> Result<CString, i32> {
 impl Input<'_> {
     /// Loads the action manifest at `path` (absolute). Once per process.
     pub fn set_action_manifest(&self, path: &Path) -> Result<(), i32> {
-        type F = unsafe extern "system" fn(*const i8) -> i32;
+        type F = unsafe extern "system" fn(*const std::ffi::c_char) -> i32;
         let path = c(&path.to_string_lossy())?;
         // SAFETY: IVRInput_011 entry 0 is SetActionManifestPath; NUL-terminated path.
         result(unsafe { entry::<F>(self.table, 0)(path.as_ptr()) })
     }
 
     pub fn action_set(&self, name: &str) -> Result<ActionSetHandle, i32> {
-        type F = unsafe extern "system" fn(*const i8, *mut u64) -> i32;
+        type F = unsafe extern "system" fn(*const std::ffi::c_char, *mut u64) -> i32;
         let name = c(name)?;
         let mut handle = 0;
         // SAFETY: entry 1 is GetActionSetHandle.
@@ -118,7 +118,7 @@ impl Input<'_> {
     }
 
     pub fn action(&self, name: &str) -> Result<ActionHandle, i32> {
-        type F = unsafe extern "system" fn(*const i8, *mut u64) -> i32;
+        type F = unsafe extern "system" fn(*const std::ffi::c_char, *mut u64) -> i32;
         let name = c(name)?;
         let mut handle = 0;
         // SAFETY: entry 2 is GetActionHandle.
@@ -128,7 +128,7 @@ impl Input<'_> {
 
     /// A device path's handle (`/user/hand/left`), for a set restricted to it.
     pub fn input_source(&self, path: &str) -> Result<InputSourceHandle, i32> {
-        type F = unsafe extern "system" fn(*const i8, *mut u64) -> i32;
+        type F = unsafe extern "system" fn(*const std::ffi::c_char, *mut u64) -> i32;
         let path = c(path)?;
         let mut handle = 0;
         // SAFETY: entry 3 is GetInputSourceHandle.

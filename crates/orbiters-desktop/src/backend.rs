@@ -164,6 +164,10 @@ pub trait Backend: Send + Sync {
     /// Uploads the picture file at `path` as the VRChat picture of `id`, an avatar or world of the signed-in VRChat
     /// account. Its step and outcome come in the snapshot's `vrchat_login.upload`, the outcome as a notice too.
     fn vrchat_picture(&self, _scope: controller::vrchat_data::Scope, _id: String, _path: PathBuf) {}
+    /// A VRChat groups request (`controller::groups`). Blocking: call on a thread of its own.
+    fn groups(&self, _scope: controller::vrchat_data::Scope, _request: controller::groups::Request) -> controller::groups::Reply {
+        controller::groups::Reply::Failed(controller::groups::Failure::NotHere)
+    }
     /// Asks for the worker's log; [`Backend::worker_log`] has it once it arrived.
     fn request_worker_log(&self);
     fn worker_log(&self) -> Option<Vec<String>>;
@@ -183,6 +187,8 @@ pub trait Backend: Send + Sync {
     fn n4n0(&self, command: N4n0Command);
     /// Explorer points: the world notice's and the camera's share buttons' presses (controller/explorer.rs).
     fn explorer(&self, _command: controller::explorer::Command) {}
+    /// The avatar gun: a press on the hit player's card (Allow, Not now, Undo).
+    fn avatar_gun(&self, _command: controller::avatar_gun::Command) {}
     /// VRChat's frames the overlay saw, for world performance statistics.
     fn frames(&self, chunk: crate::state::FrameChunk);
     /// Whether someone wears the headset (the overlay reads SteamVR's activity level).
@@ -272,6 +278,9 @@ impl Backend for Remote {
     }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.0.vrchat_data(scope, request)
+    }
+    fn groups(&self, scope: controller::vrchat_data::Scope, request: controller::groups::Request) -> controller::groups::Reply {
+        self.0.groups(scope, request)
     }
     fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
         self.0.send(&ToService::VrchatPicture { scope, id, path });
@@ -477,6 +486,9 @@ impl Backend for Remote {
     fn explorer(&self, command: controller::explorer::Command) {
         self.0.send(&ToService::Explorer { command, epoch: self.shown_epoch() });
     }
+    fn avatar_gun(&self, command: controller::avatar_gun::Command) {
+        self.0.send(&ToService::AvatarGun { command });
+    }
 
     fn updates(&self, action: UpdateAction) {
         self.0.send(&ToService::Updates { action });
@@ -545,6 +557,9 @@ impl Backend for Local {
     fn switch_demo_avatar(&self) { self.ctl.switch_demo_avatar(); }
     fn vrchat_data(&self, scope: controller::vrchat_data::Scope, request: controller::vrchat_data::Request) -> controller::vrchat_data::Result {
         self.ctl.vrchat_data(scope, request)
+    }
+    fn groups(&self, scope: controller::vrchat_data::Scope, request: controller::groups::Request) -> controller::groups::Reply {
+        self.ctl.groups(controller::groups::LOCAL_LINK, scope, request)
     }
     fn vrchat_picture(&self, scope: controller::vrchat_data::Scope, id: String, path: PathBuf) {
         self.ctl.vrchat_picture(scope, id, path);
@@ -729,6 +744,10 @@ impl Backend for Local {
 
     fn explorer(&self, command: controller::explorer::Command) {
         self.ctl.explorer_command(command, self.shown_epoch());
+    }
+
+    fn avatar_gun(&self, command: controller::avatar_gun::Command) {
+        self.ctl.avatar_gun_command(command);
     }
 
     fn updates(&self, action: UpdateAction) {

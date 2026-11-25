@@ -164,7 +164,12 @@ pub(crate) fn vrchat_turns_in_steps() -> Option<bool> {
     status.is_ok().then_some(value != 0)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) fn vrchat_turns_in_steps() -> Option<bool> {
+    orbiters_core::proton::vrchat()?.prefix.vrchat_registry().u32("VRC_INPUT_COMFORT_TURNING_h2182102264").map(|v| v != 0)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn vrchat_turns_in_steps() -> Option<bool> {
     None
 }

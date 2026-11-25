@@ -1,5 +1,5 @@
 //! Default locations. Everything the user produces lives under `Documents/Orbiters/` (sessions under the home folder's
-//! `Orbiters/` when OneDrive syncs Documents, and all of it there on a Mac); settings under the platform config folder (`%APPDATA%/Orbiters/Desktop`
+//! `Orbiters/` when OneDrive syncs Documents, and all of it there on a Mac and on Linux); settings under the platform config folder (`%APPDATA%/Orbiters/Desktop`
 //! on Windows, `~/.config/orbiters-desktop` on Linux); logs and caches, which stay on this computer, under
 //! `%LOCALAPPDATA%/Orbiters`. An app whose platform keeps its files elsewhere (Android: the app's own files folder)
 //! gives them once at start ([`set_roots`]).
@@ -107,7 +107,8 @@ fn documents_root_in(roots: Option<&Roots>) -> PathBuf {
         Some(r) => r.documents.clone(),
         // Not in a Mac's Documents: gigabytes of captures would go to iCloud where it keeps that folder (as OneDrive does on
         // Windows, below), and the app would ask for permission before it could show anything.
-        None if cfg!(target_os = "macos") => fallback_dir().join("Orbiters"),
+        // (Nor in Linux's, which Nextcloud and others sync.)
+        None if cfg!(any(target_os = "macos", target_os = "linux")) => fallback_dir().join("Orbiters"),
         None => dirs::document_dir().unwrap_or_else(fallback_dir).join("Orbiters"),
     }
 }
@@ -128,7 +129,7 @@ pub fn default_sessions_dir() -> PathBuf {
     if let Some(r) = roots() {
         return documents_root_in(Some(r)).join("Sessions");
     }
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
         return documents_root().join("Sessions");
     }
     match (dirs::document_dir(), dirs::home_dir()) {
@@ -200,6 +201,8 @@ pub fn cache_dir() -> PathBuf {
 fn cache_dir_in(roots: Option<&Roots>) -> PathBuf {
     match roots {
         Some(r) => r.cache.clone(),
+        // `$XDG_CACHE_HOME/orbiters`: what a Linux desktop's cleaners may take.
+        None if cfg!(target_os = "linux") => dirs::cache_dir().unwrap_or_else(|| fallback_dir().join(".cache")).join("orbiters"),
         None => local_data_root_in(None).join("Desktop").join("cache"),
     }
 }
@@ -287,7 +290,10 @@ pub fn vrchat_log_dir() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     #[cfg(windows)]
     candidates.extend(local_low().map(|low| low.join("VRChat").join("VRChat")));
-    #[cfg(not(windows))]
+    // The Proton prefix, in whichever Steam library holds VRChat.
+    #[cfg(target_os = "linux")]
+    candidates.extend(crate::proton::vrchat().map(|v| v.prefix.log_dir()));
+    #[cfg(not(any(windows, target_os = "linux")))]
     if let Some(home) = dirs::home_dir() {
         // Steam Proton prefix (default library and Flatpak Steam).
         for steam in [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
@@ -311,7 +317,9 @@ mod tests {
         }
         assert!(logs_dir().starts_with(local_data_root()));
         // The desktop's cache is in its data folder (in a test build the test's own folders are given apart).
-        assert!(cache_dir_in(None).starts_with(local_data_root_in(None)));
+        if cfg!(not(target_os = "linux")) {
+            assert!(cache_dir_in(None).starts_with(local_data_root_in(None)));
+        }
         #[cfg(windows)]
         assert!(local_low().is_some_and(|low| low.ends_with("LocalLow")));
     }
@@ -326,7 +334,11 @@ mod tests {
         assert_eq!(cache_dir_in(Some(&given)), files.join("cache"));
         assert_eq!(documents_root_in(Some(&given)), files.join("documents"));
         // None given (the desktop): the platform's, as before (computed, never touched here).
-        assert_eq!(cache_dir_in(None), local_data_root_in(None).join("Desktop").join("cache"));
+        if cfg!(target_os = "linux") {
+            assert!(cache_dir_in(None).is_absolute() && cache_dir_in(None).ends_with("orbiters"));
+        } else {
+            assert_eq!(cache_dir_in(None), local_data_root_in(None).join("Desktop").join("cache"));
+        }
         assert!(config_dir_in(None).is_absolute());
     }
 

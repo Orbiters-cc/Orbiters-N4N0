@@ -48,6 +48,7 @@ mod pause_resume;
 mod language_live;
 mod vrchat_login;
 mod launcher;
+mod groups;
 mod launcher_real;
 mod vr_audio;
 mod vrchat_bridge;
@@ -55,6 +56,7 @@ mod worlds_overlay;
 mod quiet_prompt;
 mod chat_bar;
 mod settings_r21;
+mod avatar_gun;
 mod photos_capture;
 
 /// The part of Photos & captures' capture element a scene of the old Capture tab opens it on (REQUEST21 5).
@@ -312,6 +314,10 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     if only.as_deref() == Some("r19-history") {
         return orbit::r19_history_shots(&out);
+    }
+    // The avatar gun's picker sheet and the hit player's card faces (made-up lists, avatars and names).
+    if only.as_deref() == Some("avatar-gun") {
+        return orbit::avatar_gun_shots(&out);
     }
     if let Some(refs) = only.as_deref().and_then(|o| o.strip_prefix("orbit-vr=")) {
         return orbit::vr_shots(&out, std::path::Path::new(refs));
@@ -2542,9 +2548,11 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vr_audio::append(&mut scenarios);
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
+    groups::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
     // REQUEST21 2: Settings in sub-tabs, with its search.
     settings_r21::append(&mut scenarios);
+    avatar_gun::append(&mut scenarios);
     // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
     // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
     for name in INVITE_SHOTS {
@@ -2597,6 +2605,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "r21" && sc.name.starts_with("r21-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "groups" && sc.name.starts_with("groups-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
                 && !(o == "events" && (sc.name.starts_with("events") || sc.name.starts_with("gallery-community")))
@@ -2768,6 +2777,9 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             if sc.page == Page::Settings {
                 staged = settings_r21::stage(&mut app, sc.name, t);
             }
+            if sc.name.starts_with("avatar-gun") {
+                avatar_gun::stage(&ctx, &mut app, sc.name);
+            }
             if sc.name.starts_with("projects-") || sc.name.starts_with("capture-toolkit") {
                 app.projects_mut().stage(&ctx, sc.name);
             }
@@ -2779,6 +2791,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
             }
         }
         launcher::stage(&ctx, &mut app, sc.name, f, sc.frames, t);
+        groups::stage(&ctx, &mut app, sc.name, &sc.snapshot, f);
         launcher_real::stage(&ctx, &mut app, sc.name, f);
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {

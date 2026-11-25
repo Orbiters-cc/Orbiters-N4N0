@@ -191,12 +191,13 @@ type Process = (u32, Option<u32>, Vec<String>, Option<PathBuf>);
 /// Unity's processes.
 fn unity_processes(system: &mut sysinfo::System) -> Vec<Process> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    // (Without threads: on Linux they would be processes of their own, each with Unity's name.)
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
     let pids: Vec<sysinfo::Pid> = system.processes().iter().filter(|(_, p)| p.name().eq_ignore_ascii_case(PROGRAM)).map(|(pid, _)| *pid).collect();
     if pids.is_empty() {
         return vec![];
     }
-    let refresh = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    let refresh = ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::Always);
     #[cfg(target_os = "macos")]
     let refresh = refresh.with_cwd(UpdateKind::Always);
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), false, refresh);

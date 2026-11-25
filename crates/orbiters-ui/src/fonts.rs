@@ -19,11 +19,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub const PHOSPHOR: &[u8] = include_bytes!("../assets/Phosphor.ttf");
 pub const PHOSPHOR_FILL: &[u8] = include_bytes!("../assets/Phosphor-Fill.ttf");
 
-/// The text font on macOS: `scripts/fonts/orbiters_sans.py` makes it from Selawik's sources (SIL Open Font License).
-#[cfg(target_os = "macos")]
+/// The text font on macOS and Linux (a Linux computer's own differ from one to the next): `scripts/fonts/orbiters_sans.py` makes it from Selawik's sources (SIL Open Font License).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SANS: &[u8] = include_bytes!("../assets/OrbitersSans-VF.ttf");
 /// Cascadia Mono (SIL Open Font License), as Windows 11 ships it.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MONO: &[u8] = include_bytes!("../assets/CascadiaMono.ttf");
 
 const WEIGHTS: [u16; 4] = [400, 500, 600, 700];
@@ -232,17 +232,17 @@ fn find_file(names: &[&str]) -> Option<PathBuf> {
     names.iter().find_map(|n| files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n))).cloned())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn find_sans() -> Option<Sans> {
     Some(Sans::Variable(Arc::new(SANS) as Blob))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn find_mono() -> Option<Blob> {
     Some(Arc::new(MONO) as Blob)
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn find_sans() -> Option<Sans> {
     let variable =
         ["InterVariable.ttf", "Inter[opsz,wght].ttf", "Inter-VariableFont_opsz,wght.ttf", "NotoSans[wdth,wght].ttf", "NotoSans-VariableFont_wdth,wght.ttf"];
@@ -263,7 +263,7 @@ fn find_sans() -> Option<Sans> {
     None
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn find_mono() -> Option<Blob> {
     find_file(&["CascadiaMono.ttf", "JetBrainsMono-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf", "LiberationMono-Regular.ttf"])
         .and_then(|p| open(&p))
@@ -899,7 +899,7 @@ mod tests {
     }
 
     /// The bundled text font carries the letters and punctuation the interface writes, with Segoe UI's line height.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn orbiters_sans_is_the_interface_s_font() {
         use skrifa::{instance::Size, MetadataProvider as _};

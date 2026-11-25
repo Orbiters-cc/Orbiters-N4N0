@@ -14,12 +14,12 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
     let mut out = vec![];
     for (id, files) in crate::builtin_templates::TEMPLATES {
         let path = cache.join(id);
-        std::fs::create_dir_all(&path)?;
+        crate::disk::create_dir_all(&path)?;
         for (relative, content) in *files {
             let p = path.join(relative);
             if !p.is_file() {
-                std::fs::create_dir_all(p.parent().unwrap())?;
-                std::fs::write(&p, content)?;
+                crate::disk::create_dir_all(p.parent().unwrap())?;
+                crate::disk::write(&p, content)?;
             }
         }
         let avatars = id.starts_with("avatars");

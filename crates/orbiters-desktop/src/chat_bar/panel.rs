@@ -195,7 +195,7 @@ fn head(bar: &mut ChatBar, ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, panel: Rect)
 /// Why N4N0 cannot answer here, and the one thing that changes it.
 fn gated(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot, thread: Rect, g: Gate) {
     let (glyph, title, body, action) = match g {
-        Gate::SigningIn => (icons::SIGN_IN, tr("Signing in…"), tr("N4N0 answers as soon as Orbiters says who is signed in."), ""),
+        Gate::SigningIn => (icons::SIGN_IN, super::signing_in(snap), tr("N4N0 answers as soon as Orbiters says who is signed in."), ""),
         Gate::SignedOut => (
             icons::SIGN_IN,
             tr("Sign in to Orbiters to talk to N4N0."),

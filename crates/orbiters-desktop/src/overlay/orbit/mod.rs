@@ -100,12 +100,12 @@ fn usage_name(action: &Action) -> String {
 /// says it is in desktop mode: the person is at the screen, verify2-r15 S5), and the settings say so: a menu around VRChat's, its camera's
 /// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
 ///
-/// On a Mac, where the app sees no process of VRChat's: the person's own VRChat runs under the engine, and a menu around VRChat's is wanted (its camera's tiles and
-/// translation are not there).
+/// On a Mac, where the app sees no process of VRChat's: the person's own VRChat runs under the engine, and a menu around VRChat's is wanted, or its camera's tiles where
+/// its engine gives VRChat's stream camera (translation is not there).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
     let here = orbiters_core::here::HERE;
     if cfg!(target_os = "macos") {
-        return here.desktop_panels && snap.launcher.desktop_game.is_some() && (!snap.steamvr.running || snap.n4n0.desktop_mode) && snap.settings.orbit.any();
+        return here.desktop_panels && snap.launcher.desktop_game.is_some() && (!snap.steamvr.running || snap.n4n0.desktop_mode) && (snap.settings.orbit.any() || snap.launcher.camera && snap.settings.orbit.camera_tiles);
     }
     here.desktop_panels
         && snap.vrchat.running
@@ -1254,7 +1254,7 @@ impl Panels {
         }
     }
 
-    /// These parts are on a Mac's screen: no 3D picture can be taken there (VRChat's stream camera is Windows'), and nothing of a headset is offered.
+    /// These parts are on a Mac's screen: nothing of a headset is offered, and a 3D picture only where its engine gives VRChat's stream camera (`LauncherState::camera`).
     #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
     pub fn on_a_mac(mut self) -> Self {
         self.mac = true;
@@ -2667,6 +2667,7 @@ impl Panels {
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
             mac: self.mac,
+            mac_camera: self.mac && snap.launcher.camera,
             picture_mode: self.facts.picture_mode,
             bloomed: self.facts.bloomed,
             hint: self.facts.hint,
@@ -5269,6 +5270,10 @@ mod desktop_wanted_tests {
         assert!(super::wanted_on_desktop(&snap), "around the Quick Menu");
         snap.settings.orbit.quick_menu = false;
         assert!(!super::wanted_on_desktop(&snap), "both off, the camera's tiles still on");
+        snap.launcher.camera = true;
+        assert!(super::wanted_on_desktop(&snap), "and its engine gives VRChat's camera");
+        snap.settings.orbit.camera_tiles = false;
+        assert!(!super::wanted_on_desktop(&snap));
         snap.settings.orbit.wheel = true;
         snap.launcher.desktop_game = None;
         assert!(!super::wanted_on_desktop(&snap), "it ended");

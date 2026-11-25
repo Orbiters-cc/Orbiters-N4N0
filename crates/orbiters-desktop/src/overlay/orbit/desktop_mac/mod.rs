@@ -13,7 +13,9 @@
 //! - **The keyboard is ours only where that is needed** ([`pointing`], [`panel::Hold`]): while something of ours is typed in, and for a page opened from the wheel. It is taken
 //!   without coming in front: the engine then lets the pointer go and releases the keys the game held, and takes it back by itself as soon as ours goes.
 //! - **With an engine from before**, which holds the mouse for as long as its game is in front, Left Option does what it did: it takes the keyboard while held.
-//! - **Not here**: the 3D pictures cell and the camera's column (Spout), translation, the corner's cards and the mismatch buttons.
+//! - **VRChat's camera** (the 3D pictures cell, its second ring, the column beside the camera's panel, the pill of a picture under way) is there where the engine gives its
+//!   stream (`LauncherState::camera`): the panel is found in the same picture of the window, only while VRChat says over OSC that its camera is open.
+//! - **Not here**: translation, the corner's cards and the mismatch buttons.
 
 pub mod capture;
 pub mod channel;
@@ -33,7 +35,7 @@ use crate::backend::Ctl;
 use crate::ipc::{Client, Endpoint, Role};
 use crate::state::{OrbitNeeds, OrbitPointing, OrbitStatus, Snapshot};
 use anyhow::Context as _;
-use capture::{Answer, Ask, Looker, Search, Trouble};
+use capture::{Answer, Ask, CameraAsk, Looker, Measured, Search, Trouble};
 use channel::{Channel, Pointer};
 use egui::{pos2, vec2, Pos2, Vec2};
 use game::{Finder, Game, Shot};
@@ -45,7 +47,7 @@ use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEventMask, NSEventModifierFlags, NSEventType, NSWorkspace};
 use objc2_foundation::{NSActivityOptions, NSDate, NSDefaultRunLoopMode, NSNotification, NSProcessInfo};
 use orbiters_i18n::mark;
-use panel::{Arrow, Hold, Layer, PanelWindow, RestRing};
+use panel::{Arrow, Hold, Layer, PanelWindow, Pill, RestRing};
 use wheel::{Fit, Scores};
 use pointing::{Pointing, Turn, Who};
 use std::collections::HashMap;
@@ -324,21 +326,21 @@ impl LookSaw {
         Self { number, key, began, frames: 0, first: None, wheel: Scores::default(), fit: None, icons: 0, anywhere: None }
     }
 
-    fn take(&mut self, answer: &Answer) {
+    fn take(&mut self, answer: &Answer, saw: &Measured) {
         if answer.look != self.number {
             return;
         }
         self.frames += 1;
         self.first.get_or_insert(answer.at.saturating_duration_since(self.began));
-        if answer.saw.wheel.of(&wheel::IN_PLACE) > self.wheel.of(&wheel::IN_PLACE) || self.frames == 1 {
-            self.wheel = answer.saw.wheel;
+        if saw.wheel.of(&wheel::IN_PLACE) > self.wheel.of(&wheel::IN_PLACE) || self.frames == 1 {
+            self.wheel = saw.wheel;
         }
-        if let Some(fit) = answer.saw.fit {
+        if let Some(fit) = saw.fit {
             if self.fit.is_none_or(|was| fit.scores.of(&wheel::FIT) > was.scores.of(&wheel::FIT)) {
                 self.fit = Some(fit);
             }
         }
-        self.icons = self.icons.max(answer.saw.icons);
+        self.icons = self.icons.max(saw.icons);
         self.anywhere = answer.anywhere.or(self.anywhere);
     }
 
@@ -382,6 +384,12 @@ pub struct Desk {
     panels: Panels,
     watcher: Watcher,
     looker: Looker,
+    /// VRChat's camera panel: where it shows, and when it was last seen there, as said to the service (part of what proves a live camera before a recording).
+    camera: super::detect::CameraWatch,
+    camera_seen_ns: Option<u64>,
+    was_menu: bool,
+    camera_logged: Option<bool>,
+    pill: Pill,
     keys: Keys,
     hints: Hints,
     pointing: Pointing,
@@ -463,6 +471,11 @@ impl Desk {
             windows: Windows::default(),
             watcher: Watcher::default(),
             looker: Looker::start(),
+            camera: Default::default(),
+            camera_seen_ns: None,
+            was_menu: false,
+            camera_logged: None,
+            pill: Pill::default(),
             keys: Keys::default(),
             hints: Hints::default(),
             pointing: Pointing::default(),
@@ -597,7 +610,7 @@ impl Desk {
         let failed = self.trouble.is_some_and(|t| now.duration_since(t) < TROUBLE_SAID);
         let note = needs.map(OrbitNeeds::words).or(failed.then_some(PICTURE_FAILED));
         let pointing = self.last.map(|_| if self.channel.state().is_some() { OrbitPointing::Free } else { OrbitPointing::LeftOption });
-        let status = OrbitStatus { note: note.map(str::to_string), needs, pointing, ..OrbitStatus::default() };
+        let status = OrbitStatus { note: note.map(str::to_string), needs, pointing, camera_panel_seen_ns: self.camera_seen_ns, ..OrbitStatus::default() };
         if self.said.as_ref() != Some(&status) {
             self.backend.orbit_status(status.clone());
             self.said = Some(status);
@@ -608,6 +621,8 @@ impl Desk {
     fn first_point(&self, open: Option<Around>, size: Vec2) -> Option<Pos2> {
         let zones: &[Zone] = match open {
             _ if self.panels.sheet_open() => &[Zone::Takeover],
+            // Its first tile.
+            Some(Around::Camera) => &[Zone::CameraPeople],
             Some(Around::Wheel) => {
                 let (center, radius) = zones::wheel(size);
                 let center = center + self.wheel_at.map_or(Vec2::ZERO, |fit| fit.moved(size));
@@ -627,8 +642,7 @@ impl Desk {
 
     /// A look's answer to what watches. A wheel beside its place opens on two frames that have it at the same one, and stays where the first had it: as it is looked at each
     /// time anew, the ring would shake by a step of the search.
-    fn watched(&mut self, answer: &Answer) {
-        let saw = answer.saw;
+    fn watched(&mut self, answer: &Answer, saw: &Measured) {
         let was = self.watcher.seen();
         let beside = saw.fit.filter(|_| saw.menu == Some(Around::Wheel));
         let again = beside.is_some_and(|fit| self.fit_seen.is_some_and(|before| before.same(&fit)));
@@ -678,7 +692,7 @@ impl Desk {
         };
         let back = front && !self.was_front;
         self.was_front = front;
-        let resting = !self.watcher.wants_frames() && self.panels.is_empty();
+        let resting = !self.watcher.wants_frames() && self.panels.is_empty() && self.camera.shown().is_none();
         let due = self.asked_window.is_none_or(|t| now.duration_since(t) >= if resting { WINDOW_EVERY } else { WINDOW_EVERY_UP });
         if due || back || keys.menu.is_some() || keys.unknown {
             self.asked_window = Some(now);
@@ -725,6 +739,10 @@ impl Desk {
             self.panels.let_go(now);
             self.looker.ask(None);
             let _ = self.looker.answers();
+            self.camera.reset();
+            self.camera_seen_ns = None;
+            self.was_menu = false;
+            self.pill.hide();
             if self.watcher.wants_frames() || !self.panels.is_empty() {
                 self.watcher.reset();
                 self.panels.set_open(None, Vec::new(), &snap);
@@ -738,11 +756,21 @@ impl Desk {
             self.panels.serve_menu(&snap);
             return self.end(now, REST);
         };
+        // VRChat's camera panel: its window of another size, its panel goes with it now, not two looks later.
+        let size = game.client();
+        let camera_wanted = snap.launcher.camera && snap.settings.orbit.camera_tiles && self.allowed.0;
+        if !camera_wanted {
+            self.camera.reset();
+        }
+        self.camera.follow_size(size);
         // VRChat's keys: the game's alone, so not those pressed while the keyboard is ours.
         if !holding {
             if let Some(key) = keys.menu {
                 self.new_look(Some(key), now);
                 self.watcher.pressed(key, now);
+                if key == MenuKey::Esc {
+                    self.camera.esc(now);
+                }
             } else if (keys.unknown || self.look_due || freed && front) && self.watcher.seen() == Seen::Resting {
                 // (the mouse let go: a menu of VRChat's opened, whatever opened it)
                 self.new_look(None, now);
@@ -758,20 +786,28 @@ impl Desk {
         }
         for answer in self.looker.answers() {
             self.trouble = None;
-            self.saw.take(&answer);
-            self.watched(&answer);
+            if let Some(saw) = answer.saw {
+                self.saw.take(&answer, &saw);
+                self.watched(&answer, &saw);
+            }
+            if let Some(look) = answer.camera.filter(|_| camera_wanted) {
+                self.camera.look(look, answer.at);
+            }
         }
         let looking = self.watcher.wants_frames();
+        let camera_frames = camera_wanted && self.camera.wants_frames(snap.camera_open_said, now);
         let search = match (self.wheel_at, self.watcher.seen()) {
             (Some(fit), Seen::Open(Around::Wheel)) => Search::At(fit),
             // Esc opens none.
             (None, Seen::Looking | Seen::Open(Around::Wheel)) | (_, Seen::Looking) if self.saw.key != Some(MenuKey::Esc) => Search::Around,
             _ => Search::InPlace,
         };
-        self.looker.ask(looking.then(|| Ask {
+        self.looker.ask((looking || camera_frames).then(|| Ask {
             window: game.window.id,
             owner: game.window.owner,
             shot: Shot::of(&game),
+            menus: looking,
+            camera: camera_frames.then(|| CameraAsk { client: size, shown: self.camera.shown(), open: snap.camera_open_said == Some(true) }),
             every: self.watcher.look_every(now),
             search,
             look: self.saw.number,
@@ -782,15 +818,30 @@ impl Desk {
         if seen != Seen::Open(Around::Wheel) && seen != Seen::Looking {
             self.wheel_at = None;
         }
+        // A menu of VRChat's that went may have opened its camera (with OSC off, nothing else says so).
+        let menu_up = matches!(seen, Seen::Open(_));
+        if std::mem::replace(&mut self.was_menu, menu_up) && !menu_up {
+            self.camera.menu_went(now);
+        }
+        let camera_panel = if camera_wanted { self.camera.tick(snap.camera_open_said, now) } else { None };
+        self.camera_seen_ns = camera_panel.map(|_| {
+            let at = orbiters_core::clock::now_ns();
+            self.camera_seen_ns.filter(|seen| at.saturating_sub(*seen) < 500_000_000).unwrap_or(at)
+        });
+        self.camera_log(camera_panel, &snap, size);
         let open = match seen {
             Seen::Open(Around::Wheel) if snap.settings.orbit.around_wheel() => Some(Around::Wheel),
             Seen::Open(Around::QuickMenu) if snap.settings.orbit.around_quick_menu() => Some(Around::QuickMenu),
             _ => None,
         };
-        let size = game.client();
+        // VRChat's menus first: they close its camera on the desktop.
+        let open = open.or(camera_panel.filter(|_| !menu_up).map(|_| Around::Camera));
         let places = open.map_or_else(Vec::new, |menu| {
-            let mut places = zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip);
-            places.retain(|p| !p.zone.needs_the_camera_s_frames());
+            let mut places = match (menu, camera_panel) {
+                (Around::Camera, Some(panel)) => zones::camera_on_screen(panel, size),
+                _ => zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip),
+            };
+            places.retain(|p| snap.launcher.camera || !p.zone.needs_the_camera_s_frames());
             // Around the wheel where it really is.
             if let Some(fit) = self.wheel_at.filter(|_| menu == Around::Wheel) {
                 let moved = fit.moved(size);
@@ -815,8 +866,12 @@ impl Desk {
             self.mouse = false;
             self.follow_wheel(&game, seen, &keys, front, pointer, &moves, None, now);
             self.windows.hide_all();
+            // What a 3D picture is doing, with no menu up to say it. (Its camera records its own stream, not this window.)
+            let words = if front && snap.launcher.camera { self.panels.away_words(&snap) } else { None };
+            self.pill.show(self.mtm, words, &game, panel::level(&game, true));
             return self.end(now, if looking { TURN } else { REST });
         }
+        self.pill.hide();
         self.panels.follow(&snap, self.backend.library_version());
         self.panels.menu_turn(&snap);
         self.panels.step_springs(dt);
@@ -1050,6 +1105,15 @@ impl Desk {
                 _ => {}
             }
             self.logged = is;
+        }
+    }
+
+    /// The column beside VRChat's camera came or went, with why, in `vr-test.log`.
+    fn camera_log(&mut self, panel: Option<egui::Rect>, snap: &Snapshot, size: Vec2) {
+        let shows = panel.is_some();
+        if self.camera_logged.replace(shows).unwrap_or(false) != shows {
+            let (went, said) = (self.camera.take_went(), snap.camera_open_said);
+            super::super::vr_log::line(&format!("desk camera: column {} at {panel:?} in {} x {} (osc {said:?})", if shows { "shown".into() } else { format!("gone ({went:?})") }, size.x, size.y)); // i18n: not shown (a log's line)
         }
     }
 

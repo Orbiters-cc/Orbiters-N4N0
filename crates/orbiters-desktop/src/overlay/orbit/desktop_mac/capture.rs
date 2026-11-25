@@ -3,7 +3,7 @@
 //!
 //! The looks run on ScreenCaptureKit's own queue, and starting and stopping on a thread of this module's, which sleeps while nothing is asked. The loop never waits for either.
 
-use super::super::detect::{self, Part};
+use super::super::detect::{self, CameraLook, Part};
 use super::super::zones::Around;
 use super::game::Shot;
 use super::wheel::{self, Fit, Scores};
@@ -90,8 +90,11 @@ pub struct Ask {
     pub window: u32,
     pub owner: u32,
     pub shot: Shot,
-    /// How long from a look to the next.
+    /// VRChat's menus are looked for, and how long from a look to the next.
+    pub menus: bool,
     pub every: Duration,
+    /// Its camera's panel is looked for.
+    pub camera: Option<CameraAsk>,
     /// Where the wheel is looked for.
     pub search: Search,
     /// The look this is of, and when it began: one that finds nothing for [`TELLS_AFTER`] says once where the disc most like a wheel is, if any.
@@ -99,6 +102,17 @@ pub struct Ask {
     pub began: Instant,
     /// The frame it says that of is kept as a picture in the logs' folder (a setting, off by default).
     pub keep: bool,
+}
+
+/// How VRChat's camera panel is looked for ([`detect::camera_look`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraAsk {
+    /// The game's picture as its places are counted ([`super::game::Game::client`]).
+    pub client: egui::Vec2,
+    /// Where it shows now, there.
+    pub shown: Option<egui::Rect>,
+    /// VRChat says its camera is open.
+    pub open: bool,
 }
 
 /// Where the wheel is looked for.
@@ -131,7 +145,9 @@ pub struct Measured {
 #[derive(Clone, Copy, Debug)]
 pub struct Answer {
     pub at: Instant,
-    pub saw: Measured,
+    /// What it saw of the menus, when they were looked for; and of the camera's panel, when that was.
+    pub saw: Option<Measured>,
+    pub camera: Option<CameraLook>,
     /// The look it is of.
     pub look: u32,
     /// The disc most like a wheel anywhere, when this look was asked for it.
@@ -206,6 +222,24 @@ pub fn measure(bgra: &[u8], width: usize, height: usize, stride: usize, shot: &S
     Some(out)
 }
 
+/// The camera's look at a whole frame of `shot`: its panel's place, counted in the game's own picture.
+pub fn camera(bgra: &[u8], width: usize, height: usize, stride: usize, shot: &Shot, ask: &CameraAsk) -> Option<CameraLook> {
+    let whole = whole(bgra, width, height, stride, shot)?;
+    let client = shot.client();
+    let parts: Vec<Part> = detect::camera_parts(client)
+        .iter()
+        .map(|r| {
+            let (x0, y0) = (r.min.x as u32, r.min.y as u32);
+            let start = (y0 * whole.stride + x0 * 4) as usize;
+            Part { x0, y0, width: r.width().ceil() as u32, height: r.height().ceil() as u32, stride: whole.stride, bgra: &whole.bgra[start.min(whole.bgra.len())..] }
+        })
+        .collect();
+    let k = ask.client.y / client.y.max(1.0);
+    let scaled = |r: egui::Rect, k: f32| egui::Rect::from_min_max((r.min.to_vec2() * k).to_pos2(), (r.max.to_vec2() * k).to_pos2());
+    let look = detect::camera_look(&parts, client, ask.shown.map(|r| scaled(r, 1.0 / k)), ask.open);
+    Some(CameraLook { found: look.found.map(|r| scaled(r, k)), at_shown: look.at_shown })
+}
+
 /// The game's own picture in a frame, as a part of itself.
 fn whole<'a>(bgra: &'a [u8], width: usize, height: usize, stride: usize, shot: &Shot) -> Option<Part<'a>> {
     if (width, height) != (shot.width as usize, shot.height as usize) || stride < width * 4 || bgra.len() < stride * height || shot.client().y < 2.0 || width < 2 {
@@ -254,8 +288,8 @@ fn keep_in(folder: &std::path::Path, image: &image::RgbaImage) {
 struct OutputIvars {
     shared: Arc<Shared>,
     answers: mpsc::Sender<Answer>,
-    /// When the last look was, and whether this stream was ended by macOS.
-    last: Mutex<Option<Instant>>,
+    /// When the menus were last looked for, and the camera's panel; and whether this stream was ended by macOS.
+    last: Mutex<(Option<Instant>, Option<Instant>)>,
     /// The look that last said what is anywhere on its frame.
     told: AtomicU64,
     ended: Arc<AtomicBool>,
@@ -297,22 +331,31 @@ impl Output {
         this.shared.frames.fetch_add(1, Ordering::Relaxed);
         let Some(ask) = *this.shared.asked.lock().unwrap() else { return };
         let now = Instant::now();
-        {
+        let (menus, camera) = {
             let mut last = this.last.lock().unwrap();
-            if last.is_some_and(|t| now.duration_since(t) < ask.every) {
+            let menus = ask.menus && last.0.is_none_or(|t| now.duration_since(t) >= ask.every);
+            let camera = ask.camera.filter(|_| last.1.is_none_or(|t| now.duration_since(t) >= detect::CAMERA_LOOK_EVERY));
+            if !menus && camera.is_none() {
                 return;
             }
-            *last = Some(now);
-        }
+            if menus {
+                last.0 = Some(now);
+            }
+            if camera.is_some() {
+                last.1 = Some(now);
+            }
+            (menus, camera)
+        };
         // SAFETY: the picture is locked for reading while its rows are read, within its own size, and unlocked after.
-        let (found, anywhere) = unsafe {
+        let (found, anywhere, camera) = unsafe {
             if CVPixelBufferLockBaseAddress(image, READ_ONLY) != 0 {
                 return;
             }
             let (base, stride) = (CVPixelBufferGetBaseAddress(image), CVPixelBufferGetBytesPerRow(image));
             let (width, height) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
             let bgra = if base.is_null() { &[][..] } else { std::slice::from_raw_parts(base, stride * height) };
-            let found = measure(bgra, width, height, stride, &ask.shot, &ask.search);
+            let camera = camera.and_then(|asked| self::camera(bgra, width, height, stride, &ask.shot, &asked));
+            let found = menus.then(|| measure(bgra, width, height, stride, &ask.shot, &ask.search)).flatten();
             // Once a look that found nothing, late in it: by then VRChat's menu shows, if it was opened.
             let tells = !matches!(ask.search, Search::At(_)) && found.is_some_and(|f| f.menu.is_none()) && now.duration_since(ask.began) >= TELLS_AFTER && this.told.swap(u64::from(ask.look), Ordering::Relaxed) != u64::from(ask.look);
             let mut anywhere = None;
@@ -325,11 +368,11 @@ impl Output {
                 }
             }
             CVPixelBufferUnlockBaseAddress(image, READ_ONLY);
-            (found, anywhere)
+            (found, anywhere, camera)
         };
         crate::perf::elsewhere(crate::perf::Part::Capture, now.elapsed());
-        if let Some(saw) = found {
-            let _ = this.answers.send(Answer { at: now, saw, look: ask.look, anywhere });
+        if found.is_some() || camera.is_some() {
+            let _ = this.answers.send(Answer { at: now, saw: found, camera, look: ask.look, anywhere });
         }
     }
 }
@@ -403,7 +446,7 @@ struct Stream {
 impl Stream {
     fn start(filter: &AnyObject, ask: &Ask, shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>, queue: Queue) -> Result<Self, Trouble> {
         let ended = Arc::new(AtomicBool::new(false));
-        let output = Output::alloc().set_ivars(OutputIvars { shared: shared.clone(), answers: answers.clone(), last: Mutex::new(None), told: AtomicU64::new(0), ended: ended.clone() });
+        let output = Output::alloc().set_ivars(OutputIvars { shared: shared.clone(), answers: answers.clone(), last: Mutex::new((None, None)), told: AtomicU64::new(0), ended: ended.clone() });
         // SAFETY: NSObject's init on a freshly allocated object; then ScreenCaptureKit's own classes, methods and argument types.
         let pace = pace(ask);
         let (stream, config, output) = unsafe {
@@ -456,8 +499,11 @@ impl Stream {
 
 /// How many frames a second are worth taking: every one of a game's just after a key, which is when a menu opens or closes, and while one shows what looks every 60 ms need.
 fn pace(ask: &Ask) -> i32 {
-    if ask.every.is_zero() {
+    if ask.menus && ask.every.is_zero() {
         60
+    } else if ask.camera.is_some() {
+        // (a look each 30 ms: what goes is gone within a few frames)
+        40
     } else {
         20
     }

@@ -466,6 +466,51 @@ impl Arrow {
     }
 }
 
+/// Says what a 3D picture is doing while no menu is up: nothing else can then. The mouse passes through it, and it is only there while it has something to say.
+#[derive(Default)]
+pub struct Pill {
+    window: Option<PanelWindow>,
+    canvas: Option<crate::overlay::Canvas>,
+    words: Option<(String, String)>,
+    scale: f64,
+}
+
+/// The pill's size, in its units, and how far under the game's top: Windows' own.
+const PILL: Vec2 = vec2(560.0, 56.0);
+const PILL_TOP: f32 = 96.0;
+
+impl Pill {
+    pub fn show(&mut self, mtm: MainThreadMarker, words: Option<(String, String)>, game: &Game, level: isize) {
+        let Some(said) = words else { return self.hide() };
+        let client = game.client();
+        let zoom = (client.y / 720.0).max(0.5);
+        let px = [(PILL.x * zoom).ceil() as u32, (PILL.y * zoom).ceil() as u32];
+        if self.scale != game.scale || self.window.as_ref().is_none_or(|w| w.px() != px) {
+            self.window = Some(PanelWindow::new(mtm, px, game.scale));
+            self.canvas = Some(crate::overlay::Canvas::zoomed(px[0], px[1], zoom));
+            self.scale = game.scale;
+            self.words = None;
+        }
+        let (Some(window), Some(canvas)) = (self.window.as_mut(), self.canvas.as_mut()) else { return };
+        if self.words.as_ref() != Some(&said) {
+            let pixels = canvas.paint(0.0, |p| super::super::panels::draw_words(p, Rect::from_min_size(pos2(0.0, 0.0), PILL), &said.0, &said.1));
+            window.picture(pixels, [0, 0, px[0], px[1]]);
+            self.words = Some(said);
+        }
+        let spot = [((client.x - px[0] as f32) / 2.0) as i32, (PILL_TOP * zoom) as i32];
+        if window.place(game, spot, 255, false) {
+            window.panel.setLevel(level);
+            window.panel.orderFrontRegardless();
+        }
+    }
+
+    pub fn hide(&mut self) {
+        if let Some(w) = self.window.as_mut() {
+            w.hide();
+        }
+    }
+}
+
 /// How much of a rest on a tool has passed ([`super::gesture`]): a ring round the arrow that closes as it does.
 #[derive(Default)]
 pub struct RestRing {

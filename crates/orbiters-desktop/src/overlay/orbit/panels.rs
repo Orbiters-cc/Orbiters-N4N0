@@ -828,8 +828,17 @@ pub struct Facts {
     pub can_light: bool,
     /// In VR, a close on the sheet and the wing.
     pub vr_close: bool,
-    /// On a Mac's screen: no 3D picture is taken there, and nothing of a headset is offered ([`super::Panels::on_a_mac`]).
+    /// On a Mac's screen: nothing of a headset is offered, and no 3D picture is taken but with `mac_camera` ([`super::Panels::on_a_mac`]).
     pub mac: bool,
+    /// On a Mac: its engine gives VRChat's stream camera.
+    pub mac_camera: bool,
+}
+
+impl Facts {
+    /// VRChat's stream camera cannot be read here: nothing takes a picture.
+    pub fn no_camera(&self) -> bool {
+        self.mac && !self.mac_camera
+    }
 }
 
 /// A capture turning on a sheet.
@@ -1820,8 +1829,8 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             // A recording starts beside VRChat's camera alone (Enzo, F15): here it says so, and while one runs it is its Stop.
             let record = if stop_shown(facts) { stop_action(facts) } else { Action::Idle };
-            if facts.mac {
-                // Nothing is taken or recorded on a Mac: what it shows alone.
+            if facts.no_camera() {
+                // Nothing is taken or recorded on a Mac whose engine does not give VRChat's camera: what it shows alone.
             } else if facts.no_kit {
                 // Recording first, as it works; then, quietly, where the kit is (round 11's judges: the banner and its green button were the loudest thing on the sheet).
                 out.push(Item { action: record, rect: r(x0, y0, width, h), look: Look::Record });
@@ -2745,7 +2754,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::VolumeBar => (tr("Volume").into(), tr("Your computer's volume.").into()),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
-        Action::Pictures if facts.mac => (tr("Pictures").into(), tr("Your pictures and 3D captures.").into()),
+        Action::Pictures if facts.no_camera() => (tr("Pictures").into(), tr("Your pictures and 3D captures.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
         Action::All => (tr("All tools").into(), tr("Everything Orbiters can do from here.").into()),
         Action::PictureLength => (
@@ -5679,6 +5688,12 @@ mod tests {
         }
         let says = |f: &Facts| caption(Action::Pictures, f).expect("words").1;
         assert_ne!(says(&facts()), says(&Facts { mac: true, ..facts() }));
+        // With an engine that gives VRChat's camera, all of it, as elsewhere.
+        for no_kit in [false, true] {
+            let mac = Facts { mac: true, mac_camera: true, no_kit, ..facts() };
+            assert_eq!(takes(&mac), takes(&Facts { no_kit, ..facts() }));
+            assert_eq!(says(&mac), says(&Facts { no_kit, ..facts() }));
+        }
         let picks = |f: &Facts| sheet_items(Sheet::Settings, f);
         let (ours, theirs) = (picks(&facts()), picks(&Facts { mac: true, ..facts() }));
         let has = |list: &[Item], f: &dyn Fn(&Item) -> bool| list.iter().any(f);

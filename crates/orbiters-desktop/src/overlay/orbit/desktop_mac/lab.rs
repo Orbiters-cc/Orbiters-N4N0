@@ -699,6 +699,64 @@ mod tests {
         println!("{tried} looked at; the nearest to a wheel where none is: {most:.2} of what is asked");
     }
 
+    /// VRChat's camera panel, on the real frames of it, drawn at part of a Mac's screen's pixels and stretched over it as the engine does, title bar or none: found where it is, in the
+    /// game's own picture, once open is what VRChat says, and where it is already shown; and none where there is none.
+    #[test]
+    fn vrchat_s_camera_panel_is_found_through_the_engine_s_stretching() {
+        use super::super::super::detect::{self, Rim};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop");
+        let (mut panels, mut none, mut missed) = (0, 0, Vec::new());
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let image = image::open(&path).unwrap().to_rgba8();
+            let (w, h) = image.dimensions();
+            let bgra: Vec<u8> = image.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+            let real = detect::camera_panel_in(&bgra, w, h);
+            let real_frame = Picture { width: w as usize, height: h as usize, bgra };
+            // A screen of that shape, as high as this Mac's, drawn at 45 %; and a window of it with a title bar. (58 % and 100 % of a screen were tried as well, 2026-11-25.)
+            let aspect = w as f32 / h as f32;
+            for (client, percent, title) in [(vec2((1912.0 * aspect).round(), 1912.0), 45.0, 0), (vec2((900.0 * aspect).round(), 900.0), 100.0, 32)] {
+                let drawn = real_frame.stretched((client.x * percent / 100.0) as usize, (client.y * percent / 100.0) as usize);
+                let k = (1080.0 / client.y).min(1.0);
+                let shot = Shot { width: (client.x * k).round() as u32, height: (client.y * k).round() as u32 + title, title };
+                let content = Shot { height: shot.height - title, title: 0, ..shot };
+                let (fw, fh) = (shot.width as usize, shot.height as usize);
+                // (a row's padding, as macOS gives)
+                let stride = (fw * 4).next_multiple_of(64);
+                let mut frame = vec![90u8; stride * fh];
+                // Only what a look reads is made.
+                for part in detect::camera_parts(content.client()) {
+                    for y in part.min.y as usize..(part.max.y.ceil() as usize + 1).min(fh - title as usize) {
+                        for x in part.min.x as usize..(part.max.x.ceil() as usize + 1).min(fw) {
+                            let at = (y + title as usize) * stride + x * 4;
+                            frame[at..at + 4].copy_from_slice(&taken(&drawn, client, &content, x, y));
+                        }
+                    }
+                }
+                let ask = capture::CameraAsk { client, shown: None, open: real.is_some() };
+                let look = capture::camera(&frame, fw, fh, stride, &shot, &ask).expect("a frame of the size asked");
+                let Some(real) = real else {
+                    none += 1;
+                    assert_eq!(look.found, None, "{name} at {percent} % of {client:?}");
+                    continue;
+                };
+                panels += 1;
+                let up = client.y / h as f32;
+                let want = egui::Rect::from_min_max((real.min.to_vec2() * up).to_pos2(), (real.max.to_vec2() * up).to_pos2());
+                let off = look.found.map(|f| (f.min - want.min).length().max((f.max - want.max).length()) / client.y);
+                if off.is_none_or(|off| off > 0.012) {
+                    missed.push(format!("{name} at {percent} % of {client:?}: {:?}, not {want:?}", look.found));
+                    continue;
+                }
+                let again = capture::CameraAsk { shown: look.found, ..ask };
+                assert_eq!(capture::camera(&frame, fw, fh, stride, &shot, &again).unwrap().at_shown, Rim::There, "{name} at {percent} %");
+            }
+        }
+        assert!(panels >= 12 && none >= 8, "{panels} {none}");
+        assert!(missed.len() * 10 <= panels, "{} of {panels}: {missed:#?}", missed.len());
+    }
+
     /// A frame of the window's older size says nothing, and a title bar is not looked at.
     #[test]
     fn a_frame_of_another_size_is_no_look() {

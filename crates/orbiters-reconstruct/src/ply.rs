@@ -71,8 +71,109 @@ pub fn read(path: &Path) -> anyhow::Result<Gaussians> {
 
 /// [`read`] of a PLY's bytes.
 pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
-    let end = data.windows(11).position(|w| w == b"end_header\n").with_context(|| tr("no PLY header"))? + 11;
-    let header = std::str::from_utf8(&data[..end])?;
+    let mut p = Parser::new(data.len() as u64);
+    p.feed(data)?;
+    p.finish()
+}
+
+/// The longest header looked for: ours are under a kilobyte.
+const HEADER_MAX: usize = 1 << 20;
+
+/// [`parse`] of a PLY of `total` bytes that comes in pieces: what is held beside the Gaussians read is one piece.
+pub struct Parser {
+    total: u64,
+    /// The header until it is whole, then what is left of the last piece: part of a splat.
+    left: Vec<u8>,
+    layout: Option<Layout>,
+    g: Gaussians,
+}
+
+#[derive(Clone, Copy)]
+struct Layout {
+    count: usize,
+    stride: usize,
+    extras: bool,
+}
+
+impl Parser {
+    pub fn new(total: u64) -> Self {
+        Self { total, left: Vec::new(), layout: None, g: Gaussians::default() }
+    }
+
+    /// The next piece.
+    pub fn feed(&mut self, mut piece: &[u8]) -> anyhow::Result<()> {
+        let layout = match self.layout {
+            Some(l) => l,
+            None => {
+                let before = self.left.len();
+                self.left.extend_from_slice(&piece[..piece.len().min(HEADER_MAX - before)]);
+                let from = before.saturating_sub(10);
+                let Some(at) = self.left[from..].windows(11).position(|w| w == b"end_header\n") else {
+                    anyhow::ensure!(self.left.len() < HEADER_MAX, "{}", tr("no PLY header"));
+                    return Ok(());
+                };
+                let end = from + at + 11;
+                let l = layout(&self.left[..end], self.total)?;
+                // The count is checked against the file's length: reserving it can never take more than the file is.
+                self.g.reserve_exact(l.count);
+                self.layout = Some(l);
+                piece = &piece[end - before..];
+                self.left.clear();
+                l
+            }
+        };
+        if !self.left.is_empty() {
+            let take = (layout.stride - self.left.len()).min(piece.len());
+            self.left.extend_from_slice(&piece[..take]);
+            piece = &piece[take..];
+            if self.left.len() < layout.stride {
+                return Ok(());
+            }
+            let record = std::mem::take(&mut self.left);
+            self.splat(layout, &record);
+        }
+        let records = piece.chunks_exact(layout.stride);
+        let rest = records.remainder();
+        for record in records {
+            self.splat(layout, record);
+        }
+        self.left.extend_from_slice(rest);
+        Ok(())
+    }
+
+    /// One splat's values (past the header's count: whatever follows the splats, which is no splat).
+    fn splat(&mut self, l: Layout, record: &[u8]) {
+        if self.g.len() >= l.count {
+            return;
+        }
+        let f = |k: usize| f32::from_le_bytes(record[k * 4..k * 4 + 4].try_into().expect("four bytes"));
+        let g = &mut self.g;
+        g.push(
+            [f(0), f(1), -f(2)],
+            [f(10), f(11), f(12)],
+            [f(13), -f(14), -f(15), f(16)],
+            f(9),
+            [0.5 + SH_C0 * f(6), 0.5 + SH_C0 * f(7), 0.5 + SH_C0 * f(8)],
+        );
+        if l.extras {
+            *g.sky.last_mut().expect("pushed") = f(17) > 0.5;
+            *g.seen.last_mut().expect("pushed") = Seen { weight: f(18), views: f(19) as u32, sectors: f(20) as u16, rate: f(21), beyond: f(22) };
+        }
+    }
+
+    pub fn finish(self) -> anyhow::Result<Gaussians> {
+        let Some(l) = self.layout else { bail!("{}", tr("no PLY header")) };
+        if self.g.len() < l.count {
+            bail!("{}", tr("PLY truncated"));
+        }
+        Ok(self.g)
+    }
+}
+
+/// What a PLY's `header` (up to its end) says of the splats after it, for a file of `total` bytes.
+fn layout(header: &[u8], total: u64) -> anyhow::Result<Layout> {
+    let end = header.len();
+    let header = std::str::from_utf8(header)?;
     let count: usize = header.lines().find_map(|l| l.strip_prefix("element vertex ")).with_context(|| tr("no vertex count"))?.trim().parse()?;
     let props: Vec<&str> = header.lines().filter_map(|l| l.strip_prefix("property float ")).collect();
     let extras = props.len() > PROPERTIES.len();
@@ -82,32 +183,53 @@ pub fn parse(data: &[u8]) -> anyhow::Result<Gaussians> {
     let stride = props.len() * 4;
     // A header may claim any count: one past what the file holds is an error, never an overflow.
     let needed = count.checked_mul(stride).and_then(|b| b.checked_add(end)).with_context(|| tr("PLY vertex count out of range"))?;
-    if data.len() < needed {
+    if total < needed as u64 {
         bail!("{}", tr("PLY truncated"));
     }
-    // The count is checked against the file's length above: reserving it can never take more than the file is.
-    let mut g = Gaussians::default();
-    g.reserve_exact(count);
-    for i in 0..count {
-        let f = |k: usize| f32::from_le_bytes(data[end + i * stride + k * 4..end + i * stride + k * 4 + 4].try_into().unwrap());
-        g.push(
-            [f(0), f(1), -f(2)],
-            [f(10), f(11), f(12)],
-            [f(13), -f(14), -f(15), f(16)],
-            f(9),
-            [0.5 + SH_C0 * f(6), 0.5 + SH_C0 * f(7), 0.5 + SH_C0 * f(8)],
-        );
-        if extras {
-            *g.sky.last_mut().expect("pushed") = f(17) > 0.5;
-            *g.seen.last_mut().expect("pushed") = Seen { weight: f(18), views: f(19) as u32, sectors: f(20) as u16, rate: f(21), beyond: f(22) };
-        }
-    }
-    Ok(g)
+    Ok(Layout { count, stride, extras })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PLY read in pieces of any size is the PLY read whole, and one cut short or of another kind is as refused.
+    #[test]
+    fn a_ply_read_in_pieces_is_the_ply_read_whole() {
+        let mut g = Gaussians::default();
+        let mut rng = fastrand::Rng::with_seed(4);
+        for i in 0..50 {
+            g.push([rng.f32(), rng.f32(), rng.f32()], [-3.0; 3], [1.0, 0.0, rng.f32(), 0.0], rng.f32(), [rng.f32(), 0.5, 0.2]);
+            g.sky[i] = i % 7 == 0;
+        }
+        let path = std::env::temp_dir().join(format!("orbiters-ply-pieces-{}.ply", std::process::id()));
+        write(&path, &g).unwrap();
+        let mut data = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // Bytes after the splats are no splat.
+        data.extend([7u8; 300]);
+        let whole = parse(&data).unwrap();
+        assert_eq!((whole.len(), &whole.means, &whole.sky), (50, &g.means, &g.sky));
+        let read = |data: &[u8], largest: usize| {
+            let mut rng = fastrand::Rng::with_seed(largest as u64);
+            let mut p = Parser::new(data.len() as u64);
+            let mut at = 0;
+            while at < data.len() {
+                let take = rng.usize(1..=largest).min(data.len() - at);
+                p.feed(&data[at..at + take])?;
+                at += take;
+            }
+            p.finish()
+        };
+        for largest in [1, 7, 11, 91, 92, 93, 500, 5000] {
+            let pieces = read(&data, largest).unwrap();
+            assert_eq!((&pieces.means, &pieces.rotations, &pieces.colors, &pieces.seen, &pieces.sky), (&whole.means, &whole.rotations, &whole.colors, &whole.seen, &whole.sky), "pieces of up to {largest}");
+        }
+        for cut in [100, data.len() - 300 - 1] {
+            assert!(parse(&data[..cut]).is_err() && read(&data[..cut], 64).is_err(), "cut at {cut}");
+        }
+        assert!(parse(b"not a PLY").is_err());
+    }
     use crate::gaussians::rotation_matrix;
 
     /// An error reads in the language of the window the worker reports to: a toast shows it as it is.

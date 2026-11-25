@@ -382,7 +382,7 @@ impl Export {
                 }
                 return;
             }
-            Some((f, Err(Failure::Failed(_) | Failure::Changed))) if *f == self.format => {
+            Some((f, Err(Failure::Failed(_) | Failure::Changed | Failure::Replaced))) if *f == self.format => {
                 if widgets::activated(&Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).variant(Variant::Primary).id_salt("export-retry").show(ui)) {
                     if let Some(dest) = self.dest.clone() {
                         self.start(&ctx, dest);

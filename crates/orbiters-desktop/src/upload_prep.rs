@@ -245,6 +245,16 @@ impl ResultIdentity {
         let complete = reconstruction::marked(&result) == Some(false);
         Self { complete, result, report, splats, edits }
     }
+
+    /// The generation of its splat edits (orbiters_reconstruct::edit::generation); none when they cannot be read.
+    pub fn edits(&self) -> Option<&str> {
+        self.edits.as_deref()
+    }
+
+    /// Whether `other` is this very reconstruction, its splat edits aside.
+    pub fn same_but_edits(&self, other: &Self) -> bool {
+        *self == Self { edits: self.edits.clone(), ..other.clone() }
+    }
 }
 
 /// A copy of one of the result's files, taken while the result is the one prepared (the sky map), so that what is sent

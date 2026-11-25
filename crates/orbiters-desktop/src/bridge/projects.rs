@@ -934,8 +934,7 @@ impl Projects {
 
     /// A Library move of this project running.
     fn moving_library(&self, path: &Path) -> Option<u64> {
-        let key = discovery::key(path);
-        self.jobs.lock().unwrap().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::key(p) == key)).map(|j| j.id)
+        self.jobs.lock().unwrap().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::same(p, path))).map(|j| j.id)
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -1481,16 +1480,7 @@ impl Projects {
                 json!({ "listed": true, "in_creator_companion": project.shared, "note": IN_ORBITERS })
             }
             "hide" | "unhide" => {
-                let mut list = hidden::load();
-                let key = discovery::key(&project.path);
-                if action == "hide" {
-                    list.insert(key);
-                } else {
-                    list.remove(&key);
-                }
-                // Numbered by time: the window keeps its own count, and saves made here must win over older ones.
-                let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                hidden::save(&list, generation).map_err(|e| failed("save_failed", e, "Try again."))?;
+                hidden::Change::new(&project.path, action == "hide").save().map_err(|e| failed("save_failed", e, "Try again."))?;
                 json!({ "hidden": action == "hide", "note": "Only the tab's lists change: the project stays where it is, and VCC and ALCOM list it as before." })
             }
             "reveal" => {
@@ -1611,8 +1601,10 @@ impl Projects {
         let keep = templates::Keep { library: args["library"].as_bool().unwrap_or(false) };
         // What the tab's dialog checks before it lets Duplicate be pressed (the copy checks again before copying).
         let exists = location.join(&name).exists();
-        let needed = templates::duplication_bytes(&project.path, keep).map_err(|e| failed("measure_failed", e, "Try again."))?;
-        let free = size::free_space(&location);
+        let need = templates::duplication_need(&project.path, keep, &AtomicBool::new(false)).map_err(|e| failed("measure_failed", e, "Try again."))?.unwrap_or_default();
+        let room = size::room(&location);
+        // What it takes on that disk, with what must stay free there.
+        let (needed, free) = (need.room(room.map_or(4096, |r| r.unit)), room.map(|r| r.free));
         let check = json!({ "copy_at": location.join(&name), "exists": exists, "bytes_needed": needed, "bytes_free": free, "library": keep.library });
         let problem = if exists {
             Some(format!("{} has a folder named {name} already.", location.display()))
@@ -1640,7 +1632,8 @@ impl Projects {
         self.spawn(Lane::Action, label, Some(location.join(&name)), true, Progress::Copy(progress), cancel, None, args, call, move || {
             let path = block_on(templates::duplicate(&orbiters_projects::vcc_dir(), &source, &location, &name, keep, &c, &p))
                 .map_err(|e| failed("duplicate_failed", e, "Read the message: a copy kept and listed is said there, and unity_list_projects shows it."))?;
-            Ok(json!({ "path": path, "listed": true, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
+            let left_out = p.lock().unwrap().left_out.clone();
+            Ok(json!({ "path": path, "listed": true, "links_to_nothing_left_out": left_out, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
         })
     }
 
@@ -2422,7 +2415,7 @@ mod unity6_tests {
         assert_eq!(unity_line_json(&temp.join("Avatar moved"), &m, &trials)["trials"].as_array().unwrap().len(), 1);
         // Verification minor 1: both tools say the target and its dated facts the same way.
         let projects = Projects::default();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let data = |a: Answer| match a {
             Answer::Data(v) => v,
             _ => panic!("data"),
@@ -2457,7 +2450,7 @@ mod unity6_tests {
         .unwrap();
         let projects = Projects::default();
         let at = job.trial.path.clone();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
         let said = |r: Result<Answer, Failure>| match r {
             Err(f) => format!("{} {}", f.code, f.message),
@@ -2489,7 +2482,7 @@ mod unity6_tests {
         project(&at, "6000.0.99f9", "3.11.0-beta.1", "6000.0");
         std::fs::create_dir_all(at.join("Assets")).unwrap();
         let projects = Projects::default();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
         let said = |r: Result<Answer, Failure>| match r {
             Err(f) => format!("{} {}", f.code, f.message),

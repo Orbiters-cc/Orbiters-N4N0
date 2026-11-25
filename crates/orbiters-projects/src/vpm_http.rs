@@ -5,11 +5,22 @@
 use futures::TryStreamExt as _;
 use indexmap::IndexMap;
 use std::io;
+use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 use vrc_get_vpm::HttpClient;
 
 /// How many redirects an archive download follows, as reqwest's default does.
 const REDIRECTS: usize = 10;
+
+/// How long a host may take to answer at all, and how long an archive may stop arriving. An archive as a whole takes what its line
+/// needs (PRJ-22: 90 s for all of it was never enough for a large package on a slow line, however well it came).
+const CONNECT: Duration = Duration::from_secs(20);
+const IDLE: Duration = Duration::from_secs(60);
+/// A listing is small, and every look at the repositories waits for the slowest: all of it within this.
+const LISTING: Duration = Duration::from_secs(90);
+/// How many archives come at once: they share one line, and vrc-get asks for every package of a change together.
+const AT_ONCE: usize = 4;
 
 /// A header a person configured on a repository, and the origin it is meant for.
 #[derive(Clone, Debug)]
@@ -20,8 +31,10 @@ struct Scoped {
 }
 
 pub(crate) struct Client {
-    /// Archives: redirects followed here, one hop at a time, so that each hop's headers are chosen again.
+    /// Redirects are followed here, one hop at a time, so that each hop's headers are chosen again.
     archives: reqwest::Client,
+    listings: reqwest::Client,
+    lines: Arc<tokio::sync::Semaphore>,
     scoped: Vec<Scoped>,
 }
 
@@ -42,16 +55,20 @@ impl Client {
             })
             .collect();
         let _ = plain;
-        Ok(Self { archives: archive_client()?, scoped })
+        Ok(Self { archives: archives(IDLE)?, listings: client().timeout(LISTING).build()?, lines: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)), scoped })
     }
 }
 
-fn archive_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+fn client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .user_agent(format!("Orbiters-N4N0/{}", orbiters_core::app_version()))
-        .timeout(std::time::Duration::from_secs(90))
+        .connect_timeout(CONNECT)
         .redirect(reqwest::redirect::Policy::none())
-        .build()?)
+}
+
+/// Given up once nothing came for `idle`, however long the whole takes.
+fn archives(idle: Duration) -> reqwest::Result<reqwest::Client> {
+    client().read_timeout(idle).build()
 }
 
 /// The headers that may go to `url`: only a pair the person's settings configure on a repository whose origin is
@@ -98,8 +115,14 @@ async fn fetch(client: &reqwest::Client, scoped: &[Scoped], url: &Url, headers: 
 impl HttpClient for Client {
     async fn get(&self, url: &Url, headers: &IndexMap<&str, &str>) -> io::Result<impl futures::AsyncRead + Send> {
         let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, *v)).collect();
+        let line = self.lines.clone().acquire_owned().await.map_err(io::Error::other)?;
         let response = fetch(&self.archives, &self.scoped, url, &headers, None).await?.error_for_status().map_err(io::Error::other)?;
-        Ok(response.bytes_stream().map_err(io::Error::other).into_async_read())
+        // The line is held as long as the archive comes.
+        let held = move |bytes| {
+            let _ = &line;
+            bytes
+        };
+        Ok(response.bytes_stream().map_err(io::Error::other).map_ok(held).into_async_read())
     }
 
     /// A listing: the same rule as an archive, hop by hop (reqwest would carry a custom header across hosts).
@@ -110,7 +133,7 @@ impl HttpClient for Client {
         current_etag: Option<&str>,
     ) -> io::Result<Option<(impl futures::AsyncRead + Send, Option<Box<str>>)>> {
         let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
-        let response = fetch(&self.archives, &self.scoped, url, &headers, current_etag).await?;
+        let response = fetch(&self.listings, &self.scoped, url, &headers, current_etag).await?;
         if current_etag.is_some() && response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(None);
         }
@@ -126,6 +149,97 @@ mod tests {
 
     fn scoped(name: &str, value: &str, repository: &str) -> Scoped {
         Scoped { name: name.into(), value: value.into(), origin: Some(Url::parse(repository).unwrap().origin()) }
+    }
+
+    /// A server of one archive: what it sends of it and how, and how many it sent at once at most.
+    fn server(answer: impl Fn(&mut std::net::TcpStream) + Send + Sync + 'static) -> (Url, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::Read as _;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("http://{}/a.zip", listener.local_addr().unwrap())).unwrap();
+        let (answer, now, most) = (Arc::new(answer), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let seen = most.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (answer, now, most) = (answer.clone(), now.clone(), most.clone());
+                std::thread::spawn(move || {
+                    let mut asked = [0u8; 4096];
+                    if !stream.read(&mut asked).is_ok_and(|n| n > 0) {
+                        return;
+                    }
+                    most.fetch_max(now.fetch_add(1, SeqCst) + 1, SeqCst);
+                    answer(&mut stream);
+                    now.fetch_sub(1, SeqCst);
+                });
+            }
+        });
+        (url, seen)
+    }
+    /// `parts` of 10 bytes, one after each `pause`; whole when they are what was promised.
+    fn parts(stream: &mut std::net::TcpStream, promised: usize, parts: usize, pause: Duration) {
+        use std::io::Write as _;
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", promised * 10);
+        for _ in 0..parts {
+            std::thread::sleep(pause);
+            if stream.write_all(&[7u8; 10]).and_then(|()| stream.flush()).is_err() {
+                return;
+            }
+        }
+        if parts < promised {
+            // It stops there, its line open.
+            std::thread::sleep(Duration::from_secs(20));
+        }
+    }
+    fn client_of(idle: Duration) -> Client {
+        Client { archives: archives(idle).unwrap(), listings: client().build().unwrap(), lines: Arc::new(tokio::sync::Semaphore::new(AT_ONCE)), scoped: vec![] }
+    }
+    async fn download(client: &Client, url: &Url) -> io::Result<usize> {
+        use futures::AsyncReadExt as _;
+        let mut bytes = vec![];
+        let none = IndexMap::new();
+        let body = client.get(url, &none).await?;
+        futures::pin_mut!(body);
+        body.read_to_end(&mut bytes).await?;
+        Ok(bytes.len())
+    }
+
+    /// PRJ-22: an archive that keeps coming is never cut, however long it takes; one that stops coming is given up.
+    #[test]
+    fn an_archive_is_given_up_when_it_stops_and_not_when_it_is_long() {
+        let client = client_of(Duration::from_millis(1500));
+        crate::runtime().unwrap().block_on(async {
+            let (slow, _) = server(|s| parts(s, 20, 20, Duration::from_millis(200)));
+            assert_eq!(download(&client, &slow).await.unwrap(), 200, "four seconds, never one and a half without a byte");
+            let started = std::time::Instant::now();
+            let (stuck, _) = server(|s| parts(s, 20, 3, Duration::from_millis(50)));
+            assert!(download(&client, &stuck).await.is_err());
+            assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        });
+    }
+
+    /// The same with the times the app has: an archive of 95 s.
+    #[test]
+    #[ignore = "takes 95 seconds"]
+    fn an_archive_may_take_longer_than_ninety_seconds() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::runtime().unwrap().block_on(async {
+            let io = vrc_get_vpm::io::DefaultEnvironmentIo::new(temp.path().into());
+            let settings = vrc_get_vpm::environment::Settings::load(&io).await.unwrap();
+            let client = Client::new(reqwest::Client::new(), &settings).unwrap();
+            let (slow, _) = server(|s| parts(s, 95, 95, Duration::from_secs(1)));
+            assert_eq!(download(&client, &slow).await.unwrap(), 950);
+        });
+    }
+
+    /// A change of many packages downloads a few at a time.
+    #[test]
+    fn a_few_archives_come_at_once() {
+        let client = client_of(Duration::from_secs(5));
+        let (url, most) = server(|s| parts(s, 4, 4, Duration::from_millis(50)));
+        let all = crate::runtime().unwrap().block_on(futures::future::join_all((0..15).map(|_| download(&client, &url))));
+        assert!(all.into_iter().all(|n| n.unwrap() == 40));
+        assert_eq!(most.load(std::sync::atomic::Ordering::SeqCst), AT_ONCE);
     }
 
     #[test]

@@ -100,7 +100,7 @@ fn time_left(seconds: f64) -> String {
 impl State {
     /// A Library move of this project is running.
     pub(super) fn repairing(&self, path: &Path) -> bool {
-        self.storage.run.as_ref().is_some_and(|r| discovery::key(&r.project) == discovery::key(path))
+        self.storage.run.as_ref().is_some_and(|r| discovery::same(&r.project, path))
     }
 
     /// Open in Unity, from wherever it is offered. `quiet`: no word when it worked (the setup dialog goes on by itself).
@@ -209,7 +209,7 @@ impl State {
     /// fraction, whether Cancel does something).
     pub(super) fn repair_capsule(&self) -> Option<(String, String, Option<f32>, bool)> {
         let run = self.storage.run.as_ref()?;
-        if self.selected.as_ref().is_some_and(|p| discovery::key(p) == discovery::key(&run.project)) {
+        if self.selected.as_ref().is_some_and(|p| discovery::same(p, &run.project)) {
             return None;
         }
         let p = run.progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -231,7 +231,7 @@ impl State {
             self.storage.plan_for = None;
         }
         self.storage.was_open = open;
-        if self.storage.plan_for.as_deref().is_some_and(|p| discovery::key(p) == discovery::key(project)) {
+        if self.storage.plan_for.as_deref().is_some_and(|p| discovery::same(p, project)) {
             return;
         }
         // Another project's measurement has nothing more to say.
@@ -403,7 +403,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
     }
     let plan = match &fixture {
         Some(f) if f.plan.is_some() => f.plan.clone(),
-        _ => state.storage.plan.as_ref().filter(|(p, _)| discovery::key(p) == discovery::key(&project.path)).map(|(_, plan)| plan.clone()),
+        _ => state.storage.plan.as_ref().filter(|(p, _)| discovery::same(p, &project.path)).map(|(_, plan)| plan.clone()),
     };
     let measuring = fixture.as_ref().and_then(|f| f.measuring.clone()).or_else(|| plan.is_none().then(|| state.storage.plan_progress.lock().unwrap_or_else(|e| e.into_inner()).clone()));
     let other_running = state.storage.run.as_ref().map(|r| r.name.clone());
@@ -578,7 +578,8 @@ mod tests {
         let mut state = State::default();
         let project = Project { name: "Avatorbit".into(), path: PathBuf::from(r"H:\metaverse\unity projects\Avatorbit"), ..Default::default() };
         state.storage.run = Some(Run {
-            project: PathBuf::from("h:/metaverse/unity projects/avatorbit/"),
+            // (Where names differ by their case, it is the same name.)
+            project: if cfg!(any(windows, target_os = "macos")) { PathBuf::from("h:/metaverse/unity projects/avatorbit/") } else { project.path.clone() },
             name: project.name.clone(),
             progress: SharedProgress::default(),
             cancel: Arc::default(),

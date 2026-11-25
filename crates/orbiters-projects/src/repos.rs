@@ -151,7 +151,7 @@ fn write(file: &Path, value: &Value) -> anyhow::Result<()> {
 fn newer(from: &Path, to: &Path) {
     let when = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let Some(theirs) = when(from) else { return };
-    if !crate::vpm::unusable_cache(to) && when(to).is_some_and(|here| here >= theirs) {
+    if when(to).is_some_and(|here| here >= theirs) && !crate::vpm::unusable_cache(to) {
         return;
     }
     let Ok(Some(bytes)) = own::steady(from) else { return };

@@ -173,6 +173,25 @@ fn a_held_root_stays_where_it_is() {
 }
 
 /// What replaced the file or folder made is never removed in its place.
+/// PRJ-2: a copy makes more folders than a Mac app may open files (256): where holding one open keeps nobody from anything, none is.
+#[cfg(unix)]
+#[test]
+fn folders_made_cost_no_open_file() {
+    let open = || std::fs::read_dir("/dev/fd").unwrap().count();
+    let temp = tempfile::tempdir().unwrap();
+    let (_, new, root) = trial(temp.path());
+    let before = open();
+    let made: Vec<_> = (0..600).map(|i| (i.to_string(), root.make_dir(Path::new(&i.to_string())).unwrap())).collect();
+    // (Other tests open files meanwhile.)
+    assert!(open() < before + 200, "{} open files for {} folders", open() - before, made.len());
+    for (name, (id, held)) in made {
+        drop(held);
+        assert!(root.remove(Path::new(&name), id, true).unwrap());
+    }
+    drop(root);
+    assert!(new.remove().unwrap());
+}
+
 #[test]
 fn only_what_was_made_is_removed() {
     let temp = tempfile::tempdir().unwrap();
@@ -548,7 +567,7 @@ mod source {
 /// What only reads. A path is let through when one of these is it, or begins it (ending in `::`).
 const READS: &[&str] = &[
     // Reading files, their names and what they are.
-    "std::fs", "std::fs::read", "std::fs::read_to_string", "std::fs::read_dir", "std::fs::metadata", "std::fs::symlink_metadata", "std::fs::canonicalize", "std::fs::Metadata", "std::fs::File::open",
+    "std::fs", "std::fs::read", "std::fs::read_to_string", "std::fs::read_dir", "std::fs::metadata", "std::fs::symlink_metadata", "std::fs::canonicalize", "std::fs::read_link", "std::fs::Metadata", "std::fs::File::open",
     // Not files at all.
     "std::io::Read", "std::io::Write", "std::io::Error", "std::io::ErrorKind::", "std::io::Result", "std::io::copy", "std::io::sink", "std::io::BufRead", "std::io::BufReader", "std::io::BufReader::", "std::io",
     "std::io::Error::", "std::path::", "std::collections::", "std::sync::", "std::ffi::", "std::time::", "std::ops::", "std::fmt::", "std::cell::", "std::mem::", "std::ptr::", "std::env::temp_dir", "std::env::var_os", "std::env::consts::",
@@ -558,7 +577,7 @@ const READS: &[&str] = &[
     // This app's own, which read.
     "crate::owned::FileId", "crate::owned::id_of", "crate::owned::id_of_file", "crate::owned::is_same", "crate::owned::is_link", "crate::owned",
     "crate::discovery::key", "crate::discovery::is_project", "crate::discovery::now", "crate::discovery::parse_version", "crate::discovery::is_link", "crate::discovery::Project", "crate::discovery::database_editors", "crate::discovery::editor_hints",
-    "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
+    "crate::editor::of", "crate::editor::running", "crate::size::free_space", "crate::size::Need", "crate::size::Need::", "crate::size::unit", "crate::data_dir", "crate::vcc_dir", "crate::vcc_app_dir", "crate::hub_data_dir", "crate::runtime", "crate::QuitAtOnce", "crate::mac::", "crate::unity_editors",
     "crate::templates::Keep", "crate::templates::Keep::", "crate::templates::left_out", "crate::templates::retarget_with", "crate::templates::packages_only_in_library", "crate::templates::installed_dependencies_complete",
     "crate::templates::dependencies_complete", "crate::templates::Marker", "crate::templates::Marker::", "crate::templates::INCOMPLETE", "crate::templates::Progress", "crate::templates::SharedProgress", "crate::templates::validate_name",
     "crate::builtin_templates::", "crate::copying", "crate::copying::", "crate::copies::", "crate::unity6::", "crate::find_editors", "crate::network::", "orbiters_core::app_version", "orbiters_core::account::", "orbiters_update::",
@@ -569,7 +588,8 @@ const ALONE: &[(&str, &[&str])] = &[
     // Not the Unity 6 feature's: a duplicate's or a new project's own. A restore's staging folder, in app data, is filled by VPM;
     // it is put on the list VCC and ALCOM share; the bundled templates' own cache.
     ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::gallery::add", "crate::own::dir", "crate::disk::companion", "crate::bundled_templates::builtins"]),
-    ("copies.rs", &["crate::gallery::add"]),
+    // (Deleting an incomplete copy the person asks to delete, through the one guarded door.)
+    ("copies.rs", &["crate::gallery::add", "crate::disk::remove_file", "crate::disk::remove_dir", "crate::storage::remove_tree"]),
     // Asking a disk and an editor's program what they are.
     ("budget.rs", &["windows::core::PCWSTR", "windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW", "windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW", "windows::Win32::Storage::FileSystem::GetVolumePathNameW"]),
     ("editors.rs", &["windows::", "winreg::", "plist::"]),

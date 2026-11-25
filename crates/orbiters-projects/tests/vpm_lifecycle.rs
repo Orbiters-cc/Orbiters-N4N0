@@ -84,6 +84,85 @@ fn repositories_packages_restore_and_templates_work_in_isolation() {
 }
 
 /// AS-11: a private repository's header (its credential) is never sent to the host its archives are on.
+/// A project with `test.avatar` 1.0.0 installed from `repo`, in an environment of its own.
+async fn with_avatar(root: &Path, project_at: &Path, url: &str) {
+    project(project_at);
+    orbiters_projects::write_json(&root.join("vrc-get/settings.json"), &json!({"ignoreOfficialRepository":true,"ignoreCuratedRepository":true})).unwrap();
+    vpm::add_repo(root, url, BTreeMap::from([("X-Fixture".into(), "enabled".into())])).await.unwrap();
+    vpm::view(root, None, true).await.unwrap();
+    let install = vpm::Change::Install { names: vec![("test.avatar".into(), Some("1.0.0".into()))], prerelease: false };
+    vpm::change(root, project_at, install).await.unwrap();
+}
+
+/// PRJ-21: removing a package, installing an exact version the listings here have and restoring one that is locked ask no repository
+/// for its listing; installing the newest does.
+#[test]
+fn a_change_that_needs_no_listing_downloads_none() {
+    let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let address = Arc::new(Mutex::new(String::new()));
+    let base = address.clone();
+    let (url, server) = serve(move |request| {
+        let path = request.split_whitespace().nth(1).unwrap_or_default().to_string();
+        seen.lock().unwrap().push(path.clone());
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if path != "/index.json" {
+            return archive(parts[0], parts[1].trim_end_matches(".zip"));
+        }
+        let base = base.lock().unwrap().clone();
+        let package = |name: &str, version: &str| json!({"name":name,"version":version,"url":format!("{base}/{name}/{version}.zip"),"vpmDependencies":{}});
+        serde_json::to_vec(&json!({"id":"test.repo","name":"R","url":format!("{base}/index.json"),"packages":{"test.avatar":{"versions":{"1.0.0":package("test.avatar","1.0.0"),"2.0.0":package("test.avatar","2.0.0")}}}})).unwrap()
+    });
+    *address.lock().unwrap() = url;
+    let (root, projects) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let at = projects.path().join("Source");
+    orbiters_projects::runtime().unwrap().block_on(async {
+        with_avatar(root.path(), &at, &server.url).await;
+        let listings = || std::mem::take(&mut *asked.lock().unwrap()).into_iter().filter(|p| p == "/index.json").count();
+        listings();
+        let install = |version: Option<&str>| vpm::Change::Install { names: vec![("test.avatar".into(), version.map(Into::into))], prerelease: false };
+        vpm::change(root.path(), &at, install(Some("1.0.0"))).await.unwrap();
+        assert_eq!(listings(), 0, "an exact version the listing here has");
+        vpm::change(root.path(), &at, vpm::Change::Remove("test.avatar".into())).await.unwrap();
+        assert_eq!((listings(), installed(&at, "test.avatar")), (0, None), "removing");
+        vpm::change(root.path(), &at, install(None)).await.unwrap();
+        assert_eq!((listings(), installed(&at, "test.avatar").as_deref()), (1, Some("2.0.0")), "the newest");
+        std::fs::remove_dir_all(at.join("Packages/test.avatar")).unwrap();
+        vpm::change(root.path(), &at, vpm::Change::Resolve).await.unwrap();
+        assert!(listings() == 0 && at.join("Packages/test.avatar/package.json").is_file(), "restoring what is locked");
+        // A server that is gone: what needs nothing of it still works.
+        drop(server);
+        vpm::change(root.path(), &at, vpm::Change::Remove("test.avatar".into())).await.unwrap();
+        assert_eq!(installed(&at, "test.avatar"), None);
+    });
+}
+
+/// PRJ-23: a change that fails (here a package in use by another program, a download that is not there) says that nothing was changed,
+/// and nothing is.
+#[cfg(windows)]
+#[test]
+fn a_change_that_fails_says_what_state_the_project_is_in() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let repo = repository();
+    let (root, projects) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let at = projects.path().join("Source");
+    orbiters_projects::runtime().unwrap().block_on(async {
+        with_avatar(root.path(), &at, &repo.url).await;
+        let before = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
+        std::fs::write(at.join("Packages/test.avatar/mine.txt"), "mine").unwrap();
+        let held = std::fs::File::options().read(true).share_mode(1).open(at.join("Packages/test.avatar/mine.txt")).unwrap();
+        let newer = vpm::Change::Install { names: vec![("test.avatar".into(), Some("2.0.0".into()))], prerelease: false };
+        let said = format!("{:#}", vpm::change(root.path(), &at, newer.clone()).await.unwrap_err());
+        assert!(said.contains("Nothing was changed"), "{said}");
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(at.join("Packages/test.avatar/mine.txt")).unwrap(), "mine");
+        assert!(at.join("Packages/test.base/package.json").is_file());
+        drop(held);
+        vpm::change(root.path(), &at, newer).await.unwrap();
+        assert_eq!(installed(&at, "test.avatar").as_deref(), Some("2.0.0"));
+    });
+}
+
 #[test]
 fn a_repositorys_credential_stays_on_its_own_origin() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));

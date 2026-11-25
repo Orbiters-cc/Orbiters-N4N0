@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 pub(super) enum ScanEvent {
     /// The projects hidden from the lists, read before the cached scan.
-    Hidden(BTreeSet<String>),
+    /// The hidden projects, and how many of the changes made here were saved when they were read.
+    Hidden(BTreeSet<String>, u64),
     Update(Scan),
     Done(Result<Scan, String>),
 }
@@ -42,14 +43,14 @@ pub(super) enum Modal {
 #[derive(Default)]
 pub(super) struct Dup {
     /// The project measured, with Library or not, and what a copy of it takes.
-    pub measured: Option<(PathBuf, bool, Result<u64, String>)>,
-    pub measure: Job<(PathBuf, bool, Result<u64, String>)>,
+    pub measured: Option<(PathBuf, bool, Result<size::Need, String>)>,
+    pub measure: Job<(PathBuf, bool, Result<size::Need, String>)>,
     pub name: String,
     pub location: String,
     pub library: bool,
     /// The (location, name) last checked: whether that folder exists already, and the room on its disk.
-    pub checked: Option<(String, String, bool, Option<u64>)>,
-    pub check: Job<((String, String, bool, Option<u64>), Option<String>)>,
+    pub checked: Option<(String, String, bool, Option<size::Room>)>,
+    pub check: Job<((String, String, bool, Option<size::Room>), Option<String>)>,
     /// Why no copy can be made at the place last checked (a share, inside another project).
     pub refused: Option<String>,
     /// The folder dialog of its location.
@@ -247,10 +248,11 @@ pub struct State {
     /// Screenshots (`projects-revisit`): the pictures asked for again after the page's second visit, the same but one.
     pub(super) fixture_arrivals: Vec<(String, TextureHandle, u64)>,
     /// Projects hidden from the lists ([`hidden`], by [`discovery::key`] of their folder), how many changes were made
-    /// to it here (each save numbered; a list read later than one never replaces it), and whether the lists show them
-    /// anyway, dimmed and marked.
+    /// to it here and how many of them are saved (a list read before one was never replaces it), and whether the lists show
+    /// them anyway, dimmed and marked.
     pub(super) hidden: BTreeSet<String>,
     pub(super) hidden_changes: u64,
+    pub(super) hidden_saved: Arc<std::sync::atomic::AtomicU64>,
     pub(super) show_hidden: bool,
     /// Projects' sizes on disk as last measured ([`size`]), the projects looked up since the page opened, the lookup
     /// and the walk running (one project at a time) and its cancel.
@@ -299,11 +301,11 @@ pub struct State {
     pub(super) last_change: Option<(PathBuf, vpm::Change)>,
     /// Packages a project needs that no repository lists: the error card with "Add their repositories".
     pub(super) missing: Option<super::missing_card::Card>,
-    /// Each project's Unity editor (by `discovery::key`), and since when Unity's save question was answered.
-    pub(super) sessions: HashMap<String, (editor::Session, Option<Instant>)>,
+    /// Each project's Unity editor, and since when Unity's save question was answered.
+    pub(super) sessions: HashMap<PathBuf, (editor::Session, Option<Instant>)>,
     /// The editors as a look at the processes sees them, by project, taken on a thread while the page shows; and when
     /// a look was last taken in.
-    pub(super) editors: crate::pages::Watch<u64, HashMap<String, Option<(u32, bool)>>>,
+    pub(super) editors: crate::pages::Watch<u64, HashMap<PathBuf, Option<(u32, bool)>>>,
     pub(super) editors_at: Option<Instant>,
     /// Show, Save & Exit or Kill running (not the page's one action: Unity may be asked while packages change).
     pub(super) editor_action: Job<Result<(), String>>,
@@ -433,6 +435,7 @@ impl Default for State {
             fixture_arrivals: vec![],
             hidden: BTreeSet::new(),
             hidden_changes: 0,
+            hidden_saved: Arc::default(),
             show_hidden: false,
             sizes: HashMap::new(),
             sizes_asked: HashSet::new(),
@@ -591,9 +594,11 @@ impl State {
         let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
         // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
         let working = super::super::Working::begin();
+        let hidden_saved = self.hidden_saved.clone();
         std::thread::spawn(move || {
             let _working = working;
-            let _ = tx.send(ScanEvent::Hidden(hidden::load()));
+            let saved = hidden_saved.load(Ordering::SeqCst);
+            let _ = tx.send(ScanEvent::Hidden(hidden::load(), saved));
             let scan = retained.unwrap_or_else(discovery::cached);
             let _ = tx.send(ScanEvent::Update(scan.clone()));
             ctx.request_repaint();
@@ -708,6 +713,8 @@ impl State {
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         self.server_now = Some(server(cx));
+        // What the repositories list is kept read while a project is shown, and let go of after.
+        orbiters_projects::listings::hold(self.selected.is_some() && !self.fixture);
         // An agent changed packages, repositories or projects through the bridge: the page looks again, as after its own.
         let changes = cx.snap.projects_changed;
         if self.bridge_changes.replace(changes).is_some_and(|seen| seen != changes) && self.started && !self.fixture {
@@ -731,8 +738,8 @@ impl State {
             while let Ok(event) = rx.try_recv() {
                 match event {
                     // A list read before a change made here would undo it.
-                    ScanEvent::Hidden(list) if self.hidden_changes == 0 => self.hidden = list,
-                    ScanEvent::Hidden(_) => {}
+                    ScanEvent::Hidden(list, saved) if saved == self.hidden_changes => self.hidden = list,
+                    ScanEvent::Hidden(..) => {}
                     ScanEvent::Update(scan) => {
                         self.scan = scan;
                         self.scan_serial += 1;
@@ -1134,12 +1141,14 @@ impl State {
             return;
         }
         self.hidden_changes += 1;
-        let (list, generation) = (self.hidden.clone(), self.hidden_changes);
+        let (change, saved) = (hidden::Change::new(path, hide), self.hidden_saved.clone());
         let working = super::super::Working::begin();
         std::thread::spawn(move || {
             let _working = working;
-            if let Err(e) = hidden::save(&list, generation) {
-                eprintln!("hidden projects: {e:#}");
+            match change.save() {
+                Ok(()) => drop(saved.fetch_add(1, Ordering::SeqCst)),
+                // (Not counted as saved: the list as it is here stays.)
+                Err(e) => eprintln!("hidden projects: {e:#}"),
             }
         });
     }
@@ -1661,6 +1670,7 @@ impl State {
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                     phase: String::from(mark("Copying project")),
+                    ..Default::default()
                 };
             }
             "projects-search" => self.query = "avatar".into(),
@@ -1789,6 +1799,7 @@ impl State {
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                     phase: String::from(mark("Copying project")),
+                    ..Default::default()
                 };
             }
             "projects-avatars" => {
@@ -1973,7 +1984,7 @@ impl State {
                     name: copy.into(),
                     location: STAND_IN_PROJECTS.into(),
                     library: name == "projects-duplicate-library",
-                    checked: Some((STAND_IN_PROJECTS.into(), copy.into(), name == "projects-duplicate-taken", Some(412_000_000_000))),
+                    checked: Some((STAND_IN_PROJECTS.into(), copy.into(), name == "projects-duplicate-taken", Some(size::Room { free: 412_000_000_000, unit: 4096 }))),
                     ..Default::default()
                 };
                 if name == "projects-duplicate-copying" {
@@ -1983,6 +1994,7 @@ impl State {
                         total: 4310,
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                         phase: String::from(mark("Copying project")),
+                    ..Default::default()
                     };
                 }
             }

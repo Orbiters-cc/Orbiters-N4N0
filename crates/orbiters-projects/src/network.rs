@@ -1,7 +1,7 @@
 use orbiters_core::account::{self, Api, Server};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A repository the server suggests. `GET /vpm/known` answers `{ repositories: [...] }` and `GET /vpm/public`
 /// `{ listings: [...] }`, the same fields in each but for `packageCount` (known) and the logos (public). Everything but
@@ -182,39 +182,87 @@ pub fn thumbnails(server: Server, ids: Vec<String>) -> anyhow::Result<HashMap<St
         return Ok(out);
     }
     let Some(account) = account::read(server) else { return Ok(out) };
+    let mut failed = None;
     for chunk in missing.chunks(50) {
-        let response = api
-            .agent()
-            .get(api.url(&format!("vrchat/avatars/thumbnails?ids={}", chunk.join(","))))
-            .header("Authorization", &format!("Bearer {}", account.token))
-            .call()?;
-        let v: serde_json::Value = Api::json(response)?;
-        for id in chunk {
-            let Some(url) = v["avatars"][id]["thumbnailUrl"].as_str() else { continue };
-            // Images are public CDN resources: never forward the Orbiters bearer token to them.
-            let parsed = url::Url::parse(url)?;
-            if parsed.scheme() != "https" {
-                continue;
+        let asked = (|| -> anyhow::Result<serde_json::Value> {
+            let response = api
+                .agent()
+                .get(api.url(&format!("vrchat/avatars/thumbnails?ids={}", chunk.join(","))))
+                .header("Authorization", &format!("Bearer {}", account.token))
+                .call()?;
+            Ok(Api::json(response)?)
+        })();
+        let answer = match asked {
+            Ok(answer) => answer,
+            Err(e) => {
+                failed = Some(e);
+                break;
             }
+        };
+        let pictures: Vec<(String, String)> = chunk.iter().filter_map(|id| Some((id.clone(), answer["avatars"][id]["thumbnailUrl"].as_str()?.to_string()))).collect();
+        // Images are public CDN resources: never forward the Orbiters bearer token to them.
+        let fetch = |url: &str| -> anyhow::Result<Vec<u8>> {
+            anyhow::ensure!(url::Url::parse(url)?.scheme() == "https", "not over https"); // i18n: not shown (the picture is left out)
             let response = api.agent().get(url).call()?;
-            if !response.status().is_success() {
-                continue;
-            }
-            let bytes = response.into_body().with_config().limit(12 * 1024 * 1024).read_to_vec()?;
-            crate::disk::create_dir_all(&cache)?;
-            let p = cache.join(format!("{}.image", crate::avatars::filename(id)));
-            let tmp = p.with_extension("tmp");
-            crate::disk::write(&tmp, &bytes)?;
-            crate::disk::rename(tmp, &p)?;
-            out.insert(id.clone(), Thumbnail { path: p, size: bytes.len() as u64 });
-        }
+            anyhow::ensure!(response.status().is_success(), "{}", response.status());
+            Ok(response.into_body().with_config().limit(12 * 1024 * 1024).read_to_vec()?)
+        };
+        out.extend(pictures_of(&pictures, &cache, &fetch));
     }
-    Ok(out)
+    match failed {
+        // What was found stays, what could not be asked for is asked for again later.
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
+}
+
+/// How many pictures are fetched at once.
+const AT_ONCE: usize = 6;
+
+/// `pictures` (id and address) fetched and kept in `cache`, each by itself: one that fails costs no other (PRJ-28).
+fn pictures_of(pictures: &[(String, String)], cache: &Path, fetch: &(dyn Fn(&str) -> anyhow::Result<Vec<u8>> + Sync)) -> HashMap<String, Thumbnail> {
+    let one = |(id, url): &(String, String)| -> anyhow::Result<(String, Thumbnail)> {
+        let bytes = fetch(url)?;
+        let path = cache.join(format!("{}.image", crate::avatars::filename(id)));
+        crate::vpm::replace_bytes(&path, &bytes)?;
+        Ok((id.clone(), Thumbnail { path, size: bytes.len() as u64 }))
+    };
+    if crate::disk::create_dir_all(cache).is_err() {
+        return HashMap::new();
+    }
+    let mut out = HashMap::new();
+    for some in pictures.chunks(AT_ONCE) {
+        std::thread::scope(|s| {
+            let fetching: Vec<_> = some.iter().map(|p| s.spawn(|| one(p))).collect();
+            out.extend(fetching.into_iter().filter_map(|t| t.join().ok()?.ok()));
+        });
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRJ-28: one picture that cannot be fetched (its address, its connection) or kept costs none of the others.
+    #[test]
+    fn one_failed_picture_costs_no_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let pictures: Vec<(String, String)> = (0..20).map(|i| (format!("avtr_{i}"), format!("https://pictures.example/{i}"))).collect();
+        // One that cannot be written: a folder is at its place.
+        std::fs::create_dir_all(cache.join(format!("{}.image", crate::avatars::filename("avtr_7")))).unwrap();
+        let fetch = |url: &str| {
+            anyhow::ensure!(!url.ends_with("/3"), "no connection");
+            Ok(url.as_bytes().to_vec())
+        };
+        let got = pictures_of(&pictures, &cache, &fetch);
+        assert_eq!(got.len(), 18);
+        assert!(!got.contains_key("avtr_3") && !got.contains_key("avtr_7"));
+        assert_eq!(std::fs::read(&got["avtr_19"].path).unwrap(), b"https://pictures.example/19");
+        let left = std::fs::read_dir(&cache).unwrap().count();
+        assert_eq!(left, 19, "no half-written file");
+    }
 
     #[test]
     fn the_known_repositories_answer_gives_owner_count_and_packages() {

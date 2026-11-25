@@ -229,6 +229,13 @@ fn read_listing(url: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}').as_bytes()).ok()
 }
 
+/// Whether a listing of the directory may have one of `missing`, as far as the directory says what is in it: the others are not
+/// downloaded, and do not count among those that are read (PRJ-26).
+fn may_have(listing: &crate::network::Listing, missing: &[Missing]) -> bool {
+    let whole = !listing.packages.is_empty() && listing.package_total().is_none_or(|n| n <= listing.packages.len());
+    !whole || listing.packages.iter().any(|p| missing.iter().any(|m| m.name == p.name))
+}
+
 /// The person's repositories turned off on this computer, from the listings last downloaded.
 async fn turned_off(root: &Path) -> Vec<Source> {
     let Ok((settings, collection)) = crate::vpm::collection(root, false).await else { return vec![] };
@@ -238,7 +245,7 @@ async fn turned_off(root: &Path) -> Vec<Source> {
         if !collection.hidden.contains(&id) {
             continue;
         }
-        let Some(cached) = collection.inner.get_remote().find(|c| c.id() == Some(id.as_str())) else { continue };
+        let Some(cached) = collection.inner.packages.get_remote().find(|c| c.id() == Some(id.as_str())) else { continue };
         let listing = serde_json::to_value(cached.repo()).unwrap_or_default();
         out.push(Source {
             name: r.name().unwrap_or(&id).to_string(),
@@ -266,7 +273,8 @@ pub async fn lookup(root: &Path, server: Server, missing: &[Missing]) -> anyhow:
         let listings: Vec<crate::network::Listing> =
             get("vpm/public").ok().and_then(|v| serde_json::from_value(v["listings"].clone()).ok()).unwrap_or_default();
         let mut more = vec![];
-        for l in listings.iter().filter(|l| !sources.iter().any(|s| same_url(&s.url, &l.url))).take(LISTINGS_READ) {
+        let others = listings.iter().filter(|l| !sources.iter().any(|s| same_url(&s.url, &l.url)) && may_have(l, &found.not_provided));
+        for l in others.take(LISTINGS_READ) {
             if let Some(listing) = read_listing(&l.url) {
                 more.push(Source { name: l.name.clone(), url: l.url.clone(), kind: Kind::Orbiters, id: None, packages: listing_versions(&listing) });
             }
@@ -317,6 +325,19 @@ mod tests {
             id: (kind == Kind::TurnedOff).then(|| name.to_lowercase()),
             packages: packages.iter().map(|(n, v)| (n.to_string(), v.iter().map(|s| s.to_string()).collect())).collect(),
         }
+    }
+
+    /// PRJ-26: only the listings that may have a missing package are read; one whose packages the directory does not say is.
+    #[test]
+    fn only_listings_that_may_have_the_package_are_read() {
+        use crate::network::{Listing, ListingPackage};
+        let package = |name: &str| ListingPackage { name: name.into(), ..Default::default() };
+        let missing = [Missing { name: "a.b".into(), range: "*".into() }];
+        let listing = |packages: &[&str], count| Listing { packages: packages.iter().map(|p| package(p)).collect(), package_count: count, ..Default::default() };
+        assert!(may_have(&listing(&["c", "a.b"], None), &missing));
+        assert!(!may_have(&listing(&["c", "d"], None), &missing) && !may_have(&listing(&["c", "d"], Some(2)), &missing));
+        assert!(may_have(&listing(&[], None), &missing), "nothing is said of it");
+        assert!(may_have(&listing(&["c", "d"], Some(9)), &missing), "it has more than is said");
     }
 
     #[test]

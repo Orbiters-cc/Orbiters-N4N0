@@ -1,0 +1,19 @@
+{
+  "Incomplete copy: it was cut short, so this folder is not a project. Delete it and make the copy again, or look into its folder.": "未完成のコピー：途中で終わったため、このフォルダーはプロジェクトではありません。削除してもう一度コピーするか、フォルダーを確認してください。",
+  "The copy to {path} failed, and what it had copied was removed": "{path}へのコピーに失敗し、コピーした分は削除されました",
+  "The copy to {path} failed. What it had copied was removed; the folder keeps what was not the copy's: {files}": "{path}へのコピーに失敗しました。コピーした分は削除しました。フォルダーにはコピー以外のものが残っています：{files}",
+  "The copy to {path} failed and could not be removed ({why})": "{path}へのコピーに失敗し、削除もできませんでした（{why}）",
+  "The copy to {path} failed and could not be removed ({why}): it is listed as an incomplete copy": "{path}へのコピーに失敗し、削除もできませんでした（{why}）。未完成のコピーとして一覧に表示されます",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}): it is listed as an incomplete copy.": "コピーを停止しました。{path}の未完成のコピーを削除できませんでした（{why}）。未完成のコピーとして一覧に表示されます。",
+  "Orbiters cannot prove that {path} is the copy it made: delete that folder yourself.": "{path}がOrbitersの作成したコピーであることを確認できません。このフォルダーはご自身で削除してください。",
+  "The incomplete copy at {path} could not be deleted: {why}": "{path}の未完成のコピーを削除できませんでした：{why}",
+  "The incomplete copy at {path} was deleted.": "{path}の未完成のコピーを削除しました。",
+  "Delete the incomplete copy…": "未完成のコピーを削除…",
+  "Delete its files": "ファイルを削除",
+  "Deleting the incomplete copy…": "未完成のコピーを削除中…",
+  "Could not record the package change before making it: nothing was changed": "パッケージの変更を始める前に記録できませんでした。何も変更していません",
+  "A package change of this project ended halfway (Orbiters closed during it). {problems}": "このプロジェクトのパッケージの変更が途中で終わりました（その間にOrbitersが終了しました）。{problems}",
+  "{name} could not be put back from {from} to {to}: {why}": "{name}を{from}から{to}に戻せませんでした：{why}",
+  "{name} may be the new one: what the project had is kept in {path}. Restore installs the version the project's list has.": "{name}は新しいものかもしれません。プロジェクトにあったものは{path}に残しています。「復元」でプロジェクトの一覧にあるバージョンをインストールできます。",
+  "Links that lead nowhere were left out: {files}": "リンク先のないリンクは除外しました：{files}"
+}

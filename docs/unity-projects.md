@@ -115,12 +115,15 @@ project's packages are known and folds away once Mixer is in.
 
 ## Discovery
 
-The cache is `%LOCALAPPDATA%/Orbiters/unity-projects.json`. Cached cards appear first; registered project metadata,
+The cache is `%LOCALAPPDATA%/Orbiters/unity-projects.json` (what the scenes held, so that one that did not change is not
+read again, is beside it in `unity-scenes.json`). Cached cards appear first; registered project metadata,
 Unity Hub/Unity registry proposals and avatar results arrive progressively and are saved before the disk scan
-finishes, so closing the window does not lose them. A below-normal-priority worker scans
-fixed local disks at most once per hour, or on Refresh. It skips system/generated folders and reparse points, stops
-at project roots, and never changes scenes or project files. A volume with no directory progress for 60 seconds is
-interrupted and reported, retaining its discoveries; other volumes continue and Refresh retries it.
+finishes, so closing the window does not lose them. Background threads (`walk`: four for a disk without seeks, one for a
+hard disk, every device beside the others) scan fixed local disks at most once per hour, or on Refresh. They skip
+system/generated folders and reparse points, stop at project roots, and never change scenes or project files. What each
+folder held is kept in `unity-folders.bin` with when the folder last changed: the next scan lists only those that changed
+since (NTFS, ReFS, APFS and HFS+; Refresh lists every one). A device with no directory progress for 60 seconds is
+interrupted and reported, retaining its discoveries; other devices continue and Refresh retries it.
 Avatar and world projects' scenes are read (avatars for the first, worlds and My World's thumbnail for the second). Proposals sort by the newest Windows modification time
 of the root, Assets, VPM manifest or ProjectVersion file.
 
@@ -143,8 +146,14 @@ template into a new folder, restores packages and registers it. A custom templat
 the exact editor version. A copy (`templates::copy_keeping`) leaves out what Unity or the IDE make again at the
 project's top (Library unless asked for, Temp, Logs, obj, `.vs`, the `.csproj` and `.sln` files), UserSettings, and Git
 history and `node_modules` wherever they are; an asset folder named Library or Temp deeper in is copied. It shows file
-progress and can be cancelled during copying. An interrupted or failed copy stays on disk for review and is not
-registered. Existing destination folders are never overwritten. A new project gets a product GUID of its own; a
+progress and can be cancelled during copying. A copy that is stopped or fails removes what it made, by the identity of
+each file and folder, and the error names the destination and why; what is not the copy's own in that folder stays and
+is named. One that could not be removed (a file in use, a disk that went, a kill, a power cut) is on the page as an
+**Incomplete copy** (`copies`, under "Copies to look at"): its folder can be opened or, after a confirmation, deleted. It
+is recorded in `%LOCALAPPDATA%/Orbiters/project-copies` before anything is made and until the copy is on the list, and a
+marker in its folder tells it wherever it is found. A copy needs the room its files take on that disk (its allocation unit counts)
+and 1 GiB left free, asked of the very list it copies. Links that lead nowhere are left out and named. Existing
+destination folders are never overwritten. A new project gets a product GUID of its own; a
 template's `productName` becomes the project's name, a copy's when it was the copied project's folder name (the editor
 keeps a project's PlayerPrefs under it), else it stays (`templates::retarget`). ALCOM's custom template descriptors
 and unitypackage hooks are not interpreted; VCC-format user template folders are supported. A created or copied
@@ -172,8 +181,8 @@ meanwhile. `size::free_space` gives the Duplicate dialog the room left on the de
 ## Hidden projects
 
 The "…" menu's **Hide this project** (Show this project once hidden) keeps the project's folder in
-`%LOCALAPPDATA%/Orbiters/hidden-projects.json` (`hidden`, by `discovery::key`; saved on a worker, a save started
-earlier never landing over a later one). Hidden projects leave the cards and Found on this computer, the counts in the
+`%LOCALAPPDATA%/Orbiters/hidden-projects.json` (`hidden`, by `discovery::key`; each change is saved by itself on a
+worker, one started earlier never landing over a later one). Hidden projects leave the cards and Found on this computer, the counts in the
 header and the sections' pills, and the choice of the project the docked panel shows first. A chip at the right of
 "Your projects", **Hidden · n**, shows them again, dimmed and marked Hidden (a found one says so in its line), until
 pressed again. Hiding the project shown moves the panel on (a sheet slides away). VCC and ALCOM keep listing them;

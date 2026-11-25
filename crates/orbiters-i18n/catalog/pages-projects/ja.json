@@ -301,7 +301,6 @@
   "Saved in {copies} places: you choose which next": "{copies}か所に保存されています。次に選びます",
   "Saved {when}": "{when}に保存",
   "Scanning fixed local disks": "内蔵ディスクをスキャンしています",
-  "Scanning {disk}": "{disk}をスキャンしています",
   "Scene": "シーン",
   "Scene light": "シーンのライト",
   "Search packages, repositories, owners and descriptions": "パッケージ、リポジトリ、作成者、説明を検索",

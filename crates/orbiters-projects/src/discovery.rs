@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc,
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,9 +47,56 @@ pub struct Project {
     pub worlds: Vec<Avatar>,
 }
 
+/// A scan's projects, shared: a scan is handed on at each of its steps, and what is handed on is not copied (PRJ-11). Changing them
+/// copies them first when somebody else has them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<Project>", into = "Vec<Project>")]
+pub struct Projects(Arc<Vec<Project>>);
+
+impl From<Vec<Project>> for Projects {
+    fn from(list: Vec<Project>) -> Self {
+        Self(Arc::new(list))
+    }
+}
+impl From<Projects> for Vec<Project> {
+    fn from(projects: Projects) -> Self {
+        Arc::unwrap_or_clone(projects.0)
+    }
+}
+impl FromIterator<Project> for Projects {
+    fn from_iter<T: IntoIterator<Item = Project>>(list: T) -> Self {
+        Vec::from_iter(list).into()
+    }
+}
+impl IntoIterator for Projects {
+    type Item = Project;
+    type IntoIter = std::vec::IntoIter<Project>;
+    fn into_iter(self) -> Self::IntoIter {
+        Vec::from(self).into_iter()
+    }
+}
+impl<'a> IntoIterator for &'a Projects {
+    type Item = &'a Project;
+    type IntoIter = std::slice::Iter<'a, Project>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+impl std::ops::Deref for Projects {
+    type Target = Vec<Project>;
+    fn deref(&self) -> &Vec<Project> {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Projects {
+    fn deref_mut(&mut self) -> &mut Vec<Project> {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Scan {
-    pub projects: Vec<Project>,
+    pub projects: Projects,
     pub last_full: u64,
     pub full_scan_ms: u64,
     pub directories: u64,
@@ -59,8 +106,6 @@ pub struct Scan {
     pub companion: bool,
     #[serde(skip)]
     pub status: String,
-    #[serde(default)]
-    pub scenes: SceneCache,
 }
 
 pub fn now() -> u64 {
@@ -76,8 +121,16 @@ pub fn fingerprint(path: &Path) -> u64 {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
 }
+/// How a folder's name is compared, as this system's disks do by default: whatever its case and separators on Windows, its case on a
+/// Mac, its very name elsewhere. A name alone does not tell two folders apart where a disk does otherwise ([`same`]).
 pub fn key(path: &Path) -> String {
-    path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    if cfg!(any(windows, target_os = "macos")) {
+        return path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    }
+    match path.to_str() {
+        Some(text) => text.trim_end_matches('/').into(),
+        None => path.as_os_str().as_encoded_bytes().escape_ascii().to_string(),
+    }
 }
 
 /// Whether two paths are one project's: the same however they are spelled, but not two folders whose names differ only by case
@@ -88,7 +141,7 @@ pub fn same(a: &Path, b: &Path) -> bool {
 
 /// Two folders there, whatever their names say.
 fn apart(a: &Path, b: &Path) -> bool {
-    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
+    let plain = |p: &Path| if cfg!(windows) { p.to_string_lossy().replace('/', "\\") } else { p.to_string_lossy().into_owned() };
     plain(a) != plain(b) && crate::owned::id_of(a).ok().zip(crate::owned::id_of(b).ok()).is_some_and(|(a, b)| a != b)
 }
 
@@ -126,14 +179,12 @@ pub fn decode_registry_path(bytes: &[u8]) -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 pub fn skip_dir(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    matches!(
-        n.as_str(),
-        "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git" // i18n: not shown (folder names and a macOS query the scan skips or asks for)
-    ) || n.starts_with("program files")
+    const SKIPPED: [&str; 10] = ["windows", "programdata", "$recycle.bin", "system volume information", "appdata", "library", "temp", "logs", "obj", "node_modules"]; // i18n: not shown (folder names and a macOS query the scan skips or asks for)
+    SKIPPED.iter().any(|s| name.eq_ignore_ascii_case(s))
+        || name.get(..13).is_some_and(|n| n.eq_ignore_ascii_case("program files"))
         // Dot-folders, on every system (PROJECTS-9, Enzo 2026-11-19: "Yes"): caches, tools' state, test stand-ins.
-        || n.starts_with('.')
-        || mac_only_skip(&n)
+        || name.starts_with('.')
+        || (cfg!(target_os = "macos") && mac_only_skip(&name.to_ascii_lowercase()))
 }
 /// Hidden folders (the Trash, Spotlight's and Time Machine's, a shell's caches) and what the Finder shows as one file: an
 /// application or a photo library, never a place for a Unity project. A Unity project's own `Library` is never reached,
@@ -143,35 +194,27 @@ fn mac_only_skip(name: &str) -> bool {
 }
 /// Whether reading this folder makes macOS ask the person for permission in the app's name: the folders of the home
 /// folder it guards (its Library is left out anyway, and Spotlight answers for all of them without asking anybody).
-fn asks_permission(path: &Path) -> bool {
+pub(crate) fn asks_permission(path: &Path) -> bool {
     cfg!(target_os = "macos")
         && path.parent().is_some_and(|parent| dirs::home_dir().as_deref() == Some(parent))
         && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g)) // i18n: not shown (folder names and a macOS query the scan skips or asks for)
 }
-pub fn is_link(m: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        m.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        m.file_type().is_symlink()
-    }
-}
+pub use crate::owned::is_link;
 pub fn is_project(path: &Path) -> bool {
     path.join("ProjectSettings/ProjectVersion.txt").is_file() && !unfinished_copy(path)
 }
 /// Whether `path` is a copy still being made (or cut short): its marker names this very folder. An older version's
 /// empty marker counts too; one naming another folder (copied, restored) does not.
-fn unfinished_copy(path: &Path) -> bool {
+pub(crate) fn unfinished_copy(path: &Path) -> bool {
     let marker = path.join(crate::templates::INCOMPLETE);
     match std::fs::read(&marker) {
         Ok(bytes) if bytes.is_empty() => true,
-        // The very folder the copy made, by identity when the marker has it (a project restored at that place with the
-        // marker, or a copy of the folder, is another folder).
-        Ok(bytes) => serde_json::from_slice::<crate::templates::Marker>(&bytes)
-            .is_ok_and(|m| key(&m.destination) == key(path) && m.folder.is_none_or(|id| crate::owned::is_same(path, id))),
+        Ok(bytes) => serde_json::from_slice::<crate::templates::Marker>(&bytes).is_ok_and(|m| match m.folder {
+            // The very folder the copy made, by identity when the marker has it, wherever it is now: renamed, or its disk under another
+            // letter (PRJ-8). A project restored at its place with the marker, or a copy of the folder, is another folder.
+            Some(id) => crate::owned::is_same(path, id),
+            None => key(&m.destination) == key(path),
+        }),
         Err(_) => false,
     }
 }
@@ -197,6 +240,59 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         worlds: vec![],
     }
 }
+/// What the scenes of the projects held when they were last read, so that one that did not change is not read again. The scan's own
+/// (PRJ-11: it was part of what a scan hands on, 1 MB copied at each step), in a file of its own.
+struct Scenes {
+    cache: SceneCache,
+    /// What was read of its file.
+    kept: u64,
+}
+
+impl Scenes {
+    fn file() -> PathBuf {
+        crate::data_dir().join("unity-scenes.json")
+    }
+
+    fn load() -> Scenes {
+        #[derive(Deserialize)]
+        struct Before {
+            scenes: SceneCache,
+        }
+        let kept = || serde_json::from_slice(&std::fs::read(Self::file()).ok()?).ok();
+        // Up to 0.3.10 it was with the projects.
+        let before = || Some(serde_json::from_slice::<Before>(&std::fs::read(crate::data_dir().join("unity-projects.json")).ok()?).ok()?.scenes);
+        let (cache, kept) = match kept() {
+            Some(cache) => (cache, true),
+            None => (before().unwrap_or_default(), false),
+        };
+        let kept = if kept { sum(&cache) } else { 0 };
+        Scenes { cache, kept }
+    }
+
+    /// Forgets the scenes of what is not among `projects` any more (PRJ-12).
+    fn keep_only(&mut self, projects: &[Project]) {
+        let there: HashSet<&Path> = projects.iter().map(|p| p.path.as_path()).collect();
+        self.cache.retain(|scene, _| scene.ancestors().any(|a| there.contains(a)));
+    }
+
+    fn save(&mut self) {
+        let now = sum(&self.cache);
+        if now != self.kept && crate::write_json(&Self::file(), &self.cache).is_ok() {
+            self.kept = now;
+        }
+    }
+}
+
+/// Differs when what a cache holds does.
+fn sum(cache: &SceneCache) -> u64 {
+    use std::hash::{Hash, Hasher};
+    cache.iter().fold(cache.len() as u64 + 1, |sum, (path, scene)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (path, scene.modified, scene.len, scene.avatars.len(), &scene.dependencies).hash(&mut h);
+        sum.wrapping_add(h.finish())
+    })
+}
+
 pub fn cached() -> Scan {
     std::fs::read(crate::data_dir().join("unity-projects.json")).ok().and_then(|s| serde_json::from_slice(&s).ok()).unwrap_or_default()
 }
@@ -358,6 +454,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
         notify(scan);
     };
+    let mut scenes = Scenes::load();
     let listed = crate::gallery::listed(&crate::vcc_dir());
     scan.warnings = listed.warning.iter().cloned().collect();
     scan.companion = listed.companion;
@@ -379,6 +476,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         known.copies.insert(keep(&mut found, p));
     }
     rebuild(&mut scan, &found, &known);
+    scenes.keep_only(&scan.projects);
     scan.status = tr("Finding nearby projects").into();
     publish(&scan);
     let seeds = seeds(&registered);
@@ -391,18 +489,21 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             roots.insert(parent.to_path_buf());
         }
     }
-    for r in roots {
-        walk(&r, Some(2), !force, cancel, &mut found, &AtomicU64::new(0), None);
-    }
+    // Copies that were cut short, found without a record of them.
+    let mut cut = vec![];
+    crate::walk::near(roots.into_iter(), Some(2), !force, cancel, |p| match unfinished_copy(&p) {
+        true => cut.push(p),
+        false => drop(keep(&mut found, p)),
+    });
     rebuild(&mut scan, &found, &known);
     publish(&scan);
     let mut enriched = HashSet::new();
-    enrich(&mut scan, cancel, &mut enriched, &mut publish);
+    enrich(&mut scan, &mut scenes.cache, cancel, &mut enriched, &mut publish);
+    scenes.save();
     if force || now().saturating_sub(scan.last_full) >= 3600 {
         scan.status = tr("Scanning fixed local disks").into();
         publish(&scan);
         let start = Instant::now();
-        let mut count = 0;
         #[cfg(target_os = "macos")]
         {
             for p in if orbiters_core::paths::roots().is_none() { spotlight_projects() } else { Vec::new() } {
@@ -411,23 +512,28 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             rebuild(&mut scan, &found, &known);
             publish(&scan);
         }
-        for disk in scan_roots(force) {
-            scan.status = tr!("Scanning {disk}", disk = disk.display());
-            publish(&scan);
-            count += scan_disk(&disk, !force, cancel, &mut found, &mut scan.warnings);
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-        }
+        // What the last walk found of the folders that did not change since; Refresh looks at every one again.
+        let folders = crate::data_dir().join("unity-folders.bin");
+        let index = Arc::new(if force { Default::default() } else { crate::walk::Index::load(&folders) });
+        let walked = crate::walk::disks(crate::walk::devices(scan_roots(force)), !force, &index, cancel, |p| match unfinished_copy(&p) {
+            true => cut.push(p),
+            false => drop(keep(&mut found, p)),
+        });
+        let _ = index.save(&folders, &walked.recorded, walked.cut);
+        scan.warnings.extend(walked.warnings);
         scan.full_scan_ms = start.elapsed().as_millis() as u64;
-        scan.directories = count;
+        scan.directories = walked.folders;
         if !cancel.load(Ordering::Relaxed) {
             scan.last_full = now();
         }
         rebuild(&mut scan, &found, &known);
         publish(&scan);
-        enrich(&mut scan, cancel, &mut enriched, &mut publish);
+        enrich(&mut scan, &mut scenes.cache, cancel, &mut enriched, &mut publish);
     }
+    for p in cut {
+        crate::copies::adopt(&crate::data_dir(), &p);
+    }
+    scenes.save();
     scan.status.clear();
     if !cancel.load(Ordering::Relaxed) {
         crate::write_json(&crate::data_dir().join("unity-projects.json"), &scan)?;
@@ -509,7 +615,7 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         // one the person registered stays wherever it is.
         .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && (known.trials.contains(*k) || known.copies.contains(*k) || !in_dot_folder(p))))
         .map(|(k, p)| {
-            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut scan.scenes);
+            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut SceneCache::new());
             project.shared = known.shared.contains(&key(p));
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
@@ -517,125 +623,39 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         .collect();
     scan.projects.sort_by_key(|p| (std::cmp::Reverse(p.registered), std::cmp::Reverse(p.modified)));
 }
-fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<String>, publish: &mut impl FnMut(&Scan)) {
+fn enrich(scan: &mut Scan, scenes: &mut SceneCache, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>, publish: &mut impl FnMut(&Scan)) {
     for i in 0..scan.projects.len() {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
         let p = &scan.projects[i];
-        if !matches!(p.kind, Kind::Avatars | Kind::Worlds) || !enriched.insert(key(&p.path)) {
+        if !matches!(p.kind, Kind::Avatars | Kind::Worlds) || !enriched.insert(p.path.clone()) {
             continue;
         }
         let path = p.path.clone();
         scan.status = if p.kind == Kind::Worlds { tr!("Reading worlds in {project}", project = p.name) } else { tr!("Reading avatars in {project}", project = p.name) };
         publish(scan);
-        let (items, complete) = avatars::in_project_checked(&path, &mut scan.scenes);
+        let (items, complete) = avatars::in_project_until(&path, scenes, cancel);
         // A readable Assets root does not guarantee its subfolders, scenes or prefabs were readable.
         if !complete {
             continue;
         }
         let (worlds, avatars): (Vec<Avatar>, Vec<Avatar>) = items.into_iter().partition(Avatar::is_world);
-        scan.projects[i].avatars = avatars;
-        scan.projects[i].worlds = worlds;
-        publish(scan);
+        // (Nothing is copied, nor handed on again, for a project that shows what it showed.)
+        if scan.projects[i].avatars != avatars || scan.projects[i].worlds != worlds {
+            let project = &mut scan.projects[i];
+            (project.avatars, project.worlds) = (avatars, worlds);
+            publish(scan);
+        }
     }
 }
-enum DiskEvent {
-    Found(PathBuf),
-    Done,
-}
-/// A damaged/offline volume must not hold every other disk hostage. Cancel an enumeration after 60 s without a
-/// single directory completed, retain discoveries already received, and report that volume in the scan warnings.
-fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<String, PathBuf>, warnings: &mut Vec<String>) -> u64 {
-    let (tx, rx) = mpsc::channel();
-    let stop = Arc::new(AtomicBool::new(false));
-    let progress = Arc::new(AtomicU64::new(0));
-    let worker = {
-        let root = root.to_path_buf();
-        let stop = stop.clone();
-        let progress = progress.clone();
-        std::thread::spawn(move || {
-            low_priority();
-            walk(&root, None, quiet, &stop, &mut HashMap::new(), &progress, Some(&tx));
-            let _ = tx.send(DiskEvent::Done);
-        })
-    };
-    let mut last = 0;
-    let mut advanced = Instant::now();
-    let mut finished = false;
-    loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(DiskEvent::Found(p)) => {
-                keep(found, p);
-            }
-            Ok(DiskEvent::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                finished = true;
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let n = progress.load(Ordering::Relaxed);
-        if n != last {
-            last = n;
-            advanced = Instant::now();
-        }
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        if advanced.elapsed() > Duration::from_secs(60) {
-            warnings.push(tr!("{folder} stopped responding for 60 seconds. Its scan was interrupted; Refresh retries it.", folder = root.display()));
-            break;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    if finished {
-        let _ = worker.join();
-    } else {
-        #[cfg(windows)]
-        unsafe {
-            use std::os::windows::io::AsRawHandle;
-            let _ = windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(worker.as_raw_handle()));
-        }
-    }
-    progress.load(Ordering::Relaxed)
-}
-/// `quiet`: leaving out the folders reading which makes the system ask the person something ([`asks_permission`]).
-fn walk(
-    root: &Path,
-    depth: Option<usize>,
-    quiet: bool,
-    cancel: &AtomicBool,
-    found: &mut HashMap<String, PathBuf>,
-    count: &AtomicU64,
-    events: Option<&mpsc::Sender<DiskEvent>>,
-) {
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    while let Some((p, d)) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
-        if is_link(&m) || !m.is_dir() {
-            continue;
-        }
-        count.fetch_add(1, Ordering::Relaxed);
-        if is_project(&p) {
-            if let Some(tx) = events {
-                let _ = tx.send(DiskEvent::Found(p.clone()));
-            }
-            keep(found, p);
-            continue;
-        }
-        if depth.is_some_and(|max| d >= max) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&p) else { continue };
-        for e in entries.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_dir()) && !skip_dir(&e.file_name().to_string_lossy()) && !(quiet && asks_permission(&e.path())) {
-                stack.push((e.path(), d + 1));
-            }
-        }
-    }
+/// What a walk of `dir` finds.
+#[cfg(test)]
+pub(crate) fn found_in(dir: &Path) -> Vec<PathBuf> {
+    let mut found = vec![];
+    crate::walk::near(std::iter::once(dir.to_path_buf()), None, false, &AtomicBool::new(false), |p| found.push(p));
+    found.sort();
+    found
 }
 
 pub fn find_editor(version: &str) -> Option<PathBuf> {
@@ -873,11 +893,9 @@ mod mac_tests {
         project("Library/Application Support/Orbiters/templates/base");
         project("Applications/Some.app/Contents/Project");
         project("Unity Projects/Avatar/Assets/Nested");
-        let mut found = HashMap::new();
-        walk(temp.path(), None, true, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
-        let mut keys: Vec<&String> = found.keys().collect();
+        let mut keys: Vec<String> = found_in(temp.path()).iter().map(|p| key(p)).collect();
         keys.sort();
-        let mut expected: Vec<&String> = wanted.iter().collect();
+        let mut expected = wanted.to_vec();
         expected.sort();
         assert_eq!(keys, expected);
     }
@@ -895,9 +913,7 @@ mod mac_tests {
         let wanted = project("Projects/Mine");
         project(".orbiters-build/runs/Stand-in");
         project("Projects/.cache/Other");
-        let mut found = HashMap::new();
-        walk(temp.path(), None, false, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
-        assert_eq!(found.keys().collect::<Vec<_>>(), [&wanted]);
+        assert_eq!(found_in(temp.path()).iter().map(|p| key(p)).collect::<Vec<_>>(), [wanted]);
     }
 
     #[test]
@@ -921,13 +937,13 @@ mod mac_tests {
     #[ignore]
     fn real_walk() {
         let start = Instant::now();
-        let (mut found, count) = (HashMap::new(), AtomicU64::new(0));
-        walk(Path::new("/Users"), None, true, &AtomicBool::new(false), &mut found, &count, None);
-        println!("{} folders in {:?}: {} projects", count.load(Ordering::Relaxed), start.elapsed(), found.len());
+        let mut found = vec![];
+        let walked = crate::walk::disks(crate::walk::devices(vec![PathBuf::from("/Users")]), true, &Arc::default(), &AtomicBool::new(false), |p| found.push(p));
+        println!("{} folders in {:?}: {} projects", walked.folders, start.elapsed(), found.len());
         let start = Instant::now();
         let spotlight = spotlight_projects();
         println!("Spotlight in {:?}: {} projects", start.elapsed(), spotlight.len());
-        for p in found.values().chain(&spotlight) {
+        for p in found.iter().chain(&spotlight) {
             println!("  {}", p.display());
         }
     }
@@ -998,6 +1014,42 @@ mod retained_lists {
         assert_eq!(kept, wanted);
     }
 
+    /// PRJ-11: a scan hands its projects on without copying them, and a project that shows what it showed copies none.
+    #[test]
+    fn a_scan_hands_its_projects_on_without_copying_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        std::fs::write(dir.path().join("Assets/Avatar.unity"), scene("Fox", AVATAR)).unwrap();
+        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), kind: Kind::Avatars, ..Default::default() }].into(), ..Default::default() };
+        let mut scenes = SceneCache::new();
+        let look = |scan: &mut Scan, scenes: &mut SceneCache| {
+            let mut handed = vec![];
+            enrich(scan, scenes, &AtomicBool::new(false), &mut HashSet::new(), &mut |s: &Scan| handed.push(s.clone()));
+            handed
+        };
+        assert_eq!(look(&mut scan, &mut scenes).len(), 2, "its avatars are new");
+        let before = scan.clone();
+        let handed = look(&mut scan, &mut scenes);
+        assert!(handed.len() == 1 && Arc::ptr_eq(&handed[0].projects.0, &before.projects.0) && Arc::ptr_eq(&scan.projects.0, &before.projects.0));
+        assert_eq!(scan.projects[0].avatars.len(), 1);
+        // What is in the cache and the file, and what the page has, stay what they are.
+        let written: Scan = serde_json::from_slice(&serde_json::to_vec(&scan).unwrap()).unwrap();
+        assert_eq!((written.projects.len(), &written.projects[0].avatars), (1, &scan.projects[0].avatars));
+        assert!(!serde_json::to_string(&scan).unwrap().contains("scenes"));
+        scan.projects.clear();
+        assert_eq!(before.projects.len(), 1, "what was handed on is not changed");
+        // PRJ-12: the scenes of a project that is not there any more are not kept.
+        let mut kept = Scenes { cache: scenes, kept: 0 };
+        kept.cache.insert(dir.path().join("Other/Assets/B.unity"), Default::default());
+        kept.cache.insert(PathBuf::from("Elsewhere/Assets/B.unity"), Default::default());
+        let all = sum(&kept.cache);
+        kept.keep_only(&before.projects);
+        assert_eq!(kept.cache.len(), 2);
+        assert_ne!(sum(&kept.cache), all);
+        kept.keep_only(&[]);
+        assert!(kept.cache.is_empty());
+    }
+
     /// Orbiters' own: a Unity 6 trial is in the list without any list of VCC's, and says so; a copy not listed yet is found wherever
     /// it is. Neither makes another project of its name.
     #[test]
@@ -1054,6 +1106,7 @@ mod retained_lists {
         assert_eq!(listed(), if disk { vec![b.clone()] } else { vec![] });
         let mut found = HashMap::new();
         let first = put(&mut found, a.clone());
+        #[cfg(windows)]
         assert_eq!(keep(&mut found, PathBuf::from(a.to_string_lossy().replace('\\', "/"))), first, "other separators are the same");
         let second = keep(&mut found, b.clone());
         assert_eq!((first != second, found.len()), (apart, if apart { 2 } else { 1 }));
@@ -1101,9 +1154,10 @@ mod retained_lists {
         let (avatar, world) = (assets.join("Avatar.unity"), assets.join("World.unity"));
         std::fs::write(&avatar, scene("Fox", AVATAR)).unwrap();
         std::fs::write(&world, scene("VRCWorld", WORLD)).unwrap();
-        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), name: "Project".into(), kind: Kind::Avatars, ..Default::default() }], ..Default::default() };
+        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), name: "Project".into(), kind: Kind::Avatars, ..Default::default() }].into(), ..Default::default() };
+        let mut scenes = SceneCache::new();
         let cancel = AtomicBool::new(false);
-        let read_again = |scan: &mut Scan| enrich(scan, &cancel, &mut HashSet::new(), &mut |_: &Scan| {});
+        let mut read_again = |scan: &mut Scan| enrich(scan, &mut scenes, &cancel, &mut HashSet::new(), &mut |_: &Scan| {});
         let shown = |scan: &Scan| {
             let ids = |list: &[Avatar]| list.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
             (ids(&scan.projects[0].avatars), ids(&scan.projects[0].worlds))

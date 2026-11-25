@@ -783,7 +783,7 @@ fn flushes_every_file(file_system: Option<&str>) -> bool {
 /// The file system of the disk the folder `path` is on, or will be (asked of the nearest folder that is there), as
 /// Windows names it: `NTFS`, `ReFS`, `exFAT`, `FAT32`. `None` when it cannot be asked, and off Windows.
 #[cfg(any(windows, unix))]
-fn file_system_of(path: &Path) -> Option<String> {
+pub(crate) fn file_system_of(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -940,6 +940,10 @@ fn relocate_on(
     link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> anyhow::Result<RepairEnd> {
     let library = project.join("Library");
+    // A Library copied back from an earlier move holds its cache's markers: they are not taken along. Left out before anything is
+    // counted, so that the last file is one that is copied, and flushed (PRJ-32).
+    let files: Vec<&(PathBuf, u64)> = files.iter().filter(|(file, _)| ![SWITCHED, COPYING].iter().any(|marker| *file == library.join(marker))).collect();
+    let taken: Vec<&Path> = files.iter().map(|(file, _)| file.as_path()).collect();
     let bytes: u64 = files.iter().map(|(_, n)| *n).sum();
     anyhow::ensure!(!target.exists(), "{}", tr("Cache destination already exists"));
     // The record first: a kill at any moment after this leaves a cache that says which project it was for, and the exact
@@ -964,18 +968,14 @@ fn relocate_on(
     });
     let mut buffers = check_buffers();
     let mut copy_all = || -> anyhow::Result<bool> {
-        for (i, (file, _)) in files.iter().enumerate() {
+        for (i, file) in taken.iter().enumerate() {
             let relative = file.strip_prefix(&library)?;
-            // A Library copied back from an earlier move holds its cache's markers: they are not taken along.
-            if relative == Path::new(SWITCHED) || relative == Path::new(COPYING) {
-                continue;
-            }
             let to = target.join(relative);
             crate::disk::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
             // Flushed all the way once it has passed, before the switch and before the original goes: every file, or the
             // last one ([`Written::persists_every_file`]).
-            let persist = disk.persists_every_file() || i + 1 == files.len();
+            let persist = disk.persists_every_file() || i + 1 == taken.len();
             if !copy_and_check(disk, file, &to, &mut buffers, work, persist).with_context(|| tr!("Could not copy {path}", path = relative.display()))? {
                 return Ok(false);
             }
@@ -1121,7 +1121,7 @@ fn read_up_to(file: &mut dyn Read, buffer: &mut [u8], sectors: bool) -> std::io:
 /// Deletes a folder this module made (never following a link out of it), telling `on_file` of each file, going on past a
 /// file that cannot be deleted so that as much as possible is freed. The first error, if any.
 #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
-fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
+pub(crate) fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
     fn remove_link(path: &Path) -> std::io::Result<()> {
         crate::disk::remove_dir(path).or_else(|_| crate::disk::remove_file(path))
     }
@@ -1294,16 +1294,7 @@ fn recorded_backup(record: Option<&serde_json::Value>, project: &Path) -> Option
     let name = backup.file_name()?.to_string_lossy().into_owned();
     let id = name.strip_prefix(BACKUP_PREFIX)?;
     let beside = backup.parent().is_some_and(|parent| key(parent) == key(project));
-    let real = std::fs::symlink_metadata(&backup).is_ok_and(|m| {
-        #[cfg(windows)]
-        let reparse = {
-            use std::os::windows::fs::MetadataExt;
-            m.file_attributes() & 0x400 != 0
-        };
-        #[cfg(not(windows))]
-        let reparse = false;
-        m.is_dir() && !m.file_type().is_symlink() && !reparse
-    });
+    let real = std::fs::symlink_metadata(&backup).is_ok_and(|m| m.is_dir() && !crate::owned::is_link(&m));
     // The very folder the repair set aside, by identity: a folder restored or put at that name later is not it.
     let same = serde_json::from_value::<crate::owned::FileId>(record?["backup_id"].clone()).is_ok_and(|was| crate::owned::is_same(&backup, was));
     (is_cache_id(id) && beside && real && same).then_some(backup)
@@ -1993,6 +1984,30 @@ mod tests {
         });
         assert!(matches!(moved.unwrap(), RepairEnd::Moved(_)));
         assert_eq!(*disk.persisted.borrow(), copies);
+        remove_redirect(&library).unwrap();
+    }
+
+    /// PRJ-32: a Library moved back by hand holds the marker of the move before, which is not taken along. Listed last (the order is
+    /// the file system's), it took the one full flush with it.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_last_file_copied_is_flushed_whatever_is_listed_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = project(temp.path(), "project", 2, 5000);
+        let library = project.join("Library");
+        let mut files = files_of(&project);
+        for marker in [COPYING, SWITCHED] {
+            std::fs::write(library.join(marker), b"").unwrap();
+            files.push((library.join(marker), 0));
+        }
+        let (progress, cancel) = (SharedProgress::default(), AtomicBool::new(false));
+        let (disk, target) = (Probe::default(), temp.path().join("moved"));
+        let last = target.join(files[1].0.strip_prefix(&library).unwrap());
+        relocate_on(&disk, &project, &target, &files, &Work { progress: &progress, cancel: &cancel }, |t, l| {
+            assert_eq!(*disk.persisted.borrow(), [last.clone()], "flushed before Library is switched");
+            redirect(t, l)
+        })
+        .unwrap();
         remove_redirect(&library).unwrap();
     }
 

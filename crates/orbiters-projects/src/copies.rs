@@ -1,6 +1,6 @@
 //! Copies of projects being made (Duplicate, a new project), recorded in Orbiters' app data before anything of one is made, until
-//! it is on the project list: one that failed, was cut short or could not be listed stays there by its path, with why, to be
-//! listed again or dismissed, wherever it is and whatever the list says. Nothing here deletes a copy.
+//! it is on the project list: one that was cut short, or that failed and could not be removed, and one that could not be listed stay
+//! there by their path, with why, to be deleted or listed, wherever they are and whatever the list says. Only [`delete`] deletes one.
 
 use crate::owned::{self, FileId};
 use crate::unity6::gate::{AppRoot, Lock};
@@ -183,6 +183,51 @@ pub fn list(dir: &Path, root: &Path, id: &str) -> anyhow::Result<PathBuf> {
     }
     remove(dir, id, Some(held));
     Ok(copy.destination)
+}
+
+/// Deletes the incomplete copy `id` with everything in its folder: only the very folder made for it, which its own marker (or that
+/// nothing is in it) says is no project. The marker goes last, so that what could not be deleted is still shown.
+pub fn delete(dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
+    let (copy, held) = take(dir, id)?;
+    let at = &copy.destination;
+    let there = copy.folder.is_some_and(|folder| owned::is_same(at, folder));
+    let marked = crate::templates::Marker::read(at).is_some_and(|m| m.folder.is_some() && m.folder == copy.folder);
+    let empty = std::fs::read_dir(at).is_ok_and(|mut e| e.next().is_none());
+    anyhow::ensure!(
+        there && (marked || empty) && !crate::discovery::is_project(at),
+        "{}",
+        tr!("Orbiters cannot prove that {path} is the copy it made: delete that folder yourself.", path = at.display())
+    );
+    let removed = (|| -> std::io::Result<()> {
+        for entry in std::fs::read_dir(at)? {
+            let entry = entry?;
+            if entry.file_name() == crate::templates::INCOMPLETE {
+                continue;
+            }
+            // (A link is taken away, never what it leads to.)
+            let path = entry.path();
+            crate::storage::remove_tree(&path, &mut || {}).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        }
+        if marked {
+            crate::disk::remove_file(at.join(crate::templates::INCOMPLETE))?;
+        }
+        crate::disk::remove_dir(at)
+    })();
+    removed.map_err(|e| anyhow::anyhow!("{}", tr!("The incomplete copy at {path} could not be deleted: {why}", path = at.display(), why = e)))?;
+    remove(dir, id, Some(held));
+    Ok(copy.destination)
+}
+
+/// Records the incomplete copy found at `path` without a record (an older version's, whose app data is gone): it is shown like any
+/// other.
+pub(crate) fn adopt(dir: &Path, path: &Path) {
+    let Some(folder) = crate::templates::Marker::read(path).and_then(|m| m.folder).filter(|id| owned::is_same(path, *id)) else { return };
+    if all(dir).iter().any(|c| c.folder == Some(folder) || crate::discovery::key(&c.destination) == crate::discovery::key(path)) {
+        return;
+    }
+    if let Ok(mut held) = Held::begin(dir, Path::new(""), path) {
+        let _ = held.made(folder);
+    }
 }
 
 /// Takes a copy off what Orbiters shows; its folder stays. Answers where that is.

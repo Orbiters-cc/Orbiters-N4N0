@@ -1,0 +1,4 @@
+# The texts of fix1124 S3, in files of other areas; and the files it adds.
+crates/orbiters-projects/src/listings.rs
+crates/orbiters-projects/src/installs.rs
+crates/orbiters-projects/src/walk.rs

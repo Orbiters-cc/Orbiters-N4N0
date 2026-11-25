@@ -1,0 +1,19 @@
+{
+  "Incomplete copy: it was cut short, so this folder is not a project. Delete it and make the copy again, or look into its folder.": "Cópia incompleta: ela foi interrompida, então esta pasta não é um projeto. Exclua-a e refaça a cópia, ou veja a pasta.",
+  "The copy to {path} failed, and what it had copied was removed": "A cópia para {path} falhou, e o que ela copiou foi removido",
+  "The copy to {path} failed. What it had copied was removed; the folder keeps what was not the copy's: {files}": "A cópia para {path} falhou. O que ela copiou foi removido; a pasta mantém o que não era da cópia: {files}",
+  "The copy to {path} failed and could not be removed ({why})": "A cópia para {path} falhou e não pôde ser removida ({why})",
+  "The copy to {path} failed and could not be removed ({why}): it is listed as an incomplete copy": "A cópia para {path} falhou e não pôde ser removida ({why}): ela aparece como cópia incompleta",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}): it is listed as an incomplete copy.": "Cópia interrompida. Não foi possível remover a cópia incompleta em {path} ({why}): ela aparece como cópia incompleta.",
+  "Orbiters cannot prove that {path} is the copy it made: delete that folder yourself.": "O Orbiters não consegue provar que {path} é a cópia que ele fez: exclua essa pasta você mesmo.",
+  "The incomplete copy at {path} could not be deleted: {why}": "Não foi possível excluir a cópia incompleta em {path}: {why}",
+  "The incomplete copy at {path} was deleted.": "A cópia incompleta em {path} foi excluída.",
+  "Delete the incomplete copy…": "Excluir a cópia incompleta…",
+  "Delete its files": "Excluir os arquivos",
+  "Deleting the incomplete copy…": "Excluindo a cópia incompleta…",
+  "Could not record the package change before making it: nothing was changed": "Não foi possível registrar a mudança de pacotes antes de fazê-la: nada foi alterado",
+  "A package change of this project ended halfway (Orbiters closed during it). {problems}": "Uma mudança de pacotes deste projeto parou no meio (o Orbiters fechou durante ela). {problems}",
+  "{name} could not be put back from {from} to {to}: {why}": "Não foi possível devolver {name} de {from} para {to}: {why}",
+  "{name} may be the new one: what the project had is kept in {path}. Restore installs the version the project's list has.": "{name} pode ser o novo: o que o projeto tinha fica em {path}. Restaurar instala a versão que está na lista do projeto.",
+  "Links that lead nowhere were left out: {files}": "Links que não levam a lugar nenhum foram deixados de fora: {files}"
+}

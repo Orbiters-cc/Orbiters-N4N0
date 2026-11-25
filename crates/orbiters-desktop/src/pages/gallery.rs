@@ -1875,17 +1875,7 @@ fn group_header(ui: &mut Ui, first: &Entry, last: &Entry, count: usize) -> (Rect
         &Txt::new(&first.world_name, 18.0).weight(weight::SEMIBOLD).tracking(-0.01),
         r.width() - bw - 24.0,
     );
-    let date = super::local_time(&controller::iso(first.taken));
-    let span = if first.taken == last.taken {
-        date
-    } else {
-        // Same day: "28 Oct 2026, 21:30 – 22:30".
-        let start = super::local_time(&controller::iso(last.taken));
-        match (start.rsplit_once(", "), date.rsplit_once(", ")) {
-            (Some((d1, t1)), Some((d2, t2))) if d1 == d2 => format!("{d1}, {t1} – {t2}"),
-            _ => format!("{start} – {date}"),
-        }
-    };
+    let span = super::local_span(last.taken, first.taken);
     let items = tr_n("{count} item", "{count} items", count as u64);
     let mut x = r.left();
     let y = r.top() + 36.0;
@@ -2062,8 +2052,7 @@ fn card(ui: &mut Ui, cx: &Cx, i: usize, e: &Entry, rect: Rect, look: &CardLook<'
     } else {
         tr("Capture")
     };
-    let time = super::local_time(&controller::iso(e.taken));
-    let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
+    let time = super::local_clock(e.taken);
     if tile {
         tile_caption(&p, ui, thumb, title, &time, from.map(|f| (f.name.as_str(), look.from)), hover);
         return (thumb, resp.filter(|_| look.interactive));

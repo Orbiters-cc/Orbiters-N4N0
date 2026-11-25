@@ -75,6 +75,11 @@ pub(super) fn pictured<'a>(state: &State, project: &'a Project) -> Vec<&'a Avata
     project.worlds.iter().chain(&project.avatars).filter(|a| state.thumbs.contains_key(&a.id)).collect()
 }
 
+/// Whether the project has one of those.
+pub(super) fn has_picture(state: &State, project: &Project) -> bool {
+    project.worlds.iter().chain(&project.avatars).any(|a| state.thumbs.contains_key(&a.id))
+}
+
 /// A project's cover in `rect` (squircle corners `radii`): the pictures it has, as a collage (one alone, two side by
 /// side, three as one large and two small, four or more in a square with how many more on the last); avatars without
 /// a picture are left out. A project without any picture shows a still of its last-open scene's 3D preview once the

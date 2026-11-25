@@ -43,21 +43,7 @@ fn unix(iso: Option<&str>) -> Option<i64> {
     parse(iso).map(|t| t.unix_timestamp())
 }
 
-/// This computer's offset from UTC (asked again once a minute: summer time).
-fn offset() -> UtcOffset {
-    use std::sync::Mutex;
-    static KEPT: Mutex<Option<(i64, UtcOffset)>> = Mutex::new(None);
-    let t = now();
-    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
-    match *kept {
-        Some((at, o)) if t - at < 60 => o,
-        _ => {
-            let o = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-            *kept = Some((t, o));
-            o
-        }
-    }
-}
+use super::offset;
 
 fn local(t: OffsetDateTime) -> OffsetDateTime {
     t.to_offset(offset())
@@ -1725,7 +1711,7 @@ impl State {
     /// Opens the window of the `n`th card (0: the hero), as if Join was pressed (screenshots), on the fixture's page
     /// with the member's invites as `asks`.
     pub fn open_card(&mut self, ctx: &egui::Context, n: usize, asks: &[(&str, Ask)], loading: bool, with_pictures: bool) {
-        let Some(card) = self.shown().get(n).cloned() else { return };
+        let Some(card) = shown(&self.cards, &self.query).get(n).map(|c| (*c).clone()) else { return };
         let origin = self.cover_rects.get(&card.id).copied().unwrap_or(Rect::from_min_size(pos2(300.0, 200.0), vec2(400.0, 225.0)));
         let mut w = Window::open(ctx, card.clone(), origin, if n == 0 { 26.0 } else { 20.0 }, Server::Production);
         if loading {
@@ -1749,17 +1735,6 @@ impl State {
         }
     }
 
-    /// The events the search shows, soonest first.
-    fn shown(&self) -> Vec<Card> {
-        let q = orbiters_core::search::Query::new(&self.query);
-        let hit = |c: &Card| {
-            q.matches(&c.title)
-                || q.in_text(&c.description)
-                || c.community.as_ref().is_some_and(|h| q.matches(&h.name))
-                || c.world.as_ref().and_then(|w| w.name.as_ref()).is_some_and(|n| q.matches(n))
-        };
-        self.cards.iter().filter(|c| hit(c)).cloned().collect()
-    }
 
     fn fetch(&mut self, ctx: &egui::Context, server: Server, more: bool) {
         let offset = if more { self.next.unwrap_or(0) } else { 0 };
@@ -1817,6 +1792,27 @@ pub fn staged_overview(card: &Card) -> Overview {
     o
 }
 
+/// The events the search shows, soonest first.
+fn shown<'c>(cards: &'c [Card], query: &str) -> Vec<&'c Card> {
+    let q = orbiters_core::search::Query::new(query);
+    let hit = |c: &&Card| {
+        q.is_empty()
+            || q.matches(&c.title)
+            || q.in_text(&c.description)
+            || c.community.as_ref().is_some_and(|h| q.matches(&h.name))
+            || c.world.as_ref().and_then(|w| w.name.as_ref()).is_some_and(|n| q.matches(n))
+    };
+    cards.iter().filter(hit).collect()
+}
+
+/// Keeps `rect` as `id`'s (the id copied the first time).
+fn place(rects: &mut HashMap<String, Rect>, id: &str, rect: Rect) {
+    match rects.get_mut(id) {
+        Some(r) => *r = rect,
+        None => drop(rects.insert(id.to_owned(), rect)),
+    }
+}
+
 pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let ctx = ui.ctx().clone();
     let page = ui.max_rect();
@@ -1852,7 +1848,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             Err(e) => state.error = Some(e.to_string()),
         }
     }
-    let shown = state.shown();
+    let shown = shown(&state.cards, &state.query);
     let now = now();
     let title = tr("Events");
     let header = super::header::Header {
@@ -1925,7 +1921,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     return;
                 }
                 // The next event, large.
-                let hero = &shown[0];
+                let hero = shown[0];
                 let hero_h = (width * 0.36).clamp(260.0, 360.0);
                 let (hr, _) = ui.allocate_exact_size(vec2(width, hero_h), Sense::hover());
                 let (hr, ha) = super::entering(ui, cx, 1, hr);
@@ -1933,7 +1929,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 let cover = state.covers.card(hero, CoverSize::Large).and_then(|p| pictures.get(&ctx, &p));
                 let small = state.covers.card(hero, CoverSize::Card).and_then(|p| pictures.get(&ctx, &p));
                 let glow = state.covers.card(hero, CoverSize::Glow).and_then(|p| pictures.get(&ctx, &p));
-                state.cover_rects.insert(hero.id.clone(), hr);
+                place(&mut state.cover_rects, &hero.id, hr);
                 let mut hu = ui.new_child(UiBuilder::new().max_rect(hr.expand(90.0)).id_salt("events-hero"));
                 hu.set_clip_rect(ui.clip_rect());
                 hu.multiply_opacity(ha * card_alpha);
@@ -1943,9 +1939,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 }
                 ui.add_space(36.0);
                 // The rest, by day.
-                let rest: Vec<&Card> = shown.iter().skip(1).collect();
+                let rest = &shown[1..];
                 let mut index = 2usize;
-                for (period, group) in period_groups(&rest, now) {
+                for (period, group) in period_groups(rest, now) {
                     let label = tr(period.label());
                     let (r, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                     let (r, a) = super::entering(ui, cx, index.min(8), r);
@@ -1965,7 +1961,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                             Rect::from_min_size(pos2(area.left() + (n % cols) as f32 * (w + 16.0), area.top() + (n / cols) as f32 * (h + 16.0)), vec2(w, h));
                         index += 1;
                         let thumb = Rect::from_min_size(r.min, vec2(w, w * 9.0 / 16.0));
-                        state.cover_rects.insert(c.id.clone(), thumb);
+                        place(&mut state.cover_rects, &c.id, thumb);
                         if !ui.is_rect_visible(r) {
                             continue;
                         }
@@ -2002,15 +1998,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if let Some((card, origin, radius)) = clicked {
         state.window = Some(Window::open(&ctx, card, origin, radius, server));
     }
-    let covers = state.covers.clone();
     if let Some(w) = state.window.as_mut() {
+        let covers = &state.covers;
         if let Some(r) = state.cover_rects.get(&w.id).copied().filter(|r| r.intersects(page)) {
             w.set_origin(r);
         }
         let pictures = state.pictures.as_mut().unwrap();
         // A picture over the window: the window waits under it.
         w.covered = state.picture.is_some();
-        let closed = w.show(ui, cx, pictures, &covers);
+        let closed = w.show(ui, cx, pictures, covers);
         if w.signed_up() {
             state.signed_up.insert(w.id.clone(), true);
         }

@@ -35,7 +35,7 @@ struct Open {
     closing: bool,
     /// The flight's progress (0 the card, 1 the page), as the last frame drew it.
     progress: f32,
-    hashes: Job<HashMap<PathBuf, Vec<String>>>,
+    hashes: Job<Arc<HashMap<PathBuf, Vec<String>>>>,
     selected: BTreeSet<PathBuf>,
     /// Pictures just handed to the tray service (shown as sending until its upload shows up).
     handed: Option<(f64, BTreeSet<PathBuf>)>,
@@ -203,7 +203,7 @@ impl State {
             serial: self.serial,
             closing: false,
             progress: 0.0,
-            hashes: Job::spawn(ctx, move || worlds::map_hashes(paths)),
+            hashes: Job::spawn(ctx, move || Arc::new(worlds::map_hashes(paths))),
             selected: BTreeSet::new(),
             handed: None,
             viewer: None,
@@ -268,7 +268,7 @@ fn cover(w: &VisitedWorld, info: Option<&Info>, width: u32) -> Option<Picture> {
     }
 }
 
-fn mine_of<'a>(mine: &'a Option<crate::state::MapsMine>, id: &str) -> Option<&'a MineWorld> {
+fn mine_of<'a>(mine: &'a Option<Arc<crate::state::MapsMine>>, id: &str) -> Option<&'a MineWorld> {
     mine.as_ref()?.worlds.iter().find(|w| w.world_id == id)
 }
 
@@ -774,7 +774,7 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         signing_in: cx.snap.account.state == crate::state::AccountState::SigningIn,
         blocked,
         mine: mine_of(&mine, &world.id),
-        hashes: hashes.as_ref(),
+        hashes: hashes.as_deref(),
         uploads: cx.snap.uploads.iter().filter(|u| u.world_id == world.id).collect(),
     };
     // Handed pictures show as sending until the service lists their upload (or for three seconds).
@@ -935,7 +935,8 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                 // Pictures.
                 let (title_r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
                 let title_r = title_r.translate(vec2(0.0, dy));
-                let shared_n = world.shots.iter().filter(|s| sharing.shared(s)).count();
+                let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
+                let shared_n = world.shots.len() - new.len();
                 let pictures_sub = if world.shots.is_empty() {
                     tr("Pictures you take here in VRChat show up here.").to_string()
                 } else if shared_n > 0 {
@@ -944,7 +945,6 @@ fn detail(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
                     tr!("{count} on this computer · pick the ones to show on the Map explorer", count = world.shots.len())
                 };
                 section_title(&cu, title_r, tr("Pictures"), &pictures_sub);
-                let new: Vec<&Shot> = world.shots.iter().filter(|s| !sharing.shared(s)).collect();
                 if !new.is_empty() && sharing.blocked.is_none() {
                     let label = if selecting { tr("Clear selection") } else { tr("Select all new") };
                     let b = Button::new(label).variant(Variant::Ghost).size(Size::Sm);

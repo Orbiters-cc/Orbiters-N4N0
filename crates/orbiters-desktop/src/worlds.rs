@@ -416,7 +416,7 @@ fn public_api_of(server: Server) -> (Api, bool) {
 /// A world's page on the Map explorer as last fetched.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Info {
-    Listed(Box<WorldPage>),
+    Listed(Arc<WorldPage>),
     /// Orbiters does not list it: not public on VRChat.
     Unlisted,
     /// Orbiters could not be reached.
@@ -488,7 +488,7 @@ impl Infos {
                     let fresh =
                         cached.as_ref().is_some_and(|c| visited::now().saturating_sub(c.fetched) < if c.page.is_some() { LISTED_FOR } else { UNLISTED_FOR });
                     let info = if fresh {
-                        cached.and_then(|c| c.page).map_or(Info::Unlisted, |p| Info::Listed(Box::new(p)))
+                        cached.and_then(|c| c.page).map_or(Info::Unlisted, |p| Info::Listed(Arc::new(p)))
                     } else {
                         match api.world(&id) {
                             Ok(page) => {
@@ -499,10 +499,10 @@ impl Infos {
                                         &serde_json::to_vec(&CachedInfo { fetched: visited::now(), page: page.clone() }).unwrap_or_default(),
                                     );
                                 }
-                                page.map_or(Info::Unlisted, |p| Info::Listed(Box::new(p)))
+                                page.map_or(Info::Unlisted, |p| Info::Listed(Arc::new(p)))
                             }
                             // Offline: the older answer, when there is one.
-                            Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Box::new(p))),
+                            Err(_) => cached.and_then(|c| c.page).map_or(Info::Unknown, |p| Info::Listed(Arc::new(p))),
                         }
                     };
                     k.lock().unwrap()[env_index(server)].insert(id, info);
@@ -531,7 +531,7 @@ impl Infos {
                 keep.then(|| std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<CachedInfo>(&b).ok())).flatten()?.page
             });
             if let Some(Some(page)) = kept {
-                self.known.lock().unwrap()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Box::new(page)));
+                self.known.lock().unwrap()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Arc::new(page)));
             }
             note_outbound(id);
             let _ = self.tx.send((server, id.to_string()));

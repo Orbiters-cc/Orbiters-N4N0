@@ -81,6 +81,9 @@ pub struct State {
     found: Option<&'static str>,
     /// How many of the notices the log shows.
     log_shown: usize,
+    log: Log,
+    /// What the search finds, for the text, the language and what can show here it was looked for with.
+    found: Option<((String, orbiters_i18n::Language, registry::Open), Vec<registry::Found>)>,
     /// Tests: the rows drawn last frame (their card's English title, their label, where), and the cards.
     /// The arrows moved the lit result this frame: it is brought into view.
     keyed: bool,
@@ -178,6 +181,13 @@ impl State {
 }
 
 /// What a sub-tab's cards asked of the page while they were drawn.
+/// The log card: the notices read last, and the watch that says their file changed.
+#[derive(Default)]
+struct Log {
+    watch: super::Watch<(), Option<std::time::SystemTime>>,
+    entries: Option<std::sync::Arc<Vec<orbiters_core::notice_log::Entry>>>,
+}
+
 #[derive(Default)]
 struct Asked {
     apply: bool,
@@ -203,8 +213,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let now = anim::time(&ctx);
     // The controls edit a copy of the settings as published; what they change is saved over the settings as they
     // are by then (`form::save`).
-    let base = cx.snap.settings.clone();
-    let mut draft = base.clone();
+    let base = cx.snap.settings.arc();
+    let mut draft = (*base).clone();
     let mut asked = Asked::default();
 
     // A folder chosen in the picker.
@@ -275,7 +285,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // The search: Ctrl (⌘) K takes the keys there; while it has them, the arrows move along the results, Enter opens
     // one and Escape clears it (the website's keys).
     let words = registry::words(&state.query);
-    let found = registry::search(&state.query, &open);
+    // Looked for again when the text, the language or what can show here changed: it reads some 150 entries' words.
+    let key = (state.query.clone(), orbiters_i18n::language(), open);
+    if state.found.as_ref().is_none_or(|(of, _)| *of != key) {
+        let found = registry::search(&state.query, &open);
+        state.found = Some((key, found));
+    }
+    let found = state.found.as_ref().map(|(_, found)| found.clone()).unwrap_or_default();
     let searching = !words.is_empty();
     state.limit = state.limit.max(RESULTS);
     let search_focused = state.search_id.is_some_and(|id| ctx.memory(|m| m.has_focus(id)));
@@ -931,8 +947,8 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
             }
             apply |= place(&mut m, c, 3, mark("About"), |ui| about_card(ui, cx, 3, draft, state, asked));
             place(&mut m, c, 4, mark("Log"), |ui| {
-                let shown = &mut state.log_shown;
-                section(ui, cx, 4, icons::SCROLL, tr("Log"), Some(tr("Every notice, warning and error N4N0 showed, kept here")), |ui| notice_log(ui, shown));
+                let (shown, log) = (&mut state.log_shown, &mut state.log);
+                section(ui, cx, 4, icons::SCROLL, tr("Log"), Some(tr("Every notice, warning and error N4N0 showed, kept here")), |ui| notice_log(ui, shown, log));
                 false
             });
         }
@@ -2196,22 +2212,16 @@ const LOG_SHOWN: usize = 400;
 /// Every notice the app showed (`orbiters_core::notice_log`), newest first: a toast is gone in seconds, and an error
 /// nobody had the time to read is still here. They are rows of the page itself (it is the one place that scrolls), the
 /// first ones at once and the others a press of Show more away.
-fn notice_log(ui: &mut Ui, shown: &mut usize) {
+fn notice_log(ui: &mut Ui, shown: &mut usize, log: &mut Log) {
     let logs = orbiters_core::paths::logs_dir();
+    // Read again only when the file changed: a watch looks at it once a second, and asks for the frame that shows it.
     let file = orbiters_core::notice_log::file(&logs);
-    // Read again only when the file changed (looked at once a second).
-    let id = Id::unique("settings-notice-log");
-    let changed = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
-    let kept: Option<(Option<std::time::SystemTime>, std::sync::Arc<Vec<orbiters_core::notice_log::Entry>>)> = ui.ctx().data(|d| d.get_temp(id));
-    let entries = match kept {
-        Some((at, entries)) if at == changed => entries,
-        _ => {
-            let entries = std::sync::Arc::new(orbiters_core::notice_log::newest(&logs, LOG_SHOWN));
-            ui.ctx().data_mut(|d| d.insert_temp(id, (changed, entries.clone())));
-            entries
-        }
+    let looked = log.watch.keep(ui.ctx(), &(), std::time::Duration::from_secs(1), || move || std::fs::metadata(&file).and_then(|m| m.modified()).ok());
+    let entries = match log.entries.take().filter(|_| looked.is_none()) {
+        Some(entries) => entries,
+        None => std::sync::Arc::new(orbiters_core::notice_log::newest(&logs, LOG_SHOWN)),
     };
-    ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    log.entries = Some(entries.clone());
     ui.add_space(8.0);
     if entries.is_empty() {
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());

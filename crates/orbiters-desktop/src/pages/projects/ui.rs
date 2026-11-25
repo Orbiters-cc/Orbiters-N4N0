@@ -116,16 +116,16 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // While a scan adds rows (and when it ends and sorts), the first project in view stays where it is on screen: what
     // grows above it scrolls the gallery by as much (AGENTS.md: progressive galleries keep the visible item).
     let (offset, top) = (out.state.clamped_offset().y, out.inner_rect.top());
-    let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
     let scanning = state.scanning();
     if scanning || state.was_scanning {
+        let places: Vec<(PathBuf, f32)> = state.row_places.iter().map(|(p, r)| (p.clone(), r.top() - top + offset)).collect();
         if let Some(dy) = anchor_shift(state.scroll_anchor.as_ref(), &places) {
             state.scroll_fix = Some((offset + dy).max(0.0));
             ctx.request_repaint();
         }
     }
     state.was_scanning = scanning;
-    state.scroll_anchor = first_in_view(&state.row_places, top).and_then(|path| places.iter().find(|(p, _)| *p == path).cloned());
+    state.scroll_anchor = first_in_view(&state.row_places, top).and_then(|path| state.row_places.iter().find(|(p, _)| *p == path).map(|(_, r)| (path, r.top() - top + offset)));
     // Across the whole page, not the cards' width only: the docked panel starts lower, and the cards blurred under the
     // header would otherwise stop at a hard edge above the gap between them and the panel.
     pages::under_top(ui, cx, "unity-projects", from, placed.band_bottom);
@@ -236,9 +236,13 @@ fn first_in_view(places: &[(PathBuf, Rect)], top: f32) -> Option<PathBuf> {
 /// The order of a list of projects: newest first, except while a scan runs (PROJECTS-18, Enzo 2026-11-19: "Yes please"):
 /// then every row keeps the place it had and what the scan finds goes at the end, so nothing moves under the pointer.
 /// The date order comes back when the scan ends.
-fn keep_places(list: &mut [Project], places: &mut std::collections::HashMap<std::path::PathBuf, usize>, scanning: bool) {
+fn keep_places(list: &mut [&Project], places: &mut std::collections::HashMap<std::path::PathBuf, usize>, scanning: bool) {
     if !scanning {
         list.sort_by_key(|p| std::cmp::Reverse(p.modified));
+        // As they were at the frame before, most of the time.
+        if places.len() == list.len() && list.iter().enumerate().all(|(i, p)| places.get(&p.path) == Some(&i)) {
+            return;
+        }
         places.clear();
     }
     for p in list.iter() {
@@ -258,7 +262,8 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         errors(ui, state, "gallery");
     }
-    for (i, w) in state.scan.warnings.clone().iter().enumerate() {
+    let scan = state.scan.arc();
+    for (i, w) in scan.warnings.iter().enumerate() {
         feedback::banner(ui, Id::unique(("projects-warning", i, w)), Tone::Warn, w, false);
         ui.add_space(12.0);
     }
@@ -270,11 +275,11 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // Hidden projects only when asked for (dimmed and marked then).
     let hidden_n = state.scan.projects.iter().filter(|p| state.is_hidden(&p.path)).count();
     let shown = |p: &&Project| state.show_hidden || !state.is_hidden(&p.path);
-    let mut registered: Vec<Project> = state.scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).cloned().collect();
+    let mut registered: Vec<&Project> = scan.projects.iter().filter(|p| p.registered).filter(matches).filter(shown).collect();
     keep_places(&mut registered, &mut registered_places, scanning);
-    let mut proposals: Vec<Project> = state.scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).cloned().collect();
+    let mut proposals: Vec<&Project> = scan.projects.iter().filter(|p| !p.registered).filter(matches).filter(shown).collect();
     keep_places(&mut proposals, &mut found_places, scanning);
-    let counted = |list: &[Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
+    let counted = |list: &[&Project]| list.iter().filter(|p| !state.is_hidden(&p.path)).count();
     let (registered_n, proposals_n) = (counted(&registered), counted(&proposals));
     state.places = [registered_places, found_places];
 
@@ -308,7 +313,7 @@ fn gallery(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     super::unity6_card::copy_rows(ui, state);
 }
 
-fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
+fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[&Project]) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let (cols, card_w) = layout::columns(w, CARD_MIN, GAP);
@@ -323,11 +328,11 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
     if let Some(gpu) = cx.gpu {
         state.preview.start(&ctx, gpu);
     }
-    let unpictured: Vec<&Project> = projects.iter().filter(|p| pictures_settled && !state.is_hidden(&p.path) && art::pictured(state, p).is_empty()).collect();
+    let unpictured: Vec<&Project> = projects.iter().copied().filter(|p| pictures_settled && !state.is_hidden(&p.path) && !art::has_picture(state, p)).collect();
     for p in unpictured {
         state.preview.want_still(&ctx, cx.gpu, &p.path);
     }
-    for (i, p) in projects.iter().enumerate() {
+    for (i, &p) in projects.iter().enumerate() {
         // Each card springs to its place (in the grid's own coordinates, so scrolling never animates): when the panel
         // takes room or gives it back, the cards reflow instead of jumping.
         // Only the place springs: a card's size is set at once (AGENTS.md: no spring on layout dimensions).
@@ -336,10 +341,10 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
         let [x, y] = anim::spring(&ctx, Id::unique(("project-card-place", &p.path)), target, Spring::SOFT);
         let cw = card_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(cw, (cw * 0.5625).round() + CARD_BODY));
-        state.anchors.insert(format!("card-{i}"), r);
         if !ui.is_rect_visible(r.expand(12.0)) {
             continue;
         }
+        state.anchors.insert(format!("card-{i}"), r);
         let resp = card(ui, cx, state, i, p, r);
         if widgets::activated(&resp) {
             opened = Some(p.path.clone());
@@ -540,7 +545,7 @@ fn quiet_empty(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
 }
 
 /// Projects found on the computer that are not in the list yet: compact rows, the first few until "Show all".
-fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
+fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[&Project]) {
     let ctx = ui.ctx().clone();
     let w = ui.available_width();
     let (cols, row_w) = layout::columns(w, 300.0, 12.0);
@@ -551,7 +556,7 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
     let mut open = None;
     let mut add = None;
     let mut picked = None;
-    for (i, p) in list.iter().take(shown).enumerate() {
+    for (i, &p) in list.iter().take(shown).enumerate() {
         let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0)];
         state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h))));
         let [x, y] = anim::spring(&ctx, Id::unique(("found-place", &p.path)), target, Spring::SOFT);
@@ -775,14 +780,15 @@ mod order_tests {
     #[test]
     fn rows_stay_in_place_while_a_scan_runs() {
         let mut places = std::collections::HashMap::new();
-        let mut list = vec![project("old", 1), project("mid", 5)];
+        let (old, mid, new, newer) = (project("old", 1), project("mid", 5), project("new", 9), project("newer", 10));
+        let mut list = vec![&old, &mid];
         keep_places(&mut list, &mut places, false);
         assert_eq!(names(&list), ["mid", "old"]);
         // The scan's next update: a newer one, given in date order as the scan sends them.
-        let mut list = vec![project("new", 9), project("mid", 5), project("old", 1)];
+        let mut list = vec![&new, &mid, &old];
         keep_places(&mut list, &mut places, true);
         assert_eq!(names(&list), ["mid", "old", "new"]);
-        let mut list = vec![project("newer", 10), project("new", 9), project("mid", 5), project("old", 1)];
+        let mut list = vec![&newer, &new, &mid, &old];
         keep_places(&mut list, &mut places, true);
         assert_eq!(names(&list), ["mid", "old", "new", "newer"]);
         // The scan ended.

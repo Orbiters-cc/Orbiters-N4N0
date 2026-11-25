@@ -1864,7 +1864,7 @@ mod tests {
         fn upload_pictures(&self, _world_id: String, _world_name: String, _paths: Vec<PathBuf>) {}
         fn upload_preview(&self, _world_id: String, _world_name: String, _session: PathBuf) {}
         fn request_maps(&self) {}
-        fn maps(&self) -> Option<crate::state::MapsMine> {
+        fn maps(&self) -> Option<std::sync::Arc<crate::state::MapsMine>> {
             None
         }
         fn calibrated(&self, _calibration: orbiters_contracts::performance::calibration::Calibration) {}

@@ -689,7 +689,7 @@ pub struct Client {
     notices: Mutex<Vec<Notice>>,
     library: AtomicU64,
     worker_log: Mutex<Option<Vec<String>>>,
-    maps: Mutex<Option<MapsMine>>,
+    maps: Mutex<Option<Arc<MapsMine>>>,
     vrchat_data: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::vrchat_data::Result>>>,
     groups: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<crate::controller::groups::Reply>>>,
     member: Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<Result<crate::member::MemberAnswer, String>>>>,
@@ -802,7 +802,7 @@ impl Client {
                     ToClient::Notice { notice } => c.notices.lock().unwrap().push(notice),
                     ToClient::Library { version } => c.library.store(version, Ordering::Relaxed),
                     ToClient::WorkerLog { lines } => *c.worker_log.lock().unwrap() = Some(lines),
-                    ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(mine),
+                    ToClient::Maps { mine } => *c.maps.lock().unwrap() = Some(Arc::new(mine)),
                     ToClient::VrchatData { id, result } => {
                         if let Some(tx) = c.vrchat_data.lock().unwrap().remove(&id) {
                             let _ = tx.send(result);
@@ -996,7 +996,7 @@ impl Client {
         self.worker_log.lock().unwrap().clone()
     }
 
-    pub fn maps(&self) -> Option<MapsMine> {
+    pub fn maps(&self) -> Option<Arc<MapsMine>> {
         self.maps.lock().unwrap().clone()
     }
 

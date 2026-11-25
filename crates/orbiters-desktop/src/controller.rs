@@ -226,7 +226,7 @@ pub struct Controller {
     reconstruction_failures: Mutex<std::collections::HashMap<PathBuf, String>>,
     /// What this member added to the Map explorer, and the uploads' numbering (controller/maps.rs).
     /// The list with whose it is (server and credential), so another account's is never shown as mine.
-    maps_mine: Mutex<Option<(Option<String>, MapsMine)>>,
+    maps_mine: Mutex<Option<(Option<String>, Arc<MapsMine>)>>,
     /// Bumped by each fetch of "My maps" (and by a sign-out): only the newest answer is kept (CTL2-8).
     maps_turn: AtomicU64,
     upload_serial: AtomicU64,

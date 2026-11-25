@@ -741,13 +741,13 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
         return;
     }
     let find = orbiters_core::search::Query::new(&state.package_query);
-    let list: Vec<vpm::Package> = state
-        .view
+    // (Shared, not copied: the repositories' packages are thousands of version names.)
+    let view = state.view.arc();
+    let list: Vec<&vpm::Package> = view
         .packages
         .iter()
-        .filter(|p| p.installed.is_none() && !versions(p, state.prerelease).is_empty())
+        .filter(|p| p.installed.is_none() && p.versions.iter().any(|v| state.prerelease || !v.contains('-')))
         .filter(|p| find.matches_any([p.name.as_str(), p.display_name.as_str()]))
-        .cloned()
         .collect();
     let all = state.view.packages.iter().filter(|p| p.installed.is_none()).count();
     if all == 0 {

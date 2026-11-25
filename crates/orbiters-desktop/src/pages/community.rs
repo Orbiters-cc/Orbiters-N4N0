@@ -525,8 +525,7 @@ impl State {
         }
         // Who posted it and when, then its words (or its gallery).
         let bx = r.left() + 16.0;
-        let time = super::local_time(&controller::iso(e.taken));
-        let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
+        let time = super::local_clock(e.taken);
         let tt = Txt::new(&time, 12.0).color(theme::fg_3());
         let tw = widgets::text_size(ui, &tt).x;
         widgets::text(&pa, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
@@ -752,15 +751,7 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
 
 /// "28 Oct 2026, 21:30 – 22:30" for a group's pictures (the newest first).
 fn span(newest: u64, oldest: u64) -> String {
-    let date = super::local_time(&controller::iso(newest));
-    if newest == oldest {
-        return date;
-    }
-    let start = super::local_time(&controller::iso(oldest));
-    match (start.rsplit_once(", "), date.rsplit_once(", ")) {
-        (Some((d1, t1)), Some((d2, t2))) if d1 == d2 => format!("{d1}, {t1} – {t2}"),
-        _ => format!("{start} – {date}"),
-    }
+    super::local_span(oldest, newest)
 }
 
 /// The event an event gallery belongs to, as the website shows it above the gallery: its cover, Event and its status,

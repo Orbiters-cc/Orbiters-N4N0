@@ -3,6 +3,7 @@ use super::thumb_cache;
 use crate::pages::{Cx, Job};
 use egui::{ColorImage, Id, Rect, TextureHandle};
 use orbiters_core::account::Server;
+use orbiters_core::slice::Slice;
 use orbiters_projects::{
     avatars::Avatar,
     blender,
@@ -105,7 +106,7 @@ const ICON_BATCH: usize = 12;
 pub(super) type ThumbBatch = (HashMap<String, (ColorImage, u64)>, Vec<String>, Vec<String>, HashMap<String, u64>);
 
 pub struct State {
-    pub(super) scan: Scan,
+    pub(super) scan: Slice<Scan>,
     pub(super) started: bool,
     pub(super) fixture: bool,
     pub(super) visit: u64,
@@ -128,7 +129,7 @@ pub struct State {
     pub(super) all_packages: bool,
     /// The package an action changes (its row shows it working).
     pub(super) busy_package: Option<String>,
-    pub(super) view: vpm::View,
+    pub(super) view: Slice<vpm::View>,
     pub(super) view_job: Job<ViewResult>,
     /// The selected project's Git repository (its branch, changes, last commits, remote page), when it is one.
     pub(super) git: Option<git::Repo>,
@@ -335,7 +336,7 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            scan: Scan::default(),
+            scan: Slice::new(Scan::default()),
             started: false,
             fixture: false,
             visit: 0,
@@ -351,7 +352,7 @@ impl Default for State {
             all_proposals: false,
             all_packages: false,
             busy_package: None,
-            view: vpm::View::default(),
+            view: Slice::new(vpm::View::default()),
             view_job: Job::default(),
             git: None,
             commit_open: HashSet::new(),
@@ -588,10 +589,10 @@ impl State {
         // The window's first look shows the projects the last one knew at once (a small file), so their covers are
         // there on the first frame; the scan then goes on from them.
         if self.scan.projects.is_empty() {
-            self.scan = discovery::cached();
+            self.scan = Slice::new(discovery::cached());
         }
         // A revisit must not replace live discoveries with an older (or temporarily unreadable) disk snapshot.
-        let retained = (!self.scan.projects.is_empty()).then(|| self.scan.clone());
+        let retained = (!self.scan.projects.is_empty()).then(|| (*self.scan).clone());
         // Work of the window (it writes the projects' list it keeps): the window does not close to the tray meanwhile.
         let working = super::super::Working::begin();
         let hidden_saved = self.hidden_saved.clone();
@@ -741,13 +742,13 @@ impl State {
                     ScanEvent::Hidden(list, saved) if saved == self.hidden_changes => self.hidden = list,
                     ScanEvent::Hidden(..) => {}
                     ScanEvent::Update(scan) => {
-                        self.scan = scan;
+                        self.scan = Slice::new(scan);
                         self.scan_serial += 1;
                     }
                     ScanEvent::Done(result) => {
                         done = true;
                         match result {
-                            Ok(scan) => self.scan = scan,
+                            Ok(scan) => self.scan = Slice::new(scan),
                             Err(e) => self.error = Some(e),
                         }
                     }
@@ -765,7 +766,7 @@ impl State {
                     if self.new_location.is_empty() {
                         self.new_location = view.default_path.display().to_string();
                     }
-                    self.view = view;
+                    self.view = Slice::new(view);
                     self.templates = templates;
                     self.git = repo;
                     self.load_banners(ctx);
@@ -988,9 +989,10 @@ impl State {
         self.scan
             .projects
             .iter()
-            .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| a.id.clone()))
-            .filter(|id| !self.thumb_ids.contains(id) && seen.insert(id.clone()))
+            .flat_map(|p| p.avatars.iter().chain(&p.worlds).map(|a| &a.id))
+            .filter(|id| !self.thumb_ids.contains(*id) && seen.insert(*id))
             .take(8)
+            .cloned()
             .collect()
     }
     /// Shows `image` (its sum `sum`) as the picture of `id`. Nothing changes when it is the picture shown already; a
@@ -1167,9 +1169,9 @@ impl State {
         });
     }
     /// What this member added to Orbiters' Map explorer (a stand-in in screenshots).
-    pub(super) fn maps(&self, cx: &Cx) -> Option<crate::state::MapsMine> {
+    pub(super) fn maps(&self, cx: &Cx) -> Option<Arc<crate::state::MapsMine>> {
         if self.fixture {
-            self.fixture_maps.clone()
+            self.fixture_maps.clone().map(Arc::new)
         } else {
             cx.ctl.maps()
         }

@@ -13,8 +13,10 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct State {
-    /// The reports kept, as last counted (all, not sent), and when.
-    counted: Option<((usize, usize), f64)>,
+    /// The reports kept, as last counted (all, not sent).
+    counted: Option<(usize, usize)>,
+    /// Counts them again while the card shows: one made meanwhile asks for the frame that says so.
+    watch: super::Watch<(), (usize, usize)>,
     sending: Option<Job<crate::mismatch::send::Outcome>>,
     /// What the last send or delete did, in words.
     said: Option<(String, egui::Color32)>,
@@ -29,11 +31,8 @@ fn count() -> (usize, usize) {
 /// The card. Returns whether the settings changed.
 pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Settings) -> bool {
     let mut apply = false;
-    let now = ui.input(|i| i.time);
-    if state.counted.is_none_or(|(_, at)| now - at > 2.0) {
-        state.counted = Some((count(), now));
-        ui.ctx().request_repaint_after(Duration::from_secs(2));
-    }
+    let looked = state.watch.keep(ui.ctx(), &(), Duration::from_secs(2), || count);
+    state.counted = Some(looked.or(state.counted).unwrap_or_else(count));
     if let Some(outcome) = state.sending.as_mut().and_then(|j| j.poll()).cloned() {
         state.sending = None;
         state.counted = None;
@@ -45,7 +44,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, id: usize, state: &mut State, draft: &mut Sett
             (tr_n("{count} report sent. Thank you!", "{count} reports sent. Thank you!", outcome.sent as u64), theme::OK)
         });
     }
-    let (all, unsent) = state.counted.map_or((0, 0), |(c, _)| c);
+    let (all, unsent) = state.counted.unwrap_or_default();
     section(ui, cx, id, icons::CHAT_CIRCLE_TEXT, tr("Beta feedback"), Some(tr("When N4N0's menus do not match VRChat's")), |ui| {
         widgets::separator(ui);
         widgets::field(

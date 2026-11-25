@@ -90,6 +90,8 @@ pub struct Previous {
     query: String,
     /// The text searched for at the last frame ([`crate::pages::new_search`]).
     searched: Option<String>,
+    /// Which of the rows the search finds: the rows and the text they were looked for in.
+    found: Option<(Arc<[Visit]>, String, Vec<usize>)>,
     /// The history's instances, read when the sheet opens (pictures of the page hand them in), and whether a read is
     /// under way: one lock, so a read finishing while the sheet is closed is never lost (verify-r21 Major 5).
     history: Arc<Mutex<HistoryRead>>,
@@ -123,7 +125,7 @@ type Reader = Arc<dyn Fn() -> Vec<Visit> + Send + Sync>;
 
 #[derive(Default)]
 struct HistoryRead {
-    rows: Option<Vec<Visit>>,
+    rows: Option<Arc<[Visit]>>,
     reading: bool,
 }
 
@@ -140,7 +142,7 @@ impl Previous {
 
     /// Pictures of the page and tests: the history's instances handed in (nothing read), the sheet up with `query`.
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
-        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows.into());
         self.staged = true;
         self.quiet = true;
         self.query = query.into();
@@ -150,7 +152,7 @@ impl Previous {
     /// Tests: the history's instances handed in (nothing read); a row picked is asked of the backend as on the app.
     #[cfg(test)]
     pub fn stand_in_rows(&mut self, rows: Vec<Visit>) {
-        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows.into());
         self.staged = true;
     }
 
@@ -440,8 +442,8 @@ pub(super) fn friend_selectable(state: &State, friend: &orbiters_core::launcher:
         None if state.places.previous.connecting => String::new(),
         None => return None,
     };
-    let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-    joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)).then(|| place.clone())
+    // (Asked of the one owner of a friends' instance, for a row in view: the list is looked through, not copied.)
+    joinable_without_asking(&place.instance_id, &me, &|id| state.data.friends.iter().any(|f| f.id == id)).then(|| place.clone())
 }
 
 /// Select on a friend's row or profile (REQUEST23): their instance becomes Where's destination, nothing sent to VRChat.
@@ -497,14 +499,14 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
                 let rows = reader();
                 let mut h = history.lock().unwrap_or_else(|e| e.into_inner());
-                h.rows = Some(rows);
+                h.rows = Some(rows.into());
                 h.reading = false;
                 drop(h);
                 anim::wake(&ctx2);
             });
             if started.is_err() {
                 let mut h = state.places.previous.history.lock().unwrap_or_else(|e| e.into_inner());
-                h.rows = Some(Vec::new());
+                h.rows = Some(Vec::new().into());
                 h.reading = false;
             }
         }
@@ -569,8 +571,17 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
 
     // The rows: one list that scrolls, only those in view laid out.
     let list = Rect::from_min_max(pos2(inner.left() - 8.0, y), pos2(inner.right() + 8.0, inner.bottom()));
-    let find = orbiters_core::search::Query::new(state.places.previous.query.trim());
-    let shown: Vec<Visit> = rows.as_deref().unwrap_or_default().iter().filter(|v| find.matches(&v.name)).cloned().collect();
+    let previous = &mut state.places.previous;
+    let query = previous.query.trim();
+    // Which of them the search finds, looked for again when it or they changed.
+    if !previous.found.as_ref().is_some_and(|(of, asked, _)| asked == query && rows.as_ref().is_some_and(|r| Arc::ptr_eq(of, r))) {
+        let find = orbiters_core::search::Query::new(query);
+        previous.found = rows.as_ref().map(|r| (r.clone(), query.to_owned(), r.iter().enumerate().filter(|(_, v)| find.matches(&v.name)).map(|(i, _)| i).collect()));
+    }
+    let shown: Vec<&Visit> = match (&rows, &previous.found) {
+        (Some(rows), Some((.., found))) => found.iter().map(|i| &rows[*i]).collect(),
+        _ => Vec::new(),
+    };
     let mut pressed: Option<(Visit, bool)> = None;
     let mut lu = panel.new_child(UiBuilder::new().max_rect(list).id_salt("where-previous-list"));
     lu.set_clip_rect(list.intersect(panel.clip_rect()));
@@ -601,7 +612,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             scroll.show_rows(&mut lu, ROW_H, shown.len(), |ui, range| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 for i in range {
-                    let v = &shown[i];
+                    let v = shown[i];
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
                     let r = r.shrink2(vec2(8.0, 0.0));
                     if let Some(p) = row(ui, state, r, v, now) {

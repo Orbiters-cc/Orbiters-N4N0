@@ -561,6 +561,38 @@ pub fn local_time(iso: &str) -> String {
     tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
 }
 
+/// This computer's offset from UTC (asked again once a minute: summer time).
+pub(crate) fn offset() -> time::UtcOffset {
+    static KEPT: std::sync::Mutex<Option<(std::time::Instant, time::UtcOffset)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
+    match *kept {
+        Some((at, offset)) if at.elapsed().as_secs() < 60 => offset,
+        _ => {
+            let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            *kept = Some((std::time::Instant::now(), offset));
+            offset
+        }
+    }
+}
+
+/// The time of day alone of Unix seconds, in local time: "21:30", as [`local_time`] ends.
+pub fn local_clock(secs: u64) -> String {
+    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
+    let t = t.to_offset(offset());
+    format!("{:02}:{:02}", t.hour(), t.minute())
+}
+
+/// From one moment to a later one (Unix seconds), in local time: "28 Oct 2026, 21:30 – 22:30" on one day, both dates
+/// otherwise, one moment alone as [`local_time`].
+pub fn local_span(from: u64, to: u64) -> String {
+    let start = local_time_unix(from);
+    if from == to {
+        return start;
+    }
+    let day = |secs: u64| time::OffsetDateTime::from_unix_timestamp(secs as i64).ok().map(|t| t.to_offset(offset()).date());
+    if day(from) == day(to) { format!("{start} – {}", local_clock(to)) } else { format!("{start} – {}", local_time_unix(to)) }
+}
+
 /// "5 min ago" for the moment `epoch` at `now` (Unix seconds; `orbiters_ui::format::relative_time`), and a frame asked
 /// for when that would read otherwise: the pages draw only when something changed, and this text changes by the clock
 /// alone. For text on screen: ask it for the rows in view.
@@ -916,6 +948,29 @@ mod tests {
         assert_eq!(to_change as i64, change - just_past_midnight);
         let (_, to_midnight) = local_day_in(change as u64, &forward);
         assert_eq!(to_change + to_midnight, 23 * 3600 - 60, "23 hours from midnight to midnight");
+    }
+
+    /// DPG-12: a card's time and a group's span say what they were cut out of the translated date for.
+    #[test]
+    fn the_time_alone_and_a_span_are_the_date_s_own_words() {
+        for language in Language::ALL {
+            in_language(language, || {
+                for from in [1_792_000_000u64, 1_792_000_000 + 11 * 3600 + 59 * 60, 1_767_225_599] {
+                    let text = local_time_unix(from);
+                    assert_eq!(text.rsplit_once(", ").unwrap().1, local_clock(from), "{language:?}");
+                    assert_eq!(local_span(from, from), text, "{language:?}");
+                    for later in [60u64, 3 * 3600, 30 * 3600] {
+                        // As the headings said it: the day once when it is the same.
+                        let end = local_time_unix(from + later);
+                        let said = match (text.rsplit_once(", "), end.rsplit_once(", ")) {
+                            (Some((d1, t1)), Some((d2, t2))) if d1 == d2 => format!("{d1}, {t1} – {t2}"),
+                            _ => format!("{text} – {end}"),
+                        };
+                        assert_eq!(local_span(from, from + later), said, "{language:?}");
+                    }
+                }
+            });
+        }
     }
 
     /// Each language writes the date its own way, but keeps the date and the time apart by ", " (the gallery and community pages split them there),

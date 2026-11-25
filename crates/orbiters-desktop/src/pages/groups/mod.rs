@@ -1,5 +1,5 @@
 //! VRChat groups in the window (REQUEST22 1): the Groups section at the bottom of Home (the groups the signed-in account
-//! owns or helps run), each group's page (Look, Members, Roles, Posts) and the banner studio.
+//! owns or helps run), each group's page (Look, Members, Roles, Posts, Events) and the banner studio.
 //!
 //! What it shows is asked of the service on demand and answered to this window alone (`controller::groups`). On disk,
 //! per account: the studio's own crops and exports, and the new posts the person is writing (their own words, nothing of
@@ -15,9 +15,11 @@
 //! check, across tabs, pages, windows and restarts (verify2 B-A, B-E, B-F). A check says what VRChat shows now, never what
 //! happened; what it cannot tell, and what VRChat does not show, are the person's to decide (verify3 Blocker 2, Major 3).
 pub mod art;
+mod events;
 mod page;
 mod studio;
-pub(crate) use page::{Composer, RoleEditor, Tab};
+pub(crate) use events::Says;
+pub(crate) use page::{Composer, Picker, RoleEditor, Tab};
 
 use super::Cx;
 use crate::backend::Ctl;
@@ -57,6 +59,7 @@ pub(crate) enum Kind {
     Open(String),
     Members { group: String, query: String, offset: usize },
     Posts { group: String, offset: usize },
+    Events { group: String, month: Option<orbiters_core::group_events::Month>, offset: usize },
     Inventory { tag: FileTag, offset: usize },
     Picture(String),
     /// A picture of the account's gallery read in full for the banner studio.
@@ -916,6 +919,10 @@ impl State {
             cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(done));
         }
         self.said = match &outcome {
+            // The one thing VRChat asks of some roles that shows nowhere else.
+            Outcome::Refused(Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid)) if sealed.as_ref().is_some_and(|s| matches!(s.write, Write::MemberRole { add: true, .. }) && s.role.as_ref().is_some_and(|r| r.requires_two_factor)) => {
+                Some(tr("VRChat refused it. This role needs two-factor authentication: it must be on for that member's VRChat account.").to_string())
+            }
             Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
             Outcome::Done(_) | Outcome::Unknown => None,
         };
@@ -1093,7 +1100,7 @@ pub(crate) fn why_text(why: Why) -> &'static str {
         Why::NoPermission => tr("Your role does not include this right."),
         Why::RoleAtOrAbove => tr("This role is at or above your own highest role."),
         Why::FixedRole => tr("Everyone's role and the owner's role cannot be changed this way."),
-        Why::PaidRole => tr("Roles bought in VRChat's store are not given here."),
+        Why::PaidRole => tr("This role is bought in VRChat's store: VRChat gives it to whoever buys it, so it is not given by hand here."),
         Why::OwnerRole => tr("Only the name and description of the owner's role change."),
         Why::NotGrantable => tr("Your role cannot give this right."),
         Why::Prerequisite => tr("A right is missing the right it depends on."),
@@ -1109,11 +1116,12 @@ pub(crate) fn missing_text(m: Missing) -> &'static str {
     match m {
         Missing::Membership => tr("VRChat did not give your own membership whole, so nothing is sent. Read the group again."),
         Missing::Identity => tr("What VRChat gave is not of your account in this group, so nothing is sent. Read the group again."),
-        Missing::Roles => tr("VRChat did not give every role of this group, so nothing is sent. Read the group again."),
-        Missing::RoleOrder => tr("VRChat did not say where this role stands among the others, so nothing is sent. Read the group again."),
-        Missing::RoleDefinition => tr("VRChat did not give what this role may do, so nothing is sent. Read the group again."),
+        Missing::Roles => tr("VRChat did not give this group's roles. They can be given on vrchat.com."),
+        Missing::RoleOrder => tr("VRChat does not say where this role stands among the others: the group's owner can give it, or anyone who may on vrchat.com."),
+        Missing::RoleDefinition => tr("VRChat does not say what this role may do, so it is not changed or deleted from here. It can be on vrchat.com."),
+        Missing::RoleGone => tr("This role is no longer in the group."),
         Missing::Catalogue => tr("VRChat did not give the rights a role can have, so nothing is sent. Read the group again."),
-        Missing::Member => tr("VRChat did not give this member's own roles whole, so nothing is sent. Read the group again."),
+        Missing::Member => tr("VRChat did not give this member's own roles whole, so they are left alone here. They can be changed on vrchat.com."),
         Missing::Post => tr("VRChat did not give this post, or who sees it, whole: it is not deleted from here."),
         Missing::Picture => tr("VRChat did not say which picture is there, so nothing is sent. Read the group again."),
         Missing::Entitlement => tr("VRChat did not say whether your account may upload, so nothing is sent. Try again shortly."),
@@ -1750,6 +1758,10 @@ pub mod stage {
         });
         state.serial += 1;
         state.flow = Some(Flow::Confirming { sealed, serial: state.serial, origin, art });
+    }
+    /// The list of a picture's edit button, open.
+    pub fn edit_open(ctx: &egui::Context, which: &str) {
+        orbiters_ui::popup::open(ctx, page::edit_list(which));
     }
     pub fn named(state: &mut State, me: &str) {
         state.me_name = me.into();

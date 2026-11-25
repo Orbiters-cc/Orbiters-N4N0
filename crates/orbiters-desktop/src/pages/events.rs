@@ -111,6 +111,11 @@ fn when_at(starts: Option<&str>, ends: Option<&str>, now: i64) -> String {
     }
 }
 
+/// The time of day of an instant, in this computer's time zone.
+pub fn clock_of(iso: Option<&str>) -> Option<String> {
+    parse(iso).map(local).map(clock)
+}
+
 /// This computer's time zone as its offset ("UTC+1", "UTC−3:30").
 pub fn zone() -> String {
     let o = offset();
@@ -180,7 +185,7 @@ fn card_phase(c: &Card, now: i64) -> Phase {
     phase(c.status.as_deref(), c.starts_at.as_deref(), c.ends_at.as_deref(), false, now)
 }
 
-fn category_label(id: &str) -> String {
+pub fn category_label(id: &str) -> String {
     match id {
         "film_media" => tr("Film & media").into(),
         "roleplaying" => tr("Roleplay").into(),
@@ -189,6 +194,12 @@ fn category_label(id: &str) -> String {
         "hangout" => tr("Hangout").into(),
         "music" => tr("Music").into(),
         "exploration" => tr("Exploration").into(),
+        "arts" => tr("Arts").into(),
+        "dance" => tr("Dance").into(),
+        "gaming" => tr("Gaming").into(),
+        "performance" => tr("Performance").into(),
+        "wellness" => tr("Wellness").into(),
+        "other" => tr("Other").into(),
         other => {
             let mut s = other.replace('_', " ");
             if let Some(first) = s.get(..1) {
@@ -1615,7 +1626,7 @@ fn note(ui: &mut Ui, id: Id, tone: Tone, text: &str, actions: &[NoteAction]) -> 
 }
 
 /// Markdown as plain text: headings' hashes, emphasis marks and links' addresses gone.
-fn plain(md: &str) -> String {
+pub fn plain(md: &str) -> String {
     let mut out = String::new();
     for line in md.lines() {
         let l = line.trim_start_matches('#').trim_start();

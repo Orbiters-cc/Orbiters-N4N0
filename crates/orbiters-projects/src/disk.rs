@@ -354,6 +354,13 @@ pub(crate) fn project_io(path: &Path) -> io::Result<vrc_get_vpm::io::DefaultProj
     Ok(vrc_get_vpm::io::DefaultProjectIo::new(path.into()))
 }
 
+/// Whether that library may change the packages of the project at `path`: it makes what it installs in the project's `Temp/vrc-get`,
+/// and then removes that folder whole.
+pub(crate) fn staging(path: &Path) -> io::Result<()> {
+    content(&path.join("Temp"))?; // i18n: not shown (a folder's name)
+    tree(&path.join("Temp/vrc-get"))
+}
+
 /// The environment in `path` (Orbiters' own), for the same library.
 pub(crate) fn environment_io(path: PathBuf) -> io::Result<vrc_get_vpm::io::DefaultEnvironmentIo> {
     for at in [path.clone(), path.join("Repos"), path.join("settings.json")] {

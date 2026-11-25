@@ -3,6 +3,7 @@ pub mod avatars;
 pub mod blender;
 mod builtin_templates;
 pub mod coherent;
+mod disk;
 pub mod discovery;
 pub mod editor;
 pub mod gallery;
@@ -182,45 +183,31 @@ pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 /// Atomic publication in the destination directory; no partially written JSON is visible.
 pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write;
-    std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent folder"))?)?;
+    crate::disk::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent folder"))?)?;
     // A file of this write's own (PROJECTS-36): the window and the service write the same files, and a shared temporary
     // name let one publish, truncate or take the other's half-written bytes.
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     let written = (|| -> anyhow::Result<()> {
-        let mut f = std::fs::File::options().write(true).create_new(true).open(&tmp)?;
+        let mut f = disk::open(std::fs::File::options().write(true).create_new(true), &tmp)?;
         f.write_all(&serde_json::to_vec_pretty(value)?)?;
         f.sync_all()?;
         Ok(())
     })();
     if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = crate::disk::remove_file(&tmp);
         return Err(e);
     }
-    // Windows rename does not replace existing files. MoveFileEx provides replacement without a gap.
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-        let src: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-        let dst: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // Another writer replacing the same file at this instant (or a reader holding it) refuses the move for a moment.
-        let mut tries = 0;
-        while let Err(e) = unsafe { MoveFileExW(PCWSTR(src.as_ptr()), PCWSTR(dst.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } {
-            tries += 1;
-            if tries >= 20 {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e.into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5 * tries));
+    // Another writer replacing the same file at this instant (or a reader holding it) refuses the move for a moment.
+    let mut tries = 0;
+    while let Err(e) = disk::replace(&tmp, path) {
+        tries += 1;
+        if tries >= 20 || cfg!(not(windows)) {
+            let _ = disk::remove_file(&tmp);
+            return Err(e.into());
         }
-    }
-    #[cfg(not(windows))]
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
+        std::thread::sleep(std::time::Duration::from_millis(5 * tries));
     }
     Ok(())
 }
@@ -239,7 +226,7 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
 pub fn unity_open(path: &Path) -> bool {
     let lock = path.join("Temp/UnityLockfile");
     #[cfg(not(unix))]
-    return lock.exists() && std::fs::OpenOptions::new().write(true).open(lock).is_err();
+    return lock.exists() && disk::open(std::fs::OpenOptions::new().write(true), lock).is_err();
     // Unity's lock file is no exclusive open here: anyone can open it, and it stays behind after a crash. What tells is
     // a lock held on it, or an editor whose command line names the project.
     #[cfg(unix)]

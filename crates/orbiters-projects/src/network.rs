@@ -201,11 +201,11 @@ pub fn thumbnails(server: Server, ids: Vec<String>) -> anyhow::Result<HashMap<St
                 continue;
             }
             let bytes = response.into_body().with_config().limit(12 * 1024 * 1024).read_to_vec()?;
-            std::fs::create_dir_all(&cache)?;
+            crate::disk::create_dir_all(&cache)?;
             let p = cache.join(format!("{}.image", crate::avatars::filename(id)));
             let tmp = p.with_extension("tmp");
-            std::fs::write(&tmp, &bytes)?;
-            std::fs::rename(tmp, &p)?;
+            crate::disk::write(&tmp, &bytes)?;
+            crate::disk::rename(tmp, &p)?;
             out.insert(id.clone(), Thumbnail { path: p, size: bytes.len() as u64 });
         }
     }

@@ -93,7 +93,7 @@ pub fn read_result(project: &Path, id: &str) -> anyhow::Result<Option<ResultFile
 pub fn take_result(project: &Path, id: &str) -> anyhow::Result<Option<ResultFile>> {
     let result = read_result(project, id)?;
     if result.is_some() {
-        std::fs::remove_file(project.join("UserSettings/Orbiters/SetupRequests").join(format!("{id}.result.json")))?;
+        crate::disk::remove_file(project.join("UserSettings/Orbiters/SetupRequests").join(format!("{id}.result.json")))?;
     }
     Ok(result)
 }

@@ -124,6 +124,7 @@ pub struct Pinned {
 impl Pinned {
     /// `path`, when it is a real folder (not a link), held.
     pub fn open(path: &Path) -> std::io::Result<Pinned> {
+        crate::disk::allowed(path)?;
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
@@ -167,7 +168,7 @@ impl Pinned {
                 return Err(std::io::Error::other("the folder was replaced")); // i18n: not shown (an error chained under a message)
             }
             let _ = &self.file;
-            std::fs::remove_dir(&self.path)
+            crate::disk::remove_dir(&self.path)
         }
     }
 }
@@ -187,6 +188,7 @@ fn delete_by_handle(file: &std::fs::File) -> std::io::Result<()> {
 /// Removes the file at `path` when it is the very file `id` names (not a link, not a file put in its place): opened
 /// once, its identity read from that handle, deleted through it. False when it is another (left as it is).
 pub fn delete_file_if(path: &Path, id: FileId) -> std::io::Result<bool> {
+    crate::disk::allowed(path)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -206,7 +208,7 @@ pub fn delete_file_if(path: &Path, id: FileId) -> std::io::Result<bool> {
         if !is_same(path, id) || std::fs::symlink_metadata(path)?.is_dir() {
             return Ok(false);
         }
-        std::fs::remove_file(path)?;
+        crate::disk::remove_file(path)?;
         Ok(true)
     }
 }

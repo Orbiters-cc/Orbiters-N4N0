@@ -148,6 +148,14 @@ pub enum ToService {
     Orbit {
         status: crate::state::OrbitStatus,
     },
+    /// Settings: macOS is asked for what those panels need there.
+    OrbitAllow {
+        needs: crate::state::OrbitNeeds,
+    },
+    /// A key typed in a page of those panels while they hold the keyboard (a Mac), for N4N0's menu's keyboard.
+    Typed {
+        key: orbiters_n4n0_core::menu::KeyInput,
+    },
     /// The beta's usage statistics this client noted since it last sent them (`usage`).
     Usage {
         steps: Vec<crate::usage::Step>,

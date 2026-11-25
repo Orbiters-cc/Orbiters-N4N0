@@ -52,22 +52,64 @@ const PLY_SPLAT_BYTES: u64 = 68;
 /// changes the result with near certainty), at a few cycles a word: 25 ms for a 3-million-splat PLY of 276 MB. Not
 /// cryptographic: it tells one reconstruction from another, it does not resist forgery.
 pub fn content_hash(bytes: &[u8]) -> u64 {
+    let mut h = ContentHash::new(bytes.len() as u64);
+    h.feed(bytes);
+    h.finish()
+}
+
+/// [`content_hash`] of bytes that come in pieces, their length known first.
+pub struct ContentHash {
+    h: u64,
+    /// The bytes of the word begun.
+    left: [u8; 8],
+    begun: usize,
+}
+
+impl ContentHash {
     const K: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mut h = 0xCBF2_9CE4_8422_2325u64 ^ (bytes.len() as u64).wrapping_mul(K);
-    let (words, rest) = bytes.as_chunks::<8>();
-    for w in words {
-        h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K);
-        h ^= h >> 29;
+
+    pub fn new(length: u64) -> Self {
+        Self { h: 0xCBF2_9CE4_8422_2325u64 ^ length.wrapping_mul(Self::K), left: [0; 8], begun: 0 }
     }
-    let mut last = [0u8; 8];
-    last[..rest.len()].copy_from_slice(rest);
-    h = (h ^ u64::from_le_bytes(last) ^ (rest.len() as u64) << 59).wrapping_mul(K);
-    // splitmix64's finaliser: the last words reach every bit too.
-    h ^= h >> 30;
-    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    h ^= h >> 27;
-    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
-    h ^ (h >> 31)
+
+    fn word(h: u64, w: [u8; 8]) -> u64 {
+        let h = (h ^ u64::from_le_bytes(w)).wrapping_mul(Self::K);
+        h ^ (h >> 29)
+    }
+
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        if self.begun > 0 {
+            let take = (8 - self.begun).min(bytes.len());
+            self.left[self.begun..self.begun + take].copy_from_slice(&bytes[..take]);
+            self.begun += take;
+            bytes = &bytes[take..];
+            if self.begun < 8 {
+                return;
+            }
+            self.h = Self::word(self.h, self.left);
+            self.begun = 0;
+        }
+        let (words, rest) = bytes.as_chunks::<8>();
+        let mut h = self.h;
+        for w in words {
+            h = Self::word(h, *w);
+        }
+        self.h = h;
+        self.left[..rest.len()].copy_from_slice(rest);
+        self.begun = rest.len();
+    }
+
+    pub fn finish(self) -> u64 {
+        let mut last = [0u8; 8];
+        last[..self.begun].copy_from_slice(&self.left[..self.begun]);
+        let mut h = (self.h ^ u64::from_le_bytes(last) ^ (self.begun as u64) << 59).wrapping_mul(Self::K);
+        // splitmix64's finaliser: the last words reach every bit too.
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+        h ^ (h >> 31)
+    }
 }
 
 /// Which PLY an edit was made on: its length and [`content_hash`].
@@ -329,15 +371,34 @@ pub fn find(ply: &Path, identity: Identity, splats: usize) -> Found {
 
 /// The PLY at `ply` whole, its identity and its edit: what the 3D view loads (it draws the edit's marks).
 pub fn read_for_view(ply: &Path) -> anyhow::Result<(Gaussians, Identity, Found)> {
-    let bytes = std::fs::read(ply).with_context(|| tr!("reading {path}", path = ply.display()))?;
-    parse_for_view(ply, &bytes)
+    read_for_view_in_pieces(ply, &mut |_| Ok(()))
 }
 
-/// [`read_for_view`] of the PLY at `ply` already read whole into `bytes` (the desktop's export reads it in steps, to
-/// show how far it got).
-pub fn parse_for_view(ply: &Path, bytes: &[u8]) -> anyhow::Result<(Gaussians, Identity, Found)> {
-    let identity = Identity::of(bytes);
-    let g = crate::ply::parse(bytes)?;
+/// The most of a PLY read at a time.
+const PIECE: u64 = 4 << 20;
+
+/// [`read_for_view`], a piece of the file at a time: what it holds beside the splats is one piece (a PLY is about as large
+/// as its splats in memory, and both were held whole). `progress` hears how much is read (0 to 1) and stops it with an error.
+pub fn read_for_view_in_pieces(ply: &Path, progress: crate::export::Progress) -> anyhow::Result<(Gaussians, Identity, Found)> {
+    use std::io::Read as _;
+    let reading = || tr!("reading {path}", path = ply.display());
+    let mut file = std::fs::File::open(ply).with_context(reading)?;
+    let bytes = file.metadata().with_context(reading)?.len();
+    let mut hash = ContentHash::new(bytes);
+    let mut parser = crate::ply::Parser::new(bytes);
+    let mut piece = Vec::with_capacity(PIECE.min(bytes) as usize);
+    let mut done = 0u64;
+    while done < bytes {
+        piece.clear();
+        let n = (&mut file).take(PIECE.min(bytes - done)).read_to_end(&mut piece).with_context(reading)?;
+        ensure!(n > 0, "{}", tr("PLY truncated"));
+        done += n as u64;
+        hash.feed(&piece);
+        parser.feed(&piece)?;
+        progress(done as f32 / bytes as f32)?;
+    }
+    let identity = Identity { bytes, hash: hash.finish() };
+    let g = parser.finish()?;
     let found = find(ply, identity, g.len());
     Ok((g, identity, found))
 }
@@ -714,6 +775,41 @@ pub fn preview_camera(session: &Path) -> Option<crate::camera::Camera> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash of every edit saved so far, whatever the pieces its bytes come in.
+    #[test]
+    fn the_content_hash_is_what_it_was_in_any_pieces() {
+        fn as_it_was(bytes: &[u8]) -> u64 {
+            const K: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut h = 0xCBF2_9CE4_8422_2325u64 ^ (bytes.len() as u64).wrapping_mul(K);
+            let (words, rest) = bytes.as_chunks::<8>();
+            for w in words {
+                h = (h ^ u64::from_le_bytes(*w)).wrapping_mul(K);
+                h ^= h >> 29;
+            }
+            let mut last = [0u8; 8];
+            last[..rest.len()].copy_from_slice(rest);
+            h = (h ^ u64::from_le_bytes(last) ^ (rest.len() as u64) << 59).wrapping_mul(K);
+            h ^= h >> 30;
+            h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            h ^= h >> 27;
+            h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+            h ^ (h >> 31)
+        }
+        let mut rng = fastrand::Rng::with_seed(3);
+        for n in (0..40).chain([1000, 1003, 65_537]) {
+            let bytes: Vec<u8> = (0..n).map(|_| rng.u8(..)).collect();
+            assert_eq!(content_hash(&bytes), as_it_was(&bytes), "{n} bytes");
+            let mut h = ContentHash::new(n as u64);
+            let mut at = 0;
+            while at < n {
+                let take = rng.usize(1..=13).min(n - at);
+                h.feed(&bytes[at..at + take]);
+                at += take;
+            }
+            assert_eq!(h.finish(), as_it_was(&bytes), "{n} bytes in pieces");
+        }
+    }
 
     /// What stops an upload or an export reads in the window's language, with the reason put in its place.
     #[test]

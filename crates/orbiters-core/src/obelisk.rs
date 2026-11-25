@@ -570,12 +570,12 @@ pub fn window_server_socket(tmp: &Path, launcher: u32) -> PathBuf {
     tmp.join(format!("obelisk-engine-{launcher}")).join("wsd.sock")
 }
 
-/// The first obelisk-cli N4N0 starts VRChat with (0.1.13: `steam play --no-saved-arguments`, which every start is made with: the
-/// profile it names is the only one the game is given; 0.1.12: a lock file that cannot be written is held all the same, a release that
+/// The first obelisk-cli N4N0 starts VRChat with (0.1.14: a paused thread resumes where it stopped, which crashed VRChat under heavy
+/// loading; 0.1.13: `steam play --no-saved-arguments`, which every start is made with: the profile it names is the only one the game is given; 0.1.12: a lock file that cannot be written is held all the same, a release that
 /// lost its Wine says so; 0.1.11: one lock for the whole library between every launch and every change
 /// of its runtimes, a look at what runs that takes no failure for nothing, a repair compared with its archive byte for byte, and
 /// every file a start needs looked at; 0.1.10: `steam play --steam-id`, the session named in `starting`).
-pub const LEAST: (u32, u32, u32) = (0, 1, 13);
+pub const LEAST: (u32, u32, u32) = (0, 1, 14);
 
 /// Whether the obelisk-cli at `program` is older than [`LEAST`], by its release folder's name; one whose folder names no
 /// release is not known to be.
@@ -799,10 +799,10 @@ mod tests {
     #[test]
     fn an_obelisk_cli_older_than_the_least_starts_no_vrchat() {
         let at = |folder: &str| PathBuf::from(format!("/T/obelisk-cli/{folder}/obelisk-cli"));
-        for old in ["obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
+        for old in ["obelisk-cli-0.1.13-arm64", "obelisk-cli-0.1.12-arm64", "obelisk-cli-0.1.11-arm64", "obelisk-cli-0.1.10-arm64", "obelisk-cli-0.1.9-arm64", "obelisk-cli-0.1.8-arm64", "obelisk-cli-0.1.2-arm64", "obelisk-cli-0.0.99-arm64"] {
             assert!(too_old(&at(old)), "{old}");
         }
-        for fit in ["obelisk-cli-0.1.13-arm64", "obelisk-cli-0.1.14-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
+        for fit in ["obelisk-cli-0.1.14-arm64", "obelisk-cli-0.1.15-arm64", "obelisk-cli-0.2.0-arm64", "obelisk-cli-1.0.0-arm64", "built-here"] {
             assert!(!too_old(&at(fit)), "{fit}");
         }
     }

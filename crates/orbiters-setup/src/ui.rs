@@ -103,6 +103,8 @@ struct Setup {
     task: Option<Arc<Progress>>,
     job: Option<Job>,
     error: Option<String>,
+    /// What Windows would not take of an install that is done.
+    notes: Vec<String>,
     /// When an update finished (the app starts again a moment later).
     finished_at: Option<f64>,
     code: Arc<AtomicI32>,
@@ -152,6 +154,7 @@ impl Setup {
             task: None,
             job: None,
             error: None,
+            notes: Vec::new(),
             finished_at: None,
             code,
         };
@@ -228,6 +231,7 @@ impl Setup {
             match task.status().done {
                 None => ctx.request_repaint_after(Duration::from_millis(50)),
                 Some(Ok(())) => {
+                    self.notes = task.status().notes;
                     self.task = None;
                     self.code.store(0, Ordering::Relaxed);
                     let uninstalled = matches!(self.job, Some(Job::Uninstall(..)));
@@ -551,6 +555,9 @@ impl Setup {
                 tr!("Updated to {version}", version = self.version()),
                 if self.args.relaunch { tr("Orbiters - N4N0 is opening again…").to_string() } else { tr!("Version {version} is in place.", version = self.version()) },
             )
+        } else if !self.notes.is_empty() {
+            // In place all the same; not where the shortcuts are, which are not all there.
+            (tr("Orbiters - N4N0 is installed").to_string(), format!("{}\n{}", tr!("Version {version} is in place.", version = self.version()), self.notes.join("\n")))
         } else {
             // Two whole sentences: where the shortcuts are cannot be a piece of one in every language.
             let sub = if self.desktop_shortcut {
@@ -1029,7 +1036,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             }),
         ),
     ];
-    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false, retry: false };
+    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false, retry: false, recover: false };
     for (name, prepare) in shots {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);

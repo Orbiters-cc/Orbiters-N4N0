@@ -295,8 +295,13 @@ fn colours(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings, orbit: &m
     if orbiters_core::here::HERE.around() {
         widgets::separator(ui);
         let mut own = orbit.has_own_accent();
+        let menus = if orbiters_core::here::HERE.vr_overlay {
+            tr("The color of Orbiters' panels beside VRChat's menus. Their own is picked in the headset, on the panels' settings.")
+        } else {
+            tr("The color of Orbiters' panels beside VRChat's menus. Their own is picked there, on the panels' settings.")
+        };
         let options = [SegOption::new(false, tr("The app's accent")), SegOption::new(true, tr("Their own"))];
-        widgets::field(ui, tr("Menus in VRChat"), Some(tr("The color of Orbiters' panels beside VRChat's menus. Their own is picked in the headset, on the panels' settings.")), 290.0, |ui| {
+        widgets::field(ui, tr("Menus in VRChat"), Some(menus), 290.0, |ui| {
             if widgets::segmented(ui, "appearance-menus", &mut own, &options, true) {
                 orbit.accent_own = own;
                 if !own {

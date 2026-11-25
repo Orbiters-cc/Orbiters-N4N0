@@ -29,8 +29,14 @@ pub struct Here {
     pub eye_picture: bool,
     /// VRChat's stream camera can be read (Spout): 3D pictures, captures, the QR scanner.
     pub camera_frames: bool,
-    /// N4N0's panels show over VRChat's window on the desktop, and that window can be read (translation there).
+    /// N4N0's panels show over VRChat's window on the desktop.
     pub desktop_panels: bool,
+    /// The text VRChat's window shows can be read (translation on the desktop).
+    pub window_text: bool,
+    /// N4N0 can move this computer's mouse, for VRChat's desktop mode.
+    pub mouse: bool,
+    /// The beta's menu mismatch buttons show (on the watch's wrist, in VRChat's window's corner).
+    pub mismatch_buttons: bool,
     /// Web pages show inside the app (the camera's links).
     pub web_pages: bool,
     /// Pictures can be dragged out of the app into others.
@@ -66,6 +72,9 @@ impl Here {
         eye_picture: true,
         camera_frames: true,
         desktop_panels: true,
+        window_text: true,
+        mouse: true,
+        mismatch_buttons: true,
         web_pages: true,
         drag_out: true,
         tray: true,
@@ -89,7 +98,10 @@ impl Here {
         driver: false,
         eye_picture: false,
         camera_frames: false,
-        desktop_panels: false,
+        desktop_panels: true,
+        window_text: false,
+        mouse: false,
+        mismatch_buttons: false,
         web_pages: false,
         drag_out: true,
         tray: true,
@@ -116,6 +128,9 @@ impl Here {
         eye_picture: false,      // L4, unknown
         camera_frames: false,    // L8
         desktop_panels: false,   // L7
+        window_text: false,      // L7
+        mouse: false,            // L7
+        mismatch_buttons: false, // L4, L7
         web_pages: false,        // L13 (the link opens in the browser)
         drag_out: false,         // L2
         tray: false,             // L2
@@ -135,7 +150,7 @@ impl Here {
 
     /// Whether what is seen can be read (translation): the headset's picture, or VRChat's window.
     pub const fn reads(self) -> bool {
-        self.eye_picture || self.desktop_panels
+        self.eye_picture || self.window_text
     }
 }
 

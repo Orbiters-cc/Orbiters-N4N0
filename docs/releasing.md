@@ -9,9 +9,16 @@ git commit -am "Orbiters - N4N0 0.2.0" && git push
 cargo xtask release             # --unsigned until code signing is set up (GitHub only)
 ```
 
-`release` refuses a commit that is not clean, not pushed, not on `main`, or whose version is already released. It
-then builds and signs everything (`dist`), uploads it (`publish`), tags the commit `desktop-v0.2.0`, and makes that
-tag's GitHub release with `OrbitersSetup-0.2.0.exe` (`github`, through the signed-in `gh`). Every version bump gets
+`release` first names the commit it releases, and everything after is about that commit, wherever `HEAD` is by then. It
+refuses a checkout that differs from it in any file, before anything is done (there is no `--allow-dirty`); a commit
+that is not on `origin/main`; a tag of the version that is on another commit, here or at origin; and a version that is
+not after the released one. A feed or an origin that cannot be asked is a refusal too. It then builds and signs
+everything (`dist`), tags the commit `desktop-v0.2.0` and pushes the tag, uploads the files (`publish`), and makes that
+tag's GitHub release with `OrbitersSetup-0.2.0.exe` (`github`, through the signed-in `gh`). Nothing is signed when a
+file of the checkout was written while it was being built. A checkout other people or sessions edit is no place to
+release from: use a clean worktree (`git worktree add --detach <folder> origin/main`, then `git submodule update --init`
+there), on no branch, which is enough once origin has the commit. `release --dev` pushes the commit to its branch before
+the build, so that its version is claimed in seconds. Every version bump gets
 its GitHub release. With `--unsigned`, before Azure Artifact Signing is set up (below), the setup carries no
 signature and goes on GitHub only: SmartScreen warns about it, and installed apps update only to signed releases.
 
@@ -76,8 +83,8 @@ applications with two renames (the old one goes back if the second fails) and op
 | `cargo xtask keygen` | Creates the release key, once. The private half goes to `~/.orbiters-release/update-signing-key`, the public half to `crates/orbiters-update/update-key.pub`, which is committed and built into every app. |
 | `cargo xtask bump <version>` | Sets `ORBITERS_VERSION` in `.cargo/config.toml`: every program and the release carry this version (`orbiters-version` says how the libraries get it). A stable version also sets `[workspace.package] version` and updates Cargo.lock; a development one (`--dev`) changes the config alone, so only the programs recompile, and `dist` refuses a stable version whose crates say another. |
 | `cargo xtask dist` | Writes `target/dist/<version>/` (details below). `--unsigned` makes a test build, and `--programs <folder>` packs programs already built there instead of building them. Neither gets a release file, so `publish` cannot put them out. `--dev` compiles as `release --dev` does (below), and is refused for a version that is not a development one (`0.3.6-dev.2`): a stable version's setup is only ever made with the full profile. |
-| `cargo xtask publish` | Uploads `target/dist/<version>/` to the server and makes it the channel's release (`--force` publishes a version that is not newer than the current one). Use it again after an upload that was cut. |
-| `cargo xtask release` | Runs the checks, `dist`, `publish`, the tag, then `github`. `--notes <file>` adds release notes (plain text, shown in the app's Settings and on GitHub). `--unsigned`: no Authenticode signatures, no `publish`. |
+| `cargo xtask publish` | Uploads `target/dist/<version>/` to the server and makes it the channel's release (`--force` publishes a version that is not newer than the current one). Use it again after an upload that was cut. It refuses a release file that names no commit (built by `dist` with changes nobody committed), and fails when the site does not serve the version back. `--dev`: the development feed, which keeps the last 8 versions (GitHub keeps them all). |
+| `cargo xtask release` | Names and checks the commit, then `dist`, the tag, `publish` and `github`. `--notes <file>` adds release notes (plain text, shown in the app's Settings and on GitHub). `--unsigned`: no Authenticode signatures. |
 | `cargo xtask github` | Makes the GitHub release of `desktop-v<version>` (the tag pushed already) with `target/dist/<version>/`'s setup, or replaces the setup of one that exists. |
 
 All of them take `--channel <name>`, `stable` by default. An app follows the channel its install record names.
@@ -160,6 +167,7 @@ Without an Authenticode signature, Windows' SmartScreen warns about the setup ("
 | `host` | `ORBITERS_RELEASE_HOST` | `blackorbit@orbiters` (the server over Tailscale SSH) |
 | `remote_dir` | `ORBITERS_RELEASE_DIR` | `/home/blackorbit/Orbiters/server/docker-data/downloads/desktop` |
 | `setup_target_dir` | `ORBITERS_SETUP_TARGET_DIR` | the target folder (the static setup needs about 1.1 GB of its own) |
+| `dev_dir` | `ORBITERS_DEV_DOWNLOADS` | the development feed: `server/docker-data/downloads/desktop` beside the main checkout, whichever worktree releases |
 | `macos_identity` | `ORBITERS_MACOS_IDENTITY` | the best identity the keychain has (`-`: ad hoc) |
 | `macos_notary_profile` | `ORBITERS_MACOS_NOTARY_PROFILE` | none: Developer ID builds are not notarized |
 
@@ -196,7 +204,10 @@ SteamVR the next time it runs. Both can be changed later in the app's Settings, 
 - **While the app runs:** it asks the app to quit, as the app's own Quit does. The app finishes saving a recording
   first. After 20 seconds the setup offers to close it, warning that unsaved work is lost.
 - **How files are replaced:** the payload is unpacked and checked inside the install folder first, then each file is
-  moved into place. If a move fails, the files already moved are put back and the error is shown.
+  moved into place, the app's own program last. If a move fails, the files already moved are put back and the error is
+  shown. A journal (`.setup-journal`) says beforehand what is about to move: after a power cut or a kill, the version
+  that was there is put back at the next sign-in (`--recover`, through `RunOnce`) or by the next setup. Once the new
+  version's record is written the install is done: a shortcut Windows would not take is said, and is no failure.
 - **Uninstalling:** Windows runs `orbiters-setup.exe --uninstall` from the install folder. It copies itself to the
   temporary folder, then removes the app's Windows entries, its SteamVR manifest (and SteamVR's start of it, when
   SteamVR runs) and only the files its install record lists. Settings,

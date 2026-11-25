@@ -153,6 +153,10 @@ pub trait Machine: Send + Sync {
     fn starting(&self) -> bool {
         false
     }
+    /// Of the VRChats `running` here, the person's own whose window the panels around VRChat's menus lie over (a Mac's; elsewhere the watchers know it).
+    fn desktop_game(&self, _running: &[u32]) -> Option<u32> {
+        None
+    }
     /// Why the last start failed after `start` returned, told once.
     fn start_failure(&self) -> Option<String> {
         None
@@ -512,6 +516,18 @@ impl MacMachine {
     }
 }
 
+impl MacMachine {
+    /// The newest launch of the one start, which is Home's and the bridge's alike, runs and is the bridge's: none of Home's.
+    fn newest_is_the_bridges(&self) -> bool {
+        self.play.newest().is_some_and(|l| l.running && !l.over && !self.home_launch.lock().unwrap().iter().any(|home| home.id == l.id))
+    }
+
+    /// Whether the game under launcher `pid` is the bridge's.
+    fn bridges(&self, pid: u32) -> bool {
+        self.newest_is_the_bridges() && self.play.newest().is_some_and(|l| l.launcher == Some(pid))
+    }
+}
+
 impl Machine for MacMachine {
     fn running(&self) -> Vec<(u32, bool)> {
         // What the engine's own records name, while that very process lives (its birth as recorded: a process that took
@@ -541,8 +557,7 @@ impl Machine for MacMachine {
         use crate::state::{VrchatDriverShown, VrchatRunShown};
         // Only what its own log said of the very process that runs (its birth with its number).
         let Some(player) = super::incident::player().filter(|p| still_born(p.launcher, Some(p.birth))) else { return Some(Vec::new()) };
-        // The one start is Home's and the bridge's: a running launch of it that is not Home's is the bridge's.
-        let bridges = self.play.newest().is_some_and(|l| l.running && !l.over && l.launcher == Some(player.launcher) && !self.home_launch.lock().unwrap().iter().any(|home| home.id == l.id));
+        let bridges = self.bridges(player.launcher);
         Some(vec![VrchatRunShown {
             pid: player.launcher,
             profile: player.profile.unwrap_or(0),
@@ -564,6 +579,11 @@ impl Machine for MacMachine {
 
     fn newest_profile(&self) -> Option<u32> {
         self.play.newest().map(|l| l.profile)
+    }
+
+    fn desktop_game(&self, running: &[u32]) -> Option<u32> {
+        // (before the engine's record names the game, a launch is known by its program alone: not the bridge's either)
+        running.iter().copied().find(|pid| !self.bridges(*pid) && !(self.play.program() == Some(*pid) && self.newest_is_the_bridges()))
     }
 
     fn newest_launch(&self) -> Option<(u64, Option<u32>)> {
@@ -1718,6 +1738,7 @@ impl Controller {
         let running: Vec<(u32, bool)> = runs.iter().map(|r| (r.0, r.1)).collect();
         let trouble = if here { machine.start_trouble() } else { None };
         let picture_lost = if here { machine.picture_lost() } else { None };
+        let desktop_game = if here { machine.desktop_game(&running.iter().map(|(pid, _)| *pid).collect::<Vec<_>>()) } else { None };
         let repairing = self.launcher.lock().unwrap().repairing;
         let engine_trouble = if here { machine.engine_problem() } else { None }.map(|p| orbiters_core::launcher::EngineTrouble { paths: p.paths, action: p.action, repairing: repairing.is_some(), percent: repairing.flatten() });
         // A start that failed after it was asked for (the game's own start, far from the press): said, and over.
@@ -1804,6 +1825,7 @@ impl Controller {
             m.several_profiles = several;
             m.log_trouble = log_trouble;
             m.picture_lost = picture_lost;
+            m.desktop_game = desktop_game;
             m.engine_trouble = engine_trouble;
             m.unresolved = unresolved;
             m.start_trouble = trouble;

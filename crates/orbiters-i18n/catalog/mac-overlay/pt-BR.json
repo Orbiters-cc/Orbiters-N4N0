@@ -1,0 +1,16 @@
+{
+  "Hold Left Option, then click a tool": "Segure Option esquerdo e clique em uma ferramenta",
+  "Or press its number, 1 to 5, from the top clockwise": "Ou aperte o número, de 1 a 5, a partir do topo no sentido horário",
+  "Left Option to click, or a number": "Option esquerdo para clicar, ou um número",
+  "Worlds in 3D, videos, instances and pictures.": "Mundos em 3D, vídeos, instâncias e fotos.",
+  "Left Option to click": "Option esquerdo para clicar",
+  "macOS does not let Orbiters - N4N0 see VRChat's window, so it cannot know when its menus open. Allow it, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0.": "O macOS não deixa o Orbiters - N4N0 ver a janela do VRChat, então ele não sabe quando os menus abrem. Permita, ative o Orbiters - N4N0 nos Ajustes do Sistema se o macOS abri-los, depois feche e reabra o Orbiters - N4N0.",
+  "macOS does not tell Orbiters - N4N0 which keys are pressed in VRChat, so Esc and R may not bring these menus. Allow Input Monitoring, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0.": "O macOS não diz ao Orbiters - N4N0 quais teclas são apertadas no VRChat, então Esc e R podem não trazer estes menus. Permita o Monitoramento de Entrada, ative o Orbiters - N4N0 nos Ajustes do Sistema se o macOS abri-los, depois feche e reabra o Orbiters - N4N0.",
+  "macOS did not give a picture of VRChat's window just now. Press Esc or R again in VRChat; if nothing appears, quit and reopen Orbiters - N4N0.": "O macOS não deu uma imagem da janela do VRChat agora há pouco. Aperte Esc ou R de novo no VRChat; se nada aparecer, feche e reabra o Orbiters - N4N0.",
+  "Allow Input Monitoring": "Permitir o Monitoramento de Entrada",
+  "Orbiters around VRChat's menus.": "Orbiters ao redor dos menus do VRChat.",
+  "Orbiters beside VRChat's Quick Menu and its wheel": "Orbiters ao lado do Menu Rápido do VRChat e da roda",
+  "Orbiters around VRChat's own wheel, opened with R. Hold Left Option to point at it, or press its number: the rest of the time the mouse is VRChat's.": "Orbiters ao redor da roda do VRChat, aberta com R. Segure Option esquerdo para apontar, ou aperte o número: no resto do tempo o mouse é do VRChat.",
+  "Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.": "Orbiters ao lado do Menu Rápido do VRChat, aberto com Esc, em tela cheia ou em janela. No Mac, o VRChat fica com o mouse enquanto os menus estão abertos: segure Option esquerdo para apontar para o Orbiters.",
+  "The color of Orbiters' panels beside VRChat's menus. Their own is picked there, on the panels' settings.": "A cor dos painéis do Orbiters ao lado dos menus do VRChat. A própria é escolhida ali, nas configurações dos painéis."
+}

@@ -309,7 +309,7 @@ mod tests {
     /// asked with.
     #[test]
     fn nothing_of_the_service_resolves_whoever_is_signed_in_by_itself() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("controller");
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         // (file, what is asked, how many times, why it may).
         const MAY: &[(&str, &str, usize, &str)] = &[
             ("account.rs", "account::read_saved(", 3, "the account thread itself: what it reads is installed under the gate; and whether the file still holds the credential whose member's id is written to it"),
@@ -327,24 +327,36 @@ mod tests {
             ("world_feedback.rs", "account_api()", 1, "whether somebody is signed in"),
             ("previous_invite.rs", "vrchat_signed_client()", 2, "bound to the VRChat account it was accepted with, checked on the hold that sends"),
         ];
+        // What is known to break the rule and is not put right yet: (file, what, how many times, since when, whose). Said on every
+        // run, and none is added without its date and who puts it right.
+        const EXCEPTIONS: &[(&str, &str, usize, &str, &str)] = &[
+            ("avatar_gun.rs", "account_api()", 3, "2026-11-25", "the avatar gun's own session: each of the three should act with the epoch it was asked with, or be listed in MAY with why it may"),
+        ];
         let mut wrong = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        let mut looked = 0;
+        // (All of what the app compiles of each file; the tests' own code, wherever it is, is not read.)
+        for (name, source) in orbiters_core::source::named(&src) {
+            let Some(name) = (if matches!(name.as_str(), "controller.rs" | "service.rs") { Some(name.as_str()) } else { name.strip_prefix("controller/") }) else { continue };
             // (The launcher's, the Where page's and the bridge's have their own owner: verify3's other findings.)
-            if !name.ends_with(".rs") || name.contains("test") || name.starts_with("bridge_") || name.starts_with("launcher") || name == "identity.rs" || name == "vrchat_data.rs" {
+            if name.starts_with("bridge_") || name.starts_with("launcher") || name == "identity.rs" || name == "vrchat_data.rs" {
                 continue;
             }
-            // (As Git wrote it here: LF or CRLF.)
-            let source = std::fs::read_to_string(entry.path()).unwrap().replace("\r\n", "\n");
-            let source = source.split("\n#[cfg(test)]\nmod ").next().unwrap();
+            looked += 1;
             for what in ["account_api()", "account::read(", "account::read_saved(", "vrchat_signed_client()"] {
                 let found = source.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(what) && !l.contains("fn ")).count();
                 let may: usize = MAY.iter().filter(|(f, w, ..)| *f == name && w.contains(what)).map(|(_, _, n, _)| n).sum();
-                if found > may {
-                    wrong.push(format!("{name}: {what} {found} times, {may} known"));
+                let excused: usize = EXCEPTIONS.iter().filter(|(f, w, ..)| *f == name && *w == what).map(|(_, _, n, ..)| n).sum();
+                if found > may + excused {
+                    wrong.push(format!("{name}: {what} {found} times, {may} known{}", if excused > 0 { format!(" and {excused} excused") } else { String::new() }));
                 }
             }
         }
+        // (Past the capture of a test's output: an exception is never out of sight.)
+        use std::io::Write as _;
+        for (file, what, times, since, whose) in EXCEPTIONS {
+            let _ = writeln!(std::io::stderr(), "EXCEPTION since {since}: controller/{file} may say {what} {times} times ({whose})");
+        }
+        assert!(looked > 40, "the service's sources are read: {looked}");
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

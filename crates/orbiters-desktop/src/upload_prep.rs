@@ -1,6 +1,7 @@
 //! Reusable upload preparation for public previews and private captures. One atomic, checksummed cache beside the
 //! reconstruction holds the three trees and their metadata. Inputs are content-hashed, including cameras and the
-//! report that chooses the start view. A retry still gets a new tree key so VRChat can detect a replaced slot.
+//! report that chooses the start view; what the start view alone is made from (the ground under the person) is hashed apart
+//! ([`ViewInputs`]), so that it can change without the trees being tuned again. A retry still gets a new tree key so VRChat can detect a replaced slot.
 //!
 //! The cache fills in the background right after a reconstruction finishes ([`queue`]), so that sharing it is a cache
 //! hit: one `orbiters-desktop --prepare-upload <session>` process at a time ([`run`]), paced as the reconstruction
@@ -67,11 +68,44 @@ impl Fingerprint {
     }
 }
 
+/// What the start view's ground and eye height come from beside the sources of [`Fingerprint`]
+/// (orbiters_reconstruct::ground::INPUTS): the content of each, or that it is missing. Freeing a capture's space removes the
+/// tracking and leaves what was measured from it (orbiters_core::measured); tracking can be put back, or be another's: the
+/// metadata cached is then made again, as a fresh preparation would make it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ViewInputs(Vec<Option<String>>);
+
+impl ViewInputs {
+    pub fn read(session: &Path) -> anyhow::Result<Self> {
+        let hash = |name: &str| match sha256_file(&session.join(name)) {
+            Ok(hash) => Ok(Some(hash)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+        Ok(Self(orbiters_reconstruct::ground::INPUTS.into_iter().map(hash).collect::<Result<_, _>>()?))
+    }
+
+    /// Neither tracking nor anything measured from it is there: nothing to measure again from.
+    fn nothing(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Header {
     fingerprint: Fingerprint,
     lengths: [usize; 3],
     metadata: serde_json::Value,
+    /// What the metadata's view was made from; none in caches written before it was recorded.
+    #[serde(default)]
+    view: Option<ViewInputs>,
+}
+
+/// What the cache answers.
+pub struct Cached {
+    pub files: PreviewFiles,
+    /// The metadata, while its view's inputs are those it was made from (or none of them is left).
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub fn tree_key() -> u32 {
@@ -90,7 +124,7 @@ fn rekey(files: &mut PreviewFiles, key: u32) -> Option<()> {
     Some(())
 }
 
-fn decode(bytes: &[u8], fingerprint: &Fingerprint, key: u32) -> Option<(PreviewFiles, serde_json::Value)> {
+fn decode(bytes: &[u8], fingerprint: &Fingerprint, view: Option<&ViewInputs>, key: u32) -> Option<Cached> {
     if bytes.get(..8)? != MAGIC || bytes.len() as u64 > MAX_BYTES {
         return None;
     }
@@ -118,10 +152,16 @@ fn decode(bytes: &[u8], fingerprint: &Fingerprint, key: u32) -> Option<(PreviewF
         return None;
     }
     rekey(&mut files, key)?;
-    Some((files, header.metadata))
+    // With nothing there to measure from, what was measured while there was something stands (tracking freed by a version that
+    // kept nothing of it): what the cache says is a fact about the recording, and a capture that never had tracking says the
+    // same of itself as it would now.
+    let same_view = view.is_some_and(|v| header.view.as_ref() == Some(v) || v.nothing());
+    Some(Cached { files, metadata: same_view.then_some(header.metadata) })
 }
 
-pub fn load(result: &Path, fingerprint: &Fingerprint, key: u32) -> Option<(PreviewFiles, serde_json::Value)> {
+/// The trees cached for `fingerprint`, with their metadata when its view was made from `view` (none: not readable, so no
+/// metadata answers).
+pub fn load(result: &Path, fingerprint: &Fingerprint, view: Option<&ViewInputs>, key: u32) -> Option<Cached> {
     use std::io::Read;
     let file = std::fs::File::open(result.join(FILE)).ok()?;
     if file.metadata().ok()?.len() > MAX_BYTES {
@@ -129,12 +169,12 @@ pub fn load(result: &Path, fingerprint: &Fingerprint, key: u32) -> Option<(Previ
     }
     let mut bytes = Vec::new();
     file.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
-    decode(&bytes, fingerprint, key)
+    decode(&bytes, fingerprint, view, key)
 }
 
-pub fn save(result: &Path, fingerprint: &Fingerprint, files: &PreviewFiles, metadata: &serde_json::Value) -> anyhow::Result<()> {
+pub fn save(result: &Path, fingerprint: &Fingerprint, view: Option<&ViewInputs>, files: &PreviewFiles, metadata: &serde_json::Value) -> anyhow::Result<()> {
     let parts = [&files.vrchat_pc, &files.vrchat_quest, &files.vrchat_coarse];
-    let header = serde_json::to_vec(&Header { fingerprint: fingerprint.clone(), lengths: parts.map(|p| p.len()), metadata: metadata.clone() })?;
+    let header = serde_json::to_vec(&Header { fingerprint: fingerprint.clone(), lengths: parts.map(|p| p.len()), metadata: metadata.clone(), view: view.cloned() })?;
     let mut bytes = Vec::with_capacity(44 + header.len() + files.len() as usize);
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&[0; 32]);
@@ -244,6 +284,16 @@ impl ResultIdentity {
         // Not marked, for sure: a mark that cannot be looked at is not its absence (night4).
         let complete = reconstruction::marked(&result) == Some(false);
         Self { complete, result, report, splats, edits }
+    }
+
+    /// The generation of its splat edits (orbiters_reconstruct::edit::generation); none when they cannot be read.
+    pub fn edits(&self) -> Option<&str> {
+        self.edits.as_deref()
+    }
+
+    /// Whether `other` is this very reconstruction, its splat edits aside.
+    pub fn same_but_edits(&self, other: &Self) -> bool {
+        *self == Self { edits: self.edits.clone(), ..other.clone() }
     }
 }
 
@@ -424,7 +474,6 @@ pub fn pause() {
 /// Starts the first waiting session's preparation when none runs, on the integrated GPU with `integrated`. `on_log`
 /// gets its log lines; `on_exit` runs once it has exited (the service then looks for its next work).
 pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on_exit: impl FnOnce() + Send + 'static) -> anyhow::Result<bool> {
-    use std::io::{BufRead, BufReader};
     let mut guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
     let b = guard.get_or_insert_with(Background::default);
     if b.running.is_some() {
@@ -489,11 +538,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
         let logging = fail_point(1).and_then(|()| {
             std::thread::Builder::new()
                 .name("upload-prep-log".into())
-                .spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        on_log(line);
-                    }
-                })
+                .spawn(move || crate::worker::log_lines(stderr).for_each(on_log))
                 .map_err(anyhow::Error::from)
         });
         if let Err(e) = logging {
@@ -722,7 +767,7 @@ mod tests {
         assert!(kept.load().is_none());
         kept.save(bytes);
         let files = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
-        save(&result, &fingerprint, &files, &serde_json::json!({})).unwrap();
+        save(&result, &fingerprint, None, &files, &serde_json::json!({})).unwrap();
         assert!(!has_partial(&dir), "prepared: gone");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -739,26 +784,34 @@ mod tests {
         let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
         let fingerprint = Fingerprint(vec![Some("fixture".into())]);
         let metadata = serde_json::json!({"quality":33.0,"view":{"position":[1,2,3]}});
-        save(&dir, &fingerprint, &files, &metadata).unwrap();
-        let (loaded, found) = load(&dir, &fingerprint, 9).unwrap();
-        assert_eq!(found, metadata);
+        let view = ViewInputs(vec![Some("a".into()), None, None, None]);
+        save(&dir, &fingerprint, Some(&view), &files, &metadata).unwrap();
+        let Cached { files: loaded, metadata: found } = load(&dir, &fingerprint, Some(&view), 9).unwrap();
+        assert_eq!(found, Some(metadata.clone()));
+        // Another view's inputs, or ones that cannot be read: the trees answer, the metadata does not.
+        for other in [Some(ViewInputs(vec![Some("b".into()), None, None, None])), None] {
+            assert!(load(&dir, &fingerprint, other.as_ref(), 9).is_some_and(|c| c.metadata.is_none()));
+        }
+        // None of them left: what was measured stands.
+        let gone = ViewInputs(vec![None; 4]);
+        assert_eq!(load(&dir, &fingerprint, Some(&gone), 9).unwrap().metadata, Some(metadata.clone()));
         for (a, b) in [(&loaded.vrchat_pc, &files.vrchat_pc), (&loaded.vrchat_quest, &files.vrchat_quest), (&loaded.vrchat_coarse, &files.vrchat_coarse)] {
             assert_eq!(&a[..20], &b[..20]);
             assert_eq!(&a[20..24], &9u32.to_le_bytes());
             assert_eq!(&a[24..], &b[24..]);
         }
-        assert!(load(&dir, &Fingerprint(vec![]), 9).is_none());
+        assert!(load(&dir, &Fingerprint(vec![]), Some(&view), 9).is_none());
         // Trees of version 1 in a cache (written before the 20-byte records, under the same magic) never answer.
         let mut quest = files.vrchat_quest.clone();
         quest[8..12].copy_from_slice(&1u32.to_le_bytes());
         let old = PreviewFiles { vrchat_pc: files.vrchat_pc.clone(), vrchat_quest: quest, vrchat_coarse: files.vrchat_coarse.clone() };
-        save(&dir, &fingerprint, &old, &metadata).unwrap();
-        assert!(load(&dir, &fingerprint, 9).is_none(), "a version 1 tree is prepared again");
-        save(&dir, &fingerprint, &files, &metadata).unwrap();
+        save(&dir, &fingerprint, Some(&view), &old, &metadata).unwrap();
+        assert!(load(&dir, &fingerprint, Some(&view), 9).is_none(), "a version 1 tree is prepared again");
+        save(&dir, &fingerprint, Some(&view), &files, &metadata).unwrap();
         let mut bytes = std::fs::read(dir.join(FILE)).unwrap();
         bytes[50] ^= 1;
-        assert!(decode(&bytes, &fingerprint, 9).is_none());
-        assert!(decode(&bytes[..30], &fingerprint, 9).is_none());
+        assert!(decode(&bytes, &fingerprint, Some(&view), 9).is_none());
+        assert!(decode(&bytes[..30], &fingerprint, Some(&view), 9).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -806,8 +859,8 @@ mod tests {
         assert_ne!(edited, unedited);
         assert_eq!(edited.generation(), Some(edit.generation().as_str()));
         let files = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
-        save(&result, &unedited, &files, &serde_json::json!({})).unwrap();
-        assert!(load(&result, &edited, 1).is_none(), "prepared before the edit: not used");
+        save(&result, &unedited, None, &files, &serde_json::json!({})).unwrap();
+        assert!(load(&result, &edited, None, 1).is_none(), "prepared before the edit: not used");
         // The picture drawn again (its flag) or hidden instead of deleted: the same outputs, the same fingerprint.
         edit.picture = false;
         edit.marks[1] = HIDDEN;
@@ -821,7 +874,7 @@ mod tests {
         assert!(Fingerprint::read(&dir, &result).is_err());
         std::fs::remove_file(result.join(reconstruction::EDIT_FILE)).unwrap();
         assert_eq!(Fingerprint::read(&dir, &result).unwrap(), unedited, "undone: the trees as trained answer again");
-        assert!(load(&result, &unedited, 1).is_some());
+        assert!(load(&result, &unedited, None, 1).is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -96,6 +96,10 @@ pub trait Backend: Send + Sync {
     }
     /// What the panels around VRChat's menus say of themselves, for Settings.
     fn orbit_status(&self, _status: crate::state::OrbitStatus) {}
+    /// Asks macOS for what the panels around VRChat's menus need there.
+    fn orbit_allow(&self, _needs: crate::state::OrbitNeeds) {}
+    /// A key typed in a page of those panels, where they hold the keyboard themselves (a Mac).
+    fn typed(&self, _key: orbiters_n4n0_core::menu::KeyInput) {}
     /// What live translation in VR is doing, for the menus and Settings.
     fn translate_status(&self, _status: crate::state::TranslateStatus) {}
     /// The beta's usage statistics noted in this process since the last call (`usage`): only a process linked to the service sends them.
@@ -263,6 +267,12 @@ impl Backend for Remote {
     }
     fn orbit_status(&self, status: crate::state::OrbitStatus) {
         self.0.send(&ToService::Orbit { status });
+    }
+    fn orbit_allow(&self, needs: crate::state::OrbitNeeds) {
+        self.0.send(&ToService::OrbitAllow { needs });
+    }
+    fn typed(&self, key: orbiters_n4n0_core::menu::KeyInput) {
+        self.0.send(&ToService::Typed { key });
     }
     fn translate_status(&self, status: crate::state::TranslateStatus) {
         self.0.send(&ToService::TranslateStatus { status });

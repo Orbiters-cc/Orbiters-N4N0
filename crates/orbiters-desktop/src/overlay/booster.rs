@@ -228,8 +228,8 @@ pub struct Host {
     world_hash: u64,
     last_report: Option<Instant>,
     last_check: Option<Instant>,
-    /// The factor last asked of the worker, and what it says is in force.
-    asked: f32,
+    /// The factor last asked of the worker (none: whatever is wanted must be asked again), and what it says is in force.
+    asked: Option<f32>,
     shown: Option<(Option<f32>, f32)>,
     /// What the worker last read of SteamVR's settings, for the log.
     steamvr_read: SteamVrRead,
@@ -254,7 +254,7 @@ impl Host {
             world_hash: 0,
             last_report: None,
             last_check: None,
-            asked: 1.0,
+            asked: Some(1.0),
             shown: None,
             steamvr_read: SteamVrRead::default(),
             session_frames: 0.0,
@@ -305,17 +305,7 @@ impl Host {
         }
         self.hear();
         let wants = self.engine.tick(&inputs, request);
-        if let Some(worker) = &self.worker {
-            if (wants.sharpness - self.asked).abs() > 0.0005 {
-                self.asked = wants.sharpness;
-                let _ = worker.jobs.send(Job::Factor(wants.sharpness));
-            }
-            if self.last_check.is_none_or(|at| at.elapsed() >= CHECK_OWNED) {
-                self.last_check = Some(Instant::now());
-                let _ = worker.jobs.send(Job::Check { watching: scene && snap.settings.booster.level >= Level::Picture });
-                let _ = worker.jobs.send(Job::ReadForLog);
-            }
-        }
+        self.ask(&wants, scene && snap.settings.booster.level >= Level::Picture);
         PANEL_PACE_MS.store(if wants.pace_panels { SLOW_PACE_MS } else { NORMAL_PACE_MS }, Ordering::Relaxed);
         self.write_log(snap, &inputs, &wants);
         self.self_check_at_session_end(snap);
@@ -333,6 +323,20 @@ impl Host {
         wants
     }
 
+    /// Says to the worker what this turn wants of it.
+    fn ask(&mut self, wants: &Wants, watching: bool) {
+        let Some(worker) = &self.worker else { return };
+        if self.asked.is_none_or(|asked| (wants.sharpness - asked).abs() > 0.0005) {
+            self.asked = Some(wants.sharpness);
+            let _ = worker.jobs.send(Job::Factor(wants.sharpness));
+        }
+        if self.last_check.is_none_or(|at| at.elapsed() >= CHECK_OWNED) {
+            self.last_check = Some(Instant::now());
+            let _ = worker.jobs.send(Job::Check { watching });
+            let _ = worker.jobs.send(Job::ReadForLog);
+        }
+    }
+
     /// What the worker said since the last turn.
     fn hear(&mut self) {
         let Some(worker) = &self.worker else { return };
@@ -341,7 +345,7 @@ impl Host {
                 Heard::Left(why) => {
                     self.engine.leave_sharpness_alone(why);
                     // The engine wants 1.0 from now on: asked again, so that whatever is owed is restored.
-                    self.asked = f32::NAN;
+                    self.asked = None;
                 }
                 Heard::Shown(shown) => self.shown = shown,
                 Heard::Log(read) => self.steamvr_read = read,
@@ -447,5 +451,51 @@ mod tests {
         assert_eq!((f.time_s, f.interval_ms, f.total_gpu_ms), (2.5, 14.0, 9.0));
         assert_eq!((f.app_gpu_ms(), f.app_cpu_ms()), (7.0, 11.0));
         assert_eq!((f.compositor_gpu_ms, f.compositor_cpu_ms), (0.5, 0.7));
+    }
+
+    /// VRR-1: sharpness left alone once (a change by hand, SteamVR refusing) is asked again: the restore to 1.0, then every
+    /// factor a later level or test wants. It was never sent again for the rest of the session, while its tests still ran.
+    #[test]
+    fn a_factor_is_sent_again_after_sharpness_was_left_alone() {
+        let (jobs, inbox) = mpsc::channel();
+        let (tell, heard) = mpsc::channel();
+        let mut host = Host {
+            engine: Engine::new(),
+            worker: Some(Worker { jobs, heard, thread: None }),
+            log: mpsc::channel().0,
+            began: Instant::now(),
+            refresh_hz: 72.0,
+            streamer: false,
+            answered: 0,
+            world_key: String::new(),
+            world_number: 0,
+            world_hash: 0,
+            last_report: None,
+            last_check: Some(Instant::now()),
+            asked: Some(1.0),
+            shown: None,
+            steamvr_read: SteamVrRead::default(),
+            session_frames: 0.0,
+            session_seconds: 0.0,
+            vrchat_was_running: false,
+        };
+        let sent = |inbox: &mpsc::Receiver<Job>| inbox.try_iter().filter_map(|j| if let Job::Factor(f) = j { Some(f) } else { None }).collect::<Vec<_>>();
+        let wants = |sharpness| Wants { sharpness, ..Wants::default() };
+        host.ask(&wants(0.85), true);
+        host.ask(&wants(0.85), true);
+        assert_eq!(sent(&inbox), [0.85], "asked once");
+        tell.send(Heard::Left(LeftAlone::HandChanged)).unwrap();
+        host.hear();
+        host.ask(&wants(1.0), true);
+        host.ask(&wants(1.0), true);
+        assert_eq!(sent(&inbox), [1.0], "what is owed is restored");
+        // The level changed: the engine tests sharpness again.
+        host.ask(&wants(0.85), true);
+        assert_eq!(sent(&inbox), [0.85]);
+        // Left alone while it already stands at what is wanted: asked again all the same.
+        tell.send(Heard::Left(LeftAlone::Refused)).unwrap();
+        host.hear();
+        host.ask(&wants(0.85), true);
+        assert_eq!(sent(&inbox), [0.85]);
     }
 }

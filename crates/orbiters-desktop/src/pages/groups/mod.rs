@@ -18,7 +18,6 @@ pub mod art;
 mod events;
 mod page;
 mod studio;
-pub(crate) use events::Says;
 pub(crate) use page::{Composer, Picker, RoleEditor, Tab};
 
 use super::Cx;
@@ -29,7 +28,7 @@ use crate::controller::vrchat_login::Presence;
 use art::Drafts;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
 use orbiters_core::groups::{ArtSlot, FileTag, GroupCard, Missing, Part, Why};
-use orbiters_core::vrchat_api::GroupFailure;
+use orbiters_core::vrchat_api::{GroupFailure, GroupRefusal};
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -60,6 +59,7 @@ pub(crate) enum Kind {
     Members { group: String, query: String, offset: usize },
     Posts { group: String, offset: usize },
     Events { group: String, month: Option<orbiters_core::group_events::Month>, offset: usize },
+    KeepEvents(String),
     Inventory { tag: FileTag, offset: usize },
     Picture(String),
     /// A picture of the account's gallery read in full for the banner studio.
@@ -729,7 +729,7 @@ impl State {
             }
             Reply::Failed(f) => {
                 self.flow = None;
-                self.ended(ctx, cx, None, Outcome::Refused(f));
+                self.ended(ctx, cx, None, Outcome::Refused(f), None);
             }
             _ => self.flow = None,
         }
@@ -756,8 +756,12 @@ impl State {
         } else {
             None
         };
+        let mut said = None;
         let outcome = match reply {
-            Reply::Outcome { outcome, .. } => outcome,
+            Reply::Outcome { outcome, said: words, .. } => {
+                said = words;
+                outcome
+            }
             // Its answer did not come: the ledger has it. Until that can be read, what it was.
             Reply::Failed(Failure::Lost) => {
                 if let Some(s) = &sealed {
@@ -773,12 +777,12 @@ impl State {
         if !mine {
             match outcome {
                 Outcome::Done(done) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(&done)),
-                Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, failure_text(f)),
+                Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, refused_text(None, f, said.as_ref())),
                 Outcome::Unknown => {}
             }
             return;
         }
-        self.ended(ctx, cx, sealed, outcome);
+        self.ended(ctx, cx, sealed, outcome, said);
     }
     fn cancel(&mut self) {
         self.end_flow();
@@ -914,16 +918,12 @@ impl State {
     }
     /// How a write ended, for the view it was of (a view of another group takes nothing from it). Toasts carry no names
     /// (M10).
-    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, sealed: Option<Sealed>, outcome: Outcome) {
+    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, sealed: Option<Sealed>, outcome: Outcome, said: Option<GroupRefusal>) {
         if let Outcome::Done(done) = &outcome {
             cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(done));
         }
         self.said = match &outcome {
-            // The one thing VRChat asks of some roles that shows nowhere else.
-            Outcome::Refused(Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid)) if sealed.as_ref().is_some_and(|s| matches!(s.write, Write::MemberRole { add: true, .. }) && s.role.as_ref().is_some_and(|r| r.requires_two_factor)) => {
-                Some(tr("VRChat refused it. This role needs two-factor authentication: it must be on for that member's VRChat account.").to_string())
-            }
-            Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
+            Outcome::Refused(f) => Some(refused_text(sealed.as_ref(), *f, said.as_ref())),
             Outcome::Done(_) | Outcome::Unknown => None,
         };
         // Without one: refused as it was being prepared, for the view still waiting for it.
@@ -1028,8 +1028,27 @@ fn role_parts(p: &orbiters_core::groups::RoleParts) -> [(bool, &'static str); 7]
 pub(crate) fn failure_text_for(write: Option<&Write>, f: Failure) -> String {
     match (write, f) {
         (Some(Write::Upload { .. }), Failure::Api(GroupFailure::Forbidden)) => tr("VRChat refused the upload: VRChat+ is needed, or your inventory is full.").to_string(),
+        (Some(Write::MemberRole { .. }), Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid)) => tr("VRChat refused this change of the member's roles: nothing changed.").to_string(),
         (Some(Write::ApplyArt { .. }), Failure::Api(GroupFailure::Forbidden)) => tr("VRChat refused the picture: your role, or the picture itself.").to_string(),
         _ => failure_text(f),
+    }
+}
+
+/// A refusal as the person reads it: what VRChat itself answered, word for word, when it is VRChat that refused (REQUEST28:
+/// that is how its reason is learnt), then what it means here.
+pub(crate) fn refused_text(sealed: Option<&Sealed>, f: Failure, said: Option<&GroupRefusal>) -> String {
+    let gives = sealed.is_some_and(|s| matches!(s.write, Write::MemberRole { add: true, .. }));
+    let ours = match f {
+        // The one thing VRChat asks of some roles that shows nowhere else.
+        Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid) if gives && sealed.and_then(|s| s.role.as_ref()).is_some_and(|r| r.requires_two_factor) => {
+            tr("VRChat refused it. This role needs two-factor authentication: it must be on for that member's VRChat account.").to_string()
+        }
+        f => failure_text_for(sealed.map(|s| &s.write), f),
+    };
+    match said {
+        Some(r) if !r.words.is_empty() => format!("{}\n{ours}", orbiters_i18n::tr!("VRChat's answer: “{words}” (error {status})", words = r.words, status = r.status)),
+        Some(r) => format!("{}\n{ours}", orbiters_i18n::tr!("VRChat refused it without saying why (error {status}).", status = r.status)),
+        None => ours,
     }
 }
 
@@ -1042,7 +1061,7 @@ fn changed_text(parts: &[(bool, &str)]) -> String {
     )
 }
 
-/// A failure in the person's words (local codes only: nothing of VRChat's text, M5, M10).
+/// A failure in the person's words (local codes only: VRChat's own are [`refused_text`]'s).
 pub(crate) fn failure_text(f: Failure) -> String {
     match f {
         Failure::Api(GroupFailure::Forbidden) => tr("Your role in this group does not allow this."),

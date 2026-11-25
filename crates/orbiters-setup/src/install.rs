@@ -3,9 +3,9 @@
 //!
 //! An install unpacks the payload into a folder of its own inside the install folder (`.setup-new`, checked file by
 //! file), waits for nothing to run from the install folder any more, then moves each file in place, the old ones
-//! aside (`.setup-old`). Moves within one folder cannot run out of space halfway, and if one fails anyway (a file held
-//! by another program), the ones made are moved back and the install is as it was, with the error shown. Only the
-//! files of the payload and of the last install's record are touched: the folder may be one the person chose, with
+//! aside (`.setup-old`; [`crate::swap`]). Moves within one folder cannot run out of space halfway, and if one fails
+//! anyway (a file held by another program, a power cut), the ones made are moved back and the install is as it was. Only
+//! the files of the payload and of the last install's record are touched: the folder may be one the person chose, with
 //! their own files in it.
 
 use crate::system;
@@ -18,9 +18,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// Where the payload is unpacked, inside the install folder.
-const STAGING: &str = ".setup-new";
+pub(crate) const STAGING: &str = ".setup-new";
 /// Where the files an install replaces wait until it has finished, inside the install folder.
-const BACKUP: &str = ".setup-old";
+pub(crate) const BACKUP: &str = ".setup-old";
 /// How long the app gets to quit before the window offers to close it (it finishes saving a recording first).
 const PATIENCE: Duration = Duration::from_secs(20);
 /// Space kept free beyond the files themselves.
@@ -53,6 +53,8 @@ pub struct Status {
     pub label: String,
     /// The app has not closed after [`PATIENCE`]: the window offers to close it.
     pub stuck: bool,
+    /// What Windows would not take (a shortcut, the installed-apps entry): the install is done all the same.
+    pub notes: Vec<String>,
     /// The outcome, once it ended.
     pub done: Option<Result<(), String>>,
 }
@@ -74,6 +76,10 @@ impl Progress {
 
     fn stuck(&self, stuck: bool) {
         self.status.lock().unwrap().stuck = stuck;
+    }
+
+    fn note(&self, notes: Vec<String>) {
+        self.status.lock().unwrap().notes = notes;
     }
 
     /// Shows a state as a running task would (the screenshots).
@@ -174,7 +180,7 @@ fn real_dir(path: &Path) -> bool {
 
 /// `relative` in `dir`, when nothing between them is a link or a junction (PROJECTS-42): a folder of the install
 /// redirected elsewhere would make an update or uninstall move or remove files outside the install folder.
-fn contained(dir: &Path, relative: &str) -> Option<PathBuf> {
+pub(crate) fn contained(dir: &Path, relative: &str) -> Option<PathBuf> {
     use std::os::windows::fs::MetadataExt;
     const REPARSE_POINT: u32 = 0x400;
     let path = inside(dir, relative)?;
@@ -261,7 +267,7 @@ fn recover_leftovers(dir: &Path, staging: &Path, backup: &Path, previous: Option
 }
 
 /// Removes the empty folders of `folder` (and it, once empty), deepest first; never a file, never through a link.
-fn remove_empty_dirs(folder: &Path) {
+pub(crate) fn remove_empty_dirs(folder: &Path) {
     if !real_dir(folder) {
         return;
     }
@@ -279,6 +285,40 @@ fn remove_empty_dirs(folder: &Path) {
 /// Installs the payload with `options`. `fresh` is a choice the person just made (the setup's window); an update
 /// keeps what they changed since (a desktop shortcut they deleted stays deleted).
 pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: bool, fresh: bool) -> anyhow::Result<()> {
+    install_with(bytes, options, progress, silent, fresh, &Windows)
+}
+
+/// What an install asks of Windows beside its files.
+trait Surroundings {
+    /// The entries and shortcuts of the install in `dir`: what could not be done, in words. Everything is tried.
+    fn integrate(&self, dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> Vec<String>;
+    /// Whether a swap in `dir` is under way, which the next sign-in is to put back if it is cut.
+    fn swapping(&self, dir: &Path, under_way: bool);
+}
+
+struct Windows;
+
+impl Surroundings for Windows {
+    fn integrate(&self, dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> Vec<String> {
+        integrate(dir, record, previous, size, fresh)
+    }
+
+    fn swapping(&self, dir: &Path, under_way: bool) {
+        let command = std::env::current_exe().ok().filter(|_| under_way).and_then(|me| crate::swap::recover_command(&me, dir));
+        let told = match command {
+            Some(command) => system::schedule_recovery(&command),
+            None => {
+                system::cancel_recovery();
+                Ok(())
+            }
+        };
+        if let Err(e) = told {
+            eprintln!("the next sign-in could not be told of the swap: {e:#}"); // i18n: not shown (a log line)
+        }
+    }
+}
+
+fn install_with(bytes: &[u8], options: &Options, progress: &Progress, silent: bool, fresh: bool, windows: &dyn Surroundings) -> anyhow::Result<()> {
     let dir = &options.dir;
     let index = payload::read_index(bytes)?;
     if let Some(free) = system::free_space(dir) {
@@ -291,13 +331,19 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     std::fs::create_dir_all(dir).with_context(|| orbiters_i18n::tr!("{path} cannot be created", path = dir.display()))?;
     let staging = dir.join(STAGING);
     let backup = dir.join(BACKUP);
+    // What a swap that was cut left, before anything else is looked at.
+    let left = crate::swap::left_programs(dir);
+    if !left.is_empty() {
+        close_app(dir, &own_programs(dir, left.iter().map(String::as_str)), progress, silent)?;
+    }
+    crate::swap::recover(dir)?;
     let previous = InstallRecord::read(dir);
     // Nothing is changed when a file of the payload would replace one of the person's, or would be reached through a
     // folder redirected elsewhere.
     let mut taken = collisions(dir, &index, previous.as_ref());
     // The record's own names (PROJECTS-34): without a record of ours, a file there is the person's.
     if previous.is_none() {
-        for name in [RECORD_FILE.to_string(), format!("{RECORD_FILE}.tmp")] {
+        for name in [RECORD_FILE.to_string(), format!("{RECORD_FILE}.tmp"), crate::swap::JOURNAL.to_string()] {
             if std::fs::symlink_metadata(dir.join(&name)).is_ok() {
                 taken.push(name);
             }
@@ -333,7 +379,6 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
     }
 
     progress.set(0.82, tr("Putting the new version in place…"));
-    swap(dir, &staging, &backup, &index, previous.as_ref())?;
     let record = InstallRecord {
         product: PRODUCT.into(),
         version: index.version.clone(),
@@ -344,95 +389,55 @@ pub fn install(bytes: &[u8], options: &Options, progress: &Progress, silent: boo
         start_with_steamvr: options.start_with_steamvr,
         installed: now(),
     };
-    record.write(dir).with_context(|| orbiters_i18n::tr!("{path} cannot be written", path = dir.join(RECORD_FILE).display()))?;
-
-    progress.set(0.9, tr("Adding it to Windows…"));
-    integrate(dir, &record, previous.as_ref(), index.total(), fresh)?;
-    remove_tree(&staging);
-    remove_tree(&backup);
-    progress.set(1.0, tr("Installed"));
-    Ok(())
-}
-
-/// Moves the unpacked files of `index` from `staging` into `dir`, what they replace (and what the `previous` install
-/// had that this one has not) into `backup`. A move that fails puts back the ones made.
-fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::Index, previous: Option<&InstallRecord>) -> anyhow::Result<()> {
-    let new: Vec<&str> = index.files.iter().map(|f| f.path.as_str()).collect();
-    let gone: Vec<&str> = previous.map(|r| r.files.iter().map(String::as_str).filter(|f| !new.contains(f)).collect()).unwrap_or_default();
-    let mut aside: Vec<&str> = Vec::new();
-    let mut placed: Vec<&str> = Vec::new();
-    let result = (|| -> anyhow::Result<()> {
-        for &path in new.iter().chain(&gone) {
-            let (Some(dest), Some(to)) = (contained(dir, path), contained(backup, path)) else { continue };
-            if dest.is_file() {
-                make_parent(&to)?;
-                rename(&dest, &to).with_context(|| orbiters_i18n::tr!("{path} is in use by another program", path = dest.display()))?;
-                aside.push(path);
-            }
-        }
-        for &path in &new {
-            let (Some(from), Some(dest)) = (contained(staging, path), contained(dir, path)) else {
-                anyhow::bail!("{}", tr!("{path} is reached through a link to another folder", path = path));
-            };
-            make_parent(&dest)?;
-            rename(&from, &dest).with_context(|| orbiters_i18n::tr!("{path} cannot be written", path = dest.display()))?;
-            placed.push(path);
-        }
-        Ok(())
-    })();
-    if let Err(e) = result {
-        // As it was: the new files out, the old ones back. Each move checked (F16): what could not be put back is named,
-        // and the backup folder then stays as it is.
-        let mut stuck = Vec::new();
-        for &path in placed.iter().rev() {
-            if let (Some(dest), Some(from)) = (contained(dir, path), contained(staging, path)) {
-                if rename(&dest, &from).is_err() {
-                    stuck.push(path);
-                }
-            }
-        }
-        for &path in aside.iter().rev() {
-            if let (Some(to), Some(dest)) = (contained(backup, path), contained(dir, path)) {
-                if rename(&to, &dest).is_err() {
-                    stuck.push(path);
-                }
-            }
-        }
-        if !stuck.is_empty() {
-            return Err(e.context(tr!(
-                "The previous version could not be fully put back: {files}. Its files are kept in {folder}.",
-                files = stuck.join(", "),
-                folder = backup.display()
-            )));
-        }
-        remove_tree(staging);
-        return Err(e.context(tr("The previous version was put back")));
+    // (A first install that is cut has no version to put back at the next sign-in: the setup is simply run again.)
+    if previous.is_some() {
+        windows.swapping(dir, true);
     }
+    let swapped = crate::swap::swap(dir, &staging, &backup, &index, previous.as_ref(), &record);
+    if previous.is_some() && !dir.join(crate::swap::JOURNAL).exists() {
+        windows.swapping(dir, false);
+    }
+    swapped?;
+    // The new version is in place: from here nothing is a failure of the install.
+    if !dir.join(crate::swap::JOURNAL).exists() {
+        remove_tree(&staging);
+        remove_tree(&backup);
+    }
+    progress.set(0.9, tr("Adding it to Windows…"));
+    progress.note(windows.integrate(dir, &record, previous.as_ref(), index.total(), fresh));
+    progress.set(1.0, tr("Installed"));
     Ok(())
 }
 
 /// Windows' side: the installed-apps entry, the Start menu (and desktop) shortcut, the start with Windows; and SteamVR's
 /// start of the app, when SteamVR runs (else the app tells it, from the record, the next time it runs).
-fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> anyhow::Result<()> {
-    system::register(dir, &record.version, size).with_context(|| tr("The installed-apps entry cannot be written"))?;
+/// What could not be done, in words: each of these is tried whatever became of the others (PRJ-41).
+fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord>, size: u64, fresh: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut tried = |what: &str, done: anyhow::Result<()>| {
+        if let Err(e) = done {
+            eprintln!("{what}: {e:#}");
+            notes.push(what.to_string());
+        }
+    };
+    tried(tr("The installed-apps entry cannot be written"), system::register(dir, &record.version, size));
     if let Some(link) = system::start_menu_shortcut() {
-        system::write_shortcut(&link, dir).with_context(|| tr("The Start menu shortcut cannot be written"))?;
+        tried(tr("The Start menu shortcut cannot be written"), system::write_shortcut(&link, dir));
     }
     if let Some(link) = system::desktop_shortcut() {
         if record.desktop_shortcut && (fresh || link.exists()) {
-            system::write_shortcut(&link, dir).with_context(|| tr("The desktop shortcut cannot be written"))?;
+            tried(tr("The desktop shortcut cannot be written"), system::write_shortcut(&link, dir));
         } else if !record.desktop_shortcut && previous.is_some_and(|p| p.desktop_shortcut) {
             let _ = std::fs::remove_file(&link);
         }
     }
     if fresh {
         if record.start_with_windows {
-            system::set_start_with_windows(dir, true)?;
+            tried(tr("The start with Windows cannot be set"), system::set_start_with_windows(dir, true));
         } else if system::starts_with_windows_from(dir) {
-            system::set_start_with_windows(dir, false)?;
+            tried(tr("The start with Windows cannot be set"), system::set_start_with_windows(dir, false));
         }
-        // Never a reason for the install to fail: what SteamVR could not be told now, the app tells it the next time
-        // SteamVR runs (its settings keep the choice).
+        // What SteamVR could not be told now, the app tells it the next time SteamVR runs (its settings keep the choice).
         if record.start_with_steamvr || previous.is_some_and(|p| p.start_with_steamvr) {
             let told = system::set_start_with_steamvr(dir, record.start_with_steamvr).unwrap_or_else(|e| {
                 eprintln!("SteamVR's start of the app: {e:#}");
@@ -444,7 +449,7 @@ fn integrate(dir: &Path, record: &InstallRecord, previous: Option<&InstallRecord
         }
     }
     system::refresh_shell();
-    Ok(())
+    notes
 }
 
 /// Updates the install in `dir` to the payload, keeping its options and channel.
@@ -471,6 +476,10 @@ pub fn uninstall(dir: &Path, remove_data: bool, progress: &Progress, silent: boo
     let record = InstallRecord::read(dir).with_context(|| tr!("Orbiters - N4N0 is not installed in {folder}.", folder = dir.display()))?;
     progress.set(0.05, tr("Closing Orbiters - N4N0…"));
     close_app(dir, &own_programs(dir, record.files.iter().map(String::as_str)), progress, silent)?;
+    // An update that was cut: what its journal names goes with the rest, whichever version it was.
+    let _ = crate::swap::recover(dir);
+    system::cancel_recovery();
+    let record = InstallRecord::read(dir).unwrap_or(record);
 
     finish_booster(progress, silent);
 
@@ -708,6 +717,9 @@ const OWN_DATA: &[(&str, Kind)] = &[
     ("SteamVR", Kind::Folder),
     ("orbit-vr-tune.json", Kind::File),
     ("unity-projects.json", Kind::File),
+    // The projects page's package repositories: what it took from Creator Companion's settings, the tokens of private
+    // repositories among it, their listings and the archives of packages.
+    ("vpm", Kind::Folder),
     ("project-sizes.json", Kind::File),
     ("hidden-projects.json", Kind::File),
     ("unity-cache-folders.json", Kind::File),
@@ -716,7 +728,26 @@ const OWN_DATA: &[(&str, Kind)] = &[
     ("project-pictures", Kind::Folder),
     ("avatar-thumbnails", Kind::Folder),
     ("world-thumbnails", Kind::Folder),
+    ("explorer-worlds.json", Kind::File),
+    ("camera-panel-fit.json", Kind::File),
+    // The VRChat groups page: what was uploaded, drafted and kept for each group.
+    ("group-uploads", Kind::Folder),
+    ("group-ledger", Kind::Folder),
+    ("group-drafts", Kind::Folder),
+    ("group-banners", Kind::Folder),
 ];
+
+/// Lists of N4N0's that are kept with their copy before the last change, their lock, and what was put aside damaged
+/// (`orbiters_projects::own`), or that a write was cut of: `<name>.json` and those beside it.
+const OWN_LISTS: &[&str] = &["unity-gallery", "unity-gallery-shared", "unity-projects", "project-sizes", "hidden-projects", "unity-cache-folders"];
+
+/// Whether `name` is one of `list`'s files.
+fn of_list(list: &str, name: &str) -> bool {
+    name.strip_prefix(list).and_then(|rest| rest.strip_prefix('.')).is_some_and(|rest| {
+        let numbered = |text: &str, from: &str, to: &str| text.strip_prefix(from).and_then(|r| r.strip_suffix(to)).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'));
+        matches!(rest, "json" | "previous.json" | "lock") || numbered(rest, "damaged-", ".json") || numbered(rest, "json.", ".tmp") || numbered(rest, "previous.json.", ".tmp")
+    })
+}
 
 /// What an entry of N4N0's is: one of another kind under its name is not N4N0's, and stays.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -775,6 +806,12 @@ fn remove_own_data(root: &Path, programs: &[String]) -> Vec<String> {
     }
     let logs = root.join("logs");
     let mut targets: Vec<(PathBuf, Kind)> = OWN_DATA.iter().map(|(n, k)| (root.join(n), *k)).collect();
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if OWN_LISTS.iter().any(|list| of_list(list, &name)) && !targets.iter().any(|(p, _)| *p == e.path()) {
+            targets.push((e.path(), Kind::File));
+        }
+    }
     let mut failed = Vec::new();
     if real_dir(&logs) {
         targets.extend(OWN_LOGS.iter().map(|n| (logs.join(n), if OWN_LOG_FOLDERS.contains(n) { Kind::Folder } else { Kind::File })));
@@ -841,7 +878,7 @@ fn now() -> String {
     time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default()
 }
 
-fn make_parent(path: &Path) -> std::io::Result<()> {
+pub(crate) fn make_parent(path: &Path) -> std::io::Result<()> {
     match path.parent() {
         Some(parent) => std::fs::create_dir_all(parent),
         None => Ok(()),
@@ -863,16 +900,21 @@ fn retrying<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T>
     op()
 }
 
-fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    CUT.with(|cut| match cut.get() {
+        Some(0) => std::panic::panic_any(Cut),
+        left => cut.set(left.map(|n| n - 1)),
+    });
     retrying(|| std::fs::rename(from, to))
 }
 
-fn remove_file(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
     retrying(|| std::fs::remove_file(path))
 }
 
 /// Removes a folder and everything in it, quietly (a leftover is removed by the next install).
-fn remove_tree(path: &Path) {
+pub(crate) fn remove_tree(path: &Path) {
     let _ = retrying(|| match std::fs::remove_dir_all(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
@@ -880,18 +922,42 @@ fn remove_tree(path: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+thread_local!(static CUT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) });
+
+#[cfg(test)]
+struct Cut;
+
+/// Runs `f` until its `moves`th move of a file, where it stops as a process that is killed does: nothing after that move is run,
+/// nothing is put back. `None` when it was cut.
+#[cfg(test)]
+pub(crate) fn cut_after<T>(moves: Option<usize>, f: impl FnOnce() -> T) -> Option<T> {
+    CUT.with(|cut| cut.set(moves));
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !info.payload().is::<Cut>() {
+            hook(info)
+        }
+    }));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    let _ = std::panic::take_hook();
+    CUT.with(|cut| cut.set(None));
+    outcome.map_err(|e| if e.is::<Cut>() { } else { std::panic::resume_unwind(e) }).ok()
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
+    use crate::swap::swap;
     use orbiters_update::{APP_EXE, STABLE};
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(crate) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orbiters-setup-{name}-{}", std::process::id()));
         remove_tree(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn index(files: &[&str]) -> payload::Index {
+    pub(crate) fn index(files: &[&str]) -> payload::Index {
         payload::Index {
             product: PRODUCT.into(),
             version: "1.0.0".into(),
@@ -899,7 +965,7 @@ mod tests {
         }
     }
 
-    fn record(files: &[&str]) -> InstallRecord {
+    pub(crate) fn record(files: &[&str]) -> InstallRecord {
         InstallRecord {
             product: PRODUCT.into(),
             version: "0.9.0".into(),
@@ -923,7 +989,7 @@ mod tests {
         std::fs::write(dir.join("gone.dll"), b"old gone").unwrap();
         std::fs::write(dir.join("mine.txt"), b"the person's").unwrap();
 
-        swap(&dir, &staging, &backup, &index(&[APP_EXE, "sub/b.dll"]), Some(&record(&[APP_EXE, "gone.dll"]))).unwrap();
+        swap(&dir, &staging, &backup, &index(&[APP_EXE, "sub/b.dll"]), Some(&record(&[APP_EXE, "gone.dll"])), &record(&[APP_EXE, "sub/b.dll"])).unwrap();
         assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"new");
         assert_eq!(std::fs::read(dir.join("sub/b.dll")).unwrap(), b"new b");
         assert!(!dir.join("gone.dll").exists(), "a file of the last install that this one has not");
@@ -942,7 +1008,7 @@ mod tests {
         std::fs::write(dir.join(APP_EXE), b"old").unwrap();
         std::fs::write(dir.join("b.dll"), b"old b").unwrap();
 
-        let e = swap(&dir, &staging, &backup, &index(&[APP_EXE, "b.dll"]), Some(&record(&[APP_EXE, "b.dll"]))).unwrap_err();
+        let e = swap(&dir, &staging, &backup, &index(&[APP_EXE, "b.dll"]), Some(&record(&[APP_EXE, "b.dll"])), &record(&[APP_EXE, "b.dll"])).unwrap_err();
         assert!(format!("{e:#}").contains("previous version was put back"), "{e:#}");
         assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"old");
         assert_eq!(std::fs::read(dir.join("b.dll")).unwrap(), b"old b");
@@ -984,7 +1050,7 @@ mod tests {
         let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
         std::fs::create_dir_all(staging.join("sub")).unwrap();
         std::fs::write(staging.join("sub/b.dll"), b"new").unwrap();
-        assert!(swap(&dir, &staging, &backup, &index(&["sub/b.dll"]), Some(&record(&["sub/b.dll"]))).is_err());
+        assert!(swap(&dir, &staging, &backup, &index(&["sub/b.dll"]), Some(&record(&["sub/b.dll"])), &record(&["sub/b.dll"])).is_err());
         assert_eq!(std::fs::read(elsewhere.join("b.dll")).unwrap(), b"someone else's");
         // (`uninstall` itself is not run here: it changes this computer's shortcuts, SteamVR and driver registrations.
         // Its loop removes only what `contained` gives.)
@@ -1113,6 +1179,18 @@ mod tests {
             "avatar-thumbnails/direct/avtr_a.image",
             "world-thumbnails/wrld_a.image",
             "package-icons/0123.png",
+            "vpm/settings.json",
+            "vpm/their-settings.json",
+            "vpm/their-settings.previous.json",
+            "vpm/repositories.json",
+            "vpm/Repos/vrc-official.json",
+            "unity-gallery.json",
+            "unity-gallery.previous.json",
+            "unity-gallery.lock",
+            "unity-gallery.damaged-0123abcd.json",
+            "unity-gallery-shared.json",
+            "unity-projects.json.4312-0.tmp",
+            "group-drafts/one/draft.json",
             "logs/perf.jsonl",
             "logs/shares.log",
             "logs/perf-report-20261119.json",
@@ -1122,7 +1200,7 @@ mod tests {
         ] {
             write(own);
         }
-        for theirs in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+        for theirs in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json", "unity-gallery.txt", "unity-gallery-of-mine.json"] {
             write(theirs);
         }
         // A link among N4N0's names: removed as a link, what it leads to stays.
@@ -1133,15 +1211,95 @@ mod tests {
         let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("hidden-projects.json") && root.join("hidden-projects.json/inside").is_dir());
-        for gone in ["vrchat-session.bin", "vrchat-session.bin.prev", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
+        for gone in ["vrchat-session.bin", "vrchat-session.bin.prev", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "vpm", "unity-gallery.json", "unity-gallery.previous.json", "unity-gallery.lock", "unity-gallery.damaged-0123abcd.json", "unity-gallery-shared.json", "unity-projects.json.4312-0.tmp", "group-drafts", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
             assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
         }
-        for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json"] {
+        for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json", "unity-gallery.txt", "unity-gallery-of-mine.json"] {
             assert!(root.join(kept).is_file(), "{kept} removed");
         }
         assert_eq!(std::fs::read(elsewhere.join("precious.txt")).unwrap(), b"not N4N0's", "through a link");
         remove_tree(&root);
         remove_tree(&elsewhere);
+    }
+
+    /// PRJ-44: what the crates keep at the top of the shared folder is all on the list, or said here to be another's: a name
+    /// added there and not here would survive "remove my data".
+    #[test]
+    fn every_name_n4n0_keeps_in_the_shared_folder_is_on_the_list() {
+        const OTHERS: &[(&str, &str)] = &[
+            ("Avatars", "the Toolkit's avatar manifests"),
+            ("Desktop", "removed whole, by its own line"),
+            ("Models", "removed whole, by its own line"),
+            ("logs", "by name (OWN_LOGS)"),
+            ("group-kills", "a test's"),
+            ("u6-stand-ins", "the screenshot harness's, under the folders it gives itself"),
+        ];
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    sources(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for krate in ["orbiters-projects", "orbiters-core", "orbiters-desktop", "orbiters-n4n0"] {
+            sources(&crates.join(krate).join("src"), &mut files);
+        }
+        let (mut named, mut missing) = (0, Vec::new());
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (call, roots) in [("data_dir().join(\"", "orbiters-projects"), ("own::dir(root).join(\"", "orbiters-projects"), ("local_data_root().join(\"", "")] {
+                // (The other programs' folders have functions of their own: `hub_data_dir`.)
+                for (at, _) in text.match_indices(call).filter(|(at, _)| !text[..*at].ends_with('_')).filter(|_| file.to_string_lossy().contains(roots)) {
+                    let name = text[at + call.len()..].split(['"', '/']).next().unwrap();
+                    named += 1;
+                    let ours = OWN_DATA.iter().any(|(n, _)| *n == name) || OWN_LISTS.iter().any(|l| of_list(l, name)) || OTHERS.iter().any(|(n, _)| *n == name);
+                    if !ours {
+                        missing.push(format!("{name} ({})", file.display()));
+                    }
+                }
+            }
+        }
+        assert!(named > 15, "the crates' sources are read: {named}");
+        assert!(missing.is_empty(), "kept in the shared folder and on no list of what \"remove my data\" removes:\n{}", missing.join("\n"));
+    }
+
+    /// PRJ-41: the new version in place, what Windows would not take (a shortcut in a protected folder) is said and is no
+    /// failure: the record is written, nothing is left of the old version, and the next sign-in has nothing to do.
+    #[test]
+    fn a_shortcut_that_cannot_be_written_is_not_a_failed_install() {
+        struct Refusing(std::cell::RefCell<Vec<bool>>);
+        impl Surroundings for Refusing {
+            fn integrate(&self, dir: &Path, _: &InstallRecord, _: Option<&InstallRecord>, _: u64, _: bool) -> Vec<String> {
+                assert!(!dir.join(BACKUP).exists() && !dir.join(STAGING).exists(), "the old version is gone by then");
+                assert_eq!(InstallRecord::read(dir).unwrap().version, "1.0.0");
+                vec!["The desktop shortcut cannot be written".into(), "The Start menu shortcut cannot be written".into()]
+            }
+            fn swapping(&self, _: &Path, under_way: bool) {
+                self.0.borrow_mut().push(under_way);
+            }
+        }
+        let dir = scratch("refused");
+        std::fs::write(dir.join(APP_EXE), b"old").unwrap();
+        std::fs::write(dir.join("gone.dll"), b"old").unwrap();
+        record(&[APP_EXE, "gone.dll"]).write(&dir).unwrap();
+        let build = scratch("refused-payload");
+        std::fs::write(build.join("app"), b"new").unwrap();
+        let packed = build.join("payload.bin");
+        payload::pack("1.0.0", &[(APP_EXE.to_string(), build.join("app"))], &packed).unwrap();
+        let options = Options { dir: dir.clone(), desktop_shortcut: true, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
+        let (progress, windows) = (Progress::default(), Refusing(Default::default()));
+        install_with(&std::fs::read(&packed).unwrap(), &options, &progress, true, false, &windows).unwrap();
+        assert_eq!(progress.status().notes.len(), 2);
+        assert_eq!(std::fs::read(dir.join(APP_EXE)).unwrap(), b"new");
+        assert!(!dir.join("gone.dll").exists() && !dir.join(crate::swap::JOURNAL).exists());
+        assert_eq!(*windows.0.borrow(), [true, false], "the next sign-in is told before the first move, and has nothing to do after the last");
+        remove_tree(&dir);
+        remove_tree(&build);
     }
 
     /// A `logs` folder redirected to another disk (or a shared folder that is a junction): nothing reached through it is

@@ -26,6 +26,7 @@ pub mod launcher_local;
 #[cfg(test)]
 mod launcher_live;
 pub mod maps;
+pub mod measured;
 pub mod notice_log;
 pub mod obelisk;
 pub mod origin;
@@ -47,6 +48,9 @@ pub mod settings;
 pub mod shared_view;
 pub mod shares;
 pub mod slice;
+/// The app's own sources, for the tests that read them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod source;
 pub mod video_history;
 pub mod visited;
 pub mod voice;

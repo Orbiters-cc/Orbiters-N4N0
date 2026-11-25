@@ -292,11 +292,17 @@ pub fn spread(poses: &[([f32; 3], [f32; 3])], k: usize) -> Vec<usize> {
     if k >= n {
         return (0..n).collect();
     }
-    let distance = |a: usize, b: usize| {
+    // The distance from pose `a` to `b`, or anything at least `bound` when it is at least that: how far apart they stand says
+    // so for most poses of a long walk, with no root taken (one part in a million over, past what its rounding could hide).
+    let distance = |a: usize, b: usize, bound: f32| {
         let ((pa, fa), (pb, fb)) = (poses[a], poses[b]);
-        let d = |u: [f32; 3], v: [f32; 3]| ((u[0] - v[0]).powi(2) + (u[1] - v[1]).powi(2) + (u[2] - v[2]).powi(2)).sqrt();
+        let d2 = |u: [f32; 3], v: [f32; 3]| (u[0] - v[0]).powi(2) + (u[1] - v[1]).powi(2) + (u[2] - v[2]).powi(2);
+        let apart = d2(pa, pb);
+        if apart > bound * bound * 1.000_001 {
+            return bound;
+        }
         // The chord between unit forward axes is about the angle: 0.35 is 20°.
-        d(pa, pb) + d(fa, fb) / 0.35
+        apart.sqrt() + d2(fa, fb).sqrt() / 0.35
     };
     let mut nearest = vec![f32::INFINITY; n];
     let mut kept = vec![false; n];
@@ -310,7 +316,7 @@ pub fn spread(poses: &[([f32; 3], [f32; 3])], k: usize) -> Vec<usize> {
             if kept[i] {
                 continue;
             }
-            nearest[i] = nearest[i].min(distance(next, i));
+            nearest[i] = nearest[i].min(distance(next, i, nearest[i]));
             if nearest[i] > far {
                 (best, far) = (Some(i), nearest[i]);
             }
@@ -326,6 +332,27 @@ pub fn spread(poses: &[([f32; 3], [f32; 3])], k: usize) -> Vec<usize> {
 fn pose(r: &FrameRecord) -> ([f32; 3], [f32; 3]) {
     let m = &r.camera_to_world;
     ([m[3], m[7], m[11]], [m[2], m[6], m[10]])
+}
+
+/// Which `k` of `frames` to train on when the budget holds no more, in their order: spread over the poses ([`spread`]),
+/// after up to a quarter of them for the detail views ([`detail_views`]: frames zoomed in on something, kept by the
+/// capture for it at a pose its other frames have too). Poses alone cannot tell those from the wide frames beside them:
+/// a long capture lost its magnified subject, and what was left had no detail view to find. A quarter is what training
+/// gives them of its colour steps (crate::train::Settings::detail_share) and leaves them fewer than a third of what is
+/// kept, which is what makes them detail views there. Without detail views, the spread alone, frame for frame.
+fn within(frames: &[&FrameRecord], k: usize) -> Vec<usize> {
+    let of = |ids: &[usize], k: usize| -> Vec<usize> { spread(&ids.iter().map(|&i| pose(frames[i])).collect::<Vec<_>>(), k).into_iter().map(|j| ids[j]).collect() };
+    let all: Vec<usize> = (0..frames.len()).collect();
+    let detail = if k < frames.len() { detail_views(&frames.iter().map(|r| r.projection[1]).collect::<Vec<_>>()) } else { Vec::new() };
+    if detail.is_empty() {
+        return of(&all, k);
+    }
+    let others: Vec<usize> = all.into_iter().filter(|i| detail.binary_search(i).is_err()).collect();
+    let zoomed = (k / 4).max(k.saturating_sub(others.len())).min(detail.len());
+    let mut kept = of(&detail, zoomed);
+    kept.extend(of(&others, k - zoomed));
+    kept.sort_unstable();
+    kept
 }
 
 /// Whether a record's pose is all numbers.
@@ -361,9 +388,9 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     ensure!(w >= 16 && h >= 16, "{}", tr!("keyframes of {width}×{height} are too small to reconstruct from", width = full_w, height = full_h));
     let mut loaded = Loaded { keyframes: keyframes.len(), depth_frames: depth_frames.len(), keyframes_skipped: keyframes.len() - sized.len(), ..Default::default() };
 
-    // Within the budget, the keyframes that look at the world most differently.
+    // Within the budget, the keyframes that look at the world most differently, and those zoomed in.
     let keep = usize::try_from(budget.keyframe_bytes / (w as u64 * h as u64 * 4)).unwrap_or(usize::MAX).max(MIN_KEPT);
-    let chosen: Vec<&FrameRecord> = spread(&sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| sized[i]).collect();
+    let chosen: Vec<&FrameRecord> = within(&sized, keep).into_iter().map(|i| sized[i]).collect();
     loaded.keyframes_over_budget = sized.len() - chosen.len();
     // Depth frames of the session's size, all on one grid, within the budget too.
     let grid = DepthLayout::new(full_w, full_h).map(|l| Arc::new(DepthGrid::new(&l, &geometry)));
@@ -371,7 +398,7 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
     loaded.depth_frames_skipped = depth_frames.len() - depth_sized.len();
     let per_frame = grid.as_ref().map_or(1, |g| g.len().max(1)) as u64;
     let keep = usize::try_from(budget.depth_samples / per_frame).unwrap_or(usize::MAX).max(MIN_KEPT);
-    let depth_chosen: Vec<&FrameRecord> = spread(&depth_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| depth_sized[i]).collect();
+    let depth_chosen: Vec<&FrameRecord> = within(&depth_sized, keep).into_iter().map(|i| depth_sized[i]).collect();
     loaded.depth_frames_over_budget = depth_sized.len() - depth_chosen.len();
     // The rig's faces: each record gives its face's size and projection (contracts' rig::RigLayout, of whichever layout
     // the avatar's upload draws), at the frames' scale, within what the budget leaves.
@@ -384,7 +411,7 @@ pub fn load_with(dir: &Path, max_width: u32, budget: Budget, mut progress: impl 
         let bytes: u64 = face_sized.iter().map(|r| face_geometry(r).width() as u64 * face_geometry(r).height() as u64 * 4).sum::<u64>() / face_sized.len() as u64;
         let left = budget.keyframe_bytes.saturating_sub(chosen.len() as u64 * w as u64 * h as u64 * 4);
         let keep = usize::try_from(left / bytes.max(1)).unwrap_or(usize::MAX).max(MIN_KEPT);
-        spread(&face_sized.iter().map(|r| pose(r)).collect::<Vec<_>>(), keep).into_iter().map(|i| face_sized[i]).collect()
+        within(&face_sized, keep).into_iter().map(|i| face_sized[i]).collect()
     };
     loaded.faces_over_budget = face_sized.len() - face_chosen.len();
 
@@ -1293,6 +1320,90 @@ mod tests {
         let data = load_with(&s.dir, 320, budget, |_| {}).expect("load");
         assert_eq!(data.views.len(), 70);
         assert_eq!(data.loaded.keyframes_over_budget, 30);
+    }
+
+    /// REC-20: over its budget, a capture keeps the frames zoomed in on something (at a pose its wide frames have too, which
+    /// the poses cannot tell apart), as the detail views they train as.
+    #[test]
+    fn frames_zoomed_in_are_kept_within_the_budget() {
+        use orbiters_contracts::manifest::FRAMES_FILE;
+        let s = fixture::session("zoomed", 320, 180, 100, &[]);
+        let mut records = bundle::read_records(&s.dir).expect("records");
+        let standing = records[39].camera_to_world;
+        for r in &mut records[40..44] {
+            r.camera_to_world = standing;
+            r.projection[0] *= 2.35;
+            r.projection[1] *= 2.35;
+        }
+        std::fs::write(s.dir.join(FRAMES_FILE), records.iter().flat_map(|r| r.to_bytes()).collect::<Vec<u8>>()).expect("frames");
+        let budget = Budget { keyframe_bytes: 70 * 320 * 180 * 4, depth_samples: u64::MAX };
+        let data = load_with(&s.dir, 320, budget, |_| {}).expect("load");
+        assert_eq!((data.views.len(), data.loaded.keyframes_over_budget), (70, 30));
+        let kept: Vec<i32> = data.detail_views().into_iter().map(|i| data.views[i].keyframe as i32).collect();
+        assert_eq!(kept, [40, 41, 42, 43], "the magnified frames");
+        // With room for all, all of them; with no zoomed frame, what the poses alone keep (above).
+        assert_eq!(load_with(&s.dir, 320, Budget::UNLIMITED, |_| {}).expect("load").detail_views().len(), 4);
+    }
+
+    /// REC-21: what is skipped without a root changes nothing that is kept.
+    #[test]
+    fn the_spread_keeps_what_every_distance_taken_whole_keeps() {
+        let whole = |poses: &[([f32; 3], [f32; 3])], k: usize| {
+            let distance = |a: usize, b: usize| {
+                let ((pa, fa), (pb, fb)) = (poses[a], poses[b]);
+                let d = |u: [f32; 3], v: [f32; 3]| ((u[0] - v[0]).powi(2) + (u[1] - v[1]).powi(2) + (u[2] - v[2]).powi(2)).sqrt();
+                d(pa, pb) + d(fa, fb) / 0.35
+            };
+            let (mut nearest, mut out, mut next) = (vec![f32::INFINITY; poses.len()], Vec::new(), 0);
+            while out.len() < k {
+                out.push(next);
+                let (mut best, mut far) = (0, f32::NEG_INFINITY);
+                for i in (0..poses.len()).filter(|i| !out.contains(i)) {
+                    nearest[i] = nearest[i].min(distance(next, i));
+                    if nearest[i] > far {
+                        (best, far) = (i, nearest[i]);
+                    }
+                }
+                next = best;
+            }
+            out.sort_unstable();
+            out
+        };
+        let mut rng = fastrand::Rng::with_seed(12);
+        for (n, k) in [(300, 40), (300, 299), (50, 25)] {
+            let mut at = [0f32; 3];
+            let poses: Vec<([f32; 3], [f32; 3])> = (0..n)
+                .map(|i| {
+                    // A walk that stands still now and then, and turns.
+                    if i % 5 != 0 {
+                        at = [at[0] + rng.f32() - 0.4, at[1], at[2] + rng.f32() * 0.3];
+                    }
+                    let (s, c) = (i as f32 * 0.3).sin_cos();
+                    (at, [s, 0.0, c])
+                })
+                .collect();
+            assert_eq!(spread(&poses, k), whole(&poses, k));
+        }
+    }
+
+    /// A quarter of what is kept at most goes to the zoomed frames, unless the others do not fill the rest; order kept; none
+    /// zoomed, the spread alone.
+    #[test]
+    fn zoomed_frames_take_a_quarter_at_most() {
+        let record = |i: usize, zoom: f32| FrameRecord { camera_to_world: [1.0, 0.0, 0.0, i as f32, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], projection: [zoom, zoom, 0.0, 0.0], ..Default::default() };
+        let kept = |zoomed: usize, n: usize, k: usize| {
+            let records: Vec<FrameRecord> = (0..n).map(|i| record(i, if i < zoomed { 3.0 } else { 1.0 })).collect();
+            let kept = within(&records.iter().collect::<Vec<_>>(), k);
+            assert!(kept.windows(2).all(|p| p[0] < p[1]) && kept.len() == k.min(n), "{kept:?}");
+            (kept.iter().filter(|&&i| i < zoomed).count(), kept)
+        };
+        assert_eq!(kept(60, 200, 80).0, 20);
+        assert_eq!(kept(5, 200, 80).0, 5);
+        // 130 wide frames for 139 places.
+        assert_eq!(kept(60, 190, 189).0, 59);
+        assert_eq!(kept(60, 190, 190).0, 60);
+        let poses: Vec<_> = (0..200).map(|i| pose(&record(i, 1.0))).collect();
+        assert_eq!(kept(0, 200, 80).1, spread(&poses, 80));
     }
 
     /// The band is found in pictures whose band does not decode: with green and blue displaced towards the centre

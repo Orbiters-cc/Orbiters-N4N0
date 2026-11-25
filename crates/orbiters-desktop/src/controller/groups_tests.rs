@@ -546,7 +546,7 @@ fn what_is_sealed_is_what_goes() {
     assert_eq!(commit(&c, &first), Outcome::Refused(Failure::Expired), "replaced by the next");
     assert_eq!((entry(&c, &first.op).state, entry(&c, &first.op).by), (State::Refused, Some(By::NeverSent)));
     let other = c.groups(LINK + 1, scope(&c), Request::Commit { op: second.op.clone(), digest: second.digest() });
-    assert_eq!(other, Reply::Outcome { op: second.op.clone(), outcome: Outcome::Refused(Failure::Expired) });
+    assert_eq!(other, Reply::Outcome { op: second.op.clone(), outcome: Outcome::Refused(Failure::Expired), said: None });
     assert_eq!(ask(&c, Request::Cancel { op: second.op.clone() }), Reply::Cancelled);
     assert_eq!(commit(&c, &second), Outcome::Refused(Failure::Expired));
     let third = prepare(&c, the(&c, Kind::ApplyIcon)).unwrap();
@@ -1152,7 +1152,7 @@ fn nothing_goes_once_another_account_is_installed() {
             let reply = c.groups(LINK, a.clone(), Request::Commit { op: s.op.clone(), digest: s.digest() });
             let private = c.groups(LINK, a, Request::Posts { group: G.into(), offset: 0 });
             drop(turn);
-            let refused = [Reply::Failed(Failure::AccountChanged), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown }, Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::AccountChanged) }];
+            let refused = [Reply::Failed(Failure::AccountChanged), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown, said: None }, Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::AccountChanged), said: None }];
             assert!(refused.contains(&reply), "{kind:?}, {during}: {reply:?}");
             assert_eq!(private, Reply::Failed(Failure::AccountChanged), "nor is anything read for it");
             assert!(writes(&sent).is_empty(), "{kind:?}, during the last read: {during}: {:?}", writes(&sent));
@@ -1346,6 +1346,37 @@ fn an_old_groups_roles_are_given_by_its_owner() {
     }
     let s = prepare(&c, Write::DeleteRole { group: G.into(), role: "grol_events".into() }).unwrap();
     assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+}
+
+/// REQUEST28: when VRChat refuses a role, what it said comes with the outcome, word for word; a write that went well, or one
+/// stopped here, carries nothing of it.
+#[test]
+fn a_refused_role_says_vrchats_own_words() {
+    let give = |c: &Shared| Write::MemberRole { group: G.into(), user: U.into(), membership: of(c, U), role: "grol_mod".into(), add: true };
+    let send = |c: &Shared, s: &Sealed| match ask(c, Request::Commit { op: s.op.clone(), digest: s.digest() }) {
+        Reply::Outcome { outcome, said, .. } => (outcome, said),
+        other => panic!("{other:?}"),
+    };
+    for (status, body, want) in [
+        (403, json!({"error": {"message": "\"You need two-factor authentication.\"", "status_code": 403}}), (GroupFailure::Forbidden, "You need two-factor authentication.")),
+        (400, json!({"error": {"message": "Cannot assign this role", "status_code": 400}}), (GroupFailure::Invalid, "Cannot assign this role")),
+        (404, json!({}), (GroupFailure::NotFound, "")),
+    ] {
+        let (c, w, _) = world();
+        let s = prepare(&c, give(&c)).unwrap();
+        w.lock().unwrap().fault = Some(Fault::Answer { done: false, status, body });
+        let (outcome, said) = send(&c, &s);
+        assert_eq!(outcome, Outcome::Refused(Failure::Api(want.0)));
+        assert_eq!(said.map(|r| (r.status, r.words)), Some((status, want.1.to_string())));
+    }
+    let (c, _, _) = world();
+    let s = prepare(&c, give(&c)).unwrap();
+    assert!(matches!(send(&c, &s), (Outcome::Done(_), None)));
+    // Stopped here before it went: no words of VRChat's.
+    let (c, w, _) = world();
+    let s = prepare(&c, give(&c)).unwrap();
+    w.lock().unwrap().rights = vec![];
+    assert!(matches!(send(&c, &s), (Outcome::Refused(Failure::Withheld(_)), None)));
 }
 
 /// REQUEST28: a group's calendar is read through the service, for the account it was asked as, and never written.
@@ -1625,7 +1656,7 @@ fn an_account_switch_drops_a_sealed_write() {
     c.update(|s| s.vrchat_login.revision += 1);
     let commit = |scope: Scope| c.groups(LINK, scope, Request::Commit { op: s.op.clone(), digest: s.digest() });
     assert_eq!(commit(a), Reply::Failed(Failure::AccountChanged));
-    assert_eq!(commit(scope(&c)), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::Expired) });
+    assert_eq!(commit(scope(&c)), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::Expired), said: None });
     let e = c.groups_book().get(&c.groups_key(&scope(&c)).unwrap(), &s.op).unwrap();
     assert_eq!((e.state, e.by), (State::Refused, Some(By::NeverSent)), "the same account, signed in again, sees it was never sent");
     assert!(writes(&sent).is_empty());
@@ -1644,7 +1675,7 @@ fn an_account_switch_after_transmission_shows_nothing_and_keeps_the_truth() {
     assert!(hold.until_reached());
     c.update(|s| s.vrchat_login.revision += 1);
     hold.let_go();
-    assert_eq!(sending.join().unwrap(), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown });
+    assert_eq!(sending.join().unwrap(), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown, said: None });
     assert_eq!(check(&c, &s.op), Observation::Answered { done: true }, "the durable scope is the same account's");
 }
 

@@ -112,6 +112,30 @@ Taken in a hand, a small 3D view is out of the menu's: it stays when the menu cl
 
 A capture around the person turns with VRChat's turning stick, the hand that does not walk (`immersive_turn`, on by default; `stereo::TurnStick`): smoothly or in 30° steps as VRChat's own Comfort Turning says, read from its registry when a capture opens. The smooth rate and the step are this code's own, as VRChat's are not readable. The stick is left alone with a menu up.
 
+## On a Mac
+
+Code: `overlay/orbit/desktop_mac/` beside `desktop.rs`; what both decide and draw the same is `desk_shared.rs`. The parts, places, detectors and settings are Windows'. Nothing of it needs an engine release: the overlay is ordinary windows of this app, and nothing is injected, drawn or sent into the game, its window or its window server (`wsd`).
+
+| | What a Mac does |
+| --- | --- |
+| Started | By the tray service while Home's VRChat runs (`LauncherState::desktop_game`, the engine's launcher; never one the bridge started), at most once every 10 s, and it ends with the game (`wanted_on_desktop`) |
+| The game's window | `wsd`'s, found from that process (`desktop_mac/game.rs`): at layer 25 over the whole screen while it is in front, at 0 behind another app. Its size is the display's pixels whatever the render percent, as macOS stretches the game's picture over it |
+| A menu is open | ScreenCaptureKit's picture of that window alone, at most 1080 rows high, started by Esc or R (and as the game comes in front), ended with the menu (`capture.rs`). The frames stay in shared memory, and a look reads what `detect::parts` names. At 45 % render the game draws 860 rows on a 1470 x 956 screen, within the sizes the detectors were measured at (`lab.rs`, tests) |
+| The keys | `CGEventSourceKeyState` each turn, only with the game in front. No event tap, no hot key, no Accessibility (a test reads the sources for them). R is the key that types "r" in the Mac's layout; the numbers are the top row's places |
+| The windows | One non-activating `NSPanel` a part, one level above the game's window while it is in front, else right above it and under what covers it. They join every Space and go when the game's window is not on screen |
+| Pointing | **Left Option**, for the wheel and the Quick Menu: the engine holds the pointer of a full-screen game for as long as its window has the keyboard, its Quick Menu included (`wsd`, relative mouse). A panel of two points takes the keyboard without bringing this app in front (`panel::Hold`): `wsd` lets the pointer go and releases the keys the game held, and takes it back by itself once that panel goes (3 to 7 ms, measured). Up, a page keeps it with no key held. A click on the game, Esc, another app in front or the menu closing gives it back; Left Option asks again |
+| Typing | The keyboard is this app's own while pointing, so a page is typed in with no hook; what the layout writes, dead keys included, goes to the service (`ToService::Typed`). Esc is the page's Back there, else it closes the page, as it is let go (held, it would repeat into the game) |
+
+**Never the whole window.** A window whose pixels cover all of the game's makes macOS stop showing the game's, and the engine then presents nothing (measured with an opaque panel: at once). `panel::uncovering` leaves out what would, and a test goes through every menu and window shape.
+
+**Permissions.** Screen Recording, without which nothing shows; Settings, "Right now", says so with the button that asks (by the service, the app macOS names; the overlay's process is its child and has what it has). Given while the app runs, a new overlay process sees it: one that was refused ends at the next Esc or R after 30 s, and the service starts another. Input Monitoring only if macOS hides which keys are down without it: the key-down counter then moves with no key to be seen (`keyboard::Keys::hidden`), Settings says so, and meanwhile a press that stands alone still starts a look.
+
+**What differs from Windows.** The Quick Menu's mouse is not free. While pointing, the game has lost its keyboard: the avatar stops, and keys go to the page. The 3D pictures cell and its second ring, what takes a picture on the Pictures sheet, and the camera's column are not there (Spout); nor are translation over the window, the corner's cards and the mismatch buttons (`Here::MAC`: `camera_frames`, `window_text`, `mismatch_buttons`). The sheet of settings has no row of a headset's. Exclusive full screen does not exist: VRChat's full screen here is a window others can lie over.
+
+**If it hangs or dies** while it holds the keyboard, its windows go with it and the game's is key again: a watchdog ends a loop that has not turned for 1.5 s, and the service starts the process again, which looks at once for a menu that is up.
+
+**Checking it with no game:** `tools/mac-overlay/check.py` (`--render-percent 45`) lays it over the engine's real `wsd` with a window that shows real frames of the menus, and checks all of the above, frames shown included. It covers the screen for a minute, and starts only while nobody uses the Mac.
+
 ## Around VRChat's camera
 
 In a headset, tiles for a 3D picture of people, of the world, and the QR code lie beside VRChat's camera panel. It can be grabbed and it can fly, and `/usercamera/Pose` is the camera's place and not its panel's, so it is found by sight, as Enzo proposed: while VRChat says its camera is open (and only then) one eye is read (`camera_frames.rs`), and the panel's white X and white chevron looked for in it (`camera_track.rs`). It is a third menu for `vr.rs` (`Around::Camera`), so lasers, presses and painting are the same as elsewhere.

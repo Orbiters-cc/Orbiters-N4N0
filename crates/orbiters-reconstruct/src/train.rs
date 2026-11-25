@@ -468,9 +468,9 @@ pub fn psnr(render: &[[f32; 4]], truth: &[u32], mask: &[f32]) -> f32 {
     (10.0 * (1.0 / mse).log10()) as f32
 }
 
-/// Renders the Gaussians on the GPU from a camera: (r, g, b, depth) per pixel.
+/// Renders the Gaussians on the GPU from a camera, every one of them ([`Gpu::render`]): (r, g, b, depth) per pixel.
 pub fn render(gpu: &mut Gpu, cam: &Camera, background: [f32; 3]) -> anyhow::Result<Vec<[f32; 4]>> {
-    gpu.step(cam, background, Target::None, None)?;
+    gpu.render(cam, background)?;
     gpu.read_image()
 }
 
@@ -719,15 +719,17 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
         Vec::new()
     };
     let mut sub_grid: Vec<u32> = Vec::new();
-    // The keyframes on the device when its memory has room for them beside the set (with a GB to spare): steps then
-    // upload no pixels. Not on a Mac, whose GPU reads the RAM they are in already: the second copy saved nothing there
-    // (500 steps at 1080p on an M3: 74.3 s with it, 74.0 and 75.9 s without) and took their whole size from everything else.
+    // The keyframes on the device when the card has room for them beside the set (with a GB to spare), whatever else is on
+    // it counted: steps then upload no pixels. Not on a GPU that reads the RAM they are in already (a Mac's, an integrated
+    // one): on a Mac the second copy saved nothing (500 steps at 1080p on an M3: 74.3 s with it, 74.0 and 75.9 s without)
+    // and took their whole size from everything else. A run can do without them: they go as soon as the card runs short
+    // ([`KEYFRAMES_LEAVE`], below), for good.
     const LEFT: u64 = 1 << 30;
     let keyframe_bytes: u64 = data.views.iter().map(|v| v.image.len() as u64 * 4).sum();
     let paused_already = control.pause.is_some_and(|p| p.asked());
     // A run resumed past its steps (Start::Trained) never takes a step: no keyframe is read from the device (C4).
     let room = |free: u64| free >= gpu.training_memory(settings.budget) + keyframe_bytes + LEFT;
-    let resident = keyframes_resident(cfg!(target_vendor = "apple"), paused_already, trained.is_some(), || gpu.free_memory().is_some_and(room));
+    let mut resident = keyframes_resident(cfg!(target_vendor = "apple") || gpu.integrated, paused_already, trained.is_some(), || gpu.card_free().is_some_and(room));
     if resident {
         let images: Vec<&[u32]> = data.views.iter().map(|v| v.image.as_slice()).collect();
         gpu.set_keyframes(&images);
@@ -809,6 +811,12 @@ pub fn train_from(data: &Dataset, gpu: &mut Gpu, from: Start, settings: &Setting
                 Some(true) => eprintln!("it {it}: training between VRChat's frames (SteamVR's frame timing)"),
                 Some(false) => eprintln!("it {it}: VRChat closed: training at full speed"),
                 None => {}
+            }
+            if resident && !keyframes_stay(gpu.card_free()) {
+                // The game (or another program) came to need the card's memory: it wins.
+                eprintln!("it {it}: graphics memory is short: the keyframes' {} MB go back", keyframe_bytes >> 20);
+                gpu.release_keyframes();
+                resident = false;
             }
         }
         let progress = crate::portraits::progress(it, base_iterations, extra);
@@ -1066,10 +1074,20 @@ fn finish(data: &Dataset, gpu: &mut Gpu, g: &mut Gaussians, settings: &Settings,
     Ok(evaluate(gpu, data, &sample, settings.background)?.unwrap_or(0.0))
 }
 
-/// Whether the keyframes go on the device: never on a Mac (its GPU reads the RAM they are in), never when a pause is
-/// already asked, never for a run resumed past its steps (no step reads them), else when `room` says they fit.
-fn keyframes_resident(apple: bool, paused: bool, trained_only: bool, room: impl FnOnce() -> bool) -> bool {
-    !apple && !paused && !trained_only && room()
+/// Whether the keyframes go on the device: never on one that reads the RAM they are in (`shared`: a Mac, an integrated
+/// GPU), never when a pause is already asked, never for a run resumed past its steps (no step reads them), else when `room`
+/// says they fit.
+fn keyframes_resident(shared: bool, paused: bool, trained_only: bool, room: impl FnOnce() -> bool) -> bool {
+    !shared && !paused && !trained_only && room()
+}
+
+/// Graphics memory free on the card under which a run gives its keyframes back: half of what it left free when it took them.
+/// Past that the next program to ask (VRChat loading avatars, a game starting) has the driver page memory out, its own too.
+const KEYFRAMES_LEAVE: u64 = 1 << 29;
+
+/// Whether the keyframes stay on a card with this much free (unknown: nothing says otherwise).
+fn keyframes_stay(free: Option<u64>) -> bool {
+    free.is_none_or(|free| free >= KEYFRAMES_LEAVE)
 }
 
 /// Whether this start follows VRChat before its loop: only a run resumed past its steps, which takes no step and so no
@@ -1544,6 +1562,9 @@ mod tests {
             true
         };
         assert!(!keyframes_resident(false, false, true, room) && !asked.get());
+        // REC-3: a game growing into the gigabyte left for it takes the keyframes' memory back.
+        assert!(keyframes_stay(Some(1 << 30)) && keyframes_stay(None));
+        assert!(!keyframes_stay(Some(0)) && !keyframes_stay(Some(400 << 20)));
         assert!(keyframes_resident(false, false, false, || true));
         assert!(!keyframes_resident(true, false, false, || true) && !keyframes_resident(false, true, false, || true));
         assert!(!keyframes_resident(false, false, false, || false));

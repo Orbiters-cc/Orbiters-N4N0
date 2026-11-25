@@ -842,14 +842,19 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
         }
         Group::Vr => {
             let mut smoothing_reset = false;
+            let mut allow = None;
             if here.around() {
                 apply |= place(&mut m, c, 1, registry::CARD_AROUND, |ui| {
                     let mut apply = false;
-                    section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera")), |ui| {
-                        apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset);
+                    let beside = if here.camera_frames { tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera") } else { tr("Orbiters beside VRChat's Quick Menu and its wheel") };
+                    section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(beside), |ui| {
+                        apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset, &mut allow);
                     });
                     apply
                 });
+                if let Some(needs) = allow {
+                    cx.ctl.orbit_allow(needs);
+                }
                 if smoothing_reset {
                     cx.toasts.push(&ctx, toast::Kind::Info, tr("Smoothing back to the values measured to match VRChat"));
                 }
@@ -912,7 +917,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
         Group::Privacy => {
             // (The statistics are counted wherever the app runs; the rest is of VRChat on this computer.)
             apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
-            if here.around() {
+            if here.mismatch_buttons {
                 apply |= place(&mut m, c, 2, mark("Beta feedback"), |ui| super::beta_feedback::card(ui, cx, 2, &mut state.beta, draft));
             }
         }
@@ -2013,37 +2018,108 @@ pub(super) fn source_chip(ui: &mut Ui, key: &str, label: &str, active: bool) -> 
 
 /// How Orbiters appears around VRChat's menus: a switch for each of them, how the tiles follow the hand, and what stands
 /// in the way now. (Where N4N0's own menu shows is with N4N0's menu, in [`super::settings_n4n0::menu_card`].)
-fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool) -> bool {
+fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool, allow: &mut Option<crate::state::OrbitNeeds>) -> bool {
     let mut apply = false;
-    widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR.")), 48.0, |ui| {
+    let here = orbiters_core::here::HERE;
+    widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr(registry::AROUND_WHEEL)), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
+    if here.camera_frames {
+        orbit_camera(ui, snap, orbit, &mut apply);
+    }
+    if here.vr_overlay {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Turn around in a 3D capture"), Some(tr("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to.")), 48.0, |ui| {
+            apply |= widgets::toggle(ui, "orbit-immersive-turn", &mut orbit.immersive_turn);
+        });
+    }
+    widgets::separator(ui);
+    widgets::field(ui, tr("Around the Quick Menu"), Some(tr(registry::AROUND_QUICK_MENU)), 48.0, |ui| {
+        apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
+    });
+    if here.vr_overlay {
+        orbit_headset(ui, orbit, reset, &mut apply);
+    }
+    let (now, needs) = orbit_now(snap);
+    if let Some(now) = now {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Right now"), Some(&now), if needs.is_some() { 220.0 } else { 48.0 }, |ui| {
+            let Some(needs) = needs else { return };
+            let words = match needs {
+                crate::state::OrbitNeeds::ScreenRecording => tr("Allow screen recording"),
+                crate::state::OrbitNeeds::InputMonitoring => tr("Allow Input Monitoring"),
+            };
+            if Button::new(words).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                *allow = Some(needs);
+            }
+        });
+    }
+    apply
+}
+
+/// What stands in the way of the panels around VRChat's menus now, in words, and what macOS must be asked for, if anything.
+fn orbit_now(snap: &Snapshot) -> (Option<String>, Option<crate::state::OrbitNeeds>) {
+    #[cfg(target_os = "macos")]
+    {
+        // The panels' own word while a game runs; with none, whether macOS would let them see one is asked here, at most every two seconds.
+        static ASKED: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+        if snap.launcher.desktop_game.is_some() {
+            return (snap.orbit.note.as_ref().map(|note| tr(note).to_string()), snap.orbit.needs);
+        }
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let allowed = match *asked {
+            Some((at, allowed)) if at.elapsed().as_secs() < 2 => allowed,
+            _ => {
+                let allowed = crate::bridge::mac::screen_recording() != Some(false);
+                *asked = Some((std::time::Instant::now(), allowed));
+                allowed
+            }
+        };
+        if allowed {
+            (Some(tr("They appear once VRChat runs.").to_string()), None)
+        } else {
+            (Some(tr(crate::state::OrbitNeeds::ScreenRecording.words()).to_string()), Some(crate::state::OrbitNeeds::ScreenRecording))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+            Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())
+        } else if let Some(note) = &snap.orbit.note {
+            Some(tr(note).to_string())
+        } else if snap.vrchat.running {
+            None
+        } else {
+            Some(tr("They appear once VRChat runs.").to_string())
+        };
+        (now, None)
+    }
+}
+
+/// The tiles around VRChat's camera.
+fn orbit_camera(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, apply: &mut bool) {
     widgets::separator(ui);
     widgets::field(ui, tr("Around the camera"), Some(tr("3D pictures, Record and the QR code beside VRChat's camera. In a headset they appear where VRChat opens it and move with the hand that holds it; in desktop mode, at the left of its panel.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
+        *apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
     });
     if orbit.camera_tiles {
         widgets::separator(ui);
         widgets::field(ui, tr("Find the camera on screen"), Some(tr("Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.")), 48.0, |ui| {
-            apply |= widgets::toggle(ui, "orbit-camera-pattern", &mut orbit.camera_pattern);
+            *apply |= widgets::toggle(ui, "orbit-camera-pattern", &mut orbit.camera_pattern);
         });
     }
     if let Some(why) = snap.orbit.camera_note.as_ref().filter(|_| orbit.camera_tiles) {
         widgets::separator(ui);
         widgets::field(ui, tr("The camera's tiles, right now"), Some(tr(why)), 48.0, |_| {});
     }
-    widgets::separator(ui);
-    widgets::field(ui, tr("Turn around in a 3D capture"), Some(tr("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-immersive-turn", &mut orbit.immersive_turn);
-    });
-    widgets::separator(ui);
-    widgets::field(ui, tr("Around the Quick Menu"), Some(tr("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
-    });
+}
+
+/// What is the headset's alone.
+fn orbit_headset(ui: &mut egui::Ui, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool, apply: &mut bool) {
     widgets::separator(ui);
     let sizes = [SegOption::new(0.8f32, tr("Smaller")), SegOption::new(1.0f32, tr("As measured")), SegOption::new(1.25f32, tr("Larger"))];
     widgets::field(ui, tr("Panels' size in VR"), Some(tr("If they sit too near or too far from VRChat's menu in your headset.")), 300.0, |ui| {
-        apply |= widgets::segmented(ui, "orbit-vr-size", &mut orbit.vr_size, &sizes, true);
+        *apply |= widgets::segmented(ui, "orbit-vr-size", &mut orbit.vr_size, &sizes, true);
     });
     widgets::separator(ui);
     use orbiters_core::settings::VrMotion;
@@ -2053,15 +2129,15 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         VrMotion::Matched => tr("The tiles around VRChat's menus stay rigid, and trail your hand as VRChat's menu does."),
     };
     widgets::field(ui, tr("How they follow your hand in VR"), Some(said), 300.0, |ui| {
-        apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
+        *apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
     });
     widgets::separator(ui);
     let smoothing = |v: f32| if v == 0.0 { tr_ctx("smoothing", "None").to_string() } else { format!("{v:.0} ms") };
     widgets::field(ui, tr("Smoothing on the Quick Menu"), Some(tr("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
+        *apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
     });
     widgets::field(ui, tr("Smoothing on the wheel"), Some(tr("The same around VRChat's Action Menu. About 20 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
+        *apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
     });
     // Both back to what was measured to match VRChat's own menus (the defaults), at once, as the sliders write them.
     let (quick, wheel) = orbiters_core::settings::OrbitSettings::measured_smoothing();
@@ -2078,24 +2154,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         if b.show(ui).clicked() {
             orbit.vr_smoothing_quick_menu_ms = quick;
             orbit.vr_smoothing_wheel_ms = wheel;
-            apply = true;
+            *apply = true;
             *reset = true;
         }
     });
-    let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
-        Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())
-    } else if let Some(note) = &snap.orbit.note {
-        Some(tr(note).to_string())
-    } else if snap.vrchat.running {
-        None
-    } else {
-        Some(tr("They appear once VRChat runs.").to_string())
-    };
-    if let Some(now) = now {
-        widgets::separator(ui);
-        widgets::field(ui, tr("Right now"), Some(&now), 48.0, |_| {});
-    }
-    apply
 }
 
 /// How many notices Settings shows (the file keeps more).

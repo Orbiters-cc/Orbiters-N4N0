@@ -1,6 +1,5 @@
 {
   "GLB exceeds 4 GB": "le GLB dépasse 4 Go",
-  "GLB too large": "GLB trop volumineux",
   "GPU device: {error}": "périphérique GPU : {error}",
   "GPU error: {error}": "erreur du GPU : {error}",
   "Invalid splat file": "Fichier de splats non valide",

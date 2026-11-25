@@ -37,7 +37,7 @@ const SETUP_TRIPLE: &str = "x86_64-pc-windows-msvc";
 /// signature valid after.
 const TIMESTAMP: &str = "http://timestamp.acs.microsoft.com";
 
-pub struct Options {
+pub struct Options<'a> {
     /// Without Authenticode signatures (until Azure Artifact Signing is set up): Windows' SmartScreen warns about such
     /// a setup when it is downloaded by hand; installed apps update to it as to any release the release key signed.
     pub unsigned: bool,
@@ -48,9 +48,11 @@ pub struct Options {
     pub programs: Option<PathBuf>,
     /// How the programs and the setup are compiled.
     pub profile: Profile,
+    /// What they are compiled from: the release file names it.
+    pub source: &'a crate::commit::Source,
 }
 
-pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
+pub fn dist(config: &Config, options: &Options<'_>) -> anyhow::Result<PathBuf> {
     let version = crate::release_version()?;
     // Whoever asks: a stable version's programs are never compiled as development builds are.
     options.profile.for_version(&version)?;
@@ -126,6 +128,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let missing = pe::missing(&files, &shipped)?;
     anyhow::ensure!(missing.is_empty(), "files need DLLs that are neither Windows' nor shipped: {missing:?}");
 
+    // Nothing is signed unless the sources still are the commit's.
+    options.source.built()?;
     if let Some(signer) = &signer {
         println!("\n== Signing the programs");
         signer.sign(&ours)?;
@@ -144,6 +148,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     copy(&full, &setup)?;
     let missing = pe::missing(std::slice::from_ref(&setup), &[])?;
     anyhow::ensure!(missing.is_empty(), "the setup needs DLLs a clean Windows lacks: {missing:?}");
+    let commit = options.source.built()?;
     if let Some(signer) = &signer {
         signer.sign(std::slice::from_ref(&setup))?;
     }
@@ -159,7 +164,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
             channel: options.channel.clone(),
             version: version.clone(),
             released: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?,
-            commit: crate::git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            commit,
             notes: options.notes.clone(),
             installer: installer.clone(),
         };
@@ -303,18 +308,30 @@ fn check_staged(stage: &Path, version: &str) -> anyhow::Result<()> {
     for name in files {
         let path = stage.join(&name);
         let bytes = std::fs::read(&path).with_context(|| format!("{} cannot be read", path.display()))?;
-        anyhow::ensure!(
-            says_version(&bytes, version),
-            "{} does not say version {version}: it was not rebuilt (is a program from there running?)",
-            path.display()
-        );
+        ensure_says_version(&path, &bytes, version)?;
     }
     Ok(())
 }
 
+/// Refuses a program that was not built for `version`, from its bytes.
+pub(crate) fn ensure_says_version(path: &Path, bytes: &[u8], version: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(says_version(bytes, version), "{} does not say version {version}: it was not rebuilt (is a program from there running?)", path.display());
+    Ok(())
+}
+
+/// Whether a version right after `before` would be the end of a longer one: its first number goes on from digits there, or it follows a dot.
+fn longer_before(before: &[u8]) -> bool {
+    let digits = before.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    match before[before.len() - digits..].first() {
+        Some(first) => *first != b'0',
+        None => before.last() == Some(&b'.'),
+    }
+}
+
 /// Whether `bytes` hold `version` as a whole version: not as the start of a longer one (0.3.6-dev.1 in 0.3.6-dev.16,
 /// 0.3.7 in 0.3.7-dev.3) nor as the end of one (0.3.6 in 10.3.6). A letter may touch it: the compiler packs string
-/// literals end to end (the capture worker's reads `0.3.6-dev.16o…`).
+/// literals end to end (the capture worker's reads `0.3.6-dev.16o…`). So may a number that no version's could be the start of: `127.0.0.1:0` packed before 0.3.11-dev.10 in
+/// the call's, as no number of a version starts with a zero.
 fn says_version(bytes: &[u8], version: &str) -> bool {
     let needle = version.as_bytes();
     if needle.is_empty() {
@@ -322,7 +339,7 @@ fn says_version(bytes: &[u8], version: &str) -> bool {
     }
     bytes.windows(needle.len()).enumerate().any(|(at, w)| {
         w == needle
-            && !at.checked_sub(1).is_some_and(|b| matches!(bytes[b], b'0'..=b'9' | b'.'))
+            && !longer_before(&bytes[..at])
             && !bytes.get(at + needle.len()).is_some_and(|a| matches!(a, b'0'..=b'9' | b'.' | b'-' | b'+'))
     })
 }
@@ -373,6 +390,9 @@ mod tests {
         assert!(!says_version(b"\x000.3.6-dev.1\x00", "0.3.6-dev.10"));
         assert!(!says_version(b"\x000.3.7-dev.3\x00", "0.3.7"), "a development build of a stable version");
         assert!(!says_version(b"\x0010.3.6\x00", "0.3.6"));
+        assert!(!says_version(b"\x00120.3.6\x00", "0.3.6"));
+        assert!(!says_version(b"\x001.0.3.6\x00", "0.3.6"));
+        assert!(says_version(b"127.0.0.1:00.3.11-dev.10\x00", "0.3.11-dev.10"), "an address packed before it: no version's number starts with a zero");
         assert!(!says_version(b"orbiters-core-0.3.6.1\x00", "0.3.6"));
         assert!(!says_version(b"", "0.3.6"));
         assert!(!says_version(b"0.3.6", ""));

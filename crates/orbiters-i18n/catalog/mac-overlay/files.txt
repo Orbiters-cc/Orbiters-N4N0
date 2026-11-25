@@ -1,0 +1,9 @@
+# The panels around VRChat's menus on a Mac's screen, and what they share with Windows'. (Settings' and the sheets' files are in areas of their own: their texts for a Mac are here.)
+crates/orbiters-desktop/src/overlay/orbit/desk_shared.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/mod.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/capture.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/game.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/keyboard.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/lab.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/panel.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/pointing.rs

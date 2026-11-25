@@ -87,7 +87,7 @@ fn the_tools_fit_what_the_server_takes() {
     assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), names.len(), "unique names");
     // What the Orbiters server takes of a client tool (backend services/n4n0/assistant/conversation.js, LIMITS): a name of
     // letters, digits, _ and -, a description of 2000 characters at most, a schema of 16000.
-    for tool in &all {
+    for tool in all {
         let name = tool["name"].as_str().unwrap();
         assert!(name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "{name}");
         let description = tool["description"].as_str().unwrap().chars().count();
@@ -518,7 +518,7 @@ fn the_tools_of_a_turn_stay_within_their_token_budget() {
 #[ignore]
 fn dump_tool_specs() {
     use std::collections::BTreeSet;
-    println!("TOOLSJSON-ALL {}", serde_json::Value::Array(tools::specs(false, true)));
+    println!("TOOLSJSON-ALL {}", serde_json::Value::Array(tools::specs(false, true).to_vec()));
     for (name, sentence) in [("greeting", "heyoo"), ("toggle", "turn on fast walk"), ("orange", "put me in orange"), ("multi", "take a 3D picture in ten seconds then share it with Kira")] {
         let groups: BTreeSet<_> = route::route(sentence, &[]);
         println!("TOOLSJSON-{name} {}", serde_json::Value::Array(tools::specs_for(false, &groups, true)));

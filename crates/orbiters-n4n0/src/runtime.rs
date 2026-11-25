@@ -2734,14 +2734,18 @@ impl N4n0 {
         self.osc.latest(&mut addresses.into_iter())
     }
 
-    /// What the assistant is told about the moment.
-    fn moment(&self, with_controls: bool) -> Moment {
+    /// What the assistant is told about the moment: what `needs` leaves out is not gathered.
+    fn moment(&self, needs: context::Needs) -> Moment {
         let running = self.host.scene().vrchat;
         let world = self.host.world();
-        let addresses = self.n4n0.lock().unwrap().controls.addresses();
-        let latest = self.osc_latest(addresses);
+        let latest = if needs.avatar {
+            let addresses = self.n4n0.lock().unwrap().controls.addresses();
+            self.osc_latest(addresses)
+        } else {
+            HashMap::new()
+        };
         let rt = self.n4n0.lock().unwrap();
-        let last_video = world.last_video.as_ref().map(|v| {
+        let last_video = world.last_video.as_ref().filter(|_| needs.video).map(|v| {
             let title = rt.videos.videos.iter().find(|s| videos::canonical(&s.url) == videos::canonical(&v.url)).and_then(|s| s.title.clone());
             (v.url.clone(), title)
         });
@@ -2753,7 +2757,7 @@ impl N4n0 {
             n4n0_prop: rt.sender.is_some(),
             afk: rt.afk,
             last_video,
-            controls: if with_controls { rt.controls.summary(&latest, CONTROLS_CHARS) } else { String::new() },
+            controls: if needs.avatar { rt.controls.summary(&latest, CONTROLS_CHARS) } else { String::new() },
             controls_from_manifest: rt.manifest,
             saved_videos: rt.videos.videos.len(),
             notes: rt.notes.clone(),
@@ -2929,14 +2933,14 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
         let Some(fence) = actor.fence() else { return };
         // What is sent from an account is offered only with its switch.
         let actions = fence.assistant_facts().actions;
-        let (tools, display) = {
+        let (bare, display) = {
             let rt = fence.n4n0.lock().unwrap();
-            let bare = !rt.manifest && !rt.controls.is_empty();
-            (tools::specs_for(bare, &tools_run.groups, actions), rt.sender.is_some())
+            (!rt.manifest && !rt.controls.is_empty(), rt.sender.is_some())
         };
+        let tools = tools::specs_for(bare, &tools_run.groups, actions);
         // The avatar's controls (up to 3,500 characters) only when the avatar's tools come with it.
         needs.avatar |= tools_run.own_groups.contains(&orbiters_n4n0_core::intents::route::ToolGroup::Avatar);
-        let told = fence.moment(needs.avatar).told(needs);
+        let told = fence.moment(needs).told(needs);
         // What it is told was written by others: it changes nothing without a yes from here on.
         tools_run.taint |= told.taint;
         heard = told.notes;

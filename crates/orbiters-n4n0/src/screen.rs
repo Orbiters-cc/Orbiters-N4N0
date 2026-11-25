@@ -2234,13 +2234,9 @@ pub(crate) fn synced(rt: &mut N4n0Runtime, now: Instant) -> Vec<Message> {
     // Full pictures (contracts Docs/n4n0-picture.md): a chunk between its steps finishes first; else, once the screen's page
     // went whole (its blocks only go again) or the screen wants nothing, three turns of every four, when the card waits for
     // nothing.
-    let screen_settled = !screen_wants
-        || (!s.close_everyone && !screen_mid && {
-            let pictures = &s.pictures;
-            let frame = Frame::public(&s.menu, Flags { loading: s.menu.loading(), pictures: s.pictures_diagnostics, ..Default::default() }, s.thumbnail, &|id: &str| thumbnail(pictures, id));
-            s.everyone.as_ref().unwrap().settled(&frame.bank)
-        });
-    let picture_goes = pictures_want && (picture_mid || (!screen_mid && !card_mid && !card_wants && screen_settled && (!screen_wants || s.picture_turns % 4 != 3)));
+    let mut frame = None;
+    let mut screen_settled = || !s.close_everyone && s.everyone.as_ref().unwrap().settled(&frame.get_or_insert_with(|| everyones(s)).bank);
+    let picture_goes = pictures_want && (picture_mid || (!screen_mid && !card_mid && !card_wants && (!screen_wants || (s.picture_turns % 4 != 3 && screen_settled()))));
     if picture_goes {
         s.screen_turn = false;
         let step_now = s.picture_everyone.as_mut().unwrap().step();
@@ -2300,10 +2296,8 @@ pub(crate) fn synced(rt: &mut N4n0Runtime, now: Instant) -> Vec<Message> {
         s.card_turn = true;
         screen::synced_close()
     } else {
-        // Everyone else's frame: no hover nor press, no friend named. A new page clears their memory first.
-        let pictures = &s.pictures;
-        let flags = Flags { loading: s.menu.loading(), pictures: s.pictures_diagnostics, ..Default::default() };
-        let frame = Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(pictures, id));
+        // A new page clears their memory first. (The frame looked at above, when one was: N4N-24.)
+        let frame = frame.unwrap_or_else(|| everyones(s));
         let send = s.everyone.as_mut().unwrap().step(&frame.bank);
         if send.moves_to_block() {
             // The pointer on the screen's block: the card's next block rests first; the card goes next.
@@ -2325,6 +2319,12 @@ pub(crate) fn synced(rt: &mut N4n0Runtime, now: Instant) -> Vec<Message> {
         sender.hold_until(now + wait);
     }
     out
+}
+
+/// Everyone else's frame: no hover nor press, no friend named.
+fn everyones(s: &ScreenRuntime) -> Frame {
+    let flags = Flags { loading: s.menu.loading(), pictures: s.pictures_diagnostics, ..Default::default() };
+    Frame::public(&s.menu, flags, s.thumbnail, &|id: &str| thumbnail(&s.pictures, id))
 }
 
 /// Thumbnail `id`, when the screen has it.

@@ -1391,10 +1391,30 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
         }
         meter.turn(busy);
-        if let Some(turns) = meter.take(Instant::now()) {
+        if let Some(mut turns) = meter.take(Instant::now()) {
+            turns.holds = held_bytes(&t).into_iter().map(|(what, bytes)| (what.to_string(), crate::perf::megabytes(bytes))).collect();
             backend.perf_turns(turns);
         }
     }
+}
+
+/// Bytes of textures each set of fetched pictures keeps here, but for what shows: about fifty thumbnails, three sheets of them. The window keeps twice that: it shows more of them at once,
+/// and is not beside a game in a headset.
+const PICTURES_HOLD: usize = 24 << 20;
+
+/// The bytes of every texture of an interface.
+fn texture_bytes(ctx: &egui::Context) -> u64 {
+    ctx.tex_manager().read().allocated().map(|(_, meta)| meta.bytes_used() as u64).sum()
+}
+
+/// What this process's caches hold, in bytes: the pictures of the menus and the captures in 3D, each by its own name in the memory log
+/// ([`crate::perf::MEMORY_LOG`]), so that a process of gigabytes says what they are (DOV-1).
+fn held_bytes(t: &Teardown) -> Vec<(&'static str, u64)> {
+    let mut out = t.menu.worlds.held_bytes();
+    if let Some(orbit) = t.orbit.as_ref() {
+        out.extend(orbit.held_bytes());
+    }
+    out
 }
 
 /// A CPU painter for the tab with its backdrop painted once (it never changes).

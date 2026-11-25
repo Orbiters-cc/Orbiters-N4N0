@@ -1441,6 +1441,8 @@ pub struct SheetPicture {
     top: u32,
     /// The page is in it.
     pub(super) page: bool,
+    /// The number of the worker's picture its overlay was last handed, with what `changed` still has to be of it; 0 where it shows something else.
+    holds: u64,
     /// What changed since it was last shown.
     pub(super) changed: Option<[u32; 4]>,
 }
@@ -1449,36 +1451,28 @@ impl SheetPicture {
     pub fn pixels(&self) -> &[u8] { self.complete_pixels.as_ref().map_or(self.pixels.as_slice(), |p| p.as_slice()) }
     /// Accept the worker's complete picture without compositing or copying pixels on input.
     pub(super) fn adopt(&mut self, picture: super::page_painter::CompleteSheet) {
-        let (pixels, px, top) = picture;
-        self.complete_pixels = Some(pixels); self.px = px; self.top = top; self.page = true;
-        self.changed = Some([0, 0, px[0], px[1]]);
+        let super::page_painter::CompleteSheet { pixels, px, top, change } = picture;
+        // Only what the picture held lacks of it; all of it where that is not the one it was painted from.
+        let holds = if self.complete_pixels.is_some() && self.px == px { self.holds } else { 0 };
+        let part = change.to_hand_on(holds, px);
+        self.complete_pixels = Some(pixels); self.px = px; self.top = top; self.page = true; self.holds = change.number;
+        self.changed = super::page_painter::either(self.changed, part);
+    }
+    /// Its overlay shows something else, or nothing: the next picture is handed on whole.
+    pub(super) fn leave(&mut self) {
+        self.page = false;
+        self.holds = 0;
     }
     /// The whole again in `rect` (x0, y0, x1, y1 of the back's pixels), and it is to be shown.
     fn redo(&mut self, rect: [u32; 4]) {
-        let w = self.px[0] as usize;
-        let page_rows = self.top..self.top + if self.page { self.page_px[1] } else { 0 };
-        for y in rect[1]..rect[3].min(self.px[1]) {
-            let (a, b) = ((y as usize * w + rect[0] as usize) * 4, (y as usize * w + rect[2].min(self.px[0]) as usize) * 4);
-            if !page_rows.contains(&y) {
-                self.pixels[a..b].copy_from_slice(&self.under[a..b]);
-                continue;
-            }
-            let from = (y - self.top) as usize * w * 4 + rect[0] as usize * 4;
-            for ((out, under), over) in self.pixels[a..b].chunks_exact_mut(4).zip(self.under[a..b].chunks_exact(4)).zip(self.over[from..from + (b - a)].chunks_exact(4)) {
-                // Pages are opaque across almost all their area. Preserve the exact blend
-                // at their cut corners and holes, and copy an opaque pixel directly.
-                if over[3] == 255 { out.copy_from_slice(over); continue; }
-                let left = 255 - over[3] as u32;
-                for c in 0..4 {
-                    out[c] = (over[c] as u32 + (under[c] as u32 * left + 127) / 255).min(255) as u8;
-                }
-            }
-        }
+        let page_px = if self.page { self.page_px } else { [self.px[0], 0] };
+        compose_part(&mut self.pixels, &self.under, self.px, &self.over, page_px, self.top, rect);
         self.changed = Some(self.changed.map_or(rect, |c| [c[0].min(rect[0]), c[1].min(rect[1]), c[2].max(rect[2]), c[3].max(rect[3])]));
     }
 
     /// The back's picture changed in `changed`.
     pub fn back(&mut self, back: &[u8], px: [u32; 2], page_top: u32, changed: [u32; 4]) {
+        self.holds = 0;
         if self.complete_pixels.take().is_some() || self.px != px {
             self.px = px;
             self.pixels = vec![0; back.len()];
@@ -1514,19 +1508,34 @@ impl SheetPicture {
     }
 }
 
-/// The whole sheet as one picture, from its back's and its page's: for the renders and the tests, as [`SheetPicture`] makes it.
+/// `rect` (x0, y0, x1, y1 of the back's pixels) of the sheet's one picture written to `out`: its back with its page over it, `top` rows down, as wide as it.
+pub(super) fn compose_part(out: &mut [u8], back: &[u8], px: [u32; 2], page: &[u8], page_px: [u32; 2], top: u32, rect: [u32; 4]) {
+    let w = px[0] as usize;
+    let page_rows = top..top + page_px[1];
+    for y in rect[1]..rect[3].min(px[1]) {
+        let (a, b) = ((y as usize * w + rect[0] as usize) * 4, (y as usize * w + rect[2].min(px[0]) as usize) * 4);
+        if !page_rows.contains(&y) {
+            out[a..b].copy_from_slice(&back[a..b]);
+            continue;
+        }
+        let from = (y - top) as usize * w * 4 + rect[0] as usize * 4;
+        for ((out, under), over) in out[a..b].chunks_exact_mut(4).zip(back[a..b].chunks_exact(4)).zip(page[from..from + (b - a)].chunks_exact(4)) {
+            // Pages are opaque across almost all their area. Preserve the exact blend
+            // at their cut corners and holes, and copy an opaque pixel directly.
+            if over[3] == 255 { out.copy_from_slice(over); continue; }
+            let left = 255 - over[3] as u32;
+            for c in 0..4 {
+                out[c] = (over[c] as u32 + (under[c] as u32 * left + 127) / 255).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// The whole sheet as one picture, from its back's and its page's: for the renders and the tests, as [`SheetPicture`] and the worker make it.
 pub fn compose_sheet(back: &[u8], back_px: [u32; 2], page: &[u8], page_px: [u32; 2], top: u32) -> Vec<u8> {
     let mut pixels = back.to_vec();
     if back_px[0] != page_px[0] || top + page_px[1] > back_px[1] { return pixels; }
-    let width = back_px[0] as usize * 4;
-    for y in 0..page_px[1] as usize {
-        let (dst, src) = ((y + top as usize) * width, y * width);
-        for (out, over) in pixels[dst..dst + width].chunks_exact_mut(4).zip(page[src..src + width].chunks_exact(4)) {
-            if over[3] == 255 { out.copy_from_slice(over); continue; }
-            let left = 255 - over[3] as u32;
-            for c in 0..4 { out[c] = (over[c] as u32 + (out[c] as u32 * left + 127) / 255).min(255) as u8; }
-        }
-    }
+    compose_part(&mut pixels, back, back_px, page, page_px, top, [0, 0, back_px[0], back_px[1]]);
     pixels
 }
 
@@ -1809,6 +1818,11 @@ impl OrbitVr {
     }
 
     /// A turn of the overlay's loop.
+    /// What its caches hold, in bytes ([`super::super::held_bytes`]).
+    pub fn held_bytes(&self) -> Vec<(&'static str, u64)> {
+        self.panels.held_bytes()
+    }
+
     /// The page painter panicked too often: the session is to end (verify2).
     pub fn painter_failed(&self) -> bool {
         self.panels.stage.painter.fatal()
@@ -2398,7 +2412,7 @@ impl OrbitVr {
         let worker_sheet = self.panels.stage.async_pages && page_at.is_some();
         let sheet = &mut self.sheet;
         if page_at.is_none() {
-            sheet.page = false;
+            sheet.leave();
         }
         let mut not_shown = Vec::new();
         self.panels.paint(cx.snap, |panel, changed| {
@@ -2471,7 +2485,7 @@ impl OrbitVr {
 
     /// Everything down and the trigger free, at once.
     fn close(&mut self, cx: &mut Cx<'_, '_>) {
-        self.sheet.page = false;
+        self.sheet.leave();
         self.block.release();
         cx.actions.set_block([false; 2]);
         self.panels.set_open(None, Vec::new(), cx.snap);

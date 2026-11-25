@@ -1897,6 +1897,14 @@ pub fn forget_pictures() {
     COLOURS.with(|l| l.borrow_mut().clear());
 }
 
+/// What the frame just painted keeps of its colours, where its look would change them: none in a look that changes none.
+pub fn kept_colours() -> Vec<Rect> {
+    let Some((_, pictures)) = captured_finish_style() else { return Vec::new() };
+    let mut out = if pictures { PICTURES.with(|l| l.borrow().clone()) } else { Vec::new() };
+    COLOURS.with(|l| out.extend_from_slice(&l.borrow()));
+    out
+}
+
 /// How luminance maps to the retro look's one colour: from nearly black through the colour to nearly white, as a phosphor does.
 pub fn retro_ramp(color: [u8; 3]) -> Vec<[u8; 3]> {
     let mix = |a: f32, b: f32, t: f32| (a + (b - a) * t).round().clamp(0.0, 255.0) as u8;

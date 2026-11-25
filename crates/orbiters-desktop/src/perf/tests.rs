@@ -120,6 +120,19 @@ fn the_meter_sums_parts_per_second_and_waits_for_its_window() {
     assert!(again.parts.is_empty());
 }
 
+/// DOV-1: the memory log says what the overlay's caches hold, by name, and a log of a version before reads with none.
+#[test]
+fn the_memory_log_says_whose_the_overlay_s_memory_is() {
+    let turns = ProcessTurns { process: "overlay".into(), holds: vec![("captures".into(), megabytes(60 << 20)), ("pages".into(), 5.0)], ..Default::default() };
+    let line = Line { turns: vec![turns, ProcessTurns { process: "orbit-desktop".into(), ..Default::default() }], ..Default::default() };
+    let memory = MemoryLine::of(&line, 1, &[]);
+    assert_eq!(memory.holds, vec![("captures".to_string(), 60.0), ("pages".to_string(), 5.0)]);
+    let written = serde_json::to_string(&memory).unwrap();
+    assert!(written.contains(r#""holds":[["captures",60.0],["pages",5.0]]"#), "{written}");
+    let before: MemoryLine = serde_json::from_str(r#"{"at":"x","mode":"vr","ram_free_mb":1.0,"ours":[]}"#).unwrap();
+    assert!(before.holds.is_empty());
+}
+
 #[test]
 fn the_log_stays_small() {
     let dir = std::env::temp_dir().join(format!("orbiters-perf-log-{}", std::process::id()));

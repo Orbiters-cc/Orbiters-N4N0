@@ -531,3 +531,6 @@ fn every_side_effect_of_the_assistant_is_behind_the_fence() {
 
 #[path = "tests_fix3.rs"]
 mod fix3;
+
+#[path = "tests_1124.rs"]
+mod review_1124;

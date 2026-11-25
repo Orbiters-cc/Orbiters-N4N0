@@ -132,15 +132,22 @@ pub fn alike(a: &str, b: &str) -> f32 {
     if a.is_empty() || b.is_empty() {
         return if a == b { 1.0 } else { 0.0 };
     }
-    let mut prev = vec![0u16; b.len() + 1];
+    let mut row = vec![0u16; b.len() + 1];
     for &x in &a {
-        let mut cur = vec![0u16; b.len() + 1];
+        // What the row above had one column before.
+        let mut corner = 0;
         for (j, &y) in b.iter().enumerate() {
-            cur[j + 1] = if x == y { prev[j] + 1 } else { prev[j + 1].max(cur[j]) };
+            let above = row[j + 1];
+            row[j + 1] = if x == y { corner + 1 } else { above.max(row[j]) };
+            corner = above;
         }
-        prev = cur;
     }
-    2.0 * prev[b.len()] as f32 / (a.len() + b.len()) as f32
+    2.0 * row[b.len()] as f32 / (a.len() + b.len()) as f32
+}
+
+/// Whether two keys are one line's: the same, or read a little differently.
+fn one_line(a: &str, b: &str) -> bool {
+    a == b || alike(a, b) >= 0.75
 }
 
 /// How far two placed lines may be and still be one line: half the line's width, and more further away (a distance
@@ -249,9 +256,9 @@ impl Tracker {
                 .enumerate()
                 .filter(|(i, _)| !matched[*i])
                 .filter_map(|(i, t)| {
+                    // (How alike they read is worked out only for lines as near.)
                     let d = geometry::norm(sub(t.placed.centre(), s.placed.centre()));
-                    let same = t.key == k || alike(&t.key, &k) >= 0.75;
-                    (same && d < tolerance(&t.placed, &s.placed)).then_some((i, d))
+                    (d < tolerance(&t.placed, &s.placed) && one_line(&t.key, &k)).then_some((i, d))
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             match best {
@@ -348,18 +355,17 @@ impl Tracker {
     fn reanchor(&self, sightings: &[Sighting]) -> Followed {
         // Each: where the anchors had it, where it was read, how far the sticks moved the player since it was confirmed.
         let mut pairs: Vec<(V3, V3, [f32; 2])> = Vec::new();
-        for s in sightings.iter().filter(|s| s.placed.measured) {
-            let k = key(&s.text);
-            let same = |text: &str| text == k || alike(text, &k) >= 0.75;
-            if sightings.iter().filter(|o| same(&key(&o.text))).count() != 1 {
-                continue;
-            }
+        let keys: Vec<String> = sightings.iter().map(|s| key(&s.text)).collect();
+        for (n, s) in sightings.iter().enumerate().filter(|(_, s)| s.placed.measured) {
+            let k = &keys[n];
             let since = |t: &Track| [(self.moved[0] - t.moved_at[0]).max(0.0), (self.moved[1] - t.moved_at[1]).max(0.0)];
             // As far as the sticks' motion since a line was confirmed can have been misjudged: half of what was walked,
             // and half of what was turned at that distance.
             let reach = |t: &Track| 0.25 + 0.5 * (since(t)[0] + since(t)[1] * s.placed.distance);
-            let near: Vec<&Track> = self.tracks.iter().filter(|t| t.placed.measured && same(&t.key) && geometry::norm(sub(t.placed.centre(), s.placed.centre())) < reach(t)).collect();
-            if let [t] = near[..] {
+            let near: Vec<&Track> = self.tracks.iter().filter(|t| t.placed.measured && geometry::norm(sub(t.placed.centre(), s.placed.centre())) < reach(t) && one_line(&t.key, k)).collect();
+            // Alone of its text in the look.
+            let alone = || !keys.iter().enumerate().any(|(m, o)| m != n && one_line(o, k));
+            if let Some(t) = near.first().filter(|_| near.len() == 1 && alone()) {
                 pairs.push((t.placed.centre(), s.placed.centre(), since(t)));
             }
         }
@@ -641,6 +647,23 @@ mod tests {
     fn misreads_of_one_line_are_one_line() {
         assert!(alike("Добро пожаловать", "Добро пожаловат") > 0.9);
         assert!(alike("出口はこちら", "入口はあちら") < 0.75);
+        // The longest common subsequence, worked out whole.
+        let whole = |a: &str, b: &str| {
+            let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+            let mut t = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+            for i in 0..a.len() {
+                for j in 0..b.len() {
+                    t[i + 1][j + 1] = if a[i] == b[j] { t[i][j] + 1 } else { t[i][j + 1].max(t[i + 1][j]) };
+                }
+            }
+            2.0 * t[a.len()][b.len()] as f32 / (a.len() + b.len()) as f32
+        };
+        let texts = ["abcabba", "cbabac", "aaaa", "a", "出口はこちら", "入口はあちら", "Добропожаловать", "ябод", "abcabbaabcabba"];
+        for a in texts {
+            for b in texts {
+                assert_eq!(alike(a, b), whole(a, b), "{a} {b}");
+            }
+        }
         let mut t = Tracker::default();
         t.update(0.0, vec![seen("Добро пожаловат", 0.0)], &|_| Seen::Open);
         let mut better = seen("Добро пожаловать", 0.01);

@@ -641,7 +641,7 @@ the part that must be this service's own (the checks before anything else) is mo
 
 ## The rules, and where they live
 
-- **Only loopback, a token, and its own name.** `127.0.0.1` only. A random token per install, kept with DPAPI (`vrchat-bridge.dat`). `Host` must be
+- **Only loopback, a token, and its own name.** `127.0.0.1` only. A random token per install, kept sealed (`vrchat-bridge.dat`: DPAPI on Windows, a key of the login keychain on a Mac). `Host` must be
   this listener's, against DNS rebinding; an `Origin` other than its own gets 403; `application/json` only; no CORS header ever. `bridge/mcp.rs`.
 - **Nothing listens unless both allow.** `bridge/keeper.rs`. It also stays closed when the person cannot be heard or the guard cannot start.
 - **Only the game it started.** A VRChat the person started is theirs: not moved, not looked at, not closed. `tools.rs`, `ours`.

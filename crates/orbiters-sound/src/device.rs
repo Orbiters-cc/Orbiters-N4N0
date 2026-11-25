@@ -234,9 +234,25 @@ impl Playout {
         Self { buffering, target: buffering.start, primed: false, calm: 0, scratch: Vec::new() }
     }
 
-    /// Fills `out` (interleaved stereo) from `queue` (mono).
-    fn fill(&mut self, queue: &mut VecDeque<f32>, out: &mut [f32]) {
+    /// Fills `out` (interleaved stereo) from `queue` (mono), locked only while what plays is taken out of it: whoever fills it never
+    /// waits for the rest (N4N-18).
+    fn fill(&mut self, queue: &Mutex<VecDeque<f32>>, out: &mut [f32]) {
         let frames = out.len() / 2;
+        let stretched = self.take(&mut queue.lock().unwrap(), frames);
+        if stretched {
+            stretch(&mut self.scratch, frames);
+        }
+        // (Nothing while it fills, less than asked for where it ran dry.)
+        let sound = self.scratch.iter().copied().chain(std::iter::repeat(0.0));
+        for (frame, v) in out.as_chunks_mut::<2>().0.iter_mut().zip(sound) {
+            frame[0] = v;
+            frame[1] = v;
+        }
+    }
+
+    /// Takes out of `queue` what plays in the next `frames`; whether it is to be made that long.
+    fn take(&mut self, queue: &mut VecDeque<f32>, frames: usize) -> bool {
+        self.scratch.clear();
         if queue.len() > self.buffering.keep {
             // A backlog: all but the target goes, the oldest first.
             let excess = queue.len() - self.target;
@@ -244,22 +260,17 @@ impl Playout {
         }
         if !self.primed {
             if queue.len() < self.target.max(frames) {
-                out.fill(0.0);
-                return;
+                return false;
             }
             self.primed = true;
         }
         if queue.len() < frames {
             // Ran dry: what is left plays, then silence until the target is back (a little more of it from now on).
-            for frame in out.as_chunks_mut::<2>().0 {
-                let v = queue.pop_front().unwrap_or(0.0);
-                frame[0] = v;
-                frame[1] = v;
-            }
+            self.scratch.extend(queue.drain(..));
             self.primed = false;
             self.target = (self.target + GROW).min(self.buffering.most);
             self.calm = 0;
-            return;
+            return false;
         }
         self.calm += frames;
         if self.calm >= CALM {
@@ -276,13 +287,8 @@ impl Playout {
         } else {
             frames
         };
-        self.scratch.clear();
         self.scratch.extend(queue.drain(..take.min(queue.len())));
-        stretch(&mut self.scratch, frames);
-        for (frame, &v) in out.as_chunks_mut::<2>().0.iter_mut().zip(&self.scratch) {
-            frame[0] = v;
-            frame[1] = v;
-        }
+        true
     }
 }
 
@@ -646,7 +652,7 @@ mod imp {
             return;
         }
         let mut speak = |render: &mut Option<Render>, trouble: &mut Option<String>| {
-            let failed = render.as_mut().and_then(|r| unsafe { feed(r, &mut |out| playout.fill(&mut playback.lock().unwrap(), out)) }.err());
+            let failed = render.as_mut().and_then(|r| unsafe { feed(r, &mut |out| playout.fill(playback, out)) }.err());
             if let Some(e) = failed {
                 *render = None;
                 *trouble = Some(orbiters_i18n::tr!("the sound output stopped ({error}); opening it again", error = e));
@@ -874,7 +880,7 @@ mod imp {
             return;
         }
         let mut speak = |render: &mut Option<Render>, trouble: &mut Option<String>| {
-            let failed = render.as_mut().and_then(|r| r.feed(&mut |out| playout.fill(&mut playback.lock().unwrap(), out)).err());
+            let failed = render.as_mut().and_then(|r| r.feed(&mut |out| playout.fill(playback, out)).err());
             if let Some(e) = failed {
                 *render = None;
                 *trouble = Some(orbiters_i18n::tr!("the sound output stopped ({error}); opening it again", error = e));
@@ -1002,10 +1008,12 @@ mod tests {
     fn play(p: &mut Playout, queue: &mut VecDeque<f32>, blocks: usize) -> Vec<f32> {
         let mut heard = Vec::new();
         let mut out = vec![0.0; 960];
+        let shared = Mutex::new(std::mem::take(queue));
         for _ in 0..blocks {
-            p.fill(queue, &mut out);
+            p.fill(&shared, &mut out);
             heard.extend(out.as_chunks::<2>().0.iter().map(|f| f[0]));
         }
+        *queue = shared.into_inner().unwrap();
         heard
     }
 

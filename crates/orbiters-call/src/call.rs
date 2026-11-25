@@ -44,6 +44,12 @@ const MIC_MOST: usize = RATE / 2;
 /// Without a sound from the microphone for this long (it failed, or went away), silence goes out in its place: the
 /// other side keeps hearing a live call.
 const MIC_SILENT_AFTER: Duration = Duration::from_millis(200);
+/// Frames of silence sent at once for the time before (0.4 s): of a longer stall (a computer that slept, a starved task) only its end is
+/// sent, as if the rest had been lost.
+const SILENCE_MOST: u32 = 20;
+/// What a stall is at most told as lost: the other side ends a call it hears nothing of for 15 s.
+const LOST_MOST: u32 = 1000;
+const FRAME_TIME: Duration = Duration::from_millis(20);
 
 /// What a call tells its owner, tagged with the call's number.
 #[derive(Debug)]
@@ -223,6 +229,14 @@ impl PeerConnectionEventHandler for Handler {
             }
         });
     }
+}
+
+/// The frames of silence due at `now` since `last_sound`, which moves on by them, and those before them left out.
+fn silence(last_sound: &mut Instant, now: Instant) -> (u32, u32) {
+    let due = (now.saturating_duration_since(*last_sound).as_millis() / FRAME_TIME.as_millis()) as u32;
+    *last_sound += FRAME_TIME * due;
+    let sent = due.min(SILENCE_MOST);
+    (sent, (due - sent).min(LOST_MOST))
 }
 
 fn random_u32() -> u32 {
@@ -415,6 +429,7 @@ impl Call {
             let mut sound = Vec::with_capacity(FRAME * 4);
             let mut failed = false;
             let mut last_sound = Instant::now();
+            let mut lost = 0;
             loop {
                 let woken = tokio::time::timeout(MIC_SILENT_AFTER, mic.ready.notified()).await.is_ok();
                 sound.clear();
@@ -423,16 +438,17 @@ impl Call {
                     last_sound = Instant::now();
                 } else if !woken {
                     // Nothing from the microphone: the time it was silent goes out as silence.
-                    let gap = last_sound.elapsed().as_secs_f64();
-                    sound.resize((gap * RATE as f64) as usize / FRAME * FRAME, 0.0);
-                    last_sound += Duration::from_secs_f64(sound.len() as f64 / RATE as f64);
+                    let (due, before) = silence(&mut last_sound, Instant::now());
+                    sound.resize(due as usize * FRAME, 0.0);
+                    lost = before as u16;
                 }
                 encoder.push(&sound, muted.load(Ordering::Relaxed), |packet, peak| {
                     Levels::note(&levels.mic, peak);
                     packets.push(Bytes::copy_from_slice(packet));
                 });
                 for data in packets.drain(..) {
-                    let sample = Sample { data, duration: Duration::from_millis(20), ..Sample::new(Instant::now()) };
+                    // The call's clock goes on across what was left out.
+                    let sample = Sample { data, duration: FRAME_TIME, prev_dropped_packets: std::mem::take(&mut lost), ..Sample::new(Instant::now()) };
                     if let Err(e) = track.sample_writer(ssrc, payload_type).write_sample(&sample).await {
                         // Once is enough (a closing connection refuses every packet).
                         if !std::mem::replace(&mut failed, true) {
@@ -452,5 +468,28 @@ impl Call {
         if let Err(e) = self.pc.close().await {
             eprintln!("call: close: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N4N-19: a sender that stalled sends no more than a moment of silence when it goes on, and then as much as time passes.
+    #[test]
+    fn a_stall_is_not_sent_as_silence_after_it() {
+        let start = Instant::now();
+        let mut last = start;
+        // As it goes: the microphone gives nothing, 200 ms at a time.
+        for i in 1..=10 {
+            assert_eq!(silence(&mut last, start + MIC_SILENT_AFTER * i), (10, 0));
+        }
+        // Eight seconds' stall, then as before: what was said is as long as what passed.
+        let after = start + Duration::from_secs(10);
+        assert_eq!(silence(&mut last, after), (20, 380));
+        assert_eq!(silence(&mut last, after + MIC_SILENT_AFTER), (10, 0));
+        // A computer that slept.
+        assert_eq!(silence(&mut last, after + Duration::from_secs(3600)), (20, LOST_MOST));
+        assert_eq!(silence(&mut last, after + Duration::from_secs(3600) + MIC_SILENT_AFTER), (10, 0));
     }
 }

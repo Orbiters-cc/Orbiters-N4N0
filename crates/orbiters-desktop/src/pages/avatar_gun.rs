@@ -77,15 +77,15 @@ fn status(cx: &Cx) -> (&'static str, egui::Color32) {
     let snap = cx.snap;
     let gun = &snap.avatar_gun;
     if snap.settings.avatar_gun.loaded.is_none() {
-        (tr("Not loaded: choose an avatar."), theme::FG_3)
+        (tr("Not loaded: choose an avatar."), theme::fg_3())
     } else if !gun.gun {
-        (tr("Your avatar has no avatar gun. Add it in Orbiters' My Avatar."), theme::FG_3)
+        (tr("Your avatar has no avatar gun. Add it in Orbiters' My Avatar."), theme::fg_3())
     } else if snap.account.state.username().is_none() {
         (tr("Sign in to Orbiters to fire it."), theme::WARN)
     } else if gun.loaded {
         (tr("Loaded. Point at someone and pull the trigger."), theme::OK)
     } else {
-        (tr("Loading… the gun shows it when it's ready."), theme::FG_3)
+        (tr("Loading… the gun shows it when it's ready."), theme::fg_3())
     }
 }
 
@@ -106,8 +106,8 @@ fn thumb(p: &egui::Painter, rect: Rect, radius: f32, texture: Option<TextureId>)
     match texture {
         Some(id) => orbiters_ui::paint::squircle_texture(p, rect, radii, id, crate::avatar_gun_ui::cover_uv(rect.size(), 4.0 / 3.0), egui::Color32::WHITE),
         None => {
-            orbiters_ui::paint::fill_convex(p, &orbiters_ui::paint::squircle_points_corners(rect, radii), |_| theme::INK_750);
-            widgets::icon(p, rect.center(), icons::USER, (rect.height() * 0.32).min(34.0), theme::FG_4);
+            orbiters_ui::paint::fill_convex(p, &orbiters_ui::paint::squircle_points_corners(rect, radii), |_| theme::ink_750());
+            widgets::icon(p, rect.center(), icons::USER, (rect.height() * 0.32).min(34.0), theme::fg_4());
         }
     }
 }
@@ -127,7 +127,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         let texture = loaded.as_ref().and_then(|l| picture(state, &ctx, cx, &l.id, &l.thumbnail));
         thumb(ui.painter(), pic, 12.0, texture);
         if loaded.is_some() {
-            ui.painter().rect_stroke(pic.expand(2.0), theme::radius(14.0), egui::Stroke::new(2.0, if snap.avatar_gun.loaded { theme::ACCENT } else { theme::white(0.25) }), egui::StrokeKind::Middle);
+            ui.painter().rect_stroke(pic.expand(2.0), theme::radius(14.0), egui::Stroke::new(2.0, if snap.avatar_gun.loaded { theme::accent() } else { theme::white(0.25) }), egui::StrokeKind::Middle);
         }
         let choose = Button::new(tr(CHOOSE)).icon(icons::CROSSHAIR).variant(Variant::Primary).size(Size::Sm);
         let bw = choose.desired_width(ui);
@@ -149,9 +149,9 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             widgets::segmented(ui, "n4n0-avatar-gun-allow", &mut allow, &options, true);
         });
         widgets::separator(ui);
-        let g = ui.painter().layout_job(Txt::new(tr(HOW), 12.0).color(theme::FG_3).line_height(16.0).job(ui.available_width()));
+        let g = ui.painter().layout_job(Txt::new(tr(HOW), 12.0).color(theme::fg_3()).line_height(16.0).job(ui.available_width()));
         let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-        ui.painter().galley(r.min, g, theme::FG_3);
+        ui.painter().galley(r.min, g, theme::fg_3());
     });
     if allow != snap.settings.avatar_gun.allow {
         let mut changed = snap.settings.clone();
@@ -193,7 +193,7 @@ pub fn detail(ctx: &Context, cx: &mut Cx, state: &mut State) {
         if backdrop.clicked() && !rect.contains(backdrop.interact_pointer_pos().unwrap_or_default()) {
             close = true;
         }
-        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::INK_950, 0.7 * morph::smoothstep(0.1, 0.6, k)));
+        ui.painter().with_clip_rect(window).rect_filled(window, 0.0, theme::alpha(theme::ink_950(), 0.7 * morph::smoothstep(0.1, 0.6, k)));
         ui.multiply_opacity(morph::shape_alpha_by(t, 0.2));
         widgets::panel(ui.painter(), rect, lerp(10.0, 24.0));
         if content <= 0.0 {
@@ -215,7 +215,7 @@ pub fn detail(ctx: &Context, cx: &mut Cx, state: &mut State) {
         let texture = shown.as_ref().and_then(|(id, _, url)| picture(state, ctx, cx, id, url));
         thumb(cu.painter(), head_pic, 10.0, texture);
         if shown.is_some() {
-            cu.painter().rect_stroke(head_pic.expand(2.0), theme::radius(12.0), egui::Stroke::new(2.0, if snap.avatar_gun.loaded { theme::ACCENT } else { theme::white(0.25) }), egui::StrokeKind::Middle);
+            cu.painter().rect_stroke(head_pic.expand(2.0), theme::radius(12.0), egui::Stroke::new(2.0, if snap.avatar_gun.loaded { theme::accent() } else { theme::white(0.25) }), egui::StrokeKind::Middle);
         }
         let x = head_pic.right() + 16.0;
         let title = shown.as_ref().map_or_else(|| tr(TITLE).to_string(), |(_, name, _)| tr!("Loaded: {name}", name = name));
@@ -254,12 +254,12 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, chosen: Option<&str>) -> Op
     let area = ui.max_rect();
     let middle = |ui: &mut Ui, glyph: &str, title: &str, words: &str| {
         let c = area.center() - vec2(0.0, 40.0);
-        widgets::icon(ui.painter(), c - vec2(0.0, 34.0), glyph, 44.0, theme::FG_4);
+        widgets::icon(ui.painter(), c - vec2(0.0, 34.0), glyph, 44.0, theme::fg_4());
         widgets::text(ui.painter(), c + vec2(0.0, 12.0), Align2::CENTER_CENTER, &Txt::new(title, 18.0).weight(weight::SEMIBOLD));
-        let mut job = Txt::new(words, 13.0).color(theme::FG_3).line_height(18.0).job(520.0);
+        let mut job = Txt::new(words, 13.0).color(theme::fg_3()).line_height(18.0).job(520.0);
         job.halign = egui::Align::Center;
         let g = ui.painter().layout_job(job);
-        ui.painter().galley(pos2(c.x, c.y + 34.0), g, theme::FG_3);
+        ui.painter().galley(pos2(c.x, c.y + 34.0), g, theme::fg_3());
         Rect::from_center_size(pos2(c.x, c.y + 34.0 + 70.0), vec2(220.0, 34.0))
     };
     let listed = match state.store.stage().clone() {
@@ -345,14 +345,14 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, chosen: Option<&str>) -> Op
                         thumb(ui.painter(), pic, 12.0, texture);
                         let on = chosen == Some(avatar.id.as_str());
                         if on {
-                            ui.painter().rect_stroke(pic.expand(1.5), theme::radius(13.5), egui::Stroke::new(2.5, theme::ACCENT), egui::StrokeKind::Middle);
+                            ui.painter().rect_stroke(pic.expand(1.5), theme::radius(13.5), egui::Stroke::new(2.5, theme::accent()), egui::StrokeKind::Middle);
                             let badge = pos2(pic.right() - 14.0, pic.top() + 14.0);
-                            ui.painter().circle_filled(badge, 10.0, theme::ACCENT);
-                            widgets::icon(ui.painter(), badge, icons::CHECK, 12.0, theme::INK_950);
+                            ui.painter().circle_filled(badge, 10.0, theme::accent());
+                            widgets::icon(ui.painter(), badge, icons::CHECK, 12.0, theme::ink_950());
                         } else if lift > 0.01 {
-                            ui.painter().rect_stroke(pic, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.7 * lift)), egui::StrokeKind::Inside);
+                            ui.painter().rect_stroke(pic, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.7 * lift)), egui::StrokeKind::Inside);
                         }
-                        let colour = if on { theme::ACCENT } else { theme::FG };
+                        let colour = if on { theme::accent() } else { theme::fg() };
                         widgets::text_truncated(ui.painter(), pos2(r.left() + 2.0, pic.bottom() + 16.0), Align2::LEFT_CENTER, &Txt::new(&avatar.name, 13.0).weight(weight::MEDIUM).color(colour), r.width() - 4.0);
                         if response.clicked() && !on {
                             pressed = Some(avatar.clone());
@@ -360,12 +360,12 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, chosen: Option<&str>) -> Op
                     }
                 }
                 (Some(_), _) => {
-                    widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(tr(picker::EMPTY_GROUP), 12.5).color(theme::FG_3));
+                    widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(tr(picker::EMPTY_GROUP), 12.5).color(theme::fg_3()));
                     ui.add_space(20.0);
                 }
                 (None, Some(e)) => {
                     let words = picker::failure(e);
-                    widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(&words, 12.5).color(theme::FG_3));
+                    widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(&words, 12.5).color(theme::fg_3()));
                     ui.add_space(20.0);
                 }
                 (None, None) => grey(ui, columns),

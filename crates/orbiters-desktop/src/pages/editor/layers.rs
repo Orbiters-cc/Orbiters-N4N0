@@ -111,7 +111,7 @@ fn add_grid(ed: &mut Editor, ui: &mut Ui, open: f32, title: &str) {
         Some(s) => tr!("Adds to {name}", name = s.name),
         None => tr("Adds to the whole picture").to_string(),
     };
-    widgets::text(gu.painter(), pos2(r.left() + 4.0, r.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(to, 11.5).color(theme::FG_3));
+    widgets::text(gu.painter(), pos2(r.left() + 4.0, r.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(to, 11.5).color(theme::fg_3()));
     let tw = (w - 6.0) / cols as f32;
     for (i, kind) in Kind::ALL.iter().enumerate() {
         let cell = Rect::from_min_size(pos2(r.left() + (i % cols) as f32 * (tw + 6.0), r.top() + 24.0 + (i / cols) as f32 * (tile_h + 6.0)), vec2(tw, tile_h));
@@ -203,9 +203,9 @@ fn row_frame(ui: &mut Ui, id: Id, r: Rect, selected: bool, sense: Sense) -> egui
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let chosen = anim::toggle(ui.ctx(), id.with("chosen"), selected, Spring::SOFT);
     let p = ui.painter();
-    p.rect_filled(r, theme::radius(12.0), theme::mix(theme::white(0.035 * hover), theme::alpha(theme::ACCENT, 0.13), chosen));
+    p.rect_filled(r, theme::radius(12.0), theme::mix(theme::white(0.035 * hover), theme::alpha(theme::accent(), 0.13), chosen));
     if chosen > 0.01 {
-        p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.45 * chosen)), egui::StrokeKind::Inside);
+        p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.0, theme::alpha(theme::accent(), 0.45 * chosen)), egui::StrokeKind::Inside);
     }
     resp
 }
@@ -220,7 +220,7 @@ fn row_text(ui: &Ui, r: Rect, left: f32, glyph: &str, color: egui::Color32, titl
     let x = tile.right() + 10.0;
     let max = (right - x).max(20.0);
     widgets::text_truncated(p, pos2(x, r.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(title, 13.0).weight(weight::MEDIUM), max);
-    widgets::text_truncated(p, pos2(x, r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_3), max);
+    widgets::text_truncated(p, pos2(x, r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::fg_3()), max);
 }
 
 fn crop_row(ed: &mut Editor, ui: &mut Ui) {
@@ -246,7 +246,7 @@ fn crop_row(ed: &mut Editor, ui: &mut Ui) {
         parts.push(if g.aspect == orbiters_ui::photo::Aspect::Free { tr("cropped").to_string() } else { tr!("cropped {aspect}", aspect = g.aspect.name()) });
     }
     let sub = if parts.is_empty() { tr("The whole picture").to_string() } else { capital(&list(&parts)) };
-    row_text(ui, r, r.left() + 8.0, icons::CROP, theme::ACCENT, tr("Crop and rotate"), &sub, r.right() - 8.0);
+    row_text(ui, r, r.left() + 8.0, icons::CROP, theme::accent(), tr("Crop and rotate"), &sub, r.right() - 8.0);
     if widgets::pressed(&resp.on_hover_cursor(CursorIcon::PointingHand)) {
         ed.selected = if selected { Selected::Nothing } else { Selected::Crop };
     }
@@ -255,17 +255,17 @@ fn crop_row(ed: &mut Editor, ui: &mut Ui) {
 /// A row that only says something (the picture under a plain picture's layers).
 fn picture_row(ui: &mut Ui, title: &str, glyph: &str, sub: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-    row_text(ui, r, r.left() + 8.0, glyph, theme::FG_3, title, sub, r.right() - 8.0);
-    widgets::icon(ui.painter(), pos2(r.right() - 20.0, r.center().y), icons::LOCK_SIMPLE, 13.0, theme::FG_4);
+    row_text(ui, r, r.left() + 8.0, glyph, theme::fg_3(), title, sub, r.right() - 8.0);
+    widgets::icon(ui.painter(), pos2(r.right() - 20.0, r.center().y), icons::LOCK_SIMPLE, 13.0, theme::fg_4());
 }
 
 fn group_row(ui: &mut Ui, title: &str, glyph: &str, sub: &str) {
     ui.add_space(6.0);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
     let p = ui.painter();
-    widgets::icon(p, pos2(r.left() + 16.0, r.center().y), glyph, 14.0, theme::FG_3);
+    widgets::icon(p, pos2(r.left() + 16.0, r.center().y), glyph, 14.0, theme::fg_3());
     widgets::text(p, pos2(r.left() + 32.0, r.center().y - 7.0), Align2::LEFT_CENTER, &Txt::caps(title));
-    widgets::text_truncated(p, pos2(r.left() + 32.0, r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::FG_4), r.width() - 40.0);
+    widgets::text_truncated(p, pos2(r.left() + 32.0, r.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.0).color(theme::fg_4()), r.width() - 40.0);
 }
 
 /// The icon of one of VRChat's layers.
@@ -306,7 +306,7 @@ fn source_row(ed: &mut Editor, ui: &mut Ui, i: usize) {
     let resp = row_frame(ui, id, r, selected, Sense::click());
     let s = &ed.doc.sources[i];
     let sub = if s.opacity < 1.0 { format!("{} · {}", count(s.layers.len()), w::percent(s.opacity)) } else { count(s.layers.len()) };
-    row_text(ui, r, r.left() + 36.0, source_glyph(&s.name), theme::FG_2, &source_name(&s.name), &sub, r.right() - 8.0);
+    row_text(ui, r, r.left() + 36.0, source_glyph(&s.name), theme::fg_2(), &source_name(&s.name), &sub, r.right() - 8.0);
     let mut visible = s.visible;
     eye(ui, id.with("eye"), pos2(r.left() + 20.0, r.center().y), &mut visible);
     ed.doc.sources[i].visible = visible;
@@ -433,7 +433,7 @@ fn stack_rows(ed: &mut Editor, ui: &mut Ui, stack: Option<usize>, indent: f32) {
         let mut lu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(row_id));
         if is_dragged {
             lu.painter().rect_filled(r.translate(vec2(0.0, 4.0)), theme::radius(12.0), theme::black(0.35));
-            lu.painter().rect_filled(r, theme::radius(12.0), theme::INK_750);
+            lu.painter().rect_filled(r, theme::radius(12.0), theme::ink_750());
         }
         let resp = row_frame(&mut lu, row_id, r, selected || is_dragged, Sense::click_and_drag());
         let kind = l.effect.kind();
@@ -455,7 +455,7 @@ fn stack_rows(ed: &mut Editor, ui: &mut Ui, stack: Option<usize>, indent: f32) {
             }
         }
         if selected || resp.hovered() {
-            widgets::icon(lu.painter(), pos2(r.right() - 52.0, r.center().y), icons::DOTS_SIX_VERTICAL, 14.0, theme::FG_4);
+            widgets::icon(lu.painter(), pos2(r.right() - 52.0, r.center().y), icons::DOTS_SIX_VERTICAL, 14.0, theme::fg_4());
             let bin = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(28.0, 28.0));
             if widgets::pressed_fresh(&IconButton::new(icons::TRASH, mark("Remove this layer")).size(28.0, 14.0).danger().id_salt(row_id.with("bin")).show_at(&mut lu, bin)) {
                 ed.selected = Selected::Layer(stack, *id);

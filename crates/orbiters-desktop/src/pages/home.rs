@@ -461,10 +461,10 @@ fn home(ui: &mut Ui, cx: &mut Cx, menu: &Menu, idle: &str, copied: Option<&str>,
         if menu.listening {
             // N4N0 listens: its dot breathes.
             widgets::status_dot(p, pos2(rect.left() + 5.0, y), Tone::Ok, true);
-            let line = Txt::new(layout::text(menu, Content::Status), 13.0).color(theme::ACCENT);
+            let line = Txt::new(layout::text(menu, Content::Status), 13.0).color(theme::accent());
             widgets::text_truncated(p, pos2(rect.left() + 18.0, y), Align2::LEFT_CENTER, &line, rect.width() * 0.6);
         } else {
-            widgets::text_truncated(p, pos2(rect.left(), y), Align2::LEFT_CENTER, &Txt::new(idle, 13.0).color(theme::FG_3), rect.width() * 0.6);
+            widgets::text_truncated(p, pos2(rect.left(), y), Align2::LEFT_CENTER, &Txt::new(idle, 13.0).color(theme::fg_3()), rect.width() * 0.6);
         }
     });
 
@@ -535,11 +535,11 @@ fn tools(ui: &mut Ui, cx: &mut Cx, menu: &Menu, copied: Option<&str>, acts: &mut
         let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SNAPPY);
         let p = ui.painter();
         p.rect_filled(link, theme::radius(11.0), theme::white(0.06 * hover));
-        let ink = theme::mix(theme::FG_3, theme::FG, hover);
+        let ink = theme::mix(theme::fg_3(), theme::fg(), hover);
         widgets::icon(p, pos2(link.left() + 14.0, link.center().y), icons::ARROW_LEFT, 12.0, ink);
         widgets::text(p, pos2(link.left() + 26.0, rect.top() + 7.0), Align2::LEFT_CENTER, &caption.color(ink));
         widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(tr("All tools"), 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
-        let sub = Txt::new(tr("Every tool of N4N0's menu, as on your avatar's screen and in VR"), 13.0).color(theme::FG_3);
+        let sub = Txt::new(tr("Every tool of N4N0's menu, as on your avatar's screen and in VR"), 13.0).color(theme::fg_3());
         widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &sub, rect.width() * 0.8);
         if widgets::activated(&resp) {
             acts.push(Act::Tools(false));
@@ -598,12 +598,12 @@ const CALLS_SOON_TOLD: &str = mark("Calls are coming soon to Orbiters - N4N0. Th
 fn soon_pill(ui: &Ui, r: Rect, alpha: f32, hover: f32) {
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha);
-    let txt = Txt::new(tr(orbiters_n4n0_core::menu::CALLS_SOON), 11.5).weight(weight::SEMIBOLD).color(theme::FG_2);
+    let txt = Txt::new(tr(orbiters_n4n0_core::menu::CALLS_SOON), 11.5).weight(weight::SEMIBOLD).color(theme::fg_2());
     let size = p.layout_job(txt.job(f32::INFINITY)).size();
     let pill = Rect::from_min_size(pos2(r.right() - INSET - size.x - 18.0, r.top() + 24.0), vec2(size.x + 18.0, size.y + 8.0));
-    p.rect_filled(pill, theme::radius(pill.height() / 2.0), theme::INK_800);
+    p.rect_filled(pill, theme::radius(pill.height() / 2.0), theme::ink_800());
     if hover > 0.01 {
-        p.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.0, theme::alpha(theme::ACCENT, hover)), egui::StrokeKind::Inside);
+        p.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.0, theme::alpha(theme::accent(), hover)), egui::StrokeKind::Inside);
     }
     widgets::text(&p, pill.center(), Align2::CENTER_CENTER, &txt);
 }
@@ -632,7 +632,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.025 * press));
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha * if state.unavailable { 0.5 } else { 1.0 });
-    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
 
     // The chip has the feature's colour: grey while what it switches is off, the light's own colour while it is on.
     let switched = matches!(target, Target::FastWalk | Target::Light);
@@ -643,7 +643,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
     };
     let (bg, fg) = match color {
         Some(c) => (theme::alpha(c, 0.12), c),
-        None => (theme::white(0.05), theme::FG_3),
+        None => (theme::white(0.05), theme::fg_3()),
     };
     let bg = anim::color(&ctx, id.with("chip-bg"), bg, Spring::SOFT);
     let fg = anim::color(&ctx, id.with("chip-fg"), fg, Spring::SOFT);
@@ -664,7 +664,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
         };
     // Not open yet: the pill says "Coming soon", the note why.
     let note = if state.soon { tr(CALLS_SOON_NOTE).to_string() } else { layout::text(menu, Content::TileNote(layout::note_of(target))) };
-    let note = Txt::new(note, 12.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+    let note = Txt::new(note, 12.5).color(if active { theme::accent() } else { theme::fg_3() });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, r.width() - 2.0 * INSET);
     if state.soon {
         soon_pill(ui, r, alpha, hover);
@@ -706,7 +706,7 @@ fn feature(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Tint), rec
         }
         // ("Coming soon" stands there instead: the way in would show under it.)
         None if state.soon => {}
-        None => widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::FG_4, theme::FG_2, hover)),
+        None => widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::fg_4(), theme::fg_2(), hover)),
     }
 }
 
@@ -733,7 +733,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.03 * press));
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha * if state.unavailable { 0.5 } else { 1.0 });
-    widgets::frame(&p, r, 14.0, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(&p, r, 14.0, theme::mix(theme::surface(), theme::ink_800(), hover));
     let switched = matches!(target, Target::FastWalk | Target::Light);
     let color = match target {
         Target::Light => menu.light.filter(|l| l.on).map(|l| menu_ui::tint(Tint::Light(l.color))),
@@ -742,7 +742,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     };
     let (bg, fg) = match color {
         Some(c) => (theme::alpha(c, 0.12), c),
-        None => (theme::white(0.05), theme::FG_3),
+        None => (theme::white(0.05), theme::fg_3()),
     };
     let bg = anim::color(&ctx, id.with("chip-bg"), bg, Spring::SOFT);
     let fg = anim::color(&ctx, id.with("chip-fg"), fg, Spring::SOFT);
@@ -769,7 +769,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
         _ => None,
     };
     // Not open yet: a "Coming soon" pill where the way in would be.
-    let soon = state.soon.then(|| Txt::new(tr(orbiters_n4n0_core::menu::CALLS_SOON), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2));
+    let soon = state.soon.then(|| Txt::new(tr(orbiters_n4n0_core::menu::CALLS_SOON), 11.0).weight(weight::SEMIBOLD).color(theme::fg_2()));
     let soon_w = soon.as_ref().map_or(0.0, |t| p.layout_job(t.job(f32::INFINITY)).size().x + 16.0);
     let end = if switch.is_some() { 56.0 } else if playing.is_some() { 40.0 } else if soon.is_some() { soon_w + 18.0 } else { 24.0 };
     let x = chip.right() + 10.0;
@@ -778,7 +778,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
     let title_y = if state.soon { r.center().y } else { r.center().y - 9.0 };
     widgets::text_truncated(&p, pos2(x, title_y), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), room);
     if !state.soon {
-        let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 11.5).color(if active { theme::ACCENT } else { theme::FG_3 });
+        let note = Txt::new(layout::text(menu, Content::TileNote(layout::note_of(target))), 11.5).color(if active { theme::accent() } else { theme::fg_3() });
         widgets::text_truncated(&p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &note, room);
     }
     resp.on_hover_text(title);
@@ -787,9 +787,9 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
         let pill = Rect::from_min_size(pos2(r.right() - 12.0 - size.x - 16.0, r.center().y - size.y / 2.0 - 4.0), vec2(size.x + 16.0, size.y + 8.0));
         let mut pp = ui.painter().clone();
         pp.multiply_opacity(alpha);
-        pp.rect_filled(pill, theme::radius(pill.height() / 2.0), theme::INK_800);
+        pp.rect_filled(pill, theme::radius(pill.height() / 2.0), theme::ink_800());
         if hover > 0.01 {
-            pp.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.0, theme::alpha(theme::ACCENT, hover)), egui::StrokeKind::Inside);
+            pp.rect_stroke(pill, theme::radius(pill.height() / 2.0), Stroke::new(1.0, theme::alpha(theme::accent(), hover)), egui::StrokeKind::Inside);
         }
         widgets::text(&pp, pill.center(), Align2::CENTER_CENTER, &txt);
         return;
@@ -817,7 +817,7 @@ fn feature_compact(ui: &mut Ui, cx: &Cx, i: usize, tile: (Target, Icon, Text, Ti
                 acts.push(Act::Press(switch));
             }
         }
-        None => widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), icons::CARET_RIGHT, 14.0, theme::mix(theme::FG_4, theme::FG_2, hover)),
+        None => widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), icons::CARET_RIGHT, 14.0, theme::mix(theme::fg_4(), theme::fg_2(), hover)),
     }
 }
 
@@ -831,7 +831,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     if r.height() <= COMPACT_H + 0.5 {
         // A compact grid's: N4N0, its caption and its words on one line.
         let chip = Rect::from_min_size(pos2(r.left() + 12.0, r.center().y - 16.0), vec2(32.0, 32.0));
-        p.rect_filled(chip, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.12));
+        p.rect_filled(chip, theme::radius(10.0), theme::alpha(theme::accent(), 0.12));
         n4n0_face(&p, chip.center(), 9.0);
         let caption = match (&menu.heard, menu.heard_private) {
             (None, _) => "N4N0",
@@ -840,14 +840,14 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
         };
         widgets::text(&p, pos2(chip.right() + 12.0, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::caps(caption));
         let (text, color) = match menu.heard.as_deref() {
-            Some(text) => (format!("“{text}”"), theme::FG_2),
-            None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::FG_3),
+            Some(text) => (format!("“{text}”"), theme::fg_2()),
+            None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::fg_3()),
         };
         widgets::text_truncated(&p, pos2(chip.right() + 12.0, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(color), r.right() - chip.right() - 24.0);
         return;
     }
     let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
-    p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
+    p.rect_filled(chip, theme::radius(11.0), theme::alpha(theme::accent(), 0.12));
     n4n0_face(&p, chip.center(), 10.0);
     let caption = match (&menu.heard, menu.heard_private) {
         (None, _) => "N4N0",
@@ -856,8 +856,8 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
     };
     widgets::text(&p, pos2(chip.right() + 12.0, chip.center().y), Align2::LEFT_CENTER, &Txt::caps(caption));
     let (text, color) = match menu.heard.as_deref() {
-        Some(text) => (format!("“{text}”"), theme::FG_2),
-        None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::FG_3),
+        Some(text) => (format!("“{text}”"), theme::fg_2()),
+        None => (tr("Nothing said yet: N4N0's answers show here.").to_string(), theme::fg_3()),
     };
     let mut job = Txt::new(text, 13.0).color(color).line_height(18.0).job(r.width() - 2.0 * INSET);
     job.wrap.max_rows = 2;
@@ -868,7 +868,7 @@ fn said(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, menu: &Menu) {
 /// N4N0 itself, `radius` large: its green dot with its eyes, as the menu's back shows it.
 fn n4n0_face(p: &Painter, center: Pos2, radius: f32) {
     let s = radius / 26.0;
-    p.circle_filled(center, radius, theme::ACCENT);
+    p.circle_filled(center, radius, theme::accent());
     for side in [-1.0, 1.0] {
         let eye = Rect::from_center_size(center + vec2(side * 9.0 * s, -2.0 * s), vec2(7.0 * s, 13.0 * s));
         p.rect_filled(eye, theme::radius(3.5 * s), menu_ui::CARD);
@@ -892,9 +892,9 @@ fn top(ui: &mut Ui, cx: &Cx, title: &str, sub: &str, acts: &mut Vec<Act>) {
 fn note_card(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, text: &str) {
     section(ui, cx, index, glyph, title, None, |ui| {
         let w = ui.available_width() - 48.0;
-        let lines = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(w));
+        let lines = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_3()).line_height(19.0).job(w));
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines.size().y + 8.0), Sense::hover());
-        ui.painter().galley(pos2(r.left() + 48.0, r.top()), lines, theme::FG_3);
+        ui.painter().galley(pos2(r.left() + 48.0, r.top()), lines, theme::fg_3());
     });
 }
 
@@ -918,7 +918,7 @@ fn icon_button(ui: &mut Ui, rect: Rect, glyph: &str, label: &str, enabled: bool)
     if enabled {
         return IconButton::new(glyph, label).size(rect.width(), 18.0).show_at(ui, rect).clicked();
     }
-    widgets::icon(ui.painter(), rect.center(), glyph, 18.0, theme::alpha(theme::FG_4, 0.6));
+    widgets::icon(ui.painter(), rect.center(), glyph, 18.0, theme::alpha(theme::fg_4(), 0.6));
     false
 }
 
@@ -1014,18 +1014,18 @@ fn timeline(ui: &mut Ui, media: &Media, acts: &mut Vec<Act>) {
     let p = ui.painter();
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
     let filled = Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * fraction, bar.max.y));
-    p.rect_filled(filled, theme::radius(3.0), if media.can_seek { theme::ACCENT } else { theme::FG_3 });
+    p.rect_filled(filled, theme::radius(3.0), if media.can_seek { theme::accent() } else { theme::fg_3() });
     if media.can_seek {
-        p.circle_filled(pos2(filled.right(), bar.center().y), 4.0 + 3.0 * hover, theme::FG);
+        p.circle_filled(pos2(filled.right(), bar.center().y), 4.0 + 3.0 * hover, theme::fg());
     }
     let shown_at = if held { (fraction * length as f32).round() as u64 } else { at as u64 };
-    let time = |s: u64| Txt::new(orbiters_n4n0_core::menu::clock(s), 12.0).color(theme::FG_3);
+    let time = |s: u64| Txt::new(orbiters_n4n0_core::menu::clock(s), 12.0).color(theme::fg_3());
     widgets::text(p, pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &time(shown_at));
     widgets::text(p, pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &time(length as u64));
     if !media.can_seek {
         let app = if media.app.is_empty() { tr("This player") } else { media.app.as_str() };
         let (note, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
-        let txt = Txt::new(tr!("{app} lets no app move in its timeline", app = app), 12.0).color(theme::FG_4);
+        let txt = Txt::new(tr!("{app} lets no app move in its timeline", app = app), 12.0).color(theme::fg_4());
         widgets::text(ui.painter(), pos2(bar.left(), note.center().y), Align2::LEFT_CENTER, &txt);
     }
 }
@@ -1044,8 +1044,8 @@ fn suggestions(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 acts.push(Act::Press(Target::Suggestion(i as u8)));
             }
             let p = ui.painter();
-            widgets::icon(p, pos2(r.left() + 8.0, r.center().y), icons::MAGNIFYING_GLASS, 14.0, theme::FG_4);
-            let line = Txt::new(*text, 13.5).color(theme::mix(theme::FG_2, theme::FG, hover));
+            widgets::icon(p, pos2(r.left() + 8.0, r.center().y), icons::MAGNIFYING_GLASS, 14.0, theme::fg_4());
+            let line = Txt::new(*text, 13.5).color(theme::mix(theme::fg_2(), theme::fg(), hover));
             widgets::text_truncated(p, pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &line, r.width() - 40.0);
         }
     });
@@ -1101,7 +1101,7 @@ fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, 
         thumbnail(p, thumb, texture, 10.0);
         // A badge in capitals, as the English one is.
         let live = tr("LIVE").to_uppercase();
-        let length = if video.live { Some((live.as_str(), theme::REC, Color32::WHITE)) } else { video.duration.as_deref().map(|d| (d, theme::black(0.7), theme::FG)) };
+        let length = if video.live { Some((live.as_str(), theme::REC, Color32::WHITE)) } else { video.duration.as_deref().map(|d| (d, theme::black(0.7), theme::fg())) };
         if let Some((label, bg, fg)) = length {
             super::sessions::badge(p, ui, pos2(thumb.right() - 6.0, thumb.bottom() - 28.0), label, bg, fg, true);
         }
@@ -1110,8 +1110,8 @@ fn result_row(ui: &mut Ui, i: usize, video: &Video, texture: Option<TextureId>, 
         let title = p.layout_job(job);
         let title_h = title.size().y;
         let top = row.center().y - (title_h + 22.0) / 2.0;
-        p.galley(pos2(x, top), title, theme::FG);
-        widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(&video.channel, 12.5).color(theme::FG_3), text_w);
+        p.galley(pos2(x, top), title, theme::fg());
+        widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(&video.channel, 12.5).color(theme::fg_3()), text_w);
     }
     let (label, glyph) = if copied { (tr("Copied"), icons::CHECK) } else { (tr("Copy link"), icons::COPY) };
     let copy = Button::new(label).icon(glyph).size(Size::Sm).width(button_w).id_salt(("orbiters-home-copy", i));
@@ -1145,7 +1145,7 @@ fn placeholder_row(ui: &mut Ui) {
 /// The results' pages: the one before, where it is, the next; the one pressed.
 fn pager(ui: &mut Ui, menu: &Menu) -> Option<Target> {
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
-    let label = Txt::new(tr!("Page {page}", page = layout::text(menu, Content::PageLabel)), 12.5).color(theme::FG_3);
+    let label = Txt::new(tr!("Page {page}", page = layout::text(menu, Content::PageLabel)), 12.5).color(theme::fg_3());
     widgets::text(ui.painter(), row.center(), Align2::CENTER_CENTER, &label);
     let mut pressed = None;
     for (target, glyph, name, dx, on) in [
@@ -1205,8 +1205,8 @@ fn call(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
             {
                 let p = ui.painter();
                 let face = pos2(row.left() + 18.0, row.center().y);
-                p.circle_filled(face, 18.0, theme::INK_750);
-                widgets::icon(p, face, icons::USER, 17.0, theme::FG_3);
+                p.circle_filled(face, 18.0, theme::ink_750());
+                widgets::icon(p, face, icons::USER, 17.0, theme::fg_3());
                 let name = Txt::new(&contact.name, 13.5).weight(weight::MEDIUM);
                 widgets::text_truncated(p, pos2(row.left() + 48.0, row.center().y), Align2::LEFT_CENTER, &name, row.width() - 48.0 - call_w - 16.0);
             }
@@ -1232,7 +1232,7 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
     let (row, _) = ui.allocate_exact_size(vec2(w, 112.0), Sense::hover());
     let takes = [
         (PhotoMode::People, icons::USERS, theme::VIOLET, mark("3D picture of people"), mark("Goes around the people here")),
-        (PhotoMode::World, icons::GLOBE_HEMISPHERE_WEST, theme::ACCENT, mark("3D picture of the world"), mark("Goes through the place, avatars left out")),
+        (PhotoMode::World, icons::GLOBE_HEMISPHERE_WEST, theme::accent(), mark("3D picture of the world"), mark("Goes through the place, avatars left out")),
     ];
     for (i, (mode, glyph, tint, title, note)) in takes.into_iter().enumerate() {
         let rect = Rect::from_min_size(row.min + vec2(i as f32 * (card_w + gap), 0.0), vec2(card_w, 112.0));
@@ -1261,7 +1261,7 @@ fn photo(ui: &mut Ui, cx: &Cx, menu: &Menu, blocked: Option<&str>, acts: &mut Ve
         widgets::icon(&p, chip.center(), glyph, 26.0, tint);
         let x = chip.right() + 18.0;
         widgets::text_truncated(&p, pos2(x, r.center().y - 12.0), Align2::LEFT_CENTER, &Txt::new(tr(title), 19.0).weight(weight::SEMIBOLD), r.right() - x - 16.0);
-        widgets::text_truncated(&p, pos2(x, r.center().y + 14.0), Align2::LEFT_CENTER, &Txt::new(tr(note), 13.5).color(theme::FG_2), r.right() - x - 16.0);
+        widgets::text_truncated(&p, pos2(x, r.center().y + 14.0), Align2::LEFT_CENTER, &Txt::new(tr(note), 13.5).color(theme::fg_2()), r.right() - x - 16.0);
     }
     if let Some(warning) = warning {
         let galley = ui.painter().layout_job(Txt::new(warning, 14.0).weight(weight::SEMIBOLD).color(theme::WARN).line_height(20.0).job(w - 28.0));
@@ -1319,15 +1319,15 @@ fn music(ui: &mut Ui, cx: &Cx, menu: &Menu, picture: &dyn Fn(&str) -> Option<Tex
                     Some(texture) => thumbnail(p, art, Some(texture), 12.0),
                     None => {
                         thumbnail(p, art, None, 12.0);
-                        widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::FG_4);
+                        widgets::icon(p, art.center(), icons::MUSIC_NOTES, 30.0, theme::fg_4());
                     }
                 }
                 let x = art.right() + 20.0;
                 let text_w = (row.right() - x - if media.is_some() { controls_w + 24.0 } else { 0.0 }).max(80.0);
                 let lines = [
                     (Content::MediaTitle, 26.0, Txt::new("", 17.0).weight(weight::SEMIBOLD)),
-                    (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::FG_2)),
-                    (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::FG_3)),
+                    (Content::MediaArtist, 52.0, Txt::new("", 13.0).color(theme::fg_2())),
+                    (Content::MediaAlbum, 74.0, Txt::new("", 12.5).color(theme::fg_3())),
                 ];
                 for (content, dy, style) in lines {
                     let line = Txt { text: layout::text(menu, content), ..style };
@@ -1602,7 +1602,7 @@ fn qr(ui: &mut Ui, cx: &Cx, menu: &Menu, acts: &mut Vec<Act>) {
                 let state = Txt::new(layout::qr_state(scanner), 15.0).weight(weight::SEMIBOLD);
                 widgets::text(p, pos2(row.left() + 20.0, row.top() + 20.0), Align2::LEFT_CENTER, &state);
                 let room = row.width() - 200.0;
-                widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::FG_3), room);
+                widgets::text_truncated(p, pos2(row.left() + 20.0, row.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(&note, 12.5).color(theme::fg_3()), room);
                 if !scanner.scanning() {
                     let button = Button::new(tr("Scan again")).icon(icons::QR_CODE).variant(Variant::Primary);
                     let bw = button.desired_width(ui);
@@ -1705,7 +1705,7 @@ fn instances(ui: &mut Ui, cx: &Cx, menu: &Menu, own_vrchat: bool, acts: &mut Vec
                 let room = r.width() - invite_w - 16.0;
                 let world = Txt::new(layout::text(menu, Content::InstanceWorld(i as u8)), 13.5).weight(weight::MEDIUM);
                 widgets::text_truncated(p, pos2(r.left(), r.center().y - 9.0), Align2::LEFT_CENTER, &world, room);
-                let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::FG_3);
+                let meta = Txt::new(layout::text(menu, Content::InstanceMeta(i as u8)), 12.0).color(theme::fg_3());
                 widgets::text_truncated(p, pos2(r.left(), r.center().y + 11.0), Align2::LEFT_CENTER, &meta, room);
             }
             if invite.confirm_at(ui, Rect::from_min_size(pos2(r.right() - invite_w, r.center().y - 16.0), vec2(invite_w, 32.0))) {
@@ -1744,7 +1744,7 @@ fn swatches(ui: &mut Ui, chosen: u8) -> Option<u8> {
         let hover = anim::toggle(&ctx, id.with("hover"), resp.hovered(), Spring::SNAPPY);
         let down = anim::toggle(&ctx, id.with("down"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
         let p = ui.painter();
-        let ring = theme::mix(theme::white(0.18 * hover), theme::FG, on);
+        let ring = theme::mix(theme::white(0.18 * hover), theme::fg(), on);
         if ring.a() > 0 {
             p.circle_stroke(center, SWATCH / 2.0 + 4.0, Stroke::new(2.0, ring));
         }

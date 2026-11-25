@@ -162,7 +162,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
     let n = widgets::text_truncated(&p, pos2(x, name_y), Align2::LEFT_CENTER, &Txt::new(&friend.name, 24.0).weight(weight::SEMIBOLD).tracking(-0.02).color(rank_color(friend.look.rank)), f.right() - x - 120.0);
     let mut cx_ = n.right() + 10.0;
     if !profile.pronouns.is_empty() {
-        cx_ = chip(&p, ui, pos2(cx_, name_y), &profile.pronouns, theme::FG_2, theme::white(0.07)) + 6.0;
+        cx_ = chip(&p, ui, pos2(cx_, name_y), &profile.pronouns, theme::fg_2(), theme::white(0.07)) + 6.0;
     }
     if friend.look.supporter {
         chip(&p, ui, pos2(cx_, name_y), "VRC+", theme::WARN, theme::alpha(theme::WARN, 0.14));
@@ -171,8 +171,8 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
     let mut lx = x;
     lx = chip(&p, ui, pos2(lx, line_y), rank_name(friend.look.rank), rank_color(friend.look.rank), theme::alpha(rank_color(friend.look.rank), 0.14)) + 8.0;
     if let Some((glyph, name)) = platform(friend.platform) {
-        widgets::icon(&p, pos2(lx + 7.0, line_y), glyph, 13.0, theme::FG_3);
-        widgets::text(&p, pos2(lx + 18.0, line_y), Align2::LEFT_CENTER, &Txt::new(name, 12.0).color(theme::FG_3));
+        widgets::icon(&p, pos2(lx + 7.0, line_y), glyph, 13.0, theme::fg_3());
+        widgets::text(&p, pos2(lx + 18.0, line_y), Align2::LEFT_CENTER, &Txt::new(name, 12.0).color(theme::fg_3()));
     }
     // Their status.
     let status_y = pic.bottom() + 22.0;
@@ -180,7 +180,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
     p.circle_filled(dot, 5.0, status_color(friend.status));
     let s = widgets::text(&p, pos2(dot.x + 12.0, status_y), Align2::LEFT_CENTER, &Txt::new(status_name(friend.status), 13.5).weight(weight::SEMIBOLD));
     if !friend.status_text.is_empty() {
-        widgets::text_truncated(&p, pos2(s.right() + 8.0, status_y), Align2::LEFT_CENTER, &Txt::new(format!("· {}", friend.status_text), 13.5).color(theme::FG_2), f.right() - s.right() - 36.0);
+        widgets::text_truncated(&p, pos2(s.right() + 8.0, status_y), Align2::LEFT_CENTER, &Txt::new(format!("· {}", friend.status_text), 13.5).color(theme::fg_2()), f.right() - s.right() - 36.0);
     }
 
     // What follows scrolls, its sections coming in one after the other.
@@ -210,12 +210,12 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
                 section(ui, 58.0, &mut |ui, r| shimmer(ui, r, clock));
             }
             if !profile.bio.trim().is_empty() {
-                let txt = Txt::new(profile.bio.trim(), 13.5).color(theme::FG_2).line_height(20.0);
+                let txt = Txt::new(profile.bio.trim(), 13.5).color(theme::fg_2()).line_height(20.0);
                 let galley = ui.painter().layout_job(txt.job(ui.available_width()));
                 let h = galley.size().y + 24.0;
                 section(ui, h, &mut |ui, r| {
                     widgets::text(ui.painter(), r.left_top() + vec2(0.0, 6.0), Align2::LEFT_CENTER, &Txt::caps(tr("Bio")));
-                    ui.painter().galley(r.left_top() + vec2(0.0, 18.0), galley.clone(), theme::FG_2);
+                    ui.painter().galley(r.left_top() + vec2(0.0, 18.0), galley.clone(), theme::fg_2());
                 });
             }
             if !profile.links.is_empty() {
@@ -235,7 +235,7 @@ fn body(ui: &mut Ui, cx: &mut Cx, state: &mut State, f: Rect, profile: &Profile,
                     widgets::frame(p, r, 12.0, theme::alpha(theme::WARN, 0.08));
                     widgets::icon(p, pos2(r.left() + 20.0, r.center().y), icons::NOTE, 15.0, theme::WARN);
                     widgets::text(p, pos2(r.left() + 38.0, r.top() + 15.0), Align2::LEFT_CENTER, &Txt::caps(tr("Your note")));
-                    widgets::text_truncated(p, pos2(r.left() + 38.0, r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(friend.note.trim(), 13.0).color(theme::FG), r.width() - 52.0);
+                    widgets::text_truncated(p, pos2(r.left() + 38.0, r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(friend.note.trim(), 13.0).color(theme::fg()), r.width() - 52.0);
                 });
             }
         });
@@ -297,7 +297,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
         Some(t) => paint::squircle_texture(&p, pic, [10.0; 4], t.id(), cover_uv(t.size_vec2(), pic.size()), Color32::WHITE),
         None => {
             widgets::frame(&p, pic, 10.0, theme::white(0.05));
-            widgets::icon(&p, pic.center(), glyph, 22.0, theme::FG_4);
+            widgets::icon(&p, pic.center(), glyph, 22.0, theme::fg_4());
         }
     }
     let x = pic.right() + 14.0;
@@ -341,7 +341,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let room = r.right() - x - 14.0 - if pill_w > 0.0 { pill_w + 10.0 } else { 0.0 } - if join_w > 0.0 { join_w + 8.0 } else { 0.0 };
     widgets::text(&p, pos2(x, r.top() + 22.0), Align2::LEFT_CENTER, &Txt::caps(tr("Where they are")));
     widgets::text_truncated(&p, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(title, 16.0).weight(weight::SEMIBOLD), room);
-    widgets::text_truncated(&p, pos2(x, r.bottom() - 22.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), room);
+    widgets::text_truncated(&p, pos2(x, r.bottom() - 22.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()), room);
     if pill_w > 0.0 {
         let pr = Rect::from_min_size(pos2(r.right() - 14.0 - pill_w, r.center().y - 18.0), vec2(pill_w, 36.0));
         if let Some(place) = &select {
@@ -386,14 +386,14 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
     let p = ui.painter().clone();
     if reach == Reach::SignIn && cx.snap.vrchat_login.presence() != crate::controller::vrchat_login::Presence::SignedOut {
         // r21: the saved session is being restored: no sign-in offered meanwhile.
-        widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::HOURGLASS_MEDIUM, 15.0, theme::FG_3);
-        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(cx.snap.account.connecting(), 13.0).color(theme::FG_2), r.width() - 30.0);
+        widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::HOURGLASS_MEDIUM, 15.0, theme::fg_3());
+        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(cx.snap.account.connecting(), 13.0).color(theme::fg_2()), r.width() - 30.0);
         return;
     }
     if reach == Reach::SignIn {
         widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::INFO, 15.0, theme::BLUE);
         let t = tr("Sign in to VRChat to boop and ask for invites.");
-        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(t, 13.0).color(theme::FG_2), r.width() - 180.0);
+        widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(t, 13.0).color(theme::fg_2()), r.width() - 180.0);
         let b = widgets::Button::new(tr("Sign in to VRChat")).variant(widgets::Variant::Primary).size(widgets::Size::Sm).id_salt("launcher-modal-sign-in");
         let w = b.desired_width(ui);
         if b.show_at(ui, Rect::from_min_size(pos2(r.right() - w, r.center().y - 16.0), vec2(w, 32.0))).clicked() {
@@ -411,12 +411,12 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
         Reach::Cooling(left) => orbiters_i18n::tr!("Boop again in {n} s", n = left),
         _ => tr("Boop").to_string(),
     };
-    let color = if reach == Reach::Sent { theme::ACCENT } else { theme::FG };
+    let color = if reach == Reach::Sent { theme::OK } else { theme::fg() };
     let wr = widgets::text(&p, pos2(c.x + 32.0, c.y), Align2::LEFT_CENTER, &Txt::new(word, 14.0).weight(weight::SEMIBOLD).color(color));
     // The emojis: one press, the same boop with it.
     if reach.pressable() && !state.data.boop_emojis.is_empty() {
         let mut x = wr.right().max(c.x + 110.0) + 12.0;
-        widgets::text(&p, pos2(x, c.y), Align2::LEFT_CENTER, &Txt::new(tr("or with"), 12.0).color(theme::FG_4));
+        widgets::text(&p, pos2(x, c.y), Align2::LEFT_CENTER, &Txt::new(tr("or with"), 12.0).color(theme::fg_4()));
         x += 52.0;
         let emojis = state.data.boop_emojis.clone();
         for e in emojis {
@@ -444,7 +444,7 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
 }
 
 fn emoji_tint(id: &str) -> Color32 {
-    let palette = [theme::WARN, theme::REC, theme::CYAN, theme::VIOLET, theme::ACCENT];
+    let palette = [theme::WARN, theme::REC, theme::CYAN, theme::VIOLET, theme::accent()];
     palette[id.bytes().map(usize::from).sum::<usize>() % palette.len()]
 }
 
@@ -463,7 +463,7 @@ fn links(ui: &mut Ui, r: Rect, links: &[String]) {
     let mut x = r.left();
     for link in links.iter().take(4) {
         let host = link.split("://").nth(1).unwrap_or(link).split('/').next().unwrap_or(link).trim_start_matches("www.").to_string();
-        let txt = Txt::new(&host, 12.5).weight(weight::MEDIUM).color(theme::FG);
+        let txt = Txt::new(&host, 12.5).weight(weight::MEDIUM).color(theme::fg());
         let w = widgets::text_size(ui, &txt).x + 38.0;
         if x + w > r.right() {
             break;
@@ -553,8 +553,8 @@ fn fact_grid(ui: &mut Ui, r: Rect, facts: &[(&'static str, &'static str, String)
     for (i, (glyph, label, value)) in facts.iter().enumerate() {
         let cell = Rect::from_min_size(r.min + vec2((i % 2) as f32 * (w + gap), (i / 2) as f32 * 50.0), vec2(w, 44.0));
         widgets::frame(p, cell, 12.0, theme::white(0.035));
-        widgets::icon(p, pos2(cell.left() + 18.0, cell.center().y), glyph, 15.0, theme::FG_3);
-        widgets::text_truncated(p, pos2(cell.left() + 36.0, cell.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(*label, 11.0).color(theme::FG_4), w - 44.0);
+        widgets::icon(p, pos2(cell.left() + 18.0, cell.center().y), glyph, 15.0, theme::fg_3());
+        widgets::text_truncated(p, pos2(cell.left() + 36.0, cell.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(*label, 11.0).color(theme::fg_4()), w - 44.0);
         widgets::text_truncated(p, pos2(cell.left() + 36.0, cell.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(value, 13.0).weight(weight::MEDIUM), w - 44.0);
     }
 }

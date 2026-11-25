@@ -1163,11 +1163,11 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
     if let Some(said) = state.said.clone() {
         let w = ui.available_width();
         let p = ui.painter().clone();
-        let galley = p.layout_job(Txt::new(&said, 13.0).color(theme::FG).line_height(19.0).job(w - 60.0));
+        let galley = p.layout_job(Txt::new(&said, 13.0).color(theme::fg()).line_height(19.0).job(w - 60.0));
         let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y.max(20.0) + 28.0), Sense::hover());
         p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::DANGER, 0.12));
         widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING_CIRCLE, 17.0, theme::DANGER);
-        p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
+        p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::fg());
     }
 }
 
@@ -1217,13 +1217,13 @@ fn fits(ui: &Ui, label: &str, glyph: f32) -> f32 {
 fn warn_card(ui: &mut Ui, text: &str, button_w: f32, button: impl FnOnce(&mut Ui, Rect)) {
     let w = ui.available_width();
     let p = ui.painter().clone();
-    let galley = p.layout_job(Txt::new(text, 13.0).color(theme::FG).line_height(19.0).job((w - 42.0 - button_w - 34.0).max(120.0)));
+    let galley = p.layout_job(Txt::new(text, 13.0).color(theme::fg()).line_height(19.0).job((w - 42.0 - button_w - 34.0).max(120.0)));
     let h = galley.size().y.max(20.0) + 28.0;
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::WARN, 0.12));
     p.rect_stroke(rect, theme::radius(14.0), egui::Stroke::new(1.0, theme::alpha(theme::WARN, 0.45)), egui::StrokeKind::Inside);
     widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
-    p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
+    p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::fg());
     if button_w > 0.0 {
         button(ui, Rect::from_min_size(pos2(rect.right() - 14.0 - button_w, (rect.center().y - 17.0).min(rect.top() + 10.0)), vec2(button_w, 34.0)));
     }
@@ -1239,7 +1239,7 @@ fn candidate_row(ui: &mut Ui, op: &str, label: &str, c: &Candidate, thumb: Optio
     let mut x = rect.left() + 16.0;
     if !c.url.is_empty() {
         let r = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 6.0), vec2(60.0, 34.0));
-        p.rect_filled(r, theme::radius(8.0), theme::INK_750);
+        p.rect_filled(r, theme::radius(8.0), theme::ink_750());
         if let Some(t) = thumb {
             paint::squircle_texture(&p, r, [theme::squircle(8.0); 4], t.id(), super::launcher::cover_uv(t.size_vec2(), r.size()), Color32::WHITE);
         }
@@ -1253,7 +1253,7 @@ fn candidate_row(ui: &mut Ui, op: &str, label: &str, c: &Candidate, thumb: Optio
         Likeness::Since => tr("added since you asked"),
         Likeness::Uncertain => tr("it may have been there before"),
     };
-    widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::FG_2), rect.right() - bw - 28.0 - x);
+    widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::fg_2()), rect.right() - bw - 28.0 - x);
     let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let r = widgets::Button::new(label).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
     if widgets::activated_fresh(&r) {
@@ -1370,7 +1370,7 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 18.0, theme::WARN);
             let line = format!("{} {}", tr("Your groups could not be loaded."), failure_text(f));
             let bw = fits(ui, tr("Read again"), 24.0);
-            widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 74.0 - bw);
+            widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), rect.width() - 74.0 - bw);
             let b = Rect::from_min_size(pos2(rect.right() - 16.0 - bw, rect.center().y - 17.0), vec2(bw, 34.0));
             if widgets::Button::new(tr("Read again")).icon(icons::ARROW_CLOCKWISE).size(widgets::Size::Sm).id_salt("groups-retry").show_at(ui, b).clicked() {
                 state.discovery = Discovery::Loading;
@@ -1442,7 +1442,7 @@ fn group_card(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &Scope, card: &Gro
         let tint = widgets::name_color(&shown_name);
         paint::fill_convex(&p, &paint::squircle_points(r, theme::squircle(theme::CARD_RADIUS)), |at| {
             let t = ((at.x - r.left()) / r.width()).clamp(0.0, 1.0);
-            theme::mix(theme::mix(tint, theme::INK_850, 0.55), theme::INK_850, t)
+            theme::mix(theme::mix(tint, theme::ink_850(), 0.55), theme::ink_850(), t)
         });
     }
     // A veil from the left, so the words read over any banner.
@@ -1474,14 +1474,14 @@ fn group_card(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &Scope, card: &Gro
         None => line,
     };
     // Under the corner button: the line takes the card's width.
-    widgets::text_truncated(&p, pos2(tx, icon_rect.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_2), r.right() - 18.0 - tx);
+    widgets::text_truncated(&p, pos2(tx, icon_rect.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_2()), r.right() - 18.0 - tx);
     // What the person can do here.
     let what = abilities_line(card);
-    let pill = Txt::new(&what, 12.0).weight(weight::MEDIUM).color(theme::FG);
+    let pill = Txt::new(&what, 12.0).weight(weight::MEDIUM).color(theme::fg());
     let pw = (widgets::text_size(ui, &pill).x + 34.0).min(r.width() - 36.0);
     let pr = Rect::from_min_size(pos2(r.left() + 18.0, r.bottom() - 18.0 - 28.0), vec2(pw, 28.0));
     p.rect_filled(pr, theme::radius(14.0), theme::black(0.42));
-    widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), if card.owner { icons::SHIELD_CHECK } else { icons::USERS_THREE }, 13.0, theme::ACCENT);
+    widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), if card.owner { icons::SHIELD_CHECK } else { icons::USERS_THREE }, 13.0, theme::accent());
     widgets::text_truncated(&p, pos2(pr.left() + 27.0, pr.center().y), Align2::LEFT_CENTER, &pill, pr.width() - 34.0);
     // The banner studio, in the corner.
     let sb = Rect::from_min_size(pos2(r.right() - 48.0, r.top() + 14.0), vec2(36.0, 36.0));

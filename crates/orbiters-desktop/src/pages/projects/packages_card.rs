@@ -81,7 +81,7 @@ pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
                     ui.painter(),
                     ui.cursor().min + vec2(0.0, 10.0),
                     Align2::LEFT_CENTER,
-                    &Txt::new(tr("No VPM package in this project yet."), 12.5).color(theme::FG_3),
+                    &Txt::new(tr("No VPM package in this project yet."), 12.5).color(theme::fg_3()),
                 );
                 ui.add_space(22.0);
             }
@@ -145,7 +145,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
         ),
         _ => (None, String::new(), String::new()),
     };
-    let sub = label.as_ref().map(|l| (l.clone(), if update.is_some() { theme::ACCENT } else { theme::WARN }, hint.clone()));
+    let sub = label.as_ref().map(|l| (l.clone(), if update.is_some() { theme::accent() } else { theme::WARN }, hint.clone()));
     let mut update_pressed = None;
     package_row_with(ui, icon.as_ref(), &pkg.name, &pkg.display_name, 108.0 + 8.0 + 32.0, sub, !busy && !working, &mut update_pressed, |ui, c| {
         let dd = Rect::from_min_size(pos2(c.left(), c.center().y - 15.0), vec2(108.0, 30.0));
@@ -154,7 +154,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
             state.anchors.insert("version-0".into(), dd);
         }
         if working {
-            feedback::spinner(ui.painter(), dd.center(), 8.0, 2.0, theme::ACCENT);
+            feedback::spinner(ui.painter(), dd.center(), 8.0, 2.0, theme::accent());
         } else {
             let items: Vec<Item> = list.iter().map(|v| if v.contains('-') { Item::new(v).detail(tr("Pre-release")) } else { Item::new(v) }).collect();
             let selected = list.iter().position(|v| *v == current);
@@ -252,18 +252,18 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
             (Some(f), None) => tr!("{version} · removed", version = f),
             _ => String::new(),
         };
-        let v = Txt::new(&label, 12.0).weight(weight::MEDIUM).color(if s.to.is_some() { theme::ACCENT } else { theme::DANGER });
+        let v = Txt::new(&label, 12.0).weight(weight::MEDIUM).color(if s.to.is_some() { theme::accent() } else { theme::DANGER });
         let vr = widgets::text(p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &v);
-        widgets::icon(p, pos2(r.left() + 6.0, r.center().y), glyph::ARROW_UP, 11.0, theme::FG_3);
+        widgets::icon(p, pos2(r.left() + 6.0, r.center().y), glyph::ARROW_UP, 11.0, theme::fg_3());
         widgets::text_truncated(p, pos2(r.left() + 20.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(&s.display_name, 12.5), vr.left() - r.left() - 30.0);
     }
     for name in &ups.all.left_out {
         let Some(u) = ups.of(name) else { continue };
         let why = if u.sdk { tr("the VRChat SDK is updated from its own row") } else { tr("does not go together with the others: update it on its own") };
-        let galley = cu.painter().layout_job(Txt::new(format!("{} {}: {why}", u.display_name, u.to), 11.5).color(theme::FG_3).line_height(16.0).job(inner.width() - 20.0));
+        let galley = cu.painter().layout_job(Txt::new(format!("{} {}: {why}", u.display_name, u.to), 11.5).color(theme::fg_3()).line_height(16.0).job(inner.width() - 20.0));
         let (r, _) = cu.allocate_exact_size(vec2(inner.width(), galley.size().y), Sense::hover());
-        widgets::icon(cu.painter(), pos2(r.left() + 6.0, r.top() + 8.0), icons::INFO, 11.0, theme::FG_4);
-        cu.painter().galley(pos2(r.left() + 20.0, r.top()), galley, theme::FG_3);
+        widgets::icon(cu.painter(), pos2(r.left() + 6.0, r.top() + 8.0), icons::INFO, 11.0, theme::fg_4());
+        cu.painter().galley(pos2(r.left() + 20.0, r.top()), galley, theme::fg_3());
     }
     cu.add_space(6.0);
     let mut apply = false;
@@ -278,7 +278,7 @@ fn plan(ui: &mut Ui, state: &mut State, project: &Project, ups: &updates::Update
     });
     let h = cu.min_rect().height() + 12.0 + 12.0;
     let rect = Rect::from_min_size(top, vec2(w, h));
-    ui.painter().set(bg, egui::Shape::rect_filled(rect, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.07)));
+    ui.painter().set(bg, egui::Shape::rect_filled(rect, theme::radius(14.0), theme::alpha(theme::accent(), 0.07)));
     ui.allocate_exact_size(vec2(w, h), Sense::hover());
     ui.add_space(4.0);
     if apply {

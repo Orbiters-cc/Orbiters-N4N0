@@ -195,7 +195,7 @@ fn textures(ctx: &Context, size: [u32; 2]) -> Textures {
     let load = |name: &str, c: Color32| {
         ctx.load_texture(format!("orbiters-logo-{name}-{}x{}", size[0], size[1]), rasterize(size[0], size[1], c, name == "mark", None), TextureOptions::LINEAR)
     };
-    let t = Textures { mark: load("mark", theme::MARK), cyan: load("cyan", theme::CYAN), violet: load("violet", theme::VIOLET) };
+    let t = Textures { mark: load("mark", theme::mark()), cyan: load("cyan", theme::CYAN), violet: load("violet", theme::VIOLET) };
     ctx.data_mut(|d| {
         let cache = d.get_temp_mut_or_default::<Cache>(id);
         cache.0.insert(0, (size, t.clone()));
@@ -259,7 +259,7 @@ fn draw(painter: &Painter, raster: Rect, shown: Rect, look: Look) {
     match look.intro_start {
         Some(start) if (anim::time(&ctx) - start) < INTRO as f64 => {
             let t = anim::since(&ctx, start, INTRO as f64) as f32;
-            let image = rasterize(size[0], size[1], theme::MARK, true, Some(t));
+            let image = rasterize(size[0], size[1], theme::mark(), true, Some(t));
             let handle = match ctx.data(|d| d.get_temp::<TextureHandle>(intro)) {
                 Some(mut h) => {
                     h.set(image, TextureOptions::LINEAR);

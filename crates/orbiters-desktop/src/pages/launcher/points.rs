@@ -80,15 +80,15 @@ impl Chip {
 pub fn draw(ui: &mut Ui, at: egui::Pos2, room: f32, chip: &Chip) -> bool {
     let ctx = ui.ctx().clone();
     let (title, rest, rest_color) = match chip {
-        Chip::Waiting => (None, tr(ex::EXPLORER_POINTS).to_string(), theme::FG_3),
+        Chip::Waiting => (None, tr(ex::EXPLORER_POINTS).to_string(), theme::fg_3()),
         Chip::Standing { title, points, next, .. } => {
             let rest = [Some(points.as_str()), next.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-            (title.clone(), rest, theme::FG)
+            (title.clone(), rest, theme::fg())
         }
     };
-    let title_txt = title.as_ref().map(|t| Txt::new(t, 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT));
+    let title_txt = title.as_ref().map(|t| Txt::new(t, 13.0).weight(weight::SEMIBOLD).color(theme::accent()));
     let rest_txt = Txt::new(rest, 13.0).weight(weight::MEDIUM).color(rest_color);
-    let dot = Txt::new(" · ", 13.0).color(theme::FG_3);
+    let dot = Txt::new(" · ", 13.0).color(theme::fg_3());
     let title_w = title_txt.as_ref().map_or(0.0, |t| widgets::text_size(ui, t).x + widgets::text_size(ui, &dot).x);
     let rest_w = widgets::text_size(ui, &rest_txt).x;
     let lead = PAD + ICON + 8.0;
@@ -100,7 +100,7 @@ pub fn draw(ui: &mut Ui, at: egui::Pos2, room: f32, chip: &Chip) -> bool {
     let p = ui.painter().clone();
     p.rect_filled(rect, theme::radius(H / 2.0), theme::black(0.5 + 0.2 * hover));
     // In the middle of the chip's height: beside the text and its line together, not the text alone.
-    widgets::icon(&p, pos2(rect.left() + PAD + ICON / 2.0, rect.center().y), icons::COMPASS, ICON, theme::ACCENT);
+    widgets::icon(&p, pos2(rect.left() + PAD + ICON / 2.0, rect.center().y), icons::COMPASS, ICON, theme::accent());
     let mut x = rect.left() + lead;
     let y = rect.top() + 15.0;
     let end = rect.right() - PAD;
@@ -118,7 +118,7 @@ pub fn draw(ui: &mut Ui, at: egui::Pos2, room: f32, chip: &Chip) -> bool {
     let track = Rect::from_min_max(pos2(rect.left() + lead, rect.bottom() - 8.0), pos2(end, rect.bottom() - 5.0));
     p.rect_filled(track, theme::radius(1.5), theme::white(0.14));
     if let Chip::Standing { progress, .. } = chip {
-        p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * progress.clamp(0.0, 1.0), track.height())), theme::radius(1.5), theme::ACCENT);
+        p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * progress.clamp(0.0, 1.0), track.height())), theme::radius(1.5), theme::accent());
     }
     widgets::note_control(&ctx, &chip.line(), rect, true);
     let pressed = widgets::activated(&resp);

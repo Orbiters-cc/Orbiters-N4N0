@@ -740,7 +740,7 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
             let mut p = ui.painter().clone();
             p.multiply_opacity(alpha);
             p.rect_filled(r, theme::radius(CHIP_H / 2.0), theme::white(0.06 * hover));
-            let color = theme::mix(theme::FG_3, theme::FG, hover);
+            let color = theme::mix(theme::fg_3(), theme::fg(), hover);
             widgets::icon(&p, pos2(r.left() + 14.0 + 8.0, r.center().y), chip.glyph, 14.0, color);
             widgets::text(
                 &p,
@@ -763,9 +763,9 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
         let mut p = ui.painter().clone();
         p.multiply_opacity(alpha);
         // As the segmented control's: the chosen one lighter, never green.
-        p.rect_filled(r, theme::radius(CHIP_H / 2.0), theme::mix(theme::mix(theme::surface(), theme::INK_750, hover), theme::INK_600, on));
-        let fg = theme::mix(theme::mix(theme::FG_3, theme::FG_2, hover), Color32::WHITE, on);
-        let icon_c = theme::mix(theme::mix(theme::FG_4, theme::FG_3, hover), theme::ACCENT, on);
+        p.rect_filled(r, theme::radius(CHIP_H / 2.0), theme::mix(theme::mix(theme::surface(), theme::ink_750(), hover), theme::ink_600(), on));
+        let fg = theme::mix(theme::mix(theme::fg_3(), theme::fg_2(), hover), Color32::WHITE, on);
+        let icon_c = theme::mix(theme::mix(theme::fg_4(), theme::fg_3(), hover), theme::accent(), on);
         widgets::icon(&p, pos2(r.left() + 14.0 + 8.0, r.center().y), chip.glyph, 14.0, icon_c);
         let label = widgets::text(
             &p,
@@ -778,7 +778,7 @@ fn draw_chips(ui: &mut Ui, cx: &Cx, state: &mut State, chips: &[Chip], origin: e
                 &p,
                 pos2(label.right() + 8.0, r.center().y),
                 Align2::LEFT_CENTER,
-                &Txt::new(n.to_string(), 12.0).color(theme::mix(theme::FG_4, theme::FG_3, on)),
+                &Txt::new(n.to_string(), 12.0).color(theme::mix(theme::fg_4(), theme::fg_3(), on)),
             );
         }
     }
@@ -857,7 +857,7 @@ fn list_view(ui: &mut Ui, cx: &Cx, state: &mut State, id: &str, rows: &[Row], no
                 tr("No video of this list matches.")
             };
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
-            widgets::text(ui.painter(), pos2(r.left() + 48.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(theme::FG_3));
+            widgets::text(ui.painter(), pos2(r.left() + 48.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(theme::fg_3()));
             return;
         }
         video_rows(ui, state, rows, now, pick_first, acts);
@@ -939,15 +939,15 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
             None => {
                 p.rect_filled(thumb, theme::radius(10.0), theme::surface_soft());
                 let glyph = if row.youtube.is_some() { icons::YOUTUBE_LOGO } else { icons::FILM_STRIP };
-                widgets::icon(p, thumb.center(), glyph, 22.0, theme::FG_4);
+                widgets::icon(p, thumb.center(), glyph, 22.0, theme::fg_4());
             }
         }
         if row.plays > 1 {
-            super::sessions::badge(p, ui, pos2(thumb.right() - 6.0, thumb.bottom() - 28.0), &format!("×{}", row.plays), theme::black(0.7), theme::FG, true);
+            super::sessions::badge(p, ui, pos2(thumb.right() - 6.0, thumb.bottom() - 28.0), &format!("×{}", row.plays), theme::black(0.7), theme::fg(), true);
         }
         let (title, title_c) = match &row.title {
-            Some(t) => (t.clone(), theme::FG),
-            None => (short_link(&row.url), theme::FG_2),
+            Some(t) => (t.clone(), theme::fg()),
+            None => (short_link(&row.url), theme::fg_2()),
         };
         let mut job = Txt::new(title, 14.0).weight(weight::MEDIUM).line_height(19.0).color(title_c).job(text_w);
         job.wrap.max_rows = 2;
@@ -957,7 +957,7 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
         p.galley(pos2(x, top), galley, title_c);
         let when = if row.plays > 0 { crate::pages::ago(ui.ctx(), row.when, now) } else { tr!("saved {when}", when = crate::pages::ago(ui.ctx(), row.when, now)) };
         let meta: Vec<&str> = [row.channel.as_deref(), row.world.as_deref(), Some(when.as_str())].into_iter().flatten().filter(|s| !s.is_empty()).collect();
-        widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(meta.join(" · "), 12.5).color(theme::FG_3), text_w);
+        widgets::text_truncated(p, pos2(x, top + title_h + 14.0), Align2::LEFT_CENTER, &Txt::new(meta.join(" · "), 12.5).color(theme::fg_3()), text_w);
     }
     let mut act = None;
     // At the right: the bookmark, Open, Copy link.
@@ -968,7 +968,7 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
         // Filled, in the accent, over the outline the button drew.
         let p = ui.painter();
         p.circle_filled(bookmark_r.center(), 12.0, theme::surface());
-        widgets::icon_fill(p, bookmark_r.center(), icons::BOOKMARK_SIMPLE, 17.0, theme::ACCENT);
+        widgets::icon_fill(p, bookmark_r.center(), icons::BOOKMARK_SIMPLE, 17.0, theme::accent());
     }
     if resp.clicked() {
         act = Some(Act::Pick(row.clone(), bookmark_r));
@@ -979,7 +979,7 @@ fn video_row(ui: &mut Ui, r: Rect, row: &Row, texture: Option<TextureId>, held: 
             act = Some(Act::Open(row.url.clone()));
         }
     } else {
-        widgets::icon(ui.painter(), open_r.center(), icons::ARROW_SQUARE_OUT, 17.0, theme::alpha(theme::FG_4, 0.5));
+        widgets::icon(ui.painter(), open_r.center(), icons::ARROW_SQUARE_OUT, 17.0, theme::alpha(theme::fg_4(), 0.5));
     }
     let (label, glyph) = if copied { (tr("Copied"), icons::CHECK) } else { (tr("Copy link"), icons::COPY) };
     let copy = Button::new(label).icon(glyph).size(Size::Sm).width(124.0).id_salt(("videos-copy", &row.url)).hint(tr("Paste it in a world's video player"));
@@ -1006,11 +1006,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, title: &str, text: &str, height: f32) {
     logo::paint(&p, lr, logo::Look::default());
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(380.0);
+        let mut job = Txt::new(text, 13.0).color(theme::fg_3()).line_height(20.0).job(380.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::fg_3());
 }
 
 /// The bookmark picker: the lists (pressed to put the video in or take it out) and a new list.
@@ -1052,7 +1052,7 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
             &painter,
             pos2(rect.left() + 18.0, rect.top() + 44.0),
             Align2::LEFT_CENTER,
-            &Txt::new(title, 12.0).color(theme::FG_3),
+            &Txt::new(title, 12.0).color(theme::fg_3()),
             width - 36.0,
         );
         let list = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 62.0), vec2(width - 16.0, list_h));
@@ -1067,9 +1067,9 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
                     rp.rect_filled(row, theme::radius(10.0), theme::white(0.06 * hover));
                     let mark = pos2(row.left() + 20.0, row.center().y);
                     if *holds {
-                        widgets::icon_fill(rp, mark, icons::CHECK_CIRCLE, 18.0, theme::ACCENT);
+                        widgets::icon_fill(rp, mark, icons::CHECK_CIRCLE, 18.0, theme::accent());
                     } else {
-                        widgets::icon(rp, mark, icons::CIRCLE, 18.0, theme::FG_4);
+                        widgets::icon(rp, mark, icons::CIRCLE, 18.0, theme::fg_4());
                     }
                     widgets::text_truncated(
                         rp,
@@ -1078,7 +1078,7 @@ fn picker(ctx: &egui::Context, state: &mut State, acts: &mut Vec<Act>) {
                         &Txt::new(name, 13.0).weight(weight::MEDIUM),
                         row.width() - 90.0,
                     );
-                    widgets::text(rp, pos2(row.right() - 12.0, row.center().y), Align2::RIGHT_CENTER, &Txt::new(count.to_string(), 12.0).color(theme::FG_4));
+                    widgets::text(rp, pos2(row.right() - 12.0, row.center().y), Align2::RIGHT_CENTER, &Txt::new(count.to_string(), 12.0).color(theme::fg_4()));
                     if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                         acts.push(Act::Toggle(lid.clone(), p.row.clone()));
                     }

@@ -106,7 +106,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
         for (mode, label) in [(LaunchMode::Vr, tr("In VR")), (LaunchMode::Desktop, tr("On the desktop"))] {
             let line = orbiters_core::vrchat_launch::arguments(mode, launch, None).join(" ");
             let width = ui.available_width();
-            ui.label(Txt::new(format!("{label}: {line}"), 11.5).mono().color(theme::FG_3).job(width)); // i18n: not shown (VRChat's options)
+            ui.label(Txt::new(format!("{label}: {line}"), 11.5).mono().color(theme::fg_3()).job(width)); // i18n: not shown (VRChat's options)
         }
     });
     apply

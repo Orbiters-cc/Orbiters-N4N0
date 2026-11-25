@@ -38,6 +38,15 @@ VENDORED = [("ALCOM project templates v1.9.3", "MIT", "crates/orbiters-projects/
     for name, folder in [("Inter", "Inter"), ("Bonbon", "Bonbon"), ("Creepster", "Creepster"), ("Diplomata", "Diplomata"),
                          ("JetBrains Mono", "JetBrains_Mono"), ("Matemasie", "Matemasie"), ("Monoton", "Monoton"),
                          ("Pirata One", "Pirata_One"), ("Plaster", "Plaster")]
+] + [
+    # The interface's fonts to choose from (orbiters-ui faces), embedded in orbiters-ui.
+    (f"{name} interface font", "OFL-1.1", f"crates/orbiters-ui/assets/faces/{folder}/OFL.txt")
+    for name, folder in [("Inter", "Inter"), ("Atkinson Hyperlegible Next", "AtkinsonHyperlegibleNext"), ("Nunito", "Nunito"),
+                         ("Montserrat", "Montserrat"), ("JetBrains Mono", "JetBrainsMono")]
+] + [
+    ("Roboto Slab interface font", "Apache-2.0", "crates/orbiters-ui/assets/faces/RobotoSlab/LICENSE.txt"),
+    # The backgrounds' shaders (orbiters-ui background), the website's, ported.
+    ("React Bits backgrounds", "MIT", "crates/orbiters-ui/assets/licenses/react-bits.txt"),
 ]
 
 # How a license file's text is recognised.

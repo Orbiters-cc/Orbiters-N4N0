@@ -215,15 +215,15 @@ impl Ask {
 fn body(ui: &mut Ui, lost: &[String]) {
     let w = ui.available_width();
     for line in lost {
-        let job = ui.painter().layout_job(Txt::new(line, 13.0).color(theme::FG).line_height(19.0).job(w - 28.0));
+        let job = ui.painter().layout_job(Txt::new(line, 13.0).color(theme::fg()).line_height(19.0).job(w - 28.0));
         let h = job.size().y;
         let (r, _) = ui.allocate_exact_size(egui::vec2(w, h + 10.0), egui::Sense::hover());
         widgets::icon(ui.painter(), pos2(r.left() + 8.0, r.top() + 9.5), icons::WARNING, 15.0, theme::WARN);
-        ui.painter().galley(pos2(r.left() + 28.0, r.top()), job, theme::FG);
+        ui.painter().galley(pos2(r.left() + 28.0, r.top()), job, theme::fg());
     }
-    let note = ui.painter().layout_job(Txt::new(tr("It stays as it is until the new one is ready: stopped or failed, nothing changes."), 12.0).color(theme::FG_3).line_height(18.0).job(w));
+    let note = ui.painter().layout_job(Txt::new(tr("It stays as it is until the new one is ready: stopped or failed, nothing changes."), 12.0).color(theme::fg_3()).line_height(18.0).job(w));
     let (r, _) = ui.allocate_exact_size(egui::vec2(w, note.size().y + 6.0), egui::Sense::hover());
-    ui.painter().galley(pos2(r.left(), r.top() + 6.0), note, theme::FG_3);
+    ui.painter().galley(pos2(r.left(), r.top() + 6.0), note, theme::fg_3());
 }
 
 /// Right to left: true when Reconstruct again was pressed.

@@ -56,7 +56,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
         ui.interact(rect, id.with("card"), Sense::click());
         widgets::panel(&p, rect, 16.0);
         let mark = Rect::from_center_size(pos2(rect.left() + 16.0 + 14.0, rect.center().y - 1.0), n4n0_logo::size_for_width(28.0));
-        n4n0_logo::paint(&p, mark, theme::MARK);
+        n4n0_logo::paint(&p, mark, theme::mark());
         let row = rect.top() + 30.0;
         let close = Rect::from_min_size(pos2(rect.right() - 12.0 - 32.0, row - 16.0), vec2(32.0, 32.0));
         let show = Button::new(tr(SHOW)).icon(icons::EYE).variant(Variant::Primary);
@@ -71,7 +71,7 @@ pub fn window(ctx: &Context, ctl: &Ctl, offer: Option<&ShareOffer>, below: bool)
         widgets::text_truncated(&p, pos2(words, rect.top() + 60.0), Align2::LEFT_CENTER, &Txt::new(question, size), room);
         let place = where_(offer);
         let size = crate::mismatch::fitting(&p, &place, &[12.5, 11.5, 10.5], room);
-        widgets::text_truncated(&p, pos2(words, rect.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room);
+        widgets::text_truncated(&p, pos2(words, rect.top() + 80.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::fg_3()), room);
         if show.width(w).confirm_at(ui, at) {
             ctl.shared_view(SharedViewCommand::Answer { id: offer.id, accept: true });
         }
@@ -137,20 +137,20 @@ pub fn pick_at(uv: [f32; 2], count: usize) -> Option<usize> {
 fn frame(p: &Painter, hover: bool) -> (Rect, f32) {
     let b = band();
     let radius = 36.0;
-    let fill = if hover { theme::mix(theme::INK_950, theme::FG, 0.08) } else { theme::alpha(theme::INK_950, 0.94) };
+    let fill = if hover { theme::mix(theme::ink_950(), theme::fg(), 0.08) } else { theme::alpha(theme::ink_950(), 0.94) };
     p.rect_filled(b, radius, fill);
-    p.rect_stroke(b, radius, egui::Stroke::new(3.0, if hover { theme::ACCENT } else { theme::white(0.16) }), egui::StrokeKind::Inside);
+    p.rect_stroke(b, radius, egui::Stroke::new(3.0, if hover { theme::accent() } else { theme::white(0.16) }), egui::StrokeKind::Inside);
     (b, radius)
 }
 
 fn pill(p: &Painter, rect: Rect, words: &str, glyph: Option<&str>, primary: bool, hover: bool) {
     let fill = match (primary, hover) {
-        (true, false) => theme::ACCENT,
-        (true, true) => theme::mix(theme::ACCENT, theme::FG, 0.2),
+        (true, false) => theme::accent(),
+        (true, true) => theme::mix(theme::accent(), theme::fg(), 0.2),
         (false, false) => theme::white(0.10),
         (false, true) => theme::white(0.22),
     };
-    let ink = if primary { theme::INK_950 } else { theme::FG };
+    let ink = if primary { theme::ink_950() } else { theme::fg() };
     p.rect_filled(rect, rect.height() / 2.0, fill);
     let (text_left, room) = match glyph {
         Some(g) => {
@@ -175,7 +175,7 @@ pub fn paint_offer(p: &Painter, from: &str, title: &str, hover: Option<bool>, le
     let offer = ShareOffer { from: from.into(), title: title.into(), ..Default::default() };
     let (b, radius) = frame(p, false);
     let mark = Rect::from_center_size(pos2(b.left() + 30.0 + 22.0, b.center().y - 2.0), n4n0_logo::size_for_width(44.0));
-    n4n0_logo::paint(p, mark, theme::MARK);
+    n4n0_logo::paint(p, mark, theme::mark());
     pill(p, pill_rect(0), tr(SHOW), Some(icons::EYE), true, hover == Some(true));
     pill(p, pill_rect(1), tr(NOT_NOW), None, false, hover == Some(false));
     // Who first, whole (the size comes down until it fits), then the question, then where it opens.
@@ -188,7 +188,7 @@ pub fn paint_offer(p: &Painter, from: &str, title: &str, hover: Option<bool>, le
     widgets::text_truncated(p, pos2(words, b.center().y + 2.0), Align2::LEFT_CENTER, &Txt::new(question, size), room + 4.0);
     let place = where_(&offer);
     let size = crate::mismatch::fitting(p, &place, &[20.0, 18.0, 16.0], room);
-    widgets::text_truncated(p, pos2(words, b.center().y + 34.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::FG_3), room + 4.0);
+    widgets::text_truncated(p, pos2(words, b.center().y + 34.0), Align2::LEFT_CENTER, &Txt::new(&place, size).color(theme::fg_3()), room + 4.0);
     time_left(p, b, radius, left);
 }
 
@@ -196,7 +196,7 @@ pub fn paint_offer(p: &Painter, from: &str, title: &str, hover: Option<bool>, le
 pub fn paint_pick(p: &Painter, names: &[String], hover: Option<usize>, left: f32) {
     let (b, radius) = frame(p, false);
     let mark = Rect::from_center_size(pos2(b.left() + 26.0 + 16.0, b.top() + 40.0), n4n0_logo::size_for_width(32.0));
-    n4n0_logo::paint(p, mark, theme::MARK);
+    n4n0_logo::paint(p, mark, theme::mark());
     let words = mark.right() + 14.0;
     let room = b.right() - 26.0 - words;
     let title = tr(WITH_WHOM);

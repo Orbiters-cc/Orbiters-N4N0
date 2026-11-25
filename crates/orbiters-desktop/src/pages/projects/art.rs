@@ -45,7 +45,7 @@ fn picture(p: &Painter, state: &State, a: &Avatar, rect: Rect, radii: [f32; 4], 
     };
     if k < 1.0 && initial {
         let tint = widgets::name_color(&a.name);
-        feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_750, tint, 0.16));
+        feedback::fill_corners(p, rect, radii, theme::mix(theme::ink_750(), tint, 0.16));
         let shade = Rect::from_min_max(pos2(rect.left(), rect.center().y), rect.max);
         paint::fill_gradient(
             p,
@@ -87,7 +87,7 @@ pub(super) fn cover(p: &Painter, state: &State, project: &Project, rect: Rect, r
         pictures.iter().all(|a| state.thumb_instant.contains(&a.id) || feedback::loaded(p.ctx(), Id::unique(("avatar-picture", &a.id)), true) >= 1.0);
     if pictures.is_empty() || !settled {
         let (tint, glyph) = kind_look(project);
-        feedback::fill_corners(p, rect, radii, theme::mix(theme::INK_800, tint, 0.08));
+        feedback::fill_corners(p, rect, radii, theme::mix(theme::ink_800(), tint, 0.08));
         let s = (rect.height() * 0.34).clamp(20.0, 64.0);
         let tile = Rect::from_center_size(rect.center(), vec2(s, s));
         p.rect_filled(tile, theme::radius(s * 0.3), theme::alpha(tint, 0.14));
@@ -162,7 +162,7 @@ pub(super) fn package_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, 
 /// the stack glyph until it arrives, then the icon fading in; a repository turned off shows it dimmed.
 pub(super) fn repo_icon(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, url: &str, enabled: bool) {
     let on = anim::toggle(p.ctx(), Id::unique(("repo-icon-on", url)), enabled, Spring::SOFT).clamp(0.0, 1.0);
-    icon_tile(p, icon, rect, url, icons::STACK, theme::mix(theme::FG_4, theme::ACCENT, on), 0.45 + 0.55 * on);
+    icon_tile(p, icon, rect, url, icons::STACK, theme::mix(theme::fg_4(), theme::accent(), on), 0.45 + 0.55 * on);
 }
 
 /// An icon on its tile: the tile tinted `tint` with `placeholder` until `icon` arrives, then the icon fading in over it
@@ -201,7 +201,7 @@ fn icon_tile(p: &Painter, icon: Option<&PackageIcon>, rect: Rect, key: &str, pla
 /// A package's tint, by who makes it.
 pub(super) fn package_tint(name: &str) -> Color32 {
     if name.starts_with("orbiters.") {
-        theme::ACCENT
+        theme::accent()
     } else if name.starts_with("com.vrchat.") {
         theme::BLUE
     } else {
@@ -215,7 +215,7 @@ pub(crate) fn selection(p: &Painter, id: Id, rect: Rect, radius: f32, selected: 
     let k = anim::toggle(p.ctx(), id, selected, Spring::BOUNCY);
     if k > 0.01 {
         let r = rect.expand(3.0 * k.clamp(0.0, 1.2));
-        paint::stroke_squircle(p, r, theme::squircle(radius + 3.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, k.clamp(0.0, 1.0))));
+        paint::stroke_squircle(p, r, theme::squircle(radius + 3.0), egui::Stroke::new(2.0, theme::alpha(theme::accent(), k.clamp(0.0, 1.0))));
     }
     k
 }
@@ -226,9 +226,9 @@ pub(crate) fn check(p: &Painter, center: egui::Pos2, k: f32) {
         return;
     }
     let r = 11.0 * k.clamp(0.0, 1.2);
-    p.circle_filled(center, r + 2.0, theme::INK_850);
-    p.circle_filled(center, r, theme::ACCENT);
-    widgets::icon(p, center, icons::CHECK, 12.0 * k.clamp(0.0, 1.0), theme::ON_ACCENT);
+    p.circle_filled(center, r + 2.0, theme::ink_850());
+    p.circle_filled(center, r, theme::accent());
+    widgets::icon(p, center, icons::CHECK, 12.0 * k.clamp(0.0, 1.0), theme::on_accent());
 }
 
 /// A small label in caps over a group of rows.
@@ -240,7 +240,7 @@ pub(super) fn caps(ui: &mut Ui, text: &str) {
 /// A card of the project panel: tinted icon tile, title and a count, an action slot on the right of the heading
 /// (`right` gets its rect), then the body; sized to what the body drew.
 pub(super) fn card(ui: &mut Ui, salt: &str, glyph: &str, title: &str, count: Option<String>, right: impl FnOnce(&mut Ui, Rect), body: impl FnOnce(&mut Ui)) {
-    card_with(ui, salt, |p, t| tile(p, t, glyph, theme::ACCENT), title, count, right, body);
+    card_with(ui, salt, |p, t| tile(p, t, glyph, theme::accent()), title, count, right, body);
 }
 
 /// [`card`] with its own tile: `tile` draws into the heading's 32-point square.

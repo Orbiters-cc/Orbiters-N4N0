@@ -274,8 +274,8 @@ pub fn paint_cover_at(p: &Painter, rect: Rect, radii: [f32; 4], tex: Option<&Tex
                 rect.left_top(),
                 rect.right_bottom(),
                 &[
-                    (0.0, theme::mix(theme::INK_800, a, 0.42).gamma_multiply(alpha)),
-                    (1.0, theme::mix(theme::INK_850, theme::VIOLET, 0.26).gamma_multiply(alpha)),
+                    (0.0, theme::mix(theme::ink_800(), a, 0.42).gamma_multiply(alpha)),
+                    (1.0, theme::mix(theme::ink_850(), theme::VIOLET, 0.26).gamma_multiply(alpha)),
                 ],
             );
             paint::fill_gradient(p, &pts, &g);
@@ -353,7 +353,7 @@ pub fn status_pill(p: &Painter, ui: &Ui, at: Pos2, ph: Phase, small: bool) -> Re
     let mut x = r.left() + 11.0;
     if dot {
         let c = pos2(x + 3.5, r.center().y);
-        let color = if ph == Phase::Live { Color32::WHITE } else { theme::ACCENT };
+        let color = if ph == Phase::Live { Color32::WHITE } else { theme::accent() };
         if ph == Phase::Live && anim::is_live(ui.ctx()) {
             let k = (anim::clock(ui.ctx(), 30.0) % 1.4 / 1.4) as f32;
             let e = ease::out_cubic(k);
@@ -368,22 +368,22 @@ pub fn status_pill(p: &Painter, ui: &Ui, at: Pos2, ph: Phase, small: bool) -> Re
 
 /// The homepage's date tile: the month over the day, in the accent's tint.
 fn date_tile(p: &Painter, rect: Rect, starts: Option<&str>) {
-    p.rect_filled(rect, theme::radius(13.0), theme::alpha(theme::ACCENT, 0.13));
+    p.rect_filled(rect, theme::radius(13.0), theme::alpha(theme::accent(), 0.13));
     let Some(t) = parse(starts).map(local) else {
-        widgets::icon(p, rect.center(), icons::CALENDAR_DOTS, 18.0, theme::ACCENT);
+        widgets::icon(p, rect.center(), icons::CALENDAR_DOTS, 18.0, theme::accent());
         return;
     };
     widgets::text(
         p,
         pos2(rect.center().x, rect.top() + 14.0),
         Align2::CENTER_CENTER,
-        &Txt::new(tr(MONTHS[t.month() as usize - 1]).to_uppercase(), 9.5).weight(weight::BOLD).tracking(0.06).color(theme::ACCENT),
+        &Txt::new(tr(MONTHS[t.month() as usize - 1]).to_uppercase(), 9.5).weight(weight::BOLD).tracking(0.06).color(theme::accent()),
     );
     widgets::text(
         p,
         pos2(rect.center().x, rect.top() + 33.0),
         Align2::CENTER_CENTER,
-        &Txt::new(t.day().to_string(), 21.0).weight(weight::BOLD).color(theme::ACCENT),
+        &Txt::new(t.day().to_string(), 21.0).weight(weight::BOLD).color(theme::accent()),
     );
 }
 
@@ -492,14 +492,14 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
     let mut pressed = None;
     let (target_w, draw): (f32, Face) = match ask {
         Ask::Busy(label) => {
-            let t = Txt::new(tr(label), size).weight(weight::MEDIUM).color(theme::FG_2);
+            let t = Txt::new(tr(label), size).weight(weight::MEDIUM).color(theme::fg_2());
             let w = widgets::text_size(ui, &t).x + 50.0;
             (
                 w,
                 Box::new(move |ui: &mut Ui, r: Rect| {
                     let p = ui.painter();
                     p.rect_filled(r, theme::radius(r.height() * 0.5), theme::control());
-                    feedback::spinner(p, pos2(r.left() + 20.0, r.center().y), 6.0, 2.0, theme::ACCENT);
+                    feedback::spinner(p, pos2(r.left() + 20.0, r.center().y), 6.0, 2.0, theme::accent());
                     widgets::text_truncated(p, pos2(r.left() + 34.0, r.center().y), Align2::LEFT_CENTER, &t, r.width() - 44.0);
                     None
                 }),
@@ -511,9 +511,9 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
                 Ask::Sent(l) => (icons::CHECK_CIRCLE, tr(l), false),
                 _ => (icons::PAPER_PLANE_TILT, tr("Invite sent"), false),
             };
-            let t = Txt::new(label, size).weight(weight::SEMIBOLD).color(theme::ACCENT);
+            let t = Txt::new(label, size).weight(weight::SEMIBOLD).color(theme::accent());
             let chip_w = widgets::text_size(ui, &t).x + 46.0;
-            let c = Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::FG_3);
+            let c = Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::fg_3());
             let cancel_w = if cancel { widgets::text_size(ui, &c).x + 24.0 } else { 0.0 };
             let id2 = id.with("cancel");
             (
@@ -521,8 +521,8 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
                 Box::new(move |ui: &mut Ui, r: Rect| {
                     let chip = Rect::from_min_size(r.min, vec2((r.width() - cancel_w).max(h), r.height()));
                     let p = ui.painter().clone();
-                    p.rect_filled(chip, theme::radius(r.height() * 0.5), theme::alpha(theme::ACCENT, 0.14));
-                    widgets::icon(&p, pos2(chip.left() + 20.0, chip.center().y), glyph, 15.0, theme::ACCENT);
+                    p.rect_filled(chip, theme::radius(r.height() * 0.5), theme::alpha(theme::accent(), 0.14));
+                    widgets::icon(&p, pos2(chip.left() + 20.0, chip.center().y), glyph, 15.0, theme::accent());
                     widgets::text_truncated(&p, pos2(chip.left() + 34.0, chip.center().y), Align2::LEFT_CENTER, &t, chip.width() - 42.0);
                     if cancel {
                         let cr = Rect::from_min_max(pos2(chip.right(), r.top()), r.max);
@@ -533,7 +533,7 @@ fn invite_control(ui: &mut Ui, id: Id, at: Pos2, ask: &Ask, primary: bool, small
                             &p,
                             pos2(cr.center().x + 2.0, cr.center().y),
                             Align2::CENTER_CENTER,
-                            &Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::mix(theme::FG_3, theme::FG, hover)),
+                            &Txt::new(tr("Cancel"), size).weight(weight::MEDIUM).color(theme::mix(theme::fg_3(), theme::fg(), hover)),
                         );
                         if sharing::pressed(resp) {
                             return Some(Press::Cancel);
@@ -1353,19 +1353,19 @@ impl Window {
             p.rect_filled(fr, theme::radius(14.0), theme::white(0.06));
             let mut tx = fr.left() + 13.0;
             if let Some(g) = glyph {
-                widgets::icon(&p, pos2(tx + 7.0, fr.center().y), g, 13.0, theme::FG_3);
+                widgets::icon(&p, pos2(tx + 7.0, fr.center().y), g, 13.0, theme::fg_3());
                 tx += 20.0;
             }
-            widgets::text(&p, pos2(tx, fr.center().y), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::FG_2));
+            widgets::text(&p, pos2(tx, fr.center().y), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::fg_2()));
         }
 
         // What it is.
         let text = [o.description.trim(), plain(&o.long_description).trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n\n");
         if !text.is_empty() {
             ui.add_space(18.0);
-            let g = ui.painter().layout_job(Txt::new(&text, 14.5).color(theme::FG_2).line_height(23.0).job(width.min(720.0)));
+            let g = ui.painter().layout_job(Txt::new(&text, 14.5).color(theme::fg_2()).line_height(23.0).job(width.min(720.0)));
             let (r, _) = ui.allocate_exact_size(vec2(width, g.size().y), Sense::hover());
-            ui.painter().galley(r.min, g, theme::FG_2);
+            ui.painter().galley(r.min, g, theme::fg_2());
         }
 
         // Program.
@@ -1394,7 +1394,7 @@ impl Window {
             let (r, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
             let p = ui.painter().clone();
             widgets::text(&p, pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Pictures from this event"), 17.0).weight(weight::SEMIBOLD));
-            widgets::text(&p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Also in Photos & captures"), 12.0).color(theme::FG_3));
+            widgets::text(&p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Also in Photos & captures"), 12.0).color(theme::fg_3()));
             ui.add_space(10.0);
             let n = self.pictures.len().min(if width < 600.0 { 3 } else { 4 });
             let gap = 10.0;
@@ -1433,12 +1433,12 @@ impl Window {
         let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
         let p = ui.painter().clone();
         let live = s.live || phase(None, s.starts_at.as_deref(), s.ends_at.as_deref(), false, now) == Phase::Live && s.instance_url.is_some();
-        widgets::frame(&p, r, 20.0, if live { theme::alpha(theme::ACCENT, 0.1) } else { theme::white(0.035) });
+        widgets::frame(&p, r, 20.0, if live { theme::alpha(theme::accent(), 0.1) } else { theme::white(0.035) });
         // Time.
         let time = if s.organizer_starts { tr("Later").to_string() } else { parse(s.starts_at.as_deref()).map(local).map(clock).unwrap_or_else(|| "—".into()) };
         let time_box = Rect::from_min_size(pos2(r.left() + 14.0, r.top() + 14.0), vec2(58.0, 28.0));
         p.rect_filled(time_box, theme::radius(14.0), theme::white(0.06));
-        widgets::text(&p, time_box.center(), Align2::CENTER_CENTER, &Txt::new(time, 12.0).weight(weight::BOLD).color(theme::ACCENT));
+        widgets::text(&p, time_box.center(), Align2::CENTER_CENTER, &Txt::new(time, 12.0).weight(weight::BOLD).color(theme::accent()));
         // World.
         let wr = Rect::from_min_size(pos2(time_box.right() + 12.0, r.top() + 12.0), vec2(96.0, 72.0));
         let world_tex = s
@@ -1450,7 +1450,7 @@ impl Window {
             Some(t) => feedback::cover(&p, wr, [12.0; 4], t, 1.0, 1.0),
             None => {
                 p.rect_filled(wr, theme::radius(12.0), theme::white(0.05));
-                widgets::icon(&p, wr.center(), if s.world.is_some() { icons::GLOBE } else { icons::LIST_CHECKS }, 20.0, theme::FG_4);
+                widgets::icon(&p, wr.center(), if s.world.is_some() { icons::GLOBE } else { icons::LIST_CHECKS }, 20.0, theme::fg_4());
             }
         }
         // What and where.
@@ -1476,7 +1476,7 @@ impl Window {
             (Some(_), true) => s.title.clone(),
             (None, _) => tr("World chosen by vote").into(),
         };
-        widgets::text_truncated(&p, pos2(tx, r.top() + 48.0), Align2::LEFT_CENTER, &Txt::new(&sub, 12.5).color(theme::FG_3), text_w);
+        widgets::text_truncated(&p, pos2(tx, r.top() + 48.0), Align2::LEFT_CENTER, &Txt::new(&sub, 12.5).color(theme::fg_3()), text_w);
         let ask = self.ask_of(&s.id);
         let line = if s.organizer_starts {
             tr("Starts when the organizer is ready").to_string()
@@ -1488,10 +1488,10 @@ impl Window {
             }
         };
         if let Some(m) = &s.movie {
-            widgets::icon(&p, pos2(tx + 6.0, r.top() + 70.0), icons::FILM_STRIP, 12.0, theme::FG_3);
-            widgets::text_truncated(&p, pos2(tx + 18.0, r.top() + 70.0), Align2::LEFT_CENTER, &Txt::new(&m.title, 12.0).color(theme::FG_2), text_w - 18.0);
+            widgets::icon(&p, pos2(tx + 6.0, r.top() + 70.0), icons::FILM_STRIP, 12.0, theme::fg_3());
+            widgets::text_truncated(&p, pos2(tx + 18.0, r.top() + 70.0), Align2::LEFT_CENTER, &Txt::new(&m.title, 12.0).color(theme::fg_2()), text_w - 18.0);
         } else if !line.is_empty() {
-            widgets::text_truncated(&p, pos2(tx, r.top() + 70.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_4), text_w);
+            widgets::text_truncated(&p, pos2(tx, r.top() + 70.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::fg_4()), text_w);
         }
         // Its actions.
         let mut act = None;
@@ -1583,7 +1583,7 @@ fn note(ui: &mut Ui, id: Id, tone: Tone, text: &str, actions: &[NoteAction]) -> 
     let buttons_w = bws.iter().sum::<f32>() + 8.0 * bws.len().saturating_sub(1) as f32;
     let beside = !actions.is_empty() && w - buttons_w > 360.0;
     let text_w = if beside { w - 56.0 - buttons_w - 16.0 } else { w - 56.0 };
-    let galley = ui.painter().layout_job(Txt::new(text, 13.0).color(theme::FG).line_height(19.0).job(text_w));
+    let galley = ui.painter().layout_job(Txt::new(text, 13.0).color(theme::fg()).line_height(19.0).job(text_w));
     let text_h = galley.size().y.max(19.0);
     let h = if beside || actions.is_empty() { (text_h + 26.0).max(52.0) } else { text_h + 26.0 + 42.0 };
     let k = anim::spring_from(ui.ctx(), id.with("in"), [0.0], [1.0], Spring::SOFT)[0];
@@ -1601,7 +1601,7 @@ fn note(ui: &mut Ui, id: Id, tone: Tone, text: &str, actions: &[NoteAction]) -> 
         Tone::Info | Tone::Off => icons::INFO,
     };
     widgets::icon(&p, pos2(r.left() + 26.0, r.top() + 13.0 + 9.5), glyph, 17.0, c);
-    p.galley(pos2(r.left() + 46.0, r.top() + 13.0), galley, theme::FG);
+    p.galley(pos2(r.left() + 46.0, r.top() + 13.0), galley, theme::fg());
     let mut pressed = None;
     let (mut x, y) = if beside { (r.right() - 12.0 - buttons_w, r.center().y - 16.0) } else { (r.left() + 46.0, r.top() + 13.0 + text_h + 8.0) };
     for (i, a) in actions.iter().enumerate() {
@@ -1942,7 +1942,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     p.multiply_opacity(a);
                     widgets::text(&p, pos2(r.left(), r.top() + 14.0), Align2::LEFT_CENTER, &Txt::new(label, 18.0).weight(weight::SEMIBOLD).tracking(-0.01));
                     let count = tr_n("{count} event", "{count} events", group.len() as u64);
-                    widgets::text(&p, pos2(r.left(), r.top() + 35.0), Align2::LEFT_CENTER, &Txt::new(count, 12.0).color(theme::FG_3));
+                    widgets::text(&p, pos2(r.left(), r.top() + 35.0), Align2::LEFT_CENTER, &Txt::new(count, 12.0).color(theme::fg_3()));
                     ui.add_space(14.0);
                     let (cols, w) = orbiters_ui::layout::columns(width, CARD_MIN, 16.0);
                     let h = w * 9.0 / 16.0 + CARD_BODY;
@@ -2188,7 +2188,7 @@ fn event_card(
         cu.disable();
     }
     let p = cu.painter().clone();
-    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
     paint_cover(&p, thumb, [20.0, 20.0, 0.0, 0.0], tex, &c.id, 1.0 + 0.06 * ease::out_cubic(hover), 1.0);
     let shade = paint::rounded_rect_points_corners(thumb, [theme::squircle(20.0), theme::squircle(20.0), 0.0, 0.0]);
@@ -2199,7 +2199,7 @@ fn event_card(
     );
     status_pill(&p, &cu, pos2(thumb.left() + 12.0, thumb.top() + 12.0), card_phase(c, now), true);
     if let Some(cat) = c.category.as_deref() {
-        super::sessions::badge(&p, &cu, pos2(thumb.right() - 12.0, thumb.top() + 13.0), &category_label(cat), theme::black(0.55), theme::FG_2, true);
+        super::sessions::badge(&p, &cu, pos2(thumb.right() - 12.0, thumb.top() + 13.0), &category_label(cat), theme::black(0.55), theme::fg_2(), true);
     }
     // Date tile, title, when.
     let tile = Rect::from_min_size(pos2(r.left() + 14.0, thumb.bottom() + 14.0), vec2(46.0, 50.0));
@@ -2212,13 +2212,13 @@ fn event_card(
         job
     });
     let gh = g.size().y;
-    p.galley(pos2(tx, tile.top() + 1.0), g, theme::FG);
+    p.galley(pos2(tx, tile.top() + 1.0), g, theme::fg());
     let times = match (parse(c.starts_at.as_deref()).map(local), parse(c.ends_at.as_deref()).map(local)) {
         (Some(a), Some(b)) => format!("{} – {}", clock(a), clock(b)),
         (Some(a), None) => clock(a),
         _ => tr("Time to be announced").into(),
     };
-    widgets::text_truncated(&p, pos2(tx, tile.top() + gh + 12.0), Align2::LEFT_CENTER, &Txt::new(times, 12.0).color(theme::FG_3), tw);
+    widgets::text_truncated(&p, pos2(tx, tile.top() + gh + 12.0), Align2::LEFT_CENTER, &Txt::new(times, 12.0).color(theme::fg_3()), tw);
     // Host and world, then Join.
     let line_y = r.bottom() - 26.0;
     let label = if signed { tr("On the list") } else { tr("Join") };
@@ -2240,7 +2240,7 @@ fn event_card(
             &p,
             pos2(ar.right() + 7.0, line_y),
             Align2::LEFT_CENTER,
-            &Txt::new(&h.name, 12.0).weight(weight::MEDIUM).color(theme::FG_2),
+            &Txt::new(&h.name, 12.0).weight(weight::MEDIUM).color(theme::fg_2()),
             if has_world { (room - ar.right() - 7.0) * 0.5 } else { room - ar.right() - 7.0 },
         );
         fx = by.right() + 12.0;
@@ -2251,10 +2251,10 @@ fn event_card(
             let wide = widgets::text_size(&cu, &Txt::new(w, 12.0)).x;
             let globe = wide + 18.0 <= room - fx || wide > room - fx;
             if globe {
-                widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::FG_4);
+                widgets::icon(&p, pos2(fx + 6.0, line_y), icons::GLOBE, 12.0, theme::fg_4());
             }
             let at = if globe { fx + 18.0 } else { fx };
-            widgets::text_truncated(&p, pos2(at, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::FG_3), room - at);
+            widgets::text_truncated(&p, pos2(at, line_y), Align2::LEFT_CENTER, &Txt::new(w, 12.0).color(theme::fg_3()), room - at);
         }
     }
     (interactive && (join || widgets::pressed(&resp))).then_some(thumb)
@@ -2276,11 +2276,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(400.0);
+        let mut job = Txt::new(text, 13.0).color(theme::fg_3()).line_height(20.0).job(400.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::fg_3());
 }
 
 #[cfg(test)]

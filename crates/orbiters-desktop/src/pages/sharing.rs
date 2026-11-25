@@ -887,15 +887,15 @@ impl Dialog {
             let at = picture.translate(vec2(slide * (1.0 - k), 0.0));
             let at = Rect::from_center_size(at.center(), at.size() * (1.0 - 0.04 * lift));
             if lift > 0.001 {
-                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::INK_750, lift.clamp(0.0, 1.0)));
+                feedback::fill_corners(&np, picture, radii, theme::alpha(theme::ink_750(), lift.clamp(0.0, 1.0)));
                 np.multiply_opacity(1.0 - 0.35 * lift.clamp(0.0, 1.0));
             }
             match (&thumb_tex, &large_tex) {
                 (Some(t), _) if shown_large < 0.99 => feedback::cover(&np, at, radii, t, 1.0 + 0.015 * hover, k),
                 (None, None) => {
-                    feedback::fill_corners(&np, at, radii, theme::alpha(theme::INK_750, k));
+                    feedback::fill_corners(&np, at, radii, theme::alpha(theme::ink_750(), k));
                     let glyph = if self.entry.is_picture() { icons::IMAGES } else { icons::CUBE };
-                    widgets::icon(&np, at.center(), glyph, 40.0, theme::alpha(theme::FG_4, k));
+                    widgets::icon(&np, at.center(), glyph, 40.0, theme::alpha(theme::fg_4(), k));
                 }
                 _ => {}
             }
@@ -1019,14 +1019,14 @@ impl Dialog {
     /// progress (bottom edge).
     fn picture_overlays(&mut self, ui: &mut Ui, cx: &Cx, picture: Rect, busy: bool, full: f32, act: &mut Option<Act>) {
         let p = ui.painter().clone();
-        let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, tr("Picture"), theme::FG) } else { (icons::CUBE, tr("3D capture"), theme::ACCENT) };
+        let (glyph, label, color) = if self.entry.is_picture() { (icons::IMAGES, tr("Picture"), theme::fg()) } else { (icons::CUBE, tr("3D capture"), theme::accent()) };
         // A multi-layer picture's chosen layer says which.
         let layer = self.layers.chosen_name().map(|n| tr!("{name} layer", name = n));
         let (glyph, label) = match &layer {
             Some(l) => (icons::STACK, l.as_str()),
             None => (glyph, label),
         };
-        let t = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let t = Txt::new(label, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
         let tw = widgets::text_size(ui, &t).x;
         let badge = Rect::from_min_size(picture.min + vec2(16.0, 16.0), vec2(tw + 38.0, 28.0));
         p.rect_filled(badge, theme::radius(14.0), theme::black(0.55));
@@ -1045,7 +1045,7 @@ impl Dialog {
             let bar = Rect::from_min_max(pos2(picture.left(), picture.bottom() - 3.0), picture.max);
             let bp = p.with_clip_rect(bar.intersect(p.clip_rect()));
             // A paused run's bar stands still and quiet.
-            let tone = if matches!(offer, Some(Offer::Paused { .. })) && !busy { theme::FG_3 } else { theme::ACCENT };
+            let tone = if matches!(offer, Some(Offer::Paused { .. })) && !busy { theme::fg_3() } else { theme::accent() };
             bp.rect_filled(bar, 0.0, theme::alpha(tone, 0.18 * running));
             let sent = sent_part(self.stage).filter(|_| busy).or(rebuilt);
             let shown = anim::spring(ui.ctx(), Id::unique(("capture-window-sent", &self.entry.key)), [sent.unwrap_or(0.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
@@ -1055,7 +1055,7 @@ impl Dialog {
                 let k = ((anim::time(ui.ctx()) * 0.8) % 1.0) as f32;
                 let w = bar.width() * 0.35;
                 let x = bar.left() - w + k * (bar.width() + w);
-                bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, running));
+                bp.rect_filled(Rect::from_min_size(pos2(x, bar.top()), vec2(w, 3.0)), theme::radius(1.5), theme::alpha(theme::accent(), running));
             }
             if anim::is_live(ui.ctx()) {
                 ui.ctx().request_repaint();
@@ -1253,7 +1253,7 @@ impl Dialog {
                 p.rect_stroke(
                     ring,
                     theme::radius(ring.height() * 0.5),
-                    egui::Stroke::new(2.0 * (1.0 - e), theme::alpha(theme::ACCENT, 0.85 * (1.0 - e))),
+                    egui::Stroke::new(2.0 * (1.0 - e), theme::alpha(theme::accent(), 0.85 * (1.0 - e))),
                     egui::StrokeKind::Outside,
                 );
                 ctx.request_repaint();
@@ -1352,7 +1352,7 @@ impl Dialog {
             working_part(ui, &what, sent_part(self.stage));
             if matches!(self.last, Some(Action::Share(_) | Action::Update)) && mine {
                 ui.add_space(6.0);
-                paragraph(ui, tr("You can close this window: it carries on."), 11.5, theme::FG_4, w);
+                paragraph(ui, tr("You can close this window: it carries on."), 11.5, theme::fg_4(), w);
             }
         }
         // A reconstruction of this capture: how far, or what it waits for, or why there can be none.
@@ -1361,21 +1361,21 @@ impl Dialog {
                 ui.add_space(14.0);
                 working_part(ui, &tr!("{stage} · {percent}%", stage = tr(stage), percent = format!("{:.0}", fraction * 100.0)), Some(fraction));
                 ui.add_space(6.0);
-                paragraph(ui, tr("You can close this window: it carries on. Its 3D view stays as it is until the new one is ready."), 11.5, theme::FG_4, w);
+                paragraph(ui, tr("You can close this window: it carries on. Its 3D view stays as it is until the new one is ready."), 11.5, theme::fg_4(), w);
             }
             Some(Offer::Paused { fraction, why }) => {
                 ui.add_space(14.0);
                 paused_part(ui, &tr!("Paused · {percent}% kept", percent = format!("{:.0}", fraction * 100.0)), fraction);
                 ui.add_space(6.0);
-                paragraph(ui, tr(why), 11.5, theme::FG_3, w);
+                paragraph(ui, tr(why), 11.5, theme::fg_3(), w);
             }
             Some(Offer::Waiting { hint }) => {
                 ui.add_space(14.0);
-                paragraph(ui, &tr!("Waiting to reconstruct. {hint}.", hint = tr(hint)), 12.0, theme::FG_3, w);
+                paragraph(ui, &tr!("Waiting to reconstruct. {hint}.", hint = tr(hint)), 12.0, theme::fg_3(), w);
             }
             Some(Offer::Blocked { reason, again: true, .. }) => {
                 ui.add_space(14.0);
-                paragraph(ui, &tr!("{reason}.", reason = tr(reason)), 12.0, theme::FG_3, w);
+                paragraph(ui, &tr!("{reason}.", reason = tr(reason)), 12.0, theme::fg_3(), w);
             }
             _ => {}
         }
@@ -1431,14 +1431,14 @@ impl Dialog {
         let p = ui.painter().clone();
         let kind = if self.entry.is_picture() { tr("VRChat picture") } else { tr("3D capture") };
         let date = super::local_time(&controller::iso(self.entry.taken));
-        let full = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::FG_3);
+        let full = Txt::new(format!("{kind} · {date}"), 12.5).color(theme::fg_3());
         // "Only on this computer" whole after it: where a language's words leave no room, the date goes without the kind, which the window's title says.
         let local = widgets::text_size(ui, &Txt::new(tr("Only on this computer"), 12.5).weight(weight::MEDIUM)).x + 28.0;
-        let line = if item.is_none() && widgets::text_size(ui, &full).x + local > max_w { Txt::new(date.clone(), 12.5).color(theme::FG_3) } else { full };
+        let line = if item.is_none() && widgets::text_size(ui, &full).x + local > max_w { Txt::new(date.clone(), 12.5).color(theme::fg_3()) } else { full };
         let r = widgets::text_truncated(&p, at, Align2::LEFT_CENTER, &line, max_w);
         let x = r.right() + 10.0;
         let (glyph, label, color) = match item {
-            None => (icons::HARD_DRIVE, tr("Only on this computer").to_string(), theme::FG_3),
+            None => (icons::HARD_DRIVE, tr("Only on this computer").to_string(), theme::fg_3()),
             Some(i) if !mine => {
                 if let Some(from) = &i.from {
                     let ar = Rect::from_center_size(pos2(x + 9.0, at.y), vec2(18.0, 18.0));
@@ -1446,15 +1446,15 @@ impl Dialog {
                         self.pictures.get(ui.ctx(), &crate::worlds::Picture::Remote { world_id: format!("person-{}", from.id), url: url.clone(), large: false })
                     });
                     widgets::avatar(&p, ar, tex.as_ref(), &from.name);
-                    let t = Txt::new(tr!("from {name}", name = from.name), 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+                    let t = Txt::new(tr!("from {name}", name = from.name), 12.5).weight(weight::MEDIUM).color(theme::fg_2());
                     widgets::text_truncated(&p, pos2(ar.right() + 6.0, at.y), Align2::LEFT_CENTER, &t, (at.x + max_w - ar.right() - 6.0).max(10.0));
                     return;
                 }
-                (icons::USERS, tr("Shared with you").to_string(), theme::FG_2)
+                (icons::USERS, tr("Shared with you").to_string(), theme::fg_2())
             }
             // Who sees it is listed under the line (Shared with).
             Some(i) if i.public || !i.grants.is_empty() => return,
-            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::FG_3),
+            Some(_) => (icons::LOCK_SIMPLE, tr("Only you").to_string(), theme::fg_3()),
         };
         if x + 40.0 > at.x + max_w {
             return;
@@ -1487,7 +1487,7 @@ impl Dialog {
         let mut coming: Vec<bool> = Vec::new();
         if item.public {
             let on_way = self.public_on_its_way;
-            chips.push((C::Public, Chip::new(tr("Everyone on Orbiters")).icon(icons::GLOBE).tone(theme::ACCENT).removable(!on_way).enabled(!busy)));
+            chips.push((C::Public, Chip::new(tr("Everyone on Orbiters")).icon(icons::GLOBE).tone(theme::accent()).removable(!on_way).enabled(!busy)));
             coming.push(on_way);
         }
         let names: Vec<(String, String)> =
@@ -1520,7 +1520,7 @@ impl Dialog {
             let mut r = Rect::from_min_size(area.min + at[n], vec2(widths[n].min(w), widgets::CHIP_H));
             if coming[n] {
                 r.max.x -= SPIN;
-                feedback::spinner(ui.painter(), pos2(r.right() + SPIN * 0.5 + 2.0, r.center().y), 5.5, 1.8, theme::ACCENT);
+                feedback::spinner(ui.painter(), pos2(r.right() + SPIN * 0.5 + 2.0, r.center().y), 5.5, 1.8, theme::accent());
             }
             let resp = chip.show_at(ui, r);
             if resp.removed {
@@ -1546,7 +1546,7 @@ impl Dialog {
         let reasons: Vec<String> = self.entry.content.explicit_reasons.iter().map(|r| orbiters_core::explicit::reason_label(r)).collect();
         let inner = w - 32.0 - 52.0;
         let title = Txt::new(tr("Before you share publicly"), 14.5).weight(weight::SEMIBOLD);
-        let body = ui.painter().layout_job(Txt::new(&warning, 12.5).color(theme::FG_2).line_height(19.0).job(inner));
+        let body = ui.painter().layout_job(Txt::new(&warning, 12.5).color(theme::fg_2()).line_height(19.0).job(inner));
         let tags_w: Vec<f32> = reasons.iter().map(|r| widgets::text_size(ui, &Txt::new(r, 11.0).weight(weight::MEDIUM)).x + 16.0).collect();
         let (tag_at, tags_h) = widgets::flow(&tags_w, inner, 22.0, 6.0);
         let h = 18.0 + 20.0 + 6.0 + body.size().y + if tags_h > 0.0 { 12.0 + tags_h } else { 0.0 } + 16.0 + 32.0 + 18.0;
@@ -1561,14 +1561,14 @@ impl Dialog {
         widgets::text(&p, pos2(x, y + 10.0), Align2::LEFT_CENTER, &title);
         y += 26.0;
         let body_h = body.size().y;
-        p.galley(pos2(x, y), body, theme::FG_2);
+        p.galley(pos2(x, y), body, theme::fg_2());
         y += body_h;
         if tags_h > 0.0 {
             y += 12.0;
             for (r, (o, tw)) in reasons.iter().zip(tag_at.iter().zip(&tags_w)) {
                 let tr = Rect::from_min_size(pos2(x, y) + *o, vec2(*tw, 22.0));
                 p.rect_filled(tr, theme::radius(11.0), theme::white(0.06));
-                widgets::text(&p, tr.center(), Align2::CENTER_CENTER, &Txt::new(r, 11.0).weight(weight::MEDIUM).color(theme::FG_2));
+                widgets::text(&p, tr.center(), Align2::CENTER_CENTER, &Txt::new(r, 11.0).weight(weight::MEDIUM).color(theme::fg_2()));
             }
         }
         let anyway = Button::new(tr("Share anyway")).icon(icons::GLOBE).variant(Variant::Warn).size(Size::Sm).enabled(!busy).id_salt("share-anyway");
@@ -1597,8 +1597,8 @@ impl Dialog {
         let (head, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
         let p = ui.painter().clone();
         widgets::text(&p, pos2(head.left(), head.top() + 10.0), Align2::LEFT_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
-        widgets::text_truncated(&p, pos2(head.left(), head.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), w - 120.0);
-        let count = Txt::new(tr!("{count} of 50", count = self.selected.len()), 11.5).color(theme::FG_4);
+        widgets::text_truncated(&p, pos2(head.left(), head.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::fg_3()), w - 120.0);
+        let count = Txt::new(tr!("{count} of 50", count = self.selected.len()), 11.5).color(theme::fg_4());
         if !self.selected.is_empty() {
             widgets::text(&p, pos2(head.right(), head.top() + 10.0), Align2::RIGHT_CENTER, &count);
         }
@@ -1638,7 +1638,7 @@ impl Dialog {
             } else {
                 tr("No VRChat friends known yet: sign in to VRChat in Settings, or let VRCX or VRCNext load your friend list.")
             };
-            paragraph(ui, text, 12.5, theme::FG_3, w);
+            paragraph(ui, text, 12.5, theme::fg_3(), w);
         } else {
             let matches = found_friends(&self.friends_list, &q);
             let pictures: Vec<Option<egui::TextureHandle>> = matches
@@ -1671,17 +1671,17 @@ impl Dialog {
                 }
             }
             if matches.is_empty() {
-                paragraph(ui, &tr!("No friend called \"{name}\".", name = self.query.trim()), 12.5, theme::FG_3, w);
+                paragraph(ui, &tr!("No friend called \"{name}\".", name = self.query.trim()), 12.5, theme::fg_3(), w);
             } else if shown < matches.len() {
                 ui.add_space(8.0);
-                paragraph(ui, &tr!("{count} more: search to find them", count = matches.len() - shown), 11.5, theme::FG_4, w);
+                paragraph(ui, &tr!("{count} more: search to find them", count = matches.len() - shown), 11.5, theme::fg_4(), w);
             }
         }
         ui.add_space(12.0);
         if !mine {
             let public = Chip::new(tr("Everyone on Orbiters too"))
                 .icon(icons::GLOBE)
-                .tone(theme::ACCENT)
+                .tone(theme::accent())
                 .selected(self.request_public)
                 .enabled(!busy)
                 .id_salt("request-public");
@@ -1951,14 +1951,14 @@ fn working_part(ui: &mut Ui, text: &str, part: Option<f32>) {
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
     let p = ui.painter();
-    widgets::frame(p, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
+    widgets::frame(p, r, 14.0, theme::alpha(theme::accent(), 0.07));
     if let Some(part) = part {
         let id = ui.scope_id().with("working-part");
         let k = anim::spring(ui.ctx(), id, [part], Spring::SOFT)[0].clamp(0.0, 1.0);
         let filled = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
-        p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.12));
+        p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::alpha(theme::accent(), 0.12));
     }
-    feedback::spinner(p, pos2(r.left() + 22.0, r.center().y), 7.0, 2.0, theme::ACCENT);
+    feedback::spinner(p, pos2(r.left() + 22.0, r.center().y), 7.0, 2.0, theme::accent());
     widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
 }
 
@@ -1972,7 +1972,7 @@ fn paused_part(ui: &mut Ui, text: &str, part: f32) {
     let k = anim::spring(ui.ctx(), id, [part], Spring::SOFT)[0].clamp(0.0, 1.0);
     let filled = Rect::from_min_size(r.min, vec2(r.width() * k, r.height()));
     p.with_clip_rect(filled.intersect(p.clip_rect())).rect_filled(r, theme::radius(14.0), theme::white(0.08));
-    widgets::icon(p, pos2(r.left() + 22.0, r.center().y), icons::PAUSE, 14.0, theme::FG_2);
+    widgets::icon(p, pos2(r.left() + 22.0, r.center().y), icons::PAUSE, 14.0, theme::fg_2());
     widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).weight(weight::MEDIUM), w - 56.0);
 }
 
@@ -2072,7 +2072,7 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
             // While they part the halves overlap: the green one lies over the grey one, opaque (the grey of a
             // secondary button on a card, mixed rather than see-through), and each label stays inside its own half.
             let p = ui.painter();
-            let grey = theme::mix(theme::INK_850, theme::INK_600, 0.55);
+            let grey = theme::mix(theme::ink_850(), theme::ink_600(), 0.55);
             let inn = ((kc - 0.45) / 0.55).clamp(0.0, 1.0);
             let label = |r: Rect, text: &str, glyph: &str, fg: Color32| {
                 let mut lp = p.with_clip_rect(r.shrink(2.0).intersect(p.clip_rect()));
@@ -2088,19 +2088,19 @@ pub fn morph(ui: &mut Ui, id: Id, right: egui::Pos2, expanded_width: f32, enable
             p.rect_filled(b, theme::radius(20.0), theme::control());
             if inn > 0.0 {
                 // Centred on what the green half leaves of it.
-                label(Rect::from_min_max(pos2(b.left().max(a.right()), b.top()), b.max), to_label, icons::USERS, theme::FG);
+                label(Rect::from_min_max(pos2(b.left().max(a.right()), b.top()), b.max), to_label, icons::USERS, theme::fg());
             }
-            p.rect_filled(a, theme::radius(20.0), theme::mix(grey, theme::ACCENT, kc));
+            p.rect_filled(a, theme::radius(20.0), theme::mix(grey, theme::accent(), kc));
             // "Share" leaves from where the button was, the halves' labels come in.
             let out = (1.0 - kc * 3.0).clamp(0.0, 1.0);
             if out > 0.0 {
                 let mut lp = p.with_clip_rect(a.intersect(p.clip_rect()));
                 lp.multiply_opacity(out);
-                widgets::icon(&lp, pos2(small.left() + 18.0 + 7.5, small.center().y), icons::CLOUD_ARROW_UP, 15.0, theme::FG);
+                widgets::icon(&lp, pos2(small.left() + 18.0 + 7.5, small.center().y), icons::CLOUD_ARROW_UP, 15.0, theme::fg());
                 widgets::text(&lp, pos2(small.left() + 18.0 + 23.0, small.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Share"), 13.5).weight(weight::MEDIUM));
             }
             if inn > 0.0 {
-                label(a, public_label, icons::GLOBE, theme::ON_ACCENT);
+                label(a, public_label, icons::GLOBE, theme::on_accent());
             }
             let _ = ui.interact(full, id.with("moving"), Sense::click());
         }

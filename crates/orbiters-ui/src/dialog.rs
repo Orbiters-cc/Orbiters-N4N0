@@ -182,7 +182,7 @@ impl<'a> Dialog<'a> {
             let p = ui.painter();
             paint::shadow(p, shape, radius, vec2(0.0, 18.0), 40.0, -10.0, theme::black(0.5 * k * solid));
             // From the colour of what it grew out of to its own, early in the flight.
-            widgets::frame(p, shape, radius, theme::mix(self.origin_fill, theme::INK_850, (k * 1.7).clamp(0.0, 1.0)).gamma_multiply(solid));
+            widgets::frame(p, shape, radius, theme::mix(self.origin_fill, theme::ink_850(), (k * 1.7).clamp(0.0, 1.0)).gamma_multiply(solid));
             let _ = ui.interact(shape, id.with("shape"), Sense::click());
 
             // The contents are laid out where the dialog lands and drawn through the flight's transform (pictures and
@@ -218,15 +218,15 @@ impl<'a> Dialog<'a> {
         let p = du.painter();
         if let Some(g) = self.glyph {
             let tile = Rect::from_min_size(pos2(x, head.center().y - 20.0), vec2(40.0, 40.0));
-            p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-            widgets::icon(p, tile.center(), g, 19.0, theme::ACCENT);
+            p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::accent(), 0.12));
+            widgets::icon(p, tile.center(), g, 19.0, theme::accent());
             x = tile.right() + 14.0;
         }
         let title_w = head.right() - 48.0 - x;
         match self.subtitle {
             Some(sub) => {
                 widgets::text_truncated(p, pos2(x, head.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD), title_w);
-                widgets::text_truncated(p, pos2(x, head.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), title_w);
+                widgets::text_truncated(p, pos2(x, head.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()), title_w);
             }
             None => {
                 widgets::text_truncated(p, pos2(x, head.center().y), Align2::LEFT_CENTER, &Txt::new(self.title, 18.0).weight(weight::SEMIBOLD), title_w);

@@ -47,7 +47,7 @@ pub fn bar_press(target: Target, status: &Status) -> Vec<Action> {
 /// Draws the bar: `name` is the capture's world.
 pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<Target>, pressed: Option<Target>, time: f64) {
     let whole = Rect::from_min_size(Pos2::ZERO, vec2(BAR_PX[0] as f32, BAR_PX[1] as f32)).shrink(2.0);
-    p.rect_filled(whole, CornerRadius::same((whole.height() / 2.0) as u8), theme::INK_850);
+    p.rect_filled(whole, CornerRadius::same((whole.height() / 2.0) as u8), theme::ink_850());
     p.rect_stroke(whole, CornerRadius::same((whole.height() / 2.0) as u8), Stroke::new(1.0, theme::white(0.06)), StrokeKind::Inside);
     let state = |t: Target| (hover == Some(t), pressed == Some(t));
     let all = targets();
@@ -61,11 +61,11 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                 if status.current.is_some() && !status.shown && status.error.is_none() {
                     loading_ring(p, c, time);
                 } else {
-                    widgets::icon(p, c, icons::CUBE_FOCUS, 26.0, if status.error.is_some() { theme::DANGER } else { theme::ACCENT });
+                    widgets::icon(p, c, icons::CUBE_FOCUS, 26.0, if status.error.is_some() { theme::DANGER } else { theme::accent() });
                 }
                 let x = r.min.x + 60.0;
                 let width = r.max.x - x - 34.0;
-                text_cut(p, pos2(x, r.min.y + 9.0), width, orbit_look::txt(name.unwrap_or_else(|| tr("3D world")).to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::FG));
+                text_cut(p, pos2(x, r.min.y + 9.0), width, orbit_look::txt(name.unwrap_or_else(|| tr("3D world")).to_string(), 18.0).weight(weight::SEMIBOLD).color(theme::fg()));
                 let line = if let Some(e) = &status.error {
                     e.clone()
                 } else if status.shown && status.stage.is_none() {
@@ -75,20 +75,20 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                 } else {
                     status.stage.clone().unwrap_or_else(|| tr("Getting ready").into())
                 };
-                let tint = if status.error.is_some() { theme::DANGER } else { theme::FG_3 };
+                let tint = if status.error.is_some() { theme::DANGER } else { theme::fg_3() };
                 text_cut(p, pos2(x, r.min.y + 35.0), width, orbit_look::txt(line, 14.0).color(tint));
-                widgets::icon(p, pos2(r.max.x - 20.0, r.center().y), icons::CARET_RIGHT, 18.0, theme::FG_3);
+                widgets::icon(p, pos2(r.max.x - 20.0, r.center().y), icons::CARET_RIGHT, 18.0, theme::fg_3());
                 if let Some(f) = status.download {
                     let track = Rect::from_min_size(pos2(x, r.max.y - 8.0), vec2(width, 3.0));
                     p.rect_filled(track, CornerRadius::same(1), theme::white(0.1));
-                    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * f, 3.0)), CornerRadius::same(1), theme::ACCENT);
+                    p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * f, 3.0)), CornerRadius::same(1), theme::accent());
                 }
             }
             Target::SeeThrough => {
-                let (bg, fg) = if status.see_through { (theme::ACCENT, theme::ON_ACCENT) } else { (RAISED, theme::FG) };
+                let (bg, fg) = if status.see_through { (theme::accent(), theme::on_accent()) } else { (RAISED, theme::fg()) };
                 bar_button(p, *rect, icons::VIRTUAL_REALITY, tr("See VRChat"), bg, fg, h, pr, 1.0);
             }
-            Target::Recenter => bar_button(p, *rect, icons::CROSSHAIR, tr("Recenter"), RAISED, theme::FG, h, pr, if status.shown { 1.0 } else { 0.45 }),
+            Target::Recenter => bar_button(p, *rect, icons::CROSSHAIR, tr("Recenter"), RAISED, theme::fg(), h, pr, if status.shown { 1.0 } else { 0.45 }),
             Target::Quality(q) => {
                 if q == Quality::Performance {
                     let track = Rect::from_min_max(rect.min, all[5].1.max);
@@ -105,7 +105,7 @@ pub fn draw_bar(p: &Painter, status: &Status, name: Option<&str>, hover: Option<
                 } else {
                     tr("Cancel")
                 };
-                bar_button(p, *rect, icons::EYE_SLASH, label, theme::mix(RAISED, theme::DANGER, 0.22), theme::FG, h, pr, 1.0);
+                bar_button(p, *rect, icons::EYE_SLASH, label, theme::mix(RAISED, theme::DANGER, 0.22), theme::fg(), h, pr, 1.0);
             }
             _ => {}
         }

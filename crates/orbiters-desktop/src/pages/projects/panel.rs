@@ -58,7 +58,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
         state.panel_closing = true;
     }
     let p = ui.painter();
-    widgets::frame(p, rect, 24.0, theme::INK_900);
+    widgets::frame(p, rect, 24.0, theme::ink_900());
     // Clicks on the panel stay there.
     let _ = ui.interact(rect, Id::unique("project-panel-body"), Sense::click());
     if split.docked {
@@ -126,7 +126,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     // floats over it. The left and bottom of what is clipped are as the scroll area's, its right where the cards end (the
     // gutter beyond holds the scroll bar and no content).
     let cut = Rect::from_min_max(rect.min + vec2(8.0, 8.0), pos2(rect.right() - 3.0 - 11.0, rect.bottom() - 8.0));
-    paint::round_clipped_corners(ui.painter(), rect, theme::squircle(24.0), cut, theme::INK_900);
+    paint::round_clipped_corners(ui.painter(), rect, theme::squircle(24.0), cut, theme::ink_900());
     sticky_bar(ui, cx, state, &project, rect, from, out.state.offset().y, !split.docked);
 }
 
@@ -146,9 +146,9 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         Some(gpu) => {
             let look = orbiters_ui::blur::Look { blur: 14.0 * k, solid: 24.0, darken: 0.55 * k, fade: 0.0 };
             orbiters_ui::blur::under(ui, Id::unique("project-panel-bar-blur"), &gpu.textures, from, band, look);
-            theme::alpha(theme::INK_900, 0.55 * k)
+            theme::alpha(theme::ink_900(), 0.55 * k)
         }
-        None => theme::alpha(theme::INK_900, 0.94 * k),
+        None => theme::alpha(theme::ink_900(), 0.94 * k),
     };
     let p = ui.painter();
     feedback::fill_corners(p, band, [24.0, 24.0, 0.0, 0.0], fill);
@@ -224,7 +224,7 @@ fn resize_handle(ui: &mut Ui, state: &mut State, page: Rect, rect: Rect) {
     let k = anim::toggle(&ctx, id.with("k"), resp.hovered() || active, Spring::SNAPPY);
     if k > 0.01 {
         let grip = Rect::from_center_size(pos2(strip.center().x, rect.center().y), vec2(4.0, 28.0 + 20.0 * k));
-        ui.painter().rect_filled(grip, theme::radius(2.0), if active { theme::ACCENT } else { theme::white(0.25 * k) });
+        ui.painter().rect_filled(grip, theme::radius(2.0), if active { theme::accent() } else { theme::white(0.25 * k) });
     }
 }
 
@@ -244,7 +244,7 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     paint::fill_gradient(
         &p,
         &paint::rounded_rect_points_corners(shade, [0.0; 4]),
-        &Gradient::vertical(shade, &[(0.0, Color32::TRANSPARENT), (1.0, theme::alpha(theme::INK_950, 0.82))]),
+        &Gradient::vertical(shade, &[(0.0, Color32::TRANSPARENT), (1.0, theme::alpha(theme::ink_950(), 0.82))]),
     );
     let (tint, kind_glyph) = art::kind_look(project);
     let kind = Txt::new(project.kind.label(), 10.5).weight(weight::SEMIBOLD).tracking(0.02);
@@ -270,12 +270,12 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
     // Where it is.
     let mut y = cover.bottom() + 14.0;
     let x = r.left() + 16.0;
-    widgets::icon(&p, pos2(x + 7.0, y + 10.0), icons::FOLDER, 14.0, theme::FG_4);
+    widgets::icon(&p, pos2(x + 7.0, y + 10.0), icons::FOLDER, 14.0, theme::fg_4());
     widgets::text_truncated(
         &p,
         pos2(x + 22.0, y + 10.0),
         Align2::LEFT_CENTER,
-        &Txt::new(project.path.display().to_string(), 12.0).color(theme::FG_3),
+        &Txt::new(project.path.display().to_string(), 12.0).color(theme::fg_3()),
         w - 54.0,
     );
     y += 30.0;
@@ -362,14 +362,14 @@ fn only_here(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
     let beside = w - bw - 8.0 >= 220.0;
     let text = ui.painter().layout_job(
         Txt::new(tr("Listed in Orbiters. Creator Companion and ALCOM do not list it: add its folder there to see it there too."), 11.5)
-            .color(theme::FG_3)
+            .color(theme::fg_3())
             .line_height(17.0)
             .job(if beside { w - bw - 34.0 } else { w - 26.0 }),
     );
     let (r, _) = ui.allocate_exact_size(vec2(w, if beside { text.size().y.max(32.0) } else { text.size().y + 36.0 } + 4.0), Sense::hover());
     let top = if beside { r.center().y - text.size().y / 2.0 } else { r.top() };
-    widgets::icon(ui.painter(), pos2(r.left() + 8.0, top + 9.0), icons::INFO, 13.0, theme::FG_4);
-    ui.painter().galley(pos2(r.left() + 22.0, top), text, theme::FG_3);
+    widgets::icon(ui.painter(), pos2(r.left() + 8.0, top + 9.0), icons::INFO, 13.0, theme::fg_4());
+    ui.painter().galley(pos2(r.left() + 22.0, top), text, theme::fg_3());
     let at = if beside { pos2(r.right() - bw, r.center().y - 16.0) } else { pos2(r.left() + 14.0, r.bottom() - 34.0) };
     if widgets::activated(&b.show_at(ui, Rect::from_min_size(at, vec2(bw, 32.0)))) {
         super::menus::companion(&ctx, cx, state, project);
@@ -386,12 +386,12 @@ fn size_pill(ui: &mut Ui, state: &mut State, project: &Project, at: egui::Pos2, 
     let Some(s) = state.sizes.get(&project.path).copied() else {
         if measuring || state.fixture {
             // "Measuring…" with its spinner, or the spinner alone where the words do not fit.
-            let t = Txt::new(tr("Measuring…"), 11.5).color(theme::FG_3);
+            let t = Txt::new(tr("Measuring…"), 11.5).color(theme::fg_3());
             let full = Rect::from_min_size(pos2(at.x, at.y - 10.0), vec2(widgets::text_size(ui, &t).x + 32.0, 20.0));
             let r = if full.right() <= right { full } else { Rect::from_min_size(full.min, vec2(28.0, 20.0)) };
             if r.right() <= right {
                 feedback::shimmer(&p, r, 10.0);
-                feedback::spinner(&p, pos2(r.left() + 14.0, r.center().y), 4.5, 1.5, theme::FG_3);
+                feedback::spinner(&p, pos2(r.left() + 14.0, r.center().y), 4.5, 1.5, theme::fg_3());
                 if r == full {
                     widgets::text(&p, pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &t);
                 }
@@ -443,9 +443,9 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 } else {
                     tr("No uploaded avatar yet. Upload one from the VRChat SDK panel, save its scene, and it shows up here.")
                 };
-                let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(ui.available_width()));
+                let g = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_3()).line_height(19.0).job(ui.available_width()));
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y + 4.0), Sense::hover());
-                ui.painter().galley(r.min, g, theme::FG_3);
+                ui.painter().galley(r.min, g, theme::fg_3());
                 return;
             }
             let worn = cx.snap.n4n0.avatar_id.clone();
@@ -477,13 +477,13 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     link.left() - x - 88.0,
                 );
                 if worn.as_ref() == Some(&a.id) {
-                    let t = Txt::new(tr("Wearing"), 10.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+                    let t = Txt::new(tr("Wearing"), 10.5).weight(weight::SEMIBOLD).color(theme::accent());
                     let tw = widgets::text_size(ui, &t).x + 16.0;
                     let pr = Rect::from_min_size(pos2(nr.right() + 8.0, nr.center().y - 10.0), vec2(tw, 20.0));
-                    p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
+                    p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::accent(), 0.14));
                     widgets::text(p, pr.center(), Align2::CENTER_CENTER, &t);
                 }
-                widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), link.left() - 8.0 - x);
+                widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::fg_3()), link.left() - 8.0 - x);
                 let enabled = project.registered && !state.running();
                 let nano = Button::new(tr("Add N4N0")).icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
                 let nw = nano.desired_width(ui);
@@ -502,7 +502,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 let mw = mine.desired_width(ui);
                 let mr = Rect::from_min_size(pos2(nr.right() + 6.0, nr.top()), vec2(mw, 32.0));
                 if mr.right() <= r.right() + 1.0 && widgets::activated(&mine.show_at(ui, mr).on_hover_text(tr("Installs My Avatar in the project, without N4N0"))) {
-                    state.modal_fill = theme::INK_850;
+                    state.modal_fill = theme::ink_850();
                     state.install(&ctx, project.clone(), a.clone(), false, server(cx), mr);
                 }
                 // Under the avatar's words, beside its picture's column.
@@ -562,11 +562,11 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
         },
         |ui| {
             let text = Txt::new(tr("Improves Unity's UI and adds features including Git management, sculpting, weight painting, mesh editing and more."), 12.5)
-                .color(theme::FG_3)
+                .color(theme::fg_3())
                 .line_height(19.0);
             let g = ui.painter().layout_job(text.job(ui.available_width()));
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), g.size().y), Sense::hover());
-            ui.painter().galley(r.min, g, theme::FG_3);
+            ui.painter().galley(r.min, g, theme::fg_3());
             let label = if adding { tr("Adding Mixer…") } else { tr("Add Mixer") };
             let b = Button::new(label).icon(icons::PLUS).size(Size::Sm).enabled(project.registered && !busy).id_salt(("add-mixer", &project.path));
             let bw = b.desired_width(ui);
@@ -578,7 +578,7 @@ fn mixer(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 state.add_mixer(&ctx, project);
             }
             if adding {
-                feedback::spinner(ui.painter(), pos2(br.right() + 18.0, br.center().y), 7.0, 2.0, theme::ACCENT);
+                feedback::spinner(ui.painter(), pos2(br.right() + 18.0, br.center().y), 7.0, 2.0, theme::accent());
             }
             mixer_info(ui, cx, info_id, info_open);
         },
@@ -608,11 +608,11 @@ fn info_button(ui: &mut Ui, id: Id, r: Rect, open: bool) -> bool {
     let p = ui.painter();
     let c = r.center();
     let radius = 16.0 * (1.0 - 0.06 * press);
-    let bg = theme::mix(theme::mix(theme::control(), theme::INK_750, hover), theme::alpha(theme::ACCENT, 0.16), o.clamp(0.0, 1.0));
+    let bg = theme::mix(theme::mix(theme::control(), theme::ink_750(), hover), theme::alpha(theme::accent(), 0.16), o.clamp(0.0, 1.0));
     p.circle_filled(c, radius, bg);
     // The two glyphs cross: the "i" shrinks and fades as the close mark grows in, both turning a quarter.
     let a = o.clamp(0.0, 1.0);
-    let fg = theme::mix(theme::mix(theme::FG_2, theme::FG, hover), theme::ACCENT, a);
+    let fg = theme::mix(theme::mix(theme::fg_2(), theme::fg(), hover), theme::accent(), a);
     if a < 0.99 {
         widgets::icon(p, c, icons::INFO, 17.0 * (1.0 - 0.4 * a), theme::alpha(fg, 1.0 - a));
     }
@@ -635,7 +635,7 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
         tr("Mixer adds new features to the Unity Editor such as sculpting, weight painting, mesh editing and syncing with a Blender project, and improves the existing panels."),
         13.0,
     )
-    .color(theme::FG_2)
+    .color(theme::fg_2())
     .line_height(20.0);
     let g = ui.painter().layout_job(text.job(w - 32.0));
     let full = 14.0 + g.size().y + 10.0 + 28.0 + 10.0;
@@ -649,16 +649,16 @@ fn mixer_info(ui: &mut Ui, cx: &mut Cx, id: Id, open: bool) {
     let drop = 10.0 * (1.0 - a);
     let mut tp = p.clone();
     tp.multiply_opacity(a);
-    tp.galley(pos2(well.left() + 16.0, well.top() + 14.0 - drop), g, theme::FG_2);
+    tp.galley(pos2(well.left() + 16.0, well.top() + 14.0 - drop), g, theme::fg_2());
     // The page: an accent link that brightens on hover, its arrow nudging out.
-    let link = Txt::new(tr("Mixer's presentation on orbiters.cc"), 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let link = Txt::new(tr("Mixer's presentation on orbiters.cc"), 12.5).weight(weight::SEMIBOLD).color(theme::accent());
     let lw = widgets::text_size(&iu, &link).x + 24.0;
     let lr = Rect::from_min_size(pos2(well.left() + 10.0, well.bottom() - 10.0 - 28.0 - drop * 0.5), vec2(lw + 12.0, 28.0));
     let resp = iu.interact(lr, id.with("link"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(MIXER_PAGE);
     let hover = anim::toggle(&ctx, id.with("link-hover"), resp.hovered(), Spring::SOFT);
-    tp.rect_filled(lr, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.1 * hover));
+    tp.rect_filled(lr, theme::radius(14.0), theme::alpha(theme::accent(), 0.1 * hover));
     widgets::text(&tp, pos2(lr.left() + 6.0, lr.center().y), Align2::LEFT_CENTER, &link);
-    widgets::icon(&tp, pos2(lr.right() - 14.0 + 2.0 * hover, lr.center().y - 2.0 * hover), icons::ARROW_SQUARE_OUT, 13.0, theme::ACCENT);
+    widgets::icon(&tp, pos2(lr.right() - 14.0 + 2.0 * hover, lr.center().y - 2.0 * hover), icons::ARROW_SQUARE_OUT, 13.0, theme::accent());
     if widgets::activated(&resp) && a > 0.5 {
         if let Err(e) = crate::controller::open_url(MIXER_PAGE) {
             cx.toasts.push(&ctx, orbiters_ui::toast::Kind::Error, tr!("The page could not open: {error}", error = e));
@@ -677,7 +677,7 @@ pub(super) fn package_row(ui: &mut Ui, icon: Option<&PackageIcon>, name: &str, d
     let tw = r.right() - control_w - 10.0 - x;
     let title = Txt::new(display, 13.5).weight(weight::MEDIUM);
     widgets::text_truncated(p, pos2(x, r.center().y - 8.0), Align2::LEFT_CENTER, &title, tw);
-    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(name, 11.0).color(theme::FG_3), tw);
+    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(name, 11.0).color(theme::fg_3()), tw);
     // A name cut short (narrow panels) shows whole on hover.
     if widgets::text_size(ui, &title).x > tw {
         let _ = ui
@@ -736,7 +736,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
             widgets::search_field(ui, "package-search", &mut state.package_query, tr("Search the repositories' packages"), ui.available_width());
             ui.add_space(2.0);
             if list.is_empty() {
-                widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new(tr("No package matches."), 12.5).color(theme::FG_3));
+                widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new(tr("No package matches."), 12.5).color(theme::fg_3()));
                 ui.add_space(24.0);
             }
             let shown = if state.all_packages || !find.is_empty() { list.len() } else { list.len().min(AVAILABLE_FIRST) };
@@ -759,7 +759,7 @@ fn available(ui: &mut Ui, state: &mut State, project: &Project) {
                         ctx.data_mut(|d| d.insert_temp(id, vs[k].clone()));
                     }
                     if working {
-                        feedback::spinner(ui.painter(), add.center(), 8.0, 2.0, theme::ACCENT);
+                        feedback::spinner(ui.painter(), add.center(), 8.0, 2.0, theme::accent());
                     } else {
                         let b = IconButton::new(icons::PLUS, mark("Add to the project")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("add", &pkg.name));
                         if !busy && widgets::activated(&b.show_at(ui, add)) {
@@ -851,7 +851,7 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                 // The whole message, wrapped, and the full hash with its date under it when open.
                 let text_w = w - 44.0 - 10.0;
                 let message = if c.body.is_empty() { c.subject.clone() } else { format!("{}\n\n{}", c.subject, c.body) };
-                let g = ui.painter().layout_job(Txt::new(&message, 12.5).color(theme::FG_2).line_height(19.0).job(text_w - 24.0));
+                let g = ui.painter().layout_job(Txt::new(&message, 12.5).color(theme::fg_2()).line_height(19.0).job(text_w - 24.0));
                 let well_h = 12.0 + g.size().y + 10.0 + 18.0 + 12.0;
                 let row_h = 54.0 + (well_h + 6.0) * o.clamp(0.0, 1.0);
                 let (row, _) = ui.allocate_exact_size(vec2(w, row_h), Sense::hover());
@@ -876,17 +876,17 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     let pulse = anim::since(&ctx, start + 0.25, 1.2) as f32;
                     let e = orbiters_ui::anim::ease::out_cubic(pulse.clamp(0.0, 1.0));
                     if pulse < 1.0 {
-                        p.circle_filled(center, radius + 3.0 + 9.0 * e, theme::alpha(theme::ACCENT, 0.3 * (1.0 - e)));
+                        p.circle_filled(center, radius + 3.0 + 9.0 * e, theme::alpha(theme::accent(), 0.3 * (1.0 - e)));
                     }
-                    p.circle_stroke(center, radius + 2.0, egui::Stroke::new(1.6, theme::ACCENT));
+                    p.circle_stroke(center, radius + 2.0, egui::Stroke::new(1.6, theme::accent()));
                 }
                 widgets::avatar(&p, Rect::from_center_size(center, vec2(radius * 2.0, radius * 2.0)), None, &c.author);
                 let x = row.left() + 44.0;
                 let caret_w = 22.0;
-                let subject = Txt::new(&c.subject, 13.0).weight(weight::MEDIUM).color(theme::mix(theme::FG, theme::FG, hover));
+                let subject = Txt::new(&c.subject, 13.0).weight(weight::MEDIUM).color(theme::mix(theme::fg(), theme::fg(), hover));
                 widgets::text_truncated(&p, pos2(x, row.top() + 18.0 + dy), Align2::LEFT_CENTER, &subject, text_w - caret_w);
                 // Who and when, and the hash in a pill on the right that copies it.
-                let hash = Txt::new(&c.short, 11.0).mono().color(theme::FG_2);
+                let hash = Txt::new(&c.short, 11.0).mono().color(theme::fg_2());
                 let hw = widgets::text_size(ui, &hash).x + 14.0;
                 let hr = Rect::from_min_size(pos2(row.right() - hw, row.top() + 30.0 + dy), vec2(hw, 18.0));
                 let hresp = ui.interact(hr, id.with("hash"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Copy the commit's hash"));
@@ -897,13 +897,13 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     copy = Some(c.hash.clone());
                 }
                 let when = format!("{} · {}", c.author, crate::pages::ago(ui.ctx(), c.time, now));
-                widgets::text_truncated(&p, pos2(x, row.top() + 39.0 + dy), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::FG_3), hr.left() - x - 8.0);
+                widgets::text_truncated(&p, pos2(x, row.top() + 39.0 + dy), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::fg_3()), hr.left() - x - 8.0);
                 // The caret turns as the commit opens.
                 let cc = pos2(row.right() - 9.0, row.top() + 18.0 + dy);
                 let turn = o.clamp(0.0, 1.0) * std::f32::consts::PI;
                 let rot = |v: egui::Vec2| vec2(v.x * turn.cos() - v.y * turn.sin(), v.x * turn.sin() + v.y * turn.cos());
                 let s = 3.4;
-                let cf = theme::alpha(theme::FG_3, 0.5 + 0.5 * hover.max(o.clamp(0.0, 1.0)));
+                let cf = theme::alpha(theme::fg_3(), 0.5 + 0.5 * hover.max(o.clamp(0.0, 1.0)));
                 p.line(vec![cc + rot(vec2(-s, -s * 0.5)), cc + rot(vec2(0.0, s * 0.5)), cc + rot(vec2(s, -s * 0.5))], egui::Stroke::new(1.5, cf));
                 if !c.subject.is_empty() && widgets::text_size(ui, &subject).x > text_w - caret_w && !open {
                     resp.clone().on_hover_text(&c.subject);
@@ -919,13 +919,13 @@ fn commits(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     wp.multiply_opacity(k);
                     wp.rect_filled(well, theme::radius(12.0), theme::white(0.035));
                     let drop = 8.0 * (1.0 - k);
-                    wp.galley(pos2(well.left() + 12.0, well.top() + 12.0 - drop), g, theme::FG_2);
+                    wp.galley(pos2(well.left() + 12.0, well.top() + 12.0 - drop), g, theme::fg_2());
                     let meta = format!("{} · {}", c.hash, date(c.time));
                     widgets::text_truncated(
                         &wp,
                         pos2(well.left() + 12.0, well.bottom() - 12.0 - 9.0 - drop * 0.5),
                         Align2::LEFT_CENTER,
-                        &Txt::new(meta, 10.5).mono().color(theme::FG_4),
+                        &Txt::new(meta, 10.5).mono().color(theme::fg_4()),
                         well.width() - 24.0,
                     );
                 }
@@ -973,18 +973,18 @@ fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
     let ctx = ui.ctx().clone();
     // (glyph, label, colour, a pulsing dot)
     let mut chips: Vec<(Option<&str>, String, Color32, bool)> = vec![];
-    chips.push((Some(glyph::GIT_BRANCH), repo.branch.clone().unwrap_or_else(|| tr("Detached").into()), theme::FG, false));
+    chips.push((Some(glyph::GIT_BRANCH), repo.branch.clone().unwrap_or_else(|| tr("Detached").into()), theme::fg(), false));
     match &repo.upstream {
-        Some(up) if repo.ahead == 0 && repo.behind == 0 => chips.push((Some(icons::CHECK), tr!("Up to date with {upstream}", upstream = up), theme::FG_3, false)),
+        Some(up) if repo.ahead == 0 && repo.behind == 0 => chips.push((Some(icons::CHECK), tr!("Up to date with {upstream}", upstream = up), theme::fg_3(), false)),
         Some(_) => {
             if repo.ahead > 0 {
-                chips.push((Some(glyph::ARROW_UP), tr!("{count} to push", count = repo.ahead), theme::ACCENT, false));
+                chips.push((Some(glyph::ARROW_UP), tr!("{count} to push", count = repo.ahead), theme::accent(), false));
             }
             if repo.behind > 0 {
                 chips.push((Some(glyph::ARROW_DOWN), tr!("{count} to pull", count = repo.behind), theme::BLUE, false));
             }
         }
-        None => chips.push((None, tr("Not on a remote").into(), theme::FG_3, false)),
+        None => chips.push((None, tr("Not on a remote").into(), theme::fg_3(), false)),
     }
     if repo.changes > 0 {
         let n = repo.changes;
@@ -1002,7 +1002,7 @@ fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
         let r = Rect::from_min_size(area.min + *at, vec2(*cw, 24.0));
         let r = Rect::from_center_size(r.center(), r.size() * (0.92 + 0.08 * k.clamp(0.0, 1.2)));
         let a = k.clamp(0.0, 1.0);
-        let tinted = *c != theme::FG && *c != theme::FG_3;
+        let tinted = *c != theme::fg() && *c != theme::fg_3();
         p.rect_filled(r, theme::radius(12.0), if tinted { theme::alpha(*c, 0.13 * a) } else { theme::white(0.06 * a) });
         let mut x = r.left() + 10.0;
         if *dot {
@@ -1013,7 +1013,7 @@ fn git_status(ui: &mut Ui, repo: &orbiters_projects::git::Repo) {
             p.circle_filled(center, 3.5, theme::alpha(*c, a));
             x += 16.0;
         } else if let Some(g) = g {
-            widgets::icon(p, pos2(x + 6.0, r.center().y), g, 12.0, theme::alpha(if *c == theme::FG { theme::FG_3 } else { *c }, a));
+            widgets::icon(p, pos2(x + 6.0, r.center().y), g, 12.0, theme::alpha(if *c == theme::fg() { theme::fg_3() } else { *c }, a));
             x += 16.0;
         }
         widgets::text(p, pos2(x, r.center().y), Align2::LEFT_CENTER, &style(label, theme::alpha(*c, a)));

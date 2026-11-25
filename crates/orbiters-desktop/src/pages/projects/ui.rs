@@ -150,7 +150,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Some("add") => add_existing(&ctx, state),
         Some("new") => {
             state.open_modal(&ctx, Modal::New, state.anchor("new"));
-            state.modal_fill = theme::ACCENT;
+            state.modal_fill = theme::accent();
         }
         _ => {}
     }
@@ -201,7 +201,7 @@ fn section_title(ui: &mut Ui, title: &str, count: Option<usize>, sub: Option<&st
         widgets::pill_at(p, ui, pos2(title_end.right() + 8.0, title_end.center().y), None, &n.to_string());
     }
     if let Some(s) = sub {
-        widgets::text_truncated(p, pos2(r.left(), r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(s, 12.5).color(theme::FG_3), r.width());
+        widgets::text_truncated(p, pos2(r.left(), r.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(s, 12.5).color(theme::fg_3()), r.width());
     }
     r
 }
@@ -370,7 +370,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         pt.multiply_opacity(1.0 - dim * (0.5 - 0.25 * hover.clamp(0.0, 1.0)));
     }
     let sel = art::selection(&pt, id.with("selected"), r, theme::CARD_RADIUS, selected);
-    widgets::frame(&pt, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover.max(sel * 0.6)));
+    widgets::frame(&pt, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover.max(sel * 0.6)));
     let cover = Rect::from_min_size(r.min, vec2(r.width(), (r.width() * 0.5625).round()));
     art::cover(&pt, state, p, cover, [theme::CARD_RADIUS, theme::CARD_RADIUS, 0.0, 0.0], 1.0 + 0.05 * ease::out_cubic(hover));
     // The picture darkens towards its bottom edge, for the badges and the step to the card.
@@ -394,7 +394,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
             true,
         );
     } else if hidden {
-        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), tr("Hidden"), theme::black(0.6), theme::FG_2, true);
+        badge(&pt, ui, pos2(cover.right() - 12.0, cover.top() + 12.0), Some(icons::EYE_SLASH), tr("Hidden"), theme::black(0.6), theme::fg_2(), true);
     }
     let x = r.left() + 16.0;
     widgets::text_truncated(&pt, pos2(x, cover.bottom() + 22.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 15.0).weight(weight::SEMIBOLD), r.width() - 32.0);
@@ -402,7 +402,7 @@ fn card(ui: &mut Ui, cx: &Cx, state: &State, i: usize, p: &Project, rect: Rect) 
         &pt,
         pos2(x, cover.bottom() + 43.0),
         Align2::LEFT_CENTER,
-        &Txt::new(tr!("Edited {when}", when = crate::pages::ago(ui.ctx(), p.modified, now())), 12.0).color(theme::FG_3),
+        &Txt::new(tr!("Edited {when}", when = crate::pages::ago(ui.ctx(), p.modified, now())), 12.0).color(theme::fg_3()),
         r.width() - 32.0,
     );
     let mut px = x;
@@ -444,7 +444,7 @@ fn entrance(ctx: &egui::Context, cx: &Cx, id: Id, i: usize) -> f32 {
 /// A small label on a picture, its left (or with `right` its right) edge at `at`.
 #[allow(clippy::too_many_arguments)]
 fn badge(p: &egui::Painter, ui: &Ui, at: egui::Pos2, glyph: Option<&str>, label: &str, bg: Color32, fg: Color32, right: bool) {
-    let t = Txt::new(label, 10.5).weight(weight::SEMIBOLD).tracking(0.02).color(theme::FG);
+    let t = Txt::new(label, 10.5).weight(weight::SEMIBOLD).tracking(0.02).color(theme::fg());
     let tw = widgets::text_size(ui, &t).x;
     let w = tw + 20.0 + if glyph.is_some() { 16.0 } else { 0.0 };
     let rect = Rect::from_min_size(if right { pos2(at.x - w, at.y) } else { at }, vec2(w, 22.0));
@@ -490,13 +490,13 @@ fn empty(ui: &mut Ui, cx: &Cx, state: &mut State) {
     widgets::text(&p, rect.center() + vec2(0.0, -24.0), Align2::CENTER_CENTER, &Txt::new(tr("Your avatar starts here"), 19.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
         let mut job = Txt::new(tr("Create a project from a VRChat template, or add one you already have: its avatars and packages show up here."), 13.0)
-            .color(theme::FG_3)
+            .color(theme::fg_3())
             .line_height(20.0)
             .job(420.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y - 4.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y - 4.0), g, theme::fg_3());
     let create = Button::new(tr("New project")).icon(icons::PLUS).variant(Variant::Primary);
     let add = Button::new(tr("Add existing")).icon(icons::FOLDER_OPEN);
     let (cw, aw) = (create.desired_width(ui), add.desired_width(ui));
@@ -507,7 +507,7 @@ fn empty(ui: &mut Ui, cx: &Cx, state: &mut State) {
     let cr = Rect::from_min_size(pos2(x0, y), vec2(cw, 40.0));
     if widgets::activated(&create.id_salt("empty-new").show_at(&mut bu, cr)) {
         state.open_modal(&ctx, Modal::New, cr);
-        state.modal_fill = theme::ACCENT;
+        state.modal_fill = theme::accent();
     }
     if widgets::activated(&add.id_salt("empty-add").enabled(!state.running()).show_at(&mut bu, Rect::from_min_size(pos2(cr.right() + 10.0, y), vec2(aw, 40.0))))
     {
@@ -522,9 +522,9 @@ fn quiet_empty(ui: &mut Ui, cx: &Cx, title: &str, text: &str) {
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha);
     widgets::frame(&p, rect, theme::CARD_RADIUS, theme::white(0.02));
-    widgets::icon(&p, rect.center() + vec2(0.0, -24.0), icons::MAGNIFYING_GLASS, 22.0, theme::FG_4);
+    widgets::icon(&p, rect.center() + vec2(0.0, -24.0), icons::MAGNIFYING_GLASS, 22.0, theme::fg_4());
     widgets::text(&p, rect.center() + vec2(0.0, 6.0), Align2::CENTER_CENTER, &Txt::new(title, 14.5).weight(weight::SEMIBOLD));
-    widgets::text(&p, rect.center() + vec2(0.0, 28.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::FG_3));
+    widgets::text(&p, rect.center() + vec2(0.0, 28.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::fg_3()));
 }
 
 /// Projects found on the computer that are not in the list yet: compact rows, the first few until "Show all".
@@ -604,7 +604,7 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<boo
     }
     let pt = &dimmed;
     let sel = art::selection(pt, id.with("selected"), r, 16.0, selected);
-    widgets::frame(pt, r, 16.0, theme::mix(theme::alpha(theme::INK_850, 0.6), theme::INK_800, hover.max(sel * 0.6)));
+    widgets::frame(pt, r, 16.0, theme::mix(theme::alpha(theme::ink_850(), 0.6), theme::ink_800(), hover.max(sel * 0.6)));
     let thumb = Rect::from_min_size(pos2(r.left() + 10.0, r.center().y - 28.0), vec2(56.0, 56.0));
     art::cover(pt, state, p, thumb, [12.0; 4], 1.0);
     let add_b = Button::new(tr("Add")).icon(icons::PLUS).size(Size::Sm).id_salt(("found-add", &p.path)).enabled(!state.running());
@@ -612,14 +612,14 @@ fn found_row(ui: &mut Ui, state: &State, p: &Project, rect: Rect) -> (Option<boo
     let x = thumb.right() + 12.0;
     let tw = r.right() - 14.0 - aw - 12.0 - x;
     widgets::text_truncated(pt, pos2(x, r.center().y - 17.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 14.0).weight(weight::SEMIBOLD), tw);
-    widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::FG_3), tw);
+    widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::fg_3()), tw);
     let meta = if p.avatars.is_empty() {
         tr!("Unity {version} · {what}", version = p.unity, what = p.kind.label())
     } else {
         tr!("Unity {version} · {what}", version = p.unity, what = tr_n("{count} avatar", "{count} avatars", p.avatars.len() as u64))
     };
     let meta = if hidden { tr!("Hidden · {meta}", meta = meta) } else { meta };
-    widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_4), tw);
+    widgets::text_truncated(pt, pos2(x, r.center().y + 18.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::fg_4()), tw);
     let br = Rect::from_min_size(pos2(r.right() - 14.0 - aw, r.center().y - 16.0), vec2(aw, 32.0));
     if widgets::activated(&add_b.show_at(ui, br)) {
         return (Some(true), resp);
@@ -686,7 +686,7 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.03 * press));
     let p = ui.painter();
-    widgets::frame(p, r, 16.0, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(p, r, 16.0, theme::mix(theme::surface(), theme::ink_800(), hover));
     let tile = Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 18.0), vec2(36.0, 36.0));
     // A call to act stands out with the green tile while N4N0 is not on the avatar.
     let c = anim::color(&ctx, id.with("tone"), tone.color(), Spring::SOFT);
@@ -705,14 +705,14 @@ pub fn capture_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, rect: Rect) {
         pos2(x, r.center().y + 9.0),
         Align2::LEFT_CENTER,
         value,
-        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::FG),
+        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::fg()),
         tw,
     );
     if let Some(g) = trailing {
         let tc = Rect::from_center_size(pos2(r.right() - 24.0, r.center().y), vec2(24.0, 24.0));
         let shift = 2.0 * hover;
         p.circle_filled(tc.center() + vec2(shift, 0.0), 12.0, theme::white(0.04 + 0.05 * hover));
-        widgets::icon(p, tc.center() + vec2(shift, 0.0), g, 13.0, if on_avatar { theme::ACCENT } else { theme::mix(theme::FG_2, theme::FG, hover) });
+        widgets::icon(p, tc.center() + vec2(shift, 0.0), g, 13.0, if on_avatar { theme::accent() } else { theme::mix(theme::fg_2(), theme::fg(), hover) });
     }
     if widgets::activated(&resp) {
         state.ensure(&ctx);

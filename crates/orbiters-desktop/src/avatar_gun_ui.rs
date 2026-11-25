@@ -94,12 +94,12 @@ pub fn command(card: &Card, part: Part) -> Command {
 
 fn pill(p: &Painter, rect: Rect, words: &str, glyph: &str, primary: bool, lit: bool, s: f32) {
     let fill = match (primary, lit) {
-        (true, false) => theme::ACCENT,
-        (true, true) => theme::mix(theme::ACCENT, theme::FG, 0.25),
+        (true, false) => theme::accent(),
+        (true, true) => theme::mix(theme::accent(), theme::fg(), 0.25),
         (false, false) => theme::white(0.12),
         (false, true) => theme::white(0.24),
     };
-    let ink = if primary { theme::INK_950 } else { theme::FG };
+    let ink = if primary { theme::ink_950() } else { theme::fg() };
     p.rect_filled(rect, rect.height() / 2.0, fill);
     let lead = 11.0 * s + 13.0 * s + 5.0 * s;
     widgets::icon(p, pos2(rect.left() + 11.0 * s + 6.5 * s, rect.center().y), glyph, 13.0 * s, ink);
@@ -140,7 +140,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
     let u = |x: f32, y: f32| at + vec2(x, y) * s;
     let rect = Rect::from_min_size(at, CARD * s);
     let ground = if hover.is_some() { (ground + 0.14).min(0.96) } else { ground };
-    p.rect_filled(rect, RADIUS * s, theme::alpha(theme::INK_950, ground));
+    p.rect_filled(rect, RADIUS * s, theme::alpha(theme::ink_950(), ground));
     // The avatar: its picture, else its place with the gun's mark (or what is happening).
     let thumb = Rect::from_min_size(u(PAD, PAD), vec2(THUMB, THUMB) * s);
     let radii = [12.0 * s; 4];
@@ -152,8 +152,8 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
             orbiters_ui::paint::fill_convex(p, &orbiters_ui::paint::squircle_points_corners(thumb, radii), |_| theme::white(0.08));
             let (glyph, ink) = match kind {
                 CardKind::Failed(_) => (icons::WARNING_CIRCLE, theme::WARN),
-                CardKind::Changing | CardKind::Undoing => (icons::CIRCLE_NOTCH, theme::ACCENT),
-                _ => (icons::USER_CIRCLE, theme::FG_2),
+                CardKind::Changing | CardKind::Undoing => (icons::CIRCLE_NOTCH, theme::accent()),
+                _ => (icons::USER_CIRCLE, theme::fg_2()),
             };
             widgets::icon(p, thumb.center(), glyph, 30.0 * s, ink);
         }
@@ -161,7 +161,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
     let right = if has_cross(&card.kind) { CARD.x - CLOSE_W - 6.0 } else { CARD.x - PAD };
     let room = (right - WORDS) * s;
     let title = card.title();
-    let title_high = words(p, u(WORDS, PAD - 1.0), &title, &[13.5 * s, 13.0 * s, 12.5 * s, 12.0 * s, 11.5 * s], room, 2, true, theme::FG) / s;
+    let title_high = words(p, u(WORDS, PAD - 1.0), &title, &[13.5 * s, 13.0 * s, 12.5 * s, 12.0 * s, 11.5 * s], room, 2, true, theme::fg()) / s;
     let (main, other) = parts(&card.kind);
     let (main_words, other_words) = card.buttons();
     let scaled = |r: Rect| Rect::from_min_max(u(r.min.x, r.min.y), u(r.max.x, r.max.y));
@@ -181,7 +181,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
                 // Right under the title, as many rows as the card has room for.
                 let top = PAD - 1.0 + title_high + 5.0;
                 let rows = (((CARD.y - 8.0 - top) / 14.0).floor() as usize).max(1);
-                words(p, u(WORDS, top), &detail, &[11.5 * s, 11.0 * s, 10.5 * s], room, rows, false, theme::FG_3);
+                words(p, u(WORDS, top), &detail, &[11.5 * s, 11.0 * s, 10.5 * s], room, rows, false, theme::fg_3());
             }
         }
     }
@@ -192,7 +192,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
         if on {
             p.circle_filled(zone.center(), 15.0 * s, theme::white(0.16));
         }
-        widgets::icon(p, zone.center(), icons::X, 15.0 * s, if on { theme::FG } else { theme::FG_2 });
+        widgets::icon(p, zone.center(), icons::X, 15.0 * s, if on { theme::fg() } else { theme::fg_2() });
     }
     if card.kind == CardKind::Ask {
         let track = Rect::from_min_max(u(RADIUS, CARD.y - 4.0), u(CARD.x - RADIUS, CARD.y - 2.0));

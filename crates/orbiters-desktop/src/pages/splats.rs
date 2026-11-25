@@ -455,7 +455,7 @@ impl Viewer {
         } else {
             let (text, color) = match &self.error {
                 Some(e) => (tr!("The splats could not be shown: {e}", e = e), theme::DANGER),
-                None => (tr("Loading the splats…").to_string(), theme::FG_3),
+                None => (tr("Loading the splats…").to_string(), theme::fg_3()),
             };
             widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(text, 13.0).color(color));
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -474,7 +474,7 @@ impl Viewer {
             },
             None => tr("3D view").into(),
         };
-        let sub_t = Txt::new(sub, 11.0).color(theme::FG_3);
+        let sub_t = Txt::new(sub, 11.0).color(theme::fg_3());
         let title_t = Txt::new(&self.title, 14.0).weight(weight::SEMIBOLD);
         let views = self.loaded.as_ref().map_or(0, |l| l.views.len());
         // The row's buttons: Save this view and Edit in 3D, and Select splats and Export… for a capture of this
@@ -515,7 +515,7 @@ impl Viewer {
                     &p,
                     label_r.center(),
                     Align2::CENTER_CENTER,
-                    &Txt::new(tr!("View {n} of {total}", n = self.view + 1, total = l.views.len()), 12.0).color(theme::FG_2),
+                    &Txt::new(tr!("View {n} of {total}", n = self.view + 1, total = l.views.len()), 12.0).color(theme::fg_2()),
                 );
                 let mut step = 0i64;
                 if Button::new("‹").variant(Variant::Ghost).width(step_w).show_at(ui, prev_r).clicked() {
@@ -539,7 +539,7 @@ impl Viewer {
                 } else {
                     tr("Drag to orbit · right-drag to pan · scroll to zoom · WASD and QE to fly · double-click for the recorded view")
                 };
-                let hint_t = Txt::new(hint, 11.5).color(theme::FG_2);
+                let hint_t = Txt::new(hint, 11.5).color(theme::fg_2());
                 let hs = widgets::text_size(ui, &hint_t);
                 let hint_r = Rect::from_min_size(pos2(rect.left() + 16.0, rect.bottom() - 16.0 - 30.0), vec2(hs.x + 28.0, 30.0));
                 chip(&p, hint_r);
@@ -581,7 +581,7 @@ fn control_chip<T: PartialEq + Copy>(
     options: &[SegOption<'_, T>],
     slider: Option<ChipSlider<'_>>,
 ) -> Rect {
-    let label = Txt::new(label, 12.0).color(theme::FG_3);
+    let label = Txt::new(label, 12.0).color(theme::fg_3());
     let label_w = widgets::text_size(ui, &label).x;
     // The segmented track's width for these labels (widgets::segmented: small labels, 12 px padding, 4 px inset).
     let seg_w = options.iter().map(|o| widgets::text_size(ui, &Txt::new(o.label, 12.0).weight(weight::MEDIUM)).x + 24.0).sum::<f32>() + 8.0;
@@ -844,11 +844,11 @@ impl Viewer {
         }
         // Saved: where, and Edit right after.
         let (text, tone) = match (&self.saved, &self.still_error) {
-            (Some(_), _) => (tr("Saved in Photos & captures"), theme::ACCENT),
+            (Some(_), _) => (tr("Saved in Photos & captures"), theme::OK),
             (None, Some(_)) => (tr("This view could not be saved"), theme::DANGER),
             _ => return,
         };
-        let t = Txt::new(text, 13.0).color(theme::FG);
+        let t = Txt::new(text, 13.0).color(theme::fg());
         let tw = widgets::text_size(ui, &t).x;
         let saved = self.saved.clone();
         let small = orbiters_ui::widgets::Size::Sm;

@@ -3,45 +3,191 @@
 //! action and for switches that are on). No gradients or glows on controls; colour means status.
 
 use crate::fonts;
+use crate::look::{Look, Tokens};
 use egui::epaint::text::{LayoutJob, TextFormat, VariationCoords};
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Stroke, Style, TextStyle, Vec2};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
 
-// Zinc, as the website (Tailwind/HeroUI dark): page, surfaces one step lighter each.
-pub const INK_950: Color32 = Color32::from_rgb(0x09, 0x09, 0x0b);
-pub const INK_900: Color32 = Color32::from_rgb(0x10, 0x10, 0x12);
-pub const INK_850: Color32 = Color32::from_rgb(0x18, 0x18, 0x1b);
-pub const INK_800: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x23);
-pub const INK_750: Color32 = Color32::from_rgb(0x27, 0x27, 0x2a);
-pub const INK_700: Color32 = Color32::from_rgb(0x30, 0x30, 0x35);
-pub const INK_600: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
+/// Orbiters' own colours, as constants: the look everything starts from ([`crate::look`] derives the others), what is drawn
+/// outside the app's look (N4N0's pictures on avatars, whose colours are the contracts' themes), and the references of
+/// tests.
+pub mod base {
+    use egui::Color32;
 
-pub const FG: Color32 = Color32::from_rgb(0xec, 0xed, 0xee);
-pub const FG_2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbb);
-pub const FG_3: Color32 = Color32::from_rgb(0x8b, 0x8b, 0x94);
-pub const FG_4: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x63);
+    // Zinc, as the website (Tailwind/HeroUI dark): page, surfaces one step lighter each.
+    pub const INK_950: Color32 = Color32::from_rgb(0x09, 0x09, 0x0b);
+    pub const INK_900: Color32 = Color32::from_rgb(0x10, 0x10, 0x12);
+    pub const INK_850: Color32 = Color32::from_rgb(0x18, 0x18, 0x1b);
+    pub const INK_800: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x23);
+    pub const INK_750: Color32 = Color32::from_rgb(0x27, 0x27, 0x2a);
+    pub const INK_700: Color32 = Color32::from_rgb(0x30, 0x30, 0x35);
+    pub const INK_600: Color32 = Color32::from_rgb(0x3f, 0x3f, 0x46);
 
-/// Orbiters green (My Avatar, Logger, Mixer): the main action, switches that are on, selected things.
-pub const ACCENT: Color32 = Color32::from_rgb(0x00, 0xda, 0x6d);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1e, 0xe6, 0x84);
-/// Text and icons on [`ACCENT`].
-pub const ON_ACCENT: Color32 = Color32::from_rgb(0x05, 0x16, 0x0c);
+    pub const FG: Color32 = Color32::from_rgb(0xec, 0xed, 0xee);
+    pub const FG_2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbb);
+    pub const FG_3: Color32 = Color32::from_rgb(0x8b, 0x8b, 0x94);
+    pub const FG_4: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x63);
 
+    /// Orbiters green (My Avatar, Logger, Mixer): the main action, switches that are on, selected things.
+    pub const ACCENT: Color32 = Color32::from_rgb(0x00, 0xda, 0x6d);
+    pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x1e, 0xe6, 0x84);
+    /// Text and icons on [`ACCENT`].
+    pub const ON_ACCENT: Color32 = Color32::from_rgb(0x05, 0x16, 0x0c);
+
+    /// The logo's mark colour.
+    pub const MARK: Color32 = Color32::from_rgb(0xe9, 0xe9, 0xf2);
+
+    pub use super::{CYAN, DANGER, OK, REC, VIOLET, WARN};
+}
+
+// The look's colours ([`crate::look`]): Orbiters' own unless the person chose others in Settings, Appearance.
+macro_rules! tokens {
+    ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {
+        #[allow(non_camel_case_types, clippy::enum_variant_names)]
+        #[derive(Clone, Copy)]
+        enum Token { $($name),+ }
+
+        const TOKENS: usize = [$(Token::$name),+].len();
+
+        /// The look of the process, a colour each (as [`Color32::to_array`] has it): read for everything drawn, set when
+        /// the look changes.
+        static NOW: [AtomicU32; TOKENS] = [$(AtomicU32::new(u32::from_ne_bytes(Tokens::ORBITERS.$name.to_array()))),+];
+
+        $($(#[$doc])* pub fn $name() -> Color32 { token(Token::$name) })+
+
+        fn of(tokens: &Tokens) -> [u32; TOKENS] {
+            [$(u32::from_ne_bytes(tokens.$name.to_array())),+]
+        }
+
+        /// Every colour of the look, together.
+        pub fn tokens() -> Tokens {
+            Tokens { $($name: $name()),+ }
+        }
+    };
+}
+
+tokens! {
+    /// The page.
+    ink_950, ink_900,
+    /// Cards.
+    ink_850,
+    /// Raised: popovers, toasts.
+    ink_800, ink_750, ink_700, ink_600,
+    fg, fg_2, fg_3,
+    /// Decoration and what is disabled: no words anyone must read.
+    fg_4,
+    /// The main action, switches that are on, selected things. What *means* good is [`OK`], whatever the accent.
+    accent, accent_hover,
+    /// Text and icons on [`accent`].
+    on_accent,
+    /// The logo's mark.
+    mark,
+    /// What is selected in a text (at 45 %).
+    selection,
+    /// The text cursor, links.
+    caret,
+}
+
+thread_local! {
+    /// [`in_look`]'s, over [`NOW`].
+    static HERE: Cell<Option<&'static [u32; TOKENS]>> = const { Cell::new(None) };
+    /// [`in_look`] with a background behind the page.
+    static HERE_OVER: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+fn token(t: Token) -> Color32 {
+    let v = HERE.with(Cell::get).map_or_else(|| NOW[t as usize].load(Ordering::Relaxed), |here| here[t as usize]);
+    let [r, g, b, a] = v.to_ne_bytes();
+    Color32::from_rgba_premultiplied(r, g, b, a)
+}
+
+/// Counts the changes of the look: what keeps something drawn compares it.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+/// A background lies behind the window's pages ([`crate::background`]): cards let a little of it through.
+static OVER_BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+pub fn generation() -> u32 {
+    GENERATION.load(Ordering::Relaxed)
+}
+
+/// The process draws in `look` from now on. Contexts follow at their next frame ([`crate::follow`]).
+pub fn set_look(look: &Look) {
+    // Asked each frame: the colours are worked out when they change.
+    static LAST: Mutex<Option<Look>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.replace(*look) == Some(*look) {
+        return;
+    }
+    let mut changed = false;
+    for (now, new) in NOW.iter().zip(of(&Tokens::of(look))) {
+        changed |= now.swap(new, Ordering::Relaxed) != new;
+    }
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether a background lies behind the pages (the window's process alone).
+pub fn set_over_background(over: bool) {
+    OVER_BACKGROUND.store(over, Ordering::Relaxed);
+}
+
+fn over_background() -> bool {
+    HERE_OVER.with(Cell::get).unwrap_or_else(|| OVER_BACKGROUND.load(Ordering::Relaxed))
+}
+
+/// Runs `f` in `look` on this thread alone (tests run side by side in one process, and the live preview draws another
+/// look than the page around it).
+pub fn in_look<R>(look: &Look, f: impl FnOnce() -> R) -> R {
+    in_tokens(&Tokens::of(look), f)
+}
+
+pub fn in_tokens<R>(tokens: &Tokens, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<&'static [u32; TOKENS]>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HERE.with(|h| h.set(self.0));
+        }
+    }
+    let here = of(tokens);
+    // SAFETY: the reference is read through HERE alone, on this thread, and HERE holds what it held before again when
+    // `_restore` drops, before `here` does (locals drop in the reverse of their order), whether `f` returns or unwinds.
+    let here: &'static [u32; TOKENS] = unsafe { &*(&raw const here) };
+    let _restore = Restore(HERE.with(|h| h.replace(Some(here))));
+    f()
+}
+
+/// Runs `f` as if a background lay behind the page, or none did, on this thread alone.
+pub fn with_background<R>(over: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            HERE_OVER.with(|h| h.set(self.0));
+        }
+    }
+    let _restore = Restore(HERE_OVER.with(|h| h.replace(Some(over))));
+    f()
+}
+
+// Colours that mean something, or tell kinds apart: the same in every look.
 pub const CYAN: Color32 = Color32::from_rgb(0x48, 0xe6, 0xff);
 pub const VIOLET: Color32 = Color32::from_rgb(0xbd, 0x65, 0xff);
 pub const INDIGO: Color32 = Color32::from_rgb(0x74, 0x66, 0xff);
 pub const BLUE: Color32 = Color32::from_rgb(0x4f, 0x89, 0xff);
 pub const PURPLE: Color32 = Color32::from_rgb(0xa2, 0x59, 0xf7);
 
-pub const OK: Color32 = ACCENT;
+/// Good, online, done: green whatever the accent.
+pub const OK: Color32 = Color32::from_rgb(0x00, 0xda, 0x6d);
 pub const WARN: Color32 = Color32::from_rgb(0xf5, 0xb7, 0x4f);
 pub const DANGER: Color32 = Color32::from_rgb(0xff, 0x6b, 0x7a);
 pub const REC: Color32 = Color32::from_rgb(0xff, 0x4d, 0x6d);
 
-/// The logo's mark colour.
-pub const MARK: Color32 = Color32::from_rgb(0xe9, 0xe9, 0xf2);
-
 pub const CARD_RADIUS: f32 = 18.0;
 pub const TILE_RADIUS: f32 = 14.0;
+/// How opaque cards are over a background.
+const OVER_BACKGROUND_ALPHA: f32 = 0.82;
 
 /// `c` at opacity `a` (0..1), blended like CSS (in gamma space).
 pub fn alpha(c: Color32, a: f32) -> Color32 {
@@ -61,24 +207,25 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     a.lerp_to_gamma(b, t.clamp(0.0, 1.0))
 }
 
-/// Card fill (the website's `--n4n0-surface`: content1 at 92 %).
+/// Card fill (the website's `--n4n0-surface`: content1 at 92 %), a little more open over a background (the website's
+/// glass over its creators' backgrounds, kept dark enough for text at AA whatever lies under it).
 pub fn surface() -> Color32 {
-    alpha(INK_850, 0.92)
+    alpha(ink_850(), if over_background() { OVER_BACKGROUND_ALPHA } else { 0.92 })
 }
 
 /// Popovers, toasts and the session detail (the website's raised surface).
 pub fn surface_strong() -> Color32 {
-    INK_800
+    ink_800()
 }
 
 /// A surface inside a card (the website's `--n4n0-surface-soft`).
 pub fn surface_soft() -> Color32 {
-    alpha(INK_750, 0.45)
+    alpha(ink_750(), 0.45)
 }
 
 /// Neutral control fill (secondary buttons, the selected segment, switches that are off).
 pub fn control() -> Color32 {
-    alpha(INK_600, 0.55)
+    alpha(ink_600(), 0.55)
 }
 
 pub fn hairline() -> Stroke {
@@ -122,7 +269,7 @@ pub struct Txt {
 
 impl Txt {
     pub fn new(text: impl Into<String>, size: f32) -> Self {
-        Self { text: text.into(), size, weight: weight::REGULAR, color: FG, tracking: 0.0, mono: false, line_height: None }
+        Self { text: text.into(), size, weight: weight::REGULAR, color: fg(), tracking: 0.0, mono: false, line_height: None }
     }
 
     pub fn weight(mut self, w: f32) -> Self {
@@ -152,7 +299,7 @@ impl Txt {
 
     /// The web's `label-caps`: 10.5 px, weight 650, 0.08 em tracking, upper case, `fg-3`.
     pub fn caps(text: impl AsRef<str>) -> Self {
-        Self::new(text.as_ref().to_uppercase(), 10.5).weight(650.0).tracking(0.08).color(FG_3)
+        Self::new(text.as_ref().to_uppercase(), 10.5).weight(650.0).tracking(0.08).color(fg_3())
     }
 
     pub fn format(&self) -> TextFormat {
@@ -187,6 +334,19 @@ impl Txt {
 pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(style);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STYLED), tokens()));
+}
+
+/// Where a context notes the colours its style was made in.
+const STYLED: &str = "orbiters-theme-styled";
+
+/// To call each frame of a context that can live through a change of look: egui's own widgets take its colours.
+pub fn follow(ctx: &egui::Context) {
+    // (A few loads and one comparison: no more than asking what changed.)
+    let now = tokens();
+    if ctx.data(|d| d.get_temp::<Tokens>(egui::Id::unique(STYLED))).is_some_and(|was| was != now) {
+        apply(ctx);
+    }
 }
 
 fn style(style: &mut Style) {
@@ -211,10 +371,10 @@ fn style(style: &mut Style) {
     v.extreme_bg_color = Color32::TRANSPARENT;
     v.faint_bg_color = white(0.03);
     v.code_bg_color = black(0.4);
-    v.hyperlink_color = CYAN;
-    v.selection.bg_fill = alpha(VIOLET, 0.45);
-    v.selection.stroke = Stroke::new(1.0, FG);
-    v.text_cursor.stroke = Stroke::new(1.5, CYAN);
+    v.hyperlink_color = caret();
+    v.selection.bg_fill = alpha(selection(), 0.45);
+    v.selection.stroke = Stroke::new(1.0, fg());
+    v.text_cursor.stroke = Stroke::new(1.5, caret());
     // Tooltips are about 28 points high: egui's blurred rectangles crease and streak under the corners once the blur
     // passes half the shape's height (its feathering meets in the middle), so popups keep a short shadow.
     v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 16, spread: 0, color: black(0.5) };
@@ -229,13 +389,13 @@ fn style(style: &mut Style) {
         w.bg_fill = bg;
         w.weak_bg_fill = bg;
         w.bg_stroke = Stroke::NONE;
-        w.fg_stroke = Stroke::new(1.0, FG_2);
+        w.fg_stroke = Stroke::new(1.0, fg_2());
         w.corner_radius = radius(10.0);
         w.expansion = 0.0;
     }
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, FG_2);
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, FG);
-    v.widgets.active.fg_stroke = Stroke::new(1.0, FG);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, fg_2());
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, fg());
+    v.widgets.active.fg_stroke = Stroke::new(1.0, fg());
 
     let s = &mut style.spacing;
     s.item_spacing = Vec2::new(8.0, 8.0);

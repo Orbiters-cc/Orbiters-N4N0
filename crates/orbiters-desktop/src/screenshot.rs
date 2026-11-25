@@ -56,6 +56,7 @@ mod worlds_overlay;
 mod quiet_prompt;
 mod chat_bar;
 mod settings_r21;
+mod appearance;
 mod avatar_gun;
 mod photos_capture;
 
@@ -215,6 +216,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                 orbiters_i18n::pin_language(language);
                 orbiters_ui::fonts::prefer_language(language.tag());
             }
+            // Any scene in a look of Settings, Appearance.
+            "--appearance" => settings.appearance = it.next().and_then(|l| appearance::parse(l)).context("--appearance <palette>[:<font>[:<background>]]")?,
             "--text-report" => {
                 text_report = Some(TextReport(PathBuf::from(it.next().context("--text-report <file>")?)));
                 orbiters_ui::text_audit::turn_on();
@@ -224,6 +227,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     let _text_report = text_report;
     settings.consent_acknowledged = true;
+    crate::appearance::follow(&settings, || {});
     std::fs::create_dir_all(&out)?;
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);
@@ -2552,6 +2556,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     launcher_real::append(&mut scenarios);
     // REQUEST21 2: Settings in sub-tabs, with its search.
     settings_r21::append(&mut scenarios);
+    appearance::append(&mut scenarios);
     avatar_gun::append(&mut scenarios);
     // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
     // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
@@ -2604,6 +2609,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "r21" && sc.name.starts_with("r21-"))
+                && !(o == "appearance" && sc.name.starts_with("appearance-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
                 && !(o == "groups" && sc.name.starts_with("groups-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
@@ -2775,7 +2781,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
                 app.open_capture(part, t);
             }
             if sc.page == Page::Settings {
-                staged = settings_r21::stage(&mut app, sc.name, t);
+                staged = appearance::stage(&mut app, sc.name, t) || settings_r21::stage(&mut app, sc.name, t);
             }
             if sc.name.starts_with("avatar-gun") {
                 avatar_gun::stage(&ctx, &mut app, sc.name);
@@ -4007,7 +4013,7 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
             if f == frames - 1 {
                 let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
                 let started = std::time::Instant::now();
-                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::ink_950()).to_vec();
                 let vertices: usize = prims
                     .iter()
                     .map(|p| match &p.primitive {
@@ -4226,7 +4232,7 @@ mod dashboard_tests {
             sw.set_textures(&mut full.textures_delta);
             if f == 89 {
                 let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::ink_950()).to_vec();
             }
             sw.free_textures(&mut full.textures_delta);
         }

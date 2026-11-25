@@ -56,6 +56,10 @@ impl Ground {
     }
 }
 
+/// The files of a session [`find`] reads (each may be missing: freeing space takes them away), beside the splats and the
+/// camera it is given.
+pub const INPUTS: [&str; 3] = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE];
+
 /// The ground under the person at `time_ns` (the session clock; None: the start) of `session`, whose splats are `g`
 /// and whose camera stood at `camera` then.
 pub fn find(session: &Path, g: &Gaussians, camera: [f32; 3], time_ns: Option<u64>) -> Ground {

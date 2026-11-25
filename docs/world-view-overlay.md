@@ -140,7 +140,7 @@ draws the bar alone (`bar-*.png`) and under the panel with a capture's page open
 ## Captures kept for showing again
 
 `overlay/worlds/cache.rs`. **In memory**, the ready captures (splats ordered for the reveal, sky map): about 60 bytes a
-splat, so 60 MB for a million; at most 1.25 GB (`ORBITERS_3D_WORLDS_MEMORY_MB` changes it), the least lately shown let
+splat, so 60 MB for a million; at most 384 MB (`ORBITERS_3D_WORLDS_MEMORY_MB` changes it), the least lately shown let
 go first, never the one on screen. Showing one of them again is at once: no download, no preparing, straight to the
 GPU. **On disk** (`%LOCALAPPDATA%\…\cache\3d-worlds`), the files as downloaded (the slot's PC tree or the API's
 `.splat`, the sky map) within 2 GB, the least lately used removed first, written only while the drive keeps 10 GB free

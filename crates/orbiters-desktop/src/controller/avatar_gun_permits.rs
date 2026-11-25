@@ -3,14 +3,18 @@
 use super::*;
 use orbiters_core::vrchat_api::{Routed, Sent};
 use orbiters_core::vrchat_log::{LogEvent, WorldState};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 
 const AVATAR: &str = "avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";
+/// The credential the hits come to.
+const THEIRS: &str = "theirs";
 const WORLD: &str = "wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b";
 const FRIEND: &str = "usr_1339e525-d75d-4832-9104-98dd89287681";
 
 struct Playing {
     ctl: Shared,
+    to: Member,
     asked: Arc<Mutex<Vec<Sent>>>,
     instance: String,
 }
@@ -42,23 +46,26 @@ fn playing(allow: AvatarGunAllow, asked: impl Fn(&Shared, &str) + Send + Sync + 
     world.apply(&LogEvent::PlayerJoined { name: "Me".into(), user_id: "usr_test".into() });
     let instance = world.instance_hash().unwrap();
     ctl.update(|s| s.vrchat.world.set(world));
-    Playing { ctl, asked: sent, instance }
+    // (Nothing of it is sent in a test: `avatar_gun_answer`.)
+    let to = Member { api: Api::at("http://127.0.0.1:9/"), token: THEIRS.into(), epoch: ctl.identity_epoch() };
+    Playing { ctl, to, asked: sent, instance }
 }
 
 impl Playing {
     fn hit(&self, shot: &str) {
         let hit = gun::Hit { shot: shot.into(), avatar: gun::Avatar::for_shot(AVATAR, "Orbit", None).unwrap(), from: gun::From { name: "Sample".into(), vrchat_id: Some(FRIEND.into()) } };
-        self.ctl.avatar_gun_hit(hit, &self.instance);
+        self.ctl.avatar_gun_hit(hit, &self.to, &self.instance);
     }
     fn selected(&self) -> bool {
         self.asked.lock().unwrap().iter().any(|s| s.method == "PUT")
     }
     fn answers(&self, shot: &str) -> Vec<Outcome> {
-        self.ctl.avatar_gun.lock().unwrap().answered.iter().filter(|(s, _)| s == shot).map(|(_, o)| *o).collect()
+        self.ctl.avatar_gun.lock().unwrap().answered.iter().filter(|(s, ..)| s == shot).map(|(_, o, _)| *o).collect()
     }
     /// The hit was answered, and as `outcome`.
     fn ends(&self, shot: &str, outcome: Outcome) {
         assert!(until(|| self.answers(shot).last() == Some(&outcome)), "{:?}", self.answers(shot));
+        assert!(self.ctl.avatar_gun.lock().unwrap().answered.iter().all(|(.., token)| token == THEIRS), "as the member it came to");
     }
 }
 
@@ -169,7 +176,7 @@ fn one_of_two_hits_at_once_is_taken() {
                 });
             }
         });
-        let all = |outcome: Outcome| p.ctl.avatar_gun.lock().unwrap().answered.iter().filter(|(_, o)| *o == outcome).count();
+        let all = |outcome: Outcome| p.ctl.avatar_gun.lock().unwrap().answered.iter().filter(|(_, o, _)| *o == outcome).count();
         assert!(until(|| all(Outcome::Asked) + all(Outcome::Refused) == 8));
         assert_eq!(all(Outcome::Asked), 1, "round {round}");
         let card = p.ctl.view().avatar_gun.card.as_ref().map(|c| c.id);
@@ -192,7 +199,7 @@ fn a_late_failure_leaves_the_hit_that_came_since() {
                 from: "Sample".into(),
                 card: card + 1,
                 instance: String::new(),
-                epoch: 0,
+                to: Member { api: Api::at("http://127.0.0.1:9/"), token: THEIRS.into(), epoch: 0 },
                 friend: false,
                 allowed: true,
             });
@@ -211,7 +218,7 @@ fn a_replaced_streams_end_leaves_the_other_ones_waits() {
     for well in [true, false] {
         {
             let mut rt = p.ctl.avatar_gun.lock().unwrap();
-            (rt.streaming, rt.connected, rt.failures, rt.retry_at) = (Some((2, "token".into(), "instance".into())), true, 3, None);
+            (rt.streaming, rt.connected, rt.failures, rt.retry_at) = (Some((2, "token".into(), "instance".into(), 1)), true, 3, None);
         }
         p.ctl.avatar_gun_stream_ended(1, well);
         let rt = p.ctl.avatar_gun.lock().unwrap();

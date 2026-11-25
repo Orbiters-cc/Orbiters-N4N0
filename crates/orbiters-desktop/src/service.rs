@@ -692,7 +692,7 @@ impl Service {
                     .and_then(|_| messages.iter().try_for_each(|m| ipc::write_line(&mut writer, m)));
                 if written.is_err() {
                     out.close();
-                    return;
+                    break;
                 }
                 #[cfg(test)]
                 completed.fetch_add(1, Ordering::Relaxed);
@@ -703,6 +703,8 @@ impl Service {
         });
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
+            // Closed, or owing more than it can hold: the other end knows at once, and nobody there waits for an answer.
+            let _ = writer.shutdown(std::net::Shutdown::Both);
         let id = self.next_link.fetch_add(1, Ordering::Relaxed);
         self.usage.linked(id, role);
         self.links.lock().unwrap().push(Link { id, role, pid, mailbox: mailbox.clone(),

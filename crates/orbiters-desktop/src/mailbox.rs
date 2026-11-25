@@ -1,14 +1,15 @@
 //! What the service tells a window, the overlay or the tray: the newest snapshot (each one replaces the one not read
 //! yet: only the newest matters) and, in order, the other messages (notices, the library's version, Close), a few
 //! hundred at most. A reader that stops reading (hung, suspended in a debugger) leaves one snapshot waiting rather
-//! than a queue of full copies growing in the service.
+//! than a queue of full copies growing in the service. What it asked for (an answer, an acknowledgement) and what it must
+//! do (Close) is never what goes: a link that owes too much of it ends instead, and whoever waits is told.
 
 use crate::ipc::ToClient;
 use crate::state::Snapshot;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Messages kept for a reader that does not read: past this, the oldest go.
+/// Messages kept for a reader that does not read: past this, the oldest that can be missed go.
 const MAX_MESSAGES: usize = 256;
 
 #[derive(Default)]
@@ -82,8 +83,18 @@ impl Mailbox {
             return self.post_snapshot(Arc::new(*snapshot));
         }
         state.messages.push_back(message);
-        while state.messages.len() > MAX_MESSAGES {
-            state.messages.pop_front();
+        if state.messages.len() > MAX_MESSAGES {
+            // An acknowledgement says it for those before it (`ipc::Client`).
+            let newest = state.messages.iter().rposition(|m| matches!(m, ToClient::SmoothingAck { .. }));
+            let passed = |i: usize, m: &ToClient| can_be_missed(m) || (matches!(m, ToClient::SmoothingAck { .. }) && newest != Some(i));
+            match (0..state.messages.len()).find(|i| passed(*i, &state.messages[*i])) {
+                Some(i) => drop(state.messages.remove(i)),
+                None => {
+                    state.close();
+                    self.ready.notify_all();
+                    return false;
+                }
+            }
         }
         self.ready.notify_one();
         true
@@ -110,11 +121,33 @@ impl Mailbox {
 
     /// The reader is gone: what waits is dropped and nothing more is kept.
     pub fn close(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.closed = true;
-        state.snapshot = None;
-        state.messages.clear();
+        self.state.lock().unwrap().close();
         self.ready.notify_all();
+    }
+}
+
+impl State {
+    fn close(&mut self) {
+        self.closed = true;
+        self.snapshot = None;
+        self.messages.clear();
+    }
+}
+
+/// What a reader that does not read can go without: nobody waits for it, and a later one says it again or makes up for it.
+fn can_be_missed(message: &ToClient) -> bool {
+    match message {
+        ToClient::Notice { .. } | ToClient::Library { .. } | ToClient::Maps { .. } | ToClient::Locomotion { .. } => true,
+        ToClient::SmoothingAck { .. }
+        | ToClient::Snapshot { .. }
+        | ToClient::WorkerLog { .. }
+        | ToClient::VrchatData { .. }
+        | ToClient::Groups { .. }
+        | ToClient::Member { .. }
+        | ToClient::Translated { .. }
+        | ToClient::Show
+        | ToClient::ShowPage { .. }
+        | ToClient::Close => false,
     }
 }
 
@@ -139,6 +172,38 @@ mod tests {
         mailbox.close();
         assert!(!mailbox.post(ToClient::Show), "a closed mailbox takes nothing");
         assert!(mailbox.take().is_none());
+    }
+
+    /// DCT-4: a reader that does not read for a while still gets what it asked for and what it must do, in order; only what can be
+    /// missed goes. One that owes too much of it has its link ended.
+    #[test]
+    fn an_answer_or_an_acknowledgement_is_never_dropped() {
+        let mailbox = Mailbox::new(true);
+        let locomotion = || ToClient::Locomotion { values: vec![("VelocityX".into(), 1.0)] };
+        assert!(mailbox.post(ToClient::SmoothingAck { id: 1, revision: 7 }));
+        assert!(mailbox.post(ToClient::Member { id: "asked".into(), answer: Err("no".into()) }));
+        assert!(mailbox.post(ToClient::Translated { id: "asked".into(), result: Ok(Vec::new()) }));
+        assert!(mailbox.post(ToClient::Close));
+        for _ in 0..3 * MAX_MESSAGES {
+            assert!(mailbox.post(locomotion()));
+        }
+        let (messages, _) = mailbox.take().unwrap();
+        assert_eq!(messages.len(), MAX_MESSAGES);
+        assert!(matches!(messages[..4], [ToClient::SmoothingAck { id: 1, revision: 7 }, ToClient::Member { .. }, ToClient::Translated { .. }, ToClient::Close]));
+        // A slider dragged meanwhile: the newest acknowledgement says it for those before it.
+        assert!(mailbox.post(ToClient::Member { id: "asked".into(), answer: Err("no".into()) }));
+        for id in 1..=2 * MAX_MESSAGES as u64 {
+            assert!(mailbox.post(ToClient::SmoothingAck { id, revision: id }));
+        }
+        let (messages, _) = mailbox.take().unwrap();
+        assert!(messages.len() == MAX_MESSAGES && matches!(messages[0], ToClient::Member { .. }));
+        assert!(matches!(messages.last(), Some(ToClient::SmoothingAck { id, .. }) if *id == 2 * MAX_MESSAGES as u64));
+        // Nothing left that can go: the link ends, rather than one answer never coming.
+        for id in 0..MAX_MESSAGES {
+            assert!(mailbox.post(ToClient::Member { id: id.to_string(), answer: Err("no".into()) }));
+        }
+        assert!(!mailbox.post(ToClient::WorkerLog { lines: Vec::new() }));
+        assert!(mailbox.take().is_none() && !mailbox.post(locomotion()));
     }
 
     #[test]

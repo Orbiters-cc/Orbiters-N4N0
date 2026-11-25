@@ -411,8 +411,8 @@ pub fn write_line<T: Serialize>(w: &mut impl Write, msg: &T) -> std::io::Result<
 const CHANGES: &str = r#"{"type":"changes","parts":"#;
 
 /// The state `snapshot` written to a link that last wrote `sent`: the parts that changed since, or the whole
-/// [`ToClient::Snapshot`] to a link that wrote none yet. A line is written for every state, changed or not: the client
-/// hears of every publish, as it did when each one was the whole state.
+/// [`ToClient::Snapshot`] to a link that wrote none yet. Nothing is written for a state that differs in nothing from the one
+/// written last (a change undone before a paced link wrote it): the client has it, and is not woken to draw it again.
 ///
 /// Made into JSON once however many links write it: the window and the overlay are handed the same published
 /// snapshot, and while both keep up they last wrote the same one.
@@ -449,21 +449,29 @@ pub fn write_state(w: &mut impl Write, sent: Option<&Arc<Snapshot>>, snapshot: &
                 let mut line = match sent {
                     None => serde_json::to_vec(&Out::Snapshot { snapshot }).map_err(std::io::Error::other)?,
                     Some(sent) => {
-                        let (parts, _) = orbiters_core::slice::changes_between(&**snapshot, &**sent).map_err(std::io::Error::other)?;
-                        let mut line = Vec::with_capacity(CHANGES.len() + parts.len() + 2);
-                        line.extend_from_slice(CHANGES.as_bytes());
-                        line.extend_from_slice(&parts);
-                        line.push(b'}');
+                        let (parts, changed) = orbiters_core::slice::changes_between(&**snapshot, &**sent).map_err(std::io::Error::other)?;
+                        let mut line = Vec::new();
+                        if changed > 0 {
+                            line.reserve_exact(CHANGES.len() + parts.len() + 2);
+                            line.extend_from_slice(CHANGES.as_bytes());
+                            line.extend_from_slice(&parts);
+                            line.push(b'}');
+                        }
                         line
                     }
                 };
-                line.push(b'\n');
+                if !line.is_empty() {
+                    line.push(b'\n');
+                }
                 let line: Arc<[u8]> = line.into();
                 *last = Some(Written { since: sent.map(Arc::downgrade), now: Arc::downgrade(snapshot), line: line.clone() });
                 line
             }
         }
     };
+    if line.is_empty() {
+        return Ok(());
+    }
     w.write_all(&line)?;
     w.flush()
 }
@@ -562,6 +570,10 @@ pub fn digest(snapshot: &Snapshot) -> String {
     format!("{hash:016x}")
 }
 
+/// How long a change is shown before the service confirms it, when the service says nothing: it refused it, or it was already
+/// so, and a state that did not change is not sent.
+const AHEAD_FOR: Duration = Duration::from_secs(3);
+
 /// The state as a client holds it.
 struct Held {
     smoothing: Vec<(u64, serde_json::Value, Option<u64>)>,
@@ -569,8 +581,10 @@ struct Held {
     /// What the service published, as its link last said: the snapshot it sent first, with every change since.
     service: Arc<Snapshot>,
     /// What the interface reads: `service`, or that with a change shown before the service confirms it
-    /// ([`Client::update_local`]), until the service's next line.
+    /// ([`Client::update_local`]), until the service's next line, or [`AHEAD_FOR`].
     shown: Arc<Snapshot>,
+    /// Since when `shown` is ahead of `service` by such a change.
+    ahead: Option<Instant>,
     /// Terminal for this connection; protected by the same lock as both state replacement paths.
     closed: bool,
 }
@@ -578,6 +592,7 @@ struct Held {
 impl Held {
     fn follow_smoothing(&mut self) {
         orbiters_core::here::engine_gives_camera(self.service.launcher.camera);
+        self.ahead = None;
         let revision = self.service.smoothing_revision;
         self.smoothing.retain(|p| p.2.is_none_or(|ack| revision < ack));
         if self.smoothing.is_empty() {
@@ -616,7 +631,7 @@ mod smoothing_ack_tests {
     #[test]
     fn with_nothing_pending_the_shown_state_is_the_service_s() {
         let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
-        let mut h = Held { service: first.clone(), shown: first.clone(), closed: false, next_smoothing: 1, smoothing: vec![
+        let mut h = Held { service: first.clone(), shown: first.clone(), ahead: None, closed: false, next_smoothing: 1, smoothing: vec![
             (1, serde_json::json!({"tracking":{"ms":[90,0,0]}}), Some(1)),
         ] };
         h.follow_smoothing();
@@ -631,7 +646,7 @@ mod smoothing_ack_tests {
     #[test]
     fn two_device_sliders_and_both_menu_sliders_survive_a_stale_snapshot() {
         let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
-        let mut h = Held { service: first.clone(), shown: first, closed: false, next_smoothing: 0, smoothing: Vec::new() };
+        let mut h = Held { service: first.clone(), shown: first, ahead: None, closed: false, next_smoothing: 0, smoothing: Vec::new() };
         for patch in [
             serde_json::json!({"tracking":{"ms":[90,0,0]}}),
             serde_json::json!({"tracking":{"ms":[90,70,0]}}),
@@ -651,7 +666,7 @@ mod smoothing_ack_tests {
     #[test]
     fn releases_survive_stale_snapshots_and_settle_on_clamp_or_refusal() {
         let first = Arc::new(Snapshot::new(orbiters_core::settings::Settings::default()));
-        let mut h = Held { service: first.clone(), shown: first.clone(), closed: false, next_smoothing: 2, smoothing: vec![
+        let mut h = Held { service: first.clone(), shown: first.clone(), ahead: None, closed: false, next_smoothing: 2, smoothing: vec![
             (1, serde_json::json!({"tracking":{"ms":[90,0,0]}}), None),
             (2, serde_json::json!({"orbit":{"vr_smoothing_wheel_ms":75}}), None),
         ] };
@@ -742,7 +757,7 @@ impl Client {
         crate::controller::follow_environment(first.settings.development);
         let client = Arc::new(Self {
             writer: Mutex::new(writer),
-            state: Mutex::new(Held { service: first.clone(), shown: first, closed: false, smoothing: Vec::new(), next_smoothing: 0 }),
+            state: Mutex::new(Held { service: first.clone(), shown: first, ahead: None, closed: false, smoothing: Vec::new(), next_smoothing: 0 }),
             shutdown: reader.get_ref().try_clone()?,
             notices: Mutex::new(Vec::new()),
             library: AtomicU64::new(0),
@@ -896,7 +911,11 @@ impl Client {
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.state.lock().unwrap().shown.clone()
+        let mut held = self.state.lock().unwrap();
+        if held.ahead.is_some_and(|since| since.elapsed() >= AHEAD_FOR) {
+            held.follow_smoothing();
+        }
+        held.shown.clone()
     }
 
     /// Keep released slider values until both their acknowledgement and its authoritative state arrive.
@@ -917,6 +936,12 @@ impl Client {
         let mut s = (*held.shown).clone();
         f(&mut s);
         held.shown = Arc::new(s);
+        held.ahead = Some(Instant::now());
+        drop(held);
+        // What the service never confirmed goes on time, also in a window where nothing else draws.
+        if let Some(ctx) = self.repaint.lock().unwrap().as_ref() {
+            ctx.request_repaint_after(AHEAD_FOR + Duration::from_millis(50));
+        }
     }
 
     /// Whole state replacement and closure are serialized. A terminated connection can never be revived by a
@@ -1308,18 +1333,20 @@ pub(crate) mod tests {
             // What these rounds never touch was sent once, with the first snapshot.
             assert!(orbiters_core::slice::Slice::same(&before.storage, &after.storage) && orbiters_core::slice::Slice::same(&before.n4n0.videos, &after.n4n0.videos));
         }
-        // A state told again with nothing changed is a new snapshot all the same (a frame is drawn for it), sharing
-        // every part.
-        let before = client.snapshot();
-        write_state(&mut writer, Some(&sent), &published).unwrap();
-        assert!(until(|| !Arc::ptr_eq(&before, &client.snapshot())));
-        let after = client.snapshot();
-        assert!(orbiters_core::slice::Slice::same(&before.settings, &after.settings) && orbiters_core::slice::Slice::same(&before.vrchat.world, &after.vrchat.world));
-        assert_eq!(json(&after), json(&published));
+        // A state with nothing changed is not told again (XCT-18, DCT-9): not a byte, to a link that has it.
+        let again = Arc::new((*published).clone());
+        let mut line = Vec::new();
+        write_state(&mut line, Some(&published), &again).unwrap();
+        write_state(&mut line, Some(&published), &again).unwrap();
+        assert!(line.is_empty(), "{}", String::from_utf8_lossy(&line));
+        // Another link made from nothing yet still gets the whole of it.
+        write_state(&mut line, None, &again).unwrap();
+        assert!(line.starts_with(br#"{"type":"snapshot""#));
+        assert_eq!(json(&client.snapshot()), json(&published));
     }
 
     /// A change shown before the service confirms it lasts until the service's next state, whatever that state
-    /// changed: a refusal that changes nothing of that part still puts back what the service holds.
+    /// changed; a refusal that changes nothing at all is not sent, and what was shown goes by itself.
     #[test]
     fn what_a_window_shows_ahead_goes_with_the_service_s_next_state() {
         let first = Arc::new(Snapshot::new(Settings::default()));
@@ -1336,10 +1363,13 @@ pub(crate) mod tests {
         let shown = client.snapshot();
         assert!(!shown.vrchat_login.busy, "the service never said busy");
         assert_eq!(shown.account.state, crate::state::AccountState::Unknown);
-        // Even a publish that changed nothing does.
+        // Nothing said of it: gone once its time is over, and not before.
         client.update_local(|s| s.vrchat_login.busy = true);
-        write_state(&mut writer, Some(&next), &next).unwrap();
+        let shown = Instant::now();
+        assert!(client.snapshot().vrchat_login.busy);
         assert!(until(|| !client.snapshot().vrchat_login.busy));
+        assert!(shown.elapsed() >= AHEAD_FOR, "{:?}", shown.elapsed());
+        assert!(Arc::ptr_eq(&client.snapshot(), &client.state.lock().unwrap().service));
     }
 
     /// A state in which every part differs from a new snapshot's: the busy evening of `--publish-cost`, and the rest.

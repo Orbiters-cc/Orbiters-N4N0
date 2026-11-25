@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,9 @@ const BUNDLE_MESSAGES: usize = 20;
 /// avatar's screen is open, and never less than the floor.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
+/// The same with neither VRChat nor SteamVR and nothing under way, where the app says when what N4N0 looks at changes
+/// ([`Host::wakes`]).
+const MAX_REST: Duration = Duration::from_secs(60);
 /// What nobody published by itself is handed to the interfaces this often at most.
 const REST_EVERY: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
@@ -366,6 +369,8 @@ pub(crate) struct N4n0Runtime {
     /// Wakes the N4N0 thread before its next deadline (`woken`: a wake came while it was busy).
     wake: Arc<Condvar>,
     woken: bool,
+    /// Nothing is under way, and the app wakes it when what it looks at changes: the thread sleeps long.
+    resting: bool,
     /// When what nobody published by itself last was ([`N4n0::publish_rest`]).
     rest_at: Option<Instant>,
     /// What the ears follow, as the last step saw it.
@@ -703,7 +708,7 @@ impl N4n0Runtime {
     /// When the N4N0 thread's next step is due: the soonest of the panel's, the messages', the held parameters', the
     /// listen's time limit, the screen's, at most [`MAX_WAIT`] away.
     fn next_due(&self, now: Instant, vrchat: bool) -> Instant {
-        let mut due = now + if self.screen.menu.open { MAX_WAIT_OPEN } else { MAX_WAIT };
+        let mut due = now + if self.screen.menu.open { MAX_WAIT_OPEN } else if self.resting { MAX_REST } else { MAX_WAIT };
         let mut at = |t: Option<Instant>| {
             if let Some(t) = t {
                 due = due.min(t);
@@ -731,6 +736,14 @@ impl N4n0Runtime {
             at(Some(self.last_avatar_check.map_or(now, |t| t + every)));
         }
         due
+    }
+
+    /// Nothing is under way that the N4N0 thread follows step by step (what is due at a time of its own is
+    /// [`Self::next_due`]'s).
+    fn at_rest(&self) -> bool {
+        let screen = !self.screen.menu.open && !self.screen.overlay_open && self.screen.photo_wait.is_none();
+        let heard = !self.answering() && self.listening.is_none() && self.voice.wake_offer.is_none() && !self.thinking();
+        screen && heard && !self.keyboard_taken && !self.woken
     }
 
     /// What the N4N0 thread's own steps change of the status, beside what they send to VRChat.
@@ -1041,6 +1054,8 @@ pub(crate) struct Device {
 pub struct N4n0 {
     pub(crate) n4n0: crate::held::Held,
     pub(crate) voice: Mutex<VoiceRuntime>,
+    /// The N4N0 thread's steps so far.
+    steps: AtomicU64,
     /// Wakes the ears' thread ([`N4n0::start`]): something they follow may have changed.
     pub(crate) ears: crate::voice::Bell,
     /// What a member had said as who is signed in stopped being known (`conversation.rs`).
@@ -1077,6 +1092,7 @@ impl N4n0 {
             n4n0: crate::held::Held::new(n4n0),
             voice: Mutex::new(VoiceRuntime::default()),
             ears: Default::default(),
+            steps: AtomicU64::new(0),
             parked: Mutex::new(None),
             voice_lifecycle: parking_lot::ReentrantMutex::new(()),
             effects: parking_lot::RwLock::new(()),
@@ -1163,15 +1179,18 @@ impl N4n0 {
             let wake = n.n4n0.lock().unwrap().wake.clone();
             loop {
                 let due = n.tick(Instant::now());
+                n.steps.fetch_add(1, Ordering::Relaxed);
                 let mut rt = n.n4n0.lock().unwrap();
                 if rt.stop {
                     break;
                 }
                 // Asleep until the next step is due, or something wakes it (a page to show, a touch, an answer).
                 if !std::mem::take(&mut rt.quietly().woken) {
-                    let most = if rt.screen.menu.open { MAX_WAIT_OPEN } else { MAX_WAIT };
+                    // (Written to since the step: handed over at the next one, soon.)
+                    let resting = rt.resting && !rt.changed();
+                    let most = if rt.screen.menu.open { MAX_WAIT_OPEN } else if resting { MAX_REST } else { MAX_WAIT };
                     let wait = due.saturating_duration_since(Instant::now()).clamp(MIN_WAIT, most);
-                    rt = rt.wait(&wake, wait);
+                    rt = rt.wait(&wake, wait, resting);
                     rt.quietly().woken = false;
                 }
             }
@@ -1372,6 +1391,8 @@ impl N4n0 {
                 let same = N4n0Status { photo_countdown: whole.photo_countdown, mirror: whole.mirror, ..rt.status() };
                 assert!(same == whole, "a step changed what shows unseen: {whole:?} {same:?}");
             }
+            let resting = self.host.wakes() && !vrchat && !steamvr && !in_call && rt.at_rest();
+            rt.quietly().resting = resting;
             due = rt.next_due(now, vrchat);
         }
         self.send(&out);
@@ -1513,6 +1534,16 @@ impl N4n0 {
     /// Wakes the N4N0 thread (an answer from YouTube, a thumbnail).
     pub(crate) fn wake(&self) {
         self.n4n0.lock().unwrap().wake();
+    }
+
+    /// How many steps the N4N0 thread made so far (each a wake-up of its).
+    pub fn steps(&self) -> u64 {
+        self.steps.load(Ordering::Relaxed)
+    }
+
+    /// What N4N0 looks at in the app changed ([`Host::wakes`]).
+    pub fn look(&self) {
+        self.n4n0.lock().unwrap().quietly().wake();
     }
 
     /// Shows `text` on the panel (nothing without the prop).

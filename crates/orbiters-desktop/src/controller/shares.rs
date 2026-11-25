@@ -23,6 +23,7 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
         let mut sent = ago(std::time::Duration::from_secs(300));
         let mut attempted = sent;
         let mut failed = false;
+        let rest = ctl.rest("presence", |s| (s.vrchat.running, super::rest::Part::of(&s.vrchat.world), super::rest::Part::of(&s.account), s.settings.development));
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let snapshot = ctl.view();
             let world = &snapshot.vrchat.world;
@@ -48,7 +49,9 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
             } else {
                 last = None;
             }
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            // Nothing of it changes but with the world, the account, or the time it is said again.
+            let (since, every) = if failed { (attempted, 60) } else { (sent, 300) };
+            rest.wait(location.map(|_| super::rest::until(Some(since), std::time::Duration::from_secs(every)).max(std::time::Duration::from_secs(1))));
         }
     });
     if let Err(e) = presence {

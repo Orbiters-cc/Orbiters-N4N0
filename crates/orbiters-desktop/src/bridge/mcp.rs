@@ -82,7 +82,30 @@ fn wait_for_one(listener: &TcpListener, most: Duration) {
     unsafe { libc::poll(&mut fd, 1, most.as_millis().max(1) as i32) };
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The same through Windows' poll (it was a look every 15 ms, some 67 a second with nobody there: BRG-7).
+#[cfg(windows)]
+fn wait_for_one(listener: &TcpListener, most: Duration) {
+    use std::os::windows::io::AsRawSocket;
+    // WSAPOLLFD, and POLLIN (POLLRDNORM | POLLRDBAND).
+    #[repr(C)]
+    struct PollFd {
+        fd: usize,
+        events: i16,
+        revents: i16,
+    }
+    const POLLIN: i16 = 0x0300;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAPoll(fds: *mut PollFd, n: u32, timeout: i32) -> i32;
+    }
+    let mut fd = PollFd { fd: listener.as_raw_socket() as usize, events: POLLIN, revents: 0 };
+    // SAFETY: one socket of ours, alive for the call.
+    if unsafe { WSAPoll(&mut fd, 1, most.as_millis().max(1) as i32) } < 0 {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn wait_for_one(_: &TcpListener, _: Duration) {
     std::thread::sleep(Duration::from_millis(15));
 }

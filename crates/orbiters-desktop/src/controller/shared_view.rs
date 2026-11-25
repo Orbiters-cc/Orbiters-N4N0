@@ -12,6 +12,7 @@
 //! offer opens nothing before its Show. A state applies only to the share accepted, only from a newer revision and
 //! term ([`orbiters_core::shared_view`]). The capture is downloaded signed in, never from a public address.
 
+use super::rest::Part;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::SharedViewCommand;
 use crate::state::{CallContact, ShareOffer, ShareOut, ShareOutPhase, ShareStart, ShareWatching, SharedViewStatus};
@@ -483,9 +484,10 @@ impl Controller {
     pub(super) fn start_shared_view(self: &Shared) {
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("shared-view".into()).spawn(move || {
+            let rest = ctl.rest("shared-view", |s| (Part::of(&s.settings), Part::of(&s.account), s.vrchat.running, Part::of(&s.vrchat.world)));
             while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
                 ctl.shared_tick();
-                std::thread::sleep(Duration::from_secs(2));
+                rest.wait(ctl.shared_rests());
             }
             // Quitting: Orbiters hears it at once (it would let the presence lapse in 2 minutes anyway).
             let owed = ctl.shared_view.lock().unwrap().withdraw();
@@ -499,6 +501,16 @@ impl Controller {
     /// Whether the calls' event stream is wanted for shares (open even with Calls off).
     pub(super) fn shared_view_wants_stream(&self) -> bool {
         self.shared_view.lock().unwrap().present
+    }
+
+    /// How long until the next look: two seconds in an instance and while anything is shared, else until that changes.
+    fn shared_rests(&self) -> Option<Duration> {
+        let view = self.view();
+        let world = &view.vrchat.world;
+        let in_world = view.settings.n4n0.enabled && view.vrchat.running && world.in_world && world.instance.is_some();
+        let rt = self.shared_view.lock().unwrap();
+        let shared = rt.present || rt.out.is_some() || rt.watching.is_some() || !rt.offers.is_empty() || !rt.targets.is_empty();
+        (shared || in_world && rt.identity.is_some()).then_some(Duration::from_secs(2))
     }
 
     fn shared_tick(self: &Shared) {

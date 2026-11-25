@@ -5,6 +5,7 @@
 //! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
 //! handed to N4N0 ([`orbiters_n4n0::N4n0::set_feedback`]) whenever what they show changes.
 
+use super::rest::Part;
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
 use orbiters_core::account::Api;
@@ -345,6 +346,15 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
+    /// How long until [`Self::next_call`] may have one by the clock alone: never with nothing queued and no world shown (what is
+    /// queued and shown meanwhile wakes the sender).
+    fn next_due(&self, now: u64) -> Option<Duration> {
+        let parked = self.parked.iter().filter(|(stamp, until)| stamp.sends_as(&self.stamp) && now < *until).map(|(_, until)| *until).max();
+        let queued = self.queue.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&self.stamp))).map(|p| p.due.max(parked.unwrap_or(0)));
+        let read = self.wanted.keys().map(|w| self.known.get(w).map_or(now, |k| k.read_at + READ_AGAIN.as_millis() as u64 + 1));
+        queued.chain(read).min().map(|at| Duration::from_millis(at.saturating_sub(now).max(300)))
+    }
+
     /// The other server's answers are forgotten, and those still coming are not taken.
     fn environment_changed(&mut self) {
         self.known.clear();
@@ -577,6 +587,7 @@ impl super::Controller {
                 }
             }
         }
+        self.rests.wake("world-feedback-send");
         self.feedback_publish();
     }
 
@@ -600,7 +611,13 @@ impl super::Controller {
         let (development, api, stamp) = self.feedback_context();
         let mut rt = self.world_feedback.lock().unwrap();
         rt.set_stamp(stamp);
-        rt.follow(development, api.is_some())
+        let changed = rt.follow(development, api.is_some());
+        drop(rt);
+        if changed {
+            // A world to read, an action to send.
+            self.rests.wake("world-feedback-send");
+        }
+        changed
     }
 
     /// One read of whom world feedback is for now, for EVERY reader of the log (the follower, the world's local address):
@@ -653,18 +670,23 @@ pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
     let _ = std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
         let mut beat = 0u32;
+        let rest = c.rest("world-feedback-log", |s| (s.vrchat.running, s.steamvr.running, Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let changed = c.feedback_follow();
             // The menus follow the world, the queue and what Orbiters answers (at most every second when nothing moves).
             if changed || beat.is_multiple_of(4) {
                 c.feedback_publish();
             }
-            beat = beat.wrapping_add(1);
-            std::thread::sleep(LOG_EVERY);
+            // Without VRChat no line of its log comes, and nothing moves but what publishes itself.
+            let view = c.view();
+            let here = view.vrchat.running || view.steamvr.running || c.shown();
+            beat = if here { beat.wrapping_add(1) } else { 0 };
+            rest.wait(here.then_some(LOG_EVERY));
         }
     });
     let c = ctl.clone();
     let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
+        let rest = c.rest("world-feedback-send", |s| (Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             // The account and server read once: what is handed out is for them, and goes with them.
             let (api, stamp) = c.account_api_for();
@@ -680,7 +702,8 @@ pub(super) fn spawn(ctl: Shared) {
                 (rt.next_call(), rt.scope)
             };
             let Some(call) = call else {
-                std::thread::sleep(Duration::from_millis(300));
+                let due = c.world_feedback.lock().unwrap().next_due(now_ms());
+                rest.wait(due);
                 continue;
             };
             let result = perform(&call, api.as_ref());
@@ -698,7 +721,9 @@ pub(super) fn spawn(ctl: Shared) {
             c.feedback_publish();
         }
     });
-    let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
+    if !cfg!(test) {
+        let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
+    }
 }
 
 /// The local address: `GET /n4n0/feedback/v1` on 127.0.0.1:22541 (contracts `Docs/world-feedback.md`).

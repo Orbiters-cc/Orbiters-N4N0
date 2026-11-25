@@ -4,6 +4,7 @@
 //! browser to bring the code of the website's Connect, and trades it for the credential. The credential stays in this
 //! process (the window only sees the account's name and state).
 
+use super::rest::{sooner, until};
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
 use orbiters_core::account::{self, Account, Api, Callback, Check, Exchange, Served, Server};
@@ -182,6 +183,10 @@ fn open_with_browser(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How often the account's file is looked at where the system does not tell of its changes, and the shortest time between two looks.
+const LOOK_EVERY: Duration = Duration::from_secs(2);
+const LOOK_APART: Duration = Duration::from_millis(500);
+
 impl Controller {
     /// Reads the account now, then follows it (and a sign-in in progress) on a thread of its own.
     pub(super) fn start_account(self: &Shared) {
@@ -192,11 +197,40 @@ impl Controller {
         if let Ok(saved) = account::read_saved(server) {
             self.account_saved_at_launch(server, saved);
         }
+        // The file changes when a tool signs in or out: the system says so, else it is looked at now and then. The folder is both
+        // environments'.
+        let weak = std::sync::Arc::downgrade(self);
+        let folder: Vec<_> = account::account_path(server).and_then(|p| Some(p.parent()?.to_path_buf())).into_iter().collect();
+        let told = orbiters_core::folder_watch::watch("account-folder", folder, move || {
+            if let Some(ctl) = weak.upgrade() {
+                ctl.rests.wake("account");
+            }
+        });
         let ctl = self.clone();
+        // (Another environment is another account installed, which wakes every loop.)
+        let rest = self.rest("account", |_| ());
         let _ = std::thread::Builder::new().name("account".into()).spawn(move || loop {
             ctl.account_tick();
-            std::thread::sleep(Duration::from_millis(500));
+            rest.wait(ctl.account_rests(told));
         });
+    }
+
+    /// How long until the next look at the account: until something is due by the clock (a file that could not be read, Orbiters
+    /// out of reach, a refused credential, what the assistant may do), and the file's own pace where nothing tells of it.
+    fn account_rests(&self, told: bool) -> Option<Duration> {
+        let mut due = (!told).then_some(LOOK_EVERY);
+        {
+            let rt = self.account_runtime.lock().unwrap();
+            if rt.unknown && rt.unreadable.is_none() {
+                due = sooner(due, Some(LOOK_APART));
+            }
+            due = sooner(due, rt.unreadable.map(|(_, _, at)| until(Some(at), REREAD)));
+            due = sooner(due, rt.offline_since.map(|at| until(Some(at), RECHECK_OFFLINE)));
+            due = sooner(due, rt.refused.map(|(at, n)| until(Some(at), refused_recheck(n))));
+        }
+        due = sooner(due, self.assistant_access_wait());
+        // (Never in a row: one due but still being asked is looked at again at the old pace.)
+        due.map(|due| due.max(LOOK_APART))
     }
 
     fn account_tick(self: &Shared) {

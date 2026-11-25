@@ -16,6 +16,7 @@
 //! THAT answer says (its `explorer`, with the upload's for a picture uploaded by this share): reading the points before
 //! and after would count another share or a removal in between.
 
+use super::rest::Part;
 use super::Shared;
 use crate::controller::shares::{Outcome, ShareJob};
 use orbiters_core::account::Server;
@@ -431,12 +432,16 @@ pub(super) struct ExplorerState {
     shared_worlds: std::collections::HashSet<String>,
 }
 
-/// The explorer's own thread: a look once a second while the service runs.
+/// The explorer's own thread: a look once a second while there is something to follow (a world, a notice, an offer), else when
+/// there comes to be.
 pub(super) fn spawn(ctl: Shared) {
     let started = std::thread::Builder::new().name("explorer".into()).spawn(move || {
+        let rest = ctl.rest("explorer", |s| {
+            let e = &s.explorer;
+            (s.vrchat.running, Part::of(&s.vrchat.world), Part::of(&s.account), s.settings.development, e.notice.is_some(), e.offer.is_some(), e.share_here.is_some())
+        });
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
-            ctl.explorer_tick();
-            std::thread::sleep(Duration::from_secs(1));
+            rest.wait(ctl.explorer_tick());
         }
     });
     if let Err(e) = started {
@@ -445,8 +450,9 @@ pub(super) fn spawn(ctl: Shared) {
 }
 
 impl super::Controller {
-    /// Once a second, on its own thread: arrival in a world, the offer's shares and timeouts, the points.
-    pub(super) fn explorer_tick(self: &Shared) {
+    /// On its own thread: arrival in a world, the offer's shares and timeouts, the points. How long until the next look
+    /// (never, but for what it watches, with nothing to follow).
+    pub(super) fn explorer_tick(self: &Shared) -> Option<Duration> {
         let snap = self.view();
         let server = if snap.settings.development { Server::Development } else { Server::Production };
         let now = Instant::now();
@@ -539,6 +545,11 @@ impl super::Controller {
             s.points_at = Some((now, account.clone()));
             self.explorer_read_points();
         }
+        let status = self.explorer_status();
+        if s.here.is_some() || status.notice.is_some() || status.offer.is_some() || s.public.is_some() || s.people.is_some() {
+            return Some(Duration::from_secs(1));
+        }
+        s.points_at.as_ref().map(|(at, _)| super::rest::until(Some(*at), POINTS_EVERY) + Duration::from_secs(1))
     }
 
     fn explorer_status(&self) -> Status {

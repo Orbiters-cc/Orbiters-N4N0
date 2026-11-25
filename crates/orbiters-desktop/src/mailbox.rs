@@ -17,6 +17,8 @@ struct State {
     snapshot: Option<Arc<Snapshot>>,
     messages: VecDeque<ToClient>,
     closed: bool,
+    /// The wait under way, or the next one, is over ([`Mailbox::nudge`]).
+    nudged: bool,
     /// For a reader that watches one thing ([`Mailbox::watching`]): whether a state differs in it from the last state it
     /// was handed. It keeps that one value between states, never a state.
     watch: Option<Box<dyn FnMut(&Snapshot) -> bool + Send>>,
@@ -110,6 +112,33 @@ impl Mailbox {
             return None;
         }
         Some((state.messages.drain(..).collect(), state.snapshot.take()))
+    }
+
+    /// Waits for mail, a nudge or `most` (for ever, without one), and drops what came: for a reader that looks at the state
+    /// itself.
+    pub fn wait(&self, most: Option<std::time::Duration>) {
+        let until = most.map(|most| std::time::Instant::now() + most);
+        let mut state = self.state.lock().unwrap();
+        while state.snapshot.is_none() && state.messages.is_empty() && !state.nudged && !state.closed {
+            state = match until.map(|until| until.saturating_duration_since(std::time::Instant::now())) {
+                Some(std::time::Duration::ZERO) => return,
+                Some(left) => self.ready.wait_timeout(state, left).unwrap().0,
+                None => self.ready.wait(state).unwrap(),
+            };
+        }
+        state.nudged = false;
+        state.snapshot = None;
+        state.messages.clear();
+    }
+
+    /// Ends the [`Mailbox::wait`] under way, or the next one.
+    pub fn nudge(&self) {
+        self.state.lock().unwrap().nudged = true;
+        self.ready.notify_all();
+    }
+
+    pub fn closed(&self) -> bool {
+        self.state.lock().unwrap().closed
     }
 
     /// How much waits for the reader: states (one at most) and other messages.

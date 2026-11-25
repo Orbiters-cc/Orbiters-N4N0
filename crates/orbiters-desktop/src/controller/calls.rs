@@ -14,6 +14,7 @@
 //! descriptions, and each side's own wait until both took the call. Calls go through the relay only unless direct
 //! calls are on (`N4n0Settings::direct_calls`), so the other side does not learn them then either.
 
+use super::rest::{sooner, until, Part};
 use super::{NoticeKind, Shared};
 use crate::state::{CallContact, CallLink, CallPhase, CallView};
 use orbiters_core::account::{Api, ApiError};
@@ -743,12 +744,13 @@ impl super::Controller {
     /// Starts the presence thread (it does nothing while calls are off).
     pub(super) fn start_calls(self: &Shared) {
         let ctl = self.clone();
+        let rest = self.rest("calls", |s| (Part::of(&s.settings), Part::of(&s.account), s.vrchat.running, s.n4n0.prop_sync.is_some()));
         let _ = std::thread::Builder::new().name("calls".into()).spawn(move || loop {
             if ctl.calls.lock().unwrap().stop {
                 break;
             }
             ctl.calls_tick();
-            std::thread::sleep(Duration::from_secs(2));
+            rest.wait(ctl.calls_rests());
         });
     }
 
@@ -897,6 +899,37 @@ impl super::Controller {
             rt.client = Some(fresh);
         }
         rt.client.clone().map(|api| (api, token))
+    }
+
+    /// How long until the next look: two seconds while a call is under way or a stream that is not wanted ends, else until what
+    /// is said or asked again is due; with neither an account nor calls, until that changes.
+    fn calls_rests(&self) -> Option<Duration> {
+        const TURN: Duration = Duration::from_secs(2);
+        let asked = self.calls_access_wait();
+        let on = self.calls_open() && self.with_settings(|s| s.n4n0.enabled && s.n4n0.calls) && self.account_api().is_some();
+        let rt = self.calls.lock().unwrap();
+        if rt.stop || rt.call.is_some() || rt.available_sent.is_some() && !on {
+            return Some(TURN);
+        }
+        let mut due = asked;
+        if on {
+            due = sooner(due, Some(until(rt.local_read, FRIENDS_EVERY)));
+            if rt.local.account.is_some() {
+                due = sooner(due, Some(until(rt.presence_sent, PRESENCE_EVERY)));
+            }
+            if matches!(rt.link, CallLink::Linked { .. }) {
+                if rt.available_sent == Some(true) {
+                    due = sooner(due, Some(until(rt.contacts_read, CONTACTS_EVERY)));
+                }
+                if rt.streaming.is_none() {
+                    due = sooner(due, Some(rt.stream_retry_at.map_or(Duration::ZERO, |at| at.saturating_duration_since(Instant::now()))));
+                }
+            }
+        } else if rt.streaming.is_some() && !self.shared_view_wants_stream() {
+            due = Some(TURN);
+        }
+        // (One that came due while it was looked at: at the next turn, as ever.)
+        due.map(|due| due.max(TURN))
     }
 
     fn calls_tick(self: &Shared) {
@@ -1120,6 +1153,9 @@ impl super::Controller {
                     rt.stream_retry_at = Some(Instant::now() + pause);
                 }
             }
+            drop(rt);
+            // Opened again when its time comes.
+            ctl.rests.wake("calls");
         });
     }
 
@@ -1216,6 +1252,8 @@ impl super::Controller {
         }
         drop(rt);
         drop(gone);
+        // A call that began has its phases' times to look at.
+        self.rests.wake("calls");
         for text in said {
             self.n4n0_say(&text);
         }

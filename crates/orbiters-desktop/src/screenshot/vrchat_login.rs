@@ -40,7 +40,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
                     rgba.extend_from_slice(if portrait { &[172, 218, 207, 255] } else { &[36, 70, 65, 255] });
                 }
             }
-            status.picture = Some(Picture { width: 64, height: 64, rgba });
+            status.picture = Some(Picture { width: 64, height: 64, rgba: rgba.into() });
         }
         if name == "vrchat-login-error" {
             status.error = Some("The username or password was not accepted by VRChat.".into());

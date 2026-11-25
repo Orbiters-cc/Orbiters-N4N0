@@ -11,11 +11,13 @@ pub(crate) struct Held(Mutex<Inner>);
 struct Inner {
     rt: N4n0Runtime,
     changed: bool,
+    /// The N4N0 thread sleeps until something happens: the next write wakes it, to hand it over.
+    resting: bool,
 }
 
 impl Held {
     pub(crate) fn new(rt: N4n0Runtime) -> Self {
-        Held(Mutex::new(Inner { rt, changed: false }))
+        Held(Mutex::new(Inner { rt, changed: false, resting: false }))
     }
 
     /// As [`Mutex::lock`].
@@ -37,6 +39,9 @@ impl Deref for Guard<'_> {
 impl DerefMut for Guard<'_> {
     fn deref_mut(&mut self) -> &mut N4n0Runtime {
         self.0.changed = true;
+        if std::mem::take(&mut self.0.resting) {
+            self.0.rt.wake();
+        }
         &mut self.0.rt
     }
 }
@@ -56,8 +61,11 @@ impl Guard<'_> {
         &mut self.0.rt
     }
 
-    /// Unlocked until `wake` is notified, `most` at most.
-    pub(crate) fn wait(self, wake: &Condvar, most: Duration) -> Self {
-        Guard(wake.wait_timeout(self.0, most).unwrap().0)
+    /// Unlocked until `wake` is notified, `most` at most; with `resting`, until anything is written too.
+    pub(crate) fn wait(mut self, wake: &Condvar, most: Duration, resting: bool) -> Self {
+        self.0.resting = resting;
+        let mut held = wake.wait_timeout(self.0, most).unwrap().0;
+        held.resting = false;
+        Guard(held)
     }
 }

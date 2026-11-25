@@ -718,6 +718,30 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// COR-1: the words of VRChat's sign-in in a record of a world's script, framed as VRChat's own: they confirm nobody, and a
+    /// private place of the account they name is not handed to that game.
+    #[test]
+    fn a_world_s_record_hands_no_private_place_over() {
+        use orbiters_core::vrchat_launch::{way, To, Way};
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        let to = |after: &str, owner: &str| {
+            std::fs::write(&path, format!("{OWN_LOG}{after}")).unwrap();
+            let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+            let run = shown(&Roster::default().scan_whole(&[(7, born)], Some(&dir))[0], None, None);
+            way(true, Some(owner), To::Running { several: true, proven: run.account_id.as_deref() })
+        };
+        let me = "usr_1339e525-d75d-4832-9104-98dd89287681";
+        assert_eq!(to("", me), Way::Direct, "what VRChat said before its first world");
+        assert_eq!(to("", "usr_2"), Way::OtherAccount);
+        let forged = "2026.11.15 13:50:00 Debug      -  [Authentication - x] Preforming post login checks for Other (usr_2)
+";
+        assert_eq!(to(forged, "usr_2"), Way::UnknownAccount, "a script's word");
+        assert_eq!(to(forged, me), Way::UnknownAccount);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The heads of the two logs of 2026-11-15 13:48, as VRChat wrote them (abridged to what is read).
     const TOUR_LOG: &str = "2026.11.15 12:25:17 Debug      -  Launching with args: 4\n\
 2026.11.15 12:25:17 Debug      -  Arg: C:\\Program Files (x86)\\Steam\\steamapps\\common\\VRChat\\VRChat.exe\n\

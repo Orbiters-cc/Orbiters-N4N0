@@ -142,12 +142,15 @@ impl Service {
     /// devices while SteamVR runs, a recording's coverage on the desktop.
     pub(crate) fn keep(self: &Arc<Self>) -> std::io::Result<()> {
         let svc = self.clone();
+        let rest = self.ctl.rest("overlay-keeper", |s| {
+            (s.vrchat.running, s.vrchat.remote, s.steamvr.running, s.steamvr.pid, s.launcher.desktop_game, controller::rest::Part::of(&s.settings), s.n4n0.desktop_mode)
+        });
         std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
             svc.keep_overlay();
             svc.keep_orbit();
             svc.keep_steamvr_start();
             svc.keep_tracking();
-            std::thread::sleep(Duration::from_secs(2));
+            rest.wait(Some(svc.keeper_rests()));
         })?;
         let svc = self.clone();
         std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
@@ -157,6 +160,17 @@ impl Service {
         // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
         crate::coverage_window::start(self.ctl.clone());
         Ok(())
+    }
+
+    /// How long until the keepers' next look: two seconds while a game or SteamVR runs or a process of theirs does (or may still
+    /// have to be seen ended); else once a minute, for the smoothing driver's block and an install to try again.
+    fn keeper_rests(&self) -> Duration {
+        let snap = self.ctl.view();
+        let game = snap.vrchat.running || snap.steamvr.running || snap.launcher.desktop_game.is_some();
+        let linked = self.links.lock().unwrap().iter().any(|l| l.role != Role::Window);
+        let overlay = self.overlay.lock().unwrap().as_mut().is_some_and(|(child, ..)| matches!(child.try_wait(), Ok(None)));
+        let orbit = self.orbit.lock().unwrap().as_mut().is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)));
+        if game || linked || overlay || orbit { Duration::from_secs(2) } else { Duration::from_secs(60) }
     }
 
     /// How many clients of `role` are linked now.
@@ -1564,18 +1578,17 @@ pub(crate) mod tests {
         let after = overlay.snapshot();
         assert_eq!(after.settings.walk_boost.strength, 0.75);
         assert!(Slice::same(&before.n4n0.lines, &after.n4n0.lines) && Slice::same(&before.storage, &after.storage), "what did not change was not sent again");
-        // A publish that changes nothing is told all the same: the client holds a new snapshot, and draws for it.
+        // A publish that changes nothing is told to nobody (XCT-18): no link writes, no client holds a new snapshot or draws.
         let before = overlay.snapshot();
-        let told = ctl.publishes();
-        ctl.update(|_| {});
-        assert_eq!(ctl.publishes(), told + 1);
-        let started = Instant::now();
-        while Arc::ptr_eq(&before, &overlay.snapshot()) && started.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(5));
+        let (told, wrote) = (ctl.publishes(), service.links.lock().unwrap()[0].writes.load(Ordering::Relaxed));
+        for _ in 0..50 {
+            ctl.update(|s| s.n4n0.afk = false);
+            ctl.update(|s| s.settings.walk_boost.strength = 0.75);
         }
-        let after = overlay.snapshot();
-        assert!(!Arc::ptr_eq(&before, &after), "told of a publish that changed nothing");
-        assert!(Slice::same(&before.settings, &after.settings) && Slice::same(&before.capture, &after.capture));
+        assert_eq!(ctl.publishes(), told);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(service.links.lock().unwrap()[0].writes.load(Ordering::Relaxed), wrote);
+        assert!(Arc::ptr_eq(&before, &overlay.snapshot()), "told of a publish that changed nothing");
         // A window that opens later is handed everything, and then only what changes, at its own pace.
         let window = linked(&service, Role::Window);
         assert!(in_step(&service, &window));

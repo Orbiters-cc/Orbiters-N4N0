@@ -174,6 +174,8 @@ impl Controller {
                 Identity::Anonymous => paused.forget_account(epoch),
             },
         }
+        // What each of the service's loops may do follows the account.
+        self.rests.wake_all();
         out
     }
 

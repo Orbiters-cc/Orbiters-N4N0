@@ -12,6 +12,7 @@ pub mod disk;
 mod dpapi;
 pub mod explicit;
 pub mod explorer;
+pub mod folder_watch;
 pub mod picture;
 pub mod features;
 pub mod gallery_talk;

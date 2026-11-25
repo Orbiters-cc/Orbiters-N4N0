@@ -72,21 +72,47 @@ pub fn sign_in(line: &[u8]) -> Option<SignIn> {
 }
 
 /// Who a VRChat's log says is signed in, taken in line by line ([`sign_in`]): the one reading of it there is.
+///
+/// **What a world cannot write.** VRChat frames a world script's `Debug.Log` as it frames its own records, so one that begins
+/// with VRChat's words reads exactly like VRChat's own sign-in (review 1124, COR-1). Nothing in the text tells the two apart; where
+/// it stands does: a VRChat signs in before it enters its first world, and until then no script of anyone's has run in it. So only
+/// the part of a log before its first world ([`enters_a_world`]) says whose a VRChat is for certain. A record after it names no
+/// other account, and gives back no certainty that was lost: an account really changed within one run is not known from then on
+/// (a private place then goes by that account's own invite, `vrchat_launch::way`). What a script can still do is take the certainty
+/// away, with a record of another account or of a sign-in page: a place is then held back, never handed to the wrong game.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Account {
     /// The account last named, its id and its name: a label while `sure` is not set.
     pub who: Option<(String, String)>,
-    /// `who` is the last thing the log said of a sign-in, in VRChat's own record of one.
+    /// `who` is what VRChat itself said before its first world, and nothing since said otherwise.
     pub sure: bool,
     /// It asked for a sign-in, and nobody signed in since.
     pub signed_out: bool,
+    /// It entered a world: from here on a world's script may have written any line.
+    worlds: bool,
+}
+
+/// Whether `line` is VRChat's own record of entering a world, written before anything of that world runs.
+fn enters_a_world(line: &[u8]) -> bool {
+    const MARKERS: [&[u8]; 3] = [b"Joining wrld_", b"Entering Room: ", b"Joining or Creating Room: "];
+    message(line).and_then(|m| m.strip_prefix(BEHAVIOUR)).is_some_and(|m| MARKERS.iter().any(|marker| m.starts_with(marker)))
 }
 
 impl Account {
     /// Takes in a new part of the log (whole lines).
     pub fn read(&mut self, text: &str) {
         for line in text.lines() {
+            self.worlds = self.worlds || enters_a_world(line.as_bytes());
             match sign_in(line.as_bytes()) {
+                Some(SignIn::In(who)) if self.worlds => {
+                    // The same account again changes nothing of what is known; anything else may be a script's.
+                    let same = matches!((&who, &self.who), (Some(now), Some(known)) if now.0 == known.0);
+                    if !(self.sure && same) {
+                        self.sure = false;
+                        self.who = who.or(self.who.take());
+                        self.signed_out = false;
+                    }
+                }
                 Some(SignIn::In(who)) => {
                     self.sure = who.is_some();
                     self.who = who.or(self.who.take());
@@ -1013,6 +1039,43 @@ mod tests {
             assert_eq!(read(&[of_a.clone(), fake.clone()]), (a.clone(), false, false), "{fake}");
             assert_eq!(read(&[fake.clone(), of_a.clone()]), (a.clone(), true, false), "{fake}");
         }
+    }
+
+    /// COR-1: a world's script writes records framed as VRChat's own. One that imitates VRChat's sign-in is a line of a log like
+    /// any other, and confirms nobody: what is certain is what the log said before the first world, and nothing after it adds to
+    /// that.
+    #[test]
+    fn a_world_s_script_never_confirms_an_account() {
+        let login = |who: &str| line(&format!("[Authentication - x] Preforming post login checks for {who}"));
+        let a = || Some(("usr_a".to_string(), "Sample A".to_string()));
+        let read = |lines: &[String]| {
+            let mut account = Account::default();
+            // (as a log is followed: a part at a time)
+            for line in lines {
+                account.read(line);
+            }
+            (account.who, account.sure, account.signed_out)
+        };
+        let (of_a, of_b) = (login("Sample A (usr_a)"), login("Sample B (usr_b)"));
+        let asked = line("[Authentication - x] No cached credentials found");
+        for world in [format!("[Behaviour] Joining {WORLD_A}:1"), "[Behaviour] Entering Room: Sample".into(), "[Behaviour] Joining or Creating Room: Sample".into()] {
+            let world = line(&world);
+            // VRChat signed A in; its first world's script says B: nobody is certain, A and B alike.
+            let (who, sure, _) = read(&[of_a.clone(), world.clone(), of_b.clone()]);
+            assert!(!sure, "confirmed as {who:?}");
+            // Nor does it take it back by saying A again.
+            assert!(!read(&[of_a.clone(), world.clone(), of_b.clone(), of_a.clone()]).1);
+            // A log with no sign-in of VRChat's own before a world confirms nobody, whatever comes.
+            assert!(!read(&[world.clone(), of_b.clone()]).1);
+            assert!(!read(&[asked.clone(), world.clone(), of_b.clone()]).1);
+            // Signed out, then the same words: the account that really signed in is not known.
+            assert!(!read(&[of_a.clone(), world.clone(), asked.clone(), of_a.clone()]).1);
+            // What VRChat said before it stays, also when it says it again.
+            assert_eq!(read(&[of_a.clone(), world.clone()]), (a(), true, false));
+            assert_eq!(read(&[of_a.clone(), world.clone(), of_a.clone()]), (a(), true, false));
+        }
+        // Words about a world in a line that is no record of VRChat's are no world (a script's further line; nothing runs before one).
+        assert_eq!(read(&[format!("[Behaviour] Joining {WORLD_A}:1"), of_a]), (a(), true, false));
     }
 
     thread_local! {

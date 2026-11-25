@@ -163,6 +163,10 @@ pub trait Parts {
     /// [`Slice::settle`] for every slice of it, against the same state as it was last handed out.
     fn settle(&mut self, previous: &Self);
 
+    /// Whether this is `other` part for part: the slices the same ones, the plain values equal. Once settled against what was
+    /// last handed out ([`Parts::settle`]), that is whether there is anything to hand out at all; it looks at no slice.
+    fn same(&self, other: &Self) -> bool;
+
     /// The name of every part, as it travels (`prefix` before each): what a test walks to change each one in turn.
     fn part_names(&self, prefix: &str, out: &mut Vec<String>);
 }
@@ -316,6 +320,15 @@ macro_rules! parts {
                 let _ = previous;
             }
 
+            fn same(&self, other: &Self) -> bool {
+                let _ = other;
+                true
+                    $( && $crate::slice::Slice::same(&self.$slice, &other.$slice) )*
+                    $( && $crate::slice::Slice::same(&self.$identity, &other.$identity) )*
+                    $( && $crate::slice::Parts::same(&self.$nested, &other.$nested) )*
+                    $( && self.$plain == other.$plain )*
+            }
+
             fn part_names(&self, prefix: &str, out: &mut ::std::vec::Vec<::std::string::String>) {
                 $( out.push(format!("{prefix}{}", stringify!($plain))); )*
                 $( out.push(format!("{prefix}{}", stringify!($slice))); )*
@@ -388,6 +401,38 @@ mod tests {
         assert_eq!(third.lines.len(), 4);
         assert_eq!(third.settings.0, 7);
         assert!(Slice::same(&third.lines, &second.lines));
+    }
+
+    /// XCT-18: each part alone, changed, is another state; written to with what it held, the same state once settled.
+    #[test]
+    fn a_settled_state_is_the_same_exactly_when_no_part_changed() {
+        let first = busy();
+        let changed: [fn(&mut State); 6] = [
+            |s| s.open = false,
+            |s| s.note = None,
+            |s| s.lines.push("three".into()),
+            |s| s.settings.0 = 8,
+            |s| s.world.speed = 1.5,
+            |s| s.world.people.clear(),
+        ];
+        for (i, change) in changed.iter().enumerate() {
+            let mut second = first.clone();
+            change(&mut second);
+            second.settle(&first);
+            assert!(!second.same(&first), "{i}");
+        }
+        let mut second = first.clone();
+        second.lines.push("three".into());
+        second.lines.pop();
+        second.settings.0 = 7;
+        second.open = true;
+        assert!(!second.same(&first), "written to");
+        second.settle(&first);
+        assert!(second.same(&first));
+        // What cannot be compared has changed once it was written to.
+        second.job.0 = 1;
+        second.settle(&first);
+        assert!(!second.same(&first));
     }
 
     #[test]

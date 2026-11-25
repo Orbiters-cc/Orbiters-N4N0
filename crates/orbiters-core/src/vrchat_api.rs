@@ -621,6 +621,73 @@ struct Response {
     location: Option<String>,
     body: Vec<u8>,
 }
+/// Who makes the requests of a read of several: a client in hand, or one several threads share ([`Turns`]).
+pub trait Asks {
+    /// `f` with the client, once the turn of `family` has come (the one request it makes, `None` for none).
+    fn ask<T>(&mut self, family: Option<&'static str>, f: impl FnOnce(&mut Client) -> Result<T>) -> Result<T>;
+}
+impl Asks for Client {
+    fn ask<T>(&mut self, _family: Option<&'static str>, f: impl FnOnce(&mut Client) -> Result<T>) -> Result<T> {
+        f(self)
+    }
+}
+
+/// A client several threads share, held for one request at a time: never while its turn is waited for, nor between two pages
+/// (a world's details wait for one request, not for a friends list). Bound to the account signed in when it was made: another
+/// one since, and nothing more is asked.
+pub struct Turns<'a> {
+    client: &'a Mutex<Client>,
+    user: Option<String>,
+}
+impl<'a> Turns<'a> {
+    pub fn new(client: &'a Mutex<Client>) -> Self {
+        let user = client.lock().unwrap().signed_in_user_id().map(str::to_owned);
+        Self { client, user }
+    }
+    /// Another account is signed in by now.
+    pub fn overtaken(&self) -> bool {
+        self.client.lock().unwrap().signed_in_user_id().is_some_and(|now| Some(now) != self.user.as_deref())
+    }
+}
+impl Asks for Turns<'_> {
+    fn ask<T>(&mut self, family: Option<&'static str>, f: impl FnOnce(&mut Client) -> Result<T>) -> Result<T> {
+        loop {
+            let wait = {
+                let mut client = self.client.lock().unwrap();
+                if client.signed_in_user_id() != self.user.as_deref() {
+                    return Err(Error::Unauthorized);
+                }
+                let wait = match family {
+                    Some(family) => client.turn(family, false)?,
+                    None => None,
+                };
+                match wait {
+                    Some(wait) => wait,
+                    None => return f(&mut client),
+                }
+            };
+            std::thread::sleep(wait.min(Duration::from_millis(50)));
+        }
+    }
+}
+
+/// Reads the pages of `path` (by their number) until one is not full, `most` at most: `each` takes a page's body and says how
+/// many it held of the [`PAGE`] asked for. Whether the last one was reached.
+fn pages(asks: &mut impl Asks, family: &'static str, most: usize, path: impl Fn(usize) -> String, mut each: impl FnMut(&[u8]) -> Result<usize>) -> Result<bool> {
+    for page in 0..most {
+        let body = asks.ask(Some(family), |c| {
+            c.authenticated()?;
+            Ok(c.get(family, &path(page))?.body)
+        })?;
+        if each(&body)? < PAGE {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+/// What one page asked of [`pages`] holds at most.
+const PAGE: usize = 100;
+
 trait Transport: Send + Sync {
     fn send(&self, request: Request) -> Result<Response>;
 }
@@ -1103,25 +1170,29 @@ impl Client {
             status => Err(Error::Refused(status, error_message(&r.body))),
         }
     }
+    /// How long `family`'s turn is away; `None` when it is there (taken now, when `take`).
+    fn turn(&self, family: &'static str, take: bool) -> Result<Option<Duration>> {
+        self.permitted()?;
+        let mut limiter = self.limiter.lock().unwrap();
+        let now = Instant::now();
+        if let Some(blocked) = limiter.blocked {
+            let wait = blocked.saturating_duration_since(now);
+            if !wait.is_zero() {
+                return Err(Error::RateLimited(wait));
+            }
+        }
+        let wait = limiter.wait(family, now);
+        if !wait.is_zero() {
+            return Ok(Some(wait));
+        }
+        if take {
+            limiter.used(family, now);
+        }
+        Ok(None)
+    }
     fn pace(&self, family: &'static str) -> Result<()> {
         loop {
-            self.permitted()?;
-            let wait = {
-                let mut limiter = self.limiter.lock().unwrap();
-                let now = Instant::now();
-                if let Some(blocked) = limiter.blocked {
-                    let wait = blocked.saturating_duration_since(now);
-                    if !wait.is_zero() {
-                        return Err(Error::RateLimited(wait));
-                    }
-                }
-                let wait = limiter.wait(family, now);
-                if wait.is_zero() {
-                    limiter.used(family, now);
-                    return self.permitted();
-                }
-                wait
-            };
+            let Some(wait) = self.turn(family, true)? else { return self.permitted() };
             #[cfg(test)]
             if let Some(pause) = &self.pacing_pause { if self.operation.is_none_or(|o| o.gate == self.allowed.operations.load(Ordering::Acquire)) { pause.wait(); pause.wait(); } }
             std::thread::sleep(wait.min(Duration::from_millis(50)));
@@ -1360,6 +1431,10 @@ impl Client {
     }
     /// Community specification: PUT /avatars/{avatarId}/select, authenticated session only.
     pub fn select_avatar(&mut self, id: &str) -> Result<()> {
+        self.select_avatar_while(id, || true)
+    }
+    /// [`Self::select_avatar`], sent only if `current` says so once there is nothing left to wait for.
+    pub fn select_avatar_while(&mut self, id: &str, current: impl FnOnce() -> bool) -> Result<()> {
         self.authenticated()?;
         if !id.starts_with("avtr_") || id.len() != 41 { return Err(Error::InvalidResponse); }
         let leave: Leave = Box::new(|| current().then(|| Box::new(()) as Box<dyn Held>));
@@ -1417,37 +1492,32 @@ impl Client {
             Err(e) => Err(e),
         }
     }
-    pub fn friends(&mut self) -> Result<Vec<User>> {
-        self.authenticated()?;
-        if let Some((_, friends)) = self.friends.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(300)) {
-            return Ok(friends.clone());
+    /// The friends, every page; kept five minutes.
+    pub fn friends(asks: &mut impl Asks) -> Result<Vec<User>> {
+        let kept = asks.ask(None, |c| {
+            c.authenticated()?;
+            Ok(c.friends.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(300)).map(|(_, friends)| friends.clone()))
+        })?;
+        if let Some(friends) = kept {
+            return Ok(friends);
         }
         let mut all = BTreeMap::new();
         for offline in [false, true] {
-            let mut offset = 0;
-            loop {
-                let r = self.get("friends", &format!("/auth/user/friends?offline={offline}&n=100&offset={offset}"))?;
-                let page: Vec<User> = serde_json::from_slice(&r.body).map_err(|_| Error::InvalidResponse)?;
+            let whole = pages(asks, "friends", 101, |page| format!("/auth/user/friends?offline={offline}&n=100&offset={}", page * 100), |body| {
+                let page: Vec<User> = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
                 let n = page.len();
-                for u in page {
-                    all.insert(u.id.clone(), u);
-                }
-        self.select_avatar_while(id, || true)
-    }
-    /// [`Self::select_avatar`], sent only if `current` says so once there is nothing left to wait for.
-    pub fn select_avatar_while(&mut self, id: &str, current: impl FnOnce() -> bool) -> Result<()> {
-                if n < 100 {
-                    break;
-                }
-                offset += 100;
-                if offset > 10000 {
-                    return Err(Error::InvalidResponse);
-                }
+                all.extend(page.into_iter().map(|u| (u.id.clone(), u)));
+                Ok(n)
+            })?;
+            if !whole {
+                return Err(Error::InvalidResponse);
             }
         }
         let all: Vec<_> = all.into_values().collect();
-        self.friends = Some((Instant::now(), all.clone()));
-        Ok(all)
+        asks.ask(None, |c| {
+            c.friends = Some((Instant::now(), all.clone()));
+            Ok(all)
+        })
     }
     pub fn user(&mut self, id: &str) -> Result<User> {
         self.authenticated()?;
@@ -2340,6 +2410,21 @@ pub(crate) mod tests {
             assert!(seen.lock().unwrap().iter().all(|r| r.method == "GET" && r.url.ends_with("/auth/user")), "identity lookup is allowed; selection is not");
         }
     }
+    /// DCT-1: an avatar is put on only if what allowed it still does when the request is about to leave, after who is signed in was
+    /// asked and its turn came.
+    #[test]
+    fn an_avatar_is_selected_only_while_it_is_still_allowed() {
+        for allowed in [true, false] {
+            let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]), response(200, "{}", &[])]);
+            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, Some("usr_test".into()));
+            let asked = seen.clone();
+            let selected = source.select_avatar_while("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", || {
+                assert_eq!(asked.lock().unwrap().len(), 1, "asked last");
+                allowed
+            });
+            assert_eq!((selected.is_ok(), seen.lock().unwrap().iter().any(|r| r.method == "PUT")), (allowed, allowed));
+        }
+    }
     #[test]
     fn source_routes_avatar_image_and_instance_through_the_personal_session() {
         let (c, seen) = mock(vec![
@@ -2398,7 +2483,7 @@ pub(crate) mod tests {
         c.allowed.revoke();
         assert_eq!(c.sign_in("u", "p"), Err(Error::Disabled));
         assert_eq!(c.avatar("avtr_a"), Err(Error::Disabled));
-        assert_eq!(c.friends(), Err(Error::Disabled));
+        assert_eq!(Client::friends(&mut c), Err(Error::Disabled));
         assert!(c.restore() == Err(Error::Disabled));
         assert!(seen.lock().unwrap().is_empty());
     }
@@ -2410,21 +2495,6 @@ pub(crate) mod tests {
                     200,
                     &format!(
                         r#"{{"requiresTwoFactorAuth":["{}"]}}"#,
-    /// DCT-1: an avatar is put on only if what allowed it still does when the request is about to leave, after who is signed in was
-    /// asked and its turn came.
-    #[test]
-    fn an_avatar_is_selected_only_while_it_is_still_allowed() {
-        for allowed in [true, false] {
-            let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]), response(200, "{}", &[])]);
-            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, Some("usr_test".into()));
-            let asked = seen.clone();
-            let selected = source.select_avatar_while("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", || {
-                assert_eq!(asked.lock().unwrap().len(), 1, "asked last");
-                allowed
-            });
-            assert_eq!((selected.is_ok(), seen.lock().unwrap().iter().any(|r| r.method == "PUT")), (allowed, allowed));
-        }
-    }
                         match method {
                             TwoFactor::Totp => "totp",
                             TwoFactor::Email => "emailOtp",
@@ -2577,96 +2647,6 @@ pub(crate) mod tests {
         assert!(matches!(c.resume(), Ok(Some(Login::SignedIn(_)))));
         assert_eq!(seen.lock().unwrap().iter().filter(|r| r.method == "POST").count(), 1);
     }
-    #[test]
-    fn friends_page_both_states_deduplicate_and_cache_for_five_minutes() {
-        let first: Vec<_> = (0..100).map(|i| serde_json::json!({"id":format!("usr_{i}"),"displayName":format!("Friend {i}")})).collect();
-        let (mut c, seen) = mock(vec![
-            response(200, &serde_json::to_string(&first).unwrap(), &[]),
-            response(200, "[]", &[]),
-            response(200, r#"[{"id":"usr_0","displayName":"Friend 0"},{"id":"usr_offline","displayName":"Offline"}]"#, &[]),
-            response(200, "[]", &[]),
-            response(200, "[]", &[]),
-        ]);
-        assert_eq!(c.friends().unwrap().len(), 101);
-        assert_eq!(c.friends().unwrap().len(), 101);
-        {
-            let seen = seen.lock().unwrap();
-            assert_eq!(seen.len(), 3);
-            assert!(seen[0].url.ends_with("offline=false&n=100&offset=0"));
-            assert!(seen[1].url.ends_with("offline=false&n=100&offset=100"));
-            assert!(seen[2].url.ends_with("offline=true&n=100&offset=0"));
-        }
-        c.friends.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(301);
-        assert!(c.friends().unwrap().is_empty());
-    }
-    #[test]
-    fn avatar_cache_expires_after_twenty_four_hours() {
-        let (mut c, seen) = mock(vec![response(200, r#"{"id":"avtr_a","name":"Before"}"#, &[]), response(200, r#"{"id":"avtr_a","name":"After"}"#, &[])]);
-        assert_eq!(c.avatar("avtr_a").unwrap().name, "Before");
-        c.avatars.get_mut("avtr_a").unwrap().0 = Instant::now() - Duration::from_secs(86401);
-        assert_eq!(c.avatar("avtr_a").unwrap().name, "After");
-        assert_eq!(seen.lock().unwrap().len(), 2);
-    }
-    #[test]
-    fn redirects_never_send_cookies_to_another_service_or_absorb_public_cdn_cookies() {
-        let mut redirect = response(302, "", &[]);
-        redirect.location = Some("https://api.orbiters.cc/image".into());
-        let (mut c, seen) = mock(vec![redirect]);
-        c.cookies.auth = "private-cookie".into();
-        assert_eq!(c.image("https://api.vrchat.cloud/api/1/file/file_a/1/file"), Err(Error::UnsafeUrl));
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        let mut redirect = response(302, "", &[]);
-        redirect.location = Some("https://assets.vrchat.com/image.png".into());
-        let (mut c, seen) = mock(vec![redirect, response(200, "image", &["auth=untrusted"])]);
-        c.cookies.auth = "private-cookie".into();
-        assert_eq!(c.image("https://api.vrchat.cloud/api/1/image/file_a/1/256").unwrap(), b"image");
-        assert!(seen.lock().unwrap()[1].cookie.is_empty());
-        assert_eq!(c.cookies.auth, "private-cookie");
-    }
-    #[test]
-    fn instances_do_not_confuse_hidden_or_unknown_with_closed() {
-        let (mut c, seen) =
-            mock(vec![response(200, r#"{"active":true}"#, &[]), response(200, r#"{"active":false}"#, &[]), response(403, "", &[]), response(200, "null", &[])]);
-        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
-        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
-        assert_eq!(seen.lock().unwrap().len(), 1);
-        c.instances.get_mut(&("wrld_a".into(), "123".into())).unwrap().0 -= Duration::from_secs(61);
-        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(false)));
-        assert_eq!(c.instance_alive("wrld_a", "hidden"), Ok(None));
-        // VRChat answers `null` for an instance it does not know: not open any more.
-        assert_eq!(c.instance_alive("wrld_a", "unknown"), Ok(Some(false)));
-        c.allowed.revoke();
-        assert_eq!(c.instance_alive("wrld_a", "123"), Err(Error::Disabled));
-    }
-    #[test]
-    fn instances_are_asked_for_as_vrchat_writes_them() {
-        let instance = "25332~hidden(usr_c1644b5b-3ca4-45b4-97c6-a2a0de70d469)~region(eu)~nonce(9f0e1d2c-3b4a-5968-7766-554433221100)";
-        let (mut c, seen) = mock(vec![response(404, r#"{"error":{"message":"Instance not found․","status_code":404}}"#, &[])]);
-        // A closed instance VRChat no longer knows is not open any more, rather than an error.
-        assert_eq!(c.instance_alive("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b", instance), Ok(Some(false)));
-        assert_eq!(seen.lock().unwrap()[0].url, format!("{BASE}/instances/wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:{instance}"));
-        assert_eq!(path_segment("a b/c?d#e%f"), "a%20b%2Fc%3Fd%23e%25f");
-    }
-    #[test]
-    fn instance_answers_open_closed_or_say_why_not() {
-        let (mut c, _) = mock(vec![
-            response(200, r#"{"id":"wrld_a:1","instanceId":"1","n_users":3}"#, &[]),
-            response(200, r#"{"id":"wrld_a:2","active":true,"closedAt":"2026-10-30T10:00:00.000Z"}"#, &[]),
-            response(200, r#"{"id":"wrld_a:3","hardClose":true}"#, &[]),
-            // Built, not a raw string: the i18n scan read the escaped quotes of a raw string as escapes, and lost its place for
-            // the rest of the file.
-            response(400, &serde_json::json!({"error":{"message":"\"malformed url\"","status_code":400,"waf_code":26497}}).to_string(), &[]),
-            response(200, "<html>", &[]),
-            response(302, "", &[]),
-        ]);
-        assert_eq!(c.instance_alive("wrld_a", "1"), Ok(Some(true)), "`active` is optional and true by default");
-        assert_eq!(c.instance_alive("wrld_a", "2"), Ok(Some(false)));
-        assert_eq!(c.instance_alive("wrld_a", "3"), Ok(Some(false))); // i18n: not shown (inside a test the scan cannot skip)
-        let refused = c.instance_alive("wrld_a", "4").unwrap_err();
-        assert_eq!(refused, Error::Refused(400, "malformed url".into()));
-        assert_eq!(refused.to_string(), "VRChat refused the request (HTTP 400: malformed url).");
-        assert_eq!(c.instance_alive("wrld_a", "5"), Err(Error::InvalidResponse));
-        assert_eq!(c.instance_alive("wrld_a", "6"), Err(Error::Refused(302, String::new())));
     /// COR-3: a read of several pages holds the client for each request alone: what another thread asks goes between two pages,
     /// while the next one's turn is waited for; and it stops once another account is signed in.
     #[test]
@@ -2742,6 +2722,96 @@ pub(crate) mod tests {
             assert!(matches!(c.avatar("avtr_a"), Err(Error::RateLimited(wait)) if wait > Duration::from_secs(60)), "nothing goes meanwhile");
         }
     }
+    #[test]
+    fn friends_page_both_states_deduplicate_and_cache_for_five_minutes() {
+        let first: Vec<_> = (0..100).map(|i| serde_json::json!({"id":format!("usr_{i}"),"displayName":format!("Friend {i}")})).collect();
+        let (mut c, seen) = mock(vec![
+            response(200, &serde_json::to_string(&first).unwrap(), &[]),
+            response(200, "[]", &[]),
+            response(200, r#"[{"id":"usr_0","displayName":"Friend 0"},{"id":"usr_offline","displayName":"Offline"}]"#, &[]),
+            response(200, "[]", &[]),
+            response(200, "[]", &[]),
+        ]);
+        assert_eq!(Client::friends(&mut c).unwrap().len(), 101);
+        assert_eq!(Client::friends(&mut c).unwrap().len(), 101);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 3);
+            assert!(seen[0].url.ends_with("offline=false&n=100&offset=0"));
+            assert!(seen[1].url.ends_with("offline=false&n=100&offset=100"));
+            assert!(seen[2].url.ends_with("offline=true&n=100&offset=0"));
+        }
+        c.friends.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(301);
+        assert!(Client::friends(&mut c).unwrap().is_empty());
+    }
+    #[test]
+    fn avatar_cache_expires_after_twenty_four_hours() {
+        let (mut c, seen) = mock(vec![response(200, r#"{"id":"avtr_a","name":"Before"}"#, &[]), response(200, r#"{"id":"avtr_a","name":"After"}"#, &[])]);
+        assert_eq!(c.avatar("avtr_a").unwrap().name, "Before");
+        c.avatars.get_mut("avtr_a").unwrap().0 = Instant::now() - Duration::from_secs(86401);
+        assert_eq!(c.avatar("avtr_a").unwrap().name, "After");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+    #[test]
+    fn redirects_never_send_cookies_to_another_service_or_absorb_public_cdn_cookies() {
+        let mut redirect = response(302, "", &[]);
+        redirect.location = Some("https://api.orbiters.cc/image".into());
+        let (mut c, seen) = mock(vec![redirect]);
+        c.cookies.auth = "private-cookie".into();
+        assert_eq!(c.image("https://api.vrchat.cloud/api/1/file/file_a/1/file"), Err(Error::UnsafeUrl));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let mut redirect = response(302, "", &[]);
+        redirect.location = Some("https://assets.vrchat.com/image.png".into());
+        let (mut c, seen) = mock(vec![redirect, response(200, "image", &["auth=untrusted"])]);
+        c.cookies.auth = "private-cookie".into();
+        assert_eq!(c.image("https://api.vrchat.cloud/api/1/image/file_a/1/256").unwrap(), b"image");
+        assert!(seen.lock().unwrap()[1].cookie.is_empty());
+        assert_eq!(c.cookies.auth, "private-cookie");
+    }
+    #[test]
+    fn instances_do_not_confuse_hidden_or_unknown_with_closed() {
+        let (mut c, seen) =
+            mock(vec![response(200, r#"{"active":true}"#, &[]), response(200, r#"{"active":false}"#, &[]), response(403, "", &[]), response(200, "null", &[])]);
+        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
+        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(true)));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        c.instances.get_mut(&("wrld_a".into(), "123".into())).unwrap().0 -= Duration::from_secs(61);
+        assert_eq!(c.instance_alive("wrld_a", "123"), Ok(Some(false)));
+        assert_eq!(c.instance_alive("wrld_a", "hidden"), Ok(None));
+        // VRChat answers `null` for an instance it does not know: not open any more.
+        assert_eq!(c.instance_alive("wrld_a", "unknown"), Ok(Some(false)));
+        c.allowed.revoke();
+        assert_eq!(c.instance_alive("wrld_a", "123"), Err(Error::Disabled));
+    }
+    #[test]
+    fn instances_are_asked_for_as_vrchat_writes_them() {
+        let instance = "25332~hidden(usr_c1644b5b-3ca4-45b4-97c6-a2a0de70d469)~region(eu)~nonce(9f0e1d2c-3b4a-5968-7766-554433221100)";
+        let (mut c, seen) = mock(vec![response(404, r#"{"error":{"message":"Instance not found․","status_code":404}}"#, &[])]);
+        // A closed instance VRChat no longer knows is not open any more, rather than an error.
+        assert_eq!(c.instance_alive("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b", instance), Ok(Some(false)));
+        assert_eq!(seen.lock().unwrap()[0].url, format!("{BASE}/instances/wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b:{instance}"));
+        assert_eq!(path_segment("a b/c?d#e%f"), "a%20b%2Fc%3Fd%23e%25f");
+    }
+    #[test]
+    fn instance_answers_open_closed_or_say_why_not() {
+        let (mut c, _) = mock(vec![
+            response(200, r#"{"id":"wrld_a:1","instanceId":"1","n_users":3}"#, &[]),
+            response(200, r#"{"id":"wrld_a:2","active":true,"closedAt":"2026-10-30T10:00:00.000Z"}"#, &[]),
+            response(200, r#"{"id":"wrld_a:3","hardClose":true}"#, &[]),
+            // Built, not a raw string: the i18n scan read the escaped quotes of a raw string as escapes, and lost its place for
+            // the rest of the file.
+            response(400, &serde_json::json!({"error":{"message":"\"malformed url\"","status_code":400,"waf_code":26497}}).to_string(), &[]),
+            response(200, "<html>", &[]),
+            response(302, "", &[]),
+        ]);
+        assert_eq!(c.instance_alive("wrld_a", "1"), Ok(Some(true)), "`active` is optional and true by default");
+        assert_eq!(c.instance_alive("wrld_a", "2"), Ok(Some(false)));
+        assert_eq!(c.instance_alive("wrld_a", "3"), Ok(Some(false))); // i18n: not shown (inside a test the scan cannot skip)
+        let refused = c.instance_alive("wrld_a", "4").unwrap_err();
+        assert_eq!(refused, Error::Refused(400, "malformed url".into()));
+        assert_eq!(refused.to_string(), "VRChat refused the request (HTTP 400: malformed url).");
+        assert_eq!(c.instance_alive("wrld_a", "5"), Err(Error::InvalidResponse));
+        assert_eq!(c.instance_alive("wrld_a", "6"), Err(Error::Refused(302, String::new())));
         assert!(!c.instances.contains_key(&("wrld_a".into(), "4".into())), "errors are not cached"); // i18n: not shown (inside a test the scan cannot skip)
     }
     #[cfg(windows)]
@@ -2807,7 +2877,7 @@ pub(crate) mod tests {
         let (mut c, seen) = unpaced(vec![response(401, "", &[]), response(401, "", &[])]);
         c.store = Some(path.clone());
         c.save().unwrap();
-        assert_eq!(c.friends(), Err(Error::Unauthorized));
+        assert_eq!(Client::friends(&mut c), Err(Error::Unauthorized));
         assert!(!c.signed_in() && !c.holds_session());
         assert_eq!(c.ended_user().map(|u| u.display_name.as_str()), Some("Tester"));
         assert!(path.is_file(), "only the person's sign-out removes the file");
@@ -2820,14 +2890,14 @@ pub(crate) mod tests {
         for look in [response(429, "", &[]), response(503, "", &[]), response(502, "", &[])] {
             let status = look.status;
             let (mut c, _) = unpaced(vec![response(401, "", &[]), look]);
-            let e = c.friends().unwrap_err();
+            let e = Client::friends(&mut c).unwrap_err();
             assert!(matches!(e, Error::RateLimited(_) | Error::Unavailable), "{status}: {e:?}");
             assert!(c.signed_in() && c.holds_session(), "{status}: kept");
         }
         // A 429 or 5xx straight away is not a sign-out either.
         for first in [response(429, "", &[]), response(500, "", &[])] {
             let (mut c, _) = unpaced(vec![first]);
-            assert!(c.friends().is_err());
+            assert!(Client::friends(&mut c).is_err());
             assert!(c.signed_in());
         }
     }

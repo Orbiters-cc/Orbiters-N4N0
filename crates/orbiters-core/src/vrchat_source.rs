@@ -2,7 +2,7 @@
 //! A direct session's cookies are private to `vrchat_api`; the fallback sees only the Orbiters bearer credential.
 use crate::account::Api;
 use orbiters_i18n::tr;
-use crate::vrchat_api::{Avatar, Client, Error, Replaced, Step, User};
+use crate::vrchat_api::{Avatar, Client, Error, Replaced, Step, Turns, User};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -51,6 +51,19 @@ impl Source {
     }
     pub fn scoped(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>, operation: crate::vrchat_api::Operation) -> Self {
         Self { direct, orbiters, log_account, operation: Some(operation) }
+    }
+    /// [`Self::direct`] for a read of several requests: the client is held for one at a time ([`Turns`]).
+    fn in_turns<T>(&self, f: impl FnOnce(&mut Turns) -> crate::vrchat_api::Result<T>) -> Option<anyhow::Result<T>> {
+        let client = self.direct.as_ref()?;
+        if !client.lock().unwrap().signed_in() {
+            return None;
+        }
+        let mut turns = Turns::new(client);
+        match f(&mut turns) {
+            // Another account signed in meanwhile: what this one's session would have said is not what is known without one.
+            Err(Error::Disabled | Error::Unauthorized) if !turns.overtaken() => None,
+            r => Some(r.map_err(Into::into)),
+        }
     }
     fn direct<T>(&self, f: impl FnOnce(&mut Client) -> crate::vrchat_api::Result<T>) -> Option<anyhow::Result<T>> {
         let mut c = self.direct.as_ref()?.lock().unwrap();
@@ -153,7 +166,7 @@ impl Source {
     }
     /// The public avatars of the account's avatar favourite group `tag`, every page. Needs the personal session.
     pub fn favorite_avatars(&self, tag: &str) -> anyhow::Result<Vec<Avatar>> {
-        match self.direct(|c| c.favorite_avatars(tag)) {
+        match self.in_turns(|c| Client::favorite_avatars(c, tag)) {
             Some(r) => r,
             None => Err(Error::Unauthorized.into()),
         }
@@ -179,7 +192,7 @@ impl Source {
                 .map(|f| User { id: f.id, display_name: f.name, user_icon: f.image.unwrap_or_default(), ..Default::default() })
                 .collect::<Vec<_>>()
         };
-        if let Some(r) = self.direct(Client::friends) {
+        if let Some(r) = self.in_turns(|c| Client::friends(c)) {
             return r.map(|direct| merge_friends(direct, local()));
         }
         Ok(local())

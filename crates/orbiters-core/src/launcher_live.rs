@@ -78,11 +78,11 @@ fn signed_in() -> serde_json::Value {
         errors.push(format!("groups: {e:?}"));
         Vec::new()
     });
-    let members = client.favourite_friends_value().map(|v| crate::launcher_feed::favourites(&v)).unwrap_or_default();
+    let members = Client::favourite_friends_value(&mut client).map(|v| crate::launcher_feed::favourites(&v)).unwrap_or_default();
     for f in &mut state.friends {
         f.favourite_groups = members.get(&f.id).cloned().unwrap_or_default();
     }
-    let notifications = client.notifications();
+    let notifications = Client::notifications(&mut client);
     let v2 = client.notifications_v2();
     let v1_types: Vec<String> = notifications.as_ref().map(|n| n.iter().filter_map(|x| x["type"].as_str().map(str::to_string)).collect()).unwrap_or_default();
     let v2_types: Vec<String> = v2.as_ref().map(|n| n.iter().filter_map(|x| x["type"].as_str().map(str::to_string)).collect()).unwrap_or_default();

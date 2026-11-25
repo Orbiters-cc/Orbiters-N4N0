@@ -4,8 +4,6 @@
 //! request goes through the client's pacing (one a second per family) and its 429 back-off.
 use super::*;
 
-/// One page of `/avatars/favorites` (the spec's largest).
-const PAGE: usize = 100;
 /// Pages read of one group at most (a VRC+ group holds far fewer).
 const PAGES: usize = 10;
 /// How long a group's avatars are kept (as the favourite world lists are).
@@ -44,38 +42,40 @@ impl Client {
 
     /// The public avatars of the avatar favourite group `tag`, in VRChat's order, every page; kept a minute. Each is kept
     /// in the day-long avatar cache too (what [`Client::avatar`] answers).
-    pub fn favorite_avatars(&mut self, tag: &str) -> Result<Vec<Avatar>> {
-        self.authenticated()?;
-        if !(!tag.is_empty() && tag.len() <= 64 && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
-            return Err(Error::InvalidResponse);
-        }
-        if let Some((_, avatars)) = self.avatar_lists.get(tag).filter(|(at, _)| at.elapsed() < KEEP) {
-            return Ok(avatars.clone());
+    pub fn favorite_avatars(asks: &mut impl Asks, tag: &str) -> Result<Vec<Avatar>> {
+        let kept = asks.ask(None, |c| {
+            c.authenticated()?;
+            if !(!tag.is_empty() && tag.len() <= 64 && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+                return Err(Error::InvalidResponse);
+            }
+            Ok(c.avatar_lists.get(tag).filter(|(at, _)| at.elapsed() < KEEP).map(|(_, avatars)| avatars.clone()))
+        })?;
+        if let Some(avatars) = kept {
+            return Ok(avatars);
         }
         let mut all: Vec<Avatar> = Vec::new();
-        for page in 0..PAGES {
-            let r = self.get("avatars", &favorite_avatars_path(tag, page * PAGE))?;
-            let (avatars, held) = parse_avatars(&r.body)?;
+        pages(asks, "avatars", PAGES, |page| favorite_avatars_path(tag, page * PAGE), |body| {
+            let (avatars, held) = parse_avatars(body)?;
             for a in avatars {
                 if !all.iter().any(|b| b.id == a.id) {
                     all.push(a);
                 }
             }
-            if held < PAGE {
-                break;
+            Ok(held)
+        })?;
+        asks.ask(None, |c| {
+            if c.avatars.len() + all.len() >= 512 {
+                c.avatars.clear();
             }
-        }
-        if self.avatars.len() + all.len() >= 512 {
-            self.avatars.clear();
-        }
-        for a in &all {
-            self.avatars.insert(a.id.clone(), (Instant::now(), a.clone()));
-        }
-        if self.avatar_lists.len() >= 32 {
-            self.avatar_lists.clear();
-        }
-        self.avatar_lists.insert(tag.to_string(), (Instant::now(), all.clone()));
-        Ok(all)
+            for a in &all {
+                c.avatars.insert(a.id.clone(), (Instant::now(), a.clone()));
+            }
+            if c.avatar_lists.len() >= 32 {
+                c.avatar_lists.clear();
+            }
+            c.avatar_lists.insert(tag.to_string(), (Instant::now(), all.clone()));
+            Ok(all)
+        })
     }
 }
 
@@ -126,7 +126,7 @@ mod tests {
         let mut second = vec![avatar(PAGE, "public"), serde_json::json!({"id": "wrld_x", "name": "a world"}), serde_json::json!({"oops": 1})];
         second.push(avatar(0, "public"));
         let (mut c, seen) = client(vec![(200, serde_json::Value::from(first).to_string()), (200, serde_json::Value::from(second).to_string())]);
-        let avatars = c.favorite_avatars("avatars1").unwrap();
+        let avatars = Client::favorite_avatars(&mut c, "avatars1").unwrap();
         assert_eq!(avatars.len(), PAGE, "private, misshapen and repeated ones left out: {}", avatars.len());
         assert_eq!(avatars[0].name, "Avatar 0", "names trimmed");
         assert!(avatars.iter().all(Avatar::public));
@@ -138,16 +138,16 @@ mod tests {
             ]
         );
         // Asked again: from what was kept, nothing asked; and each avatar is known (the hit player's check reads it).
-        assert_eq!(c.favorite_avatars("avatars1").unwrap().len(), PAGE);
+        assert_eq!(Client::favorite_avatars(&mut c, "avatars1").unwrap().len(), PAGE);
         assert_eq!(c.avatar(&id(5)).unwrap().release_status, "public");
         assert_eq!(seen.lock().unwrap().len(), 2);
-        assert!(c.favorite_avatars("../x").is_err(), "a tag that is not a plain word is never sent");
+        assert!(Client::favorite_avatars(&mut c, "../x").is_err(), "a tag that is not a plain word is never sent");
     }
 
     #[test]
     fn a_rate_limit_is_said_and_holds_every_family() {
         let (mut c, _) = client(vec![(429, "{}".into())]);
-        assert_eq!(c.favorite_avatars("avatars1"), Err(Error::RateLimited(Duration::from_secs(7))));
+        assert_eq!(Client::favorite_avatars(&mut c, "avatars1"), Err(Error::RateLimited(Duration::from_secs(7))));
         assert!(matches!(c.favorite_avatar_groups(), Err(Error::RateLimited(_))), "the back-off holds the groups too, with nothing asked");
     }
 
@@ -155,7 +155,7 @@ mod tests {
     fn signed_out_nothing_is_asked() {
         let (mut c, seen) = client(vec![]);
         c.user = None;
-        assert!(c.favorite_avatar_groups().is_err() && c.favorite_avatars("avatars1").is_err());
+        assert!(c.favorite_avatar_groups().is_err() && Client::favorite_avatars(&mut c, "avatars1").is_err());
         assert!(seen.lock().unwrap().is_empty());
     }
 }

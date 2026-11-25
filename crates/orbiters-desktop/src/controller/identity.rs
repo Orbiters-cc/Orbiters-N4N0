@@ -330,7 +330,6 @@ mod tests {
         // What is known to break the rule and is not put right yet: (file, what, how many times, since when, whose). Said on every
         // run, and none is added without its date and who puts it right.
         const EXCEPTIONS: &[(&str, &str, usize, &str, &str)] = &[
-            ("avatar_gun.rs", "account_api()", 3, "2026-11-25", "the avatar gun's own session: each of the three should act with the epoch it was asked with, or be listed in MAY with why it may"),
         ];
         let mut wrong = Vec::new();
         let mut looked = 0;

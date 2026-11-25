@@ -11,6 +11,8 @@
 //!
 //! The detection ([`Detector`]) and what a capture keeps ([`redact`], [`retain`], [`tree`]) are pure and tested on every
 //! computer; the following and the capture run on a Mac only.
+
+use orbiters_core::vrchat_log::{Account, Lines as LogLines};
 use std::path::{Path, PathBuf};
 
 /// Nothing grew for this long while the session runs: a stall (the game draws at least every few seconds, its window
@@ -924,15 +926,10 @@ pub(crate) fn player() -> Option<Player> {
 /// Who VRChat's log says is signed in, read from its start to its end as it grows: whole lines only.
 #[derive(Debug, Default)]
 pub(crate) struct SignedIn {
-    read: u64,
-    /// The account last signed in: its id, its name. A label while `sure` is not set.
-    who: Option<(String, String)>,
-    /// `who` is the last thing the log says of a sign-in, for certain.
-    sure: bool,
+    lines: LogLines,
+    account: Account,
     /// It was read to its end at the last look.
     whole: bool,
-    /// It asked for a sign-in since, and nobody signed in.
-    out: bool,
 }
 
 impl SignedIn {
@@ -941,41 +938,26 @@ impl SignedIn {
     pub(crate) fn read(&mut self, file: &std::fs::File) {
         // Not to be read now: what it said before is not what it says now, and it is read anew.
         let Ok(len) = file.metadata().map(|m| m.len()) else { return *self = SignedIn::default() };
-        if len < self.read {
+        if len < self.lines.position() {
             *self = SignedIn::default();
         }
-        let Ok(bytes) = read_at(file, self.read, SCAN_AT_MOST) else { return *self = SignedIn::default() };
-        match bytes.iter().rposition(|b| *b == b'\n') {
-            Some(end) => {
-                self.read += end as u64 + 1;
-                let text = String::from_utf8_lossy(&bytes[..=end]);
-                if let Some(who) = crate::bridge::sessions::signed_in(&text) {
-                    self.who = Some(who);
-                }
-                if let Some(said) = orbiters_core::vrchat_log::sign_in(&text) {
-                    self.sure = said.is_some() && said == self.who;
-                }
-                self.out = super::vrchats::signed_out(&text).unwrap_or(self.out);
-            }
-            // One line longer than a look: no line looked for.
-            None if bytes.len() as u64 == SCAN_AT_MOST => self.read += bytes.len() as u64,
-            None => {}
-        }
-        // Read up to its end: what is left is a line still being written.
-        self.whole = (bytes.len() as u64) < SCAN_AT_MOST;
+        let account = &mut self.account;
+        let Ok(to_end) = self.lines.read(file, len, SCAN_AT_MOST, |line| account.read(&String::from_utf8_lossy(line))) else { return *self = SignedIn::default() };
+        // Read up to its end: what is left is a line still being written (never one too long to be kept, whose end is not known).
+        self.whole = to_end && !self.lines.skipping();
     }
 
     pub(crate) fn name(&self) -> Option<&str> {
-        self.who.as_ref().map(|(_, name)| name.as_str())
+        self.account.who.as_ref().map(|(_, name)| name.as_str())
     }
 
     /// The id of the account that is signed in now; `None` where it is not known for certain, or nobody is.
     pub(crate) fn id(&self) -> Option<&str> {
-        self.who.as_ref().filter(|_| !self.out && self.sure && self.whole).map(|(id, _)| id.as_str())
+        self.account.who.as_ref().filter(|_| !self.account.signed_out && self.account.sure && self.whole).map(|(id, _)| id.as_str())
     }
 
     pub(crate) fn signed_out(&self) -> bool {
-        self.out
+        self.account.signed_out
     }
 }
 

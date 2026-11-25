@@ -11,7 +11,7 @@ use orbiters_core::features::Grant;
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -28,8 +28,9 @@ const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat bridge";
 pub trait Flag: Send + Sync {
     /// Who is signed in, and on which server: anything that changes when either does. `None`: nobody, so no proof.
     fn identity(&self) -> Option<String>;
-    /// Asks the server, for the identity at the time. May take long: it runs on a thread of its own.
-    fn ask(&self) -> anyhow::Result<bool>;
+    /// Asks the server, for `identity` ([`Flag::identity`]) and no other: an error when it is not who is signed in any more. May
+    /// take long: it runs on a thread of its own.
+    fn ask(&self, identity: &str) -> anyhow::Result<bool>;
     /// Settings has it on.
     fn enabled(&self) -> bool;
     /// Stop: Settings has it off from now on.
@@ -110,6 +111,8 @@ struct Open {
 
 struct Inner {
     identity: Option<String>,
+    /// Bumped with every identity change: an answer for an older one is dropped.
+    generation: u64,
     grant: Grant,
     open: Option<Open>,
     problem: Option<String>,
@@ -125,8 +128,6 @@ pub struct Keeper {
     inner: Mutex<Inner>,
     /// Asking takes a thread: one at a time.
     asking: AtomicBool,
-    /// Bumped with every identity change: an answer for an older one is dropped.
-    generation: AtomicU64,
     published: Box<dyn Fn(Status) + Send + Sync>,
     /// How to hear the person: Raw Input for real, nothing in tests (`None` from it fails closed).
     hear: Hear,
@@ -156,9 +157,8 @@ impl Keeper {
             bridge,
             flag,
             keys_file,
-            inner: Mutex::new(Inner { identity: None, grant: Grant::new(refresh, lifetime), open: None, problem: None, keys_unreadable: false }),
+            inner: Mutex::new(Inner { identity: None, generation: 0, grant: Grant::new(refresh, lifetime), open: None, problem: None, keys_unreadable: false }),
             asking: AtomicBool::new(false),
-            generation: AtomicU64::new(0),
             published,
             hear,
             registrations: OnceLock::new(),
@@ -211,25 +211,17 @@ impl Keeper {
     /// One look at the three conditions, and acting on what they say, then what Settings shows, a few times a second.
     pub fn tick(self: &Arc<Self>) {
         let now = Instant::now();
-        let identity = self.flag.identity();
         let ask = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.identity != identity {
-                inner.identity = identity.clone();
-                inner.grant.forget();
-                self.generation.fetch_add(1, Ordering::Relaxed);
-                self.close(&mut inner, tr("The Orbiters account or server changed: the bridge closed."), false);
-            }
-            identity.is_some() && inner.grant.due(now) && !self.asking.swap(true, Ordering::Relaxed)
+            self.follow_identity(&mut inner);
+            let ask = inner.identity.clone().filter(|_| inner.grant.due(now) && !self.asking.swap(true, Ordering::Relaxed));
+            ask.map(|identity| (identity, inner.generation))
         };
-        if ask {
+        if let Some((identity, generation)) = ask {
             let keeper = self.clone();
-            let generation = self.generation.load(Ordering::Relaxed);
             let spawned = std::thread::Builder::new().name("bridge-flag".into()).spawn(move || {
-                let answer = keeper.flag.ask();
-                if keeper.generation.load(Ordering::Relaxed) == generation {
-                    keeper.inner.lock().unwrap().grant.answered(&answer, Instant::now());
-                }
+                let answer = keeper.flag.ask(&identity);
+                keeper.answered(generation, &answer);
                 keeper.asking.store(false, Ordering::Relaxed);
                 keeper.tick();
             });
@@ -238,7 +230,8 @@ impl Keeper {
             }
         }
         let mut inner = self.inner.lock().unwrap();
-        let allowed = identity.is_some() && inner.grant.allowed(now);
+        self.follow_identity(&mut inner);
+        let allowed = inner.identity.is_some() && inner.grant.allowed(now);
         let wanted = allowed && self.flag.enabled();
         if wanted && inner.open.is_none() {
             self.open(&mut inner);
@@ -254,6 +247,26 @@ impl Keeper {
             self.clients(|clients, wanted| clients.repair(wanted));
         }
         self.publish();
+    }
+
+    /// Who is signed in now, read with what it decides held: another than before, and nothing of the last one's is left.
+    fn follow_identity(&self, inner: &mut Inner) {
+        let identity = self.flag.identity();
+        if inner.identity != identity {
+            inner.identity = identity;
+            inner.grant.forget();
+            inner.generation += 1;
+            self.close(inner, tr("The Orbiters account or server changed: the bridge closed."), false);
+        }
+    }
+
+    /// What the server answered for the identity of `generation`: taken for that one alone.
+    fn answered(&self, generation: u64, answer: &anyhow::Result<bool>) {
+        let mut inner = self.inner.lock().unwrap();
+        self.follow_identity(&mut inner);
+        if inner.generation == generation {
+            inner.grant.answered(answer, Instant::now());
+        }
     }
 
     fn open(&self, inner: &mut Inner) {
@@ -455,6 +468,68 @@ mod tests {
         let nowhere = dir.join("a-file-not-a-folder");
         std::fs::write(&nowhere, b"x").unwrap();
         assert!(Keys::load_or_create(&nowhere.join("vrchat-bridge.dat")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// BRG-2: an answer is the identity's it was asked for, whenever the account changes: while it is asked, while it waits to be
+    /// taken, and as a look at the conditions is under way. The other account's grant is nobody's yes but its own.
+    #[test]
+    fn an_answer_is_its_own_accounts_alone() {
+        use std::sync::mpsc;
+        struct Switching {
+            identity: Mutex<Option<String>>,
+            asked: Mutex<mpsc::Sender<String>>,
+            answers: Mutex<mpsc::Receiver<bool>>,
+        }
+        impl Flag for Switching {
+            fn identity(&self) -> Option<String> {
+                self.identity.lock().unwrap().clone()
+            }
+            fn ask(&self, identity: &str) -> anyhow::Result<bool> {
+                self.asked.lock().unwrap().send(identity.to_string())?;
+                Ok(self.answers.lock().unwrap().recv()?)
+            }
+            fn enabled(&self) -> bool {
+                false
+            }
+            fn turn_off(&self) {}
+        }
+        let (asked, asks) = mpsc::channel();
+        let (answer, answers) = mpsc::channel();
+        let flag = Arc::new(Switching { identity: Mutex::new(Some("a".into())), asked: Mutex::new(asked), answers: Mutex::new(answers) });
+        let dir = std::env::temp_dir().join(format!("orbiters-bridge-flag-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keeper = Keeper::new(Bridge::new(super::super::lab::LabGame::new(&dir, None), None), flag.clone(), dir.join("keys.dat"), ASK_EVERY, PROOF_LASTS, Box::new(|_| {}), Box::new(|_| None));
+        let allowed = || keeper.inner.lock().unwrap().grant.allowed(Instant::now());
+        let wait = Duration::from_secs(20);
+        keeper.tick();
+        assert_eq!(asks.recv_timeout(wait).unwrap(), "a");
+        // The answer comes, and the account changes before it is taken.
+        {
+            let mut held = keeper.inner.lock().unwrap();
+            answer.send(true).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            *flag.identity.lock().unwrap() = Some("b".into());
+            // (As a look at the conditions under way does.)
+            keeper.follow_identity(&mut held);
+            drop(held);
+        }
+        // Asked for itself, whoever was asked for before; and nothing is allowed meanwhile.
+        assert_eq!(asks.recv_timeout(wait).unwrap(), "b");
+        assert!(!allowed(), "the other account's yes is not this one's");
+        answer.send(false).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!allowed());
+        // Its own yes is.
+        *flag.identity.lock().unwrap() = Some("a".into());
+        keeper.tick();
+        assert_eq!(asks.recv_timeout(wait).unwrap(), "a");
+        answer.send(true).unwrap();
+        let until = Instant::now() + wait;
+        while !allowed() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(allowed());
         let _ = std::fs::remove_dir_all(dir);
     }
 

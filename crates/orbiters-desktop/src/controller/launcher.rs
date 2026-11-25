@@ -17,7 +17,7 @@ use super::vrchat_scope::{By, MachineParts, Session, Stamp};
 use super::{Controller, Shared};
 use orbiters_core::launcher::{Action, EngineSetup, Game, Invite, JoinFailure, JoinStep, Joining, LaunchMode, LauncherState, LogTrouble, Notice, Place, Possible, Profile, SentKind, Source, Whereabouts};
 use orbiters_core::launcher_feed::{self, Cooldowns, Decorations};
-use orbiters_core::vrchat_api::{Client, Error};
+use orbiters_core::vrchat_api::{Asks, Client, Error, Turns};
 use orbiters_core::vrchat_launch::{desktop_window, SavedWindow, To, Way};
 use orbiters_i18n::tr;
 use std::collections::{BTreeMap, HashMap};
@@ -1315,12 +1315,13 @@ fn now() -> i64 {
 /// Everything VRChat says, read once: friends (online pages then offline pages), the account, favourite groups and who
 /// is in them, invites and boops waiting. Each call is paced by the client (one a second per kind).
 pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(String, String)>, BTreeMap<String, Decorations>), Error> {
+    let mut vrchat = Turns::new(client);
     let mut friends = BTreeMap::new();
     let mut worn = BTreeMap::new();
     let mut fields = PictureFields::default();
     for offline in [false, true] {
         for page in 0..50 {
-            let items = client.lock().unwrap().friends_page(offline, page * 100)?;
+            let items = vrchat.ask(Some("friends"), |c| c.friends_page(offline, page * 100))?;
             let n = items.len();
             for v in &items {
                 if let Some(f) = launcher_feed::friend(v, !offline) {
@@ -1337,15 +1338,14 @@ pub fn read_signed_in(client: &Mutex<Client>) -> Result<(LauncherState, Vec<(Str
         }
     }
     crate::worlds::profile_pictures::note(&fields.line());
-    let me_value = client.lock().unwrap().current_user_value()?;
-    let mut me_value = me_value;
+    let mut me_value = vrchat.ask(Some("auth"), Client::current_user_value)?;
     me_value["state"] = serde_json::Value::String("online".into());
     let me = launcher_feed::friend(&me_value, false);
-    let groups = launcher_feed::favourite_groups(&client.lock().unwrap().favourite_groups_value()?);
-    let members = launcher_feed::favourites(&client.lock().unwrap().favourite_friends_value()?);
+    let groups = launcher_feed::favourite_groups(&vrchat.ask(Some("favorites"), Client::favourite_groups_value)?);
+    let members = launcher_feed::favourites(&Client::favourite_friends_value(&mut vrchat)?);
     // Notifications are a nicety: their failure leaves the list.
-    let invites: Vec<_> = client.lock().unwrap().notifications().unwrap_or_default().iter().filter_map(launcher_feed::invite).collect();
-    let boops: Vec<_> = client.lock().unwrap().notifications_v2().unwrap_or_default().iter().filter_map(launcher_feed::boop).collect();
+    let invites: Vec<_> = Client::notifications(&mut vrchat).unwrap_or_default().iter().filter_map(launcher_feed::invite).collect();
+    let boops: Vec<_> = vrchat.ask(Some("notifications"), Client::notifications_v2).unwrap_or_default().iter().filter_map(launcher_feed::boop).collect();
     let mut state = LauncherState {
         source: Source::SignedIn { user_id: me.as_ref().map(|m| m.id.clone()).unwrap_or_default(), name: me.as_ref().map(|m| m.name.clone()).unwrap_or_default() },
         possible: Possible { live_status: true, invites: true, request_invite: true, boop: true, play: true },

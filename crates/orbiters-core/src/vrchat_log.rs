@@ -38,21 +38,66 @@ pub enum LogEvent {
     WorldLine { message: String, at: Option<u64> },
 }
 
-/// What VRChat's log says of a sign-in, in `text`: the last thing it says (the account signed in, `None` where nobody is or
-/// the line names none for certain); `None` where it says nothing of one. Only VRChat's own line names an account: a script's
-/// message that says the same names none.
-pub fn sign_in(text: &str) -> Option<Option<(String, String)>> {
-    const ASKED: [&str; 2] = ["No cached credentials found", "AuthSelectionPage OnPageShown"]; // i18n: not shown (VRChat's log lines)
-    text.lines().rev().find_map(|line| {
-        let message = message(line.as_bytes()).and_then(|m| std::str::from_utf8(m).ok()).unwrap_or(line);
-        match message.split_once("post login checks for ") {
-            Some((before, rest)) => Some(rest.trim_end().rsplit_once(" (").filter(|_| before.starts_with("[Authentication")).and_then(|(name, id)| {
-                let id = id.strip_suffix(')').filter(|id| id.starts_with("usr_"))?;
-                Some((id.to_string(), name.to_string()))
-            })),
-            None => ASKED.iter().any(|said| message.contains(said)).then_some(None),
+/// What a line of VRChat's log says of a sign-in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    /// VRChat's own record of the account it signed in: its id and name, `None` where the record names nobody for certain.
+    In(Option<(String, String)>),
+    /// It asks for a sign-in: nobody is signed in.
+    Asked,
+    /// The words of a sign-in in a line that is no such record (a script's message, or a further line of one): it names nobody,
+    /// and what was certain before it no longer is.
+    Unproven,
+}
+
+/// What `line` says of a sign-in. Only a record in VRChat's own shape ([`message`]) names an account or a sign-in page.
+pub fn sign_in(line: &[u8]) -> Option<SignIn> {
+    const CHECKS: &[u8] = b"post login checks for ";
+    const ASKED: [&[u8]; 2] = [b"No cached credentials found", b"AuthSelectionPage OnPageShown"];
+    let find = memchr::memmem::find;
+    let own = message(line);
+    let said = own.unwrap_or(line);
+    if let Some(at) = find(said, CHECKS) {
+        if own.is_none() || !said.starts_with(b"[Authentication") {
+            return Some(SignIn::Unproven);
         }
-    })
+        let who = std::str::from_utf8(&said[at + CHECKS.len()..]).ok().and_then(|rest| {
+            let (name, id) = rest.trim_end().rsplit_once(" (")?;
+            let id = id.strip_suffix(')').filter(|id| id.starts_with("usr_"))?;
+            Some((id.to_string(), name.to_string()))
+        });
+        return Some(SignIn::In(who));
+    }
+    ASKED.iter().any(|words| find(said, words).is_some()).then_some(if own.is_some() { SignIn::Asked } else { SignIn::Unproven })
+}
+
+/// Who a VRChat's log says is signed in, taken in line by line ([`sign_in`]): the one reading of it there is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Account {
+    /// The account last named, its id and its name: a label while `sure` is not set.
+    pub who: Option<(String, String)>,
+    /// `who` is the last thing the log said of a sign-in, in VRChat's own record of one.
+    pub sure: bool,
+    /// It asked for a sign-in, and nobody signed in since.
+    pub signed_out: bool,
+}
+
+impl Account {
+    /// Takes in a new part of the log (whole lines).
+    pub fn read(&mut self, text: &str) {
+        for line in text.lines() {
+            match sign_in(line.as_bytes()) {
+                Some(SignIn::In(who)) => {
+                    self.sure = who.is_some();
+                    self.who = who.or(self.who.take());
+                    self.signed_out = false;
+                }
+                Some(SignIn::Asked) => (self.sure, self.signed_out) = (false, true),
+                Some(SignIn::Unproven) => self.sure = false,
+                None => {}
+            }
+        }
+    }
 }
 
 /// A video a video player of the world played.
@@ -329,52 +374,95 @@ const BLOCK: usize = 1 << 20;
 /// A line longer than this (a script dumping data) is passed over rather than kept whole.
 const MAX_LINE: usize = 1 << 20;
 
-/// Reads the complete lines of `file` from byte `from` up to byte `end`, about `budget` bytes of them at most, a block
-/// at a time: `f` gets each line without its end. Returns where the last complete line read ends (a line still being
-/// written is read again next time) and whether the reading got to `end` (or the end of the file).
-pub(crate) fn read_lines(file: &mut File, from: u64, end: u64, budget: u64, mut f: impl FnMut(&[u8])) -> (u64, bool) {
-    if from >= end || file.seek(SeekFrom::Start(from)).is_err() {
-        return (from, from >= end);
+/// Reads the whole lines of a file that grows, on from where it was: every byte once, whatever the line it belongs to. A line
+/// still being written is kept and completed by a later read; one longer than [`MAX_LINE`] is passed over to its end, however
+/// many reads that takes, and what follows it is read as the line it is (never its tail as a line of its own).
+#[derive(Clone, Debug, Default)]
+pub struct Lines {
+    /// Where the next byte to read is.
+    read: u64,
+    /// Where what was taken in ends: after the last whole line, or in the line being passed over.
+    taken: u64,
+    /// The line begun.
+    begun: Vec<u8>,
+    /// In a line too long, passed over to its end.
+    skipping: bool,
+    /// Whether `read` is known to be at a line's start, or in which of a line it is.
+    placed: bool,
+}
+
+impl Lines {
+    /// A reader on from byte `at`, where an earlier one's [`Lines::taken`] was: in the middle of a line, that line is passed over.
+    pub fn at(at: u64) -> Self {
+        Self { read: at, taken: at, ..Self::default() }
     }
-    let mut block = vec![0u8; BLOCK.min((end - from) as usize)];
-    // The line begun in an earlier block, and whether it is one too long, passed over to its end.
-    let mut pending: Vec<u8> = Vec::new();
-    let mut skipping = false;
-    let (mut read, mut done) = (from, from);
-    while read < end && done - from < budget {
-        let want = ((end - read) as usize).min(block.len());
-        let n = match file.read(&mut block[..want]) {
-            Ok(0) => return (done, true),
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return (done, false),
-        };
-        let data = &block[..n];
-        let mut start = 0;
-        while let Some(i) = memchr::memchr(b'\n', &data[start..]) {
-            let line_end = start + i;
-            if skipping {
-                skipping = false;
-            } else if pending.is_empty() {
-                f(trim_cr(&data[start..line_end]));
-            } else {
-                pending.extend_from_slice(&data[start..line_end]);
-                f(trim_cr(&pending));
-                pending.clear();
-            }
-            start = line_end + 1;
-            done = read + start as u64;
-        }
-        if !skipping {
-            pending.extend_from_slice(&data[start..]);
-            if pending.len() > MAX_LINE {
-                pending = Vec::new();
-                skipping = true;
-            }
-        }
-        read += n as u64;
+
+    /// Where what was taken in ends: the place to go on from with another reader, or after a restart.
+    pub fn taken(&self) -> u64 {
+        self.taken
     }
-    (done, read >= end)
+
+    /// How far it read: the line still being written, or passed over, counts.
+    pub fn position(&self) -> u64 {
+        self.read
+    }
+
+    /// Whether what follows is the rest of a line too long to keep: what it says is not known.
+    pub fn skipping(&self) -> bool {
+        self.skipping
+    }
+
+    /// Reads on up to byte `end`, a block at a time, about `budget` bytes at most: `f` gets each line without its end. Whether
+    /// it got to `end` (or the end of the file). It reads at its own place: the file's is left alone where it can be.
+    pub fn read(&mut self, file: &File, end: u64, budget: u64, mut f: impl FnMut(&[u8])) -> std::io::Result<bool> {
+        if self.read >= end {
+            return Ok(true);
+        }
+        if !self.placed && self.read > 0 {
+            let mut before = [0u8];
+            self.skipping = read_at(file, self.read - 1, &mut before)? == 1 && before[0] != b'\n';
+        }
+        self.placed = true;
+        let from = self.read;
+        let mut block = vec![0u8; BLOCK.min((end - from) as usize)];
+        while self.read < end && self.read - from < budget {
+            let want = ((end - self.read) as usize).min(block.len());
+            let n = match read_at(file, self.read, &mut block[..want]) {
+                Ok(0) => return Ok(true),
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            let data = &block[..n];
+            let mut start = 0;
+            while let Some(i) = memchr::memchr(b'\n', &data[start..]) {
+                let line_end = start + i;
+                if self.skipping {
+                    self.skipping = false;
+                } else if self.begun.is_empty() {
+                    f(trim_cr(&data[start..line_end]));
+                } else {
+                    self.begun.extend_from_slice(&data[start..line_end]);
+                    f(trim_cr(&self.begun));
+                    self.begun.clear();
+                }
+                start = line_end + 1;
+                self.taken = self.read + start as u64;
+            }
+            self.read += n as u64;
+            if !self.skipping {
+                self.begun.extend_from_slice(&data[start..]);
+                if self.begun.len() > MAX_LINE {
+                    self.begun = Vec::new();
+                    self.skipping = true;
+                }
+            }
+            if self.skipping {
+                self.taken = self.read;
+            }
+        }
+        Ok(self.read >= end)
+    }
 }
 
 fn trim_cr(line: &[u8]) -> &[u8] {
@@ -450,8 +538,8 @@ const PER_POLL: u64 = 32 << 20;
 pub struct LogWatcher {
     dir: Option<PathBuf>,
     file: Option<PathBuf>,
-    /// Where the next line to read starts.
-    position: u64,
+    /// How far it was read.
+    lines: Lines,
     /// Everything in the log was read: the state is VRChat's as it is now.
     caught_up: bool,
     /// The last poll's events happened while it followed (not read back from before it began on this log).
@@ -489,7 +577,7 @@ impl LogWatcher {
     }
 
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, file: None, position: 0, caught_up: false, live: false, last_read: None, only: None, skip: None, held: None, lost: false, state: WorldState::default() }
+        Self { dir, file: None, lines: Lines::default(), caught_up: false, live: false, last_read: None, only: None, skip: None, held: None, lost: false, state: WorldState::default() }
     }
 
     /// A follower of one log file only, from its start.
@@ -524,7 +612,8 @@ impl LogWatcher {
         self.live
     }
 
-    /// The log the last poll read (its file name) and the bytes it read, from and to.
+    /// The log the last poll read (its file name) and the bytes whose events it gave, from and to (what is read of a line
+    /// still being written is not among them).
     pub fn last_read(&self) -> Option<(&str, u64, u64)> {
         self.last_read.as_ref().map(|(name, from, to)| (name.as_str(), *from, *to))
     }
@@ -577,34 +666,43 @@ impl LogWatcher {
             // A new VRChat run, the previous world forgotten. One that began while another log was followed happens
             // now, read whole; one already under way when Orbiters started is read from its last join.
             live = self.file.is_some();
-            self.position = if live { 0 } else { last_join(&mut f, len).unwrap_or(0) };
+            self.lines = Lines::at(if live { 0 } else { last_join(&mut f, len).unwrap_or(0) });
             self.file = Some(newest.clone());
             self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
             self.caught_up = false;
-        } else if len < self.position {
+        } else if len < self.lines.position() {
             // Truncated: what it said is gone. Following one log, that log is lost; else read again from its start.
             if self.held.is_some() {
                 self.lose();
                 return events;
             }
-            self.position = 0;
+            self.lines = Lines::default();
             self.state = WorldState { log_file: Some(newest.clone()), ..Default::default() };
         }
-        let from = self.position;
+        let from = self.lines.taken();
         let state = &mut self.state;
-        let (to, all) = read_lines(&mut f, from, len, PER_POLL, |line| {
+        let all = self.lines.read(&f, len, PER_POLL, |line| {
             if let Some(e) = parse_bytes(line) {
                 state.apply(&e);
                 events.push(e);
             }
         });
-        self.position = to;
-        self.caught_up = all;
+        self.caught_up = all.unwrap_or(false);
         self.live = live;
         let name = newest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        self.last_read = Some((name, from, to));
+        self.last_read = Some((name, from, self.lines.taken()));
         events
     }
+}
+
+/// Reads into `into` from byte `at` of `file`, wherever its own position is (Windows moves it all the same).
+fn read_at(file: &File, at: u64, into: &mut [u8]) -> std::io::Result<usize> {
+    #[cfg(test)]
+    tests::READ.with(|read| read.set(read.get() + into.len() as u64));
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::read_at(file, into, at);
+    #[cfg(windows)]
+    std::os::windows::fs::FileExt::seek_read(file, into, at)
 }
 
 #[cfg(test)]
@@ -834,12 +932,16 @@ mod tests {
         std::fs::write(&path, format!("{left}\r\n{huge}\n{left}\npartial")).unwrap();
         let len = std::fs::metadata(&path).unwrap().len();
         let mut lines = Vec::new();
-        let (to, all) = read_lines(&mut File::open(&path).unwrap(), 0, len, u64::MAX, |l| lines.push(parse_bytes(l)));
+        let file = File::open(&path).unwrap();
+        let mut reader = Lines::default();
+        let all = reader.read(&file, len, u64::MAX, |l| lines.push(parse_bytes(l))).unwrap();
+        let to = reader.taken();
         assert_eq!(lines.iter().filter(|e| **e == Some(LogEvent::LeftRoom)).count(), 2, "the first and the last, not the long one");
         assert_eq!((to, all), (len - "partial".len() as u64, true));
         // A budget stops at a line's end, and the next read goes on from there.
-        let (first, all) = read_lines(&mut File::open(&path).unwrap(), 0, len, 1, |_| {});
-        assert_eq!((first, all), (left.len() as u64 + 2, false));
+        let mut reader = Lines::default();
+        let all = reader.read(&file, len, 1, |_| {}).unwrap();
+        assert_eq!((reader.taken(), all), (left.len() as u64 + 2, false));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -879,20 +981,86 @@ mod tests {
     }
 
     /// Who is signed in is the last thing the log says of it, for certain or not at all: a later line that names nobody takes
-    /// the earlier account with it, and a script's line names none.
+    /// the earlier account with it, and a script's line names none. COR-1: nor does a line that is no record of VRChat's,
+    /// whatever it says (a further line of a script's message).
     #[test]
     fn who_is_signed_in_is_the_last_thing_the_log_says_of_it() {
         let login = |who: &str| line(&format!("[Authentication - x] Preforming post login checks for {who}"));
         let (a, b) = (Some(("usr_a".to_string(), "Sample A".to_string())), Some(("usr_b".to_string(), "Sample (B)".to_string())));
-        assert_eq!(sign_in("nothing"), None);
-        assert_eq!(sign_in(&login("Sample A (usr_a)")), Some(a.clone()));
-        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample (B) (usr_b)")].join("\n")), Some(b));
-        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample B (not an id)")].join("\n")), Some(None), "names nobody: not known");
-        assert_eq!(sign_in(&[login("Sample A (usr_a)"), login("Sample B")].join("\r\n")), Some(None));
-        assert_eq!(sign_in(&[login("Sample A (usr_a)"), line("VP AuthSelectionPage OnPageShown()")].join("\n")), Some(None));
-        assert_eq!(sign_in(&[line("[Authentication - x] No cached credentials found"), login("Sample A (usr_a)")].join("\n")), Some(a));
-        for fake in [line("[World] post login checks for Sample A (usr_a)"), line("post login checks for Sample A (usr_a)"), "Preforming post login checks for Sample A (usr_a)".into()] {
-            assert_eq!(sign_in(&fake), Some(None), "{fake}");
+        let read = |lines: &[String]| {
+            let mut account = Account::default();
+            account.read(&lines.join("\r\n"));
+            (account.who, account.sure, account.signed_out)
+        };
+        let (of_a, of_b) = (login("Sample A (usr_a)"), login("Sample (B) (usr_b)"));
+        assert_eq!(read(&["nothing".into()]), (None, false, false));
+        assert_eq!(read(std::slice::from_ref(&of_a)), (a.clone(), true, false));
+        assert_eq!(read(&[of_a.clone(), of_b.clone()]), (b, true, false));
+        assert_eq!(read(&[of_a.clone(), login("Sample B (not an id)")]), (a.clone(), false, false), "names nobody: not known, a label is left");
+        assert_eq!(read(&[of_a.clone(), login("Sample B")]), (a.clone(), false, false));
+        assert_eq!(read(&[of_a.clone(), line("VP AuthSelectionPage OnPageShown()")]), (a.clone(), false, true));
+        assert_eq!(read(&[line("[Authentication - x] No cached credentials found"), of_a.clone()]), (a.clone(), true, false));
+        assert_eq!(read(&[line("[Authentication - x] No cached credentials found"), line("[World] post login checks for Sample A (usr_a)")]), (None, false, true));
+        for fake in [
+            line("[World] post login checks for Sample (B) (usr_b)"),
+            line("post login checks for Sample (B) (usr_b)"),
+            "Preforming post login checks for Sample (B) (usr_b)".into(),
+            "[Authentication - x] Preforming post login checks for Sample (B) (usr_b)".into(),
+            format!("   {of_b}"),
+            "AuthSelectionPage OnPageShown".into(),
+        ] {
+            assert_eq!(read(std::slice::from_ref(&fake)), (None, false, false), "{fake}");
+            assert_eq!(read(&[of_a.clone(), fake.clone()]), (a.clone(), false, false), "{fake}");
+            assert_eq!(read(&[fake.clone(), of_a.clone()]), (a.clone(), true, false), "{fake}");
+        }
+    }
+
+    thread_local! {
+        /// The bytes read from logs by this test.
+        pub(super) static READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn read_by(work: impl FnOnce()) -> u64 {
+        let before = READ.with(|read| read.get());
+        work();
+        READ.with(|read| read.get()) - before
+    }
+
+    /// COR-2: an unfinished line is read once, however long and however often the log is looked at; while it grows, what is
+    /// read is what was added; what follows its end is found, its tail never taken for a line.
+    #[test]
+    fn an_unfinished_line_is_read_once() {
+        use std::io::Write;
+        for long in [100, MAX_LINE / 2, 3 * MAX_LINE + 7] {
+            let dir = temp_dir(&format!("unfinished-{long}"));
+            let path = dir.join("output_log_2026-10-20_00-00-00.txt");
+            let left = line("[Behaviour] OnLeftRoom");
+            std::fs::write(&path, format!("{}\n{}", line(&format!("[Behaviour] Joining {WORLD_A}:1")), "z".repeat(long))).unwrap();
+            let mut w = LogWatcher::new(Some(dir.clone()));
+            assert_eq!(w.poll().len(), 1);
+            assert!(w.caught_up());
+            let idle = read_by(|| (0..10).for_each(|_| assert!(w.poll().is_empty())));
+            assert_eq!(idle, 0, "nothing new was written ({long})");
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let grown = read_by(|| {
+                for _ in 0..10 {
+                    f.write_all(&[b'z'; 1000]).unwrap();
+                    assert!(w.poll().is_empty());
+                }
+            });
+            assert_eq!(grown, 10_000, "what was added ({long})");
+            let (_, _, to) = w.last_read().unwrap();
+            // A reader that goes on from there (a history's) reads no part of it as a line.
+            f.write_all(left.as_bytes()).unwrap();
+            f.write_all(format!("\r\n{left}\n").as_bytes()).unwrap();
+            assert_eq!(w.poll(), vec![LogEvent::LeftRoom], "the line after it, alone ({long})");
+            let mut on = Lines::at(to);
+            let mut events = Vec::new();
+            let file = File::open(&path).unwrap();
+            assert!(on.read(&file, file.metadata().unwrap().len(), u64::MAX, |l| events.extend(parse_bytes(l))).unwrap());
+            assert_eq!(events.iter().filter(|e| **e == LogEvent::LeftRoom).count(), 1, "{long}");
+            assert_eq!(on.taken(), file.metadata().unwrap().len());
+            std::fs::remove_dir_all(dir).ok();
         }
     }
 

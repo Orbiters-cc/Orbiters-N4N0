@@ -13,7 +13,7 @@ use crate::bridge::sessions::{self, Eac, SideMark, Sides};
 use crate::bridge::win;
 use orbiters_core::osc::{Latest, OscValue};
 use orbiters_core::settings::{Photo3dLength, PictureMode};
-use orbiters_core::vrchat_log::LogWatcher;
+use orbiters_core::vrchat_log::{Account, Lines, LogWatcher};
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -365,9 +365,8 @@ struct SideState {
     log: Option<PathBuf>,
     watcher: Option<LogWatcher>,
     /// How far its log was read for the account and its ports.
-    read_to: u64,
-    account: Option<(String, String)>,
-    needs_sign_in: bool,
+    lines: Lines,
+    account: Account,
     query: Option<SocketAddr>,
     desktop: Option<bool>,
     looked: Option<Instant>,
@@ -505,7 +504,7 @@ impl SideGame {
                         st.followed.push(log);
                     }
                     st.watcher = None;
-                    st.read_to = 0;
+                    st.lines = Lines::default();
                     st.pid = None;
                     st.started = None;
                 }
@@ -540,22 +539,15 @@ impl SideGame {
             watcher.poll();
         }
         if let Some(log) = st.log.clone() {
-            // Whole lines, counted in the file's bytes (controller/vrchats.rs, CTL2-6).
-            let (text, consumed) = super::vrchats::read_log_from(&log, st.read_to, LOG_CHUNK);
-            st.read_to += consumed;
-            let asked = text.rfind("No cached credentials found").or_else(|| text.rfind("AuthSelectionPage OnPageShown"));
-            let signed = text.rfind("post login checks for ");
-            match (asked, signed) {
-                (Some(a), s) if s.is_none_or(|s| s < a) => {
-                    st.needs_sign_in = true;
-                    st.account = None;
-                }
-                (_, Some(_)) => {
-                    st.needs_sign_in = false;
-                    st.account = sessions::signed_in(&text);
-                }
-                _ => {}
+            let mut text = String::new();
+            if let Ok(file) = std::fs::File::open(&log) {
+                let len = file.metadata().map_or(0, |m| m.len());
+                let _ = st.lines.read(&file, len, LOG_CHUNK, |line| {
+                    text.push_str(&String::from_utf8_lossy(line));
+                    text.push('\n');
+                });
             }
+            st.account.read(&text);
             if st.query.is_none() {
                 st.query = sessions::query_port(&text).map(|p| SocketAddr::from(([127, 0, 0, 1], p)));
             }
@@ -737,8 +729,8 @@ impl Game for SideGame {
             queue: (*snap.reconstruct_queue).clone(),
             queue_waits_for: ctl.reconstruction_waits_for().to_string(),
             steamvr: snap.steamvr.running,
-            session_account: st.account.clone(),
-            needs_sign_in: st.needs_sign_in,
+            session_account: st.account.who.clone().filter(|_| st.account.sure),
+            needs_sign_in: st.account.signed_out,
             renderer_lost: false,
             start_failed: None,
         }
@@ -783,7 +775,7 @@ impl Game for SideGame {
             // A profile's account does not change between its starts: kept, so that a start that failed is not taken for a
             // profile waiting at its sign-in page (2026-11-15 07:09: go_to_world answered a stale needs_sign_in). The new
             // VRChat's log says it again, or that it waits for a sign-in.
-            let account = st.account.take();
+            let account = Account { signed_out: false, ..std::mem::take(&mut st.account) };
             let mut followed = std::mem::take(&mut st.followed);
             followed.extend(st.log.take());
             // A handful is enough: older logs are minutes old, past any launch's moment.
@@ -843,7 +835,7 @@ impl Game for SideGame {
             if st.log.as_ref() != Some(&log) {
                 st.watcher = Some(LogWatcher::of_file(log.clone()));
                 st.log = Some(log.clone());
-                st.read_to = 0;
+                st.lines = Lines::default();
             }
             st.followed.retain(|f| f != &log);
             st.pid = Some(pid);

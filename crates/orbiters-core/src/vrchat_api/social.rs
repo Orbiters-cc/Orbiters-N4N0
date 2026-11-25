@@ -19,6 +19,18 @@ fn list(body: &[u8]) -> Result<Vec<Value>> {
     }
 }
 
+/// What the pages of `path` (by their offset) list, `most` of them at most.
+fn listed(asks: &mut impl Asks, family: &'static str, most: usize, path: impl Fn(usize) -> String) -> Result<Vec<Value>> {
+    let mut all = Vec::new();
+    pages(asks, family, most, |page| path(page * PAGE), |body| {
+        let items = list(body)?;
+        let n = items.len();
+        all.extend(items);
+        Ok(n)
+    })?;
+    Ok(all)
+}
+
 impl Client {
     /// One page (up to 100) of the friends, as VRChat's `LimitedUserFriend`s: `offline=false` gives those in the game
     /// and on the website, `offline=true` the others. The caller pages (`offset` += 100 while a page is full); the
@@ -45,19 +57,8 @@ impl Client {
     }
 
     /// The account's favourite friends with their groups (`/favorites?type=friend`), every page.
-    pub fn favourite_friends_value(&mut self) -> Result<Value> {
-        self.authenticated()?;
-        let mut all = Vec::new();
-        for page in 0..10 {
-            let r = self.get("favorites", &format!("/favorites?type=friend&n=100&offset={}", page * 100))?;
-            let items = list(&r.body)?;
-            let n = items.len();
-            all.extend(items);
-            if n < 100 {
-                break;
-            }
-        }
-        Ok(Value::Array(all))
+    pub fn favourite_friends_value(asks: &mut impl Asks) -> Result<Value> {
+        listed(asks, "favorites", 10, |offset| format!("/favorites?type=friend&n=100&offset={offset}")).map(Value::Array)
     }
 
     /// `/profile/{id}` (`getPublicProfile`): bio, links, languages, badges, banner, decorations.
@@ -85,19 +86,8 @@ impl Client {
 
     /// The (v1) notifications not hidden: invites, invite requests, friend requests (`getNotifications`). Up to three
     /// pages: on an account with many friend requests waiting, the first hundred can all be those (seen 2026-11-18).
-    pub fn notifications(&mut self) -> Result<Vec<Value>> {
-        self.authenticated()?;
-        let mut all = Vec::new();
-        for page in 0..3 {
-            let r = self.get("notifications", &format!("/auth/user/notifications?hidden=false&n=100&offset={}", page * 100))?;
-            let items = list(&r.body)?;
-            let n = items.len();
-            all.extend(items);
-            if n < 100 {
-                break;
-            }
-        }
-        Ok(all)
+    pub fn notifications(asks: &mut impl Asks) -> Result<Vec<Value>> {
+        listed(asks, "notifications", 3, |offset| format!("/auth/user/notifications?hidden=false&n=100&offset={offset}"))
     }
 
     /// The newer notifications: boops among them (`getNotificationV2s`, `/notifications`).
@@ -306,11 +296,11 @@ mod tests {
         assert_eq!(c.friends_page(false, 0).unwrap().len(), 1);
         assert_eq!(c.current_user_value().unwrap()["displayName"], "Me");
         assert!(c.favourite_groups_value().unwrap().is_array());
-        assert_eq!(c.favourite_friends_value().unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(Client::favourite_friends_value(&mut c).unwrap().as_array().unwrap().len(), 1);
         assert_eq!(c.public_profile(A).unwrap()["bio"], "hi");
         assert_eq!(c.user_value(A).unwrap()["note"], "n");
         assert_eq!(c.mutuals(A).unwrap(), (3, 1));
-        assert!(c.notifications().unwrap().is_empty());
+        assert!(Client::notifications(&mut c).unwrap().is_empty());
         assert!(c.notifications_v2().unwrap().is_empty());
         assert_eq!(c.inventory_template_picture("invt_1").unwrap(), "https://api.vrchat.cloud/plate");
         assert_eq!(c.pipeline_token().unwrap().0, "authcookie_x");

@@ -17,7 +17,7 @@ use orbiters_core::reconstruction::Event as ReconstructEvent;
 use orbiters_core::settings::{Settings, WhilePlaying};
 use orbiters_core::visited;
 use orbiters_i18n::{mark, tr};
-use orbiters_core::vrchat_log::{LogEvent, LogWatcher, WorldState};
+use orbiters_core::vrchat_log::{LogEvent, WorldState};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -276,6 +276,12 @@ pub struct Controller {
     /// How many times the settings were changed: taken under `snapshot` with the change, so the writer can tell the
     /// newer of two copies whatever order they reach it in.
     settings_revision: AtomicU64,
+    settings_changes: Mutex<SettingsChanges>,
+    /// Held while the OSC service is started for the settings: a later start reads later settings.
+    osc_starting: Mutex<()>,
+    /// A test's look at a change about to be acted on (`false`), and acted on.
+    #[cfg(test)]
+    test_settings_acted: Mutex<Option<Arc<dyn Fn(&Settings, bool) + Send + Sync>>>,
     /// A capture asked for while the last one was still being saved: it starts once that one is (source, importing,
     /// started from the record toggle).
     pending_start: Mutex<Option<(SourceSpec, bool, bool, u64)>>,
@@ -379,6 +385,20 @@ const QUIT_PAUSE_LIMIT: Duration = Duration::from_secs(10);
 const HEADSET_BREAK: Duration = Duration::from_secs(60);
 
 /// `calibration.json` in the config folder: the latest calibration, kept across restarts.
+/// A change of the settings, made and not acted on yet.
+struct SettingsChange {
+    previous: orbiters_core::slice::Slice<Settings>,
+    settings: orbiters_core::slice::Slice<Settings>,
+    echo: bool,
+}
+
+/// The changes of the settings waiting to be acted on, in the order they were made, by one thread at a time.
+#[derive(Default)]
+struct SettingsChanges {
+    waiting: VecDeque<SettingsChange>,
+    acting: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredCalibration {
     utc_ms: u64,
@@ -576,6 +596,7 @@ impl Controller {
         let mut snapshot = Snapshot::with(settings);
         let calibration = read_calibration();
         snapshot.steamvr.calibration = calibration.as_ref().map(calibration_info);
+        let sides = Arc::<crate::bridge::sessions::Sides>::default();
         // N4N0 lives in the controller and reaches it through a weak link: no cycle keeps either alive.
         Arc::new_cyclic(|me| Self {
             published: Mutex::new(Arc::new(snapshot.clone())),
@@ -621,7 +642,7 @@ impl Controller {
             launcher: Mutex::new(launcher::Runtime::default()),
             launcher_started: Mutex::new(None),
             bridge: Mutex::new(None),
-            sides: Arc::default(),
+            sides: sides.clone(),
             followed: Mutex::new(None),
             quieted: Mutex::new(Vec::new()),
             travel: Mutex::new(None),
@@ -640,7 +661,7 @@ impl Controller {
             performance: Mutex::new(performance::PerformanceRuntime::default()),
             burst: Mutex::new(burst::BurstRuntime::default()),
             world_captures: Mutex::new(world_captures::WorldCapturesRuntime::default()),
-            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::default()),
+            world_feedback: Mutex::new(world_feedback::WorldFeedbackRuntime::new(vrchats::TargetLog::new(None, sides))),
             scan: Mutex::new(scan::ScanRuntime::default()),
             rig: Mutex::new(rig::RigRuntime::default()),
             // (Counted on from the moment it starts: a press that waited in a window since before is for no call of now.)
@@ -661,6 +682,10 @@ impl Controller {
             groups_admitted: Arc::default(),
             lend_gate: Mutex::new(()),
             settings_revision: AtomicU64::new(0),
+            settings_changes: Mutex::default(),
+            osc_starting: Mutex::new(()),
+            #[cfg(test)]
+            test_settings_acted: Mutex::default(),
             pending_start: Mutex::new(None),
             #[cfg(test)]
             test_commands: Mutex::new(None),
@@ -2233,7 +2258,7 @@ impl Controller {
     /// strength goes to the avatar's Walk boost radial (not when that radial set it: the contract has only the
     /// slider's changes sent, and the echo would fight a radial still moving).
     fn apply_settings(self: &Shared, f: impl FnOnce(&mut Settings), echo: bool) {
-        let (previous, settings) = {
+        let (revision, settings) = {
             let mut s = self.snapshot.lock().unwrap();
             let previous = s.settings.clone();
             f(&mut s.settings);
@@ -2247,10 +2272,50 @@ impl Controller {
             // Numbered under the lock that made the change: two changes on two threads can reach the writer in
             // either order, and the higher number is the one that holds both.
             let revision = self.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
-            (previous, (revision, s.settings.clone()))
+            // With the change itself: which server this process talks to is never another than the settings say.
+            if previous.development != s.settings.development {
+                use_environment(s.settings.development);
+            }
+            self.settings_changes.lock().unwrap().waiting.push_back(SettingsChange { previous, settings: s.settings.clone(), echo });
+            (revision, s.settings.clone())
         };
-        let (revision, settings) = settings;
         self.publish();
+        self.queue_save(revision, (*settings).clone());
+        self.act_on_settings();
+    }
+
+    /// Acts on the changes of the settings waiting, in the order they were made: two on two threads never leave what runs as
+    /// the older one had it. One made while another thread acts (or by what acting does) is acted on by that one, after it.
+    fn act_on_settings(self: &Shared) {
+        struct Acting<'a>(&'a Mutex<SettingsChanges>);
+        impl Drop for Acting<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).acting = false;
+            }
+        }
+        loop {
+            let change = {
+                let mut changes = self.settings_changes.lock().unwrap();
+                if changes.acting {
+                    return;
+                }
+                let Some(change) = changes.waiting.pop_front() else { return };
+                changes.acting = true;
+                change
+            };
+            let _acting = Acting(&self.settings_changes);
+            #[cfg(test)]
+            let (look, changed) = (self.test_settings_acted.lock().unwrap().clone(), change.settings.clone());
+            #[cfg(test)]
+            look.iter().for_each(|look| look(&changed, false));
+            self.settings_changed(change);
+            #[cfg(test)]
+            look.iter().for_each(|look| look(&changed, true));
+        }
+    }
+
+    /// What a change of the settings does to what runs.
+    fn settings_changed(self: &Shared, SettingsChange { previous, settings, echo }: SettingsChange) {
         if echo && previous.walk_boost.strength != settings.walk_boost.strength {
             self.n4n0.send_parameter(orbiters_contracts::n4n0::params::WALK_BOOST, rosc::OscType::Float(settings.walk_boost.strength));
         }
@@ -2267,7 +2332,6 @@ impl Controller {
         }
         if previous.development != settings.development {
             // The account thread reads the other server's account within half a second; the updates look there now.
-            use_environment(settings.development);
             // Signed out until it is, with nothing of the last one's credential left to send anywhere.
             self.account_environment_changed();
             // What was read of worlds' feedback is the other environment's.
@@ -2276,7 +2340,6 @@ impl Controller {
             self.update_action(crate::ipc::UpdateAction::Check);
         }
         let (osc_changed, sessions_changed) = (previous.osc != settings.osc, previous.sessions_dir != settings.sessions_dir);
-        self.queue_save(revision, (*settings).clone());
         if osc_changed || sessions_changed {
             let ctl = self.clone();
             std::thread::spawn(move || {
@@ -2408,6 +2471,7 @@ impl Controller {
     }
 
     fn start_osc(self: &Shared) {
+        let _one = self.osc_starting.lock().unwrap();
         self.start_osc_with(true);
     }
 
@@ -3343,17 +3407,10 @@ fn spawn_watchers(ctl: Shared) {
     std::thread::Builder::new()
         .name("watchers".into())
         .spawn(move || {
-            // The bridge's side sessions' logs are theirs: the app follows its target's log only (bridge/sessions.rs).
-            let new_log = || {
-                let mut log = LogWatcher::new(None);
-                let sides = ctl.sides.clone();
-                log.set_skip(Arc::new(move |path: &std::path::Path| sides.skips_log(path)));
-                log
-            };
-            let mut log = new_log();
+            // The bridge's side sessions' logs are theirs: the app follows its target's log only.
+            let mut log = vrchats::TargetLog::new(None, ctl.sides.clone());
             // Every VRChat running, and which the app follows (controller/vrchats.rs).
             let mut roster = vrchats::Roster::seeing(ctl.launcher_machine_now().vrchats_seen().unwrap_or_default());
-            let mut log_target: Option<(u32, Option<PathBuf>)> = None;
             let mut split = WorldSplit::default();
             // The worlds visited, kept from VRChat's logs before VRChat deletes them (the Visited worlds page).
             let history_file = visited::history_file();
@@ -3414,16 +3471,6 @@ fn spawn_watchers(ctl: Shared) {
                         ctl.publish_runs();
                     }
                     let pid = ctl.sides.app_pid(&vrchats);
-                    // Another VRChat followed: its log from its last world, as at a start (never its whole past as news).
-                    let target = ctl.sides.target();
-                    let now_target = target.as_ref().map(|t| (t.pid, t.log.clone()));
-                    if now_target != log_target {
-                        let followed_log = log.state.log_file.clone();
-                        if target.as_ref().is_some_and(|t| t.log.is_some() && followed_log.is_some() && t.log != followed_log) {
-                            log = new_log();
-                        }
-                        log_target = now_target;
-                    }
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
                     let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
@@ -4811,6 +4858,38 @@ mod tests {
         assert_eq!(sent.len(), 2, "record and depth switched on once: {sent:?}");
         ctl.update(|s| s.capture.state = CaptureState::Idle);
         ctl.shutdown();
+    }
+
+    /// DCT-2: two changes at once are acted on in the order they were made, whichever thread is the slower: what runs is as the
+    /// newest has it. A change made by what acting does comes after, and waits for nobody.
+    #[test]
+    fn settings_are_acted_on_in_the_order_they_changed() {
+        let ctl = Controller::new(Settings::default());
+        let (first, stalled) = mpsc::channel();
+        let (go, wait) = mpsc::channel::<()>();
+        let wait = Mutex::new(Some(wait));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (first, acted, weak) = (Mutex::new(first), seen.clone(), Arc::downgrade(&ctl));
+        *ctl.test_settings_acted.lock().unwrap() = Some(Arc::new(move |s, done| {
+            if done {
+                return acted.lock().unwrap().push((s.walk_boost.strength, s.walk_boost.enabled));
+            }
+            let held = wait.lock().unwrap().take();
+            if let Some(wait) = held {
+                first.lock().unwrap().send(()).unwrap();
+                let _ = wait.recv_timeout(Duration::from_secs(20));
+                weak.upgrade().unwrap().update_settings(|s| s.walk_boost.enabled = true);
+            }
+        }));
+        std::thread::scope(|scope| {
+            scope.spawn(|| ctl.set_walk_boost(0.25, false));
+            stalled.recv().unwrap();
+            // The second is made, and its thread is done, while the first is still acted on.
+            scope.spawn(|| ctl.set_walk_boost(0.75, false)).join().unwrap();
+            assert_eq!(ctl.settings().walk_boost.strength, 0.75);
+            go.send(()).unwrap();
+        });
+        assert_eq!(*seen.lock().unwrap(), [(0.25, false), (0.75, false), (0.75, true)]);
     }
 
     #[test]

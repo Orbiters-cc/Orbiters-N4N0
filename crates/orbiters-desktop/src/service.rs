@@ -555,7 +555,10 @@ impl Service {
                         std::thread::spawn(move || {
                             let _admitted = admitted;
                             let reply = ctl.groups(link, scope, request);
-                            mailbox.post(ToClient::Groups { id, reply });
+                            // Its link closed meanwhile: what it prepared is nobody's to send.
+                            if !mailbox.post(ToClient::Groups { id, reply }) {
+                                ctl.groups_link_closed(link);
+                            }
                         });
                     } else {
                         crate::controller::groups::not_taken_in(&request);
@@ -703,7 +706,7 @@ impl Service {
                     .and_then(|_| messages.iter().try_for_each(|m| ipc::write_line(&mut writer, m)));
                 if written.is_err() {
                     out.close();
-                    return;
+                    break;
                 }
                 #[cfg(test)]
                 completed.fetch_add(1, Ordering::Relaxed);
@@ -711,6 +714,8 @@ impl Service {
                     std::thread::sleep(pace);
                 }
             }
+            // Closed, or owing more than it can hold: the other end knows at once, and nobody there waits for an answer.
+            let _ = writer.shutdown(std::net::Shutdown::Both);
         });
         // Subscribed before it is listed: the snapshot is in its mailbox before anything else can be (a Show).
         self.ctl.subscribe(mailbox.clone());
@@ -759,23 +764,21 @@ impl Service {
         // Lines of a bounded length: a client cannot make the service hold an endless one.
         while let Ok(Some(line)) = ipc::read_line_capped(&mut reader, MAX_COMMAND) {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
-                match (&work, msg) {
+                match msg {
                     // Quitting: no new file work is taken.
-                    (_, msg) if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
-                    (Some(work), msg) if is_file_work(&msg) => {
+                    msg if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
+                    msg if is_file_work(&msg) => {
                         let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
-                        // Never waits for room: a full line refuses this one, so the Stop or the Talk release behind it
-                        // is read at once (verify2-controller).
-                        if let Err(std::sync::mpsc::TrySendError::Full(_)) = work.try_send((msg, library)) {
+                        if !hand_over(work.as_ref(), (msg, library)) {
                             self.ctl.notify(NoticeKind::Error, tr("Orbiters is busy with many requests: try again in a moment."));
                         }
                     }
                     // Quitting waits for a recording to be saved: the link goes on reading (and gets its Close).
-                    (_, ToService::Quit) => {
+                    ToService::Quit => {
                         let svc = self.clone();
                         std::thread::spawn(move || svc.quit());
                     }
-                    (_, msg) => self.handle(id, role, msg),
+                    msg => self.handle(id, role, msg),
                 }
             }
         }
@@ -865,6 +868,13 @@ const LINK_WORK: usize = 32;
 
 /// What a window asks that works on files or folders, possibly for seconds: done in its order on the link's work thread,
 /// not on its reading thread ([`Service::serve`]). A reconstruction stopped or unqueued follows the one asked before it.
+/// Hands file work to a link's thread for it. It never waits for room, and is never done on the thread that reads the link: a
+/// full line, a thread that could not start or ended refuses this one, so the Stop or the Talk release behind it is read at once
+/// (verify2-controller).
+fn hand_over<T>(work: Option<&std::sync::mpsc::SyncSender<T>>, one: T) -> bool {
+    work.is_some_and(|work| work.try_send(one).is_ok())
+}
+
 fn is_file_work(msg: &ToService) -> bool {
     matches!(
         msg,
@@ -1414,6 +1424,17 @@ pub(crate) mod tests {
 
     /// How long a Send to Mixer takes in a test ([`Service::handle`]).
     pub(crate) static FILE_WORK_TAKES: Mutex<Option<Duration>> = Mutex::new(None);
+
+    /// DCT-24: file work whose thread could not start, or ended, is refused at once, as a full line's is.
+    #[test]
+    fn file_work_nothing_can_do_is_refused() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        assert!(hand_over(Some(&tx), 1));
+        assert!(!hand_over(Some(&tx), 2), "full");
+        drop(rx);
+        assert!(!hand_over(Some(&tx), 3), "its thread ended");
+        assert!(!hand_over(None, 4), "its thread never started");
+    }
 
     /// CTL-7: a Stop sent after a slow Send to Mixer on the same link is done at once, not after the export.
     #[test]

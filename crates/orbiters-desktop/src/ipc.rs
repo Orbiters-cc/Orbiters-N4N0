@@ -793,7 +793,8 @@ impl Client {
                 match msg {
                     ToClient::SmoothingAck { id, revision } => {
                         let mut held = c.state.lock().unwrap();
-                        if let Some(p) = held.smoothing.iter_mut().find(|p| p.0 == id) { p.2 = Some(revision); }
+                        // Taken in their order: it says it for those before it whose own went (mailbox.rs).
+                        for p in held.smoothing.iter_mut().filter(|p| p.0 <= id) { p.2.get_or_insert(revision); }
                         held.follow_smoothing();
                     }
                     ToClient::Snapshot { snapshot } => c.take_snapshot(Arc::new(*snapshot)),

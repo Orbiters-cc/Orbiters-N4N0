@@ -314,6 +314,7 @@ mod tests {
         const MAY: &[(&str, &str, usize, &str)] = &[
             ("account.rs", "account::read_saved(", 3, "the account thread itself: what it reads is installed under the gate; and whether the file still holds the credential whose member's id is written to it"),
             ("assistant.rs", "self.account_api()", 1, "whether somebody is signed in"),
+            ("avatar_gun.rs", "account_api()", 1, "the stream's own member, read with its identity's epoch: what a hit may still do is checked against it as it leaves, and answered as it"),
             ("calls.rs", "account_api()", 5, "the calls' own identity: every request is stamped with it and checked as it goes (verify3 of calls)"),
             ("explorer.rs", "account_api()", 1, "reading the points shown"),
             ("maps.rs", "account_api()", 2, "reading My maps, kept by whose they are"),
@@ -329,7 +330,6 @@ mod tests {
         // What is known to break the rule and is not put right yet: (file, what, how many times, since when, whose). Said on every
         // run, and none is added without its date and who puts it right.
         const EXCEPTIONS: &[(&str, &str, usize, &str, &str)] = &[
-            ("avatar_gun.rs", "account_api()", 3, "2026-11-25", "the avatar gun's own session: each of the three should act with the epoch it was asked with, or be listed in MAY with why it may"),
         ];
         let mut wrong = Vec::new();
         let mut looked = 0;

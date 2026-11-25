@@ -274,7 +274,7 @@ impl History {
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
-            let Ok(mut file) = File::open(path) else { continue };
+            let Ok(file) = File::open(path) else { continue };
             let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
             // A log shorter than what was read of it was replaced: read again, from no world.
             let mut log = self.logs.get(name).cloned().filter(|l| l.read <= len).unwrap_or_default();
@@ -288,7 +288,8 @@ impl History {
             let from = log.read;
             let mut events = Vec::new();
             // Only joins, room names and videos count here: other lines are let go after a look at their first bytes.
-            let (read, _) = crate::vrchat_log::read_lines(&mut file, from, end, budget, |line| {
+            let mut lines = crate::vrchat_log::Lines::at(from);
+            let _ = lines.read(&file, end, budget, |line| {
                 let wanted = crate::vrchat_log::message(line).is_some_and(|m| {
                     m.starts_with(b"[Video Playback] Attempting to resolve URL '")
                         || m.starts_with(b"[Behaviour] Joining ")
@@ -298,7 +299,8 @@ impl History {
                     events.push(e);
                 }
             });
-            budget = budget.saturating_sub(read - from);
+            let read = lines.taken();
+            budget = budget.saturating_sub(lines.position() - from);
             for e in &events {
                 changed |= self.observe(&mut log, e);
             }
@@ -308,9 +310,9 @@ impl History {
             log.read = read;
             self.logs.insert(name.clone(), log);
         }
-        // Forget the logs VRChat deleted.
+        // Forget the logs VRChat deleted: not those this look at the folder missed.
         let before = self.logs.len();
-        self.logs.retain(|name, _| logs.iter().any(|(n, _)| n == name));
+        self.logs.retain(|name, _| logs.binary_search_by(|(listed, _)| listed.cmp(name)).is_ok() || !matches!(dir.join(name).try_exists(), Ok(false)));
         if changed {
             self.sort();
         }

@@ -106,6 +106,7 @@ crates/orbiters-projects/src/unity6/gate/tests.rs
 crates/orbiters-projects/src/unity6/payload/tests.rs
 crates/orbiters-projects/src/copies/tests.rs
 # VRChat groups' service tests (made-up groups and replies).
+crates/orbiters-desktop/src/controller/avatar_gun_tests.rs
 crates/orbiters-desktop/src/controller/groups_tests.rs
 crates/orbiters-desktop/src/controller/groups_world.rs
 crates/orbiters-desktop/src/pages/groups/window_tests.rs

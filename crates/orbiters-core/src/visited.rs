@@ -218,7 +218,7 @@ impl History {
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
-            let Ok(mut file) = File::open(path) else { continue };
+            let Ok(file) = File::open(path) else { continue };
             let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
             // A log shorter than what was read of it was replaced: read again.
             let from = self.logs.get(name).copied().filter(|&from| from <= len).unwrap_or(0);
@@ -231,14 +231,16 @@ impl History {
             }
             let mut events = Vec::new();
             // Only joins and room names count here: other lines are let go after a look at their first bytes.
-            let (read, _) = crate::vrchat_log::read_lines(&mut file, from, end, budget, |line| {
+            let mut lines = crate::vrchat_log::Lines::at(from);
+            let _ = lines.read(&file, end, budget, |line| {
                 let joins =
                     crate::vrchat_log::message(line).is_some_and(|m| m.starts_with(b"[Behaviour] Joining ") || m.starts_with(b"[Behaviour] Entering Room: "));
                 if let Some(e) = joins.then(|| crate::vrchat_log::parse_bytes(line)).flatten() {
                     events.push(e);
                 }
             });
-            budget = budget.saturating_sub(read - from);
+            let read = lines.taken();
+            budget = budget.saturating_sub(lines.position() - from);
             for e in &events {
                 changed |= self.observe(e);
             }
@@ -247,9 +249,9 @@ impl History {
                 changed = true;
             }
         }
-        // Forget the logs VRChat deleted.
+        // Forget the logs VRChat deleted: not those this look at the folder missed.
         let before = self.logs.len();
-        self.logs.retain(|name, _| logs.iter().any(|(n, _)| n == name));
+        self.logs.retain(|name, _| logs.binary_search_by(|(listed, _)| listed.cmp(name)).is_ok() || !matches!(dir.join(name).try_exists(), Ok(false)));
         changed | (self.logs.len() != before)
     }
 
@@ -622,6 +624,9 @@ impl ShotIndex {
                 if self.files.get(&path).is_some_and(|f| f.size == size && f.modified == modified) {
                     continue;
                 }
+                // What the file that was there said is not what this one says: while this one cannot be read (being written,
+                // or no picture), the path has none.
+                changed |= self.files.remove(&path).is_some();
                 if let Some(info) = read_shot(&path) {
                     self.files.insert(path, ShotEntry { size, modified, info, sha256: None, clean_sha256: None });
                     changed = true;
@@ -775,6 +780,37 @@ mod tests {
         std::fs::remove_file(file).unwrap();
     }
 
+    /// COR-25: how far a log was read is forgotten once it is gone, not when a look at the folder does not list it; COR-2: an old
+    /// log's line without an end, too long to keep, is read once.
+    #[test]
+    fn a_log_not_listed_is_forgotten_only_once_it_is_gone() {
+        let dir = std::env::temp_dir().join(format!("orbiters-visited-listed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("output_log_2026-10-20_00-00-00.txt");
+        std::fs::write(&log, format!("x\n{}", "z".repeat(3 << 20))).unwrap();
+        // (A name the listing leaves out stands for an entry it could not give.)
+        std::fs::write(dir.join("unlisted.txt"), "x\n").unwrap();
+        let mut history = History { instances_read: true, ..Default::default() };
+        history.logs.insert("unlisted.txt".into(), 2);
+        history.logs.insert("output_log_2026-10-19_00-00-00.txt".into(), 7);
+        assert!(history.read_logs(&dir));
+        let len = std::fs::metadata(&log).unwrap().len();
+        assert_eq!(history.logs, BTreeMap::from([("output_log_2026-10-20_00-00-00.txt".to_string(), len), ("unlisted.txt".to_string(), 2)]));
+        std::fs::remove_file(dir.join("unlisted.txt")).unwrap();
+        history.read_logs(&dir);
+        assert_eq!(history.logs.len(), 1);
+        // Its end, later, is no line; what follows it is.
+        let world = "wrld_99123966-6b37-4b5b-9f3c-0a1b2c3d4e5f";
+        let join = |world: &str| format!("2026.10.18 20:23:20 Debug      -  [Behaviour] Joining {world}:1\n");
+        use std::io::Write;
+        let mut more = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        more.write_all(format!("{}{}", join("wrld_4cf554b4-430c-4f8f-b53e-1f294eed230b"), join(world)).as_bytes()).unwrap();
+        history.read_logs(&dir);
+        assert_eq!(history.worlds.keys().collect::<Vec<_>>(), [world]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn folder_index_retains_offline_but_removes_deleted_and_removed_sources() {
         let root = std::env::temp_dir().join(format!("orbiters-picture-index-{}", std::process::id()));
@@ -803,6 +839,32 @@ mod tests {
         assert!(index.refresh(&[]));
         assert!(index.every_shot().is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// COR-23: a screenshot replaced by a file that cannot be read (being written, or no picture) keeps nothing of the picture
+    /// before it: not its world, not the hash Orbiters may know that one by. Once it can be read, it is what it says.
+    #[test]
+    fn a_replaced_screenshot_that_cannot_be_read_keeps_nothing_of_the_one_before() {
+        let dir = std::env::temp_dir().join(format!("orbiters-replaced-shot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRChat_2026-10-18_20-37-40.794_3840x2160.png");
+        let paths = std::slice::from_ref(&path);
+        std::fs::write(&path, png_with_xmp("<vrc:WorldID>wrld_before</vrc:WorldID>")).unwrap();
+        let mut index = ShotIndex::default();
+        assert!(index.refresh(std::slice::from_ref(&dir)) && index.hash(paths));
+        let before = index.shots()[0].clone();
+        assert!(before.sha256.is_some() && before.clean_sha256.is_some());
+        std::fs::write(&path, b"being written").unwrap();
+        assert!(index.refresh(std::slice::from_ref(&dir)), "it is no more what was read");
+        assert!(!index.hash(paths) && index.every_shot().is_empty() && index.fingerprints().next().is_none());
+        assert!(!index.refresh(std::slice::from_ref(&dir)), "still not to be read: nothing changed");
+        std::fs::write(&path, png_with_xmp("<vrc:WorldID>wrld_after</vrc:WorldID>")).unwrap();
+        assert!(index.refresh(std::slice::from_ref(&dir)) && index.hash(paths));
+        let after = index.shots()[0].clone();
+        assert_eq!(after.info.world_id.as_deref(), Some("wrld_after"));
+        assert!(after.sha256.is_some() && after.sha256 != before.sha256);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

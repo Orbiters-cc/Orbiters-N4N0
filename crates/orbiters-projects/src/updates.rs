@@ -6,7 +6,6 @@
 use orbiters_i18n::tr;
 use std::collections::HashMap;
 use std::path::Path;
-use vrc_get_vpm::io::DefaultProjectIo;
 use vrc_get_vpm::unity_project::pending_project_changes::PackageChange;
 use vrc_get_vpm::unity_project::AddPackageOperation;
 use vrc_get_vpm::{PackageCollection, PackageInfo, UnityProject, VersionSelector};
@@ -103,7 +102,7 @@ pub async fn check(root: &Path, path: &Path) -> anyhow::Result<Check> {
         return Ok(Check { skipped: Some(tr("Its package list uses an old range spelling; change a package once to check for updates.").into()), ..Default::default() });
     }
     let (_, packages) = crate::vpm::collection(root, false).await?;
-    let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+    let project = UnityProject::load(crate::disk::project_io(path)?).await?;
     Ok(Check { stable: find(&project, &packages, false).await, prerelease: find(&project, &packages, true).await, skipped: None })
 }
 

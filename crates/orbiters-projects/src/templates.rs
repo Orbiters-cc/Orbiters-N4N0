@@ -89,12 +89,12 @@ pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
     let mut out = vec![];
     for (id, files) in crate::builtin_templates::TEMPLATES {
         let path = cache.join(id);
-        std::fs::create_dir_all(&path)?;
+        crate::disk::create_dir_all(&path)?;
         for (relative, content) in *files {
             let p = path.join(relative);
             if !p.is_file() {
-                std::fs::create_dir_all(p.parent().unwrap())?;
-                std::fs::write(&p, content)?;
+                crate::disk::create_dir_all(p.parent().unwrap())?;
+                crate::disk::write(&p, content)?;
             }
         }
         let avatars = id.starts_with("avatars");
@@ -302,7 +302,7 @@ fn copy_keeping_then(
     }
     let source = std::fs::canonicalize(source)?;
     let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
-    std::fs::create_dir_all(parent)?;
+    crate::disk::create_dir_all(parent)?;
     let parent = std::fs::canonicalize(parent)?;
     if parent.starts_with(&source) {
         bail!("{}", tr("Create the copy outside the source project."));
@@ -326,12 +326,12 @@ fn copy_keeping_then(
             folders.push(e.path().to_path_buf());
         }
     }
-    std::fs::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
+    crate::disk::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
     // Held at once: its identity is the held folder's, and nothing can take its place until the copy is done.
     let root = crate::owned::Pinned::open(destination)?;
     let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now(), folder: Some(root.id) };
     let marker_id = {
-        let mut file = std::fs::File::options().write(true).create_new(true).open(destination.join(INCOMPLETE))?;
+        let mut file = crate::disk::open(std::fs::File::options().write(true).create_new(true), destination.join(INCOMPLETE))?;
         file.write_all(&serde_json::to_vec(&marker)?)?;
         crate::owned::id_of_file(&file)?
     };
@@ -340,7 +340,7 @@ fn copy_keeping_then(
         let rel = folder.strip_prefix(&source)?.to_path_buf();
         let at = destination.join(&rel);
         // Made here, and held: one already there is not the copy's (and is never removed by it).
-        match std::fs::create_dir(&at) {
+        match crate::disk::create_dir(&at) {
             Ok(()) => made.folders.push((rel, crate::owned::Pinned::open(&at)?)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
@@ -361,10 +361,7 @@ fn copy_keeping_then(
         let dst = destination.join(rel);
         let mut input = std::fs::File::open(p)?;
         // Never over a file that is there already: it is not this copy's.
-        let mut output = std::fs::File::options()
-            .write(true)
-            .create_new(true)
-            .open(&dst)
+        let mut output = crate::disk::open(std::fs::File::options().write(true).create_new(true), &dst)
             .with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
         made.files.push((rel.to_path_buf(), crate::owned::id_of_file(&output)?));
         loop {
@@ -452,6 +449,9 @@ async fn make(
         bail!("{}", tr("Choose an absolute destination folder."));
     }
     let destination = parent.join(name);
+    // Never in Creator Companion's or ALCOM's folder, however it is said, nor making a folder on the way there.
+    crate::disk::companion(root);
+    crate::disk::tree(&destination)?;
     let required = duplication_bytes(source, copy.unwrap_or_default())?;
     let free = crate::size::free_space(parent).with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
     anyhow::ensure!(
@@ -469,8 +469,8 @@ async fn make(
         if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
             bail!("{}", tr!("Choose a Unity editor version. The copied folder is at {path}.", path = destination.display()));
         }
-        std::fs::create_dir_all(version.parent().unwrap())
-            .and_then(|()| std::fs::write(&version, format!("m_EditorVersion: {unity}\n")))
+        crate::disk::create_dir_all(version.parent().unwrap())
+            .and_then(|()| crate::disk::write(&version, format!("m_EditorVersion: {unity}\n")))
             .with_context(|| tr!("Choose a Unity editor version. The copied folder is at {path}.", path = destination.display()))?;
     }
     // Every file is in: a Stop pressed now no longer leaves a whole copy unlisted (AGENTS.md: a retained project is
@@ -487,7 +487,7 @@ async fn make(
     let path = destination.join("ProjectSettings/ProjectSettings.asset");
     if let Ok(s) = std::fs::read_to_string(&path) {
         let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        std::fs::write(&path, retarget(&s, name, from.as_deref()))
+        crate::disk::write(&path, retarget(&s, name, from.as_deref()))
             .with_context(|| tr!("The copy is listed at {path}, but its project settings could not be updated", path = destination.display()))?;
     }
     // Duplication preserves installed package contents and exact locked versions, including packages whose
@@ -567,7 +567,7 @@ fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, p
                         tr!("{file} in the copy's Packages folder is another archive than the one {name} needs ({path})", file = filename, name = name, path = origin.display())
                     );
                 } else {
-                    std::fs::copy(&origin, &to)?;
+                    crate::disk::copy(&origin, &to)?;
                 }
                 *value = serde_json::Value::String(format!("file:{filename}"));
             }

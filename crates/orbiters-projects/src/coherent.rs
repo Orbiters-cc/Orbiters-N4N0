@@ -9,7 +9,6 @@ use orbiters_i18n::tr;
 use crate::updates::Step;
 use std::collections::HashMap;
 use std::path::Path;
-use vrc_get_vpm::io::DefaultProjectIo;
 use vrc_get_vpm::unity_project::pending_project_changes::PackageChange;
 use vrc_get_vpm::unity_project::AddPackageOperation;
 use vrc_get_vpm::version::{PrereleaseAcceptance, Version, VersionRange};
@@ -266,6 +265,6 @@ pub async fn solve_with(project: &UnityProject, packages: &impl PackageCollectio
 /// [`solve_with`] for the project at `path`, against the repositories as last downloaded.
 pub async fn solve(root: &Path, path: &Path, requested: &[(String, String)], remove: &[String], prerelease: bool) -> anyhow::Result<Plan> {
     let (_, packages) = crate::vpm::collection(root, false).await?;
-    let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+    let project = UnityProject::load(crate::disk::project_io(path)?).await?;
     Ok(solve_with(&project, &packages, requested, remove, prerelease).await)
 }

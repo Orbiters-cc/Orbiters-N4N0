@@ -22,6 +22,10 @@ use std::time::Duration;
 const GATHER: Duration = Duration::from_millis(1500);
 /// When the list was last live is written again this often while nothing else is.
 const SEEN_EVERY: i64 = 300;
+/// The folder VRChat's pictures were kept in before 0.3.10 (`worlds::profile_pictures` moves what is shown of it), and how
+/// long what is not shown stays there.
+const BEFORE: &str = "profile-pictures";
+const BEFORE_FOR: Duration = Duration::from_secs(60 * 86_400);
 /// A world's name and picture older than this are asked again when a place of the list is there (as each was in every run).
 const WORLD_FRESH: i64 = 86_400;
 
@@ -85,6 +89,17 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+/// What nobody showed for [`BEFORE_FOR`] of the pictures kept before goes; the folder with the last of it.
+fn leave_before(dir: &std::path::Path) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let unused = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if unused.is_some_and(|age| age > BEFORE_FOR) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
+}
+
 /// The requests the records are read by.
 fn source(request: &groups::Request) -> &'static str {
     match request {
@@ -107,6 +122,7 @@ impl Controller {
         let bell = self.vrchat_kept.bell.clone();
         let _ = std::thread::Builder::new().name("vrchat-kept".into()).spawn(move || {
             store::sweep(&root);
+            leave_before(&root.with_file_name(BEFORE));
             let mut heard = 0;
             loop {
                 heard = bell.wait(heard, Duration::from_secs(SEEN_EVERY as u64));
@@ -205,7 +221,10 @@ impl Controller {
         rt.forgets += 1;
         rt.open = None;
         let Some(root) = rt.root.clone() else { return true };
-        store::forget(&root, user)
+        // Pictures kept before 0.3.10, not moved yet: whose they were was not written (VRCX's copies fill them again).
+        let before = root.with_file_name(BEFORE);
+        let gone = std::fs::remove_dir_all(&before).is_ok() || !before.exists();
+        store::forget(&root, user) && gone
     }
 
     /// When a read of the groups begins: what it gives is kept only if nobody signed out meanwhile.
@@ -440,12 +459,15 @@ mod tests {
         assert!(store::there(&t.0, &account));
         let turn = c.kept_turn();
         let scope = Scope::of(&c.view());
+        let before = t.0.with_file_name(BEFORE);
+        std::fs::create_dir_all(&before).unwrap();
+        std::fs::write(before.join("u-x.pic"), b"a picture kept before").unwrap();
         c.vrchat_command(Command::SignOut);
         let until = Instant::now() + Duration::from_secs(20);
         while (store::there(&t.0, &account) || c.view().vrchat_login.busy) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(!account.dir(&t.0).exists());
+        assert!(!account.dir(&t.0).exists() && !before.exists());
         // What was on its way then writes nothing.
         c.kept_groups(turn, &scope, &groups::Request::Discover, &groups::Reply::Discovered(vec![GroupCard::default()]));
         c.kept_save(true);

@@ -468,6 +468,11 @@ fn shared() -> std::sync::MutexGuard<'static, Shared> {
     SHARED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The account on show is `account`: what this process holds of another's goes (what asks for its pictures ends with it).
+pub fn only(account: Option<&Account>) {
+    shared().retain(|(a, _)| a.is_none() || a.as_ref() == account);
+}
+
 /// The kept pictures, VRCX's and VRCNext's, and the asking.
 pub struct Profiles {
     store: Arc<Store>,

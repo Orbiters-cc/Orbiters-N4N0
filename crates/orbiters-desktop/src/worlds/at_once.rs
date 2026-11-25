@@ -108,6 +108,18 @@ pub fn texture(of: &PaintTextures, name: &str) -> Option<TextureHandle> {
     Some(t.texture.clone())
 }
 
+/// The account on show is `account` now: another's pictures leave this process's memory (its files stay its own).
+pub fn account_is(account: Option<&super::profile_pictures::Account>) {
+    let ours = account.map(|a| format!(" {:?} ", Some(a)));
+    let wide = account.map(|a| format!("w {a:?} "));
+    textures().retain(|(_, name), _| match name.as_bytes().first() {
+        Some(b'f') => name.starts_with("f None ") || ours.as_ref().is_some_and(|o| name.starts_with(&format!("f{o}"))),
+        Some(b'w') => wide.as_ref().is_some_and(|w| name.starts_with(w)),
+        _ => true,
+    });
+    super::profile_pictures::only(account);
+}
+
 pub fn keep(of: &PaintTextures, name: String, texture: &TextureHandle) {
     let mut all = textures();
     all.insert((of.id(), name), Texture { texture: texture.clone(), used: Instant::now() });
@@ -240,6 +252,13 @@ mod tests {
         let stranger = Scope::of(&snap);
         assert!(other.get_at(&textures, 10.0, &picture(&stranger, 3)).is_none());
         assert!(matches!(wide(&ctx, &connecting, &url(40)), Wide::Ready(_)) && matches!(wide(&ctx, &stranger, &url(40)), Wide::No) && matches!(wide(&ctx, &connecting, &url(41)), Wide::No));
+        // Another account on show: nothing of this one stays in memory.
+        let here = |scope: &Scope| texture(&textures, &face_name(scope, &url(3))).is_some();
+        assert!(here(&connecting));
+        account_is(Some(&account));
+        assert!(here(&connecting) && matches!(wide(&ctx, &connecting, &url(40)), Wide::Ready(_)));
+        account_is(stranger.account().as_ref());
+        assert!(!here(&connecting));
         assert!(store::forget(&store::root(), Some("usr_test")) || !store::there(&store::root(), &account));
         start_again();
     }

@@ -197,7 +197,12 @@ impl State {
             self.loader = Some(crate::worlds::Pictures::with_backend(ctx, Some(cx.ctl.clone())));
             self.ctx = Some(ctx.clone());
         }
-        self.scope = Some(crate::controller::vrchat_data::Scope::of(cx.snap));
+        let scope = crate::controller::vrchat_data::Scope::of(cx.snap);
+        // Another account (or nobody's): nothing of the one before stays in this window's memory.
+        if self.scope.as_ref().is_some_and(|s| s.account().is_some() && s.account() != scope.account()) {
+            crate::worlds::at_once::account_is(scope.account().as_ref());
+        }
+        self.scope = Some(scope);
         // The service's sign-in, against the service's list; data handed in for pictures of the page is its own.
         if !self.staged {
             // Only the account VRChat verified counts (verify-r21 Major 2): a name shown while connecting is not proof

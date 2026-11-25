@@ -224,8 +224,10 @@ mod source {
                     let end = closing(t, *i);
                     *i += 1;
                     while *i < end {
+                        let from = *i;
                         imports(t, i, &at, out, all);
-                        if t.get(*i) == Some(&Sign(',')) {
+                        // (Whatever this was, it goes on: what is no import has other signs in its braces.)
+                        if t.get(*i) == Some(&Sign(',')) || *i == from {
                             *i += 1;
                         }
                     }
@@ -248,7 +250,8 @@ mod source {
         let mut body = vec![];
         let mut i = 0;
         while i < t.len() {
-            if t[i] == Word("use".into()) && !matches!(t.get(i.wrapping_sub(1)), Some(Sign('.'))) {
+            // (`impl X + use<'a>` names lifetimes.)
+            if t[i] == Word("use".into()) && !matches!(t.get(i.wrapping_sub(1)), Some(Sign('.'))) && t.get(i + 1) != Some(&Sign('<')) {
                 i += 1;
                 imports(t, &mut i, "", &mut names, &mut out.paths);
                 continue;
@@ -467,6 +470,7 @@ fn no_writer_past_the_door_is_missed() {
         "fn f() { image::save_buffer_with_format(p, b, 1, 1, c, d); }",
         "fn f() { tempfile::tempdir(); }",
         "fn f() { std::fs::copy(a, b); } #[cfg(test)] mod tests {}",
+        "fn g() -> impl PartialEq + use<> { a; b } fn f() { std::fs::copy(a, b); }",
         "#[cfg(all(test, windows))] mod tests {} fn f() { std::fs::copy(a, b); }",
         "#[cfg(all(not(test), windows))] fn f() { std::fs::copy(a, b); }",
     ] {
@@ -544,6 +548,10 @@ fn no_way_of_writing_them_is_missed() {
         "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::new(); }",
         "fn f() { vrc_get_litedb::file_io::LiteDBFile::parse(b)?.serialize(); }",
         "fn f() { settings.remove_repo(|r| true); }",
+        // `use` that is no import, before it.
+        "fn g() -> impl PartialEq + use<> { a; b } fn f() { settings.remove_repo(|r| true); }",
+        "fn g(p: &P) -> impl Fn() + use<'_, T> { a; { b; } } fn f() { settings.remove_repo(|r| true); }",
+        "macro_rules! m { (use $x:ident) => { a; b } } fn f() { settings.remove_repo(|r| true); }",
     ] {
         for name in ["vpm.rs", "gallery.rs", "theirs.rs"] {
             // (What vpm.rs alone may name, it may not do this with.)

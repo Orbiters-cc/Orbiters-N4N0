@@ -449,8 +449,10 @@ mod source {
                     let end = closing(t, *i);
                     *i += 1;
                     while *i < end {
+                        let from = *i;
                         imports(t, i, &at, out, all);
-                        if t.get(*i) == Some(&Sign(',')) {
+                        // (Whatever this was, it goes on: what is no import has other signs in its braces.)
+                        if t.get(*i) == Some(&Sign(',')) || *i == from {
                             *i += 1;
                         }
                     }
@@ -473,7 +475,8 @@ mod source {
         let mut body = vec![];
         let mut i = 0;
         while i < t.len() {
-            if t[i] == Word("use".into()) && !matches!(t.get(i.wrapping_sub(1)), Some(Sign('.'))) {
+            // (`impl X + use<'a>` names lifetimes.)
+            if t[i] == Word("use".into()) && !matches!(t.get(i.wrapping_sub(1)), Some(Sign('.'))) && t.get(i + 1) != Some(&Sign('<')) {
                 i += 1;
                 imports(t, &mut i, "", &mut names, &mut out.paths);
                 continue;
@@ -627,6 +630,8 @@ fn no_call_into_creator_companions_files_is_missed() {
         "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::parse(b); }",
         "fn f() { crate::copies::list(a, b, c); }",
         "fn f() { crate::gallery::add(r, p); }",
+        "fn g() -> impl PartialEq + use<> { a; b } fn f() { crate::gallery::add(r, p); }",
+        "macro_rules! m { (use $x:ident) => { a; b } } fn f() { crate::gallery::add(r, p); }",
         "use crate::vpm::*; async fn f() { register(r, p, true).await; }",
         "async fn f() { super::vpm::register(r, p, true).await; }",
         "use super::super::{gallery as list}; fn f() { list::remove(r, p); }",

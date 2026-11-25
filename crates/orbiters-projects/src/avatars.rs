@@ -449,7 +449,8 @@ pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
 /// Also reports incomplete reads, so discovery can retain the previous list during transient I/O failures. A scene or
 /// a prefab of any size is read ([`read_file`]): a project's uploaded avatars and worlds show whatever its scenes weigh.
 pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec<Avatar>, bool) {
-    let mut complete = true;
+    // What could not be read: of the walk, of the prefabs' and pictures' `.meta` files (any scene may need them), and of a scene.
+    let (mut complete, mut metas) = (true, true);
     let assets = project.join("Assets");
     let mut scenes = vec![];
     // Prefabs' .meta files, read only when a scene that is read again places a prefab (PROJECTS-8): every scan read all of them,
@@ -483,9 +484,15 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             prefab_metas.push(p.to_path_buf());
         }
     }
+    // Walked whole: a scene that is not there any more has no answer to keep (PRJ-12).
+    if complete {
+        let there: HashSet<&Path> = scenes.iter().map(PathBuf::as_path).collect();
+        cache.retain(|p, _| !p.starts_with(&assets) || there.contains(p.as_path()));
+    }
     let mut prefabs: Option<HashMap<String, PathBuf>> = None;
     let mut out = vec![];
-    let mut prefab_models: HashMap<PathBuf, Option<Model>> = HashMap::new();
+    // (`None`: it cannot be read; `Some(None)`: it holds nothing that is looked for.)
+    let mut prefab_models: HashMap<PathBuf, Option<Option<Model>>> = HashMap::new();
     let mut picture_guids: Option<HashMap<String, PathBuf>> = None;
     for p in scenes {
         let Ok(meta) = std::fs::metadata(&p) else {
@@ -510,6 +517,8 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
             }
         };
         let scene = p.strip_prefix(project).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        // This scene's answer is whole: another one that is not costs it nothing (PRJ-13).
+        let mut whole = true;
         let mut avatars = model.direct(&scene);
         let mut dependencies = vec![];
         let thumbnail = model.world_thumbnail().and_then(|g| {
@@ -537,21 +546,26 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
                             found.insert(g.to_string(), meta.with_extension(""));
                         }
                     } else {
-                        complete = false;
+                        metas = false;
                     }
                 }
                 found
             });
-            let Some(source) = prefabs.get(&g) else { continue };
+            let Some(source) = prefabs.get(&g) else {
+                // Perhaps one whose `.meta` could not be read.
+                whole &= metas;
+                continue;
+            };
             dependencies.push((source.clone(), crate::discovery::fingerprint(source)));
             let prefab = prefab_models.entry(source.clone()).or_insert_with(|| match read_file_looking(source, true) {
-                Ok(ReadFile::Yaml(model, blueprint)) => blueprint.then_some(model),
-                Ok(ReadFile::OtherText) => None,
-                Ok(ReadFile::Unreadable) | Err(_) => {
-                    complete = false;
-                    None
-                }
+                Ok(ReadFile::Yaml(model, blueprint)) => Some(blueprint.then_some(model)),
+                Ok(ReadFile::OtherText) => Some(None),
+                Ok(ReadFile::Unreadable) | Err(_) => None,
             });
+            let Some(prefab) = prefab.as_ref() else {
+                whole = false;
+                continue;
+            };
             let Some(prefab) = prefab.as_ref() else { continue };
             let mut names = prefab.names.clone();
             let mut ids: HashMap<String, String> = HashMap::new();
@@ -595,12 +609,13 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
         }
         avatars.sort_by(|a, b| (&a.id, &a.path).cmp(&(&b.id, &b.path)));
         avatars.dedup();
-        if complete {
+        if whole {
             cache.insert(p, CachedScene { modified, len: meta.len(), avatars: avatars.clone(), dependencies });
         }
+        complete &= whole;
         out.extend(avatars);
     }
-    (out, complete)
+    (out, complete && metas)
 }
 
 /// Shared manifest/thumbnail filename contract, including Build & Test names.
@@ -886,6 +901,48 @@ mod read_completeness_tests {
         std::fs::write(dir.path().join("Assets").join("Placed.unity"), "%YAML 1.1\n--- !u!1001 &100\nPrefabInstance:\n  m_SourcePrefab: {fileID: 100100000, guid: 0123456789abcdef0123456789abcdef, type: 3}\n").unwrap();
         let (_, complete) = in_project_checked(dir.path(), &mut cache);
         assert!(!complete);
+    }
+
+    /// PRJ-12: a scene that is gone leaves the cache when its project was walked whole; another project's stays.
+    #[test]
+    fn a_scene_that_is_gone_leaves_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, other) = (dir.path().join("P"), dir.path().join("Pq"));
+        let mut cache = SceneCache::default();
+        for (project, scene) in [(&p, "A.unity"), (&p, "B.unity"), (&other, "A.unity")] {
+            std::fs::create_dir_all(project.join("Assets")).unwrap();
+            std::fs::write(project.join("Assets").join(scene), scene_with("Fox", AVATAR)).unwrap();
+            in_project_checked(project, &mut cache);
+        }
+        assert_eq!(cache.len(), 3);
+        std::fs::remove_file(p.join("Assets/A.unity")).unwrap();
+        in_project_checked(&p, &mut cache);
+        assert!(cache.contains_key(&p.join("Assets").join("B.unity")) && cache.contains_key(&other.join("Assets").join("A.unity")));
+        assert_eq!(cache.len(), 2, "what is not there any more is not kept");
+        // A project that cannot be walked keeps what it had.
+        std::fs::rename(&p, dir.path().join("Away")).unwrap();
+        in_project_checked(&p, &mut cache);
+        assert_eq!(cache.len(), 2);
+    }
+
+    /// PRJ-13: a scene that cannot be read costs its own answer, not those of the scenes after it.
+    #[test]
+    fn one_unreadable_scene_costs_no_other_its_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        for name in ["a", "m", "z"] {
+            std::fs::write(dir.path().join(format!("Assets/{name}.unity")), scene_with("Fox", AVATAR)).unwrap();
+        }
+        std::fs::write(dir.path().join("Assets/b.unity"), b"%YAML 1.1\n--- !u!114 &1\n  blueprintId: \xff\n").unwrap();
+        let mut cache = SceneCache::default();
+        let (found, complete) = in_project_checked(dir.path(), &mut cache);
+        assert_eq!((found.len(), complete, cache.len()), (3, false, 3));
+        // A scene that places a prefab whose `.meta` cannot be read is not known whole either.
+        std::fs::write(dir.path().join("Assets/Broken.prefab.meta"), b"guid: \xff\xfe\n").unwrap();
+        let placed = "%YAML 1.1\n--- !u!1001 &100\nPrefabInstance:\n  m_SourcePrefab: {fileID: 100100000, guid: 0123456789abcdef0123456789abcdef, type: 3}\n";
+        std::fs::write(dir.path().join("Assets/c.unity"), placed).unwrap();
+        assert!(!in_project_checked(dir.path(), &mut cache).1);
+        assert!(cache.len() == 3 && !cache.contains_key(&dir.path().join("Assets").join("c.unity")));
     }
 
     #[test]

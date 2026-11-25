@@ -4,7 +4,6 @@
 //! then), or end that one process. Import workers and batch-mode Unity processes are never taken for an editor; an
 //! editor whose command line cannot be read (another user's, elevated) is matched by its window title only while the
 //! project's `Temp/UnityLockfile` is held. Nothing in the project is deleted: Unity removes its own lock file.
-use crate::discovery::key;
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 
@@ -48,9 +47,10 @@ pub fn editor_project(args: &[String]) -> Option<PathBuf> {
     None
 }
 
-/// Whether two folders are the same one as Windows names them (case, separators, a trailing separator, `\\?\`).
+/// Whether two folders are the same one, however they are spelled (case, separators, a trailing separator, `\\?\`): never two that a
+/// disk keeps apart.
 pub fn same_folder(a: &Path, b: &Path) -> bool {
-    key(a) == key(b)
+    crate::discovery::same(a, b)
 }
 
 /// The editor that has `project` open: the one started with it, else (its command line unreadable, `locked`: the
@@ -358,6 +358,26 @@ mod tests {
         assert_eq!(worker_of(&worker), Some(PathBuf::from(r"H:\Unity projects\N4N0 sample avatar")));
         assert_eq!(editor_project(&args(&[unity, "-batchmode", "-quit", "-projectPath", "E:/World"])), None);
         assert_eq!(editor_project(&args(&[unity])), None);
+    }
+
+    /// BRG-22, PRJ-18: two projects whose folders differ only by case, on a disk that keeps those apart, are two: a command meant for
+    /// one never goes to the editor of the other.
+    #[test]
+    fn projects_that_differ_by_case_have_their_own_editors() {
+        let temp = tempfile::Builder::new().prefix("case").tempdir().unwrap();
+        if !crate::discovery::by_case(temp.path()) {
+            eprintln!("this computer cannot make a folder that keeps names apart by case: not tried");
+            return;
+        }
+        let (a, b) = (temp.path().join("Avatar"), temp.path().join("AVATAR"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let editors = [Editor { pid: 10, project: b.clone(), title: None, asking: false }];
+        assert!(!same_folder(&a, &b));
+        assert_eq!(of(&editors, &a, false), None, "the other project's editor");
+        assert_eq!(of(&editors, &b, false).map(|e| e.pid), Some(10));
+        let spelled = PathBuf::from(b.to_string_lossy().replace('\\', "/"));
+        assert_eq!(of(&editors, &spelled, false).map(|e| e.pid), Some(10), "the same, spelled otherwise");
     }
 
     #[test]

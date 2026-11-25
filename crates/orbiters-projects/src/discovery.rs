@@ -76,8 +76,16 @@ pub fn fingerprint(path: &Path) -> u64 {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos().min(u64::MAX as u128) as u64)
 }
+/// How a folder's name is compared, as this system's disks do by default: whatever its case and separators on Windows, its case on a
+/// Mac, its very name elsewhere. A name alone does not tell two folders apart where a disk does otherwise ([`same`]).
 pub fn key(path: &Path) -> String {
-    path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    if cfg!(any(windows, target_os = "macos")) {
+        return path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    }
+    match path.to_str() {
+        Some(text) => text.trim_end_matches('/').into(),
+        None => path.as_os_str().as_encoded_bytes().escape_ascii().to_string(),
+    }
 }
 
 /// Whether two paths are one project's: the same however they are spelled, but not two folders whose names differ only by case
@@ -88,7 +96,7 @@ pub fn same(a: &Path, b: &Path) -> bool {
 
 /// Two folders there, whatever their names say.
 fn apart(a: &Path, b: &Path) -> bool {
-    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
+    let plain = |p: &Path| if cfg!(windows) { p.to_string_lossy().replace('/', "\\") } else { p.to_string_lossy().into_owned() };
     plain(a) != plain(b) && crate::owned::id_of(a).ok().zip(crate::owned::id_of(b).ok()).is_some_and(|(a, b)| a != b)
 }
 
@@ -517,13 +525,13 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         .collect();
     scan.projects.sort_by_key(|p| (std::cmp::Reverse(p.registered), std::cmp::Reverse(p.modified)));
 }
-fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<String>, publish: &mut impl FnMut(&Scan)) {
+fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>, publish: &mut impl FnMut(&Scan)) {
     for i in 0..scan.projects.len() {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
         let p = &scan.projects[i];
-        if !matches!(p.kind, Kind::Avatars | Kind::Worlds) || !enriched.insert(key(&p.path)) {
+        if !matches!(p.kind, Kind::Avatars | Kind::Worlds) || !enriched.insert(p.path.clone()) {
             continue;
         }
         let path = p.path.clone();
@@ -1054,6 +1062,7 @@ mod retained_lists {
         assert_eq!(listed(), if disk { vec![b.clone()] } else { vec![] });
         let mut found = HashMap::new();
         let first = put(&mut found, a.clone());
+        #[cfg(windows)]
         assert_eq!(keep(&mut found, PathBuf::from(a.to_string_lossy().replace('\\', "/"))), first, "other separators are the same");
         let second = keep(&mut found, b.clone());
         assert_eq!((first != second, found.len()), (apart, if apart { 2 } else { 1 }));

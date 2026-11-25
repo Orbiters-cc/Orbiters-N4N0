@@ -9,7 +9,7 @@ use orbiters_i18n::tr;
 use super::state::State;
 use crate::pages::{Cx, Job};
 use egui::{pos2, vec2, Align2, Rect, Ui};
-use orbiters_projects::discovery::{self, Project};
+use orbiters_projects::discovery::Project;
 use orbiters_projects::editor::{self, Event, Session};
 use orbiters_ui::theme::{self, Txt};
 use orbiters_ui::widgets::{self, Button, Size, Variant};
@@ -26,7 +26,7 @@ const QUITTING: Duration = Duration::from_secs(20);
 impl State {
     /// The session of `project`'s editor.
     pub(super) fn session(&self, path: &std::path::Path) -> Session {
-        self.sessions.get(&discovery::key(path)).map(|s| s.0).unwrap_or_default()
+        self.sessions.get(path).map(|s| s.0).unwrap_or_default()
     }
     pub(super) fn poll_editors(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         if let Some(r) = self.editor_action.take() {
@@ -64,7 +64,7 @@ impl State {
                     .map(|p| {
                         // The lock file is read only for an editor whose command line could not be.
                         let locked = unread && orbiters_projects::unity_open(p);
-                        (discovery::key(p), editor::of(&editors, p, locked).map(|e| (e.pid, e.asking)))
+                        (p.clone(), editor::of(&editors, p, locked).map(|e| (e.pid, e.asking)))
                     })
                     .collect()
             }
@@ -87,12 +87,12 @@ impl State {
     fn quitting(&self) -> bool {
         self.sessions.values().any(|s| matches!(s.0, Session::Closing { answered: true, asking: false, .. }))
     }
-    fn apply_sessions(&mut self, ctx: &egui::Context, cx: &mut Cx, seen: HashMap<String, Option<(u32, bool)>>) {
+    fn apply_sessions(&mut self, ctx: &egui::Context, cx: &mut Cx, seen: HashMap<PathBuf, Option<(u32, bool)>>) {
         let now = Instant::now();
         for (key, seen) in seen {
             let (old, answered) = self.sessions.get(&key).copied().unwrap_or_default();
             let mut new = old.next(Event::Seen(seen));
-            let project = self.scan.projects.iter().find(|p| discovery::key(&p.path) == key).cloned();
+            let project = self.scan.projects.iter().find(|p| p.path == key).cloned();
             let name = project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
             // Unity asks whether to save: its question to the front.
             if let (Session::Closing { asking: false, .. }, Session::Closing { pid, asking: true, .. }) = (old, new) {
@@ -113,7 +113,7 @@ impl State {
             if old.ended(new) {
                 let said = if matches!(old, Session::Killing { .. }) { tr!("Unity was ended: {name} can be opened again", name = name) } else { tr!("Unity saved and closed {name}", name = name) };
                 cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, said);
-                if self.kill_confirm.as_ref().is_some_and(|p| discovery::key(p) == key) {
+                if self.kill_confirm.as_ref() == Some(&key) {
                     self.kill_confirm = None;
                 }
             }
@@ -125,7 +125,7 @@ impl State {
         }
     }
     fn editor_act(&mut self, ctx: &egui::Context, project: &Project, event: Event) {
-        let key = discovery::key(&project.path);
+        let key = project.path.clone();
         let Some((session, _)) = self.sessions.get(&key).copied() else { return };
         let Some(pid) = session.pid() else { return };
         let path = project.path.clone();

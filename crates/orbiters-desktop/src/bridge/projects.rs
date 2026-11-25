@@ -934,8 +934,7 @@ impl Projects {
 
     /// A Library move of this project running.
     fn moving_library(&self, path: &Path) -> Option<u64> {
-        let key = discovery::key(path);
-        self.jobs.lock().unwrap().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::key(p) == key)).map(|j| j.id)
+        self.jobs.lock().unwrap().list.iter().find(|j| j.lane == Lane::Storage && !j.done() && j.project.as_deref().is_some_and(|p| discovery::same(p, path))).map(|j| j.id)
     }
 
     // -----------------------------------------------------------------------------------------------------------------

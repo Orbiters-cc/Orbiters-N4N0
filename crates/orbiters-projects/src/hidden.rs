@@ -63,6 +63,7 @@ mod tests {
         save_to(&file, &hidden, 1_000_001).unwrap();
         let back = load_from(&file);
         assert_eq!(back, hidden);
+        #[cfg(windows)]
         assert!(contains(&back, Path::new("h:/unity projects/old avatar/")));
         assert!(!contains(&back, Path::new(r"H:\Unity projects\Old avatar copy")));
         // An older save finishing late leaves the newer list.

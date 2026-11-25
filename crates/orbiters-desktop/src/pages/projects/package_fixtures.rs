@@ -3,7 +3,7 @@
 use orbiters_i18n::tr;
 use super::state::{Modal, State};
 use orbiters_projects::updates::{Check, Held, Plan, Step, Update, Updates};
-use orbiters_projects::{coherent, discovery, editor::Session, missing, vpm};
+use orbiters_projects::{coherent, editor::Session, missing, vpm};
 
 // The names and versions of the screenshot scene's conflict, the packages and SDK it is about.
 const SDK: &str = "VRChat SDK - Avatars"; // i18n: not shown (a sample package name)
@@ -176,7 +176,7 @@ impl State {
                 "projects-unity-killing" => Session::Killing { pid: 4242 },
                 _ => Session::Open { pid: 4242 },
             };
-            self.sessions.insert(discovery::key(&first), (session, None));
+            self.sessions.insert(first.clone(), (session, None));
             if name == "projects-unity-kill" {
                 self.kill_confirm = Some(first.clone());
             }

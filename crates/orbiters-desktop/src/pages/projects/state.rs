@@ -299,11 +299,11 @@ pub struct State {
     pub(super) last_change: Option<(PathBuf, vpm::Change)>,
     /// Packages a project needs that no repository lists: the error card with "Add their repositories".
     pub(super) missing: Option<super::missing_card::Card>,
-    /// Each project's Unity editor (by `discovery::key`), and since when Unity's save question was answered.
-    pub(super) sessions: HashMap<String, (editor::Session, Option<Instant>)>,
+    /// Each project's Unity editor, and since when Unity's save question was answered.
+    pub(super) sessions: HashMap<PathBuf, (editor::Session, Option<Instant>)>,
     /// The editors as a look at the processes sees them, by project, taken on a thread while the page shows; and when
     /// a look was last taken in.
-    pub(super) editors: crate::pages::Watch<u64, HashMap<String, Option<(u32, bool)>>>,
+    pub(super) editors: crate::pages::Watch<u64, HashMap<PathBuf, Option<(u32, bool)>>>,
     pub(super) editors_at: Option<Instant>,
     /// Show, Save & Exit or Kill running (not the page's one action: Unity may be asked while packages change).
     pub(super) editor_action: Job<Result<(), String>>,

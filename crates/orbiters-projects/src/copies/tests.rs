@@ -103,3 +103,65 @@ fn a_copy_being_looked_at_is_not_one_being_made() {
     asked.join().unwrap();
     assert!(dismiss(&e.app, &id).is_ok());
 }
+
+/// PRJ-1: an incomplete copy is deleted with everything in it, a link's target kept; while something of it is in use it stays shown; a
+/// whole project, another folder at its place and one that is not proved to be it are never deleted.
+#[test]
+fn an_incomplete_copy_is_deleted_and_nothing_else() {
+    let e = env();
+    let at = e.root.join("Projects").join("Copy");
+    let marker = |folder| crate::templates::Marker { copy: "x".into(), destination: at.clone(), started: 1, folder };
+    let put = |m: crate::templates::Marker| std::fs::write(at.join(crate::templates::INCOMPLETE), serde_json::to_vec(&m).unwrap()).unwrap();
+    crate::unity6::trial::tests::copy_tree(&e.source, &at);
+    let mut h = held(&e, "Copy");
+    h.made(owned::id_of(&at).unwrap()).unwrap();
+    drop(h);
+    let id = one(&e).0.id;
+    // A project with no marker in it, and one whose marker is another folder's.
+    assert!(delete(&e.app, &id).is_err());
+    put(marker(Some(owned::id_of(&e.source).unwrap())));
+    assert!(delete(&e.app, &id).is_err() && at.join("Assets/Avatar.unity").is_file());
+    put(marker(Some(owned::id_of(&at).unwrap())));
+    let elsewhere = e.root.join("Elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("mine.txt"), "mine").unwrap();
+    #[cfg(windows)]
+    junction::create(&elsewhere, at.join("Linked")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, at.join("Linked")).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let in_use = std::fs::File::options().read(true).share_mode(1).open(at.join("Assets/Avatar.unity")).unwrap();
+        let said = delete(&e.app, &id).unwrap_err().to_string();
+        assert!(said.contains(&at.display().to_string()), "{said}");
+        assert_eq!(one(&e).1, Status::Incomplete, "still shown");
+        drop(in_use);
+    }
+    assert_eq!(delete(&e.app, &id).unwrap(), at);
+    assert!(!at.exists() && elsewhere.join("mine.txt").is_file() && shown(&e.app).is_empty());
+    // A crash right after its folder was made: empty.
+    std::fs::create_dir_all(&at).unwrap();
+    let mut h = held(&e, "Copy");
+    h.made(owned::id_of(&at).unwrap()).unwrap();
+    drop(h);
+    delete(&e.app, &one(&e).0.id).unwrap();
+    assert!(!at.exists());
+}
+
+/// One found on a disk without a record is shown like any other, once; what is not one is not.
+#[test]
+fn an_incomplete_copy_without_a_record_is_adopted_once() {
+    let e = env();
+    let at = e.root.join("Projects/Old");
+    crate::unity6::trial::tests::copy_tree(&e.source, &at);
+    adopt(&e.app, &at);
+    assert!(shown(&e.app).is_empty(), "a project");
+    let marker = crate::templates::Marker { copy: "x".into(), destination: at.clone(), started: 1, folder: Some(owned::id_of(&at).unwrap()) };
+    std::fs::write(at.join(crate::templates::INCOMPLETE), serde_json::to_vec(&marker).unwrap()).unwrap();
+    adopt(&e.app, &at);
+    adopt(&e.app, &at);
+    assert_eq!(one(&e).1, Status::Incomplete);
+    delete(&e.app, &one(&e).0.id).unwrap();
+    assert!(!at.exists());
+}

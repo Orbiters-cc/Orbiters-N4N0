@@ -886,11 +886,12 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
         let said = copy.error.clone().unwrap_or_default();
         let (glyph, tint, text) = match status {
             copies::Status::Unlisted => (icons::WARNING_CIRCLE, theme::WARN, format!("{} {said}", tr("Every file of the copy is there, but it is not on the project list."))),
-            copies::Status::Incomplete => (icons::X_CIRCLE, theme::DANGER, format!("{} {said}", tr("The copy was cut short: this folder is not a project, and nothing was deleted. Remove it yourself when you no longer need it."))),
+            copies::Status::Incomplete => (icons::X_CIRCLE, theme::DANGER, format!("{} {said}", tr("Incomplete copy: it was cut short, so this folder is not a project. Delete it and make the copy again, or look into its folder."))),
             copies::Status::Missing => (icons::HARD_DRIVE, theme::fg_3(), format!("{} {said}", tr("Not found at this path: its disk may not be connected, or another folder is there."))),
             copies::Status::Running => continue,
         };
-        let name = copy.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // (One found without a record does not say what it is a copy of.)
+        let name = copy.source.file_name().or(copy.destination.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         item(&mut inner, glyph, tint, &tr!("A copy of {name}", name = name), Some(&format!("{}\n{}", copy.destination.display(), text.trim())));
         let free = state.u6.busy().is_none() && !state.running();
         let mut list: Vec<(&str, &str, bool, &str)> = vec![];
@@ -900,7 +901,15 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
         if status != copies::Status::Missing {
             list.push((tr("Open the folder"), icons::FOLDER_OPEN, true, "reveal"));
         }
-        list.push((tr("Dismiss"), icons::X, free, "dismiss"));
+        // An incomplete copy is deleted, after a second press, or stays shown.
+        match status {
+            copies::Status::Incomplete if state.u6.deleting.as_ref() == Some(&copy.id) => {
+                list.push((tr("Delete its files"), super::art::glyph::TRASH_SIMPLE, free, "delete"));
+                list.push((tr("Cancel"), icons::X, true, "keep"));
+            }
+            copies::Status::Incomplete => list.push((tr("Delete the incomplete copy…"), super::art::glyph::TRASH_SIMPLE, free, "ask")),
+            _ => list.push((tr("Dismiss"), icons::X, free, "dismiss")),
+        }
         let salted: Vec<(&str, &str, bool, String)> = list.iter().map(|(l, g, e, s)| (*l, *g, *e, format!("copy-{}-{s}", copy.id))).collect();
         let refs: Vec<(&str, &str, bool, &str)> = salted.iter().map(|(l, g, e, s)| (*l, *g, *e, s.as_str())).collect();
         let pressed = buttons(&mut inner, &refs, false).map(|i| list[i].3);
@@ -917,6 +926,15 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
             }),
             Some("reveal") => {
                 let _ = orbiters_projects::reveal(&copy.destination);
+            }
+            Some("ask") => state.u6.deleting = Some(id),
+            Some("keep") => state.u6.deleting = None,
+            Some("delete") => {
+                state.u6.deleting = None;
+                state.u6.act(&ctx, tr("Deleting the incomplete copy…"), move || {
+                    let at = copies::delete(&orbiters_projects::data_dir(), &id)?;
+                    Ok(tr!("The incomplete copy at {path} was deleted.", path = at.display()))
+                });
             }
             Some("dismiss") => state.u6.act(&ctx, tr("Dismissing the copy…"), move || {
                 let at = copies::dismiss(&orbiters_projects::data_dir(), &id)?;

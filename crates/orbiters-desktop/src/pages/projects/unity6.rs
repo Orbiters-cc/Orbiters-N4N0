@@ -75,6 +75,8 @@ pub(crate) struct Fixture {
 #[derive(Default)]
 pub(crate) struct U6 {
     pub look: Option<unity6::Look>,
+    /// The incomplete copy whose deletion waits for its confirmation.
+    pub deleting: Option<String>,
     look_job: Job<(u64, u64, unity6::Look)>,
     /// Which list of projects this is: one more each time the scan gives it anew, the same paths or not (second
     /// verification's M6: a project changed in place is looked at again).

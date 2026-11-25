@@ -569,7 +569,8 @@ const ALONE: &[(&str, &[&str])] = &[
     // Not the Unity 6 feature's: a duplicate's or a new project's own. A restore's staging folder, in app data, is filled by VPM;
     // it is put on the list VCC and ALCOM share; the bundled templates' own cache.
     ("templates.rs", &["crate::vpm::change", "crate::vpm::Change::Resolve", "crate::gallery::add", "crate::own::dir", "crate::disk::companion", "crate::bundled_templates::builtins"]),
-    ("copies.rs", &["crate::gallery::add"]),
+    // (Deleting an incomplete copy the person asks to delete, through the one guarded door.)
+    ("copies.rs", &["crate::gallery::add", "crate::disk::remove_file", "crate::disk::remove_dir", "crate::storage::remove_tree"]),
     // Asking a disk and an editor's program what they are.
     ("budget.rs", &["windows::core::PCWSTR", "windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW", "windows::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW", "windows::Win32::Storage::FileSystem::GetVolumePathNameW"]),
     ("editors.rs", &["windows::", "winreg::", "plist::"]),

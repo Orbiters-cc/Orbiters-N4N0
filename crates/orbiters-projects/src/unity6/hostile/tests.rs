@@ -577,6 +577,7 @@ const PART: &str = "kept, never a project";
 const CUT: &str = "listed, the run cut after that";
 const WHOLE: &str = "whole, not listed, said";
 const GONE: &str = "nothing";
+const OTHERS: &str = "only what is not the copy's";
 
 /// The calls of Duplicate, counted where it is called.
 #[derive(Default)]
@@ -596,19 +597,21 @@ fn duplicate_troubles() -> Vec<DuplicateTrouble> {
         t("stopped, folders made", Some(Step::Folders), Stop, false, GONE),
         t("stopped too late", Some(Step::Copied), Stop, false, READY),
         t("no list to write", None, NoList, false, WHOLE),
-        t("a file that cannot be read", None, Locked, false, PART),
-        t("its Assets made a link to the original before the copy", Some(Step::Made), TrialLinked, false, PART),
+        t("a file that cannot be read", None, Locked, false, GONE),
+        t("its Assets made a link to the original before the copy", Some(Step::Made), TrialLinked, false, OTHERS),
         t("packages that cannot be restored", None, Nothing, true, LISTED),
         t("packages that cannot be restored, stopped too late", Some(Step::Listed), Stop, true, LISTED),
         t("packages that cannot be restored, stopped", Some(Step::Folders), Stop, true, GONE),
         t("packages that cannot be restored, no list to write", None, NoList, true, WHOLE),
-        t("packages that cannot be restored, a file that cannot be read", None, Locked, true, PART),
+        t("packages that cannot be restored, a file that cannot be read", None, Locked, true, GONE),
         t("restored packages, then an error", Some(Step::Restored), Fail, true, LISTED),
         t("restored packages, then a crash", Some(Step::Restored), Crash, true, CUT),
     ];
     for (step, then) in [(Step::Made, PART), (Step::Folders, PART), (Step::Copied, PART), (Step::MarkerGone, WHOLE), (Step::Listed, CUT)] {
         for incomplete in [false, true] {
-            out.push(t("an error", Some(step), Fail, incomplete, then));
+            // (An error while files go in: what went in is taken back.)
+            let failed = if matches!(step, Step::Made | Step::Folders) { GONE } else { then };
+            out.push(t("an error", Some(step), Fail, incomplete, failed));
             out.push(t("a crash", Some(step), Crash, incomplete, then));
         }
     }
@@ -685,7 +688,9 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &m
         (false, true, true, true) if said.contains("could not be restored") => LISTED,
         (false, true, true, true) => CUT,
         (false, true, true, false) => WHOLE,
-        (false, true, false, false) => PART,
+        // (A crash leaves its record, whatever it left in the folder.)
+        (false, true, false, false) if copy.join(crate::templates::INCOMPLETE).exists() || done.is_err() => PART,
+        (false, true, false, false) => OTHERS,
         (false, false, false, false) => GONE,
         other => panic!("{name}: {other:?} {said}"),
     };

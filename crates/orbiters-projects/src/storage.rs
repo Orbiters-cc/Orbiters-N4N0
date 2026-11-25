@@ -1121,7 +1121,7 @@ fn read_up_to(file: &mut dyn Read, buffer: &mut [u8], sectors: bool) -> std::io:
 /// Deletes a folder this module made (never following a link out of it), telling `on_file` of each file, going on past a
 /// file that cannot be deleted so that as much as possible is freed. The first error, if any.
 #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
-fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
+pub(crate) fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
     fn remove_link(path: &Path) -> std::io::Result<()> {
         crate::disk::remove_dir(path).or_else(|_| crate::disk::remove_file(path))
     }

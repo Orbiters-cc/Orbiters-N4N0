@@ -1,0 +1,14 @@
+{
+  "Incomplete copy: it was cut short, so this folder is not a project. Delete it and make the copy again, or look into its folder.": "Copie incomplète : elle a été interrompue, ce dossier n’est donc pas un projet. Supprime-la et refais la copie, ou regarde dans son dossier.",
+  "The copy to {path} failed, and what it had copied was removed": "La copie vers {path} a échoué, et ce qu’elle avait copié a été supprimé",
+  "The copy to {path} failed. What it had copied was removed; the folder keeps what was not the copy's: {files}": "La copie vers {path} a échoué. Ce qu’elle avait copié a été supprimé ; le dossier garde ce qui n’était pas à la copie : {files}",
+  "The copy to {path} failed and could not be removed ({why})": "La copie vers {path} a échoué et n’a pas pu être supprimée ({why})",
+  "The copy to {path} failed and could not be removed ({why}): it is listed as an incomplete copy": "La copie vers {path} a échoué et n’a pas pu être supprimée ({why}) : elle est listée comme copie incomplète",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}): it is listed as an incomplete copy.": "Copie arrêtée. La copie incomplète dans {path} n’a pas pu être supprimée ({why}) : elle est listée comme copie incomplète.",
+  "Orbiters cannot prove that {path} is the copy it made: delete that folder yourself.": "Orbiters ne peut pas prouver que {path} est la copie qu’il a faite : supprime ce dossier toi-même.",
+  "The incomplete copy at {path} could not be deleted: {why}": "La copie incomplète dans {path} n’a pas pu être supprimée : {why}",
+  "The incomplete copy at {path} was deleted.": "La copie incomplète dans {path} a été supprimée.",
+  "Delete the incomplete copy…": "Supprimer la copie incomplète…",
+  "Delete its files": "Supprimer ses fichiers",
+  "Deleting the incomplete copy…": "Suppression de la copie incomplète…"
+}

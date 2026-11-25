@@ -145,21 +145,54 @@ pub(crate) fn take_restored(stage: &Path, names: &[std::ffi::OsString], root: &W
 
 /// Takes away the copy's own marker: from here on it is a project.
 pub(crate) fn unmark(root: &WriteRoot, id: FileId) -> anyhow::Result<()> {
-    let gone = root.remove(Path::new(INCOMPLETE), id, false).unwrap_or(false);
+    let mut gone = root.remove(Path::new(INCOMPLETE), id, false);
+    // (Something looking at the new file, an antivirus, holds it for a moment.)
+    for _ in 0..20 {
+        if gone.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        gone = root.remove(Path::new(INCOMPLETE), id, false);
+    }
+    let gone = gone.unwrap_or(false);
     anyhow::ensure!(gone, "{}", tr!("{path} could not be removed.", path = root.path.join(INCOMPLETE).display()));
     Ok(())
 }
 
-/// A Stop: what this run made goes, each thing by its identity; anything else found there stays and is named. What is said.
-pub(crate) fn undo(root: WriteRoot, new: NewFolder, made: Made) -> String {
-    let path = root.path.clone();
-    let mut left = vec![];
+/// What stayed of a copy that was taken back.
+pub(crate) enum Left {
+    Nothing,
+    /// Its folder, with what is not the copy's: these.
+    Others(Vec<String>),
+    /// Something of the copy's own (in use, say), and why. Its marker stays too: it is still an incomplete copy, never a project.
+    Own(String),
+}
+
+/// What this run made goes, each thing by its identity; anything else found there stays.
+pub(crate) fn take_back(root: WriteRoot, new: NewFolder, made: Made) -> Left {
+    let (mut left, mut stuck) = (vec![], None);
+    let own = |at: &Path, e: &std::io::Error| format!("{}: {e}", at.display());
     // The marker, made first, goes last: until then the folder is never taken for a project.
-    for (rel, id, held) in made.items.into_iter().rev() {
+    let mut items = made.items.into_iter();
+    let marker = items.next();
+    for (rel, id, held) in items.rev() {
         let dir = held.is_some();
         drop(held);
-        if !root.remove(&rel, id, dir).unwrap_or(false) {
-            left.push(rel.display().to_string());
+        match root.remove(&rel, id, dir) {
+            Ok(true) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if !dir => drop(stuck.get_or_insert_with(|| own(&rel, &e))),
+            // Something else under that name, or a folder that holds something else.
+            _ => left.push(rel.display().to_string()),
+        }
+    }
+    if let Some(why) = stuck {
+        return Left::Own(why);
+    }
+    if let Some((rel, id, _)) = marker {
+        match root.remove(&rel, id, false) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Left::Own(own(&rel, &e)),
+            _ => {}
         }
     }
     // What is there besides is not the copy's.
@@ -167,11 +200,24 @@ pub(crate) fn undo(root: WriteRoot, new: NewFolder, made: Made) -> String {
     let inside = deepest(&root, &left);
     drop(root);
     match new.remove() {
-        Ok(true) => tr("Copy stopped. The incomplete copy was removed.").into(),
-        _ if left.is_empty() => {
-            tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = path.display(), why = tr("it is not the folder this copy made"))
-        }
-        _ => tr!("Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}", path = path.display(), files = inside.iter().take(5).cloned().collect::<Vec<_>>().join(", ")),
+        Ok(true) => Left::Nothing,
+        _ if left.is_empty() => Left::Own(tr("it is not the folder this copy made").into()),
+        _ => Left::Others(inside),
+    }
+}
+
+/// The first few of what stayed.
+pub(crate) fn named(files: &[String]) -> String {
+    files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+}
+
+/// A Stop: [`take_back`], and what is said.
+pub(crate) fn undo(root: WriteRoot, new: NewFolder, made: Made) -> String {
+    let path = root.path.clone();
+    match take_back(root, new, made) {
+        Left::Nothing => tr("Copy stopped. The incomplete copy was removed.").into(),
+        Left::Own(why) => tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = path.display(), why = why),
+        Left::Others(files) => tr!("Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}", path = path.display(), files = named(&files)),
     }
 }
 

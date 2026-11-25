@@ -185,8 +185,6 @@
   "The copy at {path} is not a verified one: start a new trial.": "La copie à {path} n’est pas vérifiée : commence un nouvel essai.",
   "The copy at {path} is not what the original holds ({count} differences): {first}": "La copie à {path} n’est pas ce que contient l’original ({count} différences) : {first}",
   "The copy at {path} is not what was verified any more ({count} differences): {first}": "La copie à {path} n’est plus ce qui a été vérifié ({count} différences) : {first}",
-  "The copy could not be finished: what was copied is kept at {path}, and is not listed as a project": "La copie n’a pas pu être terminée : ce qui a été copié reste à {path} et n’est pas listé comme un projet",
-  "The copy was cut short: this folder is not a project, and nothing was deleted. Remove it yourself when you no longer need it.": "La copie a été interrompue : ce dossier n’est pas un projet, et rien n’a été supprimé. Retire-le toi-même quand tu n’en as plus besoin.",
   "The copy was interrupted. This folder is not a project; nothing was deleted. Start a new trial, and remove this folder yourself when you no longer need it.": "La copie a été interrompue. Ce dossier n’est pas un projet ; rien n’a été supprimé. Commence un nouvel essai, et retire ce dossier toi-même quand tu n’en as plus besoin.",
   "The damaged record is kept at {path}.": "Le registre endommagé est gardé à {path}.",
   "The first import is estimated from the original's Library. Unity gives no rule for it: the estimate is wide on purpose.": "Le premier import est estimé d’après la Library de l’original. Unity ne donne pas de règle pour cela : l’estimation est large exprès.",

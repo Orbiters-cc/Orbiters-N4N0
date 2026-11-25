@@ -164,7 +164,7 @@ pub fn is_project(path: &Path) -> bool {
 }
 /// Whether `path` is a copy still being made (or cut short): its marker names this very folder. An older version's
 /// empty marker counts too; one naming another folder (copied, restored) does not.
-fn unfinished_copy(path: &Path) -> bool {
+pub(crate) fn unfinished_copy(path: &Path) -> bool {
     let marker = path.join(crate::templates::INCOMPLETE);
     match std::fs::read(&marker) {
         Ok(bytes) if bytes.is_empty() => true,

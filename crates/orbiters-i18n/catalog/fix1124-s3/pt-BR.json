@@ -1,0 +1,14 @@
+{
+  "Incomplete copy: it was cut short, so this folder is not a project. Delete it and make the copy again, or look into its folder.": "Cópia incompleta: ela foi interrompida, então esta pasta não é um projeto. Exclua-a e refaça a cópia, ou veja a pasta.",
+  "The copy to {path} failed, and what it had copied was removed": "A cópia para {path} falhou, e o que ela copiou foi removido",
+  "The copy to {path} failed. What it had copied was removed; the folder keeps what was not the copy's: {files}": "A cópia para {path} falhou. O que ela copiou foi removido; a pasta mantém o que não era da cópia: {files}",
+  "The copy to {path} failed and could not be removed ({why})": "A cópia para {path} falhou e não pôde ser removida ({why})",
+  "The copy to {path} failed and could not be removed ({why}): it is listed as an incomplete copy": "A cópia para {path} falhou e não pôde ser removida ({why}): ela aparece como cópia incompleta",
+  "Copy stopped. The incomplete copy at {path} could not be removed ({why}): it is listed as an incomplete copy.": "Cópia interrompida. Não foi possível remover a cópia incompleta em {path} ({why}): ela aparece como cópia incompleta.",
+  "Orbiters cannot prove that {path} is the copy it made: delete that folder yourself.": "O Orbiters não consegue provar que {path} é a cópia que ele fez: exclua essa pasta você mesmo.",
+  "The incomplete copy at {path} could not be deleted: {why}": "Não foi possível excluir a cópia incompleta em {path}: {why}",
+  "The incomplete copy at {path} was deleted.": "A cópia incompleta em {path} foi excluída.",
+  "Delete the incomplete copy…": "Excluir a cópia incompleta…",
+  "Delete its files": "Excluir os arquivos",
+  "Deleting the incomplete copy…": "Excluindo a cópia incompleta…"
+}

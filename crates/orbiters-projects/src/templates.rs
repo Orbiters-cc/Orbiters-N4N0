@@ -178,7 +178,7 @@ pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &Atom
     let stopped = |e| before_anything(e, destination, cancel);
     let payload = payload::scan(source_folder(source)?, Making { keep, ..Default::default() }, cancel).map_err(stopped)?;
     let place = Destination::check(parent, &name.to_string_lossy(), &payload.protected, Parents::Make)?;
-    let filled = fill(&payload, place, destination, cancel, progress, &mut |_| Ok(())).map_err(unmarked)?;
+    let filled = fill(&payload, place, destination, cancel, progress, false, &mut |_| Ok(())).map_err(unmarked)?;
     copying::unmark(&filled.root, filled.marker)
 }
 
@@ -205,9 +205,10 @@ struct Filled {
     marker: crate::owned::FileId,
 }
 
-/// Makes the folder and puts `payload` in it. `on_made`: told of the folder before anything is put in it. An error says whether
-/// anything of it is left ([`Nothing`]: not).
-fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress, on_made: &mut dyn FnMut(&gate::NewFolder) -> anyhow::Result<()>) -> anyhow::Result<Filled> {
+/// Makes the folder and puts `payload` in it. `on_made`: told of the folder before anything is put in it. A copy that fails or is
+/// stopped is taken back (PRJ-1: the likeliest failure is a full disk, which kept the part that filled it); an error says whether
+/// anything of it is left ([`Nothing`]: not). `recorded`: what could not be removed is shown ([`crate::copies`]).
+fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress, recorded: bool, on_made: &mut dyn FnMut(&gate::NewFolder) -> anyhow::Result<()>) -> anyhow::Result<Filled> {
     if cancel.load(Ordering::Relaxed) {
         return Err(before_anything(anyhow::anyhow!("{}", tr("Stopped.")), destination, cancel).context(Nothing));
     }
@@ -227,11 +228,23 @@ fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &Atom
     let filled = between(Step::Made).and_then(|()| copying::fill(payload, &root, &marker, &mut made, cancel, progress));
     match (filled, made.marker()) {
         (Ok(()), Some(marker)) => Ok(Filled { new, root, made, marker }),
-        (Err(_), _) if cancel.load(Ordering::Relaxed) => {
-            let said = anyhow::anyhow!("{}", copying::undo(root, new, made));
-            Err(if std::fs::symlink_metadata(destination).is_err() { said.context(Nothing) } else { said })
+        (Err(e), _) => {
+            use crate::copying::{named, Left};
+            let (path, stopped) = (destination.display(), cancel.load(Ordering::Relaxed));
+            let left = copying::take_back(root, new, made);
+            let says = match (stopped, &left) {
+                (true, Left::Nothing) => tr("Copy stopped. The incomplete copy was removed.").into(),
+                (true, Left::Others(files)) => tr!("Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}", path = path, files = named(files)),
+                (true, Left::Own(why)) if recorded => tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}): it is listed as an incomplete copy.", path = path, why = why),
+                (true, Left::Own(why)) => tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = path, why = why),
+                (false, Left::Nothing) => tr!("The copy to {path} failed, and what it had copied was removed", path = path),
+                (false, Left::Others(files)) => tr!("The copy to {path} failed. What it had copied was removed; the folder keeps what was not the copy's: {files}", path = path, files = named(files)),
+                (false, Left::Own(why)) if recorded => tr!("The copy to {path} failed and could not be removed ({why}): it is listed as an incomplete copy", path = path, why = why),
+                (false, Left::Own(why)) => tr!("The copy to {path} failed and could not be removed ({why})", path = path, why = why),
+            };
+            let said = if stopped { anyhow::anyhow!("{says}") } else { e.context(says) };
+            Err(if matches!(left, Left::Own(_)) { said } else { said.context(Nothing) })
         }
-        (Err(e), _) => Err(e.context(tr!("The copy could not be finished: what was copied is kept at {path}, and is not listed as a project", path = destination.display()))),
         (Ok(()), None) => bail!("{}", tr("Stopped.")),
     }
 }
@@ -364,7 +377,7 @@ async fn make(
     anyhow::ensure!(free >= payload.bytes, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = payload.bytes.saturating_sub(free)));
     // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
     let mut record = crate::copies::Held::begin(&app, source, &destination)?;
-    let filled = fill(&payload, place, &destination, cancel, progress, &mut |new| record.made(new.id));
+    let filled = fill(&payload, place, &destination, cancel, progress, true, &mut |new| record.made(new.id));
     let Filled { new, root: held, mut made, marker } = match filled {
         Ok(f) => f,
         Err(e) if e.downcast_ref::<Nothing>().is_some() => {
@@ -867,26 +880,108 @@ mod tests {
         assert!(is_registered(&root, &copy), "the copy is in the gallery's list");
     }
 
-    /// PROJECTS-4: a copy that stops halfway is not a project the gallery lists, and its folder is kept as it is.
+    /// A file of a project that no copy can read while the guard lives: held by another program on Windows, without a mode elsewhere.
+    struct Unreadable(#[allow(dead_code)] Option<std::fs::File>, #[allow(dead_code)] PathBuf);
+    impl Unreadable {
+        fn make(file: &Path) -> Unreadable {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "x").unwrap();
+            #[cfg(windows)]
+            let held = {
+                use std::os::windows::fs::OpenOptionsExt;
+                Some(std::fs::File::options().read(true).share_mode(0).open(file).unwrap())
+            };
+            #[cfg(unix)]
+            let held = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0)).unwrap();
+                None
+            };
+            Unreadable(held, file.to_path_buf())
+        }
+    }
+    impl Drop for Unreadable {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.1, std::fs::Permissions::from_mode(0o644));
+            }
+        }
+    }
+    /// The records of copies to `at`.
+    fn records_of(at: &Path) -> Vec<(crate::copies::Copy, crate::copies::Status)> {
+        crate::copies::shown(&crate::data_dir()).into_iter().filter(|(c, _)| c.destination == at).collect()
+    }
+
+    /// PRJ-1: a copy that fails (a file that cannot be read, a full disk) leaves nothing behind: what it made goes as for Stop, the
+    /// error names the destination and why, and the name is free again.
+    #[test]
+    fn a_copy_that_fails_is_removed_and_says_where_and_why() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let held = Unreadable::make(&source.join("Zz/held.bin"));
+        let said = made_from(temp.path(), &source, "Copy").unwrap_err();
+        let copy = temp.path().join("Copy");
+        assert!(!copy.exists(), "the incomplete copy is gone");
+        assert!(said.contains(&copy.display().to_string()) && said.contains("held.bin"), "{said}");
+        assert!(records_of(&copy).is_empty());
+        drop(held);
+        assert_eq!(made_from(temp.path(), &source, "Copy"), Ok(copy.clone()), "its name is free again");
+        assert!(crate::discovery::is_project(&copy) && !copy.join(INCOMPLETE).exists());
+    }
+
+    /// What was put in the copy while it ran is not the copy's: it stays, named, when the copy fails.
+    #[test]
+    fn a_failed_copy_keeps_what_is_not_its_own() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let _held = Unreadable::make(&source.join("Zz/held.bin"));
+        let copy = temp.path().join("Copy");
+        let hook = |step: Step| {
+            if step == Step::Folders {
+                std::fs::write(copy.join("Assets/mine.txt"), "mine").unwrap();
+            }
+            Ok(())
+        };
+        let said = stepping(hook, || made_from(temp.path(), &source, "Copy")).unwrap_err();
+        assert_eq!(std::fs::read_to_string(copy.join("Assets/mine.txt")).unwrap(), "mine");
+        assert!(said.contains("mine.txt") && said.contains("held.bin"), "{said}");
+        assert!(!copy.join(INCOMPLETE).exists() && !copy.join("ProjectSettings").exists(), "the copy's own entries went");
+        assert!(records_of(&copy).is_empty(), "nothing of the copy is left to show");
+    }
+
+    /// PRJ-1: a copy that failed and could not be removed (here: something of it is in use) is shown as an incomplete copy, named in
+    /// the error, and is deleted from there.
     #[cfg(windows)]
     #[test]
-    fn a_copy_cut_halfway_is_never_taken_for_a_project() {
+    fn a_failed_copy_that_could_not_be_removed_is_shown_and_can_be_deleted() {
         use std::os::windows::fs::OpenOptionsExt;
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({}));
-        std::fs::create_dir_all(source.join("Zz")).unwrap();
-        std::fs::write(source.join("Zz/locked.bin"), "x").unwrap();
-        // Held by another program: the copy fails on it, after ProjectSettings is in.
-        let _held = std::fs::File::options().read(true).share_mode(0).open(source.join("Zz/locked.bin")).unwrap();
+        let _held = Unreadable::make(&source.join("Zz/held.bin"));
         let copy = temp.path().join("Copy");
-        assert!(copy_keeping(&source, &copy, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).is_err());
-        assert!(copy.join("ProjectSettings/ProjectVersion.txt").is_file(), "kept as it is");
-        assert!(!crate::discovery::is_project(&copy));
-        drop(_held);
-        let whole = temp.path().join("Whole");
-        copy_keeping(&source, &whole, Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
-        assert!(crate::discovery::is_project(&whole) && !whole.join(INCOMPLETE).exists());
+        let in_use = std::cell::RefCell::new(None);
+        let hook = |step: Step| {
+            // Read and write, not delete: the marker cannot be removed.
+            if step == Step::Folders {
+                *in_use.borrow_mut() = Some(std::fs::File::options().read(true).share_mode(3).open(copy.join(INCOMPLETE)).unwrap());
+            }
+            Ok(())
+        };
+        let said = stepping(hook, || made_from(temp.path(), &source, "Copy")).unwrap_err();
+        assert!(said.contains(&copy.display().to_string()) && said.contains("held.bin") && said.contains("listed as an incomplete copy"), "{said}");
+        let [(record, crate::copies::Status::Incomplete)] = &records_of(&copy)[..] else { panic!("not shown") };
+        assert!(record.error.as_ref().is_some_and(|e| e.contains("held.bin")), "with why");
+        assert!(!crate::discovery::is_project(&copy) && crate::gallery::add(&temp.path().join("vcc"), &copy).is_err());
+        assert!(crate::copies::delete(&crate::data_dir(), &record.id).is_err(), "still in use");
+        assert_eq!(records_of(&copy).len(), 1);
+        drop(in_use.borrow_mut().take());
+        crate::copies::delete(&crate::data_dir(), &record.id).unwrap();
+        assert!(!copy.exists() && records_of(&copy).is_empty());
     }
 
     /// A copy of `source` into `copy`, stopped once its folder exists after `meanwhile` ran: what Stop says.

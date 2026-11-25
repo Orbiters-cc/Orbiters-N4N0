@@ -28,6 +28,8 @@ const WANTED_FOR: Duration = Duration::from_secs(300);
 /// Worlds a menu asked about lately (the overlay's 3D worlds panel shows any capture's world) whose feedback the menus
 /// get besides their subjects' (for [`WANTED_FOR`]).
 const ASKED_MAX: usize = 6;
+/// Worlds whose answer is kept.
+const KNOWN_MAX: usize = 128;
 /// Previous instances are read again from their file after this long.
 const INSTANCES_EVERY: Duration = Duration::from_secs(10);
 /// What the answer gives the member's own comments as their author (the world says "You").
@@ -54,8 +56,6 @@ pub(super) struct WorldFeedbackRuntime {
     known: HashMap<String, Known>,
     /// Worlds shown somewhere (the menus, the N4N0 world), since when.
     wanted: HashMap<String, Instant>,
-    /// Names the menus and the world gave worlds.
-    names: HashMap<String, String>,
     queue: Queue,
     queue_path: PathBuf,
     /// The last error of a menu's action, by world.
@@ -90,7 +90,6 @@ impl WorldFeedbackRuntime {
             world: WorldSession::default(),
             known: HashMap::new(),
             wanted: HashMap::new(),
-            names: HashMap::new(),
             queue: Queue::load(&queue_path, now_ms()),
             queue_path,
             menu_errors: HashMap::new(),
@@ -168,9 +167,6 @@ impl WorldFeedbackRuntime {
             Line::Hello => {}
             Line::Select { world, name, .. } => {
                 let world = world.to_ascii_lowercase();
-                if !name.is_empty() {
-                    self.names.insert(world.clone(), name.clone());
-                }
                 self.wanted.insert(world.clone(), Instant::now());
                 self.world.selected = Some((world, name));
             }
@@ -190,7 +186,7 @@ impl WorldFeedbackRuntime {
     /// Queues an action (kept on disk at once).
     fn push(&mut self, world: &str, action: Action) {
         if let Action::Comment { client_id, .. } = &action {
-            if self.queue.for_stamp(&self.stamp).items.iter().any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
+            if self.queue.for_stamp(&self.stamp).any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
                 return;
             }
         }
@@ -208,7 +204,7 @@ impl WorldFeedbackRuntime {
     /// What the member sees: Orbiters' answer with what waits FOR THIS server and account (another account's waiting
     /// comment on this computer is never shown as this one's).
     fn seen(&self, world: &str) -> Seen {
-        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue.for_stamp(&self.stamp), tr_latin(ME))
+        self.known.get(world).unwrap_or(&Known::default()).seen(world, self.queue.for_stamp(&self.stamp), tr_latin(ME))
     }
 
     /// The server and account of the moment: another than before (an environment switch, another account) and what
@@ -346,6 +342,18 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
+    /// At most [`KNOWN_MAX`] worlds' answers stay: those read longest ago go first, never one wanted or asked about now, selected in
+    /// the world, or with an action waiting (it is read again when it is shown again).
+    fn forget_old(&mut self) {
+        while self.known.len() > KNOWN_MAX {
+            let in_use = |w: &String| {
+                self.wanted.contains_key(w) || self.asked.iter().any(|(a, _)| a == w) || self.world.selected.as_ref().is_some_and(|(s, _)| s == w) || self.queue.items.iter().any(|p| p.world == *w)
+            };
+            let Some(oldest) = self.known.iter().filter(|(w, _)| !in_use(w)).min_by_key(|(_, k)| k.read_at).map(|(w, _)| w.clone()) else { return };
+            self.known.remove(&oldest);
+        }
+    }
+
     /// How long until [`Self::next_call`] may have one by the clock alone: never with nothing queued and no world shown (what is
     /// queued and shown meanwhile wakes the sender).
     fn next_due(&self, now: u64) -> Option<Duration> {
@@ -390,6 +398,7 @@ impl WorldFeedbackRuntime {
         match (call, result) {
             (Call::Read { world }, Ok(Some(view))) | (Call::Send { world, .. }, Ok(Some(view))) => {
                 self.known.insert(world.clone(), Known { view: Some(view), read_at: now });
+                self.forget_old();
                 if let Some(i) = index(&self.queue) {
                     self.queue.items.remove(i);
                     self.save();
@@ -599,7 +608,7 @@ impl super::Controller {
     /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
     pub(super) fn feedback_pending(&self) -> u32 {
         let rt = self.world_feedback.lock().unwrap();
-        rt.queue.for_stamp(&rt.stamp).items.len() as u32
+        rt.queue.for_stamp(&rt.stamp).count() as u32
     }
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.

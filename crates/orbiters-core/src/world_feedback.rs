@@ -446,8 +446,8 @@ impl Queue {
     }
 
     /// The actions that may go out as `now` ([`Stamp::sends_as`]): what this server and account show as waiting.
-    pub fn for_stamp(&self, now: &Stamp) -> Queue {
-        Queue { items: self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.shows_as(now))).cloned().collect() }
+    pub fn for_stamp<'a>(&'a self, now: &'a Stamp) -> impl Iterator<Item = &'a Pending> {
+        self.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.shows_as(now)))
     }
 
     /// The action at `i` failed for now: tried again after 2, 4, 8 … seconds (at most a minute), dropped after a day.
@@ -459,11 +459,6 @@ impl Queue {
         if now_ms.saturating_sub(p.since) > DROP_AFTER.as_millis() as u64 {
             self.items.remove(i);
         }
-    }
-
-    pub fn of(&self, world: &str) -> impl Iterator<Item = &Pending> + '_ {
-        let world = world.to_string();
-        self.items.iter().filter(move |p| p.world == world)
     }
 }
 
@@ -490,8 +485,8 @@ pub struct Seen {
 }
 
 impl Known {
-    /// The server's view with `queue`'s actions for `world` applied.
-    pub fn seen(&self, world: &str, queue: &Queue, me: &str) -> Seen {
+    /// The server's view with the actions `waiting` for `world` applied (those of other worlds are passed over).
+    pub fn seen<'a>(&self, world: &str, waiting: impl Iterator<Item = &'a Pending>, me: &str) -> Seen {
         let view = self.view.clone().unwrap_or_default();
         let mine = view.mine.clone().unwrap_or_default();
         let mut seen = Seen {
@@ -516,7 +511,7 @@ impl Known {
             .map(|c| (c.id, c.by.clone().unwrap_or_default(), c.text.clone(), c.at.clone(), mine.comment_ids.contains(&c.id)))
             .collect();
         let mut newer = Vec::new();
-        for p in queue.of(world) {
+        for p in waiting.filter(|p| p.world == world) {
             seen.pending += 1;
             match &p.action {
                 Action::Set(set) => {
@@ -745,8 +740,8 @@ mod tests {
         // What waits for another account is not shown as this one's.
         let mut q = Queue::default();
         q.push_to(WORLD, Action::Comment { text: "A's draft".into(), client_id: "n4n0-a".into() }, 0, prod.clone());
-        assert_eq!(q.for_stamp(&prod).items.len(), 1);
-        assert!(q.for_stamp(&other).items.is_empty(), "B never sees A's waiting comment");
+        assert_eq!(q.for_stamp(&prod).count(), 1);
+        assert!(q.for_stamp(&other).next().is_none(), "B never sees A's waiting comment");
     }
 
     #[test]
@@ -780,12 +775,12 @@ mod tests {
         q.push("w", Action::Comment { text: "new".into(), client_id: "c".into() }, 0);
         q.push("w", Action::Uncomment { comment: 9 }, 0);
         q.push("other", set(Some(true), &[]), 0);
-        let seen = known.seen("w", &q, "You");
+        let seen = known.seen("w", q.items.iter(), "You");
         assert_eq!((seen.likes, seen.liked, seen.pending), (5, true, 3));
         assert_eq!(seen.labels, vec![("meetup".to_string(), 3, false), ("mirror".to_string(), 2, false), ("pens".to_string(), 1, true)]);
         assert_eq!(seen.comment_count, 2);
         assert_eq!(seen.comments.iter().map(|c| (c.0, c.2.as_str(), c.4)).collect::<Vec<_>>(), [(0, "new", true), (8, "theirs", false)]);
-        assert!(Known::default().seen("w", &Queue::default(), "You").loading);
+        assert!(Known::default().seen("w", std::iter::empty(), "You").loading);
     }
 
     #[test]

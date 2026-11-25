@@ -1255,6 +1255,10 @@ fn was_loaded_unreadable(path: &Path) -> Option<bool> {
 }
 
 fn migrated(text: &str) -> Option<String> {
+    // Nothing to move in a file that does not name it (a Mac's other default needs reading).
+    if !cfg!(target_os = "macos") && !text.contains(&format!("\"{LEGACY_N4N0_KEY}\"")) {
+        return None;
+    }
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
     let fields = value.as_object_mut()?;

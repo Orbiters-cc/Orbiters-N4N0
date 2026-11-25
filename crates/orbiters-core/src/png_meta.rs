@@ -69,20 +69,53 @@ pub fn copy_without_metadata(src: &mut impl Read, out: &mut impl Write) -> std::
 /// SHA-256 (lowercase hex) of the copy [`copy_without_metadata`] makes of the file at `path`: what Orbiters knows that
 /// picture by once it received it without its metadata.
 pub fn clean_sha256(path: &Path) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    struct Hashing(Sha256);
-    impl Write for Hashing {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    let mut hashing = Hashing::default();
+    copy_without_metadata(&mut std::io::BufReader::new(std::fs::File::open(path)?), &mut hashing)?;
+    Ok(hashing.hex())
+}
+
+/// The SHA-256 of the file at `path` and of its copy without metadata ([`clean_sha256`]; none for what is no PNG to copy), from
+/// one reading of it.
+pub fn both_sha256(path: &Path) -> std::io::Result<(String, Option<String>)> {
+    struct Both<R> {
+        file: R,
+        own: Hashing,
+    }
+    impl<R: Read> Read for Both<R> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.file.read(out)?;
+            self.own.write_all(&out[..n])?;
+            Ok(n)
         }
     }
-    let mut hashing = Hashing(Sha256::new());
-    copy_without_metadata(&mut std::io::BufReader::new(std::fs::File::open(path)?), &mut hashing)?;
-    Ok(hashing.0.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    // (Read in large pieces, whatever the copy asks for: the hash is of the pieces read.)
+    let mut whole = std::io::BufReader::with_capacity(1 << 16, Both { file: std::fs::File::open(path)?, own: Hashing::default() });
+    let mut clean = Hashing::default();
+    let copied = copy_without_metadata(&mut whole, &mut clean);
+    // What follows the picture's end, or what stopped the copy, is the file's all the same.
+    std::io::copy(&mut whole, &mut std::io::sink())?;
+    Ok((whole.into_inner().own.hex(), copied.is_ok().then(|| clean.hex())))
+}
+
+#[derive(Default)]
+struct Hashing(sha2::Sha256);
+
+impl Hashing {
+    fn hex(self) -> String {
+        use sha2::Digest;
+        self.0.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+impl Write for Hashing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Copies that went to Orbiters are removed once sent; one that a stopped app left (a crash, a forced end) is removed

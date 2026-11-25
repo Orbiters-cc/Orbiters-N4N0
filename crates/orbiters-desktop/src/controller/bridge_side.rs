@@ -775,7 +775,7 @@ impl Game for SideGame {
             // A profile's account does not change between its starts: kept, so that a start that failed is not taken for a
             // profile waiting at its sign-in page (2026-11-15 07:09: go_to_world answered a stale needs_sign_in). The new
             // VRChat's log says it again, or that it waits for a sign-in.
-            let account = Account { signed_out: false, ..std::mem::take(&mut st.account) };
+            let account = std::mem::take(&mut st.account).started_again();
             let mut followed = std::mem::take(&mut st.followed);
             followed.extend(st.log.take());
             // A handful is enough: older logs are minutes old, past any launch's moment.

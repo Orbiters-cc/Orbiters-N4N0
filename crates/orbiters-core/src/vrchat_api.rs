@@ -938,6 +938,26 @@ pub struct Client {
     /// What VRChat said when it refused the last group call (none: it did not refuse it).
     group_refusal: Option<groups::Refusal>,
 }
+/// How long a world's or an avatar's details are kept.
+const A_DAY: Duration = Duration::from_secs(86400);
+
+/// Room for one more in `kept`, which holds `most`: what is too old to be given goes, else the one read longest ago. A key it has
+/// already takes no room.
+fn make_room<K, Q, V>(kept: &mut HashMap<K, V>, key: &Q, most: usize, lasts: Duration, at: impl Fn(&V) -> Instant)
+where
+    K: Eq + std::hash::Hash + Clone + std::borrow::Borrow<Q>,
+    Q: Eq + std::hash::Hash + ?Sized,
+{
+    if kept.len() < most || kept.contains_key(key) {
+        return;
+    }
+    kept.retain(|_, v| at(v).elapsed() < lasts);
+    while kept.len() >= most {
+        let Some(oldest) = kept.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) else { return };
+        kept.remove::<K>(&oldest);
+    }
+}
+
 impl Client {
     pub fn new(allowed: Arc<Gate>) -> Self {
         // Changing Orbiters accounts or refreshing the feature cannot reset the rate limit or a 429 backoff.
@@ -1447,9 +1467,7 @@ impl Client {
     }
     fn keep_avatar(&mut self, id: &str, body: &[u8]) -> Result<Avatar> {
         let a: Avatar = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
-        if self.avatars.len() >= 512 {
-            self.avatars.clear();
-        }
+        make_room(&mut self.avatars, id, 512, A_DAY, |kept| kept.0);
         self.avatars.insert(id.into(), (Instant::now(), a.clone()));
         Ok(a)
     }
@@ -1468,9 +1486,7 @@ impl Client {
     }
     fn keep_world(&mut self, id: &str, body: &[u8]) -> Result<World> {
         let w: World = serde_json::from_slice(body).map_err(|_| Error::InvalidResponse)?;
-        if self.worlds.len() >= 512 {
-            self.worlds.clear();
-        }
+        make_room(&mut self.worlds, id, 512, A_DAY, |kept| kept.0);
         self.worlds.insert(id.into(), (Instant::now(), w.clone()));
         Ok(w)
     }
@@ -1553,9 +1569,7 @@ impl Client {
             Err(Error::NotFound) => Ok(None),
             Err(e) => Err(e),
         }?;
-        if self.instances.len() >= 256 {
-            self.instances.clear();
-        }
+        make_room(&mut self.instances, &key, 256, A_DAY, |kept| kept.0);
         self.instances.insert(key, (asked, alive));
         Ok((alive, asked.elapsed()))
     }
@@ -1570,9 +1584,7 @@ impl Client {
         }
         let r = self.get("worlds", &path)?;
         let (worlds, more) = parse_world_list(&r.body)?;
-        if self.world_lists.len() >= 64 {
-            self.world_lists.clear();
-        }
+        make_room(&mut self.world_lists, &path, 64, Duration::from_secs(300), |kept| kept.0);
         self.world_lists.insert(path, (Instant::now(), worlds.clone(), more));
         Ok((worlds, more))
     }
@@ -2099,6 +2111,27 @@ fn image_url_allowed(url: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// COR-12: one more than fits takes the place of what is too old to be given, else of the one read longest ago; a key there
+    /// already takes nobody's. (It was all of them.)
+    #[test]
+    fn one_more_than_fits_makes_room_for_itself_alone() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut kept: std::collections::HashMap<String, (Instant, u32)> = (0..512u32).map(|i| (i.to_string(), (now + Duration::from_millis(i as u64), i))).collect();
+        let day = Duration::from_secs(86400);
+        super::make_room(&mut kept, "7", 512, day, |v| v.0);
+        assert_eq!(kept.len(), 512, "read again: nobody goes");
+        super::make_room(&mut kept, "new", 512, day, |v| v.0);
+        assert!(kept.len() == 511 && !kept.contains_key("0"), "the one read longest ago");
+        // Those too old to be given go first, all of them.
+        for old in ["1", "2", "3"] {
+            kept.get_mut(old).unwrap().0 = now - Duration::from_secs(2);
+        }
+        kept.insert("new".into(), (now + Duration::from_secs(1), 0));
+        super::make_room(&mut kept, "newer", 512, Duration::from_secs(1), |v| v.0);
+        assert!(kept.len() == 509 && !["1", "2", "3"].iter().any(|k| kept.contains_key(*k)), "{}", kept.len());
+    }
+
     #[test]
     fn vrchats_other_rows_and_the_accounts_playlists_are_asked_as_its_client_asks_them() {
         use crate::maps::{Row, WorldList};

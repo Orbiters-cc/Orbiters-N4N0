@@ -670,23 +670,29 @@ impl ShotIndex {
         out
     }
 
+    /// The two hashes of `path` as they are known (its own, its copy without metadata's), looked up, not listed.
+    pub fn hashes_of(&self, path: &Path) -> (Option<&str>, Option<&str>) {
+        self.files.get(path).map_or((None, None), |e| (e.sha256.as_deref(), e.clean_sha256.as_deref()))
+    }
+
     /// Hashes the given screenshots that have no hash yet; returns whether any was added.
     pub fn hash(&mut self, paths: &[PathBuf]) -> bool {
         let mut changed = false;
         for p in paths {
             let Some(e) = self.files.get_mut(p) else { continue };
-            if e.sha256.is_none() {
-                if let Ok(h) = sha256_file(p) {
-                    e.sha256 = Some(h);
-                    changed = true;
-                }
-            }
-            if e.clean_sha256.is_none() {
-                if let Ok(h) = crate::png_meta::clean_sha256(p) {
-                    e.clean_sha256 = Some(h);
-                    changed = true;
-                }
-            }
+            let (own, clean) = match (e.sha256.is_none(), e.clean_sha256.is_none()) {
+                (false, false) => continue,
+                // Both from one reading: of one and the same file.
+                (true, true) => match crate::png_meta::both_sha256(p) {
+                    Ok((own, clean)) => (Some(own), clean),
+                    Err(_) => continue,
+                },
+                (true, false) => (sha256_file(p).ok(), None),
+                (false, true) => (None, crate::png_meta::clean_sha256(p).ok()),
+            };
+            changed |= own.is_some() || clean.is_some();
+            e.sha256 = e.sha256.take().or(own);
+            e.clean_sha256 = e.clean_sha256.take().or(clean);
         }
         changed
     }
@@ -767,6 +773,118 @@ mod tests {
         chunk(&mut out, b"iTXt", &itxt);
         chunk(&mut out, b"IEND", &[]);
         out
+    }
+
+    /// COR-9, COR-10: a picture's two hashes come from one reading of its file, and are the ones two readings gave; they are looked
+    /// up, whatever else the index holds.
+    #[test]
+    fn a_picture_s_two_hashes_come_from_one_reading() {
+        let dir = std::env::temp_dir().join(format!("orbiters-both-hashes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = png_with_text("Description", "who took it");
+        let cases: [(&str, Vec<u8>, bool); 5] = [
+            ("plain.png", png.clone(), true),
+            ("more-after-its-end.png", [&png[..], &[7u8; 300_000]].concat(), true),
+            ("cut-short.png", png[..png.len() - 20].to_vec(), false),
+            ("no-picture.png", vec![b'x'; 200_000], false),
+            ("empty.png", Vec::new(), false),
+        ];
+        let mut index = ShotIndex::default();
+        for (name, bytes, _) in &cases {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            index.files.insert(path, ShotEntry { size: bytes.len() as u64, modified: 1, info: ShotInfo::default(), sha256: None, clean_sha256: None });
+        }
+        let paths: Vec<PathBuf> = cases.iter().map(|(name, ..)| dir.join(name)).collect();
+        assert!(index.hash(&paths));
+        for (path, (name, _, picture)) in paths.iter().zip(&cases) {
+            let (own, clean) = index.hashes_of(path);
+            assert_eq!(own.map(str::to_owned), sha256_file(path).ok(), "{name}");
+            assert_eq!(clean.map(str::to_owned), crate::png_meta::clean_sha256(path).ok(), "{name}");
+            assert_eq!(clean.is_some(), *picture, "{name}");
+        }
+        assert_eq!(index.hashes_of(&dir.join("another.png")), (None, None));
+        // One there already is kept, the other is read.
+        let first = &paths[0];
+        index.files.get_mut(first).unwrap().clean_sha256 = None;
+        index.files.get_mut(first).unwrap().sha256 = Some("kept".into());
+        assert!(index.hash(std::slice::from_ref(first)));
+        assert_eq!(index.hashes_of(first), (Some("kept"), crate::png_meta::clean_sha256(first).ok().as_deref()));
+        assert!(!index.hash(&paths[..2]), "both are known");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What COR-8, 9, 10, 20 and 28 cost as they were and as they are (printed: run it alone, with `--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn what_the_removed_work_cost() {
+        use std::time::Instant;
+        let middle = |mut run: Box<dyn FnMut()>, n: usize| {
+            let mut times: Vec<f64> = (0..n).map(|_| { let t = Instant::now(); run(); t.elapsed().as_secs_f64() * 1e3 }).collect();
+            times.sort_by(f64::total_cmp);
+            times[n / 2]
+        };
+        // COR-9: one picture of 20,000.
+        let mut index = ShotIndex::default();
+        for i in 0..20_000u64 {
+            let info = ShotInfo { taken: (i * 7919) % 100_003, world_id: Some("wrld_x".into()), ..Default::default() };
+            index.files.insert(PathBuf::from(format!("C:/pictures/{i:06}.png")), ShotEntry { size: i, modified: i, info, sha256: Some(format!("{i:064}")), clean_sha256: None });
+        }
+        let wanted = PathBuf::from("C:/pictures/012345.png");
+        let (a, b, w) = (index.clone(), index, wanted.clone());
+        let before = middle(Box::new(move || assert!(a.every_shot().into_iter().any(|s| s.path == wanted && s.sha256.is_some()))), 15);
+        let after = middle(Box::new(move || assert!(b.hashes_of(&w).0.is_some())), 15);
+        println!("COR-9, one hash of 20,000 pictures: {before:.3} ms -> {after:.5} ms");
+        // COR-10: an 8 MB picture, read from the file cache.
+        let file = std::env::temp_dir().join(format!("orbiters-hash-bench-{}.png", std::process::id()));
+        std::fs::write(&file, [png_with_text("Description", "x"), vec![3u8; 8 << 20]].concat()).unwrap();
+        let (f, g) = (file.clone(), file.clone());
+        let before = middle(Box::new(move || { sha256_file(&f).unwrap(); crate::png_meta::clean_sha256(&f).unwrap(); }), 9);
+        let after = middle(Box::new(move || { crate::png_meta::both_sha256(&g).unwrap(); }), 9);
+        println!("COR-10, both hashes of a picture whose bytes follow its end (8 MB): {before:.2} ms -> {after:.2} ms");
+        let mut whole = png_with_text("Description", "x");
+        let at = whole.windows(4).position(|w| w == b"IDAT").unwrap() - 4;
+        let data = vec![5u8; 8 << 20];
+        whole.splice(at..at + 12 + 64, [&(data.len() as u32).to_be_bytes()[..], b"IDAT", &data, &[0; 4]].concat());
+        std::fs::write(&file, whole).unwrap();
+        let (f, g) = (file.clone(), file.clone());
+        let before = middle(Box::new(move || { sha256_file(&f).unwrap(); crate::png_meta::clean_sha256(&f).unwrap(); }), 9);
+        let after = middle(Box::new(move || { crate::png_meta::both_sha256(&g).unwrap(); }), 9);
+        println!("COR-10, both hashes of a picture (8 MB): {before:.2} ms -> {after:.2} ms; opened and read {} -> 1", 2);
+        std::fs::remove_file(&file).unwrap();
+        // COR-28: the settings as they are saved.
+        let text = serde_json::to_string_pretty(&crate::settings::Settings::default()).unwrap();
+        let (t, u) = (text.clone(), text.clone());
+        let before = middle(
+            Box::new(move || {
+                let _moved: serde_json::Value = serde_json::from_str(&t).unwrap();
+                let input: serde_json::Value = serde_json::from_str(&t).unwrap();
+                let _: crate::settings::Settings = serde_json::from_value(input.clone()).unwrap();
+            }),
+            101,
+        );
+        let after = middle(Box::new(move || assert!(crate::json_lenient::<crate::settings::Settings>(&u).1.is_empty())), 101);
+        println!("COR-28, {} bytes of settings read: {:.0} us -> {:.0} us", text.len(), before * 1e3, after * 1e3);
+        // COR-20, DCT-19: 12 worlds shown, 200 comments waiting.
+        use crate::world_feedback::{Action, Known, Pending, Queue, Stamp};
+        let stamp = Stamp { server: "s".into(), account: Some("1".into()), credential: None };
+        let mut queue = Queue::default();
+        for i in 0..200 {
+            queue.push_to(&format!("w{}", i % 12), Action::Comment { text: "x".repeat(400), client_id: i.to_string() }, 1, stamp.clone());
+        }
+        let (q, s) = (queue.clone(), stamp.clone());
+        let before = middle(
+            Box::new(move || {
+                for w in 0..12 {
+                    let world = format!("w{w}");
+                    let mine: Vec<Pending> = q.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.shows_as(&s))).cloned().collect();
+                    assert!(Known::default().seen(&world, mine.iter(), "me").pending > 0);
+                }
+            }),
+            31,
+        );
+        let after = middle(Box::new(move || (0..12).for_each(|w| assert!(Known::default().seen(&format!("w{w}"), queue.for_stamp(&stamp), "me").pending > 0))), 31);
+        println!("COR-20, 12 worlds with 200 comments waiting: {:.0} us -> {:.0} us", before * 1e3, after * 1e3);
     }
 
     #[test]

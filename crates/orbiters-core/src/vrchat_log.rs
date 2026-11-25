@@ -99,6 +99,11 @@ fn enters_a_world(line: &[u8]) -> bool {
 }
 
 impl Account {
+    /// The same VRChat profile started again: what was known of it, to be read on from its new log's beginning.
+    pub fn started_again(self) -> Self {
+        Self { signed_out: false, worlds: false, ..self }
+    }
+
     /// Takes in a new part of the log (whole lines).
     pub fn read(&mut self, text: &str) {
         for line in text.lines() {

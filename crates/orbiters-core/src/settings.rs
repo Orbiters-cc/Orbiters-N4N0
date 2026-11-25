@@ -118,11 +118,11 @@ pub enum AvatarGunAllow {
     /// Nobody: hits are not even reported.
     Nobody,
     /// Everyone is asked for first ("{name} wants to change your avatar to {avatar}", Allow or Not now).
-    #[default]
     AskFirst,
     /// VRChat friends at once (a shooter whose VRChat account Orbiters verified), everyone else asked for first.
     Friends,
-    /// Anyone, at once.
+    /// Anyone, at once (Enzo, 2026-11-24: the surprise is the toy; the first change says it can be turned off).
+    #[default]
     Anyone,
 }
 
@@ -142,6 +142,8 @@ pub struct AvatarGunSettings {
     pub allow: AvatarGunAllow,
     /// What this player's gun shoots; none chosen yet.
     pub loaded: Option<LoadedAvatar>,
+    /// A gun changed this player's avatar once: its notice said the setting exists, and Settings shows it from then on.
+    pub changed_once: bool,
 }
 
 /// The beta's menu mismatch buttons (`orbiters-desktop`'s `mismatch`): three buttons always in view that say N4N0's menus do not match
@@ -1238,12 +1240,12 @@ fn earlier_render_default(launch: &mut serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
-    /// The avatar gun asks first unless the person chose otherwise, and has no avatar until one is chosen; what was chosen
-    /// is read back as saved.
+    /// Anyone's gun changes the avatar unless the person chose otherwise, the gun has no avatar until one is chosen, and no
+    /// change happened yet; what was chosen is read back as saved.
     #[test]
-    fn the_avatar_gun_asks_first_by_default() {
+    fn the_avatar_gun_lets_anyone_by_default() {
         let d = Settings::default();
-        assert_eq!((d.avatar_gun.allow, d.avatar_gun.loaded.as_ref()), (AvatarGunAllow::AskFirst, None));
+        assert_eq!((d.avatar_gun.allow, d.avatar_gun.loaded.as_ref(), d.avatar_gun.changed_once), (AvatarGunAllow::Anyone, None, false));
         let saved: Settings = serde_json::from_value(serde_json::json!({ "avatar_gun": { "allow": "friends", "loaded": { "id": "avtr_x", "name": "Robot" } } })).unwrap();
         assert_eq!(saved.avatar_gun.allow, AvatarGunAllow::Friends);
         assert_eq!(saved.avatar_gun.loaded, Some(LoadedAvatar { id: "avtr_x".into(), name: "Robot".into(), thumbnail: String::new() }));

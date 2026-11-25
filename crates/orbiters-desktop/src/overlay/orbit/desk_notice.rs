@@ -107,10 +107,10 @@ impl Shown for crate::controller::avatar_gun::Card {
         crate::controller::avatar_gun::Card::up(self, now_ms)
     }
     fn size(&self) -> Vec2 {
-        crate::avatar_gun_ui::CARD
+        crate::avatar_gun_ui::size(self)
     }
     fn part_at(&self, p: Pos2) -> Option<Self::Part> {
-        crate::avatar_gun_ui::part_at(&self.kind, p)
+        crate::avatar_gun_ui::part_at(self, p)
     }
     fn look(&self, now_ms: u64) -> u64 {
         // Its words, and its line of time left in sixty steps.

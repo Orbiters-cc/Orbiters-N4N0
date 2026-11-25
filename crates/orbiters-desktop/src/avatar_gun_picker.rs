@@ -38,8 +38,8 @@ pub struct Group {
 /// Where the picker stands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Stage {
-    /// No VRChat sign-in to read the favourites with; `gated`: the sign-in itself is not open to this Orbiters account
-    /// (the server's `n4n0-vrchat-login`).
+    /// No VRChat sign-in to read the favourites with; `gated`: the server does not offer the sign-in to this Orbiters
+    /// account now (its `n4n0-vrchat-login`, open to every member; asked again as always).
     SignedOut { gated: bool },
     /// The groups are being read.
     #[default]
@@ -52,7 +52,7 @@ pub enum Stage {
 
 /// The words of the picker's states (both pages say them).
 pub const SIGN_IN: &str = mark("Sign in to VRChat in Orbiters - N4N0 to list the avatars of your favorites.");
-pub const GATED: &str = mark("VRChat sign-in in Orbiters - N4N0 isn't open to your account yet: the picker needs it to read your favorites.");
+pub const GATED: &str = mark("VRChat sign-in isn't available for your account right now. The picker needs it to read your favorites.");
 pub const EMPTY: &str = mark("No public avatar in your favorites yet. Favorite public avatars in VRChat and they show up here.");
 pub const EMPTY_GROUP: &str = mark("No public avatar in this list");
 pub const RETRY: &str = mark("Try again");

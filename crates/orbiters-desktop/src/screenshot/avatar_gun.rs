@@ -4,7 +4,7 @@
 use super::{Page, Scenario};
 use crate::app::App;
 use crate::avatar_gun_picker::{self as picker, Stage};
-use crate::controller::avatar_gun::{Card, CardKind};
+use crate::controller::avatar_gun::{Card, CardKind, Hint};
 
 fn groups() -> Vec<picker::Group> {
     let mut groups = picker::sample(false);
@@ -19,7 +19,7 @@ fn groups() -> Vec<picker::Group> {
 /// What a scene's picker shows, and whether it is open.
 fn staged(name: &str) -> Option<(Stage, Vec<picker::Group>, bool)> {
     Some(match name {
-        "avatar-gun-card" | "avatar-gun-ask" | "avatar-gun-changed" => (Stage::Ready, groups(), false),
+        "avatar-gun-card" | "avatar-gun-ask" | "avatar-gun-changed" | "avatar-gun-first" | "avatar-gun-first-turned-off" => (Stage::Ready, groups(), false),
         "avatar-gun-picker" => (Stage::Ready, groups(), true),
         "avatar-gun-picker-arriving" => (Stage::Ready, picker::sample(true), true),
         "avatar-gun-picker-loading" => (Stage::Loading, Vec::new(), true),
@@ -33,6 +33,10 @@ fn staged(name: &str) -> Option<(Stage, Vec<picker::Group>, bool)> {
 
 /// The scene's first frame: the made-up lists and pictures, the picker opened.
 pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str) {
+    if name == "avatar-gun-settings" {
+        app.open_settings("n4n0.avatar-gun", orbiters_ui::anim::time(ctx));
+        return;
+    }
     let Some((stage, groups, open)) = staged(name) else { return };
     let origin = open.then(|| egui::Rect::from_min_size(ctx.content_rect().right_top() + egui::vec2(-260.0, 360.0), egui::vec2(140.0, 32.0)));
     app.n4n0_mut().gun_mut().stage(ctx, stage, groups, &super::orbit::avatar_portrait, origin);
@@ -75,11 +79,32 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
     // The hit player's card in the window's corner: asked, then changed (its Undo). Its time far ahead: it stays.
     let ten_minutes = 600_000;
     let until_ms = crate::controller::unix_ms() + ten_minutes;
-    let card = |kind: CardKind| Card { id: 1, kind, from: "Kite".into(), avatar_id: "avtr_00000000-0000-4000-8000-000000000003".into(), avatar: "Starlight Witch".into(), thumbnail: String::new(), until_ms, for_ms: 2 * ten_minutes }; // i18n: not shown (made-up names)
+    let card = |kind: CardKind| Card { id: 1, kind, from: "Kite".into(), avatar_id: "avtr_00000000-0000-4000-8000-000000000003".into(), avatar: "Starlight Witch".into(), thumbnail: String::new(), until_ms, for_ms: 2 * ten_minutes, hint: Hint::None }; // i18n: not shown (made-up names)
     let mut ask = snapshot.clone();
     ask.avatar_gun.card = Some(card(CardKind::Ask));
     scenarios.push(scene("avatar-gun-ask", ask, 0.0));
-    let mut changed = snapshot;
+    let mut changed = snapshot.clone();
     changed.avatar_gun.card = Some(card(CardKind::Changed));
+    changed.settings = {
+        let mut s = (*snapshot.settings).clone();
+        s.avatar_gun.changed_once = true;
+        s
+    }
+    .into();
     scenarios.push(scene("avatar-gun-changed", changed, 0.0));
+    // The first change ever: the notice with its hint, then its Turn off answered.
+    for (name, hint) in [("avatar-gun-first", Hint::Offered), ("avatar-gun-first-turned-off", Hint::TurnedOff)] {
+        let mut first = snapshot.clone();
+        first.avatar_gun.card = Some(Card { hint, ..card(CardKind::Changed) });
+        scenarios.push(scene(name, first, 0.0));
+    }
+    // Settings, N4N0 companion: the setting there once a gun changed the avatar.
+    let mut settings = snapshot.clone();
+    settings.settings = {
+        let mut s = (*snapshot.settings).clone();
+        s.avatar_gun.changed_once = true;
+        s
+    }
+    .into();
+    scenarios.push(Scenario { page: Page::Settings, ..scene("avatar-gun-settings", settings, 0.0) });
 }

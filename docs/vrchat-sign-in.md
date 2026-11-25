@@ -1,8 +1,9 @@
 # Optional VRChat sign-in (workstream H)
 
 Settings has a VRChat account card only for a signed-in Orbiters member whose server grants
-`n4n0-vrchat-login`. The server owns eligibility (ADMIN only during the permission-request phase);
-the desktop does not infer it from a name or locally stored role.
+`n4n0-vrchat-login`. The server owns eligibility (open to every member since 2026-11-25; it was ADMIN only
+during the permission-request phase); the desktop keeps asking it and does not infer it from a name or locally stored
+role.
 
 The member can enter a VRChat username and password, complete an authenticator, email or recovery-code
 challenge, see their display name and picture, and sign out. Passwords and codes are transient. Requests

@@ -300,23 +300,38 @@ pub enum Layer {
     With(u32),
 }
 
+/// How many levels above the parts of a menu the part in `zone` lies. **A click on a window raises it above the others of its level** (macOS does, whatever becomes of the
+/// click: a page whose head was clicked had its back over it, plain grey, until the page itself was clicked: the owner's first session, 2026-11-25). What lies over one
+/// another is at levels of its own, and no click changes that.
+fn rank(zone: Zone) -> isize {
+    match zone {
+        Zone::SheetBack => 1,
+        Zone::SheetHint => 2,
+        Zone::Takeover => 3,
+        Zone::SheetPeek => 4,
+        _ => 0,
+    }
+}
+
+/// How many levels above the first the arrow is.
+const ARROW_RANK: isize = 5;
+
 /// Lays the windows `ours` (bottom first) where `layer` says, in that order.
-pub fn lay(ours: &[&PanelWindow], layer: Layer) {
-    let panels = ours.iter().map(|w| &w.panel);
+pub fn lay(ours: &[(Zone, &PanelWindow)], layer: Layer) {
     match layer {
         Layer::Above(level) => {
-            for panel in panels {
-                panel.setLevel(level);
-                panel.orderFrontRegardless();
+            for (zone, w) in ours {
+                w.panel.setLevel(level + rank(*zone));
+                w.panel.orderFrontRegardless();
             }
         }
         Layer::With(game) => {
-            // Each right above the one before it, from the game's window up: under whatever covers the game.
+            // Each right above the one before it, from the game's window up: under whatever covers the game. (Nothing of ours takes a click there.)
             let mut under = game as isize;
-            for panel in panels {
-                panel.setLevel(0);
-                panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, under);
-                under = panel.windowNumber();
+            for (_, w) in ours {
+                w.panel.setLevel(0);
+                w.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, under);
+                under = w.panel.windowNumber();
             }
         }
     }
@@ -438,8 +453,8 @@ impl Arrow {
         let tip = super::super::desk_shared::arrow::TIP.to_vec2() * (px as f32 / ARROW as f32);
         let spot = at - tip;
         if window.place(game, [spot.x.round() as i32, spot.y.round() as i32], 255, false) {
-            // Above every part, and not moved in the order while it shows.
-            window.panel.setLevel(level + 1);
+            // Above every part's level, and not moved in the order while it shows.
+            window.panel.setLevel(level + ARROW_RANK);
             window.panel.orderFrontRegardless();
         }
     }
@@ -496,6 +511,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// What lies over one another is at levels of its own: macOS raises a window that is clicked among those of its level (the page's back, whose head has the tabs, came over the
+    /// page: plain grey), and no click reorders these. The arrow is over them all.
+    #[test]
+    fn a_click_puts_no_part_over_the_page() {
+        assert!(rank(Zone::WingWorlds) < rank(Zone::SheetBack) && rank(Zone::SheetBack) < rank(Zone::Takeover), "the page over its back, its back over the tiles");
+        assert!(rank(Zone::SheetBack) < rank(Zone::SheetHint));
+        assert!(rank(Zone::Takeover) < rank(Zone::SheetPeek), "the way back over what it brings back");
+        let most = [Zone::SheetBack, Zone::SheetHint, Zone::Takeover, Zone::SheetPeek, Zone::WheelWorlds].map(rank).into_iter().max().unwrap();
+        assert!(ARROW_RANK > most);
     }
 
     #[test]

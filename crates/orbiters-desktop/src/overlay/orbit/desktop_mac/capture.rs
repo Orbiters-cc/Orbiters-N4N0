@@ -6,6 +6,7 @@
 use super::super::detect::{self, Part};
 use super::super::zones::Around;
 use super::game::Shot;
+use super::wheel::{self, Fit, Scores};
 use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObject};
@@ -91,15 +92,50 @@ pub struct Ask {
     pub shot: Shot,
     /// How long from a look to the next.
     pub every: Duration,
+    /// Where the wheel is looked for.
+    pub search: Search,
+    /// The look this is of, and when it began: one that finds nothing for [`TELLS_AFTER`] says once where the disc most like a wheel is, if any.
+    pub look: u32,
+    pub began: Instant,
+    /// The frame it says that of is kept as a picture in the logs' folder (a setting, off by default).
+    pub keep: bool,
+}
+
+/// Where the wheel is looked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Search {
+    InPlace,
+    /// Around its place too (R was pressed).
+    Around,
+    /// Where it was found.
+    At(Fit),
+}
+
+/// How long a look for the wheel goes on before it says what it saw.
+const TELLS_AFTER: Duration = Duration::from_millis(900);
+
+/// What a look measured: what its log says when it found nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Measured {
+    pub menu: Option<Around>,
+    /// The wheel's rim is in place.
+    pub coming: bool,
+    pub wheel: Scores,
+    /// The best around its place, when it was looked for there.
+    pub fit: Option<Fit>,
+    /// The Quick Menu's icons found.
+    pub icons: usize,
 }
 
 /// What a look found, and when its frame was read.
 #[derive(Clone, Copy, Debug)]
 pub struct Answer {
     pub at: Instant,
-    pub menu: Option<Around>,
-    /// The wheel's rim is in place.
-    pub coming: bool,
+    pub saw: Measured,
+    /// The look it is of.
+    pub look: u32,
+    /// The disc most like a wheel anywhere, when this look was asked for it.
+    pub anywhere: Option<Option<Fit>>,
 }
 
 /// Why no picture of the window could be had.
@@ -142,19 +178,77 @@ struct Shared {
 }
 
 /// The menu's look at a whole frame of `shot` (top-down BGRA, `stride` bytes a row): `None` where the frame is not of that size (the window's older one).
-pub fn look(bgra: &[u8], width: usize, height: usize, stride: usize, shot: &Shot) -> Option<(Option<Around>, bool)> {
-    if (width, height) != (shot.width as usize, shot.height as usize) || stride < width * 4 || bgra.len() < stride * height {
+pub fn measure(bgra: &[u8], width: usize, height: usize, stride: usize, shot: &Shot, search: &Search) -> Option<Measured> {
+    let whole = whole(bgra, width, height, stride, shot)?;
+    let client = shot.client();
+    let scores = wheel::in_place(&whole, client);
+    let mut out = Measured { coming: scores.edge >= detect::WHEEL_EDGE, wheel: scores, ..Measured::default() };
+    // The wheel first: it is cheaper, and the Quick Menu's row is not under it when it shows.
+    let seen = match search {
+        _ if scores.has(&wheel::IN_PLACE) && !matches!(search, Search::At(_)) => true,
+        Search::InPlace => false,
+        Search::Around => {
+            out.fit = wheel::near(&whole, client);
+            out.fit.is_some_and(|f| f.scores.has(&wheel::FIT))
+        }
+        Search::At(fit) => {
+            out.fit = Some(*fit);
+            wheel::still(&whole, client, fit)
+        }
+    };
+    if seen {
+        out.menu = Some(Around::Wheel);
+    } else {
+        out.fit = out.fit.filter(|_| matches!(search, Search::Around));
+        out.icons = detect::icons_found(&whole, client);
+        out.menu = (out.icons >= detect::ICONS_NEEDED).then_some(Around::QuickMenu);
+    }
+    Some(out)
+}
+
+/// The game's own picture in a frame, as a part of itself.
+fn whole<'a>(bgra: &'a [u8], width: usize, height: usize, stride: usize, shot: &Shot) -> Option<Part<'a>> {
+    if (width, height) != (shot.width as usize, shot.height as usize) || stride < width * 4 || bgra.len() < stride * height || shot.client().y < 2.0 || width < 2 {
         return None;
     }
-    let client = shot.client();
-    let parts = detect::parts(client).map(|r| {
-        let (x0, y0) = (r.min.x.max(0.0) as u32, r.min.y.max(0.0) as u32);
-        let (w, h) = ((r.width().ceil() as u32).min(shot.width - x0.min(shot.width)), (r.height().ceil() as u32).min(client.y as u32 - y0.min(client.y as u32)));
-        let start = (y0 + shot.title) as usize * stride + x0 as usize * 4;
-        (w > 1 && h > 1).then(|| Part { x0, y0, width: w, height: h, stride: stride as u32, bgra: &bgra[start.min(bgra.len())..] })
+    Some(Part { x0: 0, y0: 0, width: shot.width, height: shot.height - shot.title, stride: stride as u32, bgra: &bgra[shot.title as usize * stride..] })
+}
+
+#[cfg(test)]
+pub fn look(bgra: &[u8], width: usize, height: usize, stride: usize, shot: &Shot) -> Option<(Option<Around>, bool)> {
+    measure(bgra, width, height, stride, shot, &Search::InPlace).map(|m| (m.menu, m.coming))
+}
+
+/// How many looked-at frames the logs' folder keeps.
+const KEPT: usize = 12;
+
+/// The looked-at frame in the logs' folder, the oldest of them beyond [`KEPT`] gone. (Only with the setting on.)
+fn keep(bgra: &[u8], width: usize, height: usize, stride: usize) {
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in bgra.chunks(stride).take(height) {
+        rgba.extend(row[..width * 4].chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]));
+    }
+    let _ = std::thread::Builder::new().name("orbit-keeps".into()).spawn(move || {
+        let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) else { return };
+        let folder = orbiters_core::paths::logs_dir().join(KEPT_FOLDER);
+        keep_in(&folder, &image);
     });
-    let [Some(wheel), Some(row)] = parts else { return None };
-    Some((detect::look(&wheel, &row, client), detect::wheel_coming(&wheel, client)))
+}
+
+/// The folder of the logs' folder the kept frames are in.
+pub const KEPT_FOLDER: &str = "overlay-looks";
+
+fn keep_in(folder: &std::path::Path, image: &image::RgbaImage) {
+    if std::fs::create_dir_all(folder).is_err() {
+        return;
+    }
+    let name = format!("look-{}.png", orbiters_core::now_utc_iso().replace(':', "-"));
+    let _ = image.save(folder.join(name));
+    let mut old: Vec<_> = std::fs::read_dir(folder).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+    old.sort();
+    for path in old.iter().take(old.len().saturating_sub(KEPT)) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 struct OutputIvars {
@@ -162,6 +256,8 @@ struct OutputIvars {
     answers: mpsc::Sender<Answer>,
     /// When the last look was, and whether this stream was ended by macOS.
     last: Mutex<Option<Instant>>,
+    /// The look that last said what is anywhere on its frame.
+    told: AtomicU64,
     ended: Arc<AtomicBool>,
 }
 
@@ -209,19 +305,31 @@ impl Output {
             *last = Some(now);
         }
         // SAFETY: the picture is locked for reading while its rows are read, within its own size, and unlocked after.
-        let found = unsafe {
+        let (found, anywhere) = unsafe {
             if CVPixelBufferLockBaseAddress(image, READ_ONLY) != 0 {
                 return;
             }
             let (base, stride) = (CVPixelBufferGetBaseAddress(image), CVPixelBufferGetBytesPerRow(image));
             let (width, height) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
-            let found = if base.is_null() { None } else { look(std::slice::from_raw_parts(base, stride * height), width, height, stride, &ask.shot) };
+            let bgra = if base.is_null() { &[][..] } else { std::slice::from_raw_parts(base, stride * height) };
+            let found = measure(bgra, width, height, stride, &ask.shot, &ask.search);
+            // Once a look that found nothing, late in it: by then VRChat's menu shows, if it was opened.
+            let tells = !matches!(ask.search, Search::At(_)) && found.is_some_and(|f| f.menu.is_none()) && now.duration_since(ask.began) >= TELLS_AFTER && this.told.swap(u64::from(ask.look), Ordering::Relaxed) != u64::from(ask.look);
+            let mut anywhere = None;
+            if tells {
+                if ask.search == Search::Around {
+                    anywhere = Some(whole(bgra, width, height, stride, &ask.shot).and_then(|w| wheel::anywhere(&w, ask.shot.client())));
+                }
+                if ask.keep {
+                    keep(bgra, width, height, stride);
+                }
+            }
             CVPixelBufferUnlockBaseAddress(image, READ_ONLY);
-            found
+            (found, anywhere)
         };
         crate::perf::elsewhere(crate::perf::Part::Capture, now.elapsed());
-        if let Some((menu, coming)) = found {
-            let _ = this.answers.send(Answer { at: now, menu, coming });
+        if let Some(saw) = found {
+            let _ = this.answers.send(Answer { at: now, saw, look: ask.look, anywhere });
         }
     }
 }
@@ -295,7 +403,7 @@ struct Stream {
 impl Stream {
     fn start(filter: &AnyObject, ask: &Ask, shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>, queue: Queue) -> Result<Self, Trouble> {
         let ended = Arc::new(AtomicBool::new(false));
-        let output = Output::alloc().set_ivars(OutputIvars { shared: shared.clone(), answers: answers.clone(), last: Mutex::new(None), ended: ended.clone() });
+        let output = Output::alloc().set_ivars(OutputIvars { shared: shared.clone(), answers: answers.clone(), last: Mutex::new(None), told: AtomicU64::new(0), ended: ended.clone() });
         // SAFETY: NSObject's init on a freshly allocated object; then ScreenCaptureKit's own classes, methods and argument types.
         let pace = pace(ask);
         let (stream, config, output) = unsafe {
@@ -517,5 +625,29 @@ fn pause(shared: &Shared, long: Duration) {
     let until = Instant::now() + long;
     while !shared.stop.load(Ordering::Acquire) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_newest_kept_frames_stay() {
+        let root = std::env::temp_dir().join(format!("orbiters-kept-looks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..KEPT + 3 {
+            std::fs::write(root.as_path().join(format!("look-2000-01-01T00-00-{i:02}Z.png")), b"").unwrap();
+        }
+        std::fs::write(root.as_path().join("notes.txt"), b"").unwrap();
+        keep_in(&root, &image::RgbaImage::new(2, 2));
+        let names: Vec<String> = std::fs::read_dir(root.as_path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let pictures: Vec<&String> = names.iter().filter(|n| n.ends_with(".png")).collect();
+        assert_eq!(pictures.len(), KEPT, "{names:?}");
+        assert!(names.contains(&"notes.txt".to_string()), "what is not its own stays");
+        assert!(pictures.iter().any(|n| !n.contains("2000-01-01")), "the new one stays");
+        assert!(!names.iter().any(|n| n.contains("00-00Z") || n.contains("00-01Z")), "the oldest went: {names:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

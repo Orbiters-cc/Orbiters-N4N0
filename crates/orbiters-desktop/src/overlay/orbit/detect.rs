@@ -50,6 +50,15 @@ impl Part<'_> {
         std::array::from_fn(|i| (a[i] * (1.0 - ax) + b[i] * ax) * (1.0 - ay) + (c[i] * (1.0 - ax) + d[i] * ax) * ay)
     }
 
+    /// The colour of the pixel (x, y) is on, unblended (BGR). Off the part: the nearest.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn nearest(&self, x: f32, y: f32) -> [f32; 3] {
+        let ix = (x - self.x0 as f32).clamp(0.0, self.width as f32 - 1.0) as usize;
+        let iy = (y - self.y0 as f32).clamp(0.0, self.height as f32 - 1.0) as usize;
+        let i = iy * self.stride as usize + ix * 4;
+        self.bgra.get(i..i + 3).map_or([0.0; 3], |p| [p[0] as f32, p[1] as f32, p[2] as f32])
+    }
+
     fn grey(&self, x: f32, y: f32) -> f32 {
         let c = self.at(x, y);
         (c[0] + c[1] + c[2]) / 3.0
@@ -91,6 +100,11 @@ pub const WHEEL_LINE: f32 = 0.45;
 /// How the wheel's place looks: (share of the rim that stands out from the world, share of the ring inside it of one colour, share of the rim's line brighter than the disc).
 pub fn wheel_scores(part: &Part, client: Vec2) -> (f32, f32, f32) {
     let (center, radius) = zones::wheel(client);
+    wheel_scores_at(part, center, radius)
+}
+
+/// The same of a wheel centred on `center`, of that radius.
+pub fn wheel_scores_at(part: &Part, center: egui::Pos2, radius: f32) -> (f32, f32, f32) {
     let ring = |r: f32| -> [[f32; 3]; WHEEL_ANGLES] {
         std::array::from_fn(|i| {
             let (s, c) = (i as f32 / WHEEL_ANGLES as f32 * std::f32::consts::TAU).sin_cos();

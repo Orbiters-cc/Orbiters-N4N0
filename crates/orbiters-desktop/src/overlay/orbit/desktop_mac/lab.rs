@@ -40,15 +40,20 @@ pub enum Shows {
     Wheel,
     QuickMenu,
     Nothing,
+    /// The wheel, a little off its place and smaller: where the first-person view, the avatar's height or VRChat itself may have it ([`BESIDE`]).
+    Beside,
 }
 
+/// How far off its place (in radii) and how large that wheel is.
+pub const BESIDE: (Vec2, f32) = (Vec2::new(-0.06, 0.04), 0.93);
+
 impl Shows {
-    const ALL: [(Shows, &'static str); 3] = [(Shows::Wheel, "wheel"), (Shows::QuickMenu, "qm"), (Shows::Nothing, "none")];
+    const ALL: [(Shows, &'static str); 4] = [(Shows::Wheel, "wheel"), (Shows::QuickMenu, "qm"), (Shows::Nothing, "none"), (Shows::Beside, "beside")];
 
     /// The real frames it is made of ([`super::super::detect`]'s own), by what they show: the wheel's part and the icons' row, of a 1280 x 720 window.
     fn fixtures(self) -> [&'static str; 2] {
         match self {
-            Shows::Wheel => ["wheel-forest-1280x720", "wheel-forest-1280x720-row"],
+            Shows::Wheel | Shows::Beside => ["wheel-forest-1280x720", "wheel-forest-1280x720-row"],
             Shows::QuickMenu => ["qm-forest-1280x720", "qm-forest-1280x720-row"],
             Shows::Nothing => ["none-forest-1280x720", "none-forest-1280x720-row"],
         }
@@ -125,7 +130,11 @@ pub fn frame(data: &Path, shows: Shows, client: Vec2) -> anyhow::Result<Picture>
     for (name, menu) in shows.fixtures().into_iter().zip([zones::Around::Wheel, zones::Around::QuickMenu]) {
         let (part, of, corner) = fixture(data, name)?;
         let (from, to) = (zones::frame(menu, of), zones::frame(menu, client));
-        let k = to.1 / from.1;
+        let (mut to, mut k) = (to, to.1 / from.1);
+        if shows == Shows::Beside && menu == zones::Around::Wheel {
+            to.0 += BESIDE.0 * zones::wheel(client).1;
+            k *= BESIDE.1;
+        }
         let at = to.0 + (corner - from.0) * k;
         let (pw, ph) = ((part.width as f32 * k).round() as usize, (part.height as f32 * k).round() as usize);
         let scaled = part.stretched(pw.max(1), ph.max(1));
@@ -309,6 +318,12 @@ fn desk(launcher: u32) -> anyhow::Result<()> {
                 }
                 ["button", to] => keys.button.set(*to == "down"),
                 ["point", zone] => println!("{}", serde_json::json!({ "pointed": point(&mut desk, zone) })),
+                ["spot", zone] => println!("{}", serde_json::json!({ "spot": desk.windows.list.iter().find(|(z, w)| format!("{z:?}") == *zone && w.shown()).and_then(|(_, w)| w.spot()) })),
+                ["client"] => println!("{}", serde_json::json!({ "client": desk.last.map(|g| [g.client().x, g.client().y]) })),
+                // The pointer over the control of a part that does `action`, as macOS' own pointer goes.
+                ["control", zone, action] => println!("{}", serde_json::json!({ "pointed": control(&mut desk, zone, action) })),
+                // What a person sees of a part: macOS's own picture of its window (how much of it is painted, how much it varies), and which of ours lie over it.
+                ["panel", zone] => println!("{}", serde_json::json!({ "panel": seen_of(&desk, zone) })),
                 // As macOS gives our own windows what was clicked and typed on them.
                 ["click"] => {
                     post_button(mtm, true);
@@ -414,6 +429,40 @@ fn point(desk: &mut Desk, zone: &str) -> bool {
     panel::put_pointer(&desk.hold, game.point(at))
 }
 
+/// The pointer over the control that does `action` (its name's start) on the part in `zone`.
+fn control(desk: &mut Desk, zone: &str, action: &str) -> bool {
+    let Some(game) = desk.last else { return false };
+    let at = desk.panels.all().find(|p| format!("{:?}", p.zone) == zone && p.shown).and_then(|p| {
+        let item = p.items.iter().find(|i| format!("{:?}", i.action).starts_with(action))?;
+        Some(p.placed.rect.min + item.rect.center().to_vec2() / p.logical * p.placed.rect.size())
+    });
+    at.is_some_and(|at| panel::put_pointer(&desk.hold, game.point(at)))
+}
+
+fn seen_of(desk: &Desk, zone: &str) -> serde_json::Value {
+    let Some(window) = desk.windows.list.iter().find(|(z, w)| format!("{z:?}") == zone && w.shown()).map(|(_, w)| w) else { return serde_json::Value::Null };
+    let number = u32::try_from(window.number()).unwrap_or(0);
+    let list = crate::bridge::mac::on_screen().unwrap_or_default();
+    let ours = desk.doing().shown;
+    let me = list.iter().find(|w| w.id == number).copied();
+    let over: Vec<u32> = list
+        .iter()
+        .take_while(|w| w.id != number)
+        .filter(|w| ours.contains(&w.id) && me.is_some_and(|m| w.x < m.x + m.width && m.x < w.x + w.width && w.y < m.y + m.height && m.y < w.y + w.height))
+        // (what is wide and tall enough to hide it: the arrow, a tile's corner are not)
+        .filter(|w| me.is_some_and(|m| w.width * w.height > m.width * m.height / 4.0))
+        .map(|w| w.id)
+        .collect();
+    let picture = crate::bridge::mac::capture_png(number).ok().and_then(|png| image::load_from_memory(&png).ok()).map(|i| i.to_rgba8());
+    let (opaque, spread) = picture.map_or((0.0, 0.0), |p| {
+        let n = (p.width() * p.height()).max(1) as f64;
+        let grey = |p: &image::Rgba<u8>| (f64::from(p[0]) + f64::from(p[1]) + f64::from(p[2])) / 3.0;
+        let mean = p.pixels().map(grey).sum::<f64>() / n;
+        (p.pixels().filter(|p| p[3] > 0).count() as f64 / n, (p.pixels().map(|p| (grey(p) - mean).powi(2)).sum::<f64>() / n).sqrt())
+    });
+    serde_json::json!({ "opaque": opaque, "spread": spread, "over": over })
+}
+
 fn middle(zone: Zone, placed: zones::Placed) -> Pos2 {
     match zone.ring() {
         Some(ring) => placed.center + zones::polar((ring.inner + ring.outer) / 2.0, ring.middle()) * placed.unit,
@@ -452,6 +501,8 @@ mod tests {
     fn expected(shows: Shows) -> Option<Around> {
         match shows {
             Shows::Wheel => Some(Around::Wheel),
+            // (not in its place: what looks around it finds)
+            Shows::Beside => None,
             Shows::QuickMenu => Some(Around::QuickMenu),
             Shows::Nothing => None,
         }
@@ -493,6 +544,30 @@ mod tests {
                                 bgra[(y * w + x) * 4..][..4].copy_from_slice(&taken(&guest, game.client(), &shot, x, y));
                             }
                         }
+                    }
+                    if shows == Shows::Beside {
+                        // (the whole of it is read: in place it is no wheel, around it is one, where it is)
+                        let mut bgra = vec![0u8; w * h * 4];
+                        for (i, px) in bgra.chunks_exact_mut(4).enumerate() {
+                            px.copy_from_slice(&taken(&guest, game.client(), &shot, i % w, i / w));
+                        }
+                        assert_eq!(capture::look(&bgra, w, h, w * 4, &shot).unwrap().0, None, "in place, {percent} %");
+                        let found = capture::measure(&bgra, w, h, w * 4, &shot, &capture::Search::Around).unwrap();
+                        assert_eq!(found.menu, Some(Around::Wheel), "around its place, {percent} %: {:?}", found.fit);
+                        let fit = found.fit.unwrap();
+                        let want = BESIDE.0 * 0.139;
+                        assert!((fit.off - want).length() <= 0.139 * 0.03 && (fit.size - BESIDE.1).abs() <= 0.03, "{fit}, not {want:?} {}", BESIDE.1);
+                        // Where it was found, it stays found; and nothing is there once it is gone.
+                        let at = capture::Search::At(fit);
+                        assert_eq!(capture::measure(&bgra, w, h, w * 4, &shot, &at).unwrap().menu, Some(Around::Wheel));
+                        let none = frame(&data(), Shows::Nothing, shot.client()).unwrap();
+                        for search in [at, capture::Search::Around] {
+                            assert_eq!(capture::measure(&none.bgra, w, h, w * 4, &shot, &search).unwrap().menu, None);
+                        }
+                        // What the log says of a look that found nothing names where it is.
+                        let anywhere = super::super::wheel::anywhere(&super::super::super::detect::Part { x0: 0, y0: 0, width: w as u32, height: h as u32, stride: w as u32 * 4, bgra: &bgra }, shot.client()).unwrap();
+                        assert!((anywhere.off - want).length() <= 0.139 * 0.06, "{anywhere}");
+                        continue;
                     }
                     let found = capture::look(&bgra, w, h, w * 4, &shot).expect("a frame of the size asked");
                     assert_eq!(found.0, expected(shows), "{name} at {percent} % of {:?}", game.client());
@@ -542,6 +617,57 @@ mod tests {
             }
         }
         assert!(tried >= 40, "{tried}");
+    }
+
+    /// Every real frame with no wheel, and the Quick Menu's, looked at around the wheel's place: none is taken for one, at what is asked there. And every real wheel is one there too.
+    #[test]
+    fn around_its_place_only_a_wheel_is_one() {
+        use super::super::super::detect::Part;
+        use super::super::wheel;
+        let (mut tried, mut most) = (0, 0.0f32);
+        for entry in std::fs::read_dir(data()).unwrap() {
+            let path = entry.unwrap().path();
+            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let kind = stem.split('-').next().unwrap_or_default().to_owned();
+            let fields: Vec<&str> = stem.split('_').collect();
+            if !["wheel", "qm", "none"].contains(&kind.as_str()) || fields.len() != 4 || fields[0].ends_with("-row") {
+                continue;
+            }
+            let (part, client, corner) = fixture(&data(), fields[0]).unwrap();
+            let seen = Part { x0: corner.x as u32, y0: corner.y as u32, width: part.width as u32, height: part.height as u32, stride: part.width as u32 * 4, bgra: &part.bgra };
+            let best = wheel::near(&seen, client);
+            tried += 1;
+            if kind == "wheel" {
+                let best = best.expect("a wheel");
+                assert!(best.scores.has(&wheel::FIT), "{stem}: {best}");
+                assert!(best.off.length() < 0.139 * 0.045 && (best.size - 1.0).abs() < 0.045, "{stem}: {best}");
+                assert!(wheel::still(&seen, client, &best), "{stem}");
+            } else if let Some(best) = best {
+                most = most.max(best.scores.of(&wheel::FIT));
+                assert!(best.scores.of(&wheel::FIT) < 0.9, "{stem}: {best}");
+            }
+        }
+        // And every whole frame of a world there is here, laid under the wheel's place at many places.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/overlay/orbit/testdata_camera/desktop");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let Ok(image) = image::open(&path) else { continue };
+            let image = image.to_rgba8();
+            let (w, h) = image.dimensions();
+            let bgra: Vec<u8> = image.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+            let client = vec2(w as f32, h as f32);
+            for (x, y) in [(0, 0), (w / 6, 0), (w / 3, 0), (0, h / 5), (w / 6, h / 5), (w / 3, h / 5)] {
+                // (a part that starts there, taken for the whole: another piece of the world under the wheel's place)
+                let part = Part { x0: 0, y0: 0, width: w - x, height: h - y, stride: w * 4, bgra: &bgra[((y * w + x) * 4) as usize..] };
+                tried += 1;
+                if let Some(best) = wheel::near(&part, client) {
+                    most = most.max(best.scores.of(&wheel::FIT));
+                    assert!(!best.scores.has(&wheel::FIT), "{} at {x} {y}: {best}", path.display());
+                }
+            }
+        }
+        assert!(tried >= 60, "{tried}");
+        println!("{tried} looked at; the nearest to a wheel where none is: {most:.2} of what is asked");
     }
 
     /// A frame of the window's older size says nothing, and a title bar is not looked at.

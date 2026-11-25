@@ -371,6 +371,8 @@ pub struct OrbitSettings {
     pub retro_color: [u8; 3],
     /// The retro look leaves pictures in their colours.
     pub retro_pictures: bool,
+    /// On a Mac: a look at VRChat's picture that found no menu leaves that picture in the logs' folder, to find out why. Off unless switched on.
+    pub keep_looks: bool,
 }
 
 impl OrbitSettings {
@@ -421,7 +423,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], accent_own: false, retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], accent_own: false, retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, keep_looks: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 

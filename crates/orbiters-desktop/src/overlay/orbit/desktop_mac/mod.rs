@@ -18,6 +18,7 @@ pub mod keyboard;
 pub mod lab;
 pub mod panel;
 pub mod pointing;
+pub mod wheel;
 
 use super::desk_shared::{self, hit, Clicks, Hints, Presence};
 use super::detect::{MenuKey, Seen, Watcher};
@@ -27,7 +28,7 @@ use crate::backend::Ctl;
 use crate::ipc::{Client, Endpoint, Role};
 use crate::state::{OrbitNeeds, OrbitStatus, Snapshot};
 use anyhow::Context as _;
-use capture::{Ask, Looker, Trouble};
+use capture::{Answer, Ask, Looker, Search, Trouble};
 use egui::{pos2, vec2, Pos2, Vec2};
 use game::{Finder, Game, Shot};
 use keyboard::{Keys, Source};
@@ -38,6 +39,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationD
 use objc2_foundation::{NSActivityOptions, NSDate, NSDefaultRunLoopMode, NSNotification, NSProcessInfo};
 use orbiters_i18n::mark;
 use panel::{Arrow, Hold, Layer, PanelWindow};
+use wheel::{Fit, Scores};
 use pointing::{Pointing, Turn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -198,6 +200,8 @@ struct Windows {
     painted: u64,
     /// A part that would have covered the game's whole window, left out.
     left_out: Option<Zone>,
+    /// A part was clicked: macOS raised its window above the others of its level.
+    clicked: bool,
 }
 
 impl Windows {
@@ -271,9 +275,10 @@ impl Windows {
             }
             _ => false,
         };
-        if came || moved || apart || self.layer != Some(layer) {
+        if came || moved || apart || std::mem::take(&mut self.clicked) || self.layer != Some(layer) {
             self.layer = Some(layer);
-            panel::lay(&self.shown(), layer);
+            let ours: Vec<(Zone, &PanelWindow)> = self.order.iter().filter_map(|z| self.list.get(z).map(|w| (*z, w))).filter(|(_, w)| w.shown()).collect();
+            panel::lay(&ours, layer);
         }
     }
 
@@ -283,6 +288,70 @@ impl Windows {
         for (zone, w) in &mut self.list {
             w.catch_mouse(under == Some(*zone));
         }
+    }
+}
+
+/// A look as it goes, for the line of the log that says why it found nothing.
+#[derive(Clone, Copy, Debug)]
+struct LookSaw {
+    /// Which of them it is, and the key that began it (none: it was the game coming in front, or a key macOS did not show).
+    number: u32,
+    key: Option<MenuKey>,
+    began: Instant,
+    /// Frames looked at, and how long the first took to come.
+    frames: u32,
+    first: Option<Duration>,
+    /// The most any of them had.
+    wheel: Scores,
+    fit: Option<Fit>,
+    icons: usize,
+    anywhere: Option<Option<Fit>>,
+}
+
+impl LookSaw {
+    fn new(number: u32, key: Option<MenuKey>, began: Instant) -> Self {
+        Self { number, key, began, frames: 0, first: None, wheel: Scores::default(), fit: None, icons: 0, anywhere: None }
+    }
+
+    fn take(&mut self, answer: &Answer) {
+        if answer.look != self.number {
+            return;
+        }
+        self.frames += 1;
+        self.first.get_or_insert(answer.at.saturating_duration_since(self.began));
+        if answer.saw.wheel.of(&wheel::IN_PLACE) > self.wheel.of(&wheel::IN_PLACE) || self.frames == 1 {
+            self.wheel = answer.saw.wheel;
+        }
+        if let Some(fit) = answer.saw.fit {
+            if self.fit.is_none_or(|was| fit.scores.of(&wheel::FIT) > was.scores.of(&wheel::FIT)) {
+                self.fit = Some(fit);
+            }
+        }
+        self.icons = self.icons.max(answer.saw.icons);
+        self.anywhere = answer.anywhere.or(self.anywhere);
+    }
+
+    /// What it found nothing in, in numbers.
+    fn says(&self, shot: Shot) -> String {
+        let (w, p) = (self.wheel, wheel::IN_PLACE);
+        let fit = |f: &Option<Fit>| f.map_or("none".into(), |f| f.to_string()); // i18n: not shown (a log's line)
+        let anywhere = self.anywhere.map_or("not looked for".into(), |f| fit(&f)); // i18n: not shown (a log's line)
+        format!(
+            "{} looked at ({} x {} with its title, the first after {:?} ms); the wheel in its place at best: edge {:.2}, one colour {:.2}, line {:.2} (asked {} {} {}); around it: {}; anywhere: {anywhere}; Quick Menu icons at best {} (asked {})", // i18n: not shown (a log's line)
+            self.frames,
+            shot.width,
+            shot.height,
+            self.first.map(|f| f.as_millis()),
+            w.edge,
+            w.uniform,
+            w.line,
+            p.edge,
+            p.uniform,
+            p.line,
+            fit(&self.fit),
+            self.icons,
+            super::detect::ICONS_NEEDED
+        ) // i18n: not shown (a log's line)
     }
 }
 
@@ -326,8 +395,12 @@ pub struct Desk {
     refused: bool,
     /// Esc went down while the keyboard was ours, with no page to type in: let go, it closes.
     esc: bool,
-    /// When a look began, and what the log last said.
-    looked_since: Option<Instant>,
+    /// The look under way or the last one, and what the log last said.
+    saw: LookSaw,
+    /// Where the wheel up was found, when beside its place.
+    wheel_at: Option<Fit>,
+    /// The fit of the last frame, before it opens anything.
+    fit_seen: Option<Fit>,
     logged: (Option<Seen>, bool, Option<Zone>),
     started: Instant,
     last_turn: Instant,
@@ -382,7 +455,9 @@ impl Desk {
             look_due: false,
             refused: false,
             esc: false,
-            looked_since: None,
+            saw: LookSaw::new(0, None, now),
+            wheel_at: None,
+            fit_seen: None,
             logged: (None, false, None),
             started: now,
             last_turn: now,
@@ -495,12 +570,45 @@ impl Desk {
             _ if self.panels.sheet_open() => &[Zone::Takeover],
             Some(Around::Wheel) => {
                 let (center, radius) = zones::wheel(size);
+                let center = center + self.wheel_at.map_or(Vec2::ZERO, |fit| fit.moved(size));
                 // The middle of the ring's first cell (Windows starts there too).
                 return Some(center + vec2(0.0, -1.4 * radius));
             }
             _ => &[Zone::WingWorlds, Zone::QmStrip],
         };
         zones.iter().find_map(|z| self.panels.all().find(|p| p.zone == *z && p.shown).map(|p| p.placed.rect.center()))
+    }
+
+    /// A key that may have opened a menu: a look of its own in the log.
+    fn new_look(&mut self, key: Option<MenuKey>, now: Instant) {
+        self.saw = LookSaw::new(self.saw.number.wrapping_add(1), key, now);
+        self.fit_seen = None;
+    }
+
+    /// A look's answer to what watches. A wheel beside its place opens on two frames that have it at the same one, and stays where the first had it: as it is looked at each
+    /// time anew, the ring would shake by a step of the search.
+    fn watched(&mut self, answer: &Answer) {
+        let saw = answer.saw;
+        let was = self.watcher.seen();
+        let beside = saw.fit.filter(|_| saw.menu == Some(Around::Wheel));
+        let again = beside.is_some_and(|fit| self.fit_seen.is_some_and(|before| before.same(&fit)));
+        if let (Some(_), false, Seen::Looking) = (beside, again, was) {
+            // The first frame of it there: one, whatever the frame before had elsewhere.
+            self.watcher.frame_coming(None, false, answer.at);
+        }
+        if !again {
+            self.fit_seen = beside;
+        }
+        // (the rim alone, in place, starts it as on Windows)
+        let seen = self.watcher.frame_coming(saw.menu, saw.coming, answer.at);
+        if seen == Seen::Open(Around::Wheel) {
+            if was != seen {
+                self.wheel_at = self.fit_seen;
+            } else if again && self.wheel_at.is_none() {
+                // Opened on its rim, and it is beside its place.
+                self.wheel_at = self.fit_seen;
+            }
+        }
     }
 
     /// One turn of the loop. (What AppKit makes meanwhile goes with the turn.)
@@ -582,8 +690,10 @@ impl Desk {
         // VRChat's keys: the game's alone, so not those pressed while the keyboard is ours.
         if !holding {
             if let Some(key) = keys.menu {
+                self.new_look(Some(key), now);
                 self.watcher.pressed(key, now);
             } else if (keys.unknown || self.look_due) && self.watcher.seen() == Seen::Resting {
+                self.new_look(None, now);
                 self.watcher.pressed(MenuKey::Esc, now);
             }
             self.look_due = false;
@@ -596,11 +706,30 @@ impl Desk {
         }
         for answer in self.looker.answers() {
             self.trouble = None;
-            self.watcher.frame_coming(answer.menu, answer.coming, answer.at);
+            self.saw.take(&answer);
+            self.watched(&answer);
         }
         let looking = self.watcher.wants_frames();
-        self.looker.ask(looking.then(|| Ask { window: game.window.id, owner: game.window.owner, shot: Shot::of(&game), every: self.watcher.look_every(now) }));
+        let search = match (self.wheel_at, self.watcher.seen()) {
+            (Some(fit), Seen::Open(Around::Wheel)) => Search::At(fit),
+            // Esc opens none.
+            (None, Seen::Looking | Seen::Open(Around::Wheel)) | (_, Seen::Looking) if self.saw.key != Some(MenuKey::Esc) => Search::Around,
+            _ => Search::InPlace,
+        };
+        self.looker.ask(looking.then(|| Ask {
+            window: game.window.id,
+            owner: game.window.owner,
+            shot: Shot::of(&game),
+            every: self.watcher.look_every(now),
+            search,
+            look: self.saw.number,
+            began: self.saw.began,
+            keep: snap.settings.orbit.keep_looks,
+        }));
         let seen = self.watcher.tick(now);
+        if seen != Seen::Open(Around::Wheel) && seen != Seen::Looking {
+            self.wheel_at = None;
+        }
         let open = match seen {
             Seen::Open(Around::Wheel) if snap.settings.orbit.around_wheel() => Some(Around::Wheel),
             Seen::Open(Around::QuickMenu) if snap.settings.orbit.around_quick_menu() => Some(Around::QuickMenu),
@@ -610,6 +739,13 @@ impl Desk {
         let places = open.map_or_else(Vec::new, |menu| {
             let mut places = zones::layout_as(menu, size, snap.settings.orbit.layout == orbiters_core::settings::OrbitLayout::Strip);
             places.retain(|p| !p.zone.needs_the_camera_s_frames());
+            // Around the wheel where it really is.
+            if let Some(fit) = self.wheel_at.filter(|_| menu == Around::Wheel) {
+                let moved = fit.moved(size);
+                for p in &mut places {
+                    (p.rect, p.center) = (p.rect.translate(moved), p.center + moved);
+                }
+            }
             places
         });
         self.panels.takeover_place = zones::place(Zone::Takeover, size);
@@ -642,7 +778,10 @@ impl Desk {
         for event in heard {
             match event {
                 // (on a pixel of a part, whose window took it)
-                Heard::Button(down) => self.press(down, &snap),
+                Heard::Button(down) => {
+                    self.windows.clicked = true;
+                    self.press(down, &snap);
+                }
                 Heard::Wheel(notches) if active => self.panels.wheel(notches),
                 Heard::Wheel(_) => {}
                 Heard::Key { code, down, command, control, modifiers } => self.key(code, down, command, control, modifiers),
@@ -733,17 +872,28 @@ impl Desk {
         }
     }
 
-    /// What it does, in `vr-test.log`, as it changes: what a report of something wrong with it starts from.
+    /// What it does, in `vr-test.log`, as it changes: what a report of something wrong with it starts from. Numbers alone: no picture, no name, no key but Esc and R.
     fn log(&mut self, now: Instant) {
         let seen = self.watcher.seen();
-        if seen == Seen::Looking && self.logged.0 != Some(Seen::Looking) {
-            self.looked_since = Some(now);
-        }
         let is = (Some(seen), self.hold.held(), self.windows.left_out);
         if is != self.logged {
-            let after = self.looked_since.map_or(0, |t| now.duration_since(t).as_millis());
-            let (game, frames) = (self.last.map(|g| (g.window.id, g.window.layer, g.client())), self.looker.running());
-            super::super::vr_log::line(&format!("desk: {seen:?}, {after} ms after the look began; keyboard held {}; window {game:?}; picture (runs, frames) {frames:?}; left out {:?}", is.1, is.2)); // i18n: not shown (a log's line)
+            let after = now.saturating_duration_since(self.saw.began).as_millis();
+            let (game, frames) = (self.last.map(|g| (g.window.id, g.window.layer, g.client(), g.scale)), self.looker.running());
+            let key = self.saw.key;
+            super::super::vr_log::line(&format!("desk: {seen:?}, {after} ms after the look {} began (key {key:?}); in front {}; keyboard held {}; window {game:?}; picture (runs, frames) {frames:?}; left out {:?}", self.saw.number, self.was_front, is.1, is.2)); // i18n: not shown (a log's line)
+            match (self.logged.0, seen) {
+                (Some(Seen::Looking), Seen::Resting) => {
+                    if let Some(game) = self.last {
+                        super::super::vr_log::line(&format!("desk: the look {} after {key:?} found nothing: {}", self.saw.number, self.saw.says(Shot::of(&game)))); // i18n: not shown (a log's line)
+                    }
+                }
+                (was, Seen::Open(menu)) if was != Some(seen) => {
+                    let parts: Vec<String> = self.windows.order.iter().filter_map(|z| self.windows.list.get(z).map(|w| format!("{z:?} {:?} at {:?}", w.px(), w.spot()))).collect(); // i18n: not shown (a log's line)
+                    let place = self.wheel_at.filter(|_| menu == Around::Wheel).map_or_else(|| "in its place".to_string(), |f| f.to_string()); // i18n: not shown (a log's line)
+                    super::super::vr_log::line(&format!("desk: {menu:?} {place}; parts {}", parts.join(", "))); // i18n: not shown (a log's line)
+                }
+                _ => {}
+            }
             self.logged = is;
         }
     }

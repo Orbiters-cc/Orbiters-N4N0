@@ -7,3 +7,4 @@ crates/orbiters-desktop/src/overlay/orbit/desktop_mac/keyboard.rs
 crates/orbiters-desktop/src/overlay/orbit/desktop_mac/lab.rs
 crates/orbiters-desktop/src/overlay/orbit/desktop_mac/panel.rs
 crates/orbiters-desktop/src/overlay/orbit/desktop_mac/pointing.rs
+crates/orbiters-desktop/src/overlay/orbit/desktop_mac/wheel.rs

@@ -2037,6 +2037,12 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
     widgets::field(ui, tr("Around the Quick Menu"), Some(tr(registry::AROUND_QUICK_MENU)), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
     });
+    if cfg!(target_os = "macos") {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Keep a picture when a menu is not found"), Some(tr(registry::KEEP_LOOKS)), 48.0, |ui| {
+            apply |= widgets::toggle(ui, "orbit-keep-looks", &mut orbit.keep_looks);
+        });
+    }
     if here.vr_overlay {
         orbit_headset(ui, orbit, reset, &mut apply);
     }

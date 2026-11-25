@@ -112,6 +112,8 @@ pub enum Gate {
     VrchatHere,
     /// Panels around VRChat's menus, in the headset or over its window.
     Around,
+    /// The same on a Mac, whose looks for them may leave their picture.
+    MacLooks,
     /// The same in the headset alone.
     Headset,
     /// The tiles around VRChat's camera, which need its stream.
@@ -167,6 +169,7 @@ impl Open {
             Gate::Always => true,
             Gate::VrchatHere => HERE.vrchat_runs,
             Gate::Around => HERE.around(),
+            Gate::MacLooks => cfg!(target_os = "macos"),
             Gate::Headset => HERE.vr_overlay,
             Gate::CameraTiles => HERE.around() && HERE.camera_frames,
             Gate::Mismatch => HERE.mismatch_buttons,
@@ -369,6 +372,7 @@ pub static ENTRIES: &[Entry] = &[
         .needs("vr.camera", |s| (!s.settings.orbit.camera_tiles).then_some(mark("Shown when Around the camera is on"))).controls(&["orbit-camera-pattern"]),
     e("vr.turn", Vr, CARD_AROUND, mark("Turn around in a 3D capture"), mark("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to."), mark("turning stick snap smooth rotate")).gate(Gate::Headset).controls(&["orbit-immersive-turn"]),
     e("vr.quick-menu", Vr, CARD_AROUND, mark("Around the Quick Menu"), AROUND_QUICK_MENU, mark("Quick Menu side tiles Esc")).gate(Gate::Around).controls(&["orbit-quick-menu"]),
+    e("vr.keep-looks", Vr, CARD_AROUND, mark("Keep a picture when a menu is not found"), KEEP_LOOKS, mark("diagnostic log wheel ring missing picture frame")).gate(Gate::MacLooks).controls(&["orbit-keep-looks"]),
     e("vr.size", Vr, CARD_AROUND, mark("Panels' size in VR"), mark("If they sit too near or too far from VRChat's menu in your headset."), mark("scale bigger smaller distance")).gate(Gate::Headset).controls(&["orbit-vr-size"]),
     e("vr.motion", Vr, CARD_AROUND, mark("How they follow your hand in VR"), mark("The tiles around VRChat's menus each follow your hand on a little spring of their own."), mark("spring rigid follow hand")).gate(Gate::Headset).controls(&["orbit-vr-motion"]),
     e("vr.smoothing-quick-menu", Vr, CARD_AROUND, mark("Smoothing on the Quick Menu"), mark("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat."), mark("latency smooth jitter")).gate(Gate::Headset).controls(&["orbit-vr-smoothing-quick-menu"]),
@@ -494,6 +498,7 @@ pub const AROUND_WHEEL: &str = if cfg!(target_os = "macos") {
 } else {
     mark("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR.")
 };
+pub const KEEP_LOOKS: &str = mark("To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.");
 pub const AROUND_QUICK_MENU: &str = if cfg!(target_os = "macos") {
     mark("Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. On a Mac VRChat keeps the mouse while its menus are open: hold Left Option to point at Orbiters.")
 } else {

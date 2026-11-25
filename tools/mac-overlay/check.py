@@ -7,7 +7,7 @@ It opens a bundle of its own around the engine's `wsd`, has game.c show a full-s
 menus stretched by the render percent), and turns the app's own loop over it (`orbiters-desktop --orbit-lab desk`) with a keyboard made up here. It covers the screen for about a
 minute: it starts only while nobody has used this Mac for two minutes (--force: anyway), and ends when somebody does. Screen Recording is needed of the program it is started from.
 """
-import _thread, argparse, glob, json, os, pathlib, plistlib, queue, re, shutil, signal, subprocess, sys, tempfile, threading, time
+import _thread, argparse, ctypes, glob, json, os, pathlib, plistlib, queue, re, shutil, signal, subprocess, sys, tempfile, threading, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -21,6 +21,25 @@ def locked():
     """Whether the screen is locked: macOS then shows nothing of any window, and nothing here could be told."""
     out = subprocess.run(["ioreg", "-n", "Root", "-d1"], capture_output=True, text=True).stdout
     return re.search(r'"CGSSessionScreenIsLocked"=Yes', out) is not None
+
+class Mouse:
+    """Real clicks of the mouse, as the person's: macOS does more with one than with an event of our own (it raises the window clicked). Only where the pointer already is,
+    which is over a window of ours."""
+    class Point(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+    def __init__(self):
+        cg = self.cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        cg.CGEventCreate.restype, cg.CGEventCreate.argtypes = ctypes.c_void_p, [ctypes.c_void_p]
+        cg.CGEventGetLocation.restype, cg.CGEventGetLocation.argtypes = self.Point, [ctypes.c_void_p]
+        cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, self.Point, ctypes.c_uint32]
+        cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        cg.CGPreflightPostEventAccess.restype = ctypes.c_bool
+        self.allowed, self.at = cg.CGPreflightPostEventAccess(), 0.0
+    def post(self, kind):
+        self.at = time.time()
+        at = self.cg.CGEventGetLocation(self.cg.CGEventCreate(None))
+        self.cg.CGEventPost(0, self.cg.CGEventCreateMouseEvent(None, kind, at, 0))
 
 class Lines:
     """A program whose lines are kept as they come."""
@@ -59,6 +78,7 @@ class Check:
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="orbo."))
         self.wsd_pid, self.game, self.desk = None, None, None
         self.app = None
+        self.mouse = Mouse()
 
     def ok(self, name, good, why=""):
         print(("PASS  " if good else "FAIL  ") + name + (f"  ({why})" if why and not good else ""), flush=True)
@@ -176,12 +196,36 @@ class Check:
             os.makedirs(self.a.pictures, exist_ok=True)
             self.answer(f"save {self.a.pictures}/{name}.png", "saved", 30)
 
+    def ring_place(self, name):
+        open_, _ = self.open_wheel(name)
+        if open_ is None:
+            return None
+        time.sleep(0.7)
+        return self.answer("spot WheelWorlds", "spot")
+
+    def client_high(self):
+        return self.answer("client", "client")[1]
+
     def close_menu(self):
         self.game.say("show none")
         return self.doing(lambda d: d["open"] is None and not d["looking"] and not d["shown"], 5)
 
-    def open_wheel(self):
-        self.game.say("show wheel")
+    def click(self):
+        """A real click where the pointer is, when macOS allows it of the program this runs in."""
+        if not self.mouse.allowed:
+            self.tell("click")
+            return
+        self.tell("button down"); self.mouse.post(1); time.sleep(0.08)
+        self.tell("button up"); self.mouse.post(2)
+
+    def page_shows(self, name):
+        """A short time after a press, with no input since: the page's own panel has a picture on the screen (macOS's, not ours), and nothing of ours hides it."""
+        time.sleep(0.5)
+        seen = self.answer("panel Takeover", "panel", 8)
+        self.ok(f"{name}: its page is on the screen, painted, with nothing of ours over it", bool(seen) and seen["opaque"] > 0.9 and seen["spread"] > 4 and not seen["over"], str(seen))
+
+    def open_wheel(self, name="wheel"):
+        self.game.say(f"show {name}")
         time.sleep(0.15)
         since = len(self.desk.lines)
         self.tap("r")
@@ -217,7 +261,7 @@ class Check:
         self.ok("the 3D pictures cell is not there (six cells less one, the caption)", 5 <= len(open_["shown"]) <= 7, str(open_["shown"]))
         order = self.answer("order", "order")
         ours = [w for w in order if w[0] == "ours"]
-        self.ok("the parts lie over the game's window, one level above it", bool(ours) and order[-1][0] == "game" and order[-1][1] == 25 and all(w[1] == 26 for w in ours), str(order))
+        self.ok("the parts lie over the game's window, one level above it", bool(ours) and order[-1][0] == "game" and order[-1][1] == 25 and all(26 <= w[1] <= 31 for w in ours), str(order))
         rate, zero = self.shown_rate(3)
         self.note("frames shown a second under the ring", round(rate, 1))
         self.ok("macOS goes on showing the game's frames under the ring", rate > 0.9 * base and zero == 0, f"{rate} of {base}, {zero} not shown")
@@ -270,6 +314,19 @@ class Check:
             self.tell("type 53")
             gone, _ = self.doing(lambda d: not d["sheet"] and not d["held"], 3)
             self.ok("Esc closes the page, and the game has its keyboard again", gone is not None and self.wait_log("relative mouse resumed", 2, at))
+        self.close_menu()
+        # VRChat's wheel a little off its place, and smaller: found where it is, with the ring round it there.
+        time.sleep(0.5)
+        place = self.ring_place("wheel")
+        self.close_menu()
+        time.sleep(0.5)
+        beside = self.ring_place("beside")
+        self.ok("a wheel beside its place is found", beside is not None, str(beside))
+        if place and beside:
+            radius = 0.139 * self.client_high()
+            moved = ((beside[0] - place[0]) / radius, (beside[1] - place[1]) / radius)
+            self.note("that wheel's ring moved, in radii (it lies -0.06, +0.04 off)", (round(moved[0], 3), round(moved[1], 3)))
+            self.ok("and the ring lies round it", abs(moved[0] + 0.06) < 0.035 and abs(moved[1] - 0.04) < 0.035, str(moved))
         rests, seen = self.close_menu()
         self.ok("VRChat's menu gone: the parts go, and no picture runs", rests is not None, str(seen))
 
@@ -286,9 +343,24 @@ class Check:
             points, _ = self.doing(lambda d: d["pointing"] and d["keyboard"], 2)
             self.ok("Left Option points at the wing", points is not None)
             self.ok("a tile is under the pointer", self.answer("point WingAll", "pointed") is True and self.doing(lambda d: d["catching"] == 1, 2)[0] is not None)
-            self.tell("click")
+            if not self.mouse.allowed:
+                self.note("macOS does not let this program click", "the clicks are events of our own, which raise no window")
+            self.click()
             page, _ = self.doing(lambda d: d["sheet"], 3)
             self.ok("a click on a tile opens its page", page is not None)
+            self.page_shows("All tools' tile")
+            for zone in ("WingYouTube", "WingInstances", "WingTalk", "WingWorlds"):
+                if self.answer(f"point {zone}", "pointed") is True:
+                    time.sleep(0.15); self.click()
+                    self.page_shows(zone)
+            # The tabs are on the page's head, which is the panel behind the page: a click raises it.
+            tabs = 0
+            for action in ("Pictures", "Page(Instances)", "Page(YouTube)", "Talk", "Worlds", "All"):
+                if self.answer(f"control SheetBack {action}", "pointed") is True:
+                    tabs += 1
+                    time.sleep(0.15); self.click()
+                    self.page_shows(f"the tab {action}")
+            self.ok("the page's head has its tabs", tabs >= 3, str(tabs))
             self.tell("let go option")
             time.sleep(0.4)
             page, _ = self.doing(lambda d: d["sheet"] and d["keyboard"], 1)
@@ -319,7 +391,7 @@ class Check:
             # (the engine raises its window a moment after it comes in front; ours follow at their next look at it)
             time.sleep(0.3)
             order = self.answer("order", "order")
-            self.ok("and the parts are above its full-screen level again", all(w[1] == 26 for w in order if w[0] == "ours") and any(w[0] == "ours" for w in order), str(order))
+            self.ok("and the parts are above its full-screen level again", all(26 <= w[1] <= 31 for w in order if w[0] == "ours") and any(w[0] == "ours" for w in order), str(order))
 
             # The process ended while it holds the keyboard: the game has it again by itself.
             heard = len(self.game.lines)
@@ -407,7 +479,7 @@ def main():
         while True:
             time.sleep(0.5)
             now = idle()
-            if now < was:
+            if now < was and time.time() - c.mouse.at > 2:
                 print("somebody uses this Mac: ended", flush=True)
                 _thread.interrupt_main()
                 return

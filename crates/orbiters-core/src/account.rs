@@ -13,6 +13,7 @@
 //! credential has no expiry of its own: the server drops it after 90 idle days or when the account signs out
 //! everywhere, and `unity-wizard/token` tells whether it still works.
 
+use crate::locks::*;
 use anyhow::{bail, Context as _};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -503,7 +504,7 @@ impl Api {
     pub fn at(base: &str) -> Self {
         static AGENTS: std::sync::Mutex<Vec<(String, ureq::Agent)>> = std::sync::Mutex::new(Vec::new());
         let base = format!("{}/", base.trim_end_matches('/'));
-        let mut agents = AGENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut agents = AGENTS.locked();
         if let Some((_, agent)) = agents.iter().find(|(b, _)| *b == base) {
             return Self { agent: agent.clone(), base };
         }

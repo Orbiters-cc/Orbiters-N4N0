@@ -10,6 +10,7 @@
 //! null. Every write goes in the [`WRITES`] family, whose lost answers are "outcome unknown" (B2), through
 //! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]); VRChat's own words of a refusal are kept
 //! beside ([`Refusal`]), for the person it refused to read them (REQUEST28).
+use crate::locks::*;
 use super::*;
 use crate::group_events::{is_event_id, CalendarEvent, Events, Month};
 use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Visibility};
@@ -558,7 +559,7 @@ impl Client {
         loop {
             self.permitted().map_err(|e| Failure::of(e, false))?;
             let wait = {
-                let limiter = self.limiter.lock().unwrap();
+                let limiter = self.limiter.locked();
                 let now = Instant::now();
                 if let Some(wait) = limiter.blocked.map(|b| b.saturating_duration_since(now)).filter(|w| !w.is_zero()) {
                     return Err(Failure::RateLimited(wait.as_secs().max(1)));

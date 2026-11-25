@@ -16,6 +16,7 @@
 //! [`Discovery::Platform`]: the system's Bonjour registers the services and browses, the app hands what it sees to
 //! [`OscService::saw`], and the answers VRChat takes also go to the chosen VRChat directly ([`announce`]).
 
+use crate::locks::*;
 use orbiters_i18n::tr;
 use rosc::{OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
@@ -604,15 +605,15 @@ impl Route {
     }
 
     fn target(&self) -> Option<SocketAddr> {
-        if let Some((lent, _)) = *self.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        if let Some((lent, _)) = *self.lent.locked() {
             return Some(lent);
         }
-        *self.target.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.target.locked()
     }
 
     /// Whether a datagram from `from` is taken by the filter (no filter: all).
     fn takes(&self, from: SocketAddr, datagram: &[u8]) -> bool {
-        let filter = self.filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let filter = self.filter.locked().clone();
         filter.is_none_or(|f| (f.0)(from, datagram))
     }
 
@@ -623,13 +624,13 @@ impl Route {
     }
 
     fn peer(&self) -> Option<Ipv4Addr> {
-        *self.peer.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.peer.locked()
     }
 
     /// The VRChat at `ip`, listening on `osc_port`, is the one talked with now (LAN).
     fn choose(&self, ip: Ipv4Addr, osc_port: u16) {
-        *self.peer.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ip);
-        *self.target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SocketAddr::from((ip, osc_port)));
+        *self.peer.locked() = Some(ip);
+        *self.target.locked() = Some(SocketAddr::from((ip, osc_port)));
     }
 }
 
@@ -1014,32 +1015,32 @@ impl OscService {
 
     /// VRChat's OSCQuery service when it was found.
     pub fn vrchat_query(&self) -> Option<SocketAddr> {
-        if let Some((_, query)) = *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        if let Some((_, query)) = *self.route.lent.locked() {
             return Some(query);
         }
-        *self.vrchat_query.lock().unwrap()
+        *self.vrchat_query.locked()
     }
 
     /// Lends the app to another VRChat on this machine for a while (the VRChat bridge's 3D picture in a session of its
     /// own): messages go to `osc` and VRChat's tree is read from `query` until `None` gives it back.
     pub fn lend(&self, to: Option<(SocketAddr, SocketAddr)>) {
-        *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = to;
+        *self.route.lent.locked() = to;
     }
 
     /// Where the app is lent to now ([`OscService::lend`]).
     pub fn lent(&self) -> Option<(SocketAddr, SocketAddr)> {
-        *self.route.lent.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.route.lent.locked()
     }
 
     /// Which datagrams are taken, by their source: the VRChat bridge drops those of its own VRChats beside the person's,
     /// which find these services over mDNS like any VRChat and would mix their avatar's values with the person's.
     pub fn set_datagram_filter(&self, filter: Option<DatagramFilter>) {
-        *self.route.filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filter.map(FilterSlot);
+        *self.route.filter.locked() = filter.map(FilterSlot);
     }
 
     /// Uses this OSCQuery address for VRChat (tests, or a known port).
     pub fn set_vrchat_query(&self, addr: Option<SocketAddr>) {
-        *self.vrchat_query.lock().unwrap() = addr;
+        *self.vrchat_query.locked() = addr;
     }
 
     /// Where messages go now, or why none can.
@@ -1446,7 +1447,7 @@ fn watch_vrchat(
         }
         if services.current() != before {
             let current = services.current();
-            *found.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = current;
+            *found.locked() = current;
             // On the network, the VRChat found is the one talked with now, at the input port it says. One that went
             // stays chosen: the Quest may come back, and nothing else is heard meanwhile.
             if let (Some(wanted), Some(addr)) = (lan, current) {

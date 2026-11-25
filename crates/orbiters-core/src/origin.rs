@@ -5,6 +5,7 @@
 //! the client itself and before anything is sent, a request whose bearer credential is not its destination's
 //! ([`guard`]): whatever the callers paired. A credential nobody noted reaches no Orbiters environment at all.
 
+use crate::locks::*;
 use crate::account::Server;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -37,7 +38,7 @@ pub fn of(url: &str) -> Option<String> {
 /// `token` was issued by the server at `base`: it goes there only.
 pub fn issued(token: &str, base: &str) {
     let (Some(origin), false) = (of(base), token.trim().is_empty()) else { return };
-    ISSUED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().entry(digest(token)).or_default().insert(origin);
+    ISSUED.locked().get_or_insert_default().entry(digest(token)).or_default().insert(origin);
 }
 
 /// The server at `base` gave or confirmed `token`: it is that environment's. (A stand-in's made-up ones belong to no
@@ -56,7 +57,7 @@ fn is_environment(origin: &str) -> bool {
 /// Whether a request to `url` may carry `token`.
 pub fn allowed(token: &str, url: &str) -> bool {
     let Some(origin) = of(url) else { return false };
-    match ISSUED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|all| all.get(&digest(token))) {
+    match ISSUED.locked().as_ref().and_then(|all| all.get(&digest(token))) {
         Some(origins) => origins.contains(&origin),
         // Of unknown origin: never to an environment of Orbiters (a stand-in's own address takes its made-up ones).
         None => !is_environment(&origin),

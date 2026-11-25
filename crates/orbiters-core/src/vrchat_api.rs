@@ -1,6 +1,7 @@
 //! An independent VRChat transport. Cookies never enter the Orbiters HTTP agent or API.
 //! Blocking methods belong on background threads. No credentials, codes, cookies or response bodies are logged.
 //! Reads, picture updates ([`replace_image`]), deliberate instance creation and self-invites.
+use crate::locks::*;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,7 @@ impl Gate {
     }
     /// Who its client is signed in as, while it allows it ([`Client::signed_in_user_id`], for one that may not wait for it).
     pub fn signed_in_user_id(&self) -> Option<String> {
-        self.allowed().then(|| self.user.lock().unwrap().clone()).flatten()
+        self.allowed().then(|| self.user.locked().clone()).flatten()
     }
     /// Good for at least `lifetime` from now (never shorter than it was). A revoked gate stays revoked.
     pub fn extend(&self, lifetime: Duration) {
@@ -641,19 +642,19 @@ pub struct Turns<'a> {
 }
 impl<'a> Turns<'a> {
     pub fn new(client: &'a Mutex<Client>) -> Self {
-        let user = client.lock().unwrap().signed_in_user_id().map(str::to_owned);
+        let user = client.locked().signed_in_user_id().map(str::to_owned);
         Self { client, user }
     }
     /// Another account is signed in by now.
     pub fn overtaken(&self) -> bool {
-        self.client.lock().unwrap().signed_in_user_id().is_some_and(|now| Some(now) != self.user.as_deref())
+        self.client.locked().signed_in_user_id().is_some_and(|now| Some(now) != self.user.as_deref())
     }
 }
 impl Asks for Turns<'_> {
     fn ask<T>(&mut self, family: Option<&'static str>, f: impl FnOnce(&mut Client) -> Result<T>) -> Result<T> {
         loop {
             let wait = {
-                let mut client = self.client.lock().unwrap();
+                let mut client = self.client.locked();
                 if client.signed_in_user_id() != self.user.as_deref() {
                     return Err(Error::Unauthorized);
                 }
@@ -999,7 +1000,7 @@ impl Client {
     }
     /// Who is signed in changes here alone: the gate says it too. Gives who was.
     fn set_user(&mut self, user: Option<User>) -> Option<User> {
-        *self.allowed.user.lock().unwrap() = user.as_ref().map(|u| u.id.clone());
+        *self.allowed.user.locked() = user.as_ref().map(|u| u.id.clone());
         std::mem::replace(&mut self.user, user)
     }
     fn authenticated(&self) -> Result<()> {
@@ -1177,7 +1178,7 @@ impl Client {
     /// How long `family`'s turn is away; `None` when it is there (taken now, when `take`).
     fn turn(&self, family: &'static str, take: bool) -> Result<Option<Duration>> {
         self.permitted()?;
-        let mut limiter = self.limiter.lock().unwrap();
+        let mut limiter = self.limiter.locked();
         let now = Instant::now();
         if let Some(blocked) = limiter.blocked {
             let wait = blocked.saturating_duration_since(now);
@@ -1205,7 +1206,7 @@ impl Client {
     fn back_off(&self, response: &Response) -> Error {
         let delay = retry_after(response.retry_after.as_deref());
         let until = Instant::now() + delay;
-        let mut limiter = self.limiter.lock().unwrap();
+        let mut limiter = self.limiter.locked();
         limiter.blocked = Some(limiter.blocked.map_or(until, |old| old.max(until)));
         Error::RateLimited(delay)
     }
@@ -1888,7 +1889,7 @@ pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress:
     let kind = Kind::of(id).ok_or(Error::NotFound)?;
     progress(Step::Checking);
     let (me, item) = {
-        let mut c = client.lock().unwrap();
+        let mut c = client.locked();
         c.authenticated()?;
         let me = c.user.as_ref().map(|u| u.id.clone()).unwrap_or_default();
         (me, c.fresh(kind, id)?)
@@ -1900,7 +1901,7 @@ pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress:
     let signature = signature(png);
     let parts = [("file", Part::new(png, "image/png")), ("signature", Part::new(&signature, "application/x-rsync-signature"))];
     let (file, version) = {
-        let mut c = client.lock().unwrap();
+        let mut c = client.locked();
         let existing = match file_id(&item.image_url) {
             Some(f) => match c.file(f) {
                 Ok(file) if file.takes_a_version(&me) => Some(file.id),
@@ -1918,15 +1919,15 @@ pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress:
     };
     for ((name, part), step) in parts.iter().zip([Step::Uploading, Step::Signing]) {
         progress(step);
-        let url = client.lock().unwrap().start_part(&file, version, name)?;
+        let url = client.locked().start_part(&file, version, name)?;
         put_part(client, &url, part)?;
-        client.lock().unwrap().finish_part(&file, version, name)?;
+        client.locked().finish_part(&file, version, name)?;
     }
     progress(Step::Processing);
     let mut attempts = 0;
     loop {
         let status = {
-            let mut c = client.lock().unwrap();
+            let mut c = client.locked();
             let f = c.file(&file)?;
             f.versions.into_iter().find(|v| v.version == version).map(|v| v.status).unwrap_or_default()
         };
@@ -1940,11 +1941,11 @@ pub fn replace_image(client: &Mutex<Client>, id: &str, png: &[u8], mut progress:
         // The client stays free meanwhile; a revoked grant ends the wait.
         for _ in 0..4 {
             std::thread::sleep(Duration::from_millis(500));
-            client.lock().unwrap().permitted()?;
+            client.locked().permitted()?;
         }
     }
     progress(Step::Saving);
-    client.lock().unwrap().set_image(kind, id, &format!("{BASE}/file/{file}/{version}/file"))
+    client.locked().set_image(kind, id, &format!("{BASE}/file/{file}/{version}/file"))
 }
 /// Puts a part to the storage address VRChat just gave for it, without the client locked: no session cookie or
 /// credential goes with it and none is taken from the answer, and VRChat's back-off is not touched by the storage's.
@@ -1953,7 +1954,7 @@ fn put_part(client: &Mutex<Client>, url: &str, part: &Part) -> Result<()> {
         return Err(Error::UnsafeUrl);
     }
     let (transport, gate) = {
-        let c = client.lock().unwrap();
+        let c = client.locked();
         c.authenticated()?;
         c.pace("uploads")?;
         (c.transport.clone(), c.allowed.clone())

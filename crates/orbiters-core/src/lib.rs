@@ -1,6 +1,7 @@
 //! Shared logic of Orbiters - N4N0, used by the app and its workers.
 
 pub mod account;
+pub mod app_log;
 pub mod appearance;
 pub mod assets;
 pub mod bundle;
@@ -25,6 +26,7 @@ pub mod launcher_feed;
 pub mod launcher_local;
 #[cfg(test)]
 mod launcher_live;
+pub mod locks;
 pub mod maps;
 pub mod measured;
 pub mod notice_log;
@@ -62,6 +64,7 @@ pub mod vrchat_source;
 pub mod vrchat_store;
 pub mod world_feedback;
 
+use crate::locks::*;
 pub use orbiters_contracts as contracts;
 
 /// Ends this worker when the service that started it goes, even killed or crashed. On Windows the service's job object
@@ -153,7 +156,7 @@ pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Re
 static UNREADABLE: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 fn mark_unreadable(path: &std::path::Path, unreadable: bool) {
-    let mut set = UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut set = UNREADABLE.locked();
     if unreadable {
         set.insert(path.to_path_buf());
     } else if !set.is_empty() {
@@ -163,7 +166,7 @@ fn mark_unreadable(path: &std::path::Path, unreadable: bool) {
 
 /// Whether the last [`read_text`] of `path` failed (not "there is none": it could not be read).
 pub fn was_unreadable(path: &std::path::Path) -> bool {
-    UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(path)
+    UNREADABLE.locked().contains(path)
 }
 
 /// A file whose last read failed is never replaced unseen: it is first copied aside ([`keep_aside`]) or, when it still

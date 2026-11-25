@@ -708,6 +708,8 @@ impl State {
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context, cx: &mut Cx) {
         self.server_now = Some(server(cx));
+        // What the repositories list is kept read while a project is shown, and let go of after.
+        orbiters_projects::listings::hold(self.selected.is_some() && !self.fixture);
         // An agent changed packages, repositories or projects through the bridge: the page looks again, as after its own.
         let changes = cx.snap.projects_changed;
         if self.bridge_changes.replace(changes).is_some_and(|seen| seen != changes) && self.started && !self.fixture {

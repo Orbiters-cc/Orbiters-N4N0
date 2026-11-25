@@ -3,7 +3,7 @@
 use anyhow::{bail, Context};
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings};
 use vrc_get_vpm::io::DefaultEnvironmentIo;
@@ -54,7 +54,7 @@ pub struct Package {
 }
 impl Package {
     /// Fills the websites from a package manifest where none is known yet.
-    fn websites_from(&mut self, manifest: &serde_json::Value) {
+    pub(crate) fn websites_from(&mut self, manifest: &serde_json::Value) {
         let text = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
         self.author_url = self.author_url.take().or_else(|| text(&manifest["author"]["url"]));
         self.site_url = self.site_url.take().or_else(|| text(&manifest["siteUrl"]));
@@ -83,7 +83,7 @@ pub(crate) fn loads_unchanged(path: &Path) -> std::io::Result<bool> {
 }
 
 pub(crate) struct EnabledCollection {
-    pub(crate) inner: PackageCollection,
+    pub(crate) inner: std::sync::Arc<crate::listings::Listings>,
     pub(crate) hidden: HashSet<String>,
 }
 impl EnabledCollection {
@@ -93,10 +93,10 @@ impl EnabledCollection {
 }
 impl vrc_get_vpm::PackageCollection for EnabledCollection {
     fn get_all_packages(&self) -> impl Iterator<Item = vrc_get_vpm::PackageInfo<'_>> {
-        self.inner.get_all_packages().filter(|p| self.enabled(*p))
+        self.inner.packages.get_all_packages().filter(|p| self.enabled(*p))
     }
     fn find_packages(&self, name: &str) -> impl Iterator<Item = vrc_get_vpm::PackageInfo<'_>> {
-        self.inner.find_packages(name).filter(|p| self.enabled(*p))
+        self.inner.packages.find_packages(name).filter(|p| self.enabled(*p))
     }
     fn find_package_by_name(&self, name: &str, selector: VersionSelector) -> Option<vrc_get_vpm::PackageInfo<'_>> {
         self.find_packages(name).filter(|p| selector.satisfies(p.package_json())).max_by_key(|p| p.version())
@@ -124,7 +124,7 @@ fn remote_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
 /// cut short, or not a listing at all. vrc-get takes such a file for a repository never downloaded, and only a refresh
 /// downloads it again: until then its packages have no versions and no updates.
 pub(crate) fn unusable_cache(path: &Path) -> bool {
-    std::fs::read(path).is_ok_and(|bytes| !is_listing(&bytes))
+    crate::listings::unusable(path, || std::fs::read(path).is_ok_and(|bytes| !is_listing(&bytes)))
 }
 /// Whether these bytes are a whole listing.
 pub(crate) fn is_listing(bytes: &[u8]) -> bool {
@@ -204,16 +204,44 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
     // Repositories turned off remain in the settings; only the collection supplied to the resolver omits them.
     let hidden = crate::repos::hidden(root);
     let root = &crate::repos::dir(root);
-    let mut packages = PackageCollection::load_cache(&settings, &io).await?;
+    let caches = predefined_caches(root, &settings);
     // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start. `load`
     // downloads every remote repository and writes its cache (its `update_cache`).
-    if refresh || missing_cache(root, &settings) {
+    let inner = if refresh || missing_cache(root, &settings) {
         let before = usable_caches(root, &settings);
         // Listings through the same rule as archives: a repository's headers to its own origin only, redirects included.
-        packages = PackageCollection::load(&settings, &io, Some(&crate::vpm_http::Client::new(http()?, &settings)?)).await?;
+        let packages = PackageCollection::load(&settings, &io, Some(&crate::vpm_http::Client::new(http()?, &settings)?)).await?;
         restore_usable(&before);
-    }
-    Ok((settings, EnabledCollection { inner: packages, hidden }))
+        crate::listings::Listings::new(packages)
+    } else {
+        crate::listings::load(root, &settings, &caches, &io).await?
+    };
+    Ok((settings, EnabledCollection { inner, hidden }))
+}
+/// Whether `action` in the project at `path` needs the repositories downloaded first (PRJ-21): not what removes, nor what asks for
+/// exact versions the listings here have. The rest may take a version that came out since.
+async fn wants_download(root: &Path, path: &Path, action: &Change) -> anyhow::Result<bool> {
+    let exact: Vec<(String, String)> = match action {
+        Change::Remove(_) => return Ok(false),
+        Change::Plan { install, .. } => install.clone(),
+        Change::Install { names, .. } => match names.iter().map(|(n, v)| Some((n.clone(), v.clone()?))).collect() {
+            Some(exact) => exact,
+            None => return Ok(true),
+        },
+        Change::Resolve => {
+            let Ok(bytes) = std::fs::read(path.join("Packages/vpm-manifest.json")) else { return Ok(true) };
+            let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let locked = manifest["locked"].as_object().cloned().unwrap_or_default();
+            // A package asked for and not locked (a template's) takes the newest.
+            if manifest["dependencies"].as_object().is_some_and(|d| d.keys().any(|name| !locked.contains_key(name))) {
+                return Ok(true);
+            }
+            let missing = locked.iter().filter(|(name, _)| !path.join("Packages").join(name).join("package.json").is_file());
+            missing.map(|(name, p)| (name.clone(), p["version"].as_str().unwrap_or_default().to_string())).collect()
+        }
+    };
+    let (_, packages) = collection(root, false).await?;
+    Ok(!exact.iter().all(|(name, version)| version.parse().is_ok_and(|v| packages.find_package_by_name(name, VersionSelector::specific_version(&v)).is_some())))
 }
 pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow::Result<View> {
     let (settings, collection) = collection(root, refresh).await?;
@@ -230,7 +258,7 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
             builtin: false,
         });
     }
-    for r in collection.inner.get_remote() {
+    for r in collection.inner.packages.get_remote() {
         let id = r.id().unwrap_or_default();
         if repos.iter().all(|r| r.id != id) {
             repos.push(Repository {
@@ -246,9 +274,6 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
     // The iterator contains every version; sort with VPM's SemVer ordering before producing strings.
     let mut all: Vec<_> = collection.get_all_packages().collect();
     all.sort_by(|a, b| b.version().cmp(a.version()));
-    // Listings as their JSON (vrc-get's manifests leave out the author), read once each for the websites of the
-    // packages' newest versions.
-    let mut listings: HashMap<String, serde_json::Value> = HashMap::new();
     for p in all {
         let row = packages.entry(p.name().into()).or_insert_with(|| {
             let mut row = Package {
@@ -257,10 +282,8 @@ pub async fn view(root: &Path, project: Option<&Path>, refresh: bool) -> anyhow:
                 repository: p.repo().and_then(|r| r.url()).map(ToString::to_string),
                 ..Default::default()
             };
-            if let Some(r) = p.repo() {
-                let key = r.url().map(ToString::to_string).or_else(|| r.id().map(ToOwned::to_owned)).unwrap_or_default();
-                let listing = listings.entry(key).or_insert_with(|| serde_json::to_value(r.repo()).unwrap_or_default());
-                row.websites_from(&listing["packages"][p.name()]["versions"][p.version().to_string()]);
+            if let Some(sites) = collection.inner.websites(&p) {
+                (row.author_url, row.site_url) = (sites.author_url, sites.site_url);
             }
             row
         });
@@ -356,6 +379,8 @@ pub async fn set_enabled(root: &Path, id: &str, enabled: bool) -> anyhow::Result
     })
 }
 
+const PACKAGES_LOCK: &str = "Global\\Orbiters.Vpm.Packages";
+
 #[derive(Clone, Debug)]
 pub enum Change {
     Install { names: Vec<(String, Option<String>)>, prerelease: bool },
@@ -378,12 +403,21 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     crate::disk::staging(path)?;
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let (io, _) = environment(root).await?;
-    let _lock = named_lock(&io, &crate::repos::dir(root), "Global\\Orbiters.Vpm.Packages").await?;
-    // A plan an earlier run stopped halfway is said first, from its journal (kept outside the project), before any repository is
-    // reached. Those of 0.3.8 and before are in a folder beside Creator Companion's files, and are only read.
-    unfinished(path, &plan_journals(root), true)?;
-    unfinished(path, &old_plan_journals(root), false)?;
-    let (settings, packages) = collection(root, true).await?;
+    let mut lock = named_lock(&io, &crate::repos::dir(root), PACKAGES_LOCK).await?;
+    // A plan an earlier run stopped halfway is put back first, from its journal (kept outside the project), before any
+    // repository is reached: a network failure must not hold that up.
+    recover_plans(path, &plan_journals(root))?;
+    recover_plans(path, &old_plan_journals(root))?;
+    // Downloaded without the lock: a host that does not answer must not hold every other window's change.
+    let (settings, packages) = if wants_download(root, path, &action).await? {
+        drop(lock);
+        let downloaded = collection(root, true).await?;
+        lock = named_lock(&io, &crate::repos::dir(root), PACKAGES_LOCK).await?;
+        downloaded
+    } else {
+        collection(root, false).await?
+    };
+    let _lock = lock;
     // A private repository's headers go to its own origin only, not to wherever its listing puts an archive (AS-11).
     let client = crate::vpm_http::Client::new(http()?, &settings)?;
     let mut project = UnityProject::load(crate::disk::project_io(path)?).await?;

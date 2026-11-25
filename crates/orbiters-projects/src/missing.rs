@@ -238,7 +238,7 @@ async fn turned_off(root: &Path) -> Vec<Source> {
         if !collection.hidden.contains(&id) {
             continue;
         }
-        let Some(cached) = collection.inner.get_remote().find(|c| c.id() == Some(id.as_str())) else { continue };
+        let Some(cached) = collection.inner.packages.get_remote().find(|c| c.id() == Some(id.as_str())) else { continue };
         let listing = serde_json::to_value(cached.repo()).unwrap_or_default();
         out.push(Source {
             name: r.name().unwrap_or(&id).to_string(),

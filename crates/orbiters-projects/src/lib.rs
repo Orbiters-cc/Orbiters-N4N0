@@ -13,6 +13,7 @@ pub mod gallery;
 pub mod git;
 pub mod hidden;
 pub mod icons;
+pub mod listings;
 #[cfg(target_os = "macos")]
 mod mac;
 pub mod missing;

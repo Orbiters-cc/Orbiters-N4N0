@@ -455,18 +455,15 @@ fn own_accent(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings) -> boo
 }
 
 fn tint_name(t: Tint) -> &'static str {
-    tr_ctx(
-        "surfaces",
-        match t {
-            Tint::Zinc => mark("Zinc"),
-            Tint::Graphite => mark("Graphite"),
-            Tint::Slate => mark("Slate"),
-            Tint::Moss => mark("Moss"),
-            Tint::Stone => mark("Stone"),
-            Tint::Plum => mark("Plum"),
-            Tint::Black => mark("Black"),
-        },
-    )
+    match t {
+        Tint::Zinc => tr_ctx("surfaces", "Zinc"),
+        Tint::Graphite => tr_ctx("surfaces", "Graphite"),
+        Tint::Slate => tr_ctx("surfaces", "Slate"),
+        Tint::Moss => tr_ctx("surfaces", "Moss"),
+        Tint::Stone => tr_ctx("surfaces", "Stone"),
+        Tint::Plum => tr_ctx("surfaces", "Plum"),
+        Tint::Black => tr_ctx("surfaces", "Black"),
+    }
 }
 
 // --- Font ---

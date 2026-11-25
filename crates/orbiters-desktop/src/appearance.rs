@@ -301,7 +301,7 @@ impl Wallpaper {
             self.speed = 0.0;
         }
         shown.moved += dt * self.speed;
-        if self.speed == 0.0 {
+        if self.speed == 0.0 && !moves {
             shown.moved = shown.moved.max(SHOWN_BY);
         }
         let running = self.speed > 0.0;

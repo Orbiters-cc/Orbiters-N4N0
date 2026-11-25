@@ -117,7 +117,7 @@ pub fn choose(key: &str, changed: impl FnOnce() + Send + 'static) {
                 changed();
             }
         };
-        let _ = std::thread::Builder::new().name("interface font".into()).spawn(read);
+        let _ = std::thread::Builder::new().name("interface font".into()).spawn(read); // i18n: not shown (a thread's name)
     } else {
         set(BUNDLED.iter().find(|b| b.id == key).and_then(Bundled::load));
         changed();
@@ -255,7 +255,7 @@ fn size_of(bytes: &[u8], index: u32) -> Option<(f32, f32)> {
     let em = f32::from(metrics.units_per_em).max(1.0);
     let widths = font.glyph_metrics(Size::unscaled(), LocationRef::default());
     // The letters as often as words of the interface's languages have them.
-    const SAMPLE: &str = "etaoinsrhldcumfpgwybvkxjqzEACS e a i o";
+    const SAMPLE: &str = "etaoinsrhldcumfpgwybvkxjqzEACS e a i o"; // i18n: not shown (letters to measure)
     let wide: f32 = SAMPLE.chars().filter_map(|c| font.charmap().map(c)).filter_map(|g| widths.advance_width(g)).sum();
     let x = metrics.x_height.filter(|x| *x > 0.0).unwrap_or(em * 0.5) / em;
     Some((x, wide / em / SAMPLE.chars().count() as f32))

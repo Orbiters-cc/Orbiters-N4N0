@@ -116,7 +116,7 @@ impl Pipelines {
                     woken();
                 };
                 // No thread to be had: the scene does not show, the page does.
-                let _ = std::thread::Builder::new().name("background pipelines".into()).spawn(work);
+                let _ = std::thread::Builder::new().name("background pipelines".into()).spawn(work); // i18n: not shown (a thread's name)
             }
             slot
         });

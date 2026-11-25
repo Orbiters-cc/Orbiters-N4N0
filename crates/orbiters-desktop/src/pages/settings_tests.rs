@@ -975,6 +975,7 @@ fn every_key_the_registry_names_is_in_the_cards_source() {
         include_str!("experimental.rs"),
         include_str!("network.rs"),
         include_str!("perf_card.rs"),
+        include_str!("appearance.rs"),
     ]
     .concat();
     let named = ENTRIES.iter().flat_map(|e| e.controls.iter().copied()).chain(registry::ACTIONS.iter().map(|(_, k)| *k));

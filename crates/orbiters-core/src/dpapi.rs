@@ -1,5 +1,6 @@
-//! Current-user protection shared by the two independent account stores: Windows' DPAPI, on the Mac a key the login
-//! keychain keeps, on Linux a key in a file of the person's (see each [`crypt`]). Elsewhere there is none.
+//! Current-user protection shared by VRChat's session store and [`crate::sealed`]'s files (what was said to N4N0, the
+//! bridge's keys): Windows' DPAPI, on the Mac a key the login keychain keeps, on Linux a key in a file of the person's (see
+//! each [`crypt`]). Elsewhere there is none.
 #[cfg(windows)]
 pub(crate) fn crypt(data: &[u8], entropy: &[u8], encrypt: bool) -> anyhow::Result<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};

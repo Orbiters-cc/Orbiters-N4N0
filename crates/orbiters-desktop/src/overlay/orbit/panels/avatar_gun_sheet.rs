@@ -249,11 +249,11 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
         Some(id) => squircle_picture(p, pic, radii, id, cover_uv_of(pic.size(), 4.0 / 3.0), Color32::WHITE),
         None => {
             orbiters_ui::paint::fill_convex(p, &orbiters_ui::paint::squircle_points_corners(pic, radii), |_| look::TILE);
-            widgets::icon(p, pic.center(), icons::CROSSHAIR, 24.0, look::MUTED);
+            widgets::icon(p, pic.center(), icons::CROSSHAIR, 24.0, look::muted());
         }
     }
     if f.loaded.is_some() {
-        p.rect_stroke(pic.expand(2.5), look::radius(12.0), Stroke::new(2.5, if f.ready { look::accent() } else { look::MUTED }), egui::StrokeKind::Middle);
+        p.rect_stroke(pic.expand(2.5), look::radius(12.0), Stroke::new(2.5, if f.ready { look::accent() } else { look::muted() }), egui::StrokeKind::Middle);
     }
     let x = pic.right() + 16.0;
     let right = if f.retry { RETRY.left() - 16.0 } else { 1000.0 };
@@ -262,9 +262,9 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
         None => tr(TITLE).to_string(),
     };
     let font = look::font(21.0, weight::BOLD);
-    p.text(pos2(x, 22.0), Align2::LEFT_CENTER, fit(p, &title, &font, right - x), font, look::LABEL);
+    p.text(pos2(x, 22.0), Align2::LEFT_CENTER, fit(p, &title, &font, right - x), font, look::label());
     let font = look::font(15.0, weight::MEDIUM);
-    p.text(pos2(x, 46.0), Align2::LEFT_CENTER, fit(p, &f.status, &font, right - x), font, if f.ready { theme::mix(look::accent(), Color32::WHITE, 0.3) } else { look::MUTED });
+    p.text(pos2(x, 46.0), Align2::LEFT_CENTER, fit(p, &f.status, &font, right - x), font, if f.ready { theme::mix(look::accent(), Color32::WHITE, 0.3) } else { look::muted() });
     p.line_segment([pos2(X, HEAD_H + 2.0), pos2(1024.0 - X, HEAD_H + 2.0)], Stroke::new(1.0, Color32::from_white_alpha(18)));
     if !listing(f) {
         let c = pos2(512.0, 270.0);
@@ -274,12 +274,12 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
             Stage::Failed(e) => (icons::WARNING_CIRCLE, tr("Your favorites could not be read").into(), picker::failure(e)),
             _ => (icons::STAR, tr("No public avatar yet").into(), tr(picker::EMPTY).into()),
         };
-        widgets::icon(p, c - vec2(0.0, 40.0), icon, 54.0, look::MUTED);
-        text(p, c + vec2(0.0, 16.0), Align2::CENTER_CENTER, &first, 22.0, weight::BOLD, look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(second, look::font(16.0, weight::MEDIUM), look::MUTED, 640.0);
+        widgets::icon(p, c - vec2(0.0, 40.0), icon, 54.0, look::muted());
+        text(p, c + vec2(0.0, 16.0), Align2::CENTER_CENTER, &first, 22.0, weight::BOLD, look::label());
+        let mut job = egui::text::LayoutJob::simple(second, look::font(16.0, weight::MEDIUM), look::muted(), 640.0);
         job.halign = egui::Align::Center;
         let galley = p.layout_job(job);
-        p.galley(pos2(c.x, c.y + 38.0), galley, look::MUTED);
+        p.galley(pos2(c.x, c.y + 38.0), galley, look::muted());
         return;
     }
     let list = p.with_clip_rect(Rect::from_min_max(pos2(0.0, TOP - 6.0), pos2(1024.0, 576.0)));
@@ -292,14 +292,14 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
                 let y = at(y) + SECTION_H / 2.0 - 2.0;
                 let font = look::font(18.0, weight::BOLD);
                 let name = fit(&list, &section.name, &font, 640.0);
-                let wide = list.layout_no_wrap(name.clone(), font.clone(), look::LABEL).size().x;
-                list.text(pos2(X, y), Align2::LEFT_CENTER, name, font, look::LABEL);
+                let wide = list.layout_no_wrap(name.clone(), font.clone(), look::label()).size().x;
+                list.text(pos2(X, y), Align2::LEFT_CENTER, name, font, look::label());
                 let count = match &section.tiles {
                     Some(range) => orbiters_i18n::fill(&orbiters_i18n::tr_n("{count} avatar", "{count} avatars", range.len() as u64), &[("count", &range.len())]),
                     None if section.error.is_some() => String::new(),
                     None => tr("Loading…").to_string(),
                 };
-                list.text(pos2(X + wide + 12.0, y + 1.0), Align2::LEFT_CENTER, count, look::font(15.0, weight::MEDIUM), look::MUTED);
+                list.text(pos2(X + wide + 12.0, y + 1.0), Align2::LEFT_CENTER, count, look::font(15.0, weight::MEDIUM), look::muted());
             }
             Laid::Grey(rect) => {
                 let rect = rect.translate(vec2(0.0, TOP - scroll));
@@ -311,7 +311,7 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
                 let Some(section) = f.sections.get(s) else { continue };
                 let words = section.error.clone().unwrap_or_else(|| tr(picker::EMPTY_GROUP).to_string());
                 let font = look::font(15.5, weight::MEDIUM);
-                list.text(pos2(X, at(y) + NOTE_H / 2.0 - 6.0), Align2::LEFT_CENTER, fit(&list, &words, &font, 940.0), font, look::MUTED);
+                list.text(pos2(X, at(y) + NOTE_H / 2.0 - 6.0), Align2::LEFT_CENTER, fit(&list, &words, &font, 940.0), font, look::muted());
             }
             Laid::Tile(..) => {}
         }
@@ -332,8 +332,8 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
             match tile.picture {
                 Some(id) => squircle_picture(&list, pic, radii, id, cover_uv_of(pic.size(), 4.0 / 3.0), tint),
                 None => {
-                    orbiters_ui::paint::fill_convex(&list, &orbiters_ui::paint::squircle_points_corners(pic, radii), |_| theme::INK_750);
-                    widgets::icon(&list, pic.center(), icons::USER, 36.0, look::MUTED);
+                    orbiters_ui::paint::fill_convex(&list, &orbiters_ui::paint::squircle_points_corners(pic, radii), |_| theme::ink_750());
+                    widgets::icon(&list, pic.center(), icons::USER, 36.0, look::muted());
                 }
             }
             if tile.loaded {
@@ -346,7 +346,7 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
                 list.rect_stroke(pic.shrink(1.0), look::radius(14.0), Stroke::new(2.0, look::accent()), egui::StrokeKind::Middle);
             }
             let font = look::font(15.5, weight::SEMIBOLD);
-            let colour = if tile.loaded { theme::mix(look::accent(), Color32::WHITE, 0.35) } else { look::LABEL };
+            let colour = if tile.loaded { theme::mix(look::accent(), Color32::WHITE, 0.35) } else { look::label() };
             list.text(pos2(rect.left() + 2.0, pic.bottom() + NAME_H / 2.0), Align2::LEFT_CENTER, fit(&list, &tile.name, &font, rect.width() - 4.0), font, colour);
         }
         Look::AvatarGunRetry | Look::AvatarGunConnect => {

@@ -1,6 +1,5 @@
 {
   "GLB exceeds 4 GB": "GLBが4GBを超えています",
-  "GLB too large": "GLBが大きすぎます",
   "GPU device: {error}": "GPUデバイス：{error}",
   "GPU error: {error}": "GPUエラー：{error}",
   "Invalid splat file": "スプラットファイルが無効です",

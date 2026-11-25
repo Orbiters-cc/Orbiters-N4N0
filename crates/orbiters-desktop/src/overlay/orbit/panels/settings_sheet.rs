@@ -15,12 +15,26 @@ const ROW_PICTURES: usize = 7;
 fn settings_row(i: usize) -> f32 {
     8.0 + i as f32 * 70.0
 }
+
+/// The rows there are, in their order: on a Mac's screen none of a headset's, nor of Windows' sound and microphones.
+const ROWS: [usize; 8] = [0, 1, ROW_SOUND, ROW_MICS, ROW_LANGUAGE, ROW_THEME, ROW_COLOUR, ROW_PICTURES];
+const MAC_ROWS: [usize; 5] = [0, ROW_LANGUAGE, ROW_THEME, ROW_COLOUR, ROW_PICTURES];
+
+/// Where row `i` starts, if it is there.
+fn row_at(i: usize, facts: &Facts) -> Option<f32> {
+    let rows: &[usize] = if facts.mac { &MAC_ROWS } else { &ROWS };
+    rows.iter().position(|r| *r == i).map(settings_row)
+}
 const SETTINGS_X: f32 = 276.0;
 const SETTINGS_HIGH: f32 = 58.0;
 
 /// The bar of colours.
 pub(super) fn hue_bar() -> Rect {
-    r(SETTINGS_X + 8.0 * 60.0 + 12.0, settings_row(ROW_COLOUR) + 12.0, 1000.0 - (SETTINGS_X + 8.0 * 60.0 + 12.0), 42.0)
+    hue_bar_at(settings_row(ROW_COLOUR))
+}
+
+fn hue_bar_at(row: f32) -> Rect {
+    r(SETTINGS_X + 8.0 * 60.0 + 12.0, row + 12.0, 1000.0 - (SETTINGS_X + 8.0 * 60.0 + 12.0), 42.0)
 }
 
 /// The colour on the bar at `x` on the page.
@@ -36,8 +50,9 @@ pub(super) fn hue_color(t: f32) -> [u8; 3] {
 pub(super) fn settings_items(facts: &Facts) -> Vec<Item> {
     let mut out = Vec::new();
     let mut two = |i: usize, first: (Pick, &'static str, &'static str, bool), second: (Pick, &'static str, &'static str, bool)| {
+        let Some(row) = row_at(i, facts) else { return };
         for (n, (pick, icon, label, on)) in [first, second].into_iter().enumerate() {
-            out.push(Item { action: Action::Set(pick), rect: r(SETTINGS_X + n as f32 * 318.0, settings_row(i) + 4.0, 306.0, SETTINGS_HIGH), look: Look::Choice { icon, label, on } });
+            out.push(Item { action: Action::Set(pick), rect: r(SETTINGS_X + n as f32 * 318.0, row + 4.0, 306.0, SETTINGS_HIGH), look: Look::Choice { icon, label, on } });
         }
     };
     let o = &facts.orbit;
@@ -51,18 +66,21 @@ pub(super) fn settings_items(facts: &Facts) -> Vec<Item> {
         two(ROW_PICTURES, (Pick::Pictures(false), icons::IMAGE, tr("Fully monochrome"), !o.retro_pictures), (Pick::Pictures(true), icons::IMAGES, tr("Pictures in colour"), o.retro_pictures));
     }
     let mut stepper = |row: usize, before: Pick, after: Pick, name: Look| {
-        let y = settings_row(row) + 4.0;
+        let Some(y) = row_at(row, facts).map(|y| y + 4.0) else { return };
         out.push(Item { action: Action::Set(before), rect: r(SETTINGS_X, y + 1.0, 56.0, 56.0), look: Look::Step(false) });
         out.push(Item { action: Action::Idle, rect: r(SETTINGS_X + 64.0, y, 1000.0 - SETTINGS_X - 128.0, SETTINGS_HIGH), look: name });
         out.push(Item { action: Action::Set(after), rect: r(1000.0 - 56.0, y + 1.0, 56.0, 56.0), look: Look::Step(true) });
     };
     stepper(ROW_SOUND, Pick::Sound(false), Pick::Sound(true), Look::SoundName);
     stepper(ROW_LANGUAGE, Pick::Language(false), Pick::Language(true), Look::LanguageName);
-    out.push(Item { action: Action::Page(Target::Microphones), rect: r(SETTINGS_X, settings_row(ROW_MICS) + 4.0, 1000.0 - SETTINGS_X, SETTINGS_HIGH), look: Look::MicsOpen });
-    for i in 0..SWATCHES.len() {
-        out.push(Item { action: Action::Set(Pick::Swatch(i)), rect: r(SETTINGS_X + i as f32 * 60.0, settings_row(ROW_COLOUR) + 6.0, 54.0, 54.0), look: Look::Swatch(i) });
+    if let Some(row) = row_at(ROW_MICS, facts) {
+        out.push(Item { action: Action::Page(Target::Microphones), rect: r(SETTINGS_X, row + 4.0, 1000.0 - SETTINGS_X, SETTINGS_HIGH), look: Look::MicsOpen });
     }
-    out.push(Item { action: Action::Set(Pick::Hue), rect: hue_bar(), look: Look::HueBar });
+    let colour = row_at(ROW_COLOUR, facts).unwrap_or(settings_row(ROW_COLOUR));
+    for i in 0..SWATCHES.len() {
+        out.push(Item { action: Action::Set(Pick::Swatch(i)), rect: r(SETTINGS_X + i as f32 * 60.0, colour + 6.0, 54.0, 54.0), look: Look::Swatch(i) });
+    }
+    out.push(Item { action: Action::Set(Pick::Hue), rect: hue_bar_at(colour), look: Look::HueBar });
     out
 }
 
@@ -82,21 +100,21 @@ pub(super) fn draw_settings(p: &Painter, facts: &Facts) {
         rows.push((ROW_PICTURES, tr("Pictures"), tr("Retro can leave them in colour")));
     }
     for (i, name, about) in rows {
-        let y = settings_row(i);
+        let Some(y) = row_at(i, facts) else { continue };
         let font = look::font(20.0, weight::BOLD);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, SETTINGS_X - 40.0);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, font, look::label());
+        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::label(), SETTINGS_X - 40.0);
         job.wrap.max_rows = 2;
-        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
+        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::label());
     }
 }
 
 /// The name in the row of the sound device, or of the language.
 pub(super) fn draw_stepper_name(p: &Painter, rect: Rect, icon: &str, name: &str) {
     p.rect_filled(rect, look::radius(14.0), look::TILE);
-    widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icon, 24.0, look::LABEL);
+    widgets::icon(p, pos2(rect.left() + 30.0, rect.center().y), icon, 24.0, look::label());
     let font = look::font(19.0, weight::SEMIBOLD);
-    p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, name, &font, rect.width() - 70.0), font, look::LABEL);
+    p.text(pos2(rect.left() + 56.0, rect.center().y), Align2::LEFT_CENTER, fit(p, name, &font, rect.width() - 70.0), font, look::label());
 }
 
 pub(super) fn sound_name(facts: &Facts) -> &str {

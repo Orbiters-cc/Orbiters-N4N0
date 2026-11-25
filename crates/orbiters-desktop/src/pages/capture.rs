@@ -391,13 +391,13 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
     let (glyph, tint) = match reason {
         Some(Why::Capturing) => match c.picture {
             Some(PictureMode::People) => (icons::USERS, theme::VIOLET),
-            Some(PictureMode::World) => (icons::GLOBE_HEMISPHERE_WEST, theme::ACCENT),
+            Some(PictureMode::World) => (icons::GLOBE_HEMISPHERE_WEST, theme::accent()),
             None => (icons::RECORD, theme::REC),
         },
-        Some(Why::Reconstructing) => (icons::CUBE_FOCUS, theme::ACCENT),
+        Some(Why::Reconstructing) => (icons::CUBE_FOCUS, theme::accent()),
         Some(Why::Error | Why::LeftOut | Why::Kit) => (icons::WARNING, theme::WARN),
         Some(Why::Finished) => (icons::CHECK_CIRCLE, theme::OK),
-        None => (icons::APERTURE, theme::ACCENT),
+        None => (icons::APERTURE, theme::accent()),
     };
     let p = bu.painter().clone();
     widgets::frame(&p, rect, theme::CARD_RADIUS, theme::mix(theme::surface(), tint, if capturing { 0.10 } else { 0.03 + 0.03 * hover }));
@@ -407,7 +407,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
         let j = snap.reconstruction.as_ref();
         let f = j.map_or(0.0, super::sessions::overall_progress);
         orbiters_ui::paint::ring(&p, tile.center(), 11.0, 2.5, theme::alpha(tint, 0.3));
-        orbiters_ui::paint::arc(&p, tile.center(), 11.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.5, if j.is_some_and(|j| j.paused) { theme::FG_3 } else { tint });
+        orbiters_ui::paint::arc(&p, tile.center(), 11.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.5, if j.is_some_and(|j| j.paused) { theme::fg_3() } else { tint });
     } else if capturing && matches!(c.state, CaptureState::Recording) {
         widgets::status_dot(&p, tile.center(), Tone::Rec, true);
     } else {
@@ -474,7 +474,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
                 let b = IconButton::new(glyph, label).size(34.0, 16.0).id_salt(salt);
                 let resp = if vrchat { b.show_at(&mut bu, r) } else { bu.interact(r, Id::unique(salt), Sense::hover()).on_hover_text(why_not) };
                 if !vrchat {
-                    widgets::icon(&p, r.center(), glyph, 16.0, theme::FG_4);
+                    widgets::icon(&p, r.center(), glyph, 16.0, theme::fg_4());
                 }
                 if vrchat && widgets::activated(&resp) {
                     chosen = Some(mode);
@@ -511,11 +511,11 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
     // stands at.
     let summary = if open && reason != Some(Why::Capturing) { None } else { reason };
     let line: (String, egui::Color32) = match summary {
-        Some(Why::Capturing) if open => (world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| tr("VRChat world").into()), theme::FG_2),
+        Some(Why::Capturing) if open => (world.world_name.clone().filter(|_| world.in_world).unwrap_or_else(|| tr("VRChat world").into()), theme::fg_2()),
         Some(Why::Capturing) => {
             let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
             let kept = c.stats.as_ref().map_or(0, |s| s.keyframes);
-            (fill(&tr_n("{elapsed}   ·   {count} keyframe", "{elapsed}   ·   {count} keyframes", kept as u64), &[("elapsed", &elapsed)]), theme::FG_2)
+            (fill(&tr_n("{elapsed}   ·   {count} keyframe", "{elapsed}   ·   {count} keyframes", kept as u64), &[("elapsed", &elapsed)]), theme::fg_2())
         }
         Some(Why::Reconstructing) => {
             let j = snap.reconstruction.as_ref().expect("a reconstruction");
@@ -524,18 +524,18 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
             (format!("{badge} · {name}"), color)
         }
         Some(Why::Error) => (c.error.clone().unwrap_or_default(), theme::DANGER),
-        Some(Why::LeftOut) => (c.left_out.why.clone().unwrap_or_default(), if c.left_out.wearer == Left::InPicture { theme::FG_2 } else { theme::WARN }),
+        Some(Why::LeftOut) => (c.left_out.why.clone().unwrap_or_default(), if c.left_out.wearer == Left::InPicture { theme::fg_2() } else { theme::WARN }),
         Some(Why::Kit) => (tr("N4N0 is not on the avatar you wear yet: add it to capture with it").into(), theme::WARN),
         Some(Why::Finished) => {
             let name = state.finished.as_ref().and_then(|f| name_of(&f.dir)).unwrap_or_else(|| tr("Session").into());
             (orbiters_i18n::tr!("Saved · {name}", name = name), theme::OK)
         }
-        None if !here => (tr("VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures.").into(), theme::FG_3),
-        None if !consent => (tr("Read the capture notice before your first capture").into(), theme::FG_3),
-        None if !snap.vrchat.running => (tr("Start VRChat first: its camera takes the picture").into(), theme::FG_3),
+        None if !here => (tr("VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures.").into(), theme::fg_3()),
+        None if !consent => (tr("Read the capture notice before your first capture").into(), theme::fg_3()),
+        None if !snap.vrchat.running => (tr("Start VRChat first: its camera takes the picture").into(), theme::fg_3()),
         None => match world.world_name.clone().filter(|_| world.in_world) {
-            Some(name) => (orbiters_i18n::tr!("Ready · {world}", world = name), theme::FG_2),
-            None => (tr("VRChat is running; join a world to tag captures with it.").into(), theme::FG_3),
+            Some(name) => (orbiters_i18n::tr!("Ready · {world}", world = name), theme::fg_2()),
+            None => (tr("VRChat is running; join a world to tag captures with it.").into(), theme::fg_3()),
         },
     };
     widgets::text_truncated(&p, pos2(x, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD).tracking(-0.01), room);
@@ -588,8 +588,8 @@ fn world_id_row(ui: &mut Ui, id: &str) {
     let r = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
-            ui.add(egui::Label::new(egui::RichText::new(label.to_uppercase()).size(11.0).color(theme::FG_3)).selectable(false));
-            ui.add(egui::Label::new(egui::RichText::new(id).monospace().size(12.5).color(theme::FG_2)).selectable(true));
+            ui.add(egui::Label::new(egui::RichText::new(label.to_uppercase()).size(11.0).color(theme::fg_3())).selectable(false));
+            ui.add(egui::Label::new(egui::RichText::new(id).monospace().size(12.5).color(theme::fg_2())).selectable(true));
         })
         .response
         .rect;
@@ -627,12 +627,12 @@ fn reconstruction(ui: &mut Ui, cx: &mut Cx, name_of: &dyn Fn(&Path) -> Option<St
         }
         d
     };
-    widgets::text_truncated(&p, pos2(rect.right() - 20.0, rect.top() + 72.0), Align2::RIGHT_CENTER, &Txt::new(&detail, 12.5).color(theme::FG_3), rect.width() * 0.45);
+    widgets::text_truncated(&p, pos2(rect.right() - 20.0, rect.top() + 72.0), Align2::RIGHT_CENTER, &Txt::new(&detail, 12.5).color(theme::fg_3()), rect.width() * 0.45);
     let track = Rect::from_min_size(pos2(x, rect.top() + 70.0), vec2((rect.width() * 0.5 - 22.0).max(80.0), 6.0));
     p.rect_filled(track, theme::radius(3.0), theme::white(0.07));
     p.rect_filled(Rect::from_min_size(track.min, vec2((track.width() * f.clamp(0.0, 1.0)).max(6.0), 6.0)), theme::radius(3.0), super::sessions::job_bar(j));
     if j.paused {
-        widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(tr("Paused"), 12.0).color(theme::FG_3), room);
+        widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(tr("Paused"), 12.0).color(theme::fg_3()), room);
     }
     if widgets::activated(&stop.show_at(ui, stop_r)) {
         cx.ctl.stop_reconstruction();
@@ -644,13 +644,13 @@ fn reconstruction(ui: &mut Ui, cx: &mut Cx, name_of: &dyn Fn(&Path) -> Option<St
 fn error_card(ui: &mut Ui, cx: &mut Cx) {
     let Some(error) = cx.snap.capture.error.clone() else { return };
     let w = ui.available_width();
-    let galley = ui.painter().layout_job(Txt::new(&error, 13.5).color(theme::FG).line_height(19.0).job(w - 68.0));
+    let galley = ui.painter().layout_job(Txt::new(&error, 13.5).color(theme::fg()).line_height(19.0).job(w - 68.0));
     let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0 + 18.0), Sense::hover());
     let p = ui.painter();
     widgets::frame(p, rect, 14.0, theme::alpha(theme::DANGER, 0.10));
     widgets::icon(p, pos2(rect.left() + 26.0, rect.top() + 12.0 + 9.5), icons::WARNING_CIRCLE, 18.0, theme::DANGER);
     widgets::text(p, pos2(rect.left() + 48.0, rect.top() + 21.0), Align2::LEFT_CENTER, &Txt::caps(tr("The last capture stopped")));
-    p.galley(pos2(rect.left() + 48.0, rect.top() + 34.0), galley, theme::FG);
+    p.galley(pos2(rect.left() + 48.0, rect.top() + 34.0), galley, theme::fg());
 }
 
 /// N4N0 missing from the avatar worn: what it is for, and the card that puts it on (Unity projects' own).
@@ -664,11 +664,11 @@ fn kit_card(ui: &mut Ui, cx: &mut Cx, projects: &mut super::projects::State) {
     widgets::text(&p, pos2(rect.left() + 22.0, rect.top() + 26.0), Align2::LEFT_CENTER, &Txt::caps(tr("Capture kit")));
     let galley = p.layout_job(
         Txt::new(tr("Put N4N0 on the avatar you capture with: Orbiters installs it in its Unity project, you confirm in Unity"), 13.0)
-            .color(theme::FG_2)
+            .color(theme::fg_2())
             .line_height(18.0)
             .job(text_room),
     );
-    p.galley(pos2(rect.left() + 22.0, rect.top() + 40.0), galley, theme::FG_2);
+    p.galley(pos2(rect.left() + 22.0, rect.top() + 40.0), galley, theme::fg_2());
     let at = Rect::from_min_size(pos2(rect.right() - 12.0 - card_w, rect.top() + 12.0), vec2(card_w, 62.0));
     let mut cu = ui.new_child(UiBuilder::new().max_rect(at).id_salt("capture-kit"));
     super::projects::capture_card(&mut cu, cx, projects, at);
@@ -764,7 +764,7 @@ fn actions(ui: &mut Ui, cx: &mut Cx, upload: &mut Option<(String, Option<bool>)>
     };
     let place = BigAction {
         glyph: icons::GLOBE_HEMISPHERE_WEST,
-        tint: theme::ACCENT,
+        tint: theme::accent(),
         title: place_title,
         note: world_note,
         warn: false,
@@ -866,7 +866,7 @@ impl BigAction<'_> {
             r.width() - 44.0,
         );
         let note = if self.enabled { self.note } else { self.why_not };
-        let (color, line) = if self.warn && self.enabled { (theme::WARN, 18.0) } else { (theme::FG_2, 18.0) };
+        let (color, line) = if self.warn && self.enabled { (theme::WARN, 18.0) } else { (theme::fg_2(), 18.0) };
         let galley = p.layout_job(Txt::new(note, 13.5).color(color).line_height(line).job(r.width() - 44.0));
         p.galley(pos2(r.left() + 22.0, r.bottom() - 46.0), galley, color);
         clicked
@@ -901,7 +901,7 @@ fn why_last(ui: &mut Ui, cx: &mut Cx, toolkit_asked: &mut bool, projects: &mut s
     };
     let text = note.map_or(why.clone(), |n| format!("{why} {n}"));
     let w = ui.available_width();
-    let ink = if wearer { theme::FG } else { tone };
+    let ink = if wearer { theme::fg() } else { tone };
     let galley = ui.painter().layout_job(Txt::new(text, 13.5).color(ink).line_height(19.0).job(w - 68.0));
     let button_h = if button.is_some() { 44.0 } else { 0.0 };
     let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y + 24.0 + button_h), Sense::hover());
@@ -935,7 +935,7 @@ fn quiet_row(ui: &mut Ui, cx: &mut Cx) {
     let mut test = false;
     block(ui, cx, 2, 36.0, |ui, rect| {
         let p = ui.painter();
-        let label = widgets::text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Picture length"), 13.0).color(theme::FG_3));
+        let label = widgets::text(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Picture length"), 13.0).color(theme::fg_3()));
         let mut length = snap.settings.photo_3d;
         let lengths = [Photo3dLength::Quick, Photo3dLength::Standard, Photo3dLength::Full]
             .into_iter()
@@ -993,7 +993,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
     ui.multiply_opacity(alpha);
     let tint = match c.picture {
         Some(PictureMode::People) => theme::VIOLET,
-        Some(PictureMode::World) => theme::ACCENT,
+        Some(PictureMode::World) => theme::accent(),
         None => theme::REC,
     };
     widgets::frame(ui.painter(), rect, theme::CARD_RADIUS, theme::mix(theme::surface(), tint, 0.10));
@@ -1018,7 +1018,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         ui.painter(),
         pos2(button.center().x, rect.bottom() - 16.0),
         Align2::CENTER_CENTER,
-        &Txt::new(stop, 13.0).weight(weight::MEDIUM).color(theme::FG_2),
+        &Txt::new(stop, 13.0).weight(weight::MEDIUM).color(theme::fg_2()),
     );
 
     // What is happening.
@@ -1038,7 +1038,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         let elapsed = format::duration(c.stats.as_ref().map(|s| s.elapsed_s).unwrap_or(0.0));
         let kept = c.stats.as_ref().map_or(0, |s| s.keyframes);
         let line = fill(&tr_n("{elapsed}   ·   {count} keyframe", "{elapsed}   ·   {count} keyframes", kept as u64), &[("elapsed", &elapsed)]);
-        widgets::text(&p, pos2(x + 18.0, rect.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(line, 13.0).weight(weight::MEDIUM).color(theme::FG));
+        widgets::text(&p, pos2(x + 18.0, rect.top() + 28.0), Align2::LEFT_CENTER, &Txt::new(line, 13.0).weight(weight::MEDIUM).color(theme::fg()));
     }
     widgets::text_truncated(&p, pos2(x, rect.top() + 60.0), Align2::LEFT_CENTER, &Txt::new(title, 24.0).weight(weight::SEMIBOLD).tracking(-0.01), room);
     let doing = match (c.picture, c.state) {
@@ -1055,10 +1055,10 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
         }
         _ => c.source.clone().unwrap_or_default(),
     };
-    widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(doing, 13.5).color(theme::FG_2), room);
+    widgets::text_truncated(&p, pos2(x, rect.top() + 88.0), Align2::LEFT_CENTER, &Txt::new(doing, 13.5).color(theme::fg_2()), room);
     if let Some(warning) = warning {
         // The wearer comes out afterwards: nothing is going wrong, so it reads as a note.
-        let ink = if c.left_out.wearer == Left::InPicture { theme::FG_2 } else { theme::WARN };
+        let ink = if c.left_out.wearer == Left::InPicture { theme::fg_2() } else { theme::WARN };
         let galley = p.layout_job(Txt::new(warning, 13.0).color(ink).line_height(17.0).job(room));
         p.galley(pos2(x, rect.top() + 104.0), galley, ink);
     } else {
@@ -1070,7 +1070,7 @@ fn under_way(ui: &mut Ui, cx: &mut Cx) {
             (false, false) => None,
         };
         if let Some(out) = out {
-            widgets::text_truncated(&p, pos2(x, rect.top() + 114.0), Align2::LEFT_CENTER, &Txt::new(out, 13.5).color(theme::ACCENT), room);
+            widgets::text_truncated(&p, pos2(x, rect.top() + 114.0), Align2::LEFT_CENTER, &Txt::new(out, 13.5).color(theme::accent()), room);
         }
     }
     // A free recording's pause, and its folder.
@@ -1133,11 +1133,11 @@ fn vrchat_picker(ui: &mut Ui, cx: &mut Cx) {
         }
         let hint = if busy { tr("Finish the current capture first.") } else { tr("Pictures are taken in the one you pick") };
         let right = row.left() + runs.len() as f32 * (width + gap) - gap;
-        widgets::text(&p, pos2(right, rect.top() + 8.0), Align2::RIGHT_CENTER, &Txt::new(hint, 12.5).color(theme::FG_3));
+        widgets::text(&p, pos2(right, rect.top() + 8.0), Align2::RIGHT_CENTER, &Txt::new(hint, 12.5).color(theme::fg_3()));
         if let Some(note) = note {
             let y = row.bottom() + 18.0;
-            widgets::icon(&p, pos2(rect.left() + 8.0, y), icons::INFO, 14.0, theme::FG_3);
-            widgets::text_truncated(&p, pos2(rect.left() + 24.0, y), Align2::LEFT_CENTER, &Txt::new(note, 12.5).color(theme::FG_2), rect.width() - 24.0);
+            widgets::icon(&p, pos2(rect.left() + 8.0, y), icons::INFO, 14.0, theme::fg_3());
+            widgets::text_truncated(&p, pos2(rect.left() + 24.0, y), Align2::LEFT_CENTER, &Txt::new(note, 12.5).color(theme::fg_2()), rect.width() - 24.0);
         }
     });
     if let Some(pid) = chosen {
@@ -1150,17 +1150,17 @@ fn vrchat_card(ui: &Ui, card: Rect, id: Id, run: &VrchatRunShown, hovered: bool)
     let p = ui.painter();
     let lit = anim::toggle(ui.ctx(), id.with("lit"), run.target, Spring::SOFT);
     let hover = anim::toggle(ui.ctx(), id.with("hover"), hovered, Spring::SNAPPY);
-    let fill = theme::alpha(theme::ACCENT, 0.08 * lit);
+    let fill = theme::alpha(theme::accent(), 0.08 * lit);
     widgets::frame(p, card, 16.0, theme::surface());
     p.rect_filled(card, theme::radius(16.0), fill);
     p.rect_filled(card, theme::radius(16.0), theme::white(0.03 * hover));
     if lit > 0.01 {
-        p.rect_stroke(card, theme::radius(16.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.85 * lit)), egui::StrokeKind::Inside);
+        p.rect_stroke(card, theme::radius(16.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.85 * lit)), egui::StrokeKind::Inside);
     }
     let (glyph, tint) = match run.driver {
-        VrchatDriverShown::Person => (icons::USER, theme::ACCENT),
+        VrchatDriverShown::Person => (icons::USER, theme::accent()),
         VrchatDriverShown::Agent { .. } => (icons::SPARKLE, theme::CYAN),
-        VrchatDriverShown::Left => (icons::SPARKLE, theme::FG_4),
+        VrchatDriverShown::Left => (icons::SPARKLE, theme::fg_4()),
     };
     let tile = Rect::from_min_size(pos2(card.left() + 14.0, card.top() + 14.0), vec2(36.0, 36.0));
     p.rect_filled(tile, theme::radius(12.0), theme::alpha(tint, 0.12));
@@ -1168,15 +1168,15 @@ fn vrchat_card(ui: &Ui, card: Rect, id: Id, run: &VrchatRunShown, hovered: bool)
     let x = tile.right() + 12.0;
     // Its mark on the right: where pictures are taken, or the way to choose it.
     let mark_w = if run.target {
-        let label = Txt::new(tr("Pictures here"), 12.0).weight(weight::MEDIUM).color(theme::ACCENT);
+        let label = Txt::new(tr("Pictures here"), 12.0).weight(weight::MEDIUM).color(theme::accent());
         let w = widgets::text_size(ui, &label).x + 30.0;
         let pill = Rect::from_min_size(pos2(card.right() - 12.0 - w, card.top() + 12.0), vec2(w, 24.0));
-        p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14));
-        widgets::icon(p, pos2(pill.left() + 13.0, pill.center().y), icons::CHECK, 12.0, theme::ACCENT);
+        p.rect_filled(pill, theme::radius(12.0), theme::alpha(theme::accent(), 0.14));
+        widgets::icon(p, pos2(pill.left() + 13.0, pill.center().y), icons::CHECK, 12.0, theme::accent());
         widgets::text(p, pos2(pill.left() + 23.0, pill.center().y), Align2::LEFT_CENTER, &label);
         w + 12.0
     } else if hovered {
-        let label = Txt::new(tr("Take pictures here"), 12.0).weight(weight::MEDIUM).color(theme::FG_2);
+        let label = Txt::new(tr("Take pictures here"), 12.0).weight(weight::MEDIUM).color(theme::fg_2());
         let w = widgets::text_size(ui, &label).x;
         widgets::text(p, pos2(card.right() - 14.0, card.top() + 24.0), Align2::RIGHT_CENTER, &label);
         w + 14.0
@@ -1187,7 +1187,7 @@ fn vrchat_card(ui: &Ui, card: Rect, id: Id, run: &VrchatRunShown, hovered: bool)
     let name = crate::controller::vrchats::who(run);
     widgets::text_truncated(p, pos2(x, card.top() + 24.0), Align2::LEFT_CENTER, &Txt::new(name, 15.0).weight(weight::SEMIBOLD), room);
     let world = run.world.clone().unwrap_or_else(|| tr("Not in a world yet").into());
-    widgets::text_truncated(p, pos2(x, card.top() + 43.0), Align2::LEFT_CENTER, &Txt::new(world, 12.5).color(theme::FG_2), card.right() - x - 14.0);
+    widgets::text_truncated(p, pos2(x, card.top() + 43.0), Align2::LEFT_CENTER, &Txt::new(world, 12.5).color(theme::fg_2()), card.right() - x - 14.0);
     // Who drives it, how it runs, and its camera.
     let driver = match &run.driver {
         VrchatDriverShown::Person => tr("Your own").to_string(),
@@ -1206,14 +1206,14 @@ fn vrchat_card(ui: &Ui, card: Rect, id: Id, run: &VrchatRunShown, hovered: bool)
     let y = card.bottom() - 22.0;
     let left = card.left() + 16.0;
     let used = widgets::text_size(ui, &Txt::new(&line, 12.0)).x;
-    widgets::text_truncated(p, pos2(left, y), Align2::LEFT_CENTER, &Txt::new(&line, 12.0).color(theme::FG_3), card.width() * 0.6);
+    widgets::text_truncated(p, pos2(left, y), Align2::LEFT_CENTER, &Txt::new(&line, 12.0).color(theme::fg_3()), card.width() * 0.6);
     if let Some(open) = run.camera {
         let cx_ = left + used.min(card.width() * 0.6) + 18.0;
         // Closed on the one pictures are taken in: what to do before a picture, in amber.
         let (tone, ink) = match (open, run.target) {
-            (true, _) => (Tone::Ok, theme::FG_2),
+            (true, _) => (Tone::Ok, theme::fg_2()),
             (false, true) => (Tone::Warn, theme::WARN),
-            (false, false) => (Tone::Off, theme::FG_3),
+            (false, false) => (Tone::Off, theme::fg_3()),
         };
         widgets::status_dot(p, pos2(cx_, y), tone, false);
         let words = if open { tr("Camera open") } else { tr("Camera closed") };
@@ -1341,7 +1341,7 @@ fn recording_settings(ui: &mut Ui, cx: &mut Cx) {
         let p = ui.painter().clone();
         widgets::text(&p, pos2(card.left() + 22.0, card.top() + 28.0), Align2::LEFT_CENTER, &Txt::caps(tr_ctx("the noun", "Recording")));
         let sub = if snap.osc.listening { tr("Also from your Action Menu") } else { tr("Saved as a session") };
-        widgets::text_truncated(&p, pos2(card.left() + 22.0, card.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), 180.0);
+        widgets::text_truncated(&p, pos2(card.left() + 22.0, card.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()), 180.0);
         let mut mode = settings.capture_mode;
         let mut quality = settings.storage_quality;
         let modes = [
@@ -1376,7 +1376,7 @@ fn consent(ui: &mut Ui, cx: &mut Cx) {
     if !cx.snap.vrchat_login.allowed {
         bullets.push(tr("Orbiters - N4N0 never asks for your VRChat login and only reads VRChat's local log, OSC and Spout."));
     }
-    let galleys: Vec<_> = bullets.iter().map(|b| ui.painter().layout_job(Txt::new(*b, 13.0).color(theme::FG_2).line_height(20.0).job(w - 300.0))).collect();
+    let galleys: Vec<_> = bullets.iter().map(|b| ui.painter().layout_job(Txt::new(*b, 13.0).color(theme::fg_2()).line_height(20.0).job(w - 300.0))).collect();
     let text_h: f32 = galleys.iter().map(|g| g.size().y + 8.0).sum();
     let h = (24.0 + 36.0 + 16.0 + text_h + 16.0).max(ACTION_H);
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
@@ -1386,14 +1386,14 @@ fn consent(ui: &mut Ui, cx: &mut Cx) {
     let p = ui.painter().clone();
     widgets::card(&p, rect, theme::CARD_RADIUS);
     let tile = Rect::from_min_size(rect.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
-    p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-    widgets::icon(&p, tile.center(), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
+    p.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::accent(), 0.12));
+    widgets::icon(&p, tile.center(), icons::SHIELD_CHECK, 18.0, theme::accent());
     widgets::text(&p, pos2(tile.right() + 10.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Before you capture"), 16.0).weight(weight::SEMIBOLD));
     let mut y = tile.bottom() + 16.0;
     for g in galleys {
-        p.circle_filled(pos2(rect.left() + 30.0, y + 10.0), 2.0, theme::FG_3);
+        p.circle_filled(pos2(rect.left() + 30.0, y + 10.0), 2.0, theme::fg_3());
         let gh = g.size().y;
-        p.galley(pos2(rect.left() + 24.0 + 16.0, y), g, theme::FG_2);
+        p.galley(pos2(rect.left() + 24.0 + 16.0, y), g, theme::fg_2());
         y += gh + 8.0;
     }
     let button = Rect::from_min_size(pos2(rect.right() - 24.0 - 200.0, rect.center().y - 22.0), vec2(200.0, 44.0));
@@ -1514,7 +1514,7 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
             &p,
             pos2(rect.right() - 20.0, rect.top() + 26.0),
             Align2::RIGHT_CENTER,
-            &Txt::new(right, 12.5).color(theme::FG_3),
+            &Txt::new(right, 12.5).color(theme::fg_3()),
             rect.width() * 0.6,
         );
         let rows = crate::streams::streams(snap);
@@ -1525,13 +1525,13 @@ fn performance(ui: &mut Ui, cx: &mut Cx) {
             widgets::frame(&p, cell, 14.0, theme::white(0.03));
             let tile = Rect::from_min_size(cell.min + vec2(14.0, 14.0), vec2(36.0, 36.0));
             p.rect_filled(tile, theme::radius(11.0), theme::alpha(row.tone.color(), 0.12));
-            widgets::icon(&p, tile.center(), row.glyph, 17.0, if row.tone == Tone::Off { theme::FG_3 } else { row.tone.color() });
+            widgets::icon(&p, tile.center(), row.glyph, 17.0, if row.tone == Tone::Off { theme::fg_3() } else { row.tone.color() });
             widgets::text(&p, pos2(cell.left() + 14.0, tile.bottom() + 18.0), Align2::LEFT_CENTER, &Txt::new(row.name, 14.0).weight(weight::SEMIBOLD));
             widgets::text_truncated(
                 &p,
                 pos2(cell.left() + 14.0, tile.bottom() + 38.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(&row.status, 12.0).color(theme::FG_3),
+                &Txt::new(&row.status, 12.0).color(theme::fg_3()),
                 cell.width() - 28.0,
             );
             if let Some(level) = row.level {
@@ -1576,7 +1576,7 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             Some([x, y, z]) => format!("x {x:.1}   y {y:.1}   z {z:.1} m"),
             None => tr("Exact positions from the capture strip, top-down").into(),
         };
-        widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3));
+        widgets::text(p, pos2(rect.left() + 20.0, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()));
         // What went wrong: the capture's error, else what the recording goes on without (a microphone that could not
         // be opened, files that could not be written), as the worker last said them.
         let warnings = s.map(|s| s.warnings.join(" · ")).filter(|w| !w.is_empty());
@@ -1617,11 +1617,11 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
             if m.hints.is_empty() {
                 let mut x = map.left() + 12.0;
                 let y = map.top() + 14.0;
-                widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 11.5).color(theme::FG_3));
+                widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(tr("Seen from"), 11.5).color(theme::fg_3()));
                 x += 62.0;
                 for (directions, label) in [(1u8, tr("1–2 directions")), (3, "3–5"), (6, tr("6 or more"))] {
                     p.rect_filled(Rect::from_center_size(pos2(x + 5.0, y), vec2(10.0, 10.0)), 2.0, theme::alpha(trail::coverage_colour(directions), 0.7));
-                    widgets::text(p, pos2(x + 14.0, y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::FG_3));
+                    widgets::text(p, pos2(x + 14.0, y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::fg_3()));
                     // Wide letters (Japanese) take about twice a Latin letter's room.
                     x += 24.0 + label.chars().map(|ch| if ch.is_ascii() || ch.len_utf8() < 3 { 6.5 } else { 11.5 }).sum::<f32>();
                 }
@@ -1629,7 +1629,7 @@ fn camera_path(ui: &mut Ui, cx: &mut Cx) {
                 for (k, hint) in m.hints.iter().take(2).enumerate() {
                     let y = map.top() + 16.0 + 22.0 * k as f32;
                     p.circle_filled(pos2(map.left() + 16.0, y), 3.0, theme::WARN);
-                    widgets::text_truncated(p, pos2(map.left() + 26.0, y), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::FG), map.width() - 40.0);
+                    widgets::text_truncated(p, pos2(map.left() + 26.0, y), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::fg()), map.width() - 40.0);
                 }
             }
         }
@@ -1934,8 +1934,7 @@ pub(crate) mod tests {
     /// The owner's rule (never a scroll area inside another): the element draws none of its own.
     #[test]
     fn the_element_has_no_scroll_area_of_its_own() {
-        let source = include_str!("capture.rs");
-        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let code = orbiters_core::source::production(include_str!("capture.rs"));
         assert!(!code.contains(concat!("Scroll", "Area")), "the capture element scrolls with the page's list");
     }
 

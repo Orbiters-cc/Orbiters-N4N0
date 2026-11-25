@@ -270,20 +270,20 @@ fn avatar_card(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, avatar: &AvatarVi
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.025 * press));
     let mut p = ui.painter().clone();
     p.multiply_opacity(alpha);
-    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+    widgets::frame(&p, r, theme::CARD_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
     // The chip in the States tile's colour; the avatar worn's in the accent.
-    let tint = if avatar.worn { theme::ACCENT } else { menu_ui::tint(Tint::Pink) };
+    let tint = if avatar.worn { theme::accent() } else { menu_ui::tint(Tint::Pink) };
     let chip = Rect::from_min_size(r.min + vec2(INSET, 22.0), vec2(36.0, 36.0));
     p.rect_filled(chip, theme::radius(11.0), theme::alpha(tint, 0.12));
     widgets::icon(&p, chip.center(), if avatar.worn { icons::PERSON } else { icons::USER_CIRCLE }, 17.0, tint);
     if avatar.worn {
-        let pill = Txt::new(tr("Wearing now"), 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+        let pill = Txt::new(tr("Wearing now"), 11.5).weight(weight::SEMIBOLD).color(theme::accent());
         let pw = widgets::text_size(ui, &pill).x + 20.0;
         let pr = Rect::from_min_size(pos2(r.right() - INSET - pw, chip.center().y - 10.0), vec2(pw, 20.0));
-        p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.14));
+        p.rect_filled(pr, theme::radius(10.0), theme::alpha(theme::accent(), 0.14));
         widgets::text(&p, pr.center(), Align2::CENTER_CENTER, &pill);
     } else {
-        widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::FG_4, theme::FG_2, hover));
+        widgets::icon(&p, pos2(r.right() - INSET - 8.0, chip.center().y), icons::CARET_RIGHT, 16.0, theme::mix(theme::fg_4(), theme::fg_2(), hover));
     }
     let x = r.left() + INSET;
     let room = r.width() - 2.0 * INSET;
@@ -295,7 +295,7 @@ fn avatar_card(ui: &mut Ui, cx: &Cx, index: usize, rect: Rect, avatar: &AvatarVi
         Some(name) => tr!("{saved} · Default: {name}", saved = saved, name = name),
         None => saved,
     };
-    let note = Txt::new(line, 12.5).color(if default.is_none() { theme::FG_3 } else { theme::ACCENT });
+    let note = Txt::new(line, 12.5).color(if default.is_none() { theme::fg_3() } else { theme::accent() });
     widgets::text_truncated(&p, pos2(x, r.bottom() - 24.0), Align2::LEFT_CENTER, &note, room);
     pressed
 }
@@ -339,9 +339,9 @@ fn avatar_page(ui: &mut Ui, cx: &mut Cx, page: &mut StatesPage, view: &StatesVie
 fn note(ui: &mut Ui, cx: &Cx, index: usize, glyph: &str, title: &str, text: &str) {
     section(ui, cx, index, glyph, title, None, |ui| {
         let w = ui.available_width() - 48.0;
-        let lines = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(w));
+        let lines = ui.painter().layout_job(Txt::new(text, 12.5).color(theme::fg_3()).line_height(19.0).job(w));
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines.size().y + 8.0), Sense::hover());
-        ui.painter().galley(pos2(r.left() + 48.0, r.top()), lines, theme::FG_3);
+        ui.painter().galley(pos2(r.left() + 48.0, r.top()), lines, theme::fg_3());
     });
 }
 
@@ -435,12 +435,12 @@ fn state_card(ui: &mut Ui, cx: &Cx, index: usize, page: &mut StatesPage, whose: 
 
 /// "Default", in the accent, at `left_top`.
 fn default_pill(ui: &Ui, left_top: egui::Pos2) {
-    let txt = Txt::new(tr("Default"), 11.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+    let txt = Txt::new(tr("Default"), 11.5).weight(weight::SEMIBOLD).color(theme::accent());
     let w = widgets::text_size(ui, &txt).x + 14.0 + 16.0;
     let r = Rect::from_min_size(left_top, vec2(w, 18.0));
     let p = ui.painter();
-    p.rect_filled(r, theme::radius(9.0), theme::alpha(theme::ACCENT, 0.14));
-    widgets::icon(p, pos2(r.left() + 13.0, r.center().y), icons::STAR, 11.0, theme::ACCENT);
+    p.rect_filled(r, theme::radius(9.0), theme::alpha(theme::accent(), 0.14));
+    widgets::icon(p, pos2(r.left() + 13.0, r.center().y), icons::STAR, 11.0, theme::accent());
     widgets::text(p, pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &txt);
 }
 
@@ -474,7 +474,7 @@ fn buttons_row(ui: &mut Ui, row: Rect, page: &mut StatesPage, whose: &Whose, sta
         page.ask(whose, StateAction::Default { id: (!state.default).then(|| id.clone()) }, now, out);
     }
     if state.default {
-        ui.painter().rect_stroke(rect, theme::radius(20.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.55)), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, theme::radius(20.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.55)), egui::StrokeKind::Inside);
     }
     // At the right: Rename, then Delete (twice: the first press asks).
     let confirming = page.confirm.as_ref().is_some_and(|(c, _)| *c == id);
@@ -680,14 +680,10 @@ mod destructive_tests {
         let (mut checked, mut wrong) = (0, Vec::new());
         for path in all {
             let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
-            let source = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+            let source = orbiters_core::source::production(&std::fs::read_to_string(&path).unwrap());
             let lines: Vec<&str> = source.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 if line.trim_start().starts_with("//") || !(line.contains("Variant::Danger") || line.contains(".danger()")) {
-                    continue;
-                }
-                // (This test's own words.)
-                if name == "pages/states.rs" && lines[..n].contains(&"mod destructive_tests {") {
                     continue;
                 }
                 if NOT.iter().any(|(file, what)| name == *file && line.contains(what)) {

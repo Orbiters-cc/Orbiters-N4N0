@@ -354,5 +354,7 @@
   "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "ブリッジの鍵を読み込めませんでした（{error}）。読み込めるようになるまで閉じたままです。",
   "The bridge's keys could not be read ({error}), so it stays closed until they can be, or until you reset the token.": "ブリッジのキーを読めませんでした（{error}）。読めるようになるか、トークンをリセットするまで閉じたままです。",
   "A new token: the bridge's unreadable keys were kept aside ({path}); the agents it was added to are updated.": "新しいトークン：読めないブリッジのキーは退避しました（{path}）。追加済みのエージェントは更新されます。",
-  "The bridge's keys could not be reset: {error}": "ブリッジのキーをリセットできませんでした：{error}"
+  "The bridge's keys could not be reset: {error}": "ブリッジのキーをリセットできませんでした：{error}",
+  "This capture was reconstructed again while the file was made: nothing was saved. Try again to export the new splats.": "ファイルの作成中にこのキャプチャが再構築されたため、何も保存されませんでした。もう一度試すと、新しいスプラットを書き出せます。",
+  "its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to export it": "前回の再構築は一部しか保存されていません（ファイルが別のプログラムで開かれていました）。書き出すには、もう一度再構築してください"
 }

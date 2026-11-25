@@ -22,11 +22,34 @@ pub enum CaptureState {
     Importing,
 }
 
+/// What macOS must allow before the panels around VRChat's menus can work there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrbitNeeds {
+    /// Screen Recording: the picture of VRChat's window, which says when a menu is open.
+    ScreenRecording,
+    /// Input Monitoring: which keys are pressed, where macOS hides them without it.
+    InputMonitoring,
+}
+
+impl OrbitNeeds {
+    /// What it keeps from working, and what to do, in English.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::ScreenRecording => orbiters_i18n::mark("macOS does not let Orbiters - N4N0 see VRChat's window, so it cannot know when its menus open. Allow it, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0."),
+            Self::InputMonitoring => orbiters_i18n::mark("macOS does not tell Orbiters - N4N0 which keys are pressed in VRChat, so Esc and R may not bring these menus. Allow Input Monitoring, switch Orbiters - N4N0 on in System Settings if macOS opens it, then quit and reopen Orbiters - N4N0."),
+        }
+    }
+}
+
 /// What the panels around VRChat's menus can do now: for Settings to tell the person.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OrbitStatus {
-    /// What is in the way, in words, none when they can show (desktop: exclusive full screen; VR: no trigger block).
+    /// What is in the way, in words, none when they can show (desktop: exclusive full screen; VR: no trigger block; a Mac: what macOS does not allow).
     pub note: Option<String>,
+    /// On a Mac: what macOS must allow first, which Settings offers to ask for.
+    #[serde(default)]
+    pub needs: Option<OrbitNeeds>,
     /// SteamVR's "Experimental overlay input overrides": `None` where it is not known (no SteamVR).
     pub steamvr_overrides: Option<bool>,
     /// Why the tiles around VRChat's camera cannot show, in words, as `note`.

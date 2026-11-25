@@ -300,12 +300,13 @@ pub struct Role {
     pub requires_two_factor: bool,
     pub requires_purchase: bool,
     pub updated_at: Option<String>,
-    /// What the rules decide by was in VRChat's answer: its rights, its rank, and whether it is Everyone's or a bought one.
-    /// A role read without them authorises nothing and counts as privileged (verify-r22 Blocker 4). A management flag left
-    /// out reads as on (it is then confirmed, always), a "members can take it" left out as off: the strict side of each.
+    /// What it may do was in VRChat's answer: its rights, whole. A role read without them counts as privileged (giving it is
+    /// always confirmed) and is neither edited nor deleted here (verify-r22 Blocker 4). A flag VRChat leaves out is off, which
+    /// is its own default (VRChat's roles made before a flag existed come without it, REQUEST28); only a management flag left
+    /// out reads as on: it is then confirmed.
     #[serde(default)]
     pub known: bool,
-    /// Its words and every flag were there too: only such a role is compared with what was asked (an edit, a check).
+    /// Its name, its rank and its flags were read too: only such a role is compared with what was asked (an edit, a check).
     #[serde(default)]
     pub whole: bool,
     /// When it was made, only when VRChat's text is a real RFC 3339 time.
@@ -317,6 +318,10 @@ impl Role {
     /// The owner's role: it holds the wildcard.
     pub fn is_owner_role(&self) -> bool {
         self.permissions.iter().any(|p| p == ALL)
+    }
+    /// The owner's role among `roles`, also where VRChat left out its rights: then the highest one is, when no other is.
+    pub fn is_owners_of(&self, roles: &[Role]) -> bool {
+        self.is_owner_role() || (!self.known && !roles.iter().any(Role::is_owner_role) && roles.iter().all(|r| r.id == self.id || self.order.is_some_and(|o| r.order.is_none_or(|x| o < x))))
     }
     /// A grant or removal of this role changes what someone may do (M3): it is confirmed.
     pub fn privileged(&self) -> bool {
@@ -572,11 +577,11 @@ impl RoleParts {
     }
 }
 
-/// Whether `roles` are the group's roles, all of them: those no group is without (its owner's, Everyone's) and every one
-/// there was before (`known`, whether an id was), each read well enough to be told apart. Only of such a list does a role's
-/// absence say anything (verify4 F3).
+/// Whether `roles` are the group's roles, all of them: its owner's, and every one there was before (`known`, whether an id
+/// was), each read well enough to be told apart; with none known from before, Everyone's too, which older groups do not flag.
+/// Only of such a list does a role's absence say anything (verify4 F3).
 pub fn whole_list(roles: &[Role], before: usize, known: impl Fn(&str) -> bool) -> bool {
-    roles.iter().all(|r| r.known) && roles.iter().any(|r| r.default_role) && roles.iter().any(Role::is_owner_role) && roles.iter().filter(|r| known(&r.id)).count() >= before
+    roles.iter().all(|r| r.known && r.order.is_some()) && (before > 1 || roles.iter().any(|r| r.default_role)) && roles.iter().any(Role::is_owner_role) && roles.iter().filter(|r| known(&r.id)).count() >= before
 }
 
 impl PostDraft {
@@ -851,8 +856,10 @@ pub enum Missing {
     Roles,
     /// Where a role stands among the others.
     RoleOrder,
-    /// A role's rights or flags.
+    /// What a role may do.
     RoleDefinition,
+    /// The role itself: it is not among the group's.
+    RoleGone,
     /// The rights a role can be given.
     Catalogue,
     /// The other member's own record, whole.
@@ -924,6 +931,8 @@ pub struct Actor<'a> {
     pub role_ids: Option<&'a [String]>,
     /// Only for taking a role oneself.
     pub status: Option<&'a str>,
+    /// The group is theirs (VRChat's `ownerId`) and their rights say so too: the owner gives any role, whatever its rank.
+    pub owner: bool,
 }
 
 impl<'a> Actor<'a> {
@@ -937,7 +946,7 @@ impl<'a> Actor<'a> {
         if me.user_id != signed_in || me.group_id.as_deref().is_some_and(|g| g != group.id) {
             return Err(Missing::Identity);
         }
-        Ok(Self { group: &group.id, user_id: &me.user_id, permissions: &me.permissions, role_ids: me.roles_known.then_some(me.role_ids.as_slice()), status: Some(me.status.as_str()).filter(|s| !s.is_empty()) })
+        Ok(Self { group: &group.id, user_id: &me.user_id, permissions: &me.permissions, role_ids: me.roles_known.then_some(me.role_ids.as_slice()), status: Some(me.status.as_str()).filter(|s| !s.is_empty()), owner: group.owner_id == me.user_id && has(&me.permissions, ROLES_ASSIGN) })
     }
 }
 
@@ -1063,10 +1072,13 @@ pub const UPLOAD: &str = "upload";
 /// Allowed (and whether the person confirms it), or not.
 fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool, No> {
     let rights = actor.permissions;
-    let role_of = |id: &str| -> Result<(&[Role], &Role), No> {
+    let found = |id: &str| -> Result<(&[Role], &Role), No> {
         let roles = catalogue.roles.ok_or(Missing::Roles)?;
-        let role = roles.iter().find(|r| r.id == id).ok_or(Missing::RoleDefinition)?;
-        // A role read without its rights, rank or flags: nothing says it is harmless (Blocker 4).
+        Ok((roles, roles.iter().find(|r| r.id == id).ok_or(Missing::RoleGone)?))
+    };
+    // To change or delete: a role read without its rights is one whose change cannot be shown (Blocker 4).
+    let role_of = |id: &str| -> Result<(&[Role], &Role), No> {
+        let (roles, role) = found(id)?;
         if !role.known {
             return Err(Missing::RoleDefinition.into());
         }
@@ -1077,15 +1089,21 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
         Action::Post => right(ANNOUNCEMENT_MANAGE).map(|_| true),
         Action::ApplyArt => right(DATA_MANAGE).map(|_| true),
         Action::AssignRole { role, user, .. } => {
-            let (roles, role) = role_of(role)?;
+            // VRChat's own rule (REQUEST28): the group's owner gives any role; whoever may assign roles gives those below
+            // their own highest. What the role may do decides only whether it is confirmed: one whose rights VRChat left
+            // out is.
+            let (roles, role) = found(role)?;
             if role.default_role {
                 return Err(Why::FixedRole.into());
             }
-            if role.is_owner_role() {
+            if role.is_owners_of(roles) {
                 return Err(Why::OwnerRole.into());
             }
             if role.requires_purchase {
                 return Err(Why::PaidRole.into());
+            }
+            if actor.owner {
+                return Ok(role.privileged());
             }
             if *user == actor.user_id {
                 // Taking or leaving a role oneself: one members may take, or one below one's own with the right to assign.
@@ -1101,7 +1119,6 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
                 return Ok(role.privileged());
             }
             right(ROLES_ASSIGN)?;
-            right(MEMBERS_MANAGE)?;
             below(actor, roles, role)?;
             Ok(role.privileged())
         }
@@ -1141,7 +1158,7 @@ fn decide(action: &Action, actor: &Actor, catalogue: &Catalogue) -> Result<bool,
         }
         Action::DeleteRole { role } => {
             let (roles, role) = role_of(role)?;
-            if role.default_role || role.is_owner_role() {
+            if role.default_role || role.is_owners_of(roles) {
                 return Err(Why::FixedRole.into());
             }
             // One whose name or flags were left out is not one a person can confirm deleting (verify4 F3).
@@ -1295,10 +1312,10 @@ mod tests {
         let assign_only = s(&[ROLES_ASSIGN]);
         let mod_perms = s(&["group-instance-moderate"]);
         let (owner_roles, admin_roles, mod_roles) = (s(&["grol_owner"]), s(&["grol_admin"]), s(&["grol_mod"]));
-        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member") };
-        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member") };
-        let assigner = Actor { group: "grp_1", user_id: "usr_admin", permissions: &assign_only, role_ids: Some(&admin_roles), status: Some("member") };
-        let moderator = Actor { group: "grp_1", user_id: "usr_mod", permissions: &mod_perms, role_ids: Some(&mod_roles), status: Some("member") };
+        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member"), owner: true };
+        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member"), owner: false };
+        let assigner = Actor { group: "grp_1", user_id: "usr_admin", permissions: &assign_only, role_ids: Some(&admin_roles), status: Some("member"), owner: false };
+        let moderator = Actor { group: "grp_1", user_id: "usr_mod", permissions: &mod_perms, role_ids: Some(&mod_roles), status: Some("member"), owner: false };
         let rich_perms = s(&[ROLES_MANAGE, ROLES_ASSIGN, MEMBERS_MANAGE, "group-instance-join", "group-instance-moderate"]);
         let rich_admin = Actor { permissions: &rich_perms, ..admin };
         let open_up = RoleChange { self_assignable: Some(true), ..Default::default() };
@@ -1315,11 +1332,12 @@ mod tests {
             ("nobody assigns a paid role", can(assign("grol_supporter"), &owner, &cat), Withheld(Why::PaidRole)),
             ("admin assigns below", can(assign("grol_mod"), &admin, &cat), Allowed),
             ("admin cannot assign own rank", can(assign("grol_admin"), &admin, &cat), Withheld(Why::RoleAtOrAbove)),
-            ("assign without member data", can(assign("grol_mod"), &assigner, &cat), Withheld(Why::NoPermission)),
+            ("the right to assign is enough", can(assign("grol_mod"), &assigner, &cat), Allowed),
+            ("the right to assign gives nothing at its own rank", can(assign("grol_admin"), &assigner, &cat), Withheld(Why::RoleAtOrAbove)),
             ("moderator cannot assign", can(assign("grol_artist"), &moderator, &cat), Withheld(Why::NoPermission)),
             ("moderator takes a self role", can(Action::AssignRole { role: "grol_pronouns", user: "usr_mod", membership: &gmem, add: true }, &moderator, &cat), Allowed),
             ("moderator cannot self-take another", can(Action::AssignRole { role: "grol_artist", user: "usr_mod", membership: &gmem, add: true }, &moderator, &cat), Withheld(Why::NotSelfAssignable)),
-            ("unknown role", can(assign("grol_gone"), &owner, &cat), Unknown(Missing::RoleDefinition)),
+            ("unknown role", can(assign("grol_gone"), &owner, &cat), Unknown(Missing::RoleGone)),
             ("admin renames below", can(Action::EditRole { role: "grol_mod", change: &rename }, &admin, &cat), Allowed),
             ("admin cannot rename own", can(Action::EditRole { role: "grol_admin", change: &rename }, &admin, &cat), Withheld(Why::RoleAtOrAbove)),
             ("no widening a privileged role without its rights", can(Action::EditRole { role: "grol_mod", change: &open_up }, &admin, &cat), Withheld(Why::Escalation)),
@@ -1347,19 +1365,46 @@ mod tests {
         }
     }
 
-    /// Blocker 4: a role read without its rights or flags is no cosmetic role: it is never given from here, and counts
-    /// as privileged (so anything about it is confirmed).
+    /// REQUEST28: what VRChat leaves out of a role never greys it for who may give it. The owner gives any role, also one whose
+    /// rank or rights did not come; whoever may assign gives those below their own, and only a rank that did not come stops
+    /// them. A role read without its rights is always confirmed, and neither edited nor deleted here (Blocker 4).
     #[test]
-    fn a_role_read_without_its_rights_authorises_nothing() {
-        let owner_perms = s(&["*"]);
-        let owner_roles = s(&["grol_owner"]);
-        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member") };
+    fn a_role_read_in_part_is_given_by_who_may_and_confirmed() {
+        let (owner_perms, owner_roles, assign_only, admin_roles) = (s(&["*"]), s(&["grol_owner"]), s(&[ROLES_ASSIGN]), s(&["grol_admin"]));
+        let owner = Actor { group: "grp_1", user_id: "usr_owner", permissions: &owner_perms, role_ids: Some(&owner_roles), status: Some("member"), owner: true };
+        let assigner = Actor { group: "grp_1", user_id: "usr_admin", permissions: &assign_only, role_ids: Some(&admin_roles), status: Some("member"), owner: false };
         let mut roles = roles();
-        roles[3].known = false; // "grol_artist" arrived without its permission list
+        roles[3] = Role { known: false, ..role("grol_artist", 3, &[]) };
+        roles[2] = Role { known: false, order: None, ..role("grol_mod", 2, &[]) };
         let cat = Catalogue { roles: Some(&roles), permissions: None };
+        let gmem = membership();
+        let give = |role, add| Action::AssignRole { role, user: "usr_x", membership: &gmem, add };
         assert!(roles[3].privileged(), "unknown means privileged");
-        assert_eq!(can(Action::AssignRole { role: "grol_artist", user: "usr_x", membership: &membership(), add: true }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
+        for id in ["grol_mod", "grol_artist"] {
+            for add in [true, false] {
+                match super::can(give(id, add), Ok(owner), &cat) {
+                    Authority::Allowed(p) => assert!(p.needs_confirmation(), "{id}: confirmed"),
+                    no => panic!("{id}: {no:?}"),
+                }
+            }
+        }
+        // No rank of the owner's own is needed, nor any other role's.
+        assert_eq!(can(give("grol_artist", true), &Actor { role_ids: None, ..owner }, &cat), Got::Allowed);
+        assert_eq!(can(give("grol_artist", true), &assigner, &cat), Got::Allowed, "by rank");
+        assert_eq!(can(give("grol_mod", true), &assigner, &cat), Got::Unknown(Missing::RoleOrder), "no rank to compare");
+        assert_eq!(can(give("grol_owner", true), &owner, &cat), Got::Withheld(Why::OwnerRole));
         assert_eq!(can(Action::DeleteRole { role: "grol_artist" }, &owner, &cat), Got::Unknown(Missing::RoleDefinition));
+        // The owner's role without its rights is still the owner's.
+        let mut bare = self::roles();
+        bare[0] = Role { known: false, permissions: vec![], ..bare[0].clone() };
+        let cat = Catalogue { roles: Some(&bare), permissions: None };
+        assert_eq!(can(give("grol_owner", true), &owner, &cat), Got::Withheld(Why::OwnerRole));
+        assert_eq!(can(give("grol_artist", true), &owner, &cat), Got::Allowed);
+        // The owner is the group's, by its own field: a right alone does not make one, nor does the field without the right.
+        let group = |owner_id: &str, rights: &[&str]| Group { id: "grp_1".into(), owner_id: owner_id.into(), my_member: Some(MyMember { user_id: "usr_me".into(), permissions: s(rights), rights_known: true, ..Default::default() }), ..Default::default() };
+        let owner = |owner_id: &str, rights: &[&str]| Actor::of(&group(owner_id, rights), "usr_me").unwrap().owner;
+        assert!(owner("usr_me", &["*"]) && owner("usr_me", &[ROLES_ASSIGN]));
+        assert!(!owner("usr_x", &["*"]) && !owner("", &["*"]) && !owner("usr_me", &["group-instance-moderate"]));
     }
 
     /// verify2 B-D, verify3 deviation 9: the actor is the signed-in account's own membership of this group with its rights
@@ -1414,7 +1459,7 @@ mod tests {
     #[test]
     fn a_permit_covers_only_what_was_decided() {
         let (rights, ids, roles) = (s(&["*"]), s(&["grol_owner"]), roles());
-        let actor = Actor { group: "grp_1", user_id: "usr_owner", permissions: &rights, role_ids: Some(&ids), status: Some("member") };
+        let actor = Actor { group: "grp_1", user_id: "usr_owner", permissions: &rights, role_ids: Some(&ids), status: Some("member"), owner: false };
         let cat = Catalogue { roles: Some(&roles), permissions: None };
         let gmem = membership();
         let another = Membership { joined_at: "2026-02-02T00:00:00Z".into(), ..membership() };
@@ -1500,7 +1545,7 @@ mod tests {
     fn missing_role_data_withholds() {
         let admin_perms = s(&[ROLES_MANAGE, ROLES_ASSIGN, MEMBERS_MANAGE]);
         let admin_roles = s(&["grol_admin"]);
-        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member") };
+        let admin = Actor { group: "grp_1", user_id: "usr_admin", permissions: &admin_perms, role_ids: Some(&admin_roles), status: Some("member"), owner: false };
         let mut roles = roles();
         let rename = RoleChange { name: Some("x".into()), ..Default::default() };
         let none = Catalogue { roles: None, permissions: None };

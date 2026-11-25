@@ -128,7 +128,7 @@ pub fn menu_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bo
         tr("Opens in the SteamVR overlay, in front of you")
     };
     section(ui, cx, index, icons::STACK, tr("N4N0's menu"), Some(menu_sub), |ui| {
-        if orbiters_core::here::HERE.around() {
+        if orbiters_core::here::HERE.vr_overlay {
             use orbiters_core::settings::MenuDisplay;
             // Two different things, each whole without the other (moved from Settings' Performance card).
             let ways = [SegOption::new(MenuDisplay::AvatarScreen, tr("Avatar's screen")), SegOption::new(MenuDisplay::Floating, tr("Floating"))];
@@ -253,7 +253,7 @@ pub fn calls_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> b
         }
         if matches!(calls.link, CallLink::Linked { .. } | CallLink::NotLinked { .. }) {
             ui.add_space(4.0);
-            note(ui, tr(CALLS_ON_PAGE), theme::FG_3);
+            note(ui, tr(CALLS_ON_PAGE), theme::fg_3());
             ui.add_space(8.0);
         }
     });
@@ -369,7 +369,7 @@ pub fn ears_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, mic: 
             apply |= widgets::toggle(ui, "n4n0-mute", &mut draft.n4n0.mute_while_talking);
         });
         ui.add_space(4.0);
-        note(ui, tr("In VRChat: hold Talk in N4N0's menu, touch N4N0 with a hand, or start with “Nano” when the wake word is on."), theme::FG_3);
+        note(ui, tr("In VRChat: hold Talk in N4N0's menu, touch N4N0 with a hand, or start with “Nano” when the wake word is on."), theme::fg_3());
         ui.add_space(8.0);
     });
     apply

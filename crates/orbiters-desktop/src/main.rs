@@ -7,9 +7,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod appearance;
 mod chat_bar;
 mod audio_devices;
 mod backend;
+mod background_bench;
 mod booster;
 mod bench;
 mod bridge;
@@ -70,6 +72,8 @@ mod worlds;
 mod window;
 mod words;
 mod worker;
+#[cfg(test)]
+mod layers;
 #[cfg(all(test, windows))]
 mod test_crash;
 
@@ -113,10 +117,10 @@ pub(crate) fn hold_the_mta() {
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(windows)]
-    hold_the_mta();
     // The release's version, for the libraries too (orbiters-version says why it is given here).
     orbiters_version::set(env!("ORBITERS_VERSION"));
+    #[cfg(windows)]
+    hold_the_mta();
     sandbox_switches();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let private_roots = harness::prepare(&args)?;
@@ -147,6 +151,10 @@ fn main() -> anyhow::Result<()> {
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]
         Some("--orbit-desktop") => overlay::orbit::desktop::run(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--orbit-desktop") => overlay::orbit::desktop_mac::run(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--orbit-lab") => overlay::orbit::desktop_mac::lab::run(&args[1..]),
         #[cfg(windows)]
         Some("--orbit-bench") => overlay::orbit::desktop::bench(&args[1..]),
         #[cfg(windows)]

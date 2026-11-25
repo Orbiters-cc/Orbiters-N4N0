@@ -37,7 +37,7 @@ const SETUP_TRIPLE: &str = "x86_64-pc-windows-msvc";
 /// signature valid after.
 const TIMESTAMP: &str = "http://timestamp.acs.microsoft.com";
 
-pub struct Options {
+pub struct Options<'a> {
     /// Without Authenticode signatures (until Azure Artifact Signing is set up): Windows' SmartScreen warns about such
     /// a setup when it is downloaded by hand; installed apps update to it as to any release the release key signed.
     pub unsigned: bool,
@@ -48,9 +48,11 @@ pub struct Options {
     pub programs: Option<PathBuf>,
     /// How the programs and the setup are compiled.
     pub profile: Profile,
+    /// What they are compiled from: the release file names it.
+    pub source: &'a crate::commit::Source,
 }
 
-pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
+pub fn dist(config: &Config, options: &Options<'_>) -> anyhow::Result<PathBuf> {
     let version = crate::release_version()?;
     // Whoever asks: a stable version's programs are never compiled as development builds are.
     options.profile.for_version(&version)?;
@@ -126,6 +128,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     let missing = pe::missing(&files, &shipped)?;
     anyhow::ensure!(missing.is_empty(), "files need DLLs that are neither Windows' nor shipped: {missing:?}");
 
+    // Nothing is signed unless the sources still are the commit's.
+    options.source.built()?;
     if let Some(signer) = &signer {
         println!("\n== Signing the programs");
         signer.sign(&ours)?;
@@ -144,6 +148,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
     copy(&full, &setup)?;
     let missing = pe::missing(std::slice::from_ref(&setup), &[])?;
     anyhow::ensure!(missing.is_empty(), "the setup needs DLLs a clean Windows lacks: {missing:?}");
+    let commit = options.source.built()?;
     if let Some(signer) = &signer {
         signer.sign(std::slice::from_ref(&setup))?;
     }
@@ -159,7 +164,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
             channel: options.channel.clone(),
             version: version.clone(),
             released: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?,
-            commit: crate::git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            commit,
             notes: options.notes.clone(),
             installer: installer.clone(),
         };
@@ -303,12 +308,14 @@ fn check_staged(stage: &Path, version: &str) -> anyhow::Result<()> {
     for name in files {
         let path = stage.join(&name);
         let bytes = std::fs::read(&path).with_context(|| format!("{} cannot be read", path.display()))?;
-        anyhow::ensure!(
-            says_version(&bytes, version),
-            "{} does not say version {version}: it was not rebuilt (is a program from there running?)",
-            path.display()
-        );
+        ensure_says_version(&path, &bytes, version)?;
     }
+    Ok(())
+}
+
+/// Refuses a program that was not built for `version`, from its bytes.
+pub(crate) fn ensure_says_version(path: &Path, bytes: &[u8], version: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(says_version(bytes, version), "{} does not say version {version}: it was not rebuilt (is a program from there running?)", path.display());
     Ok(())
 }
 

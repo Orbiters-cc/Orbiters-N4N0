@@ -16,7 +16,7 @@ and looks alone.
 |---|---|---|
 | `orbiters-core/src/proton.rs` | Steam's roots, VRChat's library and Proton prefix, Windows paths in it, its registry file (read only) | done |
 | `orbiters-core/src/processes.rs` | the processes from `/proc`, without their threads, with their whole names | done |
-| `orbiters-core/src/dpapi.rs` (`sealing`) | the session store's key and seal, shared with the Mac's unsigned builds | done |
+| `orbiters-core/src/dpapi.rs` (`sealing`), `sealed.rs` | the key and seal of the session store, of what was said to N4N0 and of the bridge's keys, shared with the Mac's unsigned builds: the key is a file only the person can read (0600, `session-key` beside the settings) | done |
 | `orbiters-core/src/disk.rs` | a disk's free space | done |
 | `orbiters-desktop/src/controller/linux_vrchat.rs` | VRChat for Home and Where: what runs (done), starting it | L1 |
 | `orbiters-desktop/src/linux/{tray,startup,open}.rs` | tray, start with the session, opening and revealing files | L2 |

@@ -81,17 +81,17 @@ impl Worker {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("call-stdout".into()).spawn(move || {
-            crate::worker::pipe_records(stdout, "call", |line| {
+            for line in crate::worker::records(stdout, "call") {
                 match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
                     // Not the line: it may hold a description (addresses).
                     Err(e) => eprintln!("call: unexpected output ({} bytes): {e}", line.len()),
                 }
-            });
+            }
             ctl.on_call_worker_exit(number);
         })?;
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
-            crate::worker::pipe_lines(stderr, |line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
+            crate::worker::log_lines(stderr).for_each(|line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
         Ok(Self { child, stdin, number, ended: false })
     }

@@ -1,5 +1,6 @@
 //! The pages, plus what they share: the page context, background jobs and staggered entrances.
 
+pub mod appearance;
 pub mod avatar_gun;
 mod beta_feedback;
 mod booster_card;
@@ -419,7 +420,7 @@ pub fn heading_in(ui: &Ui, rect: Rect, caption: &str, title: &str, sub: Option<&
     widgets::text(p, pos2(rect.left(), rect.top() + 7.0), Align2::LEFT_CENTER, &Txt::caps(caption));
     widgets::text(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(title, 30.0).weight(weight::SEMIBOLD).tracking(-0.015));
     if let Some(sub) = sub {
-        widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.0).color(theme::FG_3), room);
+        widgets::text_truncated(p, pos2(rect.left(), rect.top() + 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.0).color(theme::fg_3()), room);
     }
 }
 

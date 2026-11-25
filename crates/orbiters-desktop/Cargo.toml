@@ -71,12 +71,13 @@ winit = { version = "0.30", default-features = false }
 # eframe's: the window itself, to ask macOS of it (mac_cover.rs).
 raw-window-handle = "0.6"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSObject", "NSProcessInfo", "NSRunLoop", "NSDate"] }
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSURL", "NSGeometry", "NSNotification", "NSObject", "NSProcessInfo", "NSRunLoop", "NSDate", "NSError"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSRunningApplication", "NSResponder", "NSEvent", "NSWindow", "NSView", "NSGraphics", "NSImage", "NSImageRep", "NSBitmapImageRep",
-    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "objc2-core-foundation",
+    "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSWorkspace", "NSPanel", "NSColor", "objc2-core-foundation",
 ] }
-objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes", "CFString"] }
 
 [dev-dependencies]
 orbiters-core = { workspace = true, features = ["test-support"] }

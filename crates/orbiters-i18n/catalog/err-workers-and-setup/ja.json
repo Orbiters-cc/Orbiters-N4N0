@@ -108,5 +108,7 @@
   "{folder} is left from an earlier install and could not be set aside: nothing was changed.": "{folder}は以前のインストールの残りで、退避できませんでした。何も変更されていません。",
   "{path} is a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクです。その中のものは何も削除していません",
   "not what N4N0 keeps under this name: left as it is": "N4N0がこの名前で保存しているものではないため、そのままにしました",
-  "{path} is reached through a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクを経由しています。その中のものは何も削除していません"
+  "{path} is reached through a link to another folder: nothing in it was removed": "{path}は別のフォルダーへのリンクを経由しています。その中のものは何も削除していません",
+  "Another setup is at work in {folder}: nothing was changed.": "{folder} で別のインストールが進行中です。何も変更されていません。",
+  "The start with Windows cannot be set": "Windows と同時の起動を設定できません"
 }

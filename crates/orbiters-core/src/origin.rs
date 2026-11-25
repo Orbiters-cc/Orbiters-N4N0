@@ -188,44 +188,32 @@ mod tests {
         // Clients of other servers, which send no Orbiters credential (the speech models', updates, the translator's,
         // VRChat's own API, which has its own sign-in and hosts).
         const OTHERS: &[&str] = &["orbiters-voice/src/main.rs", "orbiters-update/src/net.rs", "orbiters-translate/src/provider.rs", "orbiters-core/src/vrchat_api.rs", "orbiters-core/src/origin.rs"];
-        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for e in std::fs::read_dir(dir).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    sources(&p, out);
-                } else if p.extension().is_some_and(|e| e == "rs") {
-                    out.push(p);
-                }
-            }
-        }
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let mut files = Vec::new();
-        for c in std::fs::read_dir(&crates).unwrap().flatten() {
-            sources(&c.path().join("src"), &mut files);
-        }
         let mut wrong = Vec::new();
-        for f in files {
-            let name = f.to_string_lossy().replace('\\', "/");
-            let text = std::fs::read_to_string(&f).unwrap();
-            // Tests' own clients, at the foot of a file, are not the app's.
-            let app = text.split("#[cfg(test)]").next().unwrap_or_default();
+        let mut agents = 0;
+        let folders: Vec<_> = std::fs::read_dir(&crates).unwrap().flatten().map(|c| c.path().join("src")).collect();
+        for f in folders.iter().flat_map(|src| crate::source::files(src)) {
+            let name = f.path.to_string_lossy().replace('\\', "/");
+            // All of the app's code in it: tests' own clients, wherever they are, are not the app's.
+            let app = f.text.as_str();
             if OTHERS.iter().any(|o| name.ends_with(o)) {
                 assert!(!app.contains("\"Authorization\", &format!(\"Bearer") || name.ends_with("vrchat_api.rs"), "{name}");
                 continue;
             }
             for (n, _) in app.match_indices("Agent::config_builder()") {
-                let statement = &app[n..(n + 700).min(app.len())];
-                let statement = statement.split(';').next().unwrap_or(statement);
+                let statement = app[n..].split(';').next().unwrap_or_default();
+                agents += 1;
                 if !statement.contains("origin::guard") {
                     wrong.push(format!("{name}: {}", statement.chars().take(120).collect::<String>()));
                 }
             }
-            for other in ["Agent::new_with_defaults", "Agent::new_with_config", "ureq::get(", "ureq::post(", "ureq::put(", "ureq::delete("] {
+            for other in ["Agent::new_with_defaults", "Agent::new_with_config", "ureq::get(", "ureq::post(", "ureq::put(", "ureq::delete(", "ureq::patch(", "ureq::head(", "ureq::agent(", "ureq::run("] {
                 if app.contains(other) {
                     wrong.push(format!("{name}: {other}"));
                 }
             }
         }
+        assert!(agents >= 3, "the app's clients are found: {agents}");
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }

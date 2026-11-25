@@ -2,14 +2,16 @@
 //! and bodies from the community OpenAPI spec at 68091ebc (`getUserAllGroupPermissions`, `getUserGroups`, `getGroup`
 //! with `includeRoles`, `getGroupPermissions`, `getGroupMembers`, `searchGroupMembers`, `getGroupMember`,
 //! `addGroupMemberRole` / `removeGroupMemberRole` (no body), `createGroupRole`, `updateGroupRole`, `deleteGroupRole`,
-//! `getGroupPosts`, `addGroupPost`, `deleteGroupPost`, `getFiles`, `getFile`, `uploadImage` (multipart), `updateGroup`),
+//! `getGroupPosts`, `addGroupPost`, `deleteGroupPost`, `getGroupCalendarEvents` (read only), `getFiles`, `getFile`, `uploadImage` (multipart), `updateGroup`),
 //! and VRCX at e819c4e4 (`src/api/group.ts`: the post id in the post path).
 //!
 //! What is never sent: the legacy announcement routes (`G/announcement`, whose POST replaces every announcement: B1),
 //! `updateGroupPost` (it carries the audience whole and takes no condition: verify3 Blocker 4), `nameplateId` (B4), and a
 //! null. Every write goes in the [`WRITES`] family, whose lost answers are "outcome unknown" (B2), through
-//! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]): no server text reaches a notice.
+//! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]); VRChat's own words of a refusal are kept
+//! beside ([`Refusal`]), for the person it refused to read them (REQUEST28).
 use super::*;
+use crate::group_events::{is_event_id, CalendarEvent, Events, Month};
 use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Visibility};
 use serde_json::{json, Map, Value};
 
@@ -18,10 +20,12 @@ pub(super) const WRITES: &str = "group-writes";
 const READS: &str = "groups";
 /// Members and posts are asked this many at a time (VRChat takes 1 to 100).
 pub const PAGE: usize = 50;
+/// A calendar's events, VRChat's most (1 to 100).
+pub const EVENTS_PAGE: usize = 100;
 /// A picture uploaded from this computer is this large at most.
 pub const UPLOAD_MAX: usize = 10 * 1024 * 1024;
 
-/// Why a group call did not give what it asked for: local codes, worded by the interface. No server text.
+/// Why a group call did not give what it asked for: local codes, worded by the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
     /// Not signed in to VRChat (or its session ended).
@@ -42,6 +46,25 @@ pub enum Failure {
     Unknown,
     /// VRChat's answer to a read could not be read.
     BadAnswer,
+}
+
+/// What VRChat itself answered when it refused a group call: its words as they are (cleaned as any text of VRChat's), for
+/// the person it refused, and no one else.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    pub status: u16,
+    /// Empty when VRChat gave none.
+    pub words: String,
+}
+
+/// The answers that are VRChat's "no" to this very request.
+const REFUSED: [u16; 16] = [400, 402, 403, 404, 405, 406, 409, 410, 412, 413, 415, 422, 423, 424, 428, 451];
+
+fn refusal_words(body: &[u8]) -> String {
+    let v: Value = serde_json::from_slice(body).unwrap_or_default();
+    let m = v["error"]["message"].as_str().or(v["error"].as_str()).or(v["message"].as_str()).unwrap_or_default().trim();
+    // VRChat puts some of its messages in quotes of their own.
+    g::text(m.strip_prefix('"').and_then(|m| m.strip_suffix('"')).unwrap_or(m), 400)
 }
 
 impl Failure {
@@ -152,19 +175,22 @@ pub(crate) fn parse_role(v: &Value) -> Option<Role> {
     if !g::is_role_id(&id) {
         return None;
     }
+    // No field of a role is required in VRChat's own description of it, and each flag has a default, off: a role made before
+    // a flag existed comes without it, and that is off, not "unknown" (REQUEST28: a group's oldest roles stayed greyed for
+    // its owner). A flag of another kind is not readable.
+    let readable = |k: &str| v.get(k).is_none_or(|x| x.is_null() || x.is_boolean());
     let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
-    // What the rules decide by must all be there, the rights as an array of strings: a missing field is not "none"
-    // (verify-r22 Blocker 4).
+    // Its rights have no default: left out, what it may do is not known (verify-r22 Blocker 4).
     let rights = whole_strings(v, "permissions", 128);
-    let flags = |k: &[&str]| k.iter().all(|k| v.get(*k).is_some_and(Value::is_boolean));
-    let known = rights.is_some() && v.get("order").and_then(Value::as_i64).is_some() && flags(&["defaultRole", "requiresPurchase"]);
-    let words = ["name", "description"].iter().all(|k| v.get(*k).is_some_and(Value::is_string));
-    let whole = known && words && flags(&["isManagementRole", "isSelfAssignable", "isAddedOnJoin", "requiresTwoFactor"]);
+    let order = v.get("order").and_then(|o| o.as_i64().or_else(|| o.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 1e15).map(|f| f as i64)));
+    let words = v.get("name").is_some_and(Value::is_string) && v.get("description").is_none_or(|d| d.is_null() || d.is_string());
+    let known = rights.is_some();
+    let whole = known && order.is_some() && words && ["defaultRole", "requiresPurchase", "isManagementRole", "isSelfAssignable", "isAddedOnJoin", "requiresTwoFactor"].iter().all(|k| readable(k));
     Some(Role {
         // As VRChat has them (an edit is compared with and sent against these); shown through `groups::label`.
         name: s(v, "name").chars().take(256).collect(),
         description: s(v, "description").chars().take(2048).collect(),
-        order: v.get("order").and_then(Value::as_i64),
+        order,
         // Every right VRChat gives is kept as it is, those this version does not know included (never sent back unasked).
         permissions: rights.unwrap_or_default(),
         known,
@@ -172,7 +198,7 @@ pub(crate) fn parse_role(v: &Value) -> Option<Role> {
         created_at: v.get("createdAt").and_then(Value::as_str).and_then(g::time),
         default_role: flag("defaultRole"),
         // Left out, the strict side: it counts as one, so that giving it is always confirmed.
-        management: flag("isManagementRole") || !flags(&["isManagementRole"]),
+        management: flag("isManagementRole") || !v.get("isManagementRole").is_some_and(Value::is_boolean),
         self_assignable: flag("isSelfAssignable"),
         added_on_join: flag("isAddedOnJoin"),
         requires_two_factor: flag("requiresTwoFactor"),
@@ -364,6 +390,35 @@ pub(crate) fn parse_post(v: &Value) -> Option<Post> {
 }
 
 /// A file of the account's (`File`): its id and its latest version's address on VRChat's file API.
+/// An event of a group's calendar. One that is deleted, or has no id or title, is none.
+pub(crate) fn parse_event(v: &Value) -> Option<CalendarEvent> {
+    let (id, title) = (s(v, "id"), g::label(&s(v, "title"), 128));
+    if !is_event_id(&id) || title.is_empty() || v.get("deletedAt").is_some_and(|d| !d.is_null()) {
+        return None;
+    }
+    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let names = |k: &str, max: usize| strings(v, k, max).iter().map(|x| g::label(x, 64)).filter(|x| !x.is_empty()).collect();
+    Some(CalendarEvent {
+        title,
+        description: g::text(&s(v, "description"), 4000),
+        starts_at: v.get("startsAt").and_then(Value::as_str).and_then(g::time),
+        ends_at: v.get("endsAt").and_then(Value::as_str).and_then(g::time),
+        access: g::label(&s(v, "accessType"), 16),
+        category: g::label(&s(v, "category"), 32),
+        platforms: names("platforms", 8),
+        languages: names("languages", 8),
+        tags: names("tags", 16),
+        image_url: https(v, "imageUrl"),
+        interested: count(v, "interestedUserCount"),
+        following: v.get("userInterest").and_then(|u| u.get("isFollowing")).and_then(Value::as_bool),
+        featured: flag("featured"),
+        draft: flag("isDraft"),
+        role_ids: strings(v, "roleIds", 64).into_iter().filter(|r| g::is_role_id(r)).collect(),
+        repeats: v.get("recurrence").map(|r| g::label(&s(r, "frequency"), 16)).filter(|f| !f.is_empty()),
+        id,
+    })
+}
+
 pub(crate) fn parse_file(v: &Value) -> Option<InventoryFile> {
     let id = s(v, "id");
     let url = v.get("versions")?.as_array()?.iter().rev().find_map(|version| version.get("file").and_then(|f| f.get("url")).and_then(Value::as_str).map(str::to_string))?;
@@ -466,15 +521,26 @@ impl Client {
         if write && leave.is_none() {
             return Err(Failure::Disabled);
         }
+        self.group_refusal = None;
         self.authenticated().map_err(|e| Failure::of(e, false))?;
         let family = if write { WRITES } else if path.starts_with("/file") { "files" } else { READS };
-        let r = self.request_with(family, method, format!("{BASE}{path}"), None, body, form, &[400, 403, 404], leave).map_err(|e| Failure::of(e, write))?;
+        let sent = self.request_with(family, method, format!("{BASE}{path}"), None, body, form, &REFUSED, leave);
+        self.group_refusal = match &sent {
+            Ok(r) if REFUSED.contains(&r.status) => Some(Refusal { status: r.status, words: refusal_words(&r.body) }),
+            Err(Error::Refused(status, words)) => Some(Refusal { status: *status, words: g::text(words, 400) }),
+            _ => None,
+        };
+        let r = sent.map_err(|e| Failure::of(e, write))?;
         match r.status {
-            400 => Err(Failure::Invalid),
             403 => Err(Failure::Forbidden),
             404 => Err(Failure::NotFound),
+            s if REFUSED.contains(&s) => Err(Failure::Invalid),
             _ => Ok(r.body),
         }
+    }
+    /// What VRChat said when it refused the last call of this module, taken.
+    pub fn take_group_refusal(&mut self) -> Option<Refusal> {
+        self.group_refusal.take()
     }
     fn group_read(&mut self, path: &str) -> GroupResult<Value> {
         let body = self.group_call("GET", path, None, None, None)?;
@@ -537,9 +603,22 @@ impl Client {
     pub fn group(&mut self, group: &str) -> GroupResult<Group> {
         let path = Self::group_path(group)?;
         let v = self.group_read(&format!("{path}?includeRoles=true"))?;
-        let found = parse_group(&v).ok_or(Failure::BadAnswer)?;
+        let mut found = parse_group(&v).ok_or(Failure::BadAnswer)?;
         if found.id != group {
             return Err(Failure::BadAnswer);
+        }
+        // (What refuses that second look is no refusal of this one.)
+        // A role that came in part with the group is read from the roles' own list, once: what is not there either stays
+        // as it is, and withholds only what needs it.
+        if found.roles.as_ref().is_some_and(|r| r.iter().any(|r| !r.whole)) {
+            if let Ok(list) = self.group_roles(group) {
+                for role in found.roles.iter_mut().flatten().filter(|r| !r.whole) {
+                    if let Some(better) = list.iter().find(|x| x.id == role.id && (x.whole || x.known && !role.known)) {
+                        *role = better.clone();
+                    }
+                }
+            }
+            self.group_refusal = None;
         }
         Ok(found)
     }
@@ -669,13 +748,32 @@ impl Client {
             return Err(Failure::NotFound);
         }
         let v = self.group_write("DELETE", &format!("{path}/roles/{}", encode(role)), None, leave)?;
-        // The roles left: without it, and with those no group is without (its owner's, Everyone's); whether all the others
+        // The roles left: without it, and with those no group is without (its owner's, and Everyone's, flagged or not); whether all the others
         // are there is the caller's to see (verify3 Major 5, verify4 F3).
         let roles = parse_roles(&v).ok_or(Failure::Unknown)?;
-        if roles.iter().any(|r| r.id == role) || !g::whole_list(&roles, 0, |_| false) {
+        if roles.iter().any(|r| r.id == role) || !g::whole_list(&roles, 2, |_| true) {
             return Err(Failure::Unknown);
         }
         Ok(roles)
+    }
+
+    /// `GET /calendar/{g}?n&offset[&date]`: `{results,hasNext,totalCount}`, of the whole calendar or of one month.
+    pub fn group_events(&mut self, group: &str, month: Option<Month>, offset: usize) -> GroupResult<Events> {
+        if !g::is_group_id(group) {
+            return Err(Failure::NotFound);
+        }
+        let month = month.map(|m| format!("&date={}", encode(&m.date()))).unwrap_or_default();
+        let v = self.group_read(&format!("/calendar/{}?n={EVENTS_PAGE}&offset={offset}{month}", encode(group)))?;
+        let list = v.get("results").and_then(Value::as_array).ok_or(Failure::BadAnswer)?;
+        // Whether there is more is VRChat's word; without it, its count's or a page as long as was asked for.
+        let more = match (v.get("hasNext").and_then(Value::as_bool), count(&v, "totalCount")) {
+            (Some(more), _) => more,
+            (None, Some(total)) => offset + list.len() < total as usize,
+            (None, None) => list.len() >= EVENTS_PAGE,
+        };
+        // Of this group only: another's is no event of it.
+        let of_it = |e: &&Value| e.get("ownerId").and_then(Value::as_str).is_none_or(|o| o == group);
+        Ok(Events { raw: list.len(), more: more && !list.is_empty(), items: list.iter().take(EVENTS_PAGE).filter(of_it).filter_map(parse_event).collect() })
     }
 
     /// `GET G/posts?n&offset`: `{posts,total}`.
@@ -896,6 +994,30 @@ mod tests {
         assert_eq!(c.create_role(G, &RoleDraft::default(), go()), Err(Failure::Invalid));
     }
 
+    /// REQUEST28: what VRChat says when it refuses is kept word for word beside the code, for that call alone.
+    #[test]
+    fn a_refusal_keeps_vrchats_own_words() {
+        let (mut c, _) = mock_signed_in(vec![
+            raw_response(403, &json!({"error": {"message": "\"You must have 2FA enabled to be given this role.\"", "status_code": 403}}).to_string()),
+            raw_response(409, &json!({"error": "Already\u{202e} there", "status_code": 409}).to_string()),
+            raw_response(400, "<html>"),
+            raw_response(200, &json!(["grol_a"]).to_string()),
+            raw_response(502, &json!({"error": {"message": "down"}}).to_string()),
+        ]);
+        let mut give = || (c.set_member_role(G, U, "grol_a", true, go()), c.take_group_refusal());
+        let said = |status: u16, words: &str| Some(Refusal { status, words: words.into() });
+        assert_eq!(give(), (Err(Failure::Forbidden), said(403, "You must have 2FA enabled to be given this role.")));
+        assert_eq!(give(), (Err(Failure::Invalid), said(409, "Already there")));
+        assert_eq!(give(), (Err(Failure::Invalid), said(400, "")), "refused, and no words");
+        assert_eq!(give(), (Ok(vec!["grol_a".to_string()]), None), "done: nothing of the one before");
+        assert_eq!(give(), (Err(Failure::Unknown), None), "an answer that is not VRChat's no");
+        // A part read beside a group that was refused is no refusal of the group.
+        let mut part = role_json("grol_b", "Staff", 1, &[]);
+        part.as_object_mut().unwrap().remove("permissions");
+        let (mut c, _) = mock_signed_in(vec![raw_response(200, &json!({"id": G, "name": "x", "roles": [part]}).to_string()), raw_response(403, &json!({"error": {"message": "no"}}).to_string())]);
+        assert!(c.group(G).is_ok() && c.take_group_refusal().is_none());
+    }
+
     /// B2: a write's 5xx, unreadable answer or lost connection is "unknown", a read's is not.
     #[test]
     fn a_lost_write_answer_is_unknown() {
@@ -903,6 +1025,73 @@ mod tests {
         assert_eq!(c.create_post(G, &PostDraft::default(), go()), Err(Failure::Unknown));
         assert_eq!(c.create_role(G, &RoleDraft::default(), go()), Err(Failure::Unknown));
         assert_eq!(c.group_roles(G), Err(Failure::Unavailable));
+    }
+
+    /// REQUEST28: a group's calendar, whole or a month of it: read only, its own events, what can be read of each.
+    #[test]
+    fn a_groups_calendar_is_read() {
+        let event = |id: &str, more: Value| {
+            let mut v = json!({"id": id, "ownerId": G, "title": "Showcase", "description": "Bring\nwhat you made", "startsAt": "2026-11-28T20:00:00.000Z", "endsAt": "2026-11-28T22:00:00.000Z", "accessType": "group", "category": "arts",
+                "platforms": ["standalonewindows", "android"], "languages": ["eng"], "tags": [], "imageUrl": "https://api.vrchat.cloud/api/1/image/file_x/1/1024", "imageId": "file_x", "interestedUserCount": 12, "userInterest": {"isFollowing": true},
+                "featured": false, "isDraft": false, "roleIds": null, "deletedAt": null, "occurrenceKind": "single", "recurrence": null, "seriesId": null});
+            for (k, x) in more.as_object().unwrap() {
+                v[k.as_str()] = x.clone();
+            }
+            v
+        };
+        let page = json!({"results": [event("cal_1", json!({})), event("cal_2", json!({"deletedAt": "2026-11-01T00:00:00Z"})), event("cal_3", json!({"ownerId": "grp_00000000-0000-4000-8000-0000000000ff"})), event("cal_4", json!({"imageUrl": null, "interestedUserCount": null, "recurrence": {"frequency": "weekly", "interval": 1, "timezone": "Europe/Paris"}, "roleIds": ["grol_a", 7], "startsAt": "soon"})), {"id": 7}], "hasNext": true, "totalCount": 9});
+        let (mut c, sent) = mock_signed_in(vec![raw_response(200, &page.to_string()), raw_response(200, r#"{"results":[],"hasNext":true}"#), raw_response(200, "[]")]);
+        let e = c.group_events(G, None, 0).unwrap();
+        assert_eq!((e.raw, e.more, e.items.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()), (5, true, vec!["cal_1", "cal_4"]));
+        let one = &e.items[0];
+        assert_eq!((one.interested, one.following, one.access.as_str(), one.platforms.len(), one.repeats.as_deref()), (Some(12), Some(true), "group", 2, None));
+        let four = &e.items[1];
+        assert!(four.image_url.is_empty() && four.interested.is_none() && four.starts_at.is_none() && four.repeats.as_deref() == Some("weekly") && four.role_ids == ["grol_a"]);
+        assert!(!c.group_events(G, Some(Month { year: 2026, month: 12 }), 100).unwrap().more, "nothing came: nothing after it");
+        assert_eq!(c.group_events(G, None, 0), Err(Failure::BadAnswer));
+        assert_eq!(c.group_events("grp_../x", None, 0), Err(Failure::NotFound));
+        let sent = sent.lock().unwrap();
+        assert!(sent.iter().all(|r| r.method == "GET"));
+        assert!(sent[0].url.ends_with(&format!("/calendar/{G}?n=100&offset=0")), "{}", sent[0].url);
+        assert!(sent[1].url.contains("offset=100&date=2026-12-15T12%3A00%3A00.000Z"), "{}", sent[1].url);
+    }
+
+    /// REQUEST28: the shapes VRChat's roles come in. No field is required and each flag has a default (`GroupRole` in the API
+    /// description): a role made before a flag existed comes without it, or with null, and reads as whole, the flag off.
+    #[test]
+    fn a_role_from_before_a_flag_existed_is_a_whole_role() {
+        // As an old group's first roles come: what roles had then, nothing that came later.
+        let old = json!({"id": "grol_old", "groupId": G, "name": "Staff", "description": "", "isSelfAssignable": false, "isManagementRole": true,
+            "permissions": ["group-members-manage", "group-roles-assign"], "requiresTwoFactor": false, "order": 1, "createdAt": "2023-01-01T00:00:00.000Z", "updatedAt": "2023-01-01T00:00:00.000Z"});
+        let r = parse_role(&old).unwrap();
+        assert!(r.known && r.whole && r.management && !r.default_role && !r.requires_purchase && !r.added_on_join);
+        assert_eq!((r.order, r.permissions.len()), (Some(1), 2));
+        let null = json!({"id": "grol_old", "name": "Staff", "description": null, "permissions": [], "order": 2.0, "defaultRole": null, "requiresPurchase": null, "isAddedOnJoin": null, "requiresTwoFactor": null, "isSelfAssignable": null, "isManagementRole": false});
+        let r = parse_role(&null).unwrap();
+        assert!(r.known && r.whole && !r.privileged() && r.order == Some(2));
+        // Only a flag that is there and on is one.
+        let paid = json!({"id": "grol_paid", "name": "Supporter", "description": "", "permissions": [], "order": 3, "requiresPurchase": true, "requiresTwoFactor": true, "productId": "prod_1"});
+        let r = parse_role(&paid).unwrap();
+        assert!(r.whole && r.requires_purchase && r.requires_two_factor);
+    }
+
+    /// REQUEST28: a role that comes with the group without its rights is read once from the roles' own list; one that came
+    /// whole asks for nothing more.
+    #[test]
+    fn a_role_in_part_is_read_from_the_roles_list() {
+        let mut part = role_json("grol_b", "Staff", 1, &[]);
+        part.as_object_mut().unwrap().remove("permissions");
+        let group = |roles: Vec<Value>| json!({"id": G, "name": "x", "roles": roles});
+        let (mut c, sent) = mock_signed_in(vec![raw_response(200, &group(vec![role_json("grol_a", "Artists", 3, &[]), part.clone()]).to_string()), raw_response(200, &json!([role_json("grol_a", "Other", 9, &[]), role_json("grol_b", "Staff", 1, &["group-roles-assign"])]).to_string())]);
+        let roles = c.group(G).unwrap().roles.unwrap();
+        assert_eq!(roles.iter().map(|r| (r.name.as_str(), r.order, r.known, r.permissions.len())).collect::<Vec<_>>(), [("Artists", Some(3), true, 0), ("Staff", Some(1), true, 1)], "only the one in part is taken from there");
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        let (mut c, sent) = mock_signed_in(vec![raw_response(200, &group(vec![role_json("grol_a", "Artists", 3, &[])]).to_string())]);
+        c.group(G).unwrap();
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        // The list refused: the group as it came.
+        let (mut c, _) = mock_signed_in(vec![raw_response(200, &group(vec![part]).to_string()), raw_response(403, "{}")]);
+        assert!(!c.group(G).unwrap().roles.unwrap()[0].known);
     }
 
     /// Blocker 4: a role or member read without what the rules decide by is not taken for a harmless one.
@@ -943,11 +1132,18 @@ mod tests {
         v.as_object_mut().unwrap().remove("isManagementRole");
         v.as_object_mut().unwrap().remove("isSelfAssignable");
         let r = parse_role(&v).unwrap();
-        assert!(r.known && !r.whole && r.management && r.privileged() && !r.self_assignable);
-        for needed in ["permissions", "order", "defaultRole", "requiresPurchase"] {
+        assert!(r.known && r.whole && r.management && r.privileged() && !r.self_assignable);
+        // Its rights have no default; its rank neither, but that says nothing of its rights.
+        for (gone, known) in [("permissions", false), ("order", true), ("name", true)] {
             let mut v = role_json("grol_a", "Artists", 3, &[]);
-            v.as_object_mut().unwrap().remove(needed);
-            assert!(!parse_role(&v).unwrap().known, "without {needed}");
+            v.as_object_mut().unwrap().remove(gone);
+            let r = parse_role(&v).unwrap();
+            assert!(r.known == known && !r.whole, "without {gone}");
+        }
+        for (odd, value) in [("requiresPurchase", json!("no")), ("defaultRole", json!(0)), ("description", json!(7)), ("order", json!(1.5))] {
+            let mut v = role_json("grol_a", "Artists", 3, &[]);
+            v[odd] = value;
+            assert!(!parse_role(&v).unwrap().whole, "{odd}");
         }
         let g = parse_group(&json!({"id": G, "bannerId": null, "iconId": "https://elsewhere"})).unwrap();
         assert!(g.banner_known && g.banner_id.is_none() && !g.icon_known, "null is none; another form is not known");
@@ -1008,7 +1204,9 @@ mod tests {
             ("take back", &take, json!(["grol_b"]), vec![json!(["grol_a", "grol_b"]), json!(null)]),
             ("new role", &make, new_role(), vec![role_json("grol_n", "Another", 4, &[]), role_json("grol_n", "New", 4, &["group-data-manage"]), other_group, json!({"id": "grol_n", "name": "New"})]),
             ("edit role", &update, json!([role_json("grol_a", "New", 3, &[])]), vec![json!([role_json("grol_a", "Old", 3, &[])]), json!([role_json("grol_b", "New", 3, &[])]), json!([]), json!([{"id": "grol_a", "name": "New"}])]),
-            ("delete role", &drop_role, json!([owner(), role_json("grol_b", "B", 3, &[]), everyone()]), vec![json!([owner(), role_json("grol_a", "A", 3, &[]), everyone()]), json!([owner(), role_json("grol_b", "B", 3, &[])]), json!([everyone()]), json!([owner(), everyone(), {"id": "grol_b"}]), json!({}), json!([]), json!([role_json("grol_b", "B", 3, &[])])]),
+            ("delete role", &drop_role, json!([owner(), role_json("grol_b", "B", 3, &[]), everyone()]), vec![json!([owner(), role_json("grol_a", "A", 3, &[]), everyone()]), json!([everyone()]), json!([owner(), everyone(), {"id": "grol_b"}]), json!({}), json!([]), json!([role_json("grol_b", "B", 3, &[])])]),
+            // An old group flags no role as Everyone's: whether every other role is in the list is the caller's to see.
+            ("delete role of an old group", &drop_role, json!([owner(), role_json("grol_b", "B", 3, &[])]), vec![json!([owner()])]),
             ("new post", &publish, post("gpos_1", "t", "x", json!([]), json!(null)), vec![post("gpos_1", "t", "another", json!([]), json!(null)), post("gpos_1", "t", "x", json!(["grol_a"]), json!(null)), json!({"id": "gpos_1", "authorId": "usr_test", "title": "t", "text": "x"})]),
             ("delete post", &remove, json!({"success": {"message": "Group Post was deleted!", "status_code": 200}}), vec![json!({}), json!({"success": {}}), json!({"success": {"status_code": 500}})]),
             ("upload", &upload, file("file_up", "usr_test", "gallery"), vec![file("file_up", "usr_other", "gallery"), file("file_up", "usr_test", "icon"), json!({"id": "file_up"})]),

@@ -80,6 +80,40 @@ fn found() -> &'static Found {
     FOUND.get_or_init(|| Found { sans: find_sans(), mono: find_mono() })
 }
 
+/// The fixed-width font Gradient ASCII's glyphs are drawn with: the first the website names that a computer has (Consolas
+/// on Windows), else the app's own fixed-width font.
+pub fn glyph_font() -> Option<Blob> {
+    system_file("consola.ttf").or_else(|| found().mono.clone())
+}
+
+/// The sizes `measure` finds of the default text font (its regular weight): what a chosen font is fitted to.
+pub(crate) fn default_sizes<T>(measure: impl Fn(&[u8], u32) -> Option<T>) -> Option<T> {
+    match found().sans.as_ref()? {
+        Sans::Variable(b) => measure(b.as_ref().as_ref(), 0),
+        Sans::Static(files) => measure(files[0].as_ref()?.as_ref().as_ref(), 0),
+    }
+}
+
+/// Where a context notes which chosen font it draws with ([`crate::faces`]).
+const FACE: &str = "orbiters-fonts-face";
+const FACE_MARK: &str = "orbiters-fonts-face-mark";
+
+/// To call each frame of a context that can live through a change of font: it takes the one chosen.
+pub fn follow_face(ctx: &egui::Context) {
+    // The names are compared only once the font may have changed.
+    let mark = crate::faces::mark();
+    if ctx.data(|d| d.get_temp::<u32>(egui::Id::unique(FACE_MARK))) == Some(mark) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(FACE_MARK), mark));
+    let now = crate::faces::key();
+    let was = ctx.data(|d| d.get_temp::<String>(egui::Id::unique(FACE))).unwrap_or_default();
+    if was != now {
+        install(ctx);
+        ctx.request_repaint();
+    }
+}
+
 /// Loads the fonts into `ctx` (egui's own fonts stay as fallbacks for symbols the system font lacks), and the
 /// system's fonts for other scripts as their letters appear.
 pub fn install(ctx: &egui::Context) {
@@ -93,7 +127,10 @@ pub fn install(ctx: &egui::Context) {
     defs.families.insert(icons_fill(), vec!["phosphor-fill".into()]);
 
     let found = found();
-    VARIABLE.store(matches!(found.sans, Some(Sans::Variable(_))), Ordering::Relaxed);
+    // The font chosen in Settings stands first; what it lacks comes from the default, then as ever.
+    let chosen = crate::faces::chosen();
+    let chosen_varies = matches!(chosen.as_deref().map(|c| &c.sans), Some(crate::faces::Sans::Variable(..)));
+    VARIABLE.store(chosen_varies || matches!(found.sans, Some(Sans::Variable(_))), Ordering::Relaxed);
     for (i, w) in WEIGHTS.iter().enumerate() {
         let name = format!("ui-{w}");
         let data = match &found.sans {
@@ -107,6 +144,18 @@ pub fn install(ctx: &egui::Context) {
             None => None,
         };
         let mut list = Vec::new();
+        if let Some(c) = &chosen {
+            let tweak = FontTweak { scale: c.scale, ..Default::default() };
+            let data = match &c.sans {
+                crate::faces::Sans::Variable(b, index) => {
+                    FontData::from_blob(b.clone(), *index).tweak(FontTweak { coords: VariationCoords::new([(b"wght", *w as f32)]), ..tweak })
+                }
+                crate::faces::Sans::Static(files) => FontData::from_blob(files[i].0.clone(), files[i].1).tweak(tweak),
+            };
+            let name = format!("chosen-{}-{w}", c.key);
+            defs.font_data.insert(name.clone(), data.into());
+            list.push(name);
+        }
         if let Some(data) = data {
             defs.font_data.insert(name.clone(), data.into());
             list.push(name);
@@ -124,7 +173,10 @@ pub fn install(ctx: &egui::Context) {
     }
     ctx.set_fonts(defs);
 
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), preferred()));
+    ctx.data_mut(|d| {
+        d.insert_temp(egui::Id::unique(LANGUAGE_FONTS), preferred());
+        d.insert_temp(egui::Id::unique(FACE), chosen.map(|c| c.key.clone()).unwrap_or_default());
+    });
     // Once per context, whatever calls this again.
     let added = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<bool>(egui::Id::unique("orbiters-fonts-provider")), true));
     if !added {

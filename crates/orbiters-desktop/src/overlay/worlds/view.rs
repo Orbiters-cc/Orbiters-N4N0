@@ -566,6 +566,8 @@ impl View {
         self.turning = TurnStick::default();
         self.turn_read = None;
         self.steps_turn = vrchat_turns_in_steps().unwrap_or(false);
+        // A thread that ended since the last turn is let go of first: this capture is for the one that takes over.
+        self.answers(overlay);
         self.error = None;
         self.pacer = Pacer::default();
         self.motion = None;
@@ -876,8 +878,7 @@ impl View {
             self.observe(steamvr, Instant::now());
         }
         self.answers(overlay);
-        if let Some(sorted) = self.small_coming.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.small_coming = None;
+        if let Some(sorted) = self.sorted() {
             let mut small = stereo::Small::new(&sorted.view, &head_pose(steamvr, 0.0), sorted.small_reach());
             if let Some((at, radius)) = self.small_place {
                 // In a panel's hole it shows what stands in it, nearer than it does in the room.
@@ -893,8 +894,7 @@ impl View {
             if self.idle_since.is_some_and(|t| t.elapsed() >= IDLE_KEEPS_GPU) {
                 self.idle_since = None;
                 // The device, the splats and the textures go with the thread.
-                self.thread = None;
-                self.gpu_ready = false;
+                self.let_go_of_thread();
                 #[cfg(windows)]
                 {
                     self.d3d11 = None;
@@ -1207,14 +1207,67 @@ impl View {
         None
     }
 
-    fn answers(&mut self, overlay: &vr::Overlay) {
+    /// The render thread goes: [`View::warm_up`] starts another for the next capture, with a device, shaders and textures of its own.
+    fn let_go_of_thread(&mut self) {
+        self.thread = None;
+        self.gpu_ready = false;
+    }
+
+    /// What the render thread answered since the last turn. A thread that ended (an error, a panic, one that could not start) is let go of
+    /// here, so that the next capture starts over: kept, it took every later capture into a channel nobody reads, and each stayed loading
+    /// until the view had been off for [`IDLE_KEEPS_GPU`].
+    fn heard(&mut self) -> Vec<Answer> {
         let mut answers = Vec::new();
+        let mut ended = None;
         if let Some(thread) = &self.thread {
-            while let Ok(a) = thread.rx.try_recv() {
-                answers.push(a);
+            loop {
+                match thread.rx.try_recv() {
+                    Ok(Answer::Failed(e)) => ended = Some(e),
+                    Ok(a) => answers.push(a),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        ended.get_or_insert_with(|| tr("The 3D view stopped. Show it again.").to_string());
+                        break;
+                    }
+                }
             }
         }
-        for answer in answers {
+        if let Some(e) = ended {
+            self.let_go_of_thread();
+            self.stopped(e);
+        }
+        answers
+    }
+
+    /// What shows, or was getting ready to, cannot: it goes, saying why. With nothing showing there is nothing to say.
+    fn stopped(&mut self, why: String) {
+        eprintln!("3D worlds: {why}");
+        self.in_flight = None;
+        self.small_coming = None;
+        if self.active() {
+            self.error = Some(why);
+            self.phase = Phase::Leaving { since: Instant::now() };
+        }
+    }
+
+    /// The capture sorted around its subject, to show small, once it is. A sort that ended without it (a panic, a thread that could not
+    /// start) stops the view: it stayed loading.
+    fn sorted(&mut self) -> Option<Arc<Capture>> {
+        match self.small_coming.as_ref()?.try_recv() {
+            Ok(sorted) => {
+                self.small_coming = None;
+                Some(sorted)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.stopped(tr("The 3D view stopped. Show it again.").into());
+                None
+            }
+        }
+    }
+
+    fn answers(&mut self, overlay: &vr::Overlay) {
+        for answer in self.heard() {
             match answer {
                 #[cfg(windows)]
                 Answer::Textures(handles) => {
@@ -1226,7 +1279,12 @@ impl View {
                                 self.shown_slot = [0; 6];
                                 self.forget_drawn();
                             }
-                            Err(e) => self.error = Some(format!("{e:#}")),
+                            // Nothing can be drawn into textures that do not open: the next capture starts over, with a device and
+                            // textures of its own.
+                            Err(e) => {
+                                self.let_go_of_thread();
+                                self.stopped(format!("{e:#}"));
+                            }
                         }
                     }
                 }
@@ -1259,12 +1317,8 @@ impl View {
                     }
                     self.abandon(cube_index);
                 }
-                Answer::Failed(e) => {
-                    eprintln!("3D worlds: {e}");
-                    self.error = Some(e);
-                    self.in_flight = None;
-                    self.phase = Phase::Leaving { since: Instant::now() };
-                }
+                // Taken by `heard`.
+                Answer::Failed(_) => {}
             }
         }
     }
@@ -1479,6 +1533,52 @@ mod tests {
     }
 
     use super::*;
+
+    /// DOV-20: a render thread that failed, or ended without a word, is let go of at the next turn, so that the next capture starts another
+    /// ([`View::warm_up`] starts one when there is none): it stayed, and every capture shown after it stayed loading.
+    #[test]
+    fn a_failed_render_thread_is_let_go_of_so_that_the_next_capture_starts_another() {
+        let fake = || {
+            let (tx, asks) = mpsc::channel();
+            let (answers, rx) = mpsc::channel();
+            (Thread { tx, rx }, asks, answers)
+        };
+        for panicked in [false, true] {
+            let mut view = View::new("test");
+            let (thread, asks, answers) = fake();
+            view.thread = Some(thread);
+            view.gpu_ready = true;
+            view.phase = Phase::Loading;
+            view.in_flight = Some(7);
+            answers.send(Answer::Loaded).unwrap();
+            if !panicked {
+                answers.send(Answer::Failed("the graphics card was reset".into())).unwrap();
+            }
+            drop((asks, answers));
+            let heard = view.heard();
+            assert!(matches!(heard[..], [Answer::Loaded]), "what it answered before");
+            assert!(view.thread.is_none(), "the next capture starts another");
+            assert!(!view.gpu_ready && view.in_flight.is_none());
+            assert!(!view.active() && view.error.is_some(), "said, and gone");
+        }
+        // A thread that works stays; one that failed with nothing showing goes without a word.
+        let mut view = View::new("test");
+        let (thread, _asks, answers) = fake();
+        view.thread = Some(thread);
+        assert!(view.heard().is_empty() && view.thread.is_some());
+        answers.send(Answer::Failed("gone".into())).unwrap();
+        assert!(view.heard().is_empty());
+        assert!(view.thread.is_none() && view.error.is_none() && view.phase == Phase::Off);
+        // The same of the sort a capture shown small waits for.
+        let mut view = View::new("test");
+        view.phase = Phase::Loading;
+        let (sort, coming) = mpsc::channel();
+        view.small_coming = Some(coming);
+        assert!(view.sorted().is_none() && view.active(), "still sorting");
+        drop(sort);
+        assert!(view.sorted().is_none());
+        assert!(!view.active() && view.error.is_some() && view.small_coming.is_none());
+    }
     use crate::overlay::slots::fake::{Process, World, ALL};
     use crate::overlay::slots::Slots as _;
     use std::cell::RefCell;

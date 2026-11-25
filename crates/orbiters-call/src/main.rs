@@ -18,11 +18,13 @@ mod loopback;
 mod opus;
 mod protocol;
 
-use call::{Call, PeerEvent};
+use call::{Call, MicQueue, PeerEvent};
 use orbiters_core::call::{CallCommand, CallEvent, EndReason, IceCandidate, IceServer};
-use orbiters_i18n::{tr};
+use orbiters_i18n::tr;
 use orbiters_sound::Duplex;
+use std::collections::VecDeque;
 use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
@@ -80,20 +82,39 @@ enum Role {
     Callee(String),
 }
 
+/// A call's sound devices while they are open.
+trait Sound: Send {
+    /// What is wrong with them now.
+    fn trouble(&self) -> Option<String>;
+}
+
+impl Sound for Duplex {
+    fn trouble(&self) -> Option<String> {
+        self.error()
+    }
+}
+
+/// Opens them: a microphone (`None`: the default one) into the queue, the sound heard to the output. May take seconds.
+type Open = Arc<dyn Fn(Option<String>, Arc<MicQueue>, Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<Box<dyn Sound>> + Send + Sync>;
+
+/// What a call's devices opened on their own thread came to.
+type Opened = (u64, anyhow::Result<Box<dyn Sound>>);
+
 struct Worker {
     events: UnboundedSender<(u64, PeerEvent)>,
+    opened: UnboundedSender<Opened>,
     call: Option<Call>,
     /// The highest call number seen: a command for an earlier call is late.
     latest: u64,
     connected: Option<Instant>,
     mic_device: Option<String>,
-    audio: Option<Duplex>,
+    audio: Option<Box<dyn Sound>>,
     /// The sound devices' last trouble said, so it is said once.
     audio_error: Option<String>,
     /// Candidates for a call whose offer or answer has not come yet.
     early: Option<(u64, Vec<IceCandidate>)>,
-    /// Calls open no sound device (`--no-sound`).
-    no_sound: bool,
+    /// `None`: calls open no sound device (`--no-sound`).
+    open: Option<Open>,
 }
 
 impl Worker {
@@ -197,7 +218,9 @@ impl Worker {
     }
 
     async fn stop(&mut self) {
-        self.audio = None;
+        if let Some(audio) = self.audio.take() {
+            close(audio);
+        }
         self.audio_error = None;
         self.connected = None;
         if let Some(call) = self.call.take() {
@@ -227,8 +250,12 @@ impl Worker {
                 if let Err(e) = call.start_sending().await {
                     error(id, tr!("The call's audio could not be sent: {error}", error = format!("{e:#}")));
                 }
-                if !self.no_sound {
-                    self.audio = open_audio(call, self.mic_device.clone());
+                // On a thread of its own (N4N-5): the next command is not kept waiting for a device that is slow to open.
+                if let Some(open) = self.open.clone() {
+                    let (mic, speaker, device, opened) = (call.mic.clone(), call.speaker.clone(), self.mic_device.clone(), self.opened.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let _ = opened.send((id, open(device, mic, speaker)));
+                    });
                 }
             }
             PeerEvent::Ended(EndReason::Failed) => {
@@ -239,13 +266,23 @@ impl Worker {
         }
     }
 
+    /// The devices opened for call `id` are there, or are not: a call that ended meanwhile has none.
+    fn audio_opened(&mut self, (id, opened): Opened) {
+        match opened {
+            Ok(audio) if self.call.as_ref().is_some_and(|c| c.id == id) => self.audio = Some(audio),
+            Ok(late) => close(late),
+            Err(e) if self.call.as_ref().is_some_and(|c| c.id == id) => error(id, tr!("The call's sound could not start: {error}", error = format!("{e:#}"))),
+            Err(_) => {}
+        }
+    }
+
     async fn tick(&mut self) {
         let Some(call) = &self.call else { return };
         let id = call.id;
         if let Some(connected) = self.connected {
             let (mic, remote) = call.levels.take();
             emit(&CallEvent::Levels { call: id, mic, remote });
-            if let Some(trouble) = self.audio.as_ref().and_then(Duplex::error) {
+            if let Some(trouble) = self.audio.as_ref().and_then(|a| a.trouble()) {
                 if self.audio_error.as_ref() != Some(&trouble) {
                     error(id, tr!("Call sound: {trouble}", trouble = trouble));
                     self.audio_error = Some(trouble);
@@ -266,13 +303,14 @@ impl Worker {
 /// The microphone (`device`, else the default one) into the call and the call to the default output. The devices
 /// open on a thread of their own, which takes the default microphone when the chosen one fails, follows a default
 /// output that changes and reopens a device that goes away; with no sound at all the call goes on, unheard.
-fn open_audio(call: &Call, device: Option<String>) -> Option<Duplex> {
-    let mic = call.mic.clone();
-    let speaker = call.speaker.clone();
+fn open_audio(device: Option<String>, mic: Arc<MicQueue>, speaker: Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<Box<dyn Sound>> {
     // Waits up to 3 s for the devices.
-    tokio::task::block_in_place(|| Duplex::start(device, move |samples: &[f32]| mic.push(samples), speaker))
-        .map_err(|e| error(call.id, tr!("The call's sound could not start: {error}", error = format!("{e:#}"))))
-        .ok()
+    Ok(Box::new(Duplex::start(device, move |samples: &[f32]| mic.push(samples), speaker)?))
+}
+
+/// Closing waits for the devices' thread, which may be opening one again.
+fn close(audio: Box<dyn Sound>) {
+    tokio::task::spawn_blocking(move || drop(audio));
 }
 
 /// WebRTC's warnings and errors (a relay URL it skips, a socket it could not bind) on stderr, which the service logs.
@@ -357,7 +395,9 @@ async fn serve(no_sound: bool) {
         let _ = inputs.send(Input::StdinClosed);
     });
     let (events, mut event_rx) = unbounded_channel();
-    let mut worker = Worker { events, call: None, latest: 0, connected: None, mic_device: None, audio: None, audio_error: None, early: None, no_sound };
+    let (opened, mut opened_rx) = unbounded_channel();
+    let open: Option<Open> = (!no_sound).then(|| Arc::new(open_audio) as Open);
+    let mut worker = Worker { events, opened, call: None, latest: 0, connected: None, mic_device: None, audio: None, audio_error: None, early: None, open };
     let mut ticker = tokio::time::interval(LEVELS_EVERY);
     emit(&CallEvent::Ready);
     loop {
@@ -374,6 +414,7 @@ async fn serve(no_sound: bool) {
                 }
             },
             Some((id, event)) = event_rx.recv() => worker.call_event(id, event).await,
+            Some(opened) = opened_rx.recv() => worker.audio_opened(opened),
             _ = ticker.tick() => worker.tick().await,
         }
     }
@@ -449,7 +490,69 @@ mod tests {
 
     fn worker() -> (Worker, tokio::sync::mpsc::UnboundedReceiver<(u64, PeerEvent)>) {
         let (events, rx) = unbounded_channel();
-        (Worker { events, call: None, latest: 0, connected: None, mic_device: None, audio: None, audio_error: None, early: None, no_sound: true }, rx)
+        let opened = unbounded_channel().0;
+        (Worker { events, opened, call: None, latest: 0, connected: None, mic_device: None, audio: None, audio_error: None, early: None, open: None }, rx)
+    }
+
+    fn offer(call: u64) -> CallCommand {
+        CallCommand::Offer { call, ice_servers: vec![], mic: None, muted: false, relay_only: false }
+    }
+
+    /// Devices that take a second to open; how many are open.
+    struct Slow(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Sound for Slow {
+        fn trouble(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl Drop for Slow {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// N4N-5: a connected call is muted, left and replaced while its sound devices open; those that come late are closed again, and
+    /// never become the next call's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_sound_devices_hold_no_command() {
+        use std::sync::atomic::Ordering;
+        let (mut w, _rx) = worker();
+        let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let opens = open.clone();
+        w.open = Some(Arc::new(move |_, _, _| {
+            std::thread::sleep(Duration::from_secs(1));
+            opens.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Slow(opens.clone())) as Box<dyn Sound>)
+        }));
+        let (opened, mut opened_rx) = unbounded_channel();
+        w.opened = opened;
+        w.command(offer(1)).await;
+        let start = Instant::now();
+        w.call_event(1, PeerEvent::Connected).await;
+        w.command(CallCommand::Mute { call: 1, on: true }).await;
+        assert!(w.call.as_ref().unwrap().muted.load(Ordering::Relaxed));
+        w.command(CallCommand::Hangup { call: 1 }).await;
+        assert!(start.elapsed() < Duration::from_millis(700), "{:?}", start.elapsed());
+        assert!(w.call.is_none());
+        // The next call, whose devices come after the first one's.
+        w.command(offer(2)).await;
+        w.call_event(2, PeerEvent::Connected).await;
+        let first = opened_rx.recv().await.unwrap();
+        assert_eq!(first.0, 1);
+        w.audio_opened(first);
+        assert!(w.audio.is_none(), "another call's");
+        let second = opened_rx.recv().await.unwrap();
+        w.audio_opened(second);
+        assert!(w.audio.is_some());
+        while open.load(Ordering::SeqCst) > 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        w.command(CallCommand::Hangup { call: 2 }).await;
+        while open.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

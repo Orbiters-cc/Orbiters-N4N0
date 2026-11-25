@@ -16,8 +16,12 @@ pub mod camera_track;
 pub mod camera_web;
 pub mod vrchat_grip;
 pub mod detect;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) mod desk_shared;
 #[cfg(windows)]
 pub mod desktop;
+#[cfg(target_os = "macos")]
+pub mod desktop_mac;
 #[cfg(windows)]
 pub mod desk_translate;
 #[cfg(windows)]
@@ -95,8 +99,15 @@ fn usage_name(action: &Action) -> String {
 /// Whether the desktop's panels are wanted: VRChat runs on this computer in desktop mode (without SteamVR, or with SteamVR running while VRChat
 /// says it is in desktop mode: the person is at the screen, verify2-r15 S5), and the settings say so: a menu around VRChat's, its camera's
 /// tiles, or translation (whose translations the desktop's process shows, menus or none: verify-r15).
+///
+/// On a Mac, where the app sees no process of VRChat's: the person's own VRChat runs under the engine, and a menu around VRChat's is wanted (its camera's tiles and
+/// translation are not there).
 pub fn wanted_on_desktop(snap: &Snapshot) -> bool {
-    orbiters_core::here::HERE.desktop_panels
+    let here = orbiters_core::here::HERE;
+    if cfg!(target_os = "macos") {
+        return here.desktop_panels && snap.launcher.desktop_game.is_some() && (!snap.steamvr.running || snap.n4n0.desktop_mode) && snap.settings.orbit.any();
+    }
+    here.desktop_panels
         && snap.vrchat.running
         && !snap.vrchat.remote
         && (!snap.steamvr.running || snap.n4n0.desktop_mode)
@@ -948,7 +959,7 @@ pub struct Panels {
     audio_outputs: Vec<orbiters_core::settings::AudioEndpoint>,
     audio_outputs_coming: Option<mpsc::Receiver<Vec<orbiters_core::settings::AudioEndpoint>>>,
     /// What was last taken as how the parts look.
-    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>, Option<orbiters_i18n::Language>, orbiters_i18n::Language)>,
+    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>, Option<orbiters_i18n::Language>, orbiters_i18n::Language, (u32, u32))>,
     /// A capture turning on the sheet, on the desktop: its view, its newest picture not painted yet, what it has been painted with, and the hand on it.
     sheet_view: Option<sheet_view::SheetView>,
     view_frame: Option<sheet_view::Frame>,
@@ -1048,6 +1059,8 @@ pub struct Panels {
     pub facts: Facts,
     /// Pixels of picture a placed pixel.
     sharp: f32,
+    /// On a Mac's screen ([`Panels::on_a_mac`]).
+    mac: bool,
     /// World search is the platform's in VR (where its 3D view lives), here on the desktop.
     worlds_here: bool,
     /// The person's Hide: nothing shows for this opening.
@@ -1203,6 +1216,7 @@ impl Panels {
             recents: Recents::default(),
             facts: Facts::default(),
             sharp,
+            mac: false,
             worlds_here,
             hidden: false,
             talking: false,
@@ -1238,6 +1252,20 @@ impl Panels {
             #[cfg(test)]
             opened_in_browser: Vec::new(),
         }
+    }
+
+    /// These parts are on a Mac's screen: no 3D picture can be taken there (VRChat's stream camera is Windows'), and nothing of a headset is offered.
+    #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+    pub fn on_a_mac(mut self) -> Self {
+        self.mac = true;
+        self.facts.mac = true;
+        self
+    }
+
+    /// N4N0's keyboard shows in a page here, and takes what is typed: as last said to the service.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn typing(&self) -> bool {
+        self.reported.is_some_and(|(_, _, keyboard)| keyboard)
     }
 
     pub fn open_menu(&self) -> Option<Around> {
@@ -2286,7 +2314,8 @@ impl Panels {
         }
         // What is chosen in Settings: from now on, all of it painted again. A colour held on the bar is what shows until it is let go.
         crate::language::follow(&snap.settings);
-        let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()), crate::language::chosen(&snap.settings), orbiters_i18n::language());
+        crate::appearance::follow(&snap.settings, || {});
+        let style = (crate::appearance::orbit(&snap.settings), snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()), crate::language::chosen(&snap.settings), orbiters_i18n::language(), crate::appearance::drawn_in());
         if self.style_seen.as_ref() != Some(&style) && self.hue_held.is_none() {
             panels::set_style(&style.0);
             self.style_seen = Some(style);
@@ -2576,7 +2605,7 @@ impl Panels {
             strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
             // While a colour is held on the bar, that one.
             orbit: {
-                let mut orbit = snap.settings.orbit;
+                let mut orbit = crate::appearance::orbit(&snap.settings);
                 if self.hue_held.is_some() {
                     (orbit.accent, orbit.retro_color) = (self.facts.orbit.accent, self.facts.orbit.retro_color);
                 }
@@ -2631,6 +2660,7 @@ impl Panels {
             playing_link_copied: menu.media.as_ref().and_then(|m| m.video.as_deref()).is_some_and(|v| menu.copied.as_deref() == Some(v)),
             can_light: menu.light.is_some(),
             vr_close: self.sharp > 1.0,
+            mac: self.mac,
             picture_mode: self.facts.picture_mode,
             bloomed: self.facts.bloomed,
             hint: self.facts.hint,
@@ -3214,7 +3244,7 @@ impl Panels {
     fn set(&mut self, pick: panels::Pick, snap: &Snapshot) {
         use orbiters_core::settings::MenuLook;
         let retro = snap.settings.orbit.theme == MenuLook::Retro;
-        let colour = |c: [u8; 3]| if retro { serde_json::json!({ "orbit": { "retro_color": c } }) } else { serde_json::json!({ "orbit": { "accent": c } }) };
+        let colour = |c: [u8; 3]| if retro { serde_json::json!({ "orbit": { "retro_color": c } }) } else { serde_json::json!({ "orbit": { "accent": c, "accent_own": true } }) };
         let patch = match pick {
             panels::Pick::Layout(layout) => serde_json::json!({ "orbit": { "layout": layout } }),
             panels::Pick::Motion(motion) => serde_json::json!({ "orbit": { "vr_motion": motion } }),
@@ -3828,7 +3858,7 @@ impl Panels {
         self.booster_held = None;
         self.smoothing_held = None;
         if self.hue_held.take().is_some() {
-            let saved = self.backend.view().settings.orbit;
+            let saved = crate::appearance::orbit(&self.backend.view().settings);
             self.facts.orbit = saved;
             panels::set_style(&saved);
             self.paint_all_again();
@@ -3897,8 +3927,8 @@ impl Panels {
                 self.show_hue(colour);
                 self.hue_held = None;
             }
-            let key = if self.facts.orbit.theme == MenuLook::Retro { "retro_color" } else { "accent" };
-            self.backend.patch_settings(serde_json::json!({ "orbit": { key: colour } }));
+            let patch = if self.facts.orbit.theme == MenuLook::Retro { serde_json::json!({ "retro_color": colour }) } else { serde_json::json!({ "accent": colour, "accent_own": true }) };
+            self.backend.patch_settings(serde_json::json!({ "orbit": patch }));
         }
         if self.turning.take().is_some() {
             if let Some(view) = &self.sheet_view {
@@ -4735,16 +4765,16 @@ pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     use orbiters_ui::{icons, theme, widgets};
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(area, 0.0, panels::look::OPAQUE);
-    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, tr("Type on your keyboard"), theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, tr("Enter searches"), theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
+    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::label());
+    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, tr("Type on your keyboard"), theme::font(22.0, theme::weight::BOLD), panels::look::label());
+    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, tr("Enter searches"), theme::font(15.0, theme::weight::MEDIUM), panels::look::muted());
     // What the world's player has now, which is what a search here would replace.
     if let Some(title) = playing {
         let row = egui::Rect::from_center_size(pos2(area.center().x, area.bottom() - 42.0), vec2(area.width() - 96.0, 56.0));
         p.rect_filled(row, theme::radius(10.0), panels::look::TILE);
-        widgets::icon(p, pos2(row.left() + 30.0, row.center().y), icons::MONITOR_PLAY, 26.0, panels::look::LABEL);
+        widgets::icon(p, pos2(row.left() + 30.0, row.center().y), icons::MONITOR_PLAY, 26.0, panels::look::label());
         let font = theme::font(13.0, theme::weight::SEMIBOLD);
-        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, tr("In this world's player"), font, panels::look::MUTED);
+        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, tr("In this world's player"), font, panels::look::muted());
         let font = theme::font(16.0, theme::weight::SEMIBOLD);
         let room = row.width() - 72.0;
         let mut shown = title.to_string();
@@ -4754,7 +4784,7 @@ pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
             shown.pop();
             shown.push('…');
         }
-        p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::LABEL);
+        p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::label());
     }
 }
 
@@ -5215,6 +5245,29 @@ fn note_words(text: &str) -> (String, String) {
 
 #[cfg(test)]
 mod desktop_wanted_tests {
+    /// On a Mac the panels are wanted for the person's own VRChat under the engine, and for nothing else: not one on the network, not with both menus off (their camera's
+    /// tiles are not there), and no more once it ended.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mac_s_panels_follow_its_own_vrchat() {
+        let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
+        assert!(!super::wanted_on_desktop(&snap), "no game");
+        snap.vrchat.running = true;
+        snap.vrchat.remote = true;
+        assert!(!super::wanted_on_desktop(&snap), "a VRChat on the network");
+        snap.launcher.desktop_game = Some(4242);
+        assert!(super::wanted_on_desktop(&snap), "this Mac's, one on the network or none");
+        (snap.vrchat.running, snap.vrchat.remote) = (false, false);
+        assert!(super::wanted_on_desktop(&snap));
+        snap.settings.orbit.wheel = false;
+        assert!(super::wanted_on_desktop(&snap), "around the Quick Menu");
+        snap.settings.orbit.quick_menu = false;
+        assert!(!super::wanted_on_desktop(&snap), "both off, the camera's tiles still on");
+        snap.settings.orbit.wheel = true;
+        snap.launcher.desktop_game = None;
+        assert!(!super::wanted_on_desktop(&snap), "it ended");
+    }
+
     /// verify-r15: translation on keeps the desktop's process (which shows its translations) with every menu and the camera's tiles off; off, nothing does.
     #[test]
     fn translation_alone_keeps_the_desktop_s_process() {
@@ -5227,7 +5280,7 @@ mod desktop_wanted_tests {
         snap.settings.translate.enabled = true;
         snap.settings.translate.window_on = true;
         if menus_off {
-            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::here::HERE.desktop_panels, "translation on, menus off");
+            assert_eq!(super::wanted_on_desktop(&snap), orbiters_core::here::HERE.window_text, "translation on, menus off");
             snap.settings.translate.enabled = false;
             assert!(!super::wanted_on_desktop(&snap), "nothing wanted");
         }
@@ -5242,6 +5295,8 @@ mod desktop_wanted_tests {
         }
         let mut snap = crate::state::Snapshot::new(orbiters_core::settings::Settings::default());
         snap.vrchat.running = true;
+        // (a Mac's VRChat is known by the engine's launcher of it)
+        snap.launcher.desktop_game = Some(1);
         assert!(snap.settings.orbit.any(), "menus around VRChat's are on by default");
         // (SteamVR running, VRChat's desktop mode); VRChat in VR needs SteamVR.
         for (steamvr, desktop) in [(false, true), (true, true), (true, false)] {

@@ -92,7 +92,7 @@ impl Toasts {
             let mut bottom = screen.bottom() - 20.0;
             for t in self.items.iter().rev() {
                 let (glyph, color) = t.kind.icon();
-                let text = Txt::new(orbiters_i18n::tr(&t.message), 13.0).color(theme::FG).line_height(20.0);
+                let text = Txt::new(orbiters_i18n::tr(&t.message), 13.0).color(theme::fg()).line_height(20.0);
                 let galley = ui.painter().layout_job(text.job(WIDTH - 16.0 - 17.0 - 12.0 - 16.0));
                 let h = galley.size().y + 28.0;
                 let id = Id::unique(("orbiters-toast", t.id));
@@ -116,7 +116,7 @@ impl Toasts {
                 p.multiply_opacity(alpha);
                 widgets::panel(&p, rect, 16.0);
                 widgets::icon(&p, pos2(rect.left() + 16.0 + 8.5, rect.top() + 14.0 + 10.0), glyph, 17.0, color);
-                p.galley(pos2(rect.left() + 16.0 + 17.0 + 12.0, rect.top() + 14.0), galley, theme::FG);
+                p.galley(pos2(rect.left() + 16.0 + 17.0 + 12.0, rect.top() + 14.0), galley, theme::fg());
                 // Countdown bar: a 2-point line shrinking over seconds needs no more than 30 frames a second.
                 let life = t.kind.lifetime();
                 let k = 1.0 - (anim::since_every(ctx, t.born, life, 30.0) / life).clamp(0.0, 1.0) as f32;

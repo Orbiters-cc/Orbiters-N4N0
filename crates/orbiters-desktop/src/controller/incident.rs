@@ -1761,17 +1761,17 @@ mod tests {
     /// since its launcher was born and before that moment, and only while that launcher is sure to live.
     #[test]
     fn what_a_capture_reads_is_the_launch_s_own_from_the_moment_it_is_found() {
-        use std::io::Read as _;
         let dir = std::env::temp_dir().join(format!("orbiters-incident-held-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("vrchat")).unwrap();
+        std::fs::create_dir_all(dir.join("engine")).unwrap();
         let now = || std::time::SystemTime::now();
         let birth_of = |at: std::time::SystemTime| {
             let since = at.duration_since(std::time::UNIX_EPOCH).unwrap();
             (since.as_secs(), since.subsec_micros())
         };
         let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
-        let engine_log = dir.join("wine-438100.log");
+        let engine_log = dir.join("engine").join("wine-438100.log");
         let ring = ring_of(&engine_log);
         let vrchat = |name: &str| dir.join("vrchat").join(format!("output_log_{name}.txt"));
         // Another launch's, made before: never this one's, two seconds before or not.
@@ -1785,10 +1785,12 @@ mod tests {
         let mut f = followed();
         f.associate(&dir.join("vrchat"), &|| true);
         assert!(f.engine.is_none() && f.vrchat.is_none() && f.ring.is_none());
-        // Its own.
+        // Its own, made anew. In a folder made anew too: Windows gives a file made again under a name removed within 15 seconds
+        // the time the removed one was made (NTFS's tunnelling, kept by folder).
         pause();
+        std::fs::rename(dir.join("engine"), dir.join("engine before")).unwrap();
+        std::fs::create_dir(dir.join("engine")).unwrap();
         for path in [&engine_log, &ring] {
-            std::fs::remove_file(path).unwrap();
             std::fs::write(path, "mine").unwrap();
         }
         std::fs::write(vrchat("2"), begun("mine")).unwrap();
@@ -1810,8 +1812,8 @@ mod tests {
         f.associate(&dir.join("vrchat"), &|| true);
         let held = f.held();
         for file in [&held.engine, &held.vrchat, &held.ring] {
-            let mut text = String::new();
-            file.as_ref().unwrap().try_clone().unwrap().read_to_string(&mut text).unwrap();
+            // Read as the app reads it: by place. Windows moves a file's own position with each read, a Mac does not.
+            let text = String::from_utf8(read_at(file.as_ref().unwrap(), 0, 1 << 20).unwrap()).unwrap();
             assert_eq!(text.lines().last(), Some("mine"));
         }
         // Made after the moment it is looked: not found to be anyone's.
@@ -1824,7 +1826,6 @@ mod tests {
     /// the command line this launch's launcher starts the game with; of two, with nothing that tells them apart, none is.
     #[test]
     fn vrchat_s_log_is_the_one_that_names_this_launch_s_own_command_line() {
-        use std::io::Read as _;
         let dir = std::env::temp_dir().join(format!("orbiters-incident-own-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1840,11 +1841,10 @@ mod tests {
             text + tail
         };
         let held = |arguments: Option<&[String]>| {
-            let mut text = String::new();
             let arguments = arguments.map(<[String]>::to_vec);
             let mut followed = Followed { session: "s".into(), launcher: 1, birth, engine_log: dir.join("none"), arguments, engine: None, vrchat: None, ring: None };
             followed.associate(&dir, &|| true);
-            followed.vrchat?.read_to_string(&mut text).unwrap();
+            let text = String::from_utf8(read_at(&followed.vrchat?, 0, 1 << 20).unwrap()).unwrap();
             Some(text.lines().last().unwrap_or_default().to_string())
         };
         let own: Vec<String> = ["--no-vr", "-screen-fullscreen", "1", "vrchat://launch?id=x"].map(String::from).to_vec();

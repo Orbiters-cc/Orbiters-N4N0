@@ -47,7 +47,7 @@ pub(super) fn rows(ui: &mut Ui, state: &mut State, target: &Avatar, indent: f32)
         let p = ui.painter();
         widgets::text_truncated(p, pos2(x, row.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&name, 13.0).weight(weight::MEDIUM), tw);
         let detail = tr!("{tool} · saved {when}", tool = l.tool.label(), when = crate::pages::ago(ui.ctx(), l.modified, now));
-        widgets::text_truncated(p, pos2(x, row.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(detail, 11.5).color(theme::FG_3), tw);
+        widgets::text_truncated(p, pos2(x, row.center().y + 9.0), Align2::LEFT_CENTER, &Txt::new(detail, 11.5).color(theme::fg_3()), tw);
         // Where it is, whole, on hover.
         let _ = ui
             .interact(Rect::from_min_max(pos2(tile.left(), row.top()), pos2(br.left() - 4.0, row.bottom())), Id::unique(("blend-row", &target.id, &l.blend)), Sense::hover())

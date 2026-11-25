@@ -49,6 +49,52 @@ pub struct Card {
     pub discord: Option<Host>,
     pub world: Option<World>,
     pub steps: u32,
+    /// The VRChat calendar entry made for it (`cal_…`); none from a server that does not say, or for a cancelled event.
+    pub calendar_id: Option<String>,
+    /// Its page on the website.
+    pub url: Option<String>,
+    /// The member asked for an invite to any step and did not withdraw it; none signed out.
+    pub signed_up: Option<bool>,
+}
+
+/// A slot of an event's staff and who holds it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Staff {
+    pub name: String,
+    pub people: Vec<Person>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Person {
+    pub username: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Prize {
+    /// A place ("1st"), as the organiser wrote or numbered it.
+    pub place: Option<serde_json::Value>,
+    pub title: String,
+}
+
+impl Prize {
+    pub fn place(&self) -> String {
+        match &self.place {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// An event's staff and prizes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Details {
+    pub staff: Vec<Staff>,
+    pub prizes: Vec<Prize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -110,6 +156,40 @@ pub struct Overview {
     pub steps: Vec<Step>,
     /// VRChat could not name every world yet: ask again shortly.
     pub worlds_pending: bool,
+    pub details: Details,
+    /// The VRChat calendar entry made for it (`cal_…`), its page on the website, whether the member signed up, and their
+    /// invites (none signed out, or from a server that does not say).
+    pub calendar_id: Option<String>,
+    pub url: Option<String>,
+    pub signed_up: Option<bool>,
+    pub invites: Option<Invites>,
+    /// How many signed up, its Discord event and announcement: for who runs it on Orbiters, none for everyone else.
+    pub signups: Option<u32>,
+    pub discord_event_url: Option<String>,
+    pub discord_announcement_url: Option<String>,
+}
+
+impl Card {
+    /// The event as far as its card says it, until its page is read.
+    pub fn overview(&self) -> Overview {
+        Overview {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            status: self.status.clone().unwrap_or_default(),
+            starts_at: self.starts_at.clone(),
+            ends_at: self.ends_at.clone(),
+            category: self.category.clone(),
+            adult_only: self.adult_only,
+            has_banner: self.has_banner,
+            community: self.community.clone(),
+            discord: self.discord.clone(),
+            calendar_id: self.calendar_id.clone(),
+            url: self.url.clone(),
+            signed_up: self.signed_up,
+            ..Overview::default()
+        }
+    }
 }
 
 /// The member's invite status for each step (`pending`, `sending`, `sent`, `uncertain`, `failed`, `withdrawn`), and why
@@ -180,7 +260,15 @@ impl Refused {
     pub fn of(e: &anyhow::Error) -> Option<&Refused> {
         e.downcast_ref()
     }
+    /// What [`Api::events_of_calendar`] gets from a server from before its route: not found, or (its other routes ask for the
+    /// website's session first) not signed in. One that has the route answers neither: it takes anyone.
+    pub fn no_calendar_route(&self) -> bool {
+        matches!(self.status, 401 | 404)
+    }
 }
+
+/// Calendar entries asked of Orbiters at once.
+pub const CALENDAR_IDS: usize = 50;
 
 /// A person on Orbiters (a gallery's creator, a picture's author): their Discord picture when they have one.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -427,6 +515,15 @@ impl Api {
         answer(self.signed(r, token).call()?)
     }
 
+    /// The events made as these entries of a VRChat group's calendar (`cal_…`, at most [`CALENDAR_IDS`]) that the member may
+    /// open, past and members-only ones too; `token` so that Orbiters says whether they signed up. A server from before this
+    /// route refuses it ([`Refused::no_calendar_route`]).
+    pub fn events_of_calendar(&self, token: Option<&str>, ids: &[String]) -> anyhow::Result<Vec<Card>> {
+        anyhow::ensure!(!ids.is_empty() && ids.len() <= CALENDAR_IDS && ids.iter().all(|id| crate::group_events::is_event_id(id)), "{}", tr("not an Orbiters id"));
+        let r = self.agent().get(&self.url("community-events/public")).query("calendarIds", ids.join(","));
+        Ok(answer::<Cards>(self.signed(r, token).call()?)?.items)
+    }
+
     /// The url of an event's cover (read it with the member's credential: members-only covers need it).
     pub fn event_banner_url(&self, id: &str) -> anyhow::Result<String> {
         Ok(self.url(&format!("community-events/public/{}/banner", piece(id)?)))
@@ -554,6 +651,38 @@ mod tests {
         assert_eq!(o.steps.len(), 2);
         assert!(o.steps[0].invite_open && o.steps[0].world.as_ref().and_then(|w| w.name.as_deref()) == Some("Sunset Studio"));
         assert_eq!(o.community.as_ref().and_then(|c| c.account_id.as_deref()), Some("usr_c0ffee00-0000-4000-8000-000000000001"));
+    }
+
+    /// REQUEST28: what the event answers say for a group's calendar, as the server gives it to a member, to who runs the event
+    /// and to nobody; and as one from before says nothing of it.
+    #[test]
+    fn calendar_fields_read_as_given_and_as_left_out() {
+        let page: Cards = serde_json::from_str(
+            r#"{"items":[{"id":"e1","title":"T","description":"D","startsAt":"2026-11-28T20:00:00.000Z","endsAt":null,"category":"arts","status":"ended","adultOnly":false,"hasBanner":false,
+            "community":{"id":"grp_1","name":"Makers","iconUrl":null},"discord":{"name":"Workshop","iconUrl":"https://cdn.discordapp.com/icons/1/a.png"},"world":null,"steps":1,
+            "calendarId":"cal_1","url":"https://orbiters.cc/events/e1","signedUp":true},{"id":"e2","community":null,"calendarId":null,"url":"x","signedUp":null}]}"#,
+        )
+        .unwrap();
+        let (a, b) = (&page.items[0], &page.items[1]);
+        assert_eq!((a.calendar_id.as_deref(), a.signed_up, a.community.as_ref().and_then(|c| c.id.as_deref())), (Some("cal_1"), Some(true), Some("grp_1")));
+        assert!(b.calendar_id.is_none() && b.signed_up.is_none());
+        let o = a.overview();
+        assert_eq!((o.title.as_str(), o.status.as_str(), o.url.as_deref(), o.signed_up), ("T", "ended", Some("https://orbiters.cc/events/e1"), Some(true)));
+        assert!(o.discord.is_some() && o.signups.is_none() && o.steps.is_empty());
+        let staff: Overview = serde_json::from_str(r#"{"id":"e1","signups":7,"signedUp":false,"invites":{"items":{"main":"withdrawn"},"reasons":{}},"discordEventUrl":"https://discord.com/events/1/2","discordAnnouncementUrl":null}"#).unwrap();
+        assert!(staff.signups == Some(7) && staff.discord_event_url.is_some() && staff.discord_announcement_url.is_none() && staff.invites.is_some());
+        let member: Overview = serde_json::from_str(r#"{"id":"e1","signups":null,"signedUp":null,"invites":null,"discordEventUrl":null,"discordAnnouncementUrl":null}"#).unwrap();
+        assert!(member.signups.is_none() && member.invites.is_none() && member.discord_event_url.is_none());
+        let old: Overview = serde_json::from_str(r#"{"id":"e1"}"#).unwrap();
+        assert!(old.calendar_id.is_none() && old.url.is_none());
+        for (status, old) in [(404, true), (401, true), (400, false), (403, false), (429, false), (500, false)] {
+            assert_eq!(refused(status, "").no_calendar_route(), old, "{status}");
+        }
+        // Only calendar entries go into the question, and never more than it takes.
+        let api = Api::at("http://127.0.0.1:9");
+        for bad in [vec![], vec!["cal_1,cal_2".to_string()], vec!["evt_1".into()], vec!["cal_1".into(); 51]] {
+            assert!(api.events_of_calendar(None, &bad).unwrap_err().to_string().contains("not an Orbiters id"));
+        }
     }
 
     #[test]

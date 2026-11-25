@@ -263,6 +263,8 @@ fn record_phase(phase: usize, took: Duration) {
 pub(crate) struct PaintTextures(std::sync::Arc<egui::epaint::mutex::RwLock<egui::epaint::textures::TextureManager>>);
 impl PaintTextures {
     pub(crate) fn of(ctx: &egui::Context) -> Self { Self(ctx.tex_manager()) }
+    /// Which interface's textures these are, for as long as any of them is held.
+    pub(crate) fn id(&self) -> usize { std::sync::Arc::as_ptr(&self.0).cast::<()>() as usize }
     pub(crate) fn load_texture(&self, name: impl Into<String>, image: impl Into<egui::ImageData>, options: egui::TextureOptions) -> egui::TextureHandle {
         let id = self.0.write().alloc(name.into(), image.into(), options);
         egui::TextureHandle::new(self.0.clone(), id)
@@ -461,7 +463,7 @@ impl Canvas {
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
-        orbiters_ui::fonts::follow_language(&self.ctx);
+        orbiters_ui::follow(&self.ctx);
         self.ran = true;
         let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
@@ -492,7 +494,7 @@ impl Canvas {
         let mut input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), self.size)), time: Some(time), ..Default::default() };
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(self.zoom), ..Default::default() });
         let (restyle, size) = (self.restyle.filter(|_| !self.restyle_off), self.size);
-        orbiters_ui::fonts::follow_language(&self.ctx);
+        orbiters_ui::follow(&self.ctx);
         self.ran = true;
         let phase = Instant::now();
         let mut full = self.ctx.run_ui(input, |ui| {
@@ -1025,6 +1027,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         }
         // The language the settings ask for, for the dashboard tab too, whether or not the menus around VRChat are on.
         crate::language::follow(&snap.settings);
+        crate::appearance::follow(&snap.settings, || {});
         // Words that stay on the dashboard are put into the language now, as the settings can change it while they show.
         if let Some(failed) = &actions.failed {
             let text = failed.text();
@@ -1331,7 +1334,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
                 ..Default::default()
             };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
-            orbiters_ui::fonts::follow_language(&ctx);
+            orbiters_ui::follow(&ctx);
             let mut full = ctx.run_ui(input, |ui| t.state.show(ui, &snap, &backend, &mut poses));
             if orbiters_ui::widgets::take_press(&ctx) {
                 sounds.click();
@@ -1339,7 +1342,7 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             painter.set_textures(&mut full.textures_delta);
             let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
             // Only what changed is painted, and only that part sent; a frame like the last one costs no upload.
-            painter.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_950);
+            painter.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::ink_950());
             let damage = painter.damage();
             tab_presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(&overlay, main, painter.pixels(), WIDTH, HEIGHT, r));
             painter.free_textures(&mut full.textures_delta);
@@ -1401,7 +1404,7 @@ pub fn painter() -> Software {
     let mut full = ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), ui::SIZE)), ..Default::default() }, |ui| ui::backdrop(ui));
     sw.set_textures(&mut full.textures_delta);
     let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-    sw.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_950);
+    sw.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::ink_950());
     sw.keep_as_backdrop();
     sw.free_textures(&mut full.textures_delta);
     sw
@@ -1419,11 +1422,11 @@ fn thumbnail() -> Option<Vec<u8>> {
     for _ in 0..2 {
         let mut full = ctx.run_ui(input.clone(), |ui| {
             let size = orbiters_ui::n4n0_logo::size_for_width(88.0);
-            orbiters_ui::n4n0_logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::theme::MARK);
+            orbiters_ui::n4n0_logo::paint(ui.painter(), Rect::from_center_size(pos2(64.0, 64.0), size), orbiters_ui::theme::mark());
         });
         sw.set_textures(&mut full.textures_delta);
         let primitives = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-        out = Some(sw.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::INK_900).to_vec());
+        out = Some(sw.paint(&primitives, full.pixels_per_point, orbiters_ui::theme::ink_900()).to_vec());
         sw.free_textures(&mut full.textures_delta);
     }
     out

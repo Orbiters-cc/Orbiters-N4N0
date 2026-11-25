@@ -623,14 +623,14 @@ fn world_card(
     paint::fill_gradient(
         &p,
         &shade,
-        &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::INK_950, 0.1)), (1.0, theme::alpha(theme::INK_950, 0.9))]),
+        &Gradient::vertical(thumb, &[(0.0, Color32::TRANSPARENT), (0.55, theme::alpha(theme::ink_950(), 0.1)), (1.0, theme::alpha(theme::ink_950(), 0.9))]),
     );
     let mut x = thumb.left() + 12.0;
     if w.reconstructed() > 0 {
-        x += badge(&p, ui, pos2(x, thumb.top() + 12.0), "3D", theme::black(0.55), theme::ACCENT, false) + 6.0;
+        x += badge(&p, ui, pos2(x, thumb.top() + 12.0), "3D", theme::black(0.55), theme::accent(), false) + 6.0;
     }
     if !w.shots.is_empty() {
-        badge(&p, ui, pos2(x, thumb.top() + 12.0), &tr_n("{count} picture", "{count} pictures", w.shots.len() as u64), theme::black(0.55), theme::FG_2, false);
+        badge(&p, ui, pos2(x, thumb.top() + 12.0), &tr_n("{count} picture", "{count} pictures", w.shots.len() as u64), theme::black(0.55), theme::fg_2(), false);
     }
     if shared {
         badge(&p, ui, pos2(thumb.right() - 12.0, thumb.top() + 12.0), tr("On Orbiters"), theme::alpha(theme::OK, 0.2), theme::OK, true);
@@ -655,7 +655,7 @@ fn world_card(
         &p,
         pos2(x, thumb.bottom() + 42.0),
         Align2::LEFT_CENTER,
-        &Txt::new(line, 12.0).color(theme::FG_3),
+        &Txt::new(line, 12.0).color(theme::fg_3()),
         r.width() - 32.0,
     );
     let mut px = x;
@@ -700,11 +700,11 @@ fn empty_state(ui: &mut Ui, cx: &Cx, searching: bool, height: f32) {
     };
     widgets::text(&p, rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, &Txt::new(title, 17.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 13.0).color(theme::FG_3).line_height(20.0).job(380.0);
+        let mut job = Txt::new(text, 13.0).color(theme::fg_3()).line_height(20.0).job(380.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::FG_3);
+    p.galley(pos2(rect.center().x, rect.center().y + 34.0), g, theme::fg_3());
 }
 
 /// What the world's page shares and how.
@@ -1146,7 +1146,7 @@ fn hero(
     paint::fill_gradient(
         &p,
         &shade,
-        &Gradient::vertical(rect, &[(0.0, theme::alpha(theme::INK_950, 0.15)), (0.45, Color32::TRANSPARENT), (1.0, theme::alpha(theme::INK_950, 0.85))]),
+        &Gradient::vertical(rect, &[(0.0, theme::alpha(theme::ink_950(), 0.15)), (0.45, Color32::TRANSPARENT), (1.0, theme::alpha(theme::ink_950(), 0.85))]),
     );
     if content <= 0.0 {
         return;
@@ -1188,7 +1188,7 @@ fn hero(
         &cp,
         pos2(rect.left() + 28.0, rect.bottom() - 28.0 + dy),
         Align2::LEFT_CENTER,
-        &Txt::new(sub, 13.0).color(theme::FG_2),
+        &Txt::new(sub, 13.0).color(theme::fg_2()),
         rect.width() - 56.0 - buttons_w,
     );
 
@@ -1227,13 +1227,13 @@ pub(crate) fn copy_name(ui: &mut Ui, id: &str, name: &str, at: egui::Pos2) {
     let copied = ctx.data(|d| d.get_temp::<f64>(key)).is_some_and(|at| now - at < COPIED_FOR);
     let rect = Rect::from_min_size(pos2(at.x, at.y - 16.0), vec2(32.0, 32.0));
     let (glyph, label) = if copied { (icons::CHECK, mark("Copied")) } else { (icons::COPY, mark("Copy the world's name")) };
-    let b = IconButton::new(glyph, label).size(32.0, 15.0).backdrop(theme::alpha(theme::INK_950, 0.35)).id_salt(("world-copy-name", id));
+    let b = IconButton::new(glyph, label).size(32.0, 15.0).backdrop(theme::alpha(theme::ink_950(), 0.35)).id_salt(("world-copy-name", id));
     if widgets::activated(&b.show_at(ui, rect)) {
         ctx.copy_text(name.to_string());
         ctx.data_mut(|d| d.insert_temp(key, now));
     }
     if copied {
-        let t = Txt::new(tr("Copied"), 13.0).weight(weight::SEMIBOLD).color(theme::ACCENT);
+        let t = Txt::new(tr("Copied"), 13.0).weight(weight::SEMIBOLD).color(theme::accent());
         widgets::text(ui.painter(), pos2(rect.right() + 8.0, rect.center().y), Align2::LEFT_CENTER, &t);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
@@ -1242,7 +1242,7 @@ pub(crate) fn copy_name(ui: &mut Ui, id: &str, name: &str, at: egui::Pos2) {
 fn section_title(ui: &Ui, rect: Rect, title: &str, sub: &str) {
     let p = ui.painter();
     widgets::text(p, pos2(rect.left(), rect.top() + 12.0), Align2::LEFT_CENTER, &Txt::new(title, 18.0).weight(weight::SEMIBOLD));
-    widgets::text_truncated(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::FG_3), rect.width() - 180.0);
+    widgets::text_truncated(p, pos2(rect.left(), rect.top() + 34.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.5).color(theme::fg_3()), rect.width() - 180.0);
 }
 
 fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
@@ -1250,10 +1250,10 @@ fn note(ui: &Ui, rect: Rect, glyph: &str, title: &str, text: &str) {
     widgets::frame(p, rect, 16.0, theme::surface_soft());
     let tile = Rect::from_min_size(pos2(rect.left() + 16.0, rect.center().y - 18.0), vec2(36.0, 36.0));
     p.rect_filled(tile, theme::radius(10.0), theme::white(0.06));
-    widgets::icon(p, tile.center(), glyph, 17.0, theme::FG_3);
+    widgets::icon(p, tile.center(), glyph, 17.0, theme::fg_3());
     let x = tile.right() + 14.0;
     widgets::text(p, pos2(x, rect.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::MEDIUM));
-    widgets::text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::FG_3), rect.right() - x - 16.0);
+    widgets::text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::fg_3()), rect.right() - x - 16.0);
 }
 
 enum RowAction {
@@ -1317,24 +1317,24 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     let upload = sharing.preview_upload(&s.dir);
     let waiting = cx.snap.reconstruct_queue.contains(&s.dir);
     let (state_text, state_color) = if let Some(j) = job {
-        (format!("{} · {:.0}%", stage_label(j.stage), overall_progress(j) * 100.0), theme::ACCENT)
+        (format!("{} · {:.0}%", stage_label(j.stage), overall_progress(j) * 100.0), theme::accent())
     } else if waiting {
-        (tr("Waiting to reconstruct").to_string(), theme::FG_2)
+        (tr("Waiting to reconstruct").to_string(), theme::fg_2())
     } else if let Some(u) = upload.filter(|u| u.running()) {
         match u.state {
-            UploadState::Preparing => (tr("Preparing the web preview…").to_string(), theme::ACCENT),
-            _ => (tr!("Sharing · {percent}%", percent = format!("{:.0}", u.fraction() * 100.0)), theme::ACCENT),
+            UploadState::Preparing => (tr("Preparing the web preview…").to_string(), theme::accent()),
+            _ => (tr!("Sharing · {percent}%", percent = format!("{:.0}", u.fraction() * 100.0)), theme::accent()),
         }
     } else if let Some(r) = &s.reconstruction {
         let splats = compact(r.gaussians as u64);
         match r.psnr_held_out {
-            Some(q) => (tr!("Splats ready · {count} · {quality} dB", count = splats, quality = format!("{q:.1}")), theme::FG_2),
-            None => (tr!("Splats ready · {count}", count = splats), theme::FG_2),
+            Some(q) => (tr!("Splats ready · {count} · {quality} dB", count = splats, quality = format!("{q:.1}")), theme::fg_2()),
+            None => (tr!("Splats ready · {count}", count = splats), theme::fg_2()),
         }
     } else if st.depth_frames == 0 {
-        (tr("No depth frames: cannot be reconstructed").to_string(), theme::FG_4)
+        (tr("No depth frames: cannot be reconstructed").to_string(), theme::fg_4())
     } else {
-        (tr("Not reconstructed yet").to_string(), theme::FG_3)
+        (tr("Not reconstructed yet").to_string(), theme::fg_3())
     };
     if upload.is_some_and(|u| matches!(u.state, UploadState::Done { .. })) {
         line.push_str(&format!(" · {}", tr("shared")));
@@ -1342,7 +1342,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
     let offer = super::reconstruct_again::offer(&super::reconstruct_again::Facts::of_session(s), cx.snap);
     use super::reconstruct_again::Offer;
     let right_w = 330.0;
-    widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), rect.right() - x - right_w - 16.0);
+    widgets::text_truncated(&p, pos2(x, rect.top() + 46.0), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::fg_3()), rect.right() - x - right_w - 16.0);
     widgets::text_truncated(
         &p,
         pos2(x, rect.top() + 64.0),
@@ -1354,7 +1354,7 @@ fn session_row(ui: &mut Ui, cx: &Cx, rect: Rect, s: &SessionSummary, tex: Option
         let bar = Rect::from_min_size(pos2(x, rect.bottom() - 6.0), vec2(rect.right() - x - right_w - 16.0, 3.0));
         let f = anim::spring_from(ui.ctx(), Id::unique(("preview-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
         p.rect_filled(bar, theme::radius(1.5), theme::white(0.08));
-        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::ACCENT);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, 3.0)), theme::radius(1.5), theme::accent());
     }
 
     if let (Offer::Running { fraction, .. } | Offer::Paused { fraction, .. }, Some(j)) = (offer, job) {
@@ -1468,7 +1468,7 @@ fn picture_tile(ui: &mut Ui, rect: Rect, shot: &Shot, tex: Option<&TextureHandle
     let mut p = ui.painter().clone();
     p.multiply_opacity(enter.clamp(0.0, 1.0));
     if picked > 0.01 {
-        p.rect_filled(rect, theme::radius(theme::TILE_RADIUS), theme::alpha(theme::ACCENT, 0.12 * picked));
+        p.rect_filled(rect, theme::radius(theme::TILE_RADIUS), theme::alpha(theme::accent(), 0.12 * picked));
     }
     match tex {
         Some(t) => {
@@ -1484,7 +1484,7 @@ fn picture_tile(ui: &mut Ui, rect: Rect, shot: &Shot, tex: Option<&TextureHandle
     }
     if look.shared || look.sending {
         let label = if look.sending { tr("Sharing…") } else { tr("Shared") };
-        let fg = if look.sending { theme::FG_2 } else { theme::OK };
+        let fg = if look.sending { theme::fg_2() } else { theme::OK };
         badge(&p, ui, pos2(r.left() + 8.0, r.top() + 8.0), label, theme::black(0.6), fg, false);
     }
     if can_pick && (look.selecting || hover > 0.01 || picked > 0.01) {
@@ -1492,12 +1492,12 @@ fn picture_tile(ui: &mut Ui, rect: Rect, shot: &Shot, tex: Option<&TextureHandle
         let mut cp = p.clone();
         cp.multiply_opacity(a);
         let c = check.center();
-        cp.circle_filled(c, 11.0, theme::mix(theme::black(0.35), theme::ACCENT, picked));
-        cp.circle_stroke(c, 11.0, egui::Stroke::new(1.5, theme::mix(theme::white(if over_check { 1.0 } else { 0.8 }), theme::ACCENT, picked)));
+        cp.circle_filled(c, 11.0, theme::mix(theme::black(0.35), theme::accent(), picked));
+        cp.circle_stroke(c, 11.0, egui::Stroke::new(1.5, theme::mix(theme::white(if over_check { 1.0 } else { 0.8 }), theme::accent(), picked)));
         if picked > 0.01 {
             let mut ip = cp.clone();
             ip.multiply_opacity(picked);
-            widgets::icon(&ip, c, icons::CHECK, 13.0, theme::ON_ACCENT);
+            widgets::icon(&ip, c, icons::CHECK, 13.0, theme::on_accent());
         }
     }
     if resp.clicked() {
@@ -1549,12 +1549,12 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
                 let bar = Rect::from_min_size(pos2(x, rect.center().y + 9.0), vec2(rect.width() - 44.0 - 60.0, 4.0));
                 let f = anim::spring_from(ctx, Id::unique(("pictures-upload", u.id)), [0.0], [u.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
                 p.rect_filled(bar, theme::radius(2.0), theme::white(0.08));
-                p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(4.0), 4.0)), theme::radius(2.0), theme::ACCENT);
+                p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(4.0), 4.0)), theme::radius(2.0), theme::accent());
                 widgets::text(
                     &p,
                     pos2(rect.right() - 22.0, rect.center().y + 10.0),
                     Align2::RIGHT_CENTER,
-                    &Txt::new(format!("{:.0}%", f * 100.0), 12.0).color(theme::FG_3),
+                    &Txt::new(format!("{:.0}%", f * 100.0), 12.0).color(theme::fg_3()),
                 );
             }
             return;
@@ -1569,7 +1569,7 @@ fn action_bar(ctx: &egui::Context, o: &Open, world: &VisitedWorld, sharing: &Sha
             &p,
             pos2(x, rect.center().y + 10.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr("Public on the Map explorer, with everyone in them"), 11.5).color(theme::FG_3),
+            &Txt::new(tr("Public on the Map explorer, with everyone in them"), 11.5).color(theme::fg_3()),
         );
         let mut right = rect.right() - 12.0;
         if sharing.account {
@@ -1653,7 +1653,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
     orbiters_ui::front::area(ctx, id, Order::Foreground, !closing).fixed_pos(area.min).interactable(!closing).show(ctx, |ui| {
         let (_, backdrop) = ui.allocate_exact_size(area.size(), Sense::click());
         let p = ui.painter().clone();
-        p.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.92 * morph::smoothstep(0.05, 0.6, t)));
+        p.rect_filled(area, 0.0, theme::alpha(theme::ink_950(), 0.92 * morph::smoothstep(0.05, 0.6, t)));
         let stage = area.shrink2(vec2(88.0, 72.0));
         let aspect = if shot.info.height > 0 { shot.info.width as f32 / shot.info.height as f32 } else { 16.0 / 9.0 };
         let (w, h) = if stage.width() / stage.height() > aspect { (stage.height() * aspect, stage.height()) } else { (stage.width(), stage.width() / aspect) };
@@ -1686,7 +1686,7 @@ fn viewer(ctx: &egui::Context, cx: &mut Cx, state: &mut State, world: &VisitedWo
             number = index + 1,
             count = count
         );
-        widgets::text(&pp, pos2(pic.left(), pic.bottom() + 24.0), Align2::LEFT_CENTER, &Txt::new(caption, 12.5).color(theme::FG_2));
+        widgets::text(&pp, pos2(pic.left(), pic.bottom() + 24.0), Align2::LEFT_CENTER, &Txt::new(caption, 12.5).color(theme::fg_2()));
         let mut vu = ui.new_child(UiBuilder::new().max_rect(area).id_salt("viewer-actions"));
         vu.multiply_opacity(k);
         if closing {

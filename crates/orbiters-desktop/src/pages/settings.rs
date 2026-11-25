@@ -55,6 +55,8 @@ pub struct State {
     experimental: super::experimental::State,
     /// The FPS booster's card.
     booster: super::booster_card::State,
+    /// Appearance: what its card of fonts read, and what is typed there.
+    appearance: super::appearance::State,
     /// Beta feedback: the menu mismatch buttons and their reports.
     beta: super::beta_feedback::State,
     /// The sub-tab shown: kept while the app runs, whatever page is visited in between.
@@ -134,6 +136,11 @@ impl State {
         self.choose_group(group, now);
         self.jump = jump.map(|id| Jump { id, lit: None, waited: 0, quiet: false });
         true
+    }
+
+    /// Screenshots: Appearance, with this computer's fonts shown as a list of these.
+    pub(crate) fn stage_fonts(&mut self, names: &[&str]) {
+        self.appearance.stage_fonts(names);
     }
 
     /// The sub-tab shown (tests, screenshots).
@@ -334,7 +341,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     }
     if state.query.is_empty() && !resp.has_focus() {
         let keys = if cfg!(target_os = "macos") { "⌘ K" } else { "Ctrl K" }; // i18n: not shown (key names, as on the keyboard)
-        let t = Txt::new(keys, 11.0).color(theme::FG_4);
+        let t = Txt::new(keys, 11.0).color(theme::fg_4());
         let s = widgets::text_size(ui, &t);
         let chip = Rect::from_min_size(pos2(search_r.right() - 14.0 - s.x - 12.0, search_r.center().y - 10.0), vec2(s.x + 12.0, 20.0));
         ui.painter().rect_filled(chip, theme::radius(6.0), theme::white(0.05));
@@ -418,7 +425,7 @@ fn side_list(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching:
     let pill = Rect::from_min_size(pos2(rect.left(), rect.top() + y), vec2(rect.width(), SIDE_ITEM));
     let p = ui.painter();
     p.rect_filled(pill, theme::radius(12.0), theme::white(0.07 * lit));
-    p.rect_filled(Rect::from_center_size(pos2(pill.left() + 1.5, pill.center().y), vec2(3.0, 18.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, lit));
+    p.rect_filled(Rect::from_center_size(pos2(pill.left() + 1.5, pill.center().y), vec2(3.0, 18.0)), theme::radius(1.5), theme::alpha(theme::accent(), lit));
     let mut picked = None;
     for (i, group) in groups.iter().enumerate() {
         let r = item(i);
@@ -428,9 +435,9 @@ fn side_list(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching:
         }
         let on = *group == shown && !searching;
         let none = searching && counts.get(i).copied().unwrap_or(0) == 0;
-        let target = if on { egui::Color32::WHITE } else if resp.hovered() { theme::FG_2 } else if none { theme::FG_4 } else { theme::FG_3 };
+        let target = if on { egui::Color32::WHITE } else if resp.hovered() { theme::fg_2() } else if none { theme::fg_4() } else { theme::fg_3() };
         let fg = anim::color(&ctx, id.with(("fg", i)), target, Spring::SNAPPY);
-        let icon_c = anim::color(&ctx, id.with(("ic", i)), if on { theme::ACCENT } else { target }, Spring::SNAPPY);
+        let icon_c = anim::color(&ctx, id.with(("ic", i)), if on { theme::accent() } else { target }, Spring::SNAPPY);
         let p = ui.painter();
         if on {
             widgets::icon_fill(p, pos2(r.left() + 22.0, r.center().y), group.icon(), 16.0, icon_c);
@@ -441,10 +448,10 @@ fn side_list(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching:
         let mut room = r.width() - 46.0 - 12.0;
         // While searching: how many results each has, where it has any.
         if searching && count > 0 {
-            let t = Txt::new(count.to_string(), 11.0).color(theme::FG_2);
+            let t = Txt::new(count.to_string(), 11.0).color(theme::fg_2());
             let s = widgets::text_size(ui, &t);
             let badge = Rect::from_min_size(pos2(r.right() - 10.0 - s.x - 14.0, r.center().y - 10.0), vec2(s.x + 14.0, 20.0));
-            ui.painter().rect_filled(badge, theme::radius(10.0), theme::alpha(theme::ACCENT, 0.16));
+            ui.painter().rect_filled(badge, theme::radius(10.0), theme::alpha(theme::accent(), 0.16));
             widgets::text(ui.painter(), badge.center(), Align2::CENTER_CENTER, &t);
             room -= badge.width() + 8.0;
         }
@@ -482,9 +489,9 @@ fn tab_row(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching: b
         let p = ui.painter();
         p.rect_filled(r, theme::radius(12.0), theme::white(0.03 + 0.04 * lit + 0.03 * hover));
         if lit > 0.01 {
-            p.rect_filled(Rect::from_center_size(pos2(r.center().x, r.bottom() - 1.5), vec2(18.0, 3.0)), theme::radius(1.5), theme::alpha(theme::ACCENT, lit));
+            p.rect_filled(Rect::from_center_size(pos2(r.center().x, r.bottom() - 1.5), vec2(18.0, 3.0)), theme::radius(1.5), theme::alpha(theme::accent(), lit));
         }
-        let c = if on { theme::ACCENT } else if resp.hovered() { theme::FG_2 } else { theme::FG_3 };
+        let c = if on { theme::accent() } else if resp.hovered() { theme::fg_2() } else { theme::fg_3() };
         let icon_at = if *group == shown { pos2(r.left() + 20.0, r.center().y) } else { r.center() };
         if on {
             widgets::icon_fill(p, icon_at, group.icon(), 16.0, c);
@@ -492,13 +499,13 @@ fn tab_row(ui: &mut Ui, rect: Rect, groups: &[Group], shown: Group, searching: b
             widgets::icon(p, icon_at, group.icon(), 16.0, c);
         }
         if *group == shown && w > icon_w + 12.0 {
-            let fg = if on { egui::Color32::WHITE } else { theme::FG_2 };
+            let fg = if on { egui::Color32::WHITE } else { theme::fg_2() };
             widgets::text_truncated(p, pos2(r.left() + 38.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(group.title(), 13.5).weight(weight::MEDIUM).color(fg), w - 50.0);
         }
         let count = counts.get(i).copied().unwrap_or(0);
         if searching && count > 0 {
             let dot = pos2(r.right() - 8.0, r.top() + 8.0);
-            p.circle_filled(dot, 4.0, theme::ACCENT);
+            p.circle_filled(dot, 4.0, theme::accent());
         }
     }
     picked
@@ -589,11 +596,11 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Opt
     let text_w = width - 28.0 - 32.0;
     let title_text = e.shown(e.title);
     let place = if e.card == e.title { e.group.title().to_string() } else { format!("{} › {}", e.group.title(), e.shown_card()) };
-    let crumb = ui.painter().layout_job(marked(&place, words, Txt::new("", 11.5).color(theme::FG_3), text_w, 1));
+    let crumb = ui.painter().layout_job(marked(&place, words, Txt::new("", 11.5).color(theme::fg_3()), text_w, 1));
     let title = ui.painter().layout_job(marked(title_text, words, Txt::new("", 14.0).weight(weight::MEDIUM), text_w, 2));
-    let about = (!e.about.is_empty()).then(|| ui.painter().layout_job(marked(tr(e.about), words, Txt::new("", 12.0).color(theme::FG_3).line_height(17.0), text_w, 2)));
+    let about = (!e.about.is_empty()).then(|| ui.painter().layout_job(marked(tr(e.about), words, Txt::new("", 12.0).color(theme::fg_3()).line_height(17.0), text_w, 2)));
     let related = (f.by_keyword && !e.keywords.is_empty())
-        .then(|| ui.painter().layout_job(marked(&tr!("Related: {words}", words = tr(e.keywords)), words, Txt::new("", 11.5).color(theme::FG_4), text_w, 1)));
+        .then(|| ui.painter().layout_job(marked(&tr!("Related: {words}", words = tr(e.keywords)), words, Txt::new("", 11.5).color(theme::fg_4()), text_w, 1)));
     let hidden = needs.map(|(_, when)| ui.painter().layout_job(Txt::new(format!("↳ {}", tr(when)), 11.5).color(theme::WARN).job(text_w)));
     let h = 12.0
         + crumb.size().y
@@ -611,32 +618,32 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Opt
     let lit = anim::toggle(ui.ctx(), resp.id.with("lit"), active, Spring::SNAPPY);
     let p = ui.painter();
     if lit > 0.01 {
-        p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.10 * lit));
+        p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::accent(), 0.10 * lit));
     }
     let mut y = r.top() + 12.0;
     let x = r.left() + 14.0;
     let crumb_h = crumb.size().y;
-    p.galley(pos2(x, y), crumb, theme::FG_3);
+    p.galley(pos2(x, y), crumb, theme::fg_3());
     y += crumb_h + 3.0;
     let title_h = title.size().y;
-    p.galley(pos2(x, y), title, theme::FG);
+    p.galley(pos2(x, y), title, theme::fg());
     y += title_h;
     if let Some(g) = about {
         y += 3.0;
         let gh = g.size().y;
-        p.galley(pos2(x, y), g, theme::FG_3);
+        p.galley(pos2(x, y), g, theme::fg_3());
         y += gh;
     }
     if let Some(g) = related {
         y += 3.0;
         let gh = g.size().y;
-        p.galley(pos2(x, y), g, theme::FG_4);
+        p.galley(pos2(x, y), g, theme::fg_4());
         y += gh;
     }
     if let Some(g) = hidden {
         p.galley(pos2(x, y + 4.0), g, theme::WARN);
     }
-    widgets::icon(p, pos2(r.right() - 22.0, r.center().y), icons::ARROW_RIGHT, 14.0, theme::mix(theme::FG_4, theme::ACCENT, lit));
+    widgets::icon(p, pos2(r.right() - 22.0, r.center().y), icons::ARROW_RIGHT, 14.0, theme::mix(theme::fg_4(), theme::accent(), lit));
     RowPick { rect: r, hovered: resp.hovered(), pressed: widgets::pressed(&resp) }
 }
 
@@ -644,8 +651,8 @@ fn result_row(ui: &mut Ui, f: &Found, words: &[String], active: bool, needs: Opt
 fn marked(text: &str, words: &[String], look: Txt, width: f32, rows: usize) -> egui::text::LayoutJob {
     let base = look.format();
     let mut lit = base.clone();
-    lit.background = theme::alpha(theme::ACCENT, 0.26);
-    lit.color = theme::FG;
+    lit.background = theme::alpha(theme::accent(), 0.26);
+    lit.color = theme::fg();
     let mut job = egui::text::LayoutJob::default();
     let mut at = 0;
     for m in registry::marks(text, words) {
@@ -670,7 +677,7 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
     super::block(ui, cx, 0, 48.0, |ui, r| {
         let p = ui.painter();
         widgets::text(p, pos2(r.left() + 2.0, r.top() + 13.0), Align2::LEFT_CENTER, &Txt::new(group.title(), 20.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        widgets::text_truncated(p, pos2(r.left() + 2.0, r.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(group.about(), 12.5).color(theme::FG_3), r.width() - 4.0);
+        widgets::text_truncated(p, pos2(r.left() + 2.0, r.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(group.about(), 12.5).color(theme::fg_3()), r.width() - 4.0);
     });
     // A link to a setting hidden until another allows it lands on that one.
     if let Some(jump) = state.jump.as_mut().filter(|j| j.lit.is_none()) {
@@ -702,10 +709,10 @@ fn group_page(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, draf
 fn found_banner(ui: &mut Ui, entry: &Entry, when: Option<&str>) -> bool {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().min(orbiters_ui::layout::SECTION_ALONE_MAX), 44.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(r, theme::radius(14.0), theme::alpha(theme::ACCENT, 0.08));
-    widgets::icon(p, pos2(r.left() + 20.0, r.center().y), icons::MAGNIFYING_GLASS, 14.0, theme::ACCENT);
+    p.rect_filled(r, theme::radius(14.0), theme::alpha(theme::accent(), 0.08));
+    widgets::icon(p, pos2(r.left() + 20.0, r.center().y), icons::MAGNIFYING_GLASS, 14.0, theme::accent());
     let place = if entry.card == entry.title { entry.group.title().to_string() } else { format!("{} › {}", entry.group.title(), entry.shown_card()) };
-    let t = widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{place} › "), 12.5).color(theme::FG_3), r.width() * 0.5);
+    let t = widgets::text_truncated(p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{place} › "), 12.5).color(theme::fg_3()), r.width() * 0.5);
     let n = widgets::text_truncated(p, pos2(t.right(), r.center().y), Align2::LEFT_CENTER, &Txt::new(entry.shown(entry.title), 12.5).weight(weight::SEMIBOLD), r.right() - t.right() - 52.0);
     // Hidden until another setting allows it: what it needs, beside it (that setting is the one lit).
     if let Some(when) = when {
@@ -751,17 +758,17 @@ fn light(ui: &mut Ui, state: &mut State, cards: &[(&'static str, Rect)], rows: &
         Some(row) => {
             let r = row.rect.expand2(vec2(12.0, -2.0));
             let (painter, slot) = &row.behind;
-            painter.set(*slot, egui::Shape::rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.14 * k)));
-            ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.45 * k)), egui::StrokeKind::Inside);
+            painter.set(*slot, egui::Shape::rect_filled(r, theme::radius(12.0), theme::alpha(theme::accent(), 0.14 * k)));
+            ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.0, theme::alpha(theme::accent(), 0.45 * k)), egui::StrokeKind::Inside);
         }
         None if control.is_some() => {
             let r = target.expand(6.0);
-            ui.painter().rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.10 * k));
-            ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.6 * k)), egui::StrokeKind::Outside);
+            ui.painter().rect_filled(r, theme::radius(12.0), theme::alpha(theme::accent(), 0.10 * k));
+            ui.painter().rect_stroke(r, theme::radius(12.0), egui::Stroke::new(1.5, theme::alpha(theme::accent(), 0.6 * k)), egui::StrokeKind::Outside);
         }
         None => {
             for (grow, a) in [(2.0, 0.8), (6.0, 0.18), (10.0, 0.07)] {
-                ui.painter().rect_stroke(target.expand(grow), theme::radius(theme::CARD_RADIUS + grow), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, a * k)), egui::StrokeKind::Outside);
+                ui.painter().rect_stroke(target.expand(grow), theme::radius(theme::CARD_RADIUS + grow), egui::Stroke::new(2.0, theme::alpha(theme::accent(), a * k)), egui::StrokeKind::Outside);
             }
         }
     }
@@ -794,6 +801,11 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
     let snap = cx.snap;
     let here = orbiters_core::here::HERE;
     let mut cards = Vec::new();
+    // One column of wide cards: a preview and pictures to choose from.
+    if state.group == Group::Appearance {
+        asked.apply |= super::appearance::cards(ui, cx, &mut state.appearance, draft, &mut cards);
+        return cards;
+    }
     let mut m = super::Masonry::new(ui, &format!("settings-{}", state.group.id()));
     let c = &mut cards;
     let mut apply = false;
@@ -830,14 +842,19 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
         }
         Group::Vr => {
             let mut smoothing_reset = false;
+            let mut allow = None;
             if here.around() {
                 apply |= place(&mut m, c, 1, registry::CARD_AROUND, |ui| {
                     let mut apply = false;
-                    section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera")), |ui| {
-                        apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset);
+                    let beside = if here.camera_frames { tr("Orbiters beside VRChat's Quick Menu, its wheel and its camera") } else { tr("Orbiters beside VRChat's Quick Menu and its wheel") };
+                    section(ui, cx, 1, icons::STACK, tr(registry::CARD_AROUND), Some(beside), |ui| {
+                        apply = orbit_settings(ui, snap, &mut draft.orbit, &mut smoothing_reset, &mut allow);
                     });
                     apply
                 });
+                if let Some(needs) = allow {
+                    cx.ctl.orbit_allow(needs);
+                }
                 if smoothing_reset {
                     cx.toasts.push(&ctx, toast::Kind::Info, tr("Smoothing back to the values measured to match VRChat"));
                 }
@@ -890,6 +907,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
                 apply |= place(&mut m, c, 5, mark("VRChat on your network"), |ui| widgets::unrecorded(|| super::network::card(ui, cx, 5, &mut state.network, draft)));
             }
         }
+        Group::Appearance => {}
         Group::Language => {
             apply |= place(&mut m, c, 1, mark("Language"), |ui| super::language_card::card(ui, cx, 1, draft));
             if here.reads() {
@@ -899,7 +917,7 @@ fn group_cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, base: &Settings, dra
         Group::Privacy => {
             // (The statistics are counted wherever the app runs; the rest is of VRChat on this computer.)
             apply |= place(&mut m, c, 1, registry::CARD_PRIVACY, |ui| privacy_card(ui, cx, 1, draft));
-            if here.around() {
+            if here.mismatch_buttons {
                 apply |= place(&mut m, c, 2, mark("Beta feedback"), |ui| super::beta_feedback::card(ui, cx, 2, &mut state.beta, draft));
             }
         }
@@ -1039,7 +1057,7 @@ fn osc_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
             }
         });
         widgets::field(ui, tr("VRChat log"), Some(&log_desc), 120.0, |ui| {
-            let (t, c) = if snap.vrchat.log_found { (tr("Read locally"), theme::OK) } else { ("–", theme::FG_4) };
+            let (t, c) = if snap.vrchat.log_found { (tr("Read locally"), theme::OK) } else { ("–", theme::fg_4()) };
             let (r, _) = ui.allocate_exact_size(vec2(100.0, 20.0), Sense::hover());
             widgets::text(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(c));
         });
@@ -1235,9 +1253,9 @@ fn storage_card(ui: &mut Ui, cx: &Cx, index: usize, ctx: &egui::Context, draft: 
         ui.add_space(12.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
         let p = ui.painter();
-        widgets::text(p, row.left_center(), Align2::LEFT_CENTER, &Txt::new(tr("Library usage"), 12.0).color(theme::FG_3));
+        widgets::text(p, row.left_center(), Align2::LEFT_CENTER, &Txt::new(tr("Library usage"), 12.0).color(theme::fg_3()));
         let lim = if limit > 0.0 { format!("{limit:.0} GB") } else { tr("unlimited").into() };
-        widgets::text(p, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(format!("{used_gb:.1} / {lim}"), 12.0).color(theme::FG_3));
+        widgets::text(p, row.right_center(), Align2::RIGHT_CENTER, &Txt::new(format!("{used_gb:.1} / {lim}"), 12.0).color(theme::fg_3()));
         ui.add_space(8.0);
         widgets::progress(ui, Id::unique("storage-usage"), usage, 10.0);
         ui.add_space(12.0);
@@ -1264,6 +1282,14 @@ fn storage_card(ui: &mut Ui, cx: &Cx, index: usize, ctx: &egui::Context, draft: 
             let mut v = draft.storage_limit_gb as f32;
             if widgets::slider(ui, "limit", &mut v, 0.0..=2000.0, 10.0, |v| if v == 0.0 { tr("No limit").into() } else { format!("{v:.0} GB") }) {
                 draft.storage_limit_gb = v as f64;
+                apply = true;
+            }
+        });
+        widgets::separator(ui);
+        widgets::field(ui, tr("Friends' and groups' pictures"), Some(tr("VRChat's pictures, kept on this computer so that they show at once. Past this, the ones seen longest ago go; signing out of VRChat removes them all.")), 284.0, |ui| {
+            let mut v = draft.vrchat_pictures_mb as f32;
+            if widgets::slider(ui, "vrchat-pictures", &mut v, 64.0..=2048.0, 64.0, |v| format!("{v:.0} MB")) {
+                draft.vrchat_pictures_mb = v as u32;
                 apply = true;
             }
         });
@@ -1394,7 +1420,7 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
         ui.add_space(8.0);
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::hover());
         let lr = Rect::from_min_size(pos2(row.left(), row.center().y - 21.0), orbiters_ui::n4n0_logo::size_for_width(48.0));
-        orbiters_ui::n4n0_logo::paint(ui.painter(), lr, theme::MARK);
+        orbiters_ui::n4n0_logo::paint(ui.painter(), lr, theme::mark());
         let x = lr.right() + 16.0;
         let p = ui.painter();
         widgets::text(p, pos2(x, row.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(format!("Orbiters - N4N0 {}", snap.version), 15.0).weight(weight::SEMIBOLD));
@@ -1402,7 +1428,7 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
             p,
             pos2(x, row.center().y + 10.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr("Copyright © 2026 Enzo DUTRA / blackorbit. Free to use; see the licence for what is allowed."), 12.5).color(theme::FG_3),
+            &Txt::new(tr("Copyright © 2026 Enzo DUTRA / blackorbit. Free to use; see the licence for what is allowed."), 12.5).color(theme::fg_3()),
             row.width() - (x - row.left()) - 240.0,
         );
         if let Some(err) = &snap.worker.error {
@@ -1443,11 +1469,11 @@ fn about_card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings, state: &
             let k = anim::spring_from(ui.ctx(), Id::unique("worker-log-open"), [0.0], [1.0], Spring::SOFT)[0].clamp(0.0, 1.0);
             let text = if lines.is_empty() { tr("No output yet.").to_string() } else { lines[lines.len().saturating_sub(state.worker_shown)..].join("\n") };
             let w = ui.available_width();
-            let g = ui.painter().layout_job(Txt::new(text, 11.0).mono().color(theme::FG_2).line_height(17.0).job(w - 24.0));
+            let g = ui.painter().layout_job(Txt::new(text, 11.0).mono().color(theme::fg_2()).line_height(17.0).job(w - 24.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, (g.size().y + 24.0) * k), Sense::hover());
-            ui.painter().rect_filled(r, theme::radius(12.0), theme::INK_900);
+            ui.painter().rect_filled(r, theme::radius(12.0), theme::ink_900());
             let clip = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
-            clip.galley(r.min + vec2(12.0, 12.0), g, theme::FG_2);
+            clip.galley(r.min + vec2(12.0, 12.0), g, theme::fg_2());
             ui.add_space(12.0);
         }
     });
@@ -1517,11 +1543,11 @@ fn updates(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
         let notes = notes.trim();
         if !notes.is_empty() {
             let w = ui.available_width();
-            let mut job = Txt::new(notes, 12.0).color(theme::FG_3).line_height(18.0).job(w);
+            let mut job = Txt::new(notes, 12.0).color(theme::fg_3()).line_height(18.0).job(w);
             job.wrap.max_rows = 8;
             let g = ui.painter().layout_job(job);
             let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y + 16.0), Sense::hover());
-            ui.painter().galley(r.min, g, theme::FG_3);
+            ui.painter().galley(r.min, g, theme::fg_3());
         }
     }
 }
@@ -1616,12 +1642,12 @@ fn explorer(ui: &mut Ui, cx: &Cx) {
             let (r, _) = ui.allocate_exact_size(vec2(160.0, 24.0), Sense::hover());
             let p = ui.painter();
             if let Some(title) = title.as_ref() {
-                widgets::text(p, pos2(r.right(), r.top() + 4.0), Align2::RIGHT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT));
+                widgets::text(p, pos2(r.right(), r.top() + 4.0), Align2::RIGHT_CENTER, &Txt::new(title, 12.5).weight(weight::SEMIBOLD).color(theme::accent()));
             }
             if let Some(points) = cx.snap.explorer.points.as_ref() {
                 let track = Rect::from_min_max(pos2(r.left(), r.bottom() - 5.0), pos2(r.right(), r.bottom() - 1.0));
                 p.rect_filled(track, theme::radius(2.0), theme::white(0.10));
-                p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * points.progress(), track.height())), theme::radius(2.0), theme::ACCENT);
+                p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * points.progress(), track.height())), theme::radius(2.0), theme::accent());
             }
         });
     }
@@ -1668,10 +1694,10 @@ fn vrchat_pressed(response: egui::Response) -> bool {
 fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32, shown: &mut bool) -> egui::Response {
     let id = ui.scope_id().with("vrchat-password");
     let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_750);
+    ui.painter().rect_filled(rect, theme::radius(12.0), theme::ink_750());
     let ring = anim::toggle(ui.ctx(), id.with("ring"), ui.memory(|m| m.has_focus(id)), Spring::SNAPPY);
     if ring > 0.01 {
-        ui.painter().rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), egui::StrokeKind::Outside);
+        ui.painter().rect_stroke(rect, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::accent(), 0.8 * ring)), egui::StrokeKind::Outside);
     }
     let eye = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), vec2(28.0, 28.0));
     let label = if *shown { tr("Hide the password") } else { tr("Show the password") };
@@ -1687,8 +1713,8 @@ fn vrchat_password(ui: &mut Ui, password: &mut String, width: f32, shown: &mut b
             .password(!*shown)
             .frame(egui::Frame::NONE)
             .font(theme::font(13.0, weight::REGULAR))
-            .text_color(theme::FG)
-            .hint_text(egui::RichText::new(tr("VRChat password")).color(theme::FG_4))
+            .text_color(theme::fg())
+            .hint_text(egui::RichText::new(tr("VRChat password")).color(theme::fg_4()))
             .margin(egui::Margin::ZERO)
             .align(Align2::LEFT_CENTER),
     )
@@ -1730,9 +1756,9 @@ fn code_cells(ui: &mut Ui, code: &mut String) -> egui::Response {
         let next = focused && i == n.min(5);
         let ring = anim::toggle(&ctx, id.with(("ring", i)), next, Spring::SNAPPY);
         let filled = anim::toggle(&ctx, id.with(("filled", i)), i < n, Spring::SOFT);
-        p.rect_filled(r, theme::radius(12.0), theme::mix(theme::INK_750, theme::INK_700, filled));
+        p.rect_filled(r, theme::radius(12.0), theme::mix(theme::ink_750(), theme::ink_700(), filled));
         if ring > 0.01 {
-            p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.85 * ring)), egui::StrokeKind::Outside);
+            p.rect_stroke(r, theme::radius(12.0), egui::Stroke::new(2.0, theme::alpha(theme::accent(), 0.85 * ring)), egui::StrokeKind::Outside);
         }
         if let Some(c) = code.chars().nth(i) {
             let k = anim::spring_from(&ctx, id.with(("digit", i, c)), [0.55], [1.0], Spring::BOUNCY)[0];
@@ -1741,7 +1767,7 @@ fn code_cells(ui: &mut Ui, code: &mut String) -> egui::Response {
             // A caret that blinks where the next digit goes.
             let t = anim::time(&ctx);
             if (t * 1.6).fract() < 0.6 {
-                p.rect_filled(Rect::from_center_size(r.center(), vec2(2.0, 20.0)), theme::radius(1.0), theme::FG_2);
+                p.rect_filled(Rect::from_center_size(r.center(), vec2(2.0, 20.0)), theme::radius(1.0), theme::fg_2());
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -1755,19 +1781,19 @@ fn vrchat_identity(ui: &mut Ui, name: &str, picture: Option<&egui::TextureHandle
     let (row, _) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
     let p = ui.painter().clone();
     let a = Rect::from_center_size(pos2(row.left() + 28.0, row.center().y), vec2(52.0, 52.0));
-    p.circle_stroke(a.center(), 29.0, egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.9)));
+    p.circle_stroke(a.center(), 29.0, egui::Stroke::new(2.0, theme::alpha(theme::OK, 0.9)));
     widgets::avatar(&p, a, picture, name);
     let dot = a.center() + vec2(19.0, 19.0);
     p.circle_filled(dot, 7.0, theme::surface_strong());
-    p.circle_filled(dot, 5.0, theme::ACCENT);
+    p.circle_filled(dot, 5.0, theme::OK);
     let x = a.right() + 18.0;
     widgets::text_truncated(&p, pos2(x, row.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(name, 16.0).weight(weight::SEMIBOLD), w - 220.0);
-    widgets::icon(&p, pos2(x + 6.0, row.center().y + 12.0), icons::LOCK_SIMPLE, 12.0, theme::FG_3);
+    widgets::icon(&p, pos2(x + 6.0, row.center().y + 12.0), icons::LOCK_SIMPLE, 12.0, theme::fg_3());
     widgets::text_truncated(
         &p,
         pos2(x + 18.0, row.center().y + 12.0),
         Align2::LEFT_CENTER,
-        &Txt::new(tr("Connected · the session stays encrypted on this computer"), 12.0).color(theme::FG_3),
+        &Txt::new(tr("Connected · the session stays encrypted on this computer"), 12.0).color(theme::fg_3()),
         w - 240.0,
     );
     let b = Button::new(if busy { tr("Signing out…") } else { tr("Sign out") }).icon(icons::SIGN_OUT).variant(Variant::Secondary).size(Size::Sm).enabled(!busy);
@@ -1848,12 +1874,12 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
                     let ready = !state.username.trim().is_empty() && !state.password.is_empty();
                     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
                     let note = tr("Instead of Orbiters' shared account: friends, instances and pictures come from yours.");
-                    widgets::icon(ui.painter(), pos2(row.left() + 7.0, row.center().y), icons::SHIELD_CHECK, 14.0, theme::FG_3);
+                    widgets::icon(ui.painter(), pos2(row.left() + 7.0, row.center().y), icons::SHIELD_CHECK, 14.0, theme::fg_3());
                     widgets::text_truncated(
                         ui.painter(),
                         pos2(row.left() + 22.0, row.center().y),
                         Align2::LEFT_CENTER,
-                        &Txt::new(note, 12.0).color(theme::FG_3),
+                        &Txt::new(note, 12.0).color(theme::fg_3()),
                         row.width() - 230.0,
                     );
                     let b = Button::new(if busy { tr("Signing in…") } else { tr("Sign in to VRChat") }).icon(icons::SIGN_IN).variant(Variant::Primary).enabled(ready);
@@ -1963,7 +1989,7 @@ fn folder_field(ui: &mut Ui, label: &str, description: Option<&str>, value: &std
         if description.is_some() {
             ui.add_space(8.0);
             let (r, _) = ui.allocate_exact_size(vec2(260.0, 20.0), Sense::hover());
-            widgets::text_truncated(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(&shown, 12.0).color(theme::FG_3), 260.0);
+            widgets::text_truncated(ui.painter(), r.right_center(), Align2::RIGHT_CENTER, &Txt::new(&shown, 12.0).color(theme::fg_3()), 260.0);
         }
     });
     clicked
@@ -1977,14 +2003,14 @@ pub(crate) fn default_mic() -> &'static str {
 /// A chip to choose a source (a Spout sender, a microphone, a sound device); `key` names the choice it makes, for the
 /// registry of Settings ([`widgets::mark_control`]).
 pub(super) fn source_chip(ui: &mut Ui, key: &str, label: &str, active: bool) -> egui::Response {
-    let t = Txt::new(label, 12.0).color(if active { theme::FG } else { theme::FG_2 });
+    let t = Txt::new(label, 12.0).color(if active { theme::fg() } else { theme::fg_2() });
     let s = widgets::text_size(ui, &t);
     let (r, resp) = ui.allocate_exact_size(vec2(s.x + 24.0, 30.0), Sense::click());
     widgets::mark_control(key, "chip", r);
     let hover = anim::toggle(ui.ctx(), resp.id.with("hover"), resp.hovered(), Spring::SNAPPY);
     let press = anim::toggle(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let rr = Rect::from_center_size(r.center(), r.size() * (1.0 - 0.05 * press));
-    let bg = if active { theme::INK_600 } else { theme::mix(theme::control(), theme::INK_600, 0.5 * hover) };
+    let bg = if active { theme::ink_600() } else { theme::mix(theme::control(), theme::ink_600(), 0.5 * hover) };
     ui.painter().rect_filled(rr, theme::radius(15.0), bg);
     widgets::text(ui.painter(), rr.center(), Align2::CENTER_CENTER, &t);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1992,37 +2018,108 @@ pub(super) fn source_chip(ui: &mut Ui, key: &str, label: &str, active: bool) -> 
 
 /// How Orbiters appears around VRChat's menus: a switch for each of them, how the tiles follow the hand, and what stands
 /// in the way now. (Where N4N0's own menu shows is with N4N0's menu, in [`super::settings_n4n0::menu_card`].)
-fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool) -> bool {
+fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool, allow: &mut Option<crate::state::OrbitNeeds>) -> bool {
     let mut apply = false;
-    widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr("Orbiters around VRChat's own wheel, with it, whatever N4N0's menu does: opened with R in desktop mode, or by holding the menu button in VR.")), 48.0, |ui| {
+    let here = orbiters_core::here::HERE;
+    widgets::field(ui, tr("Around the Action Menu's wheel"), Some(tr(registry::AROUND_WHEEL)), 48.0, |ui| {
         apply |= widgets::toggle(ui, "orbit-wheel", &mut orbit.wheel);
     });
+    if here.camera_frames {
+        orbit_camera(ui, snap, orbit, &mut apply);
+    }
+    if here.vr_overlay {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Turn around in a 3D capture"), Some(tr("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to.")), 48.0, |ui| {
+            apply |= widgets::toggle(ui, "orbit-immersive-turn", &mut orbit.immersive_turn);
+        });
+    }
+    widgets::separator(ui);
+    widgets::field(ui, tr("Around the Quick Menu"), Some(tr(registry::AROUND_QUICK_MENU)), 48.0, |ui| {
+        apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
+    });
+    if here.vr_overlay {
+        orbit_headset(ui, orbit, reset, &mut apply);
+    }
+    let (now, needs) = orbit_now(snap);
+    if let Some(now) = now {
+        widgets::separator(ui);
+        widgets::field(ui, tr("Right now"), Some(&now), if needs.is_some() { 220.0 } else { 48.0 }, |ui| {
+            let Some(needs) = needs else { return };
+            let words = match needs {
+                crate::state::OrbitNeeds::ScreenRecording => tr("Allow screen recording"),
+                crate::state::OrbitNeeds::InputMonitoring => tr("Allow Input Monitoring"),
+            };
+            if Button::new(words).variant(Variant::Secondary).size(Size::Sm).show(ui).clicked() {
+                *allow = Some(needs);
+            }
+        });
+    }
+    apply
+}
+
+/// What stands in the way of the panels around VRChat's menus now, in words, and what macOS must be asked for, if anything.
+fn orbit_now(snap: &Snapshot) -> (Option<String>, Option<crate::state::OrbitNeeds>) {
+    #[cfg(target_os = "macos")]
+    {
+        // The panels' own word while a game runs; with none, whether macOS would let them see one is asked here, at most every two seconds.
+        static ASKED: std::sync::Mutex<Option<(std::time::Instant, bool)>> = std::sync::Mutex::new(None);
+        if snap.launcher.desktop_game.is_some() {
+            return (snap.orbit.note.as_ref().map(|note| tr(note).to_string()), snap.orbit.needs);
+        }
+        let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let allowed = match *asked {
+            Some((at, allowed)) if at.elapsed().as_secs() < 2 => allowed,
+            _ => {
+                let allowed = crate::bridge::mac::screen_recording() != Some(false);
+                *asked = Some((std::time::Instant::now(), allowed));
+                allowed
+            }
+        };
+        if allowed {
+            (Some(tr("They appear once VRChat runs.").to_string()), None)
+        } else {
+            (Some(tr(crate::state::OrbitNeeds::ScreenRecording.words()).to_string()), Some(crate::state::OrbitNeeds::ScreenRecording))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
+            Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())
+        } else if let Some(note) = &snap.orbit.note {
+            Some(tr(note).to_string())
+        } else if snap.vrchat.running {
+            None
+        } else {
+            Some(tr("They appear once VRChat runs.").to_string())
+        };
+        (now, None)
+    }
+}
+
+/// The tiles around VRChat's camera.
+fn orbit_camera(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core::settings::OrbitSettings, apply: &mut bool) {
     widgets::separator(ui);
     widgets::field(ui, tr("Around the camera"), Some(tr("3D pictures, Record and the QR code beside VRChat's camera. In a headset they appear where VRChat opens it and move with the hand that holds it; in desktop mode, at the left of its panel.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
+        *apply |= widgets::toggle(ui, "orbit-camera", &mut orbit.camera_tiles);
     });
     if orbit.camera_tiles {
         widgets::separator(ui);
         widgets::field(ui, tr("Find the camera on screen"), Some(tr("Also looks for the camera's panel in what VRChat shows and moves the tiles onto it. Off by default: it can put them in the wrong place. It keeps nothing it sees.")), 48.0, |ui| {
-            apply |= widgets::toggle(ui, "orbit-camera-pattern", &mut orbit.camera_pattern);
+            *apply |= widgets::toggle(ui, "orbit-camera-pattern", &mut orbit.camera_pattern);
         });
     }
     if let Some(why) = snap.orbit.camera_note.as_ref().filter(|_| orbit.camera_tiles) {
         widgets::separator(ui);
         widgets::field(ui, tr("The camera's tiles, right now"), Some(tr(why)), 48.0, |_| {});
     }
-    widgets::separator(ui);
-    widgets::field(ui, tr("Turn around in a 3D capture"), Some(tr("In a headset, with a capture around you: VRChat's turning stick turns what you see, smoothly or in steps as VRChat is set to.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-immersive-turn", &mut orbit.immersive_turn);
-    });
-    widgets::separator(ui);
-    widgets::field(ui, tr("Around the Quick Menu"), Some(tr("Orbiters beside VRChat's own Quick Menu, with it, whatever N4N0's menu does: opened with Esc in desktop mode, or by a short press of the menu button in VR.")), 48.0, |ui| {
-        apply |= widgets::toggle(ui, "orbit-quick-menu", &mut orbit.quick_menu);
-    });
+}
+
+/// What is the headset's alone.
+fn orbit_headset(ui: &mut egui::Ui, orbit: &mut orbiters_core::settings::OrbitSettings, reset: &mut bool, apply: &mut bool) {
     widgets::separator(ui);
     let sizes = [SegOption::new(0.8f32, tr("Smaller")), SegOption::new(1.0f32, tr("As measured")), SegOption::new(1.25f32, tr("Larger"))];
     widgets::field(ui, tr("Panels' size in VR"), Some(tr("If they sit too near or too far from VRChat's menu in your headset.")), 300.0, |ui| {
-        apply |= widgets::segmented(ui, "orbit-vr-size", &mut orbit.vr_size, &sizes, true);
+        *apply |= widgets::segmented(ui, "orbit-vr-size", &mut orbit.vr_size, &sizes, true);
     });
     widgets::separator(ui);
     use orbiters_core::settings::VrMotion;
@@ -2032,15 +2129,15 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         VrMotion::Matched => tr("The tiles around VRChat's menus stay rigid, and trail your hand as VRChat's menu does."),
     };
     widgets::field(ui, tr("How they follow your hand in VR"), Some(said), 300.0, |ui| {
-        apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
+        *apply |= widgets::segmented(ui, "orbit-vr-motion", &mut orbit.vr_motion, &motions, true);
     });
     widgets::separator(ui);
     let smoothing = |v: f32| if v == 0.0 { tr_ctx("smoothing", "None").to_string() } else { format!("{v:.0} ms") };
     widgets::field(ui, tr("Smoothing on the Quick Menu"), Some(tr("How softly what is rigid follows your hand: what opens in front of VRChat's menu, always, and the tiles when they match it. About 35 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
+        *apply |= widgets::slider(ui, "orbit-vr-smoothing-quick-menu", &mut orbit.vr_smoothing_quick_menu_ms, 0.0..=150.0, 1.0, smoothing);
     });
     widgets::field(ui, tr("Smoothing on the wheel"), Some(tr("The same around VRChat's Action Menu. About 20 ms lines up with VRChat.")), 300.0, |ui| {
-        apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
+        *apply |= widgets::slider(ui, "orbit-vr-smoothing-wheel", &mut orbit.vr_smoothing_wheel_ms, 0.0..=150.0, 1.0, smoothing);
     });
     // Both back to what was measured to match VRChat's own menus (the defaults), at once, as the sliders write them.
     let (quick, wheel) = orbiters_core::settings::OrbitSettings::measured_smoothing();
@@ -2057,24 +2154,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
         if b.show(ui).clicked() {
             orbit.vr_smoothing_quick_menu_ms = quick;
             orbit.vr_smoothing_wheel_ms = wheel;
-            apply = true;
+            *apply = true;
             *reset = true;
         }
     });
-    let now = if !orbiters_core::osc::VRCHAT_RUNS_HERE {
-        Some(tr("VRChat runs on another computer here, so nothing can appear around its menus.").to_string())
-    } else if let Some(note) = &snap.orbit.note {
-        Some(tr(note).to_string())
-    } else if snap.vrchat.running {
-        None
-    } else {
-        Some(tr("They appear once VRChat runs.").to_string())
-    };
-    if let Some(now) = now {
-        widgets::separator(ui);
-        widgets::field(ui, tr("Right now"), Some(&now), 48.0, |_| {});
-    }
-    apply
 }
 
 /// How many notices Settings shows (the file keeps more).
@@ -2102,7 +2185,7 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
     ui.add_space(8.0);
     if entries.is_empty() {
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-        widgets::text(ui.painter(), pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Nothing yet."), 13.0).color(theme::FG_3));
+        widgets::text(ui.painter(), pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Nothing yet."), 13.0).color(theme::fg_3()));
         return;
     }
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
@@ -2122,8 +2205,8 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
                 "error" => theme::DANGER,
                 "warning" => theme::WARN,
                 "success" => theme::OK,
-                "detail" => theme::FG_4,
-                _ => theme::FG_3,
+                "detail" => theme::fg_4(),
+                _ => theme::fg_3(),
             };
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
             if !ui.is_rect_visible(row) {
@@ -2131,9 +2214,9 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
             }
             let p = ui.painter();
             p.circle_filled(pos2(row.left() + 5.0, row.center().y), 3.5, colour);
-            let time = widgets::text(p, pos2(row.left() + 18.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(super::local_time_unix(entry.at.max(0) as u64), 12.0).color(theme::FG_3).mono());
+            let time = widgets::text(p, pos2(row.left() + 18.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(super::local_time_unix(entry.at.max(0) as u64), 12.0).color(theme::fg_3()).mono());
             let one_line = entry.text.replace('\n', " ");
-            let text_colour = if entry.kind == "detail" { theme::FG_3 } else { theme::FG_2 };
+            let text_colour = if entry.kind == "detail" { theme::fg_3() } else { theme::fg_2() };
             widgets::text_truncated(p, pos2(time.right() + 12.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&one_line, 12.5).color(text_colour), row.right() - time.right() - 20.0);
             ui.interact(row, id.with(("row", entry.at, one_line.len())), Sense::hover()).on_hover_text(&entry.text);
         }

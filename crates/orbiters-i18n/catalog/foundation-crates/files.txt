@@ -14,6 +14,7 @@ crates/orbiters-core/src/account.rs
 crates/orbiters-core/src/assets.rs
 crates/orbiters-core/src/bundle.rs
 crates/orbiters-core/src/cleanup.rs
+crates/orbiters-core/src/measured.rs
 crates/orbiters-core/src/community.rs
 crates/orbiters-core/src/dpapi.rs
 crates/orbiters-core/src/gallery_talk.rs
@@ -41,6 +42,7 @@ crates/orbiters-openvr/src/mirror.rs
 crates/orbiters-setup/build.rs
 crates/orbiters-setup/src/install.rs
 crates/orbiters-setup/src/main.rs
+crates/orbiters-setup/src/swap.rs
 crates/orbiters-setup/src/system.rs
 crates/orbiters-setup/src/ui.rs
 crates/orbiters-smooth/src/control.rs

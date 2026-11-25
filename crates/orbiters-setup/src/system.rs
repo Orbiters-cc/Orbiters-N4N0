@@ -294,6 +294,20 @@ pub fn cancel_update_retry() {
     }
 }
 
+const RECOVERY: &str = "OrbitersN4N0Recover"; // i18n: not shown (a registry value name)
+
+/// Has Windows run `command` once at the next sign-in: it puts back what a swap that is cut leaves.
+pub fn schedule_recovery(command: &str) -> anyhow::Result<()> {
+    Key::create(RUN_ONCE)?.set_text(RECOVERY, command)
+}
+
+/// No swap is under way any more.
+pub fn cancel_recovery() {
+    unsafe {
+        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(RUN_ONCE), &HSTRING::from(RECOVERY));
+    }
+}
+
 /// Starts the app (in the tray, without its window) when the person signs in to Windows, or stops doing so.
 pub fn set_start_with_windows(dir: &Path, on: bool) -> anyhow::Result<()> {
     windows_start::set(&dir.join(APP_EXE), on)

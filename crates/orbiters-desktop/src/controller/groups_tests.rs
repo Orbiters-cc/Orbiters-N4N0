@@ -546,7 +546,7 @@ fn what_is_sealed_is_what_goes() {
     assert_eq!(commit(&c, &first), Outcome::Refused(Failure::Expired), "replaced by the next");
     assert_eq!((entry(&c, &first.op).state, entry(&c, &first.op).by), (State::Refused, Some(By::NeverSent)));
     let other = c.groups(LINK + 1, scope(&c), Request::Commit { op: second.op.clone(), digest: second.digest() });
-    assert_eq!(other, Reply::Outcome { op: second.op.clone(), outcome: Outcome::Refused(Failure::Expired) });
+    assert_eq!(other, Reply::Outcome { op: second.op.clone(), outcome: Outcome::Refused(Failure::Expired), said: None });
     assert_eq!(ask(&c, Request::Cancel { op: second.op.clone() }), Reply::Cancelled);
     assert_eq!(commit(&c, &second), Outcome::Refused(Failure::Expired));
     let third = prepare(&c, the(&c, Kind::ApplyIcon)).unwrap();
@@ -740,12 +740,11 @@ fn what_is_missing_is_never_allowed() {
         ("no roles", Kind::AssignRole, without("roles"), Missing::Roles),
         ("no banner field", Kind::ApplyBanner, without("bannerId"), Missing::Picture),
         ("no icon field", Kind::ApplyIcon, without("iconId"), Missing::Picture),
-        ("the role's rights unknown", Kind::AssignRole, Box::new(|w| drop(w.roles[1].as_object_mut().unwrap().remove("permissions"))), Missing::RoleDefinition),
-        ("a right too long to carry", Kind::AssignRole, Box::new(|w| w.roles[1]["permissions"] = json!(["r".repeat(3000)])), Missing::RoleDefinition),
-        ("whether it is Everyone's unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[3].as_object_mut().unwrap().remove("defaultRole"))), Missing::RoleDefinition),
-        ("whether it is bought unknown", Kind::AssignRole, Box::new(|w| drop(w.roles[1].as_object_mut().unwrap().remove("requiresPurchase"))), Missing::RoleDefinition),
+        ("the role's rights unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[3].as_object_mut().unwrap().remove("permissions"))), Missing::RoleDefinition),
+        ("a right too long to carry", Kind::EditRole, Box::new(|w| w.roles[2]["permissions"] = json!(["r".repeat(3000)])), Missing::RoleDefinition),
+        ("whether it is Everyone's unreadable", Kind::DeleteRole, Box::new(|w| w.roles[3]["defaultRole"] = json!("no")), Missing::RoleDefinition),
         ("my own role's place unknown", Kind::DeleteRole, Box::new(|w| drop(w.roles[0].as_object_mut().unwrap().remove("order"))), Missing::RoleOrder),
-        ("the role's two-factor flag unknown", Kind::EditRole, Box::new(|w| drop(w.roles[2].as_object_mut().unwrap().remove("requiresTwoFactor"))), Missing::RoleDefinition),
+        ("the role's two-factor flag unreadable", Kind::EditRole, Box::new(|w| w.roles[2]["requiresTwoFactor"] = json!(0)), Missing::RoleDefinition),
         ("a right of the catalogue unreadable", Kind::CreateRole, Box::new(|w| w.instead = vec![("/permissions".into(), json!([{"name": "group-instance-join"}]))]), Missing::Catalogue),
         ("the member without managed roles", Kind::AssignRole, no("mRoleIds", U), Missing::Member),
         ("the member without roles", Kind::UnassignRole, no("roleIds", V), Missing::Member),
@@ -793,6 +792,10 @@ fn what_is_left_out_withholds_only_what_needs_it() {
         ("my managed roles left out: a role given", Kind::AssignRole, mine(&["mRoleIds"])),
         ("whether a role manages left out: given as a managing one", Kind::AssignRole, role(1, "isManagementRole")),
         ("whether members may take it left out: given", Kind::AssignRole, role(1, "isSelfAssignable")),
+        ("its rights left out: given by the group's owner", Kind::AssignRole, role(1, "permissions")),
+        ("its rank left out: given by the group's owner", Kind::AssignRole, role(1, "order")),
+        ("a flag from after it was made left out: given", Kind::AssignRole, role(1, "requiresPurchase")),
+        ("whether it is Everyone's left out: given", Kind::AssignRole, role(1, "defaultRole")),
     ];
     for (what, kind, change) in cases {
         let (c, w, sent) = world();
@@ -1109,7 +1112,7 @@ fn nothing_goes_once_another_account_is_installed() {
             let reply = c.groups(LINK, a.clone(), Request::Commit { op: s.op.clone(), digest: s.digest() });
             let private = c.groups(LINK, a, Request::Posts { group: G.into(), offset: 0 });
             drop(turn);
-            let refused = [Reply::Failed(Failure::AccountChanged), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown }, Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::AccountChanged) }];
+            let refused = [Reply::Failed(Failure::AccountChanged), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown, said: None }, Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::AccountChanged), said: None }];
             assert!(refused.contains(&reply), "{kind:?}, {during}: {reply:?}");
             assert_eq!(private, Reply::Failed(Failure::AccountChanged), "nor is anything read for it");
             assert!(writes(&sent).is_empty(), "{kind:?}, during the last read: {during}: {:?}", writes(&sent));
@@ -1247,13 +1250,118 @@ fn a_press_is_for_the_rows_own_membership() {
     assert_eq!(writes(&sent).len(), 1);
 }
 
+/// REQUEST28: a group from before VRChat's newer flags, as it comes: its first roles without them, one even without its
+/// rights, no role flagged as Everyone's. Its owner gives and takes each, with its confirmation; a member who may assign gives
+/// those below their own; and one deleted is certified by the list that is left.
+#[test]
+fn an_old_groups_roles_are_given_by_its_owner() {
+    let old = |w: &mut World| {
+        for r in w.roles.iter_mut() {
+            let r = r.as_object_mut().unwrap();
+            for gone in ["defaultRole", "requiresPurchase", "isAddedOnJoin"] {
+                r.remove(gone);
+            }
+        }
+        w.roles[1].as_object_mut().unwrap().remove("permissions");
+    };
+    let give = |c: &Shared, role: &str, add: bool, user: &str| Write::MemberRole { group: G.into(), user: user.into(), membership: of(c, user), role: role.into(), add };
+    for (role, add, user) in [("grol_mod", true, U), ("grol_mod", false, V), ("grol_artist", true, U)] {
+        let (c, w, sent) = world();
+        old(&mut w.lock().unwrap());
+        let s = prepare(&c, give(&c, role, add, user)).unwrap_or_else(|r| panic!("{role}: {r:?}"));
+        assert_eq!(s.confirm, role == "grol_mod", "{role}: what it may do is not known, or it may do nothing");
+        assert!(matches!(commit(&c, &s), Outcome::Done(_)), "{role}");
+        assert_eq!(writes(&sent), [format!("{} /groups/{G}/members/{user}/roles/{role}", if add { "PUT" } else { "DELETE" })]);
+    }
+    // What the group's answer leaves out is read once from the roles' own list, before the confirmation shows it.
+    let (c, w, sent) = world();
+    let whole = w.lock().unwrap().roles.clone();
+    old(&mut w.lock().unwrap());
+    w.lock().unwrap().list = Some(whole);
+    let s = prepare(&c, give(&c, "grol_mod", true, U)).unwrap();
+    assert_eq!(s.role.as_ref().unwrap().permissions, ["group-instance-moderate"]);
+    assert!(super::world::calls(&sent).iter().any(|c| c.ends_with("/roles")));
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    // Not the owner, with the right to assign and nothing else: below their own role, by its rank.
+    let (c, w, sent) = world();
+    {
+        let mut w = w.lock().unwrap();
+        old(&mut w);
+        w.rights = vec!["group-roles-assign".into()];
+        w.words = json!({"ownerId": "usr_else"});
+        let mut g = w.group();
+        g["myMember"]["roleIds"] = json!(["grol_artist"]);
+        w.instead = vec![(format!("/groups/{G}?"), g)];
+    }
+    assert_eq!(prepare(&c, give(&c, "grol_mod", true, U)), failed(Failure::Withheld(Why::RoleAtOrAbove)));
+    let s = prepare(&c, give(&c, "grol_events", true, U)).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+    assert_eq!(writes(&sent).len(), 1);
+    // A role is deleted, and the list that is left says so, with no role flagged as Everyone's in it.
+    let (c, w, _) = world();
+    {
+        let mut w = w.lock().unwrap();
+        old(&mut w);
+        w.roles[1]["permissions"] = json!([]);
+    }
+    let s = prepare(&c, Write::DeleteRole { group: G.into(), role: "grol_events".into() }).unwrap();
+    assert!(matches!(commit(&c, &s), Outcome::Done(_)));
+}
+
+/// REQUEST28: when VRChat refuses a role, what it said comes with the outcome, word for word; a write that went well, or one
+/// stopped here, carries nothing of it.
+#[test]
+fn a_refused_role_says_vrchats_own_words() {
+    let give = |c: &Shared| Write::MemberRole { group: G.into(), user: U.into(), membership: of(c, U), role: "grol_mod".into(), add: true };
+    let send = |c: &Shared, s: &Sealed| match ask(c, Request::Commit { op: s.op.clone(), digest: s.digest() }) {
+        Reply::Outcome { outcome, said, .. } => (outcome, said),
+        other => panic!("{other:?}"),
+    };
+    for (status, body, want) in [
+        (403, json!({"error": {"message": "\"You need two-factor authentication.\"", "status_code": 403}}), (GroupFailure::Forbidden, "You need two-factor authentication.")),
+        (400, json!({"error": {"message": "Cannot assign this role", "status_code": 400}}), (GroupFailure::Invalid, "Cannot assign this role")),
+        (404, json!({}), (GroupFailure::NotFound, "")),
+    ] {
+        let (c, w, _) = world();
+        let s = prepare(&c, give(&c)).unwrap();
+        w.lock().unwrap().fault = Some(Fault::Answer { done: false, status, body });
+        let (outcome, said) = send(&c, &s);
+        assert_eq!(outcome, Outcome::Refused(Failure::Api(want.0)));
+        assert_eq!(said.map(|r| (r.status, r.words)), Some((status, want.1.to_string())));
+    }
+    let (c, _, _) = world();
+    let s = prepare(&c, give(&c)).unwrap();
+    assert!(matches!(send(&c, &s), (Outcome::Done(_), None)));
+    // Stopped here before it went: no words of VRChat's.
+    let (c, w, _) = world();
+    let s = prepare(&c, give(&c)).unwrap();
+    w.lock().unwrap().rights = vec![];
+    assert!(matches!(send(&c, &s), (Outcome::Refused(Failure::Withheld(_)), None)));
+}
+
+/// REQUEST28: a group's calendar is read through the service, for the account it was asked as, and never written.
+#[test]
+fn a_groups_events_are_read_only() {
+    let (c, w, sent) = world();
+    let event = |id: &str| json!({"id": id, "ownerId": G, "title": "Showcase", "startsAt": "2026-11-28T20:00:00Z", "endsAt": "2026-11-28T22:00:00Z", "accessType": "public", "category": "arts", "description": ""});
+    w.lock().unwrap().instead = vec![("/calendar/".into(), json!({"results": [event("cal_1"), event("cal_2")], "hasNext": false, "totalCount": 2}))];
+    let month = orbiters_core::group_events::Month { year: 2026, month: 11 };
+    let Reply::Events(page) = ask(&c, Request::Events { group: G.into(), month: Some(month), offset: 0 }) else { panic!() };
+    assert_eq!((page.items.len(), page.more), (2, false));
+    assert_eq!(ask(&c, Request::Events { group: "grp_/../x".into(), month: None, offset: 0 }), Reply::Failed(Failure::Api(GroupFailure::NotFound)));
+    assert!(writes(&sent).is_empty() && super::world::calls(&sent).iter().any(|c| c.contains(&format!("/calendar/{G}?n=100&offset=0&date=2026-11-15"))));
+}
+
 /// verify4 F3: a role read without its name or a flag is not deleted; a list that is not the group's whole list certifies no
 /// deletion, neither as its answer nor at a check; the role still in it says it is there.
 #[test]
 fn a_deletion_is_certified_by_the_whole_list_only() {
-    for field in ["name", "description", "isManagementRole", "requiresTwoFactor"] {
+    for (field, odd) in [("name", None), ("permissions", None), ("order", None), ("description", Some(json!(7))), ("requiresTwoFactor", Some(json!("no")))] {
         let (c, w, sent) = world();
-        w.lock().unwrap().roles[3].as_object_mut().unwrap().remove(field);
+        match odd {
+            Some(v) => w.lock().unwrap().roles[3][field] = v,
+            None => drop(w.lock().unwrap().roles[3].as_object_mut().unwrap().remove(field)),
+        }
         assert_eq!(prepare(&c, Write::DeleteRole { group: G.into(), role: "grol_events".into() }), failed(Failure::NotRead(Missing::RoleDefinition)), "{field}");
         assert!(writes(&sent).is_empty());
     }
@@ -1508,7 +1616,7 @@ fn an_account_switch_drops_a_sealed_write() {
     c.update(|s| s.vrchat_login.revision += 1);
     let commit = |scope: Scope| c.groups(LINK, scope, Request::Commit { op: s.op.clone(), digest: s.digest() });
     assert_eq!(commit(a), Reply::Failed(Failure::AccountChanged));
-    assert_eq!(commit(scope(&c)), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::Expired) });
+    assert_eq!(commit(scope(&c)), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Refused(Failure::Expired), said: None });
     let e = c.groups_book().get(&c.groups_key(&scope(&c)).unwrap(), &s.op).unwrap();
     assert_eq!((e.state, e.by), (State::Refused, Some(By::NeverSent)), "the same account, signed in again, sees it was never sent");
     assert!(writes(&sent).is_empty());
@@ -1527,7 +1635,7 @@ fn an_account_switch_after_transmission_shows_nothing_and_keeps_the_truth() {
     assert!(hold.until_reached());
     c.update(|s| s.vrchat_login.revision += 1);
     hold.let_go();
-    assert_eq!(sending.join().unwrap(), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown });
+    assert_eq!(sending.join().unwrap(), Reply::Outcome { op: s.op.clone(), outcome: Outcome::Unknown, said: None });
     assert_eq!(check(&c, &s.op), Observation::Answered { done: true }, "the durable scope is the same account's");
 }
 

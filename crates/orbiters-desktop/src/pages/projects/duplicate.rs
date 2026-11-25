@@ -171,7 +171,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
         None => String::new(),
     };
     let meta = format!("{}{size}", project.path.display());
-    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_3), w - 80.0);
+    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::fg_3()), w - 80.0);
 
     art::caps(ui, tr("Name of the copy"));
     widgets::text_field(ui, "dup-name", &mut state.dup.name, tr("My avatar copy"), w, false);
@@ -200,8 +200,8 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
             let sep = if loc.contains('\\') { '\\' } else { '/' };
             let target = format!("{}{sep}{}", loc.trim_end_matches(['/', '\\']), state.dup.name);
             let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-            widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), art::glyph::ARROW_RIGHT, 13.0, theme::FG_4);
-            widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::FG_3), w - 22.0);
+            widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), art::glyph::ARROW_RIGHT, 13.0, theme::fg_4());
+            widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::fg_3()), w - 22.0);
         }
         _ => {}
     }
@@ -217,9 +217,9 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
     });
     if let (Some(need), Some((_, _, _, Some(free)))) = (needed(state, &project), state.dup.checked.as_ref()) {
         let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::HARD_DRIVE, 13.0, theme::FG_4);
+        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::HARD_DRIVE, 13.0, theme::fg_4());
         let room = tr!("About {need} to copy · {free} free on that disk", need = format::bytes(need as f64), free = format::bytes(*free as f64));
-        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(room, 12.0).color(theme::FG_3), w - 22.0);
+        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(room, 12.0).color(theme::fg_3()), w - 22.0);
     }
     note(
         ui,

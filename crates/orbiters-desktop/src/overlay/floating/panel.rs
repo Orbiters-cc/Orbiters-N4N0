@@ -284,12 +284,12 @@ impl Panel {
                 ..Default::default()
             };
             input.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), focused: Some(true), ..Default::default() });
-            orbiters_ui::fonts::follow_language(&self.ctx);
+            orbiters_ui::follow(&self.ctx);
             let mut full = self.ctx.run_ui(input, |ui| state.show_in(ui, snap, backend, poses, ui::Surface::Floating));
             pressed |= orbiters_ui::widgets::take_press(&self.ctx);
             self.painter.set_textures(&mut full.textures_delta);
             let primitives = self.ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-            self.painter.paint(&primitives, full.pixels_per_point, theme::INK_950);
+            self.painter.paint(&primitives, full.pixels_per_point, theme::ink_950());
             let damage = self.painter.damage();
             self.presented.hand_over(damage, std::time::Instant::now(), |r| presenter.show_part(overlay, self.handle, self.painter.pixels(), PX[0], PX[1], r));
             self.painter.free_textures(&mut full.textures_delta);
@@ -406,7 +406,7 @@ impl Pointer {
 /// it is moved by), close on the right. A button under a laser lights up; one at its end of the sizes is dim.
 pub fn paint_bar(p: &egui::Painter, hover: Option<BarButton>, pressed: Option<BarButton>, width: f32) {
     let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(BAR_PX[0] as f32, BAR_PX[1] as f32));
-    p.rect_filled(rect.shrink(2.0), theme::radius(34.0), theme::alpha(theme::INK_900, 0.96));
+    p.rect_filled(rect.shrink(2.0), theme::radius(34.0), theme::alpha(theme::ink_900(), 0.96));
     p.rect_stroke(rect.shrink(2.0), theme::radius(34.0), Stroke::new(2.0, theme::white(0.1)), egui::StrokeKind::Inside);
     let widths = FloatingSettings::WIDTHS;
     let can = |b: BarButton| match b {
@@ -429,16 +429,16 @@ pub fn paint_bar(p: &egui::Painter, hover: Option<BarButton>, pressed: Option<Ba
         };
         p.circle_filled(r.center(), r.width() / 2.0 * if down { 0.9 } else { 1.0 }, bg);
         let fg = match (can(b), lit, b) {
-            (false, _, _) => theme::FG_4,
+            (false, _, _) => theme::fg_4(),
             (true, true, BarButton::Close) => theme::DANGER,
-            (true, true, _) => theme::FG,
-            (true, false, _) => theme::FG_2,
+            (true, true, _) => theme::fg(),
+            (true, false, _) => theme::fg_2(),
         };
         widgets::icon(p, r.center(), glyph, 26.0, fg);
     }
     // The handle: a bar, lighter under a laser.
     let handle = Rect::from_center_size(BarButton::Handle.rect().center(), vec2(if hover == Some(BarButton::Handle) { 150.0 } else { 136.0 }, 14.0));
-    let tone = if hover == Some(BarButton::Handle) { theme::FG } else { theme::FG_3 };
+    let tone = if hover == Some(BarButton::Handle) { theme::fg() } else { theme::fg_3() };
     p.rect_filled(handle, theme::radius(7.0), tone);
 }
 

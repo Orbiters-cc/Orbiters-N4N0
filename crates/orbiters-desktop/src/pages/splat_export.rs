@@ -236,7 +236,7 @@ impl Export {
                 count = format::integer(n as f64)
             ),
         };
-        paragraph(ui, &lead, theme::FG_2);
+        paragraph(ui, &lead, theme::fg_2());
 
         // Edits that cannot be applied: why, and the way on.
         if let Some(problem) = problem(edits.as_ref(), self.outcome.as_ref()) {
@@ -308,7 +308,7 @@ impl Export {
     /// finds it by the format's name, widgets::control).
     fn row(&mut self, ui: &mut Ui, f: Format, splats: Option<usize>, enabled: bool) {
         let w = ui.available_width();
-        let hint = ui.painter().layout_job(Txt::new(f.hint(), 12.0).color(theme::FG_3).line_height(17.0).job(w - 16.0 - 56.0));
+        let hint = ui.painter().layout_job(Txt::new(f.hint(), 12.0).color(theme::fg_3()).line_height(17.0).job(w - 16.0 - 56.0));
         let (r, _) = ui.allocate_exact_size(vec2(w, 14.0 + 20.0 + 4.0 + hint.size().y + 14.0), Sense::hover());
         let id = Id::unique(("export-format", f.extension()));
         let selected = self.format == f;
@@ -319,19 +319,19 @@ impl Export {
         let shown = Rect::from_center_size(r.center(), r.size() * (1.0 - 0.015 * press));
         let p = ui.painter();
         let sel = super::projects::art::selection(p, id.with("ring"), shown, 16.0, selected);
-        widgets::frame(p, shown, 16.0, theme::mix(theme::surface_soft(), theme::INK_750, hover.max(sel * 0.7)));
+        widgets::frame(p, shown, 16.0, theme::mix(theme::surface_soft(), theme::ink_750(), hover.max(sel * 0.7)));
         let x = r.left() + 16.0;
         let y = r.top() + 14.0 + 10.0;
         let name = widgets::text(p, pos2(x, y), Align2::LEFT_CENTER, &Txt::new(f.label(), 14.0).weight(weight::SEMIBOLD));
-        let kind = widgets::text(p, pos2(name.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(f.kind(), 12.0).weight(weight::MEDIUM).color(theme::FG_2));
+        let kind = widgets::text(p, pos2(name.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(f.kind(), 12.0).weight(weight::MEDIUM).color(theme::fg_2()));
         if let Some(n) = splats {
             let size = tr!("about {size}", size = format::bytes(f.estimate(n) as f64));
-            widgets::text(p, pos2(kind.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(size, 12.0).color(theme::FG_4));
+            widgets::text(p, pos2(kind.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(size, 12.0).color(theme::fg_4()));
         }
-        p.galley(pos2(x, r.top() + 14.0 + 20.0 + 4.0), hint, theme::FG_3);
+        p.galley(pos2(x, r.top() + 14.0 + 20.0 + 4.0), hint, theme::fg_3());
         // A radio: a ring, filled with a check once chosen.
         let c = pos2(r.right() - 28.0, r.center().y);
-        p.circle_stroke(c, 10.0, egui::Stroke::new(1.5, theme::mix(theme::FG_4, theme::ACCENT, sel.clamp(0.0, 1.0))));
+        p.circle_stroke(c, 10.0, egui::Stroke::new(1.5, theme::mix(theme::fg_4(), theme::accent(), sel.clamp(0.0, 1.0))));
         super::projects::art::check(p, c, sel);
         widgets::note_control(ui.ctx(), f.label(), r, enabled);
         if enabled && widgets::activated(&resp) {
@@ -382,7 +382,7 @@ impl Export {
                 }
                 return;
             }
-            Some((f, Err(Failure::Failed(_) | Failure::Changed))) if *f == self.format => {
+            Some((f, Err(Failure::Failed(_) | Failure::Changed | Failure::Replaced))) if *f == self.format => {
                 if widgets::activated(&Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).variant(Variant::Primary).id_salt("export-retry").show(ui)) {
                     if let Some(dest) = self.dest.clone() {
                         self.start(&ctx, dest);
@@ -444,10 +444,10 @@ fn caps(ui: &mut Ui, text: &str) {
 /// A line under an info mark.
 fn note(ui: &mut Ui, text: &str) {
     let w = ui.available_width();
-    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::FG_3).line_height(18.0).job(w - 22.0));
+    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::fg_3()).line_height(18.0).job(w - 22.0));
     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
-    widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.top() + 9.0), icons::INFO, 13.0, theme::FG_4);
-    ui.painter().galley(pos2(r.left() + 22.0, r.top()), g, theme::FG_3);
+    widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.top() + 9.0), icons::INFO, 13.0, theme::fg_4());
+    ui.painter().galley(pos2(r.left() + 22.0, r.top()), g, theme::fg_3());
 }
 
 /// What runs, how far, and where it goes.
@@ -456,16 +456,16 @@ fn progress_card(ui: &mut Ui, id: Id, heading: &str, done: f32, dest: Option<&Pa
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 92.0), Sense::hover());
     let p = ui.painter();
-    widgets::frame(p, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
-    feedback::spinner(p, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::ACCENT);
+    widgets::frame(p, r, 14.0, theme::alpha(theme::accent(), 0.07));
+    feedback::spinner(p, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::accent());
     widgets::text(p, pos2(r.left() + 42.0, r.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(heading, 13.5).weight(weight::MEDIUM));
     let bar = Rect::from_min_size(pos2(r.left() + 16.0, r.top() + 50.0), vec2(r.width() - 32.0, 6.0));
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
     let f = anim::value(&ctx, id, done, Spring::SOFT).clamp(0.0, 1.0);
-    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
     if let Some(d) = dest {
         let line = tr!("To {path} · closing stops it", path = d.display());
-        widgets::text_truncated(p, pos2(r.left() + 16.0, r.top() + 74.0), Align2::LEFT_CENTER, &Txt::new(line, 11.5).color(theme::FG_3), r.width() - 32.0);
+        widgets::text_truncated(p, pos2(r.left() + 16.0, r.top() + 74.0), Align2::LEFT_CENTER, &Txt::new(line, 11.5).color(theme::fg_3()), r.width() - 32.0);
     }
 }
 

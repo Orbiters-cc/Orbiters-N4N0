@@ -111,19 +111,24 @@ impl Pieces {
     pub fn encode(&self, text: &str) -> Vec<String> {
         let normal = format!("▁{}", text.split_whitespace().collect::<Vec<_>>().join("▁"));
         let mut parts: Vec<String> = normal.chars().map(|c| c.to_string()).collect();
+        // What each part and the next one score as one piece: a merge changes its neighbours' only (N4N-21).
+        let score = |pair: &[String]| self.score.get(&pair.concat()).copied();
+        let mut scores: Vec<Option<f32>> = parts.windows(2).map(score).collect();
         loop {
+            // The first of the best.
             let mut best: Option<(usize, f32)> = None;
-            for i in 0..parts.len().saturating_sub(1) {
-                let merged = format!("{}{}", parts[i], parts[i + 1]);
-                if let Some(&s) = self.score.get(&merged) {
-                    if best.is_none_or(|(_, b)| s > b) {
-                        best = Some((i, s));
-                    }
+            for (i, s) in scores.iter().enumerate() {
+                if let Some(s) = s.filter(|s| best.is_none_or(|(_, b)| *s > b)) {
+                    best = Some((i, s));
                 }
             }
             let Some((i, _)) = best else { break };
             let next = parts.remove(i + 1);
             parts[i].push_str(&next);
+            scores.remove(i);
+            for at in i.saturating_sub(1)..(i + 1).min(scores.len()) {
+                scores[at] = score(&parts[at..at + 2]);
+            }
         }
         parts
     }
@@ -247,6 +252,9 @@ impl Builtin {
                 let vocab = shape[shape.len() - 1] as usize;
                 (0..b)
                     .map(|r| {
+                        if finished[r] {
+                            return PAD;
+                        }
                         let at = (r * width + width - 1) * vocab;
                         logits[at..at + vocab].iter().enumerate().fold((0usize, f32::MIN), |m, (i, &v)| if v > m.1 { (i, v) } else { m }).0 as i64
                     })
@@ -262,7 +270,7 @@ impl Builtin {
             drop(outputs);
             for r in 0..b {
                 if finished[r] {
-                    feed.push(PAD);
+                    feed.push(next[r]);
                 } else if next[r] == EOS || out[r].len() >= limit[r] {
                     finished[r] = true;
                     done(r, text_of(&out[r], &self.words));
@@ -314,6 +322,38 @@ mod tests {
         }
         let pieces = Pieces { score };
         assert_eq!(pieces.encode("hello"), vec!["▁hello"]);
+        // As when every pair is looked up at every merge, ties and all.
+        let whole = |pieces: &Pieces, text: &str| {
+            let mut parts: Vec<String> = format!("▁{}", text.split_whitespace().collect::<Vec<_>>().join("▁")).chars().map(|c| c.to_string()).collect();
+            loop {
+                let mut best: Option<(usize, f32)> = None;
+                for i in 0..parts.len().saturating_sub(1) {
+                    if let Some(&s) = pieces.score.get(&format!("{}{}", parts[i], parts[i + 1])) {
+                        if best.is_none_or(|(_, b)| s > b) {
+                            best = Some((i, s));
+                        }
+                    }
+                }
+                let Some((i, _)) = best else { return parts };
+                let next = parts.remove(i + 1);
+                parts[i].push_str(&next);
+            }
+        };
+        let mut many = Pieces { score: HashMap::new() };
+        let letters = ["a", "b", "é", "出", "▁"];
+        let mut seed = 7u32;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as usize % n
+        };
+        for _ in 0..120 {
+            let piece: String = (0..2 + next(4)).map(|_| letters[next(5)]).collect();
+            many.score.insert(piece, -(next(6) as f32));
+        }
+        for _ in 0..300 {
+            let text: String = (0..next(40)).map(|_| [letters[next(4)], " "][(next(6) == 0) as usize]).collect();
+            assert_eq!(many.encode(&text), whole(&many, &text), "{text}");
+        }
         // "▁h" (-1) before "lo" (-3); "▁he" and "e▁" are no pieces.
         assert_eq!(pieces.encode("he  lo"), vec!["▁h", "e", "▁", "lo"]);
     }

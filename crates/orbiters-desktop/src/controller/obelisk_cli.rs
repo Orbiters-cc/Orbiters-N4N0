@@ -7,7 +7,6 @@ use anyhow::Context as _;
 use orbiters_core::launcher::EngineSetup;
 use orbiters_core::obelisk::{self, Event, Phase};
 use orbiters_i18n::tr;
-use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,7 +74,7 @@ pub fn run(program: &Path, args: &[&str], stop: &AtomicBool, mut each: impl FnMu
     let mut child = spawn(program, args).map_err(|e| Failure::new("spawn", e.to_string()))?;
     let out = child.stdout.take().expect("piped");
     let mut failed = None;
-    for line in BufReader::new(out).lines().map_while(Result::ok) {
+    for line in crate::worker::records(out, "obelisk-cli") {
         if stop.load(Ordering::Relaxed) {
             let _ = child.kill();
             break;
@@ -114,7 +113,7 @@ pub fn run_for(program: &Path, args: &[&str], limit: Duration, mut each: impl Fn
     // A bounded queue: a program that floods its output waits for this reader, never fills memory.
     let (sender, receiver) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
+        for line in crate::worker::records(out, "obelisk-cli") {
             if sender.send(line).is_err() {
                 break;
             }
@@ -191,7 +190,7 @@ pub(crate) fn read_lines_until(out: impl std::io::Read + std::os::unix::io::AsRa
 /// Elsewhere (never run there: VRChat runs through Obelisk on a Mac only), a plain reader of lines.
 #[cfg(not(unix))]
 pub(crate) fn read_lines_until(out: impl std::io::Read, stop: &AtomicBool, mut each: impl FnMut(String) -> bool) {
-    for line in BufReader::new(out).lines().map_while(Result::ok) {
+    for line in crate::worker::log_lines(out) {
         if stop.load(Ordering::Relaxed) || !each(line) {
             return;
         }

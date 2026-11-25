@@ -37,10 +37,10 @@ pub fn show(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
     // What is in it, as it will be sent.
     let width = ui.available_width();
     let text = report.summary.join("\n");
-    let galley = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::FG_2).line_height(18.0).job(width - 24.0));
+    let galley = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::fg_2()).line_height(18.0).job(width - 24.0));
     let (r, _) = ui.allocate_exact_size(vec2(width, galley.size().y + 24.0), Sense::hover());
-    ui.painter().rect_filled(r, theme::radius(12.0), theme::INK_900);
-    ui.painter().galley(r.min + vec2(12.0, 12.0), galley, theme::FG_2);
+    ui.painter().rect_filled(r, theme::radius(12.0), theme::ink_900());
+    ui.painter().galley(r.min + vec2(12.0, 12.0), galley, theme::fg_2());
     ui.add_space(8.0);
     let (row, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
     let mut bu = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -69,9 +69,9 @@ pub fn show(ui: &mut Ui, ctl: &Ctl, snap: &Snapshot) {
         ui.painter().galley(r.min, g, theme::WARN);
     } else if let Some(path) = &report.path {
         let saved = orbiters_i18n::tr!("Saved as {name} in the logs' folder.", name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        let g = ui.painter().layout_job(Txt::new(saved, 12.0).color(theme::FG_3).job(width));
+        let g = ui.painter().layout_job(Txt::new(saved, 12.0).color(theme::fg_3()).job(width));
         let (r, _) = ui.allocate_exact_size(g.size(), Sense::hover());
-        ui.painter().galley(r.min, g, theme::FG_3);
+        ui.painter().galley(r.min, g, theme::fg_3());
     }
     ui.add_space(8.0);
 }

@@ -18,7 +18,7 @@ use orbiters_ui::{icons, widgets};
 use std::sync::OnceLock;
 
 /// The page's background in Orbiters' own colours (the window's Home draws N4N0's eyes with it).
-pub const CARD: Color32 = theme::INK_900;
+pub const CARD: Color32 = theme::base::INK_900;
 /// How much of the card covers an element greyed out (the avatar's screen uses the same).
 const UNAVAILABLE_VEIL: f32 = 0.6;
 /// What a label keeps clear of its element's sides.
@@ -158,16 +158,16 @@ impl Palette {
     pub fn new(c: &Colors) -> Palette {
         let white = [255; 3];
         // Dark ink on a light accent (the base: Orbiters' near-black green), near white on a dark one.
-        let on_accent = if luminance(c.accent) > 0.18 { between(theme::ACCENT, Color32::BLACK, theme::ON_ACCENT, c.accent, [0; 3]) } else { theme::FG };
+        let on_accent = if luminance(c.accent) > 0.18 { between(theme::base::ACCENT, Color32::BLACK, theme::base::ON_ACCENT, c.accent, [0; 3]) } else { theme::base::FG };
         Palette {
             card: rgb(c.background),
             surface: rgb(c.surface),
-            raised: between(theme::INK_800, theme::FG, theme::INK_750, c.surface, c.text),
-            raised2: between(theme::INK_800, theme::FG, theme::INK_700, c.surface, c.text),
+            raised: between(theme::base::INK_800, theme::base::FG, theme::base::INK_750, c.surface, c.text),
+            raised2: between(theme::base::INK_800, theme::base::FG, theme::base::INK_700, c.surface, c.text),
             text: rgb(c.text),
-            text2: between(theme::FG, theme::FG_3, theme::FG_2, c.text, c.muted),
+            text2: between(theme::base::FG, theme::base::FG_3, theme::base::FG_2, c.text, c.muted),
             muted: rgb(c.muted),
-            faint: between(theme::FG_3, theme::INK_900, theme::FG_4, c.muted, c.background),
+            faint: between(theme::base::FG_3, theme::base::INK_900, theme::base::FG_4, c.muted, c.background),
             accent: rgb(c.accent),
             on_accent,
             danger: between(theme::REC, Color32::WHITE, theme::DANGER, c.red, white),

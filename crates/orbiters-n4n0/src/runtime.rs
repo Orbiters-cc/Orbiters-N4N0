@@ -40,6 +40,7 @@ use orbiters_n4n0_core::videos::{self, SavedVideo, Videos};
 use rosc::OscType;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -52,6 +53,8 @@ const BUNDLE_MESSAGES: usize = 20;
 /// avatar's screen is open, and never less than the floor.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
+/// What nobody published by itself is handed to the interfaces this often at most.
+const REST_EVERY: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
 /// What has arrived of an answer goes to the windows and sheets this often at most: faster than it can be read.
 const STREAM_EVERY: Duration = Duration::from_millis(60);
@@ -363,6 +366,10 @@ pub(crate) struct N4n0Runtime {
     /// Wakes the N4N0 thread before its next deadline (`woken`: a wake came while it was busy).
     wake: Arc<Condvar>,
     woken: bool,
+    /// When what nobody published by itself last was ([`N4n0::publish_rest`]).
+    rest_at: Option<Instant>,
+    /// What the ears follow, as the last step saw it.
+    ears: u64,
     /// Testing (the N4N0 page): the state N4N0 is held in, when every state began to show in turn, the owner acted as
     /// away.
     pub(crate) test_face: Option<N4n0Face>,
@@ -585,7 +592,7 @@ impl N4n0Runtime {
         let others = read_for(&gone);
         let what: Vec<String> = gone.into_iter().map(|p| p.what).collect();
         self.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
-        self.note(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+        self.note("The owner's avatar changed before they answered: Orbiters - N4N0 did not", &what, ", nor ", others); // i18n: not shown
         self.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
         if kept.is_empty() {
             self.pending_at = None;
@@ -726,6 +733,18 @@ impl N4n0Runtime {
         due
     }
 
+    /// What the N4N0 thread's own steps change of the status, beside what they send to VRChat.
+    #[allow(clippy::type_complexity)]
+    fn glimpse(&self, now: Instant) -> impl PartialEq + use<> {
+        let s = &self.screen;
+        (
+            (self.face(), self.sender.as_ref().and_then(TextSender::current_text), self.listening.is_some(), self.enabled, self.test_face),
+            (s.countdown(now), s.available, s.card_view().map(|c| c.left), s.menu.open, s.menu.desktop_mode, s.menu_request, s.menu_toggle),
+            (s.photo_wait, s.dictation.clone(), self.mirror.view(now, crate::mirror::reach(false, &self.params)), self.voice.wake_offer),
+            (self.vrchat_running, self.tracking.clone(), self.tracking_note.clone(), self.versions.clone(), self.world_video.clone()),
+        )
+    }
+
     fn face(&self) -> N4n0Face {
         if let Some(face) = self.test_face {
             face
@@ -832,9 +851,9 @@ impl N4n0Runtime {
         }
     }
 
-    /// What the assistant is told at its next turn, and whose words it may quote.
-    fn note(&mut self, text: String, taint: Taint) {
-        self.notes.push(context::Note { text, taint });
+    /// What the assistant is told at its next turn (`lead`, then the outcomes), and whose words it may quote.
+    fn note(&mut self, lead: &str, outcomes: &[String], joint: &str, taint: Taint) {
+        self.notes.extend(context::Note::of(lead, outcomes, joint, taint));
     }
 
     pub(crate) fn line(&mut self, who: N4n0Who, text: impl Into<String>) {
@@ -1020,8 +1039,10 @@ pub(crate) struct Device {
 /// N4N0 in an app: started once ([`N4n0::start`]), fed what VRChat says ([`N4n0::on_parameter`], [`N4n0::on_avatar`])
 /// and what the interfaces ask ([`N4n0::command`]), stopped when the app quits ([`N4n0::shutdown`]).
 pub struct N4n0 {
-    pub(crate) n4n0: Mutex<N4n0Runtime>,
+    pub(crate) n4n0: crate::held::Held,
     pub(crate) voice: Mutex<VoiceRuntime>,
+    /// Wakes the ears' thread ([`N4n0::start`]): something they follow may have changed.
+    pub(crate) ears: crate::voice::Bell,
     /// What a member had said as who is signed in stopped being known (`conversation.rs`).
     pub(crate) parked: Mutex<Option<crate::conversation::Parked>>,
     /// Capture admission and final dispatch share this owner with page and blocker changes.
@@ -1053,8 +1074,9 @@ impl N4n0 {
             n4n0.screen.mouse = mouse;
         }
         Arc::new(Self {
-            n4n0: Mutex::new(n4n0),
+            n4n0: crate::held::Held::new(n4n0),
             voice: Mutex::new(VoiceRuntime::default()),
+            ears: Default::default(),
             parked: Mutex::new(None),
             voice_lifecycle: parking_lot::ReentrantMutex::new(()),
             effects: parking_lot::RwLock::new(()),
@@ -1146,21 +1168,24 @@ impl N4n0 {
                     break;
                 }
                 // Asleep until the next step is due, or something wakes it (a page to show, a touch, an answer).
-                if !std::mem::take(&mut rt.woken) {
+                if !std::mem::take(&mut rt.quietly().woken) {
                     let most = if rt.screen.menu.open { MAX_WAIT_OPEN } else { MAX_WAIT };
                     let wait = due.saturating_duration_since(Instant::now()).clamp(MIN_WAIT, most);
-                    rt = wake.wait_timeout(rt, wait).unwrap().0;
-                    rt.woken = false;
+                    rt = rt.wait(&wake, wait);
+                    rt.quietly().woken = false;
                 }
             }
         });
-        // The ears follow VRChat and the settings apart, so the panel's steps never wait for them.
+        // The ears follow VRChat, the settings and what N4N0 does apart, so the panel's steps never wait for them: at each change
+        // ([`N4n0::ears_look`]) and when a wait of theirs ends, not in between.
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("n4n0-watch".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("n4n0-ears".into()).spawn(move || {
             while !n.stopped() {
-                n.voice_follow();
-                n.publish();
-                std::thread::sleep(Duration::from_millis(100));
+                let due = n.voice_follow();
+                if n.n4n0.lock().unwrap().changed() {
+                    n.publish();
+                }
+                n.ears.wait(due);
             }
         });
     }
@@ -1176,9 +1201,12 @@ impl N4n0 {
             let rt = self.n4n0.lock().unwrap();
             (rt.pins_due.is_some_and(|t| t <= now), rt.screen.available)
         };
-        let (settings, walk, tracking, assistant) =
-            self.with_settings(|s| (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone(), s.n4n0.enabled.then_some(s.n4n0.assistant)));
+        let (settings, walk, tracking, assistant, mut ears) = self.with_settings(|s| {
+            let ears = BuildHasherDefault::<DefaultHasher>::default().hash_one(crate::voice::followed(&s.n4n0));
+            (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone(), s.n4n0.enabled.then_some(s.n4n0.assistant), ears)
+        });
         let scene = self.host.scene();
+        ears = ears.wrapping_add((scene.vrchat as u64) << 8 | self.host.signed_as() as u64);
         // What the Tracking page shows, and the versions at the bottom of Home.
         let smoothing = self.host.smoothing();
         let app_version = self.host.app_version();
@@ -1202,14 +1230,15 @@ impl N4n0 {
         let default_state;
         {
             let mut rt = self.n4n0.lock().unwrap();
-            before = (
-                rt.face(),
-                rt.sender.as_ref().and_then(TextSender::current_text),
-                rt.listening.is_some(),
-                rt.screen.countdown(now),
-                rt.screen.available,
-                rt.screen.card_view().map(|c| c.left),
-            );
+            // (Its own steps write to it all the time: what they change that shows is looked at here.)
+            let mut changed = rt.changed();
+            before = rt.glimpse(now);
+            #[cfg(test)]
+            let whole = rt.status();
+            if rt.ears != ears {
+                rt.ears = ears;
+                changed = true;
+            }
             if rt.vrchat_running && !vrchat {
                 // VRChat closed: the avatar it wore goes with it.
                 rt.forget_avatar();
@@ -1335,14 +1364,14 @@ impl N4n0 {
             default_state = crate::states::tick(&mut rt, now);
             // The QR code scanner stops after its time without a link.
             qr_ended = crate::qr::tick(&mut rt, now);
-            after = (
-                rt.face(),
-                rt.sender.as_ref().and_then(TextSender::current_text),
-                rt.listening.is_some(),
-                rt.screen.countdown(now),
-                rt.screen.available,
-                rt.screen.card_view().map(|c| c.left),
-            );
+            after = rt.glimpse(now);
+            changed |= before != after || !out.is_empty();
+            rt.set_changed(changed);
+            #[cfg(test)]
+            if !changed {
+                let same = N4n0Status { photo_countdown: whole.photo_countdown, mirror: whole.mirror, ..rt.status() };
+                assert!(same == whole, "a step changed what shows unseen: {whole:?} {same:?}");
+            }
             due = rt.next_due(now, vrchat);
         }
         self.send(&out);
@@ -1393,7 +1422,23 @@ impl N4n0 {
         if before != after || screen_changed {
             self.publish();
         }
-        due
+        self.publish_rest(now).map_or(due, |at| due.min(at))
+    }
+
+    /// Hands over what was changed and not published since, or says when to.
+    fn publish_rest(&self, now: Instant) -> Option<Instant> {
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            if !rt.changed() {
+                return None;
+            }
+            if let Some(at) = rt.rest_at.map(|t| t + REST_EVERY).filter(|at| now < *at) {
+                return Some(at);
+            }
+            rt.quietly().rest_at = Some(now);
+        }
+        self.hand_over(false);
+        None
     }
 
     /// Shows the AFK message while VRChat says the person is away (and nothing else is up), takes it down after.
@@ -1445,16 +1490,24 @@ impl N4n0 {
 
     /// Publishes N4N0's state, and wakes the N4N0 thread: what changed (listening, an answer) shows at its next step.
     pub fn publish(&self) {
+        self.hand_over(true);
+    }
+
+    fn hand_over(&self, wake: bool) {
         let readiness = self.voice_readiness();
         let signed_as = self.host.signed_as();
         let status = {
             let mut rt = self.n4n0.lock().unwrap();
             rt.voice.readiness = readiness;
             rt.signed_as = signed_as;
-            rt.wake();
+            if wake {
+                rt.wake();
+            }
+            rt.set_changed(false);
             rt.status()
         };
         self.host.publish(status);
+        self.ears_look(readiness);
     }
 
     /// Wakes the N4N0 thread (an answer from YouTube, a thumbnail).
@@ -2335,8 +2388,13 @@ impl N4n0 {
     /// belongs to the next one (verify-r21 3, verify2-r21 M1). What is under way stops and nothing of it comes back. Only
     /// through [`crate::Paused::forget_account`]: nothing acts meanwhile.
     pub(crate) fn forget_account(&self, epoch: u64) {
-        self.voice_forget();
         self.drop_kept_conversation();
+        self.forget_said(epoch);
+    }
+
+    /// [`N4n0::forget_account`] but for what is kept in the file.
+    pub(crate) fn forget_said(&self, epoch: u64) {
+        self.voice_forget();
         {
             let mut rt = self.n4n0.lock().unwrap();
             rt.account_epoch = epoch;
@@ -2667,6 +2725,8 @@ impl N4n0 {
             sender.hide();
         }
         rt.wake();
+        drop(rt);
+        self.ears.ring();
     }
 
     /// The latest values VRChat sent for `addresses` only (face tracking alone sends hundreds of others).
@@ -2674,14 +2734,18 @@ impl N4n0 {
         self.osc.latest(&mut addresses.into_iter())
     }
 
-    /// What the assistant is told about the moment.
-    fn moment(&self, with_controls: bool) -> Moment {
+    /// What the assistant is told about the moment: what `needs` leaves out is not gathered.
+    fn moment(&self, needs: context::Needs) -> Moment {
         let running = self.host.scene().vrchat;
         let world = self.host.world();
-        let addresses = self.n4n0.lock().unwrap().controls.addresses();
-        let latest = self.osc_latest(addresses);
+        let latest = if needs.avatar {
+            let addresses = self.n4n0.lock().unwrap().controls.addresses();
+            self.osc_latest(addresses)
+        } else {
+            HashMap::new()
+        };
         let rt = self.n4n0.lock().unwrap();
-        let last_video = world.last_video.as_ref().map(|v| {
+        let last_video = world.last_video.as_ref().filter(|_| needs.video).map(|v| {
             let title = rt.videos.videos.iter().find(|s| videos::canonical(&s.url) == videos::canonical(&v.url)).and_then(|s| s.title.clone());
             (v.url.clone(), title)
         });
@@ -2693,7 +2757,7 @@ impl N4n0 {
             n4n0_prop: rt.sender.is_some(),
             afk: rt.afk,
             last_video,
-            controls: if with_controls { rt.controls.summary(&latest, CONTROLS_CHARS) } else { String::new() },
+            controls: if needs.avatar { rt.controls.summary(&latest, CONTROLS_CHARS) } else { String::new() },
             controls_from_manifest: rt.manifest,
             saved_videos: rt.videos.videos.len(),
             notes: rt.notes.clone(),
@@ -2784,7 +2848,7 @@ impl N4n0 {
 
     /// N4N0's state, for a change to the saved videos: refused while the list on disk could not be read (a save would
     /// replace it), which is tried again first.
-    fn videos_writable(&self) -> Result<std::sync::MutexGuard<'_, N4n0Runtime>, String> {
+    fn videos_writable(&self) -> Result<crate::held::Guard<'_>, String> {
         if self.n4n0.lock().unwrap().videos_unreadable.is_none() {
             return Ok(self.n4n0.lock().unwrap());
         }
@@ -2869,14 +2933,14 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
         let Some(fence) = actor.fence() else { return };
         // What is sent from an account is offered only with its switch.
         let actions = fence.assistant_facts().actions;
-        let (tools, display) = {
+        let (bare, display) = {
             let rt = fence.n4n0.lock().unwrap();
-            let bare = !rt.manifest && !rt.controls.is_empty();
-            (tools::specs_for(bare, &tools_run.groups, actions), rt.sender.is_some())
+            (!rt.manifest && !rt.controls.is_empty(), rt.sender.is_some())
         };
+        let tools = tools::specs_for(bare, &tools_run.groups, actions);
         // The avatar's controls (up to 3,500 characters) only when the avatar's tools come with it.
         needs.avatar |= tools_run.own_groups.contains(&orbiters_n4n0_core::intents::route::ToolGroup::Avatar);
-        let told = fence.moment(needs.avatar).told(needs);
+        let told = fence.moment(needs).told(needs);
         // What it is told was written by others: it changes nothing without a yes from here on.
         tools_run.taint |= told.taint;
         heard = told.notes;
@@ -2886,8 +2950,8 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             time: local_time_iso(),
             display: display.then_some(Display { columns: contract::COLUMNS as u32, rows: contract::ROWS as u32 }),
         };
-        // Let in until it is with Orbiters: a handover comes before it (and nothing is sent) or after, never between
-        // (verify4-r21 P10). Not while the answer is read.
+        // Let in until it has left for Orbiters: a handover comes before it (and nothing is sent) or after, never between
+        // (verify4-r21 P10). Not while Orbiters takes its time, nor while the answer is read.
         let mut admitted = Some(fence);
         let request =
             Request { client: "desktop", messages: &conversation, input: input.take(), tool_results: std::mem::take(&mut results), tools: &tools, context };
@@ -2964,7 +3028,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             let (all, mut others) = crate::conversation::merged(full, marks, &sent, some, conversation, tools_run.taint);
             rt.conversation = assistant::trim(all, MAX_CONVERSATION);
             rt.conversation_others = others.split_off(others.len() - rt.conversation.len());
-            // What the assistant was told with this turn has been heard.
+            // What the assistant was told with this turn (each note whole) has been heard.
             for i in heard.into_iter().rev().filter(|i| *i < rt.notes.len()).collect::<Vec<_>>() {
                 rt.notes.remove(i);
             }
@@ -2977,7 +3041,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
                 let others = read_for(&stale);
                 let what: Vec<String> = stale.into_iter().map(|p| p.what).collect();
                 rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
-                rt.note(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+                rt.note("The owner's avatar changed before they answered: Orbiters - N4N0 did not", &what, ", nor ", others); // i18n: not shown
             }
             let (question, on_panel) = questions(&tools_run.waiting);
             if !shown.is_empty() {
@@ -3001,7 +3065,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             // Nothing of the turn stays in the conversation (calls without results would refuse every next turn),
             // nor waits for a yes; what its tools did is told at the next turn.
             if !tools_run.done.is_empty() {
-                rt.note(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", ")), tools_run.taint.max(Taint::labels(tools_run.named_labels))); // i18n: not shown
+                rt.note("Your last answer did not arrive; before that, Orbiters - N4N0 did:", &tools_run.done, ", ", tools_run.taint.max(Taint::labels(tools_run.named_labels))); // i18n: not shown
             }
             let from_server = e.downcast_ref::<AssistantError>().map(|a| (a.message.clone(), a.on_panel.clone()));
             if from_server.is_none() {
@@ -3282,7 +3346,7 @@ impl Fence<'_> {
                 let mut rt = self.n4n0.lock().unwrap();
                 rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
                 let why = if reply.is_some() { "said no" } else { "asked something else" }; // i18n: not shown
-                rt.note(format!("Since your last answer the owner {why}: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+                rt.note(&format!("Since your last answer the owner {why}: Orbiters - N4N0 did not"), &what, ", nor ", others); // i18n: not shown
                 if reply.is_some() {
                     rt.show(tr_latin("OK, I won't."));
                 }
@@ -3320,11 +3384,11 @@ impl Fence<'_> {
         let mut rt = self.n4n0.lock().unwrap();
         if !done.is_empty() {
             rt.line(N4n0Who::Note, tr!("Done: {what}", what = done.join("; ")));
-            rt.note(format!("Since your last answer the owner said yes, and Orbiters - N4N0 did: {}.", done.join(", ")), others); // i18n: not shown
+            rt.note("Since your last answer the owner said yes, and Orbiters - N4N0 did:", &done, ", ", others); // i18n: not shown
         }
         if !failed.is_empty() {
             rt.line(N4n0Who::Error, tr!("Not done: {what}", what = failed.join("; ")));
-            rt.note(format!("Since your last answer the owner said yes, but Orbiters - N4N0 could not: {}.", failed.join(", ")), Taint::Others); // i18n: not shown
+            rt.note("Since your last answer the owner said yes, but Orbiters - N4N0 could not:", &failed, ", ", Taint::Others); // i18n: not shown
         }
         rt.show(if failed.is_empty() { tr_latin("Done.") } else { tr_latin("I couldn't do it: see Orbiters - N4N0.") });
         drop(rt);

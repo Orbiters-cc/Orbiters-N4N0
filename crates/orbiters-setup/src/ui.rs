@@ -103,6 +103,8 @@ struct Setup {
     task: Option<Arc<Progress>>,
     job: Option<Job>,
     error: Option<String>,
+    /// What Windows would not take of an install that is done.
+    notes: Vec<String>,
     /// When an update finished (the app starts again a moment later).
     finished_at: Option<f64>,
     code: Arc<AtomicI32>,
@@ -152,6 +154,7 @@ impl Setup {
             task: None,
             job: None,
             error: None,
+            notes: Vec::new(),
             finished_at: None,
             code,
         };
@@ -228,6 +231,7 @@ impl Setup {
             match task.status().done {
                 None => ctx.request_repaint_after(Duration::from_millis(50)),
                 Some(Ok(())) => {
+                    self.notes = task.status().notes;
                     self.task = None;
                     self.code.store(0, Ordering::Relaxed);
                     let uninstalled = matches!(self.job, Some(Job::Uninstall(..)));
@@ -292,7 +296,7 @@ impl Setup {
             ui.painter(),
             pos2(rect.left() + 16.0, rect.center().y),
             Align2::LEFT_CENTER,
-            &Txt::new(title, 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2),
+            &Txt::new(title, 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::fg_2()),
         );
         let busy = self.busy();
         let buttons = [(icons::MINUS, tr("Minimize"), 15.0, false), (icons::X, if busy { tr("Wait for it to finish") } else { tr("Close") }, 16.0, true)];
@@ -304,13 +308,13 @@ impl Setup {
             let press = anim::toggle(&ctx, id.with(("press", i)), enabled && resp.is_pointer_button_down_on(), Spring::SNAPPY);
             let br = Rect::from_center_size(b.center(), b.size() * (1.0 - 0.14 * press));
             let (bg, fg) = if danger {
-                (theme::alpha(theme::REC, 0.85 * hover), theme::mix(theme::FG_3, Color32::WHITE, hover))
+                (theme::alpha(theme::REC, 0.85 * hover), theme::mix(theme::fg_3(), Color32::WHITE, hover))
             } else {
-                (theme::white(0.08 * hover), theme::mix(theme::FG_3, theme::FG, hover))
+                (theme::white(0.08 * hover), theme::mix(theme::fg_3(), theme::fg(), hover))
             };
             let p = ui.painter();
             p.rect_filled(br, theme::radius(8.0), bg);
-            widgets::icon(p, br.center(), glyph, size, if enabled { fg } else { theme::FG_4 });
+            widgets::icon(p, br.center(), glyph, size, if enabled { fg } else { theme::fg_4() });
             if resp.clicked() && enabled {
                 if danger {
                     self.close(&ctx);
@@ -349,10 +353,10 @@ impl Setup {
         p.multiply_opacity(t);
         let y = logo_rect.bottom() + 28.0 + 12.0 * (1.0 - t);
         widgets::text(&p, pos2(rect.center().x, y + 12.0), Align2::CENTER_CENTER, &Txt::new("Orbiters", 26.0).weight(weight::SEMIBOLD).tracking(-0.01));
-        let galley = p.layout_job(Txt::new("N4N0", 12.5).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
-        p.galley(pos2(rect.center().x - galley.size().x * 0.5 + 0.16 * 12.5, y + 38.0 - galley.size().y * 0.5), galley, theme::FG);
+        let galley = p.layout_job(Txt::new("N4N0", 12.5).weight(weight::MEDIUM).tracking(0.32).color(theme::fg_3()).job(f32::INFINITY));
+        p.galley(pos2(rect.center().x - galley.size().x * 0.5 + 0.16 * 12.5, y + 38.0 - galley.size().y * 0.5), galley, theme::fg());
 
-        let version = Txt::new(tr!("Version {version}", version = self.version()), 11.5).weight(weight::MEDIUM).color(theme::FG_3);
+        let version = Txt::new(tr!("Version {version}", version = self.version()), 11.5).weight(weight::MEDIUM).color(theme::fg_3());
         let size = widgets::text_size(ui, &version);
         let pill = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 44.0), vec2(size.x + 24.0, 26.0));
         p.rect_filled(pill, theme::radius(13.0), theme::white(0.06));
@@ -381,7 +385,7 @@ impl Setup {
         let (title, verb, note, warn) = self.action();
         let (visit, since) = (self.visit, self.page_since);
         let sub = note.unwrap_or_else(|| tr("N4N0 and its menu for VRChat: fast walk, YouTube, calls, 3D pictures, music and the light.").into());
-        block(ui, visit, since, 0, r, |ui| heading(ui, title, Some(&sub), if warn { theme::WARN } else { theme::FG_3 }));
+        block(ui, visit, since, 0, r, |ui| heading(ui, title, Some(&sub), if warn { theme::WARN } else { theme::fg_3() }));
 
         let locked = self.existing.is_some();
         let dir_text = short_path(&self.dir.display().to_string(), 64);
@@ -417,7 +421,7 @@ impl Setup {
         let needs = self.index.as_ref().map(|i| tr!("Needs {size} of space.", size = format::bytes(i.total() as f64))).unwrap_or_default();
         let note_rect = Rect::from_min_max(pos2(r.left(), r.bottom() - 74.0), pos2(r.right(), r.bottom() - 52.0));
         block(ui, visit, since, 2, note_rect, |ui| {
-            paragraph(ui, &if needs.is_empty() { by_installing.to_string() } else { format!("{needs} {by_installing}") }, 12.0, theme::FG_4);
+            paragraph(ui, &if needs.is_empty() { by_installing.to_string() } else { format!("{needs} {by_installing}") }, 12.0, theme::fg_4());
         });
 
         let mut install = false;
@@ -451,7 +455,7 @@ impl Setup {
 
     fn licence(&mut self, ui: &mut Ui, r: Rect, now: f64) {
         let (visit, since) = (self.visit, self.page_since);
-        block(ui, visit, since, 0, r, |ui| heading(ui, tr("Licence"), Some(tr("Free to use, under these terms.")), theme::FG_3));
+        block(ui, visit, since, 0, r, |ui| heading(ui, tr("Licence"), Some(tr("Free to use, under these terms.")), theme::fg_3()));
         let body = Rect::from_min_max(pos2(r.left(), r.top() + 84.0), pos2(r.right(), r.bottom() - 60.0));
         block(ui, visit, since, 1, body, |ui| {
             egui::ScrollArea::vertical().id_salt("licence").auto_shrink([false, false]).max_height(body.height()).show(ui, |ui| {
@@ -485,19 +489,19 @@ impl Setup {
             Some(Job::Uninstall(..)) => (tr("Uninstalling Orbiters - N4N0").into(), tr("Its files are removed; your sessions stay.").into()),
             _ => (tr("Installing Orbiters - N4N0").into(), tr!("Version {version}, in {folder}.", version = self.version(), folder = self.dir.display())),
         };
-        block(ui, visit, since, 0, r, |ui| heading(ui, &title, Some(&sub), theme::FG_3));
+        block(ui, visit, since, 0, r, |ui| heading(ui, &title, Some(&sub), theme::fg_3()));
         let area = Rect::from_min_max(pos2(r.left(), r.top() + 104.0), r.max);
         block(ui, visit, since, 1, area, |ui| {
             let w = ui.available_width();
             let (row, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-            let percent = Txt::new(format!("{:.0} %", status.fraction * 100.0), 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+            let percent = Txt::new(format!("{:.0} %", status.fraction * 100.0), 12.5).weight(weight::MEDIUM).color(theme::fg_2());
             let pw = widgets::text_size(ui, &percent).x;
             widgets::text(ui.painter(), pos2(row.right(), row.center().y), Align2::RIGHT_CENTER, &percent);
             widgets::text_truncated(
                 ui.painter(),
                 pos2(row.left(), row.center().y),
                 Align2::LEFT_CENTER,
-                &Txt::new(&status.label, 13.0).color(theme::FG_2),
+                &Txt::new(&status.label, 13.0).color(theme::fg_2()),
                 w - pw - 16.0,
             );
             ui.add_space(10.0);
@@ -520,7 +524,7 @@ impl Setup {
                         &Txt::new(tr("Orbiters - N4N0 is still closing"), 14.0).weight(weight::SEMIBOLD),
                     );
                     ui.add_space(6.0);
-                    paragraph(ui, tr("It finishes saving a recording before it quits. Close it now, and what it has not saved yet is lost."), 12.5, theme::FG_3);
+                    paragraph(ui, tr("It finishes saving a recording before it quits. Close it now, and what it has not saved yet is lost."), 12.5, theme::fg_3());
                     ui.add_space(12.0);
                     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::hover());
                     let b = Button::new(tr("Close it now")).icon(icons::X_CIRCLE).variant(Variant::Danger).size(Size::Sm);
@@ -551,6 +555,9 @@ impl Setup {
                 tr!("Updated to {version}", version = self.version()),
                 if self.args.relaunch { tr("Orbiters - N4N0 is opening again…").to_string() } else { tr!("Version {version} is in place.", version = self.version()) },
             )
+        } else if !self.notes.is_empty() {
+            // In place all the same; not where the shortcuts are, which are not all there.
+            (tr("Orbiters - N4N0 is installed").to_string(), format!("{}\n{}", tr!("Version {version} is in place.", version = self.version()), self.notes.join("\n")))
         } else {
             // Two whole sentences: where the shortcuts are cannot be a piece of one in every language.
             let sub = if self.desktop_shortcut {
@@ -560,9 +567,9 @@ impl Setup {
             };
             (tr("Orbiters - N4N0 is installed").to_string(), sub)
         };
-        block(ui, visit, since, 0, r, |ui| badge(ui, icons::CHECK, theme::ACCENT));
+        block(ui, visit, since, 0, r, |ui| badge(ui, icons::CHECK, theme::accent()));
         let text = Rect::from_min_max(pos2(r.left(), r.top() + 84.0), r.max);
-        block(ui, visit, since, 1, text, |ui| heading(ui, &title, Some(&sub), theme::FG_3));
+        block(ui, visit, since, 1, text, |ui| heading(ui, &title, Some(&sub), theme::fg_3()));
         if updating && self.args.relaunch {
             return;
         }
@@ -600,11 +607,11 @@ impl Setup {
         block(ui, visit, since, 0, r, |ui| badge(ui, icons::WARNING, theme::DANGER));
         let text = Rect::from_min_max(pos2(r.left(), r.top() + 84.0), r.max);
         block(ui, visit, since, 1, text, |ui| {
-            heading(ui, title, None, theme::FG_3);
+            heading(ui, title, None, theme::fg_3());
             ui.add_space(14.0);
             card(ui, |ui| {
                 ui.add_space(12.0);
-                paragraph(ui, &error, 12.5, theme::FG_2);
+                paragraph(ui, &error, 12.5, theme::fg_2());
                 ui.add_space(14.0);
             });
         });
@@ -642,7 +649,7 @@ impl Setup {
         let (visit, since) = (self.visit, self.page_since);
         let version = self.existing.as_ref().map(|e| e.version.clone()).unwrap_or_default();
         let sub = tr!("Version {version}, in {folder}.", version = version, folder = self.dir.display());
-        block(ui, visit, since, 0, r, |ui| heading(ui, tr("Uninstall Orbiters - N4N0?"), Some(&sub), theme::FG_3));
+        block(ui, visit, since, 0, r, |ui| heading(ui, tr("Uninstall Orbiters - N4N0?"), Some(&sub), theme::fg_3()));
         let remove = &mut self.remove_data;
         let card_area = Rect::from_min_max(pos2(r.left(), r.top() + 92.0), r.max);
         block(ui, visit, since, 1, card_area, |ui| {
@@ -681,9 +688,9 @@ impl Setup {
         } else {
             tr("Your recorded sessions and its settings are still there, should you install it again.")
         };
-        block(ui, visit, since, 0, r, |ui| badge(ui, icons::CHECK, theme::ACCENT));
+        block(ui, visit, since, 0, r, |ui| badge(ui, icons::CHECK, theme::accent()));
         let text = Rect::from_min_max(pos2(r.left(), r.top() + 84.0), r.max);
-        block(ui, visit, since, 1, text, |ui| heading(ui, tr("Orbiters - N4N0 is uninstalled"), Some(sub), theme::FG_3));
+        block(ui, visit, since, 1, text, |ui| heading(ui, tr("Orbiters - N4N0 is uninstalled"), Some(sub), theme::fg_3()));
         let mut close = false;
         footer(ui, visit, since, 2, r, |ui, row| {
             let b = Button::new(tr("Close")).variant(Variant::Primary);
@@ -706,7 +713,7 @@ impl eframe::App for Setup {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::INK_950.to_normalized_gamma_f32()
+        theme::ink_950().to_normalized_gamma_f32()
     }
 }
 
@@ -772,7 +779,7 @@ fn heading(ui: &mut Ui, title: &str, sub: Option<&str>, sub_color: Color32) {
     let w = ui.available_width();
     let g = ui.painter().layout_job(Txt::new(title, 22.0).weight(weight::SEMIBOLD).tracking(-0.01).job(w));
     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
-    ui.painter().galley(r.min, g, theme::FG);
+    ui.painter().galley(r.min, g, theme::fg());
     if let Some(sub) = sub {
         ui.add_space(6.0);
         paragraph(ui, sub, 13.0, sub_color);
@@ -821,7 +828,7 @@ fn bar(ui: &mut Ui, id: Id, fraction: f32) {
     p.rect_filled(rect, theme::radius(h * 0.5), theme::white(0.07));
     let f = anim::spring_from(ui.ctx(), id, [0.0], [fraction.clamp(0.0, 1.0)], Spring::SOFT)[0].clamp(0.0, 1.0);
     let fill = Rect::from_min_size(rect.min, vec2((rect.width() * f).max(h), h));
-    p.rect_filled(fill, theme::radius(h * 0.5), theme::ACCENT);
+    p.rect_filled(fill, theme::radius(h * 0.5), theme::accent());
     if f < 0.999 && anim::is_live(ui.ctx()) {
         let t = (anim::clock(ui.ctx(), 60.0) * 0.6).fract() as f32;
         let x = fill.left() + (fill.width() + 80.0) * t - 40.0;
@@ -846,10 +853,10 @@ fn licence_text(ui: &mut Ui) {
             paragraph_styled(ui, Txt::new(unlink(h), 13.5).weight(weight::SEMIBOLD));
             ui.add_space(2.0);
         } else if let Some(item) = line.strip_prefix("- ") {
-            paragraph_styled(ui, Txt::new(format!("•  {}", unlink(item)), 12.5).color(theme::FG_2).line_height(18.0));
+            paragraph_styled(ui, Txt::new(format!("•  {}", unlink(item)), 12.5).color(theme::fg_2()).line_height(18.0));
             ui.add_space(3.0);
         } else {
-            paragraph_styled(ui, Txt::new(unlink(line), 12.5).color(theme::FG_2).line_height(18.0));
+            paragraph_styled(ui, Txt::new(unlink(line), 12.5).color(theme::fg_2()).line_height(18.0));
         }
     }
 }
@@ -1029,7 +1036,7 @@ pub fn screenshots(dir: &std::path::Path, payload: Option<&'static [u8]>) -> any
             }),
         ),
     ];
-    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false, retry: false };
+    let args = Args { mode: Mode::Install, silent: false, dir: Some(orbiters_update::default_install_dir()), relaunch: true, hidden: false, relocated: false, retry: false, recover: false };
     for (name, prepare) in shots {
         let ctx = egui::Context::default();
         orbiters_ui::install(&ctx);

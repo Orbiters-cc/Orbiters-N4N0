@@ -51,7 +51,7 @@ fn para(ui: &mut Ui, txt: Txt) {
     let w = ui.available_width();
     let galley = ui.painter().layout_job(txt.job(w));
     let (r, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(r.min, galley, theme::FG);
+    ui.painter().galley(r.min, galley, theme::fg());
 }
 
 /// Draws the card in place of the error banner; returns whether it did (the banner is then left out).
@@ -72,7 +72,7 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
     let n = packages.len();
     para(&mut cu, Txt::new(if n == 1 { tr("A package this project needs is in none of your repositories") } else { tr("Packages this project needs are in none of your repositories") }, 13.0).weight(weight::SEMIBOLD).line_height(19.0));
     let names: Vec<String> = packages.iter().map(label).collect();
-    para(&mut cu, Txt::new(names.join(" · "), 12.0).color(theme::FG_2).line_height(17.0));
+    para(&mut cu, Txt::new(names.join(" · "), 12.0).color(theme::fg_2()).line_height(17.0));
     let mut act: Option<Act> = None;
     let busy = state.acting().is_some() && !retrying;
     if retrying {
@@ -91,7 +91,7 @@ pub(super) fn show(ui: &mut Ui, state: &mut State, salt: &str) -> bool {
                 }
             }
             Some(Err(e)) => {
-                para(&mut cu, Txt::new(tr!("Their repositories could not be looked up: {error}", error = e), 12.0).color(theme::FG_2).line_height(17.0));
+                para(&mut cu, Txt::new(tr!("Their repositories could not be looked up: {error}", error = e), 12.0).color(theme::fg_2()).line_height(17.0));
                 if widgets::activated(&Button::new(tr("Try again")).variant(Variant::Secondary).size(Size::Sm).id_salt(("missing-again", salt)).show(&mut cu)) {
                     act = Some(Act::Find);
                 }
@@ -182,21 +182,21 @@ enum Act {
 
 fn status(ui: &mut Ui, text: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-    feedback::spinner(ui.painter(), pos2(r.left() + 8.0, r.center().y), 7.0, 2.0, theme::ACCENT);
-    widgets::text(ui.painter(), pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(theme::FG_2));
+    feedback::spinner(ui.painter(), pos2(r.left() + 8.0, r.center().y), 7.0, 2.0, theme::accent());
+    widgets::text(ui.painter(), pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(text, 12.5).color(theme::fg_2()));
 }
 
 /// A repository to add and the packages it brings.
 fn addition(ui: &mut Ui, a: &missing::Addition) {
     let w = ui.available_width();
     let pkgs: Vec<String> = a.packages.iter().map(|(n, v)| format!("{n} {v}")).collect();
-    let body = Txt::new(tr!("for {packages}", packages = pkgs.join(", ")), 11.5).color(theme::FG_3).line_height(16.0);
+    let body = Txt::new(tr!("for {packages}", packages = pkgs.join(", ")), 11.5).color(theme::fg_3()).line_height(16.0);
     let galley = ui.painter().layout_job(body.job(w - 40.0));
     let h = 22.0 + galley.size().y + 10.0;
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let p = ui.painter();
     widgets::frame(p, r, 10.0, theme::black(0.22));
-    widgets::icon(p, pos2(r.left() + 16.0, r.top() + 16.0), if a.turn_on.is_some() { icons::EYE } else { icons::PLUS }, 13.0, theme::ACCENT);
+    widgets::icon(p, pos2(r.left() + 16.0, r.top() + 16.0), if a.turn_on.is_some() { icons::EYE } else { icons::PLUS }, 13.0, theme::accent());
     let verb = if a.turn_on.is_some() { tr("Turn on") } else { tr("Add") };
     let name = widgets::text_truncated(
         p,
@@ -205,17 +205,17 @@ fn addition(ui: &mut Ui, a: &missing::Addition) {
         &Txt::new(format!("{verb} {}", a.name), 12.5).weight(weight::MEDIUM),
         (w - 40.0) * 0.6,
     );
-    widgets::text_truncated(p, pos2(name.right() + 8.0, r.top() + 16.0), Align2::LEFT_CENTER, &Txt::new(host(&a.url), 11.0).color(theme::FG_4), r.right() - name.right() - 18.0);
-    p.galley(pos2(r.left() + 30.0, r.top() + 27.0), galley, theme::FG_3);
+    widgets::text_truncated(p, pos2(name.right() + 8.0, r.top() + 16.0), Align2::LEFT_CENTER, &Txt::new(host(&a.url), 11.0).color(theme::fg_4()), r.right() - name.right() - 18.0);
+    p.galley(pos2(r.left() + 30.0, r.top() + 27.0), galley, theme::fg_3());
     let _ = ui.interact(r, Id::unique(("missing-addition", &a.url)), Sense::hover()).on_hover_text(&a.url);
 }
 
 fn line(ui: &mut Ui, glyph: &str, color: egui::Color32, text: &str) {
     let w = ui.available_width();
-    let galley = ui.painter().layout_job(Txt::new(text, 11.5).color(theme::FG_2).line_height(16.0).job(w - 22.0));
+    let galley = ui.painter().layout_job(Txt::new(text, 11.5).color(theme::fg_2()).line_height(16.0).job(w - 22.0));
     let (r, _) = ui.allocate_exact_size(vec2(w, galley.size().y.max(16.0)), Sense::hover());
     widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.top() + 8.0), glyph, 12.0, color);
-    ui.painter().galley(pos2(r.left() + 20.0, r.top()), galley, theme::FG_2);
+    ui.painter().galley(pos2(r.left() + 20.0, r.top()), galley, theme::fg_2());
 }
 
 /// Adds the repositories (turning the person's own back on) and runs the change that failed again.

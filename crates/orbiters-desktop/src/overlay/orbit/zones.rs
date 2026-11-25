@@ -324,6 +324,11 @@ impl Zone {
         }
     }
 
+    /// Takes 3D pictures: there only where VRChat's stream camera can be read (Spout, which a Mac has not).
+    pub fn needs_the_camera_s_frames(self) -> bool {
+        self == Zone::WheelPictures || self.group() == Some(Group::Pictures) || Self::CAMERA.contains(&self)
+    }
+
     /// Nothing is pressed here: the pointer and a click pass through to what is under it.
     pub fn passes_clicks(self) -> bool {
         matches!(self, Zone::WheelCaption | Zone::QmCaption | Zone::CameraCaption | Zone::CameraScan | Zone::WheelVeil | Zone::SheetHint)

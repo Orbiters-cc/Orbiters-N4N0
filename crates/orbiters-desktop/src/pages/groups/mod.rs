@@ -1,10 +1,13 @@
 //! VRChat groups in the window (REQUEST22 1): the Groups section at the bottom of Home (the groups the signed-in account
-//! owns or helps run), each group's page (Look, Members, Roles, Posts) and the banner studio.
+//! owns or helps run), each group's page (Look, Members, Roles, Posts, Events) and the banner studio.
 //!
 //! What it shows is asked of the service on demand and answered to this window alone (`controller::groups`). On disk,
 //! per account: the studio's own crops and exports, and the new posts the person is writing (their own words, nothing of
 //! anyone else's; a post is not edited here, its page on vrchat.com is). Everything is bound to the account scope it was asked under: another account (or "Connecting") drops it all, confirmations included (B3).
-//! Pictures of groups and members are kept in memory only, a bounded number, asked for what is in view.
+//! Pictures of groups and members, and what the pages last read (the cards, a group's page, its first members and posts),
+//! are kept on this computer in the account's own folder (REQUEST28, `orbiters_core::vrchat_store`: the service writes, this
+//! reads): they show at once, and change in place when VRChat answers. While the saved session is being restored
+//! ([`State::held`]) they show for that very account, and nothing is asked or sent.
 //!
 //! The window owns no write. A press prepares one; the service seals it; the confirmation is drawn from the sealed object
 //! and nothing else; Send names it and the digest of what was drawn. Leaving the view it was asked from ends it unsent.
@@ -12,9 +15,10 @@
 //! check, across tabs, pages, windows and restarts (verify2 B-A, B-E, B-F). A check says what VRChat shows now, never what
 //! happened; what it cannot tell, and what VRChat does not show, are the person's to decide (verify3 Blocker 2, Major 3).
 pub mod art;
+mod events;
 mod page;
 mod studio;
-pub(crate) use page::{Composer, RoleEditor, Tab};
+pub(crate) use page::{Composer, Picker, RoleEditor, Tab};
 
 use super::Cx;
 use crate::backend::Ctl;
@@ -24,7 +28,7 @@ use crate::controller::vrchat_login::Presence;
 use art::Drafts;
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
 use orbiters_core::groups::{ArtSlot, FileTag, GroupCard, Missing, Part, Why};
-use orbiters_core::vrchat_api::GroupFailure;
+use orbiters_core::vrchat_api::{GroupFailure, GroupRefusal};
 use orbiters_i18n::tr;
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::icons;
@@ -54,6 +58,8 @@ pub(crate) enum Kind {
     Open(String),
     Members { group: String, query: String, offset: usize },
     Posts { group: String, offset: usize },
+    Events { group: String, month: Option<orbiters_core::group_events::Month>, offset: usize },
+    KeepEvents(String),
     Inventory { tag: FileTag, offset: usize },
     Picture(String),
     /// A picture of the account's gallery read in full for the banner studio.
@@ -122,9 +128,10 @@ impl Jobs {
         let working = crate::pages::Working::begin();
         std::thread::spawn(move || {
             let _working = working;
+            let account = scope.account();
             let reply = ctl.groups(scope, request);
             let image = match (&kind, &reply) {
-                (Kind::Picture(_), Reply::Picture(bytes)) => decode_picture(bytes),
+                (Kind::Picture(url), Reply::Picture(bytes)) => kept_picture(account.as_ref(), url, bytes),
                 // Exactly the sealed bytes, or nothing (B-E).
                 (Kind::Art { sha256, .. }, Reply::Picture(bytes)) if digest(bytes) == *sha256 => decode_picture(bytes),
                 _ => None,
@@ -165,9 +172,42 @@ fn digest(bytes: &[u8]) -> String {
 
 /// A picture as a texture's pixels, at most 640 px a side, decoded within bounds (Major 5).
 fn decode_picture(bytes: &[u8]) -> Option<egui::ColorImage> {
+    smaller(bytes).map(|img| egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+fn smaller(bytes: &[u8]) -> Option<image::RgbaImage> {
     let img = art::decode_bounded(bytes, art::PICTURE_PIXELS).ok()?;
-    let img = if img.width() > 640 || img.height() > 640 { image::imageops::thumbnail(&img, 640.min(img.width()), ((640.0 * img.height() as f32 / img.width() as f32) as u32).clamp(1, 640)) } else { img };
+    Some(if img.width() > 640 || img.height() > 640 { image::imageops::thumbnail(&img, 640.min(img.width()), ((640.0 * img.height() as f32 / img.width() as f32) as u32).clamp(1, 640)) } else { img })
+}
+
+/// A picture VRChat sent, kept for the account it was asked for (on the request's thread).
+fn kept_picture(account: Option<&orbiters_core::vrchat_store::Account>, url: &str, bytes: &[u8]) -> Option<egui::ColorImage> {
+    use crate::worlds::profile_pictures::{Profiles, Size};
+    let img = smaller(bytes)?;
+    if account.is_some() {
+        Profiles::of(account).keep_sent(url, Size::Wide, &img, bytes);
+    }
     Some(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+/// What was last read of the groups of `scope`'s account: of `kind`, under `id`.
+pub(crate) fn kept<T: serde::de::DeserializeOwned>(scope: &Scope, kind: &str, id: &str) -> Option<T> {
+    use orbiters_core::vrchat_store as store;
+    Some(store::Store::read(&kept_root(), &scope.account()?)?.get::<T>(kind, id)?.value)
+}
+
+#[cfg(not(test))]
+fn kept_root() -> std::path::PathBuf {
+    orbiters_core::vrchat_store::root()
+}
+/// Tests: a folder of the test's own.
+#[cfg(test)]
+fn kept_root() -> std::path::PathBuf {
+    KEPT_ROOT.with(|r| r.borrow().clone()).unwrap_or_else(|| orbiters_core::paths::cache_dir().join("no-vrchat-store"))
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static KEPT_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 enum Pic {
@@ -176,8 +216,8 @@ enum Pic {
     Failed,
 }
 
-/// Group and member pictures, in memory only, the newest [`PICTURES_MAX`] (M10). A picture that failed is not asked
-/// again by itself.
+/// Group and member pictures, the newest [`PICTURES_MAX`] as textures (M10), the others read again from this computer. A
+/// picture that failed is not asked again by itself.
 #[derive(Default)]
 pub(crate) struct Pictures {
     map: HashMap<String, Pic>,
@@ -198,7 +238,17 @@ impl Pictures {
             Some(_) => return None,
             None => {}
         }
-        if jobs.pictures_running() >= PICTURES_AT_ONCE {
+        // Shown before, in this run or another: in this very frame, without VRChat (REQUEST28).
+        match crate::worlds::at_once::wide(ctx, scope, url) {
+            crate::worlds::at_once::Wide::Ready(t) => {
+                self.arrived_as(url.to_string(), Pic::Ready(t.clone()));
+                return Some(t);
+            }
+            crate::worlds::at_once::Wide::Later => return None,
+            crate::worlds::at_once::Wide::No => {}
+        }
+        // (Nothing is asked of an account still on its way back.)
+        if !scope.signed_in() || jobs.pictures_running() >= PICTURES_AT_ONCE {
             return None;
         }
         self.map.insert(url.to_string(), Pic::Waiting);
@@ -214,6 +264,9 @@ impl Pictures {
             Some(img) => Pic::Ready(ctx.load_texture(format!("group-picture-{}", self.order.len()), img, egui::TextureOptions::LINEAR)),
             None => Pic::Failed,
         };
+        self.arrived_as(url, pic);
+    }
+    fn arrived_as(&mut self, url: String, pic: Pic) {
         self.map.insert(url.clone(), pic);
         self.order.retain(|u| *u != url);
         self.order.push_back(url);
@@ -270,8 +323,11 @@ struct Lost {
 const SENT_MAX: usize = 16;
 
 pub struct State {
-    /// The scope everything here was asked under; `None` while VRChat is not signed in for certain.
+    /// The scope everything here was asked under; `None` while VRChat is not signed in for certain (nor is on its way back as
+    /// an account whose groups were kept: [`State::held`]).
     scope: Option<Scope>,
+    /// The saved session is being restored: what was last read shows, nothing is asked.
+    held: bool,
     pub(crate) jobs: Jobs,
     pub(crate) pictures: Pictures,
     pub(crate) discovery: Discovery,
@@ -319,6 +375,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             scope: None,
+            held: false,
             jobs: Jobs::default(),
             pictures: Pictures::default(),
             discovery: Discovery::default(),
@@ -401,6 +458,20 @@ impl State {
         }
         self.token += 1;
     }
+    /// Pictures of the page: how many cards show, and the page of one opened as a press on its card opens it.
+    pub fn kept_cards(&self) -> Option<usize> {
+        match &self.discovery {
+            Discovery::Ready(cards, _) => Some(cards.len()),
+            _ => None,
+        }
+    }
+    pub fn open_kept(&mut self, i: usize) {
+        let (Discovery::Ready(cards, _), Some(scope)) = (&self.discovery, self.scope.clone()) else { return };
+        let Some(card) = cards.get(i).cloned() else { return };
+        let mut open = page::Open::new(card, &self.drafts);
+        open.as_kept(&scope);
+        self.open = Some(open);
+    }
     /// Back to Home (the sidebar's Home). The new post being written is kept on disk first.
     pub fn close(&mut self) {
         self.end_flow();
@@ -429,15 +500,42 @@ impl State {
         if self.staged {
             return;
         }
-        let now = Self::signed(cx);
+        // Signed in; or on its way back, as the service verified it for this very member: shown as it was, nothing asked.
+        let signed = Self::signed(cx);
+        let held = signed.is_none() && cx.snap.vrchat_login.presence() == Presence::Connecting && cx.snap.vrchat_login.known.is_some();
+        let now = signed.or_else(|| held.then(|| Scope::of(cx.snap)).filter(|s| s.account().is_some()));
+        // The very account that was on its way back is there: what shows stays, and is read now.
+        let back = self.held && !held && now.as_ref().zip(self.scope.as_ref()).is_some_and(|(a, b)| a.account().is_some() && a.account() == b.account());
+        if back || (held && self.held && now.as_ref().zip(self.scope.as_ref()).is_some_and(|(a, b)| a.account() == b.account())) {
+            if back {
+                self.held = false;
+                self.jobs.reset();
+                self.pictures.forget_unread();
+                self.ledger_due = true;
+                self.ledger_at = 0.0;
+                if let Some(open) = self.open.as_mut() {
+                    open.reload();
+                }
+                if let Discovery::Ready(_, at) = &mut self.discovery {
+                    *at = f64::NEG_INFINITY;
+                }
+            }
+            self.scope = now.clone();
+            if back {
+                self.drafts = self.scope.as_ref().map(Drafts::load).unwrap_or_default();
+            }
+        }
         self.me_name = cx.snap.vrchat_login.user.as_ref().map(|u| orbiters_core::groups::label(&u.display_name, 32)).unwrap_or_default();
         if now != self.scope {
             self.end_flow();
             self.keep_drafts();
             self.scope = now;
+            self.held = held && self.scope.is_some();
             self.jobs.reset();
             self.pictures.clear();
-            self.discovery = Discovery::Idle;
+            // The cards as they were last read; read again at once (REQUEST28).
+            let cards = self.scope.as_ref().and_then(|s| kept::<Vec<GroupCard>>(s, orbiters_core::vrchat_store::kind::GROUPS, orbiters_core::vrchat_store::ONLY));
+            self.discovery = cards.filter(|c| !c.is_empty()).map_or(Discovery::Idle, |c| Discovery::Ready(c, f64::NEG_INFINITY));
             self.hydrate_again.clear();
             self.open = None;
             self.studio = None;
@@ -494,7 +592,7 @@ impl State {
 
     /// Takes what came back.
     fn take(&mut self, ctx: &egui::Context, cx: &mut Cx) {
-        if let (Some(scope), false) = (self.scope.clone(), self.staged) {
+        if let (Some(scope), false) = (self.scope.clone(), self.staged || self.held) {
             for op in std::mem::take(&mut self.cancels) {
                 self.jobs.ask(ctx, cx.ctl, &scope, Kind::Cancel(op.clone()), Request::Cancel { op });
             }
@@ -506,8 +604,22 @@ impl State {
         }
         for a in self.jobs.take() {
             match (a.kind, a.reply) {
-                (Kind::Discover, Reply::Discovered(cards)) => self.discovery = Discovery::Ready(cards, anim::time(ctx)),
-                (Kind::Discover, Reply::Failed(f)) => self.discovery = Discovery::Failed(f, anim::time(ctx)),
+                (Kind::Discover, Reply::Discovered(mut cards)) => {
+                    // A card not read yet keeps the name and pictures it shows.
+                    if let Discovery::Ready(before, _) = &self.discovery {
+                        for c in cards.iter_mut().filter(|c| !c.named) {
+                            if let Some(b) = before.iter().find(|b| b.id == c.id && b.named) {
+                                *c = GroupCard { owner: c.owner, permissions: c.permissions.clone(), ..b.clone() };
+                            }
+                        }
+                    }
+                    self.discovery = Discovery::Ready(cards, anim::time(ctx));
+                }
+                // What shows stays when it could not be read again: the next try as after any.
+                (Kind::Discover, Reply::Failed(f)) => match &mut self.discovery {
+                    Discovery::Ready(cards, at) if !cards.is_empty() => *at = anim::time(ctx),
+                    _ => self.discovery = Discovery::Failed(f, anim::time(ctx)),
+                },
                 (Kind::Hydrate, Reply::Hydrated(named)) => {
                     let again = anim::time(ctx) + HYDRATE_AGAIN;
                     if let Discovery::Ready(cards, _) = &mut self.discovery {
@@ -585,6 +697,10 @@ impl State {
         if self.flow.is_some() {
             return;
         }
+        if self.held {
+            self.said = Some(failure_text(Failure::SignedOut));
+            return;
+        }
         self.said = None;
         self.origin = origin;
         self.token += 1;
@@ -613,7 +729,7 @@ impl State {
             }
             Reply::Failed(f) => {
                 self.flow = None;
-                self.ended(ctx, cx, None, Outcome::Refused(f));
+                self.ended(ctx, cx, None, Outcome::Refused(f), None);
             }
             _ => self.flow = None,
         }
@@ -640,8 +756,12 @@ impl State {
         } else {
             None
         };
+        let mut said = None;
         let outcome = match reply {
-            Reply::Outcome { outcome, .. } => outcome,
+            Reply::Outcome { outcome, said: words, .. } => {
+                said = words;
+                outcome
+            }
             // Its answer did not come: the ledger has it. Until that can be read, what it was.
             Reply::Failed(Failure::Lost) => {
                 if let Some(s) = &sealed {
@@ -657,12 +777,12 @@ impl State {
         if !mine {
             match outcome {
                 Outcome::Done(done) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(&done)),
-                Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, failure_text(f)),
+                Outcome::Refused(f) => cx.toasts.push(ctx, orbiters_ui::toast::Kind::Info, refused_text(None, f, said.as_ref())),
                 Outcome::Unknown => {}
             }
             return;
         }
-        self.ended(ctx, cx, sealed, outcome);
+        self.ended(ctx, cx, sealed, outcome, said);
     }
     fn cancel(&mut self) {
         self.end_flow();
@@ -798,12 +918,12 @@ impl State {
     }
     /// How a write ended, for the view it was of (a view of another group takes nothing from it). Toasts carry no names
     /// (M10).
-    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, sealed: Option<Sealed>, outcome: Outcome) {
+    fn ended(&mut self, ctx: &egui::Context, cx: &mut Cx, sealed: Option<Sealed>, outcome: Outcome, said: Option<GroupRefusal>) {
         if let Outcome::Done(done) = &outcome {
             cx.toasts.push(ctx, orbiters_ui::toast::Kind::Success, done_text(done));
         }
         self.said = match &outcome {
-            Outcome::Refused(f) => Some(failure_text_for(sealed.as_ref().map(|p| &p.write), *f)),
+            Outcome::Refused(f) => Some(refused_text(sealed.as_ref(), *f, said.as_ref())),
             Outcome::Done(_) | Outcome::Unknown => None,
         };
         // Without one: refused as it was being prepared, for the view still waiting for it.
@@ -908,8 +1028,27 @@ fn role_parts(p: &orbiters_core::groups::RoleParts) -> [(bool, &'static str); 7]
 pub(crate) fn failure_text_for(write: Option<&Write>, f: Failure) -> String {
     match (write, f) {
         (Some(Write::Upload { .. }), Failure::Api(GroupFailure::Forbidden)) => tr("VRChat refused the upload: VRChat+ is needed, or your inventory is full.").to_string(),
+        (Some(Write::MemberRole { .. }), Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid)) => tr("VRChat refused this change of the member's roles: nothing changed.").to_string(),
         (Some(Write::ApplyArt { .. }), Failure::Api(GroupFailure::Forbidden)) => tr("VRChat refused the picture: your role, or the picture itself.").to_string(),
         _ => failure_text(f),
+    }
+}
+
+/// A refusal as the person reads it: what VRChat itself answered, word for word, when it is VRChat that refused (REQUEST28:
+/// that is how its reason is learnt), then what it means here.
+pub(crate) fn refused_text(sealed: Option<&Sealed>, f: Failure, said: Option<&GroupRefusal>) -> String {
+    let gives = sealed.is_some_and(|s| matches!(s.write, Write::MemberRole { add: true, .. }));
+    let ours = match f {
+        // The one thing VRChat asks of some roles that shows nowhere else.
+        Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid) if gives && sealed.and_then(|s| s.role.as_ref()).is_some_and(|r| r.requires_two_factor) => {
+            tr("VRChat refused it. This role needs two-factor authentication: it must be on for that member's VRChat account.").to_string()
+        }
+        f => failure_text_for(sealed.map(|s| &s.write), f),
+    };
+    match said {
+        Some(r) if !r.words.is_empty() => format!("{}\n{ours}", orbiters_i18n::tr!("VRChat's answer: “{words}” (error {status})", words = r.words, status = r.status)),
+        Some(r) => format!("{}\n{ours}", orbiters_i18n::tr!("VRChat refused it without saying why (error {status}).", status = r.status)),
+        None => ours,
     }
 }
 
@@ -922,7 +1061,7 @@ fn changed_text(parts: &[(bool, &str)]) -> String {
     )
 }
 
-/// A failure in the person's words (local codes only: nothing of VRChat's text, M5, M10).
+/// A failure in the person's words (local codes only: VRChat's own are [`refused_text`]'s).
 pub(crate) fn failure_text(f: Failure) -> String {
     match f {
         Failure::Api(GroupFailure::Forbidden) => tr("Your role in this group does not allow this."),
@@ -980,7 +1119,7 @@ pub(crate) fn why_text(why: Why) -> &'static str {
         Why::NoPermission => tr("Your role does not include this right."),
         Why::RoleAtOrAbove => tr("This role is at or above your own highest role."),
         Why::FixedRole => tr("Everyone's role and the owner's role cannot be changed this way."),
-        Why::PaidRole => tr("Roles bought in VRChat's store are not given here."),
+        Why::PaidRole => tr("This role is bought in VRChat's store: VRChat gives it to whoever buys it, so it is not given by hand here."),
         Why::OwnerRole => tr("Only the name and description of the owner's role change."),
         Why::NotGrantable => tr("Your role cannot give this right."),
         Why::Prerequisite => tr("A right is missing the right it depends on."),
@@ -996,11 +1135,12 @@ pub(crate) fn missing_text(m: Missing) -> &'static str {
     match m {
         Missing::Membership => tr("VRChat did not give your own membership whole, so nothing is sent. Read the group again."),
         Missing::Identity => tr("What VRChat gave is not of your account in this group, so nothing is sent. Read the group again."),
-        Missing::Roles => tr("VRChat did not give every role of this group, so nothing is sent. Read the group again."),
-        Missing::RoleOrder => tr("VRChat did not say where this role stands among the others, so nothing is sent. Read the group again."),
-        Missing::RoleDefinition => tr("VRChat did not give what this role may do, so nothing is sent. Read the group again."),
+        Missing::Roles => tr("VRChat did not give this group's roles. They can be given on vrchat.com."),
+        Missing::RoleOrder => tr("VRChat does not say where this role stands among the others: the group's owner can give it, or anyone who may on vrchat.com."),
+        Missing::RoleDefinition => tr("VRChat does not say what this role may do, so it is not changed or deleted from here. It can be on vrchat.com."),
+        Missing::RoleGone => tr("This role is no longer in the group."),
         Missing::Catalogue => tr("VRChat did not give the rights a role can have, so nothing is sent. Read the group again."),
-        Missing::Member => tr("VRChat did not give this member's own roles whole, so nothing is sent. Read the group again."),
+        Missing::Member => tr("VRChat did not give this member's own roles whole, so they are left alone here. They can be changed on vrchat.com."),
         Missing::Post => tr("VRChat did not give this post, or who sees it, whole: it is not deleted from here."),
         Missing::Picture => tr("VRChat did not say which picture is there, so nothing is sent. Read the group again."),
         Missing::Entitlement => tr("VRChat did not say whether your account may upload, so nothing is sent. Try again shortly."),
@@ -1163,11 +1303,11 @@ pub(crate) fn uncertain_panel(ui: &mut Ui, ctx: &egui::Context, ctl: &Ctl, state
     if let Some(said) = state.said.clone() {
         let w = ui.available_width();
         let p = ui.painter().clone();
-        let galley = p.layout_job(Txt::new(&said, 13.0).color(theme::FG).line_height(19.0).job(w - 60.0));
+        let galley = p.layout_job(Txt::new(&said, 13.0).color(theme::fg()).line_height(19.0).job(w - 60.0));
         let (rect, _) = ui.allocate_exact_size(vec2(w, galley.size().y.max(20.0) + 28.0), Sense::hover());
         p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::DANGER, 0.12));
         widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING_CIRCLE, 17.0, theme::DANGER);
-        p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
+        p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::fg());
     }
 }
 
@@ -1217,13 +1357,13 @@ fn fits(ui: &Ui, label: &str, glyph: f32) -> f32 {
 fn warn_card(ui: &mut Ui, text: &str, button_w: f32, button: impl FnOnce(&mut Ui, Rect)) {
     let w = ui.available_width();
     let p = ui.painter().clone();
-    let galley = p.layout_job(Txt::new(text, 13.0).color(theme::FG).line_height(19.0).job((w - 42.0 - button_w - 34.0).max(120.0)));
+    let galley = p.layout_job(Txt::new(text, 13.0).color(theme::fg()).line_height(19.0).job((w - 42.0 - button_w - 34.0).max(120.0)));
     let h = galley.size().y.max(20.0) + 28.0;
     let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     p.rect_filled(rect, theme::radius(14.0), theme::alpha(theme::WARN, 0.12));
     p.rect_stroke(rect, theme::radius(14.0), egui::Stroke::new(1.0, theme::alpha(theme::WARN, 0.45)), egui::StrokeKind::Inside);
     widgets::icon(&p, pos2(rect.left() + 22.0, rect.top() + 24.0), icons::WARNING, 17.0, theme::WARN);
-    p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::FG);
+    p.galley(pos2(rect.left() + 42.0, rect.top() + 14.0), galley, theme::fg());
     if button_w > 0.0 {
         button(ui, Rect::from_min_size(pos2(rect.right() - 14.0 - button_w, (rect.center().y - 17.0).min(rect.top() + 10.0)), vec2(button_w, 34.0)));
     }
@@ -1239,7 +1379,7 @@ fn candidate_row(ui: &mut Ui, op: &str, label: &str, c: &Candidate, thumb: Optio
     let mut x = rect.left() + 16.0;
     if !c.url.is_empty() {
         let r = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 6.0), vec2(60.0, 34.0));
-        p.rect_filled(r, theme::radius(8.0), theme::INK_750);
+        p.rect_filled(r, theme::radius(8.0), theme::ink_750());
         if let Some(t) = thumb {
             paint::squircle_texture(&p, r, [theme::squircle(8.0); 4], t.id(), super::launcher::cover_uv(t.size_vec2(), r.size()), Color32::WHITE);
         }
@@ -1253,7 +1393,7 @@ fn candidate_row(ui: &mut Ui, op: &str, label: &str, c: &Candidate, thumb: Optio
         Likeness::Since => tr("added since you asked"),
         Likeness::Uncertain => tr("it may have been there before"),
     };
-    widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::FG_2), rect.right() - bw - 28.0 - x);
+    widgets::text_truncated(&p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(format!("{name} · {} · {when} · {same}", tail(&c.id)), 13.0).color(theme::fg_2()), rect.right() - bw - 28.0 - x);
     let b = Rect::from_min_size(pos2(rect.right() - 10.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let r = widgets::Button::new(label).size(widgets::Size::Sm).enabled(!telling).id_salt(("group-candidate", op, c.id.as_str())).show_at(ui, b);
     if widgets::activated_fresh(&r) {
@@ -1313,7 +1453,7 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Discovery::Ready(_, at) | Discovery::Failed(_, at) => now - at > READ_AGAIN,
         Discovery::Loading => false,
     };
-    if due && !state.staged {
+    if due && !state.staged && !state.held {
         if !matches!(state.discovery, Discovery::Ready(..)) {
             state.discovery = Discovery::Loading;
         }
@@ -1346,6 +1486,9 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     Some(CardPress::Open) => {
                         state.end_flow();
                         state.open = Some(page::Open::new(card, &state.drafts));
+                        if let (Some(open), false) = (state.open.as_mut(), state.staged) {
+                            open.as_kept(&scope);
+                        }
                         state.ledger_due = true;
                     }
                     Some(CardPress::Studio) => {
@@ -1356,7 +1499,7 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                     None => {}
                 }
             }
-            if !unnamed.is_empty() && !state.staged && !state.jobs.busy_with(|k| *k == Kind::Hydrate) {
+            if !unnamed.is_empty() && !state.staged && !state.held && !state.jobs.busy_with(|k| *k == Kind::Hydrate) {
                 state.jobs.ask(&ctx, cx.ctl, &scope, Kind::Hydrate, Request::Hydrate { ids: unnamed });
             }
         }
@@ -1370,7 +1513,7 @@ pub fn home_section(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 18.0, theme::WARN);
             let line = format!("{} {}", tr("Your groups could not be loaded."), failure_text(f));
             let bw = fits(ui, tr("Read again"), 24.0);
-            widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 74.0 - bw);
+            widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), rect.width() - 74.0 - bw);
             let b = Rect::from_min_size(pos2(rect.right() - 16.0 - bw, rect.center().y - 17.0), vec2(bw, 34.0));
             if widgets::Button::new(tr("Read again")).icon(icons::ARROW_CLOCKWISE).size(widgets::Size::Sm).id_salt("groups-retry").show_at(ui, b).clicked() {
                 state.discovery = Discovery::Loading;
@@ -1442,7 +1585,7 @@ fn group_card(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &Scope, card: &Gro
         let tint = widgets::name_color(&shown_name);
         paint::fill_convex(&p, &paint::squircle_points(r, theme::squircle(theme::CARD_RADIUS)), |at| {
             let t = ((at.x - r.left()) / r.width()).clamp(0.0, 1.0);
-            theme::mix(theme::mix(tint, theme::INK_850, 0.55), theme::INK_850, t)
+            theme::mix(theme::mix(tint, theme::ink_850(), 0.55), theme::ink_850(), t)
         });
     }
     // A veil from the left, so the words read over any banner.
@@ -1474,14 +1617,14 @@ fn group_card(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &Scope, card: &Gro
         None => line,
     };
     // Under the corner button: the line takes the card's width.
-    widgets::text_truncated(&p, pos2(tx, icon_rect.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_2), r.right() - 18.0 - tx);
+    widgets::text_truncated(&p, pos2(tx, icon_rect.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_2()), r.right() - 18.0 - tx);
     // What the person can do here.
     let what = abilities_line(card);
-    let pill = Txt::new(&what, 12.0).weight(weight::MEDIUM).color(theme::FG);
+    let pill = Txt::new(&what, 12.0).weight(weight::MEDIUM).color(theme::fg());
     let pw = (widgets::text_size(ui, &pill).x + 34.0).min(r.width() - 36.0);
     let pr = Rect::from_min_size(pos2(r.left() + 18.0, r.bottom() - 18.0 - 28.0), vec2(pw, 28.0));
     p.rect_filled(pr, theme::radius(14.0), theme::black(0.42));
-    widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), if card.owner { icons::SHIELD_CHECK } else { icons::USERS_THREE }, 13.0, theme::ACCENT);
+    widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), if card.owner { icons::SHIELD_CHECK } else { icons::USERS_THREE }, 13.0, theme::accent());
     widgets::text_truncated(&p, pos2(pr.left() + 27.0, pr.center().y), Align2::LEFT_CENTER, &pill, pr.width() - 34.0);
     // The banner studio, in the corner.
     let sb = Rect::from_min_size(pos2(r.right() - 48.0, r.top() + 14.0), vec2(36.0, 36.0));
@@ -1634,6 +1777,10 @@ pub mod stage {
         });
         state.serial += 1;
         state.flow = Some(Flow::Confirming { sealed, serial: state.serial, origin, art });
+    }
+    /// The list of a picture's edit button, open.
+    pub fn edit_open(ctx: &egui::Context, which: &str) {
+        orbiters_ui::popup::open(ctx, page::edit_list(which));
     }
     pub fn named(state: &mut State, me: &str) {
         state.me_name = me.into();

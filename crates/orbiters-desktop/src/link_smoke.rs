@@ -26,7 +26,6 @@ use crate::link_between::{Between, Line};
 use crate::service::Service;
 use anyhow::Context as _;
 use orbiters_core::settings::Settings;
-use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -131,7 +130,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
     let (out, heard) = (process.stdout.take().context("its output")?, said.clone());
     let (done, output_done) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("link-smoke-reader".into()).spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
+        for line in crate::worker::log_lines(out) {
             let mut said = heard.lock().unwrap();
             if let Some(digest) = line.strip_prefix("state ") {
                 said.state = Some(digest.trim().to_string());
@@ -245,6 +244,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     state.account = Default::default();
     state.vrchat.pid = None;
     *state.steamvr = Default::default();
+    // (On a Mac the panels stay for the engine's launcher: this process, which has no window server.)
+    state.launcher.desktop_game = cfg!(target_os = "macos").then(std::process::id);
     ctl.set_snapshot(state);
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let endpoint = Endpoint { port: listener.local_addr()?.port(), token: uuid::Uuid::new_v4().simple().to_string() };
@@ -255,7 +256,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     if !has("--no-window") {
         shown.push(start("window", Role::Window, "--window", &["--no-focus"], &endpoint, &root)?);
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if !has("--no-panels") {
         shown.push(start("desktop panels", Role::Orbit, "--orbit-desktop", &[], &endpoint, &root)?);
     }

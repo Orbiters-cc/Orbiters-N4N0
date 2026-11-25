@@ -225,8 +225,8 @@ impl Panel {
         let go = &d.status.go;
         let state = |t: Target| (self.hover == Some(t), self.pressed == Some(t));
         self.title(p, tr("Go there"), self.entry(d).map(|e| e.name.as_str()), 990.0, shown);
-        text_cut(p, pos2(32.0, 86.0), 960.0, orbit_look::txt(tr("Pick an instance, or make one: Orbiters takes you there in VRChat."), 17.0).color(fade(theme::FG_3, shown)));
-        let head = |p: &Painter, x: f32, words: &str| text(p, pos2(x, 128.0), Align2::LEFT_CENTER, orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(fade(theme::FG_2, shown)));
+        text_cut(p, pos2(32.0, 86.0), 960.0, orbit_look::txt(tr("Pick an instance, or make one: Orbiters takes you there in VRChat."), 17.0).color(fade(theme::fg_3(), shown)));
+        let head = |p: &Painter, x: f32, words: &str| text(p, pos2(x, 128.0), Align2::LEFT_CENTER, orbit_look::txt(words, 15.0).weight(weight::SEMIBOLD).color(fade(theme::fg_2(), shown)));
         // On the way: how, and what to do now if anything, large, where the list was (the end of this story is in VRChat).
         if let Some(gone) = &go.went {
             let sent = &gone.instance;
@@ -240,49 +240,49 @@ impl Panel {
                 Went::Direct | Went::Started => icons::SIGN_IN,
             };
             widgets::icon(p, pos2(card.center().x, 176.0), glyph, 48.0, fade(orbit_look::accent(), shown));
-            text(p, pos2(card.center().x, 228.0), Align2::CENTER_CENTER, orbit_look::txt(title, 28.0).weight(weight::BOLD).color(fade(theme::FG, shown)));
-            text(p, pos2(card.center().x, 272.0), Align2::CENTER_CENTER, orbit_look::txt(instance_line(sent), 18.0).color(fade(theme::FG_2, shown)));
-            let mut job = orbit_look::txt(says, 19.0).color(fade(theme::FG, shown)).line_height(26.0).job(card.width() - 56.0);
+            text(p, pos2(card.center().x, 228.0), Align2::CENTER_CENTER, orbit_look::txt(title, 28.0).weight(weight::BOLD).color(fade(theme::fg(), shown)));
+            text(p, pos2(card.center().x, 272.0), Align2::CENTER_CENTER, orbit_look::txt(instance_line(sent), 18.0).color(fade(theme::fg_2(), shown)));
+            let mut job = orbit_look::txt(says, 19.0).color(fade(theme::fg(), shown)).line_height(26.0).job(card.width() - 56.0);
             job.wrap.max_rows = 4;
             job.halign = egui::Align::Center;
             let galley = p.layout_job(job);
-            p.galley(pos2(card.center().x, 300.0), galley, theme::FG);
+            p.galley(pos2(card.center().x, 300.0), galley, theme::fg());
             for (t, rect) in targets {
                 if *t == Target::GoRetry {
                     let (h, pr) = state(*t);
-                    pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), tr("See the instances again"), RAISED2, theme::FG, h, pr, shown);
+                    pill_button(p, *rect, Some(icons::ARROW_U_UP_LEFT), tr("See the instances again"), RAISED2, theme::fg(), h, pr, shown);
                 }
                 if *t == Target::GoInvite {
                     let (h, pr) = state(*t);
-                    pill_button(p, *rect, Some(icons::ENVELOPE_SIMPLE), tr("Send me an invite instead"), RAISED, theme::FG, h, pr, shown);
+                    pill_button(p, *rect, Some(icons::ENVELOPE_SIMPLE), tr("Send me an invite instead"), RAISED, theme::fg(), h, pr, shown);
                 }
             }
         } else {
             head(p, 32.0, tr("Instances now"));
             match (&go.list, go.loading) {
                 (None, true) => {
-                    widgets::icon(p, pos2(LIST.center().x, LIST.center().y - 30.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, fade(theme::FG_4, shown));
-                    text(p, pos2(LIST.center().x, LIST.center().y + 18.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Looking for instances…"), 20.0).color(fade(theme::FG_3, shown)));
+                    widgets::icon(p, pos2(LIST.center().x, LIST.center().y - 30.0), icons::GLOBE_HEMISPHERE_WEST, 40.0, fade(theme::fg_4(), shown));
+                    text(p, pos2(LIST.center().x, LIST.center().y + 18.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Looking for instances…"), 20.0).color(fade(theme::fg_3(), shown)));
                 }
                 (None, false) => {
                     widgets::icon(p, pos2(LIST.center().x, LIST.center().y - 40.0), icons::WARNING, 40.0, fade(theme::WARN, shown));
                     let words = go.error.clone().unwrap_or_else(|| tr("The instances could not be read.").to_string());
-                    let mut job = orbit_look::txt(words, 18.0).color(fade(theme::FG, shown)).line_height(24.0).job(LIST.width() - 40.0);
+                    let mut job = orbit_look::txt(words, 18.0).color(fade(theme::fg(), shown)).line_height(24.0).job(LIST.width() - 40.0);
                     job.wrap.max_rows = 3;
                     job.halign = egui::Align::Center;
-                    p.galley(pos2(LIST.center().x, LIST.center().y), p.layout_job(job), theme::FG);
+                    p.galley(pos2(LIST.center().x, LIST.center().y), p.layout_job(job), theme::fg());
                 }
                 (Some(list), _) if list.items.is_empty() => {
-                    widgets::icon(p, pos2(LIST.center().x, LIST.center().y - 40.0), icons::USERS_THREE, 40.0, fade(theme::FG_4, shown));
-                    text(p, pos2(LIST.center().x, LIST.center().y + 6.0), Align2::CENTER_CENTER, orbit_look::txt(tr("No instance you can join right now"), 21.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-                    text(p, pos2(LIST.center().x, LIST.center().y + 38.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Make a new one on the right."), 17.0).color(fade(theme::FG_3, shown)));
+                    widgets::icon(p, pos2(LIST.center().x, LIST.center().y - 40.0), icons::USERS_THREE, 40.0, fade(theme::fg_4(), shown));
+                    text(p, pos2(LIST.center().x, LIST.center().y + 6.0), Align2::CENTER_CENTER, orbit_look::txt(tr("No instance you can join right now"), 21.0).weight(weight::SEMIBOLD).color(fade(theme::fg(), shown)));
+                    text(p, pos2(LIST.center().x, LIST.center().y + 38.0), Align2::CENTER_CENTER, orbit_look::txt(tr("Make a new one on the right."), 17.0).color(fade(theme::fg_3(), shown)));
                 }
                 (Some(list), _) => {
                     let pages = go_pages(go);
                     let first = self.go_page.min(pages - 1) * GO_ROWS;
                     // A page past what was read: the next batch is on its way.
                     if first >= list.items.len() {
-                        text(p, pos2(LIST.center().x, LIST.center().y), Align2::CENTER_CENTER, orbit_look::txt(tr("Looking for more instances…"), 19.0).color(fade(theme::FG_3, shown)));
+                        text(p, pos2(LIST.center().x, LIST.center().y), Align2::CENTER_CENTER, orbit_look::txt(tr("Looking for more instances…"), 19.0).color(fade(theme::fg_3(), shown)));
                     }
                     for (slot, i) in (first..(first + GO_ROWS).min(list.items.len())).enumerate() {
                         let item = &list.items[i];
@@ -293,30 +293,30 @@ impl Panel {
                         let rect = if pr { rect.shrink(2.0) } else { rect };
                         p.rect_filled(rect, CornerRadius::same(18), fade(if h { RAISED2 } else { RAISED }, appear));
                         // Who may join, then where and how full; friends in it, when VRChat said.
-                        text_cut(p, pos2(rect.min.x + 20.0, rect.min.y + 8.0), 360.0, orbit_look::txt(access_name(item.access), 19.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha)));
+                        text_cut(p, pos2(rect.min.x + 20.0, rect.min.y + 8.0), 360.0, orbit_look::txt(access_name(item.access), 19.0).weight(weight::SEMIBOLD).color(fade(theme::fg(), alpha)));
                         let mut under = format!("{} · {}", region_words(&item.region), people(item));
                         if let Some(friends) = item.friends.filter(|n| *n > 0) {
                             under = format!("{under} · {}", tr_n("{count} friend", "{count} friends", friends as u64));
                         }
-                        text_cut(p, pos2(rect.min.x + 20.0, rect.min.y + 34.0), 400.0, orbit_look::txt(under, 15.5).color(fade(theme::FG_3, alpha)));
+                        text_cut(p, pos2(rect.min.x + 20.0, rect.min.y + 34.0), 400.0, orbit_look::txt(under, 15.5).color(fade(theme::fg_3(), alpha)));
                         let (word, tint) = if item.can_join {
                             (tr("Join"), orbit_look::accent())
                         } else if item.full {
-                            (tr("Full"), theme::FG_3)
+                            (tr("Full"), theme::fg_3())
                         } else if item.closed {
-                            (tr("Closed"), theme::FG_3)
+                            (tr("Closed"), theme::fg_3())
                         } else {
-                            (tr("Cannot join"), theme::FG_3)
+                            (tr("Cannot join"), theme::fg_3())
                         };
                         text(p, pos2(rect.max.x - 20.0, rect.center().y), Align2::RIGHT_CENTER, orbit_look::txt(word, 17.0).weight(weight::SEMIBOLD).color(fade(tint, alpha)));
                     }
                     if list.unavailable > 0 && pages == 1 && list.remaining.is_empty() {
                         let line = tr_n("{count} more is hidden from you", "{count} more are hidden from you", list.unavailable as u64);
                         let y = row_rect((list.items.len() - first).min(GO_ROWS)).min.y + 14.0;
-                        text(p, pos2(48.0, y), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::FG_4, shown)));
+                        text(p, pos2(48.0, y), Align2::LEFT_CENTER, orbit_look::txt(line, 15.0).color(fade(theme::fg_4(), shown)));
                     }
                     if pages > 1 {
-                        text(p, pos2(512.0, 530.0), Align2::CENTER_CENTER, orbit_look::txt(format!("{}/{}", self.go_page.min(pages - 1) + 1, pages), 17.0).color(fade(theme::FG_3, shown)));
+                        text(p, pos2(512.0, 530.0), Align2::CENTER_CENTER, orbit_look::txt(format!("{}/{}", self.go_page.min(pages - 1) + 1, pages), 17.0).color(fade(theme::fg_3(), shown)));
                     }
                 }
             }
@@ -332,10 +332,10 @@ impl Panel {
             match *t {
                 Target::GoRegion => {
                     let rect = if pr { rect.shrink(2.0) } else { *rect };
-                    p.rect_stroke(rect, CornerRadius::same(23), Stroke::new(1.5, fade(if h { theme::FG_2 } else { theme::INK_600 }, shown)), StrokeKind::Inside);
-                    widgets::icon(p, pos2(rect.min.x + 24.0, rect.center().y), icons::GLOBE_HEMISPHERE_WEST, 20.0, fade(theme::FG_2, shown));
-                    text_cut(p, pos2(rect.min.x + 44.0, rect.center().y - 10.0), rect.width() - 80.0, orbit_look::txt(tr!("In {region}", region = region_name(region)), 17.0).weight(weight::SEMIBOLD).color(fade(theme::FG, shown)));
-                    widgets::icon(p, pos2(rect.max.x - 22.0, rect.center().y), icons::CARET_RIGHT, 18.0, fade(theme::FG_3, shown));
+                    p.rect_stroke(rect, CornerRadius::same(23), Stroke::new(1.5, fade(if h { theme::fg_2() } else { theme::ink_600() }, shown)), StrokeKind::Inside);
+                    widgets::icon(p, pos2(rect.min.x + 24.0, rect.center().y), icons::GLOBE_HEMISPHERE_WEST, 20.0, fade(theme::fg_2(), shown));
+                    text_cut(p, pos2(rect.min.x + 44.0, rect.center().y - 10.0), rect.width() - 80.0, orbit_look::txt(tr!("In {region}", region = region_name(region)), 17.0).weight(weight::SEMIBOLD).color(fade(theme::fg(), shown)));
+                    widgets::icon(p, pos2(rect.max.x - 22.0, rect.center().y), icons::CARET_RIGHT, 18.0, fade(theme::fg_3(), shown));
                 }
                 Target::NewInstance(k) => {
                     let kind = NEW_KINDS[k as usize];
@@ -343,28 +343,28 @@ impl Panel {
                     let alpha = if busy { shown * 0.5 } else { shown };
                     p.rect_filled(rect, CornerRadius::same(23), fade(if h && !busy { RAISED2 } else { RAISED }, alpha));
                     widgets::icon(p, pos2(rect.min.x + 24.0, rect.center().y), icons::PLUS, 18.0, fade(orbit_look::accent(), alpha));
-                    let name = orbit_look::txt(new_kind_name(kind), 17.0).weight(weight::SEMIBOLD).color(fade(theme::FG, alpha));
+                    let name = orbit_look::txt(new_kind_name(kind), 17.0).weight(weight::SEMIBOLD).color(fade(theme::fg(), alpha));
                     let galley = p.layout_job(name.job_truncated(120.0));
                     let wide = galley.size().x;
-                    p.galley(pos2(rect.min.x + 44.0, rect.center().y - galley.size().y / 2.0), galley, theme::FG);
-                    text_cut(p, pos2(rect.min.x + 52.0 + wide, rect.center().y - 9.0), rect.max.x - 16.0 - (rect.min.x + 52.0 + wide), orbit_look::txt(new_kind_says(kind), 15.0).color(fade(theme::FG_3, alpha)));
+                    p.galley(pos2(rect.min.x + 44.0, rect.center().y - galley.size().y / 2.0), galley, theme::fg());
+                    text_cut(p, pos2(rect.min.x + 52.0 + wide, rect.center().y - 9.0), rect.max.x - 16.0 - (rect.min.x + 52.0 + wide), orbit_look::txt(new_kind_says(kind), 15.0).color(fade(theme::fg_3(), alpha)));
                 }
                 Target::Previous => round_button(p, rect.center(), icons::CARET_LEFT, h, pr, shown),
                 Target::Next => round_button(p, rect.center(), icons::CARET_RIGHT, h, pr, shown),
                 Target::GoRetry if go.went.is_none() => {
-                    pill_button(p, *rect, Some(icons::ARROW_CLOCKWISE), if go.list.is_some() { tr("Read again") } else { tr("Try again") }, RAISED2, theme::FG, h, pr, shown)
+                    pill_button(p, *rect, Some(icons::ARROW_CLOCKWISE), if go.list.is_some() { tr("Read again") } else { tr("Try again") }, RAISED2, theme::fg(), h, pr, shown)
                 }
                 _ => {}
             }
         }
         // What is going on now, or what did not happen, at the foot.
         let (line, tint) = match (go.busy, &go.error) {
-            (Some(GoBusy::Creating), _) => (tr("Making the instance, then taking you there…").to_string(), theme::FG_2),
-            (Some(GoBusy::Going), _) => (tr("Taking you there…").to_string(), theme::FG_2),
-            (Some(GoBusy::Inviting), _) => (tr("Sending you an invite…").to_string(), theme::FG_2),
+            (Some(GoBusy::Creating), _) => (tr("Making the instance, then taking you there…").to_string(), theme::fg_2()),
+            (Some(GoBusy::Going), _) => (tr("Taking you there…").to_string(), theme::fg_2()),
+            (Some(GoBusy::Inviting), _) => (tr("Sending you an invite…").to_string(), theme::fg_2()),
             (None, Some(error)) if go.list.is_some() || go.went.is_some() => (error.clone(), theme::WARN),
-            (None, _) if go.loading && go.list.is_some() => (tr("Reading the instances again…").to_string(), theme::FG_3),
-            _ => (String::new(), theme::FG_3),
+            (None, _) if go.loading && go.list.is_some() => (tr("Reading the instances again…").to_string(), theme::fg_3()),
+            _ => (String::new(), theme::fg_3()),
         };
         if !line.is_empty() {
             let room = if go_pages(go) > 1 { 380.0 } else { 760.0 };

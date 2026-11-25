@@ -74,7 +74,7 @@ pub fn mic_test(ui: &mut Ui, test: &mut MicTest, device: &str) {
     p.rect_filled(meter, theme::radius(4.0), theme::white(0.07));
     if test.level > 0.005 {
         let fill = Rect::from_min_size(meter.min, vec2((meter.width() * test.level).max(8.0), meter.height()));
-        p.rect_filled(fill, theme::radius(4.0), if peak > 0.98 { theme::DANGER } else { theme::ACCENT });
+        p.rect_filled(fill, theme::radius(4.0), if peak > 0.98 { theme::DANGER } else { theme::accent() });
     }
     let (note, color) = match (&test.error, active) {
         (Some(e), _) => (tr!("The microphone did not start: {error}", error = e), theme::DANGER),
@@ -85,9 +85,9 @@ pub fn mic_test(ui: &mut Ui, test: &mut MicTest, device: &str) {
             } else {
                 tr("You hear your microphone on this PC's sound output: wear headphones to avoid feedback.")
             };
-            (text.to_string(), theme::FG_3)
+            (text.to_string(), theme::fg_3())
         }
-        (None, false) => (tr("Hear yourself to check the microphone and its level.").to_string(), theme::FG_3),
+        (None, false) => (tr("Hear yourself to check the microphone and its level.").to_string(), theme::fg_3()),
     };
     if cfg!(target_os = "macos") && test.error.is_some() {
         // Where macOS wants the microphone turned on is long, and is the point: it wraps rather than being cut.

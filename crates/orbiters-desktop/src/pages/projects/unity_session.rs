@@ -187,7 +187,7 @@ pub(super) fn controls(ui: &mut Ui, state: &mut State, project: &Project, rect: 
             let p = ui.painter();
             widgets::frame(p, rect, rect.height() * 0.5, theme::alpha(theme::DANGER, 0.12));
             feedback::spinner(p, pos2(rect.left() + 20.0, rect.center().y), 7.0, 2.0, theme::DANGER);
-            widgets::text(p, pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Ending Unity…"), 12.5).color(theme::FG_2));
+            widgets::text(p, pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Ending Unity…"), 12.5).color(theme::fg_2()));
         }
         _ if confirming => {
             // The longer words when they fit.

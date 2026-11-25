@@ -521,6 +521,10 @@ pub struct LauncherState {
     pub notice: Option<Notice>,
     /// Reading the friends for the first time.
     pub loading: bool,
+    /// The list is the one last on show, kept on this computer ([`crate::vrchat_store`]), and VRChat has not said anything
+    /// since: when it was last live. `None` once read.
+    #[serde(default)]
+    pub kept: Option<i64>,
     /// VRChat's profiles on this computer: the ones running, starting or used before, by number.
     #[serde(default)]
     pub profiles: Vec<GameProfile>,
@@ -557,6 +561,10 @@ pub struct LauncherState {
     /// VRChat ran and its log could not be read: whose a VRChat is cannot be told here.
     #[serde(default)]
     pub log_trouble: Option<LogTrouble>,
+    /// On a Mac: the process of the engine's launcher of the person's own VRChat, while it runs: whose window the panels around VRChat's menus lie over. Never one the
+    /// VRChat bridge started (that one is the agent's, and it clicks there).
+    #[serde(default)]
+    pub desktop_game: Option<u32>,
 }
 
 /// A private place on its way to a VRChat that was started without it ([`LauncherState::joining`]): its world's name alone.
@@ -768,6 +776,7 @@ pub fn sample() -> LauncherState {
         game: Game::NotRunning,
         notice: None,
         loading: false,
+        kept: None,
         unresolved: 0,
         profiles: vec![
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },
@@ -779,6 +788,7 @@ pub fn sample() -> LauncherState {
         start_trouble: None,
         several_profiles: true,
         joining: None,
+        desktop_game: None,
         log_trouble: None,
         mine: Some(MyProfile {
             loaded: true,

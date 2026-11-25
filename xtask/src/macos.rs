@@ -42,11 +42,13 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
-pub struct Options {
+pub struct Options<'a> {
     pub channel: String,
     pub notes: String,
     /// How the programs are compiled.
     pub profile: crate::Profile,
+    /// What they are compiled from: the release file names it.
+    pub source: &'a crate::commit::Source,
 }
 
 /// How the application gets signed.
@@ -274,10 +276,11 @@ fn sign(identity: &Identity, entitlements: &Path, file: &Path, is_main: bool) ->
     Ok(())
 }
 
-pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
+pub fn dist(config: &Config, options: &Options<'_>) -> anyhow::Result<PathBuf> {
     let version = crate::release_version()?;
     // Whoever asks: a stable version's programs are never compiled as development builds are.
     options.profile.for_version(&version)?;
+    crate::ensure_versions_agree(&version)?;
     let target = crate::target_dir();
     let dist = target.join("dist").join(&version);
     if dist.exists() {
@@ -298,6 +301,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
         let path = bin.join(program);
         let built = std::fs::metadata(&path).with_context(|| format!("{} is missing", path.display()))?.modified()?;
         anyhow::ensure!(built >= bumped, "{} is older than the version in Cargo.toml: it was not rebuilt", path.display());
+        // (A development bump writes only `.cargo/config.toml`, and the dates say nothing then.)
+        crate::dist::ensure_says_version(&path, &std::fs::read(&path)?, &version)?;
     }
 
     println!("\n== Application");
@@ -337,6 +342,8 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(output(Command::new("lipo").arg("-archs").arg(&file))?.split_whitespace().any(|a| a == "arm64"), "{} has no arm64 code", file.display());
     }
 
+    // Nothing is signed unless the sources still are the commit's.
+    let commit = options.source.built()?;
     println!("\n== Signing");
     let listed = output(Command::new("security").args(["find-identity", "-v", "-p", "codesigning"])).unwrap_or_default();
     let identity = answering(Identity::choose(config.macos_identity.as_deref(), &listed), config.macos_identity.is_some(), &dist)?;
@@ -418,7 +425,7 @@ pub fn dist(config: &Config, options: &Options) -> anyhow::Result<PathBuf> {
                 channel: options.channel.clone(),
                 version: version.clone(),
                 released: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?,
-                commit: crate::git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+                commit,
                 notes: options.notes.clone(),
                 installer: installer.clone(),
             };

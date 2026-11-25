@@ -158,7 +158,7 @@ pub fn paint_zoomed(painter: &Painter, rect: Rect, zoom: f32, glitch: Option<(f6
             draw(painter, rect, shown.translate(vec2(-dx, 0.0)), theme::VIOLET, alpha);
         }
     }
-    draw(painter, rect, shown, theme::MARK, Color32::WHITE);
+    draw(painter, rect, shown, theme::mark(), Color32::WHITE);
 }
 
 /// The app's icon, `size` × `size` pixels: a rounded square of the night's violet with a blue glow, the mark in the

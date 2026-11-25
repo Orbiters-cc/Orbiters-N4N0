@@ -577,6 +577,17 @@ impl Service {
             ToService::ShowWindow => self.show_window(false),
             ToService::ShowPage { page } => self.show_page(page),
             ToService::Orbit { status } => self.ctl.set_orbit_status(status),
+            // Asked by this process, the app macOS names: the panels' own is its child, and has what it has.
+            #[cfg(target_os = "macos")]
+            ToService::OrbitAllow { needs } => match needs {
+                crate::state::OrbitNeeds::ScreenRecording => crate::bridge::mac::ask_screen_recording(),
+                crate::state::OrbitNeeds::InputMonitoring => crate::overlay::orbit::desktop_mac::keyboard::ask_listening(),
+            },
+            #[cfg(not(target_os = "macos"))]
+            ToService::OrbitAllow { .. } => {}
+            // Only from the panels, which take the keyboard for it: nothing else types here.
+            ToService::Typed { key } if role == Role::Orbit => crate::keys::typed(key),
+            ToService::Typed { .. } => {}
             ToService::TranslateStatus { status } => self.ctl.set_translate_status(status),
             ToService::Translate { id, batch } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());

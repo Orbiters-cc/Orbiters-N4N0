@@ -8,14 +8,15 @@
 //! cargo xtask release         build, sign, pack, publish, tag, and the GitHub release
 //! ```
 //!
-//! `release` checks the commit (clean, pushed, on main, its version not released yet), runs `dist` (the programs
-//! built in release and signed with Azure Artifact Signing, the setup with them inside, signed too, and the signed
-//! release file: `target/dist/<version>/`), then `publish` (uploaded to orbiters.cc over SSH, the release file last:
-//! installed apps see the new version only once its setup is there), then tags the commit `desktop-v<version>` and
-//! makes that tag's release on GitHub with the setup attached (`github`). `--unsigned` releases before Authenticode
+//! `release` names the commit it releases and checks it (clean, pushed, on main, its version not released yet), runs
+//! `dist` (the programs built in release and signed with Azure Artifact Signing, the setup with them inside, signed
+//! too, and the signed release file: `target/dist/<version>/`), tags that commit `desktop-v<version>`, then `publish`
+//! (uploaded to orbiters.cc over SSH, the release file last: installed apps see the new version only once its setup is
+//! there), and makes the tag's release on GitHub with the setup attached (`github`). `--unsigned` releases before Authenticode
 //! signing is set up: on GitHub only, since installed apps update only to signed releases. `dist`, `publish` and
 //! `github` also run on their own (`publish` or `github` again after a cut upload). See docs/releasing.md.
 
+mod commit;
 mod dist;
 mod licenses;
 mod macos;
@@ -43,12 +44,14 @@ cargo xtask <command>
   publish [--channel <name>] [--force] [--dev]
                                uploads target/dist/<version>/ to orbiters.cc and makes it the channel's release
                                (--dev: copies it to the development environment's feed on this computer)
-  release [--notes <file>] [--channel <name>] [--allow-dirty] [--unsigned]
-                               checks the commit, then dist, publish, the desktop-v<version> tag and its GitHub
-                               release with the setup (--unsigned: no Authenticode signature yet)
-  release --dev [--notes <file>] [--allow-dirty]
-                               a development build (bump --dev first): dist --dev, publish --dev, push, tag and a
-                               GitHub pre-release. Installed apps switched to the development environment update to it
+  release [--notes <file>] [--channel <name>] [--unsigned]
+                               names and checks the commit, then dist, the desktop-v<version> tag, publish and the
+                               GitHub release with the setup (--unsigned: no Authenticode signature yet)
+  release --dev [--notes <file>]
+                               a development build (bump --dev first, committed): pushes the commit, then dist --dev,
+                               the tag, publish --dev and a GitHub pre-release. Installed apps switched to the
+                               development environment update to it. From a worktree on no branch too, once origin has
+                               the commit
   github [--notes <file>] [--unsigned]
                                the GitHub release of target/dist/<version>/'s setup (its tag pushed already)
 
@@ -82,7 +85,7 @@ pub struct Config {
     /// Where the setup is built with the C runtime inside (`ORBITERS_SETUP_TARGET_DIR`; the target folder).
     pub setup_target_dir: Option<PathBuf>,
     /// The development environment's feed folder (`ORBITERS_DEV_DOWNLOADS`; the server repository's
-    /// `docker-data/downloads/desktop` beside this one), served by the development server at
+    /// `docker-data/downloads/desktop` beside this one's main checkout), served by the development server at
     /// `orbiters_update::DEVELOPMENT_FEED`.
     pub dev_dir: Option<PathBuf>,
     /// The Mac: the identity to sign with, `-` for ad hoc (`ORBITERS_MACOS_IDENTITY`; the best one the keychain has).
@@ -118,11 +121,11 @@ impl Config {
         Ok(config)
     }
 
-    pub fn dev_dir(&self) -> PathBuf {
-        self.dev_dir.clone().unwrap_or_else(|| {
-            let root = root();
-            root.parent().unwrap_or(&root).join("server").join("docker-data").join("downloads").join("desktop")
-        })
+    /// The development environment's feed: the configured folder, or the server's beside this repository's main checkout
+    /// (wherever the worktree a release is made from is). None on a Mac that has no server, whose builds go on GitHub only;
+    /// elsewhere a feed that is not there is an error, never a folder made where nothing serves it.
+    pub fn dev_feed(&self) -> anyhow::Result<Option<PathBuf>> {
+        dev_feed(self.dev_dir.as_deref(), &root(), cfg!(target_os = "macos"))
     }
 
     pub fn key_path(&self) -> PathBuf {
@@ -136,6 +139,22 @@ impl Config {
     pub fn remote_dir(&self) -> String {
         self.remote_dir.clone().unwrap_or_else(|| "/home/blackorbit/Orbiters/server/docker-data/downloads/desktop".into()).trim_end_matches('/').to_string()
     }
+}
+
+fn dev_feed(configured: Option<&Path>, root: &Path, may_lack: bool) -> anyhow::Result<Option<PathBuf>> {
+    let (feed, server) = match configured {
+        Some(feed) => (feed.to_path_buf(), feed.to_path_buf()),
+        None => {
+            let checkout = commit::main_checkout(root).unwrap_or_else(|| root.to_path_buf());
+            let server = checkout.parent().unwrap_or(&checkout).join("server");
+            (server.join("docker-data").join("downloads").join("desktop"), server)
+        }
+    };
+    if server.is_dir() {
+        return Ok(Some(feed));
+    }
+    anyhow::ensure!(may_lack && configured.is_none(), "no development feed at {}: set dev_dir in ~/.orbiters-release/config.json, or ORBITERS_DEV_DOWNLOADS", feed.display());
+    Ok(None)
 }
 
 /// How a release's programs are compiled.
@@ -202,9 +221,11 @@ pub fn is_development(version: &str) -> bool {
     semver::Version::parse(version).is_ok_and(|v| v.pre.as_str().strip_prefix("dev.").is_some_and(|n| n.parse::<u64>().is_ok()))
 }
 
-/// The repository's root (this crate's parent).
+/// The repository's root (this crate's parent): of the checkout `cargo xtask` was run in, which `cargo run` says. Where this
+/// program was compiled is another one's when several share a target folder, and what is released must be this one's.
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask sits in the repository").to_path_buf()
+    let xtask = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    xtask.parent().expect("xtask sits in the repository").to_path_buf()
 }
 
 /// Cargo's target folder: `CARGO_TARGET_DIR`, or the repository's `target`.
@@ -315,10 +336,6 @@ fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
 }
 
-pub fn git(args: &[&str]) -> anyhow::Result<String> {
-    output(Command::new("git").current_dir(root()).args(args)).map(|s| s.trim().to_string())
-}
-
 pub fn cargo() -> Command {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root());
@@ -398,17 +415,19 @@ fn command(args: &[String], version: &dyn Fn() -> anyhow::Result<String>) -> any
         Some("dist") => {
             // On Windows and on a Mac alike, before a setting is read or a program built.
             let profile = Profile::of(rest).for_version(&version()?)?;
-            if cfg!(target_os = "macos") {
-                return macos::dist(&Config::load()?, &macos::Options { channel, notes: notes()?, profile }).map(drop);
-            }
             let programs = value(rest, "--programs").map(PathBuf::from);
-            let options = dist::Options { unsigned: flag(rest, "--unsigned"), channel, notes: notes()?, programs, profile };
-            dist::dist(&Config::load()?, &options).map(drop)
+            let config = Config::load()?;
+            // Not a release: what is in the checkout is built, and what it holds beside its commit is said in the release file.
+            let source = commit::Source::any(root())?;
+            make(&config, &source, flag(rest, "--unsigned"), &channel, notes()?, programs, profile).map(drop)
         }
-        Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &release_version()?, &channel, flag(rest, "--force")),
-        Some("publish") => publish::publish(&Config::load()?, &release_version()?, &channel, flag(rest, "--force")),
-        Some("release") if flag(rest, "--dev") => release_dev(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty")),
-        Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--allow-dirty"), flag(rest, "--unsigned")),
+        Some("publish") if flag(rest, "--dev") => publish::publish_dev(&Config::load()?, &release_version()?, &channel, flag(rest, "--force"))?.served(),
+        Some("publish") => publish::publish(&Config::load()?, &release_version()?, &channel, flag(rest, "--force"))?.served(),
+        Some("release") if flag(rest, "--allow-dirty") => {
+            anyhow::bail!("a release is a commit: there is no --allow-dirty (cargo xtask dist builds what is not committed)")
+        }
+        Some("release") if flag(rest, "--dev") => release_dev(&Config::load()?, &channel, notes()?),
+        Some("release") => release(&Config::load()?, &channel, notes()?, flag(rest, "--unsigned")),
         Some("github") => publish::github(&release_version()?, &notes()?, flag(rest, "--unsigned")),
         _ => {
             println!("{HELP}");
@@ -473,38 +492,41 @@ fn bump(version: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Everything a version bump needs: the checks, `dist`, `publish`, the tag, the GitHub release. `unsigned`: before
-/// Authenticode signing is set up, a setup without signatures, on GitHub only.
-fn release(config: &Config, channel: &str, notes: String, allow_dirty: bool, unsigned: bool) -> anyhow::Result<()> {
+/// `dist`, on this platform; on one that has no release of its own, nothing.
+fn make(config: &Config, source: &commit::Source, unsigned: bool, channel: &str, notes: String, programs: Option<PathBuf>, profile: Profile) -> anyhow::Result<PathBuf> {
+    let channel = channel.to_string();
+    if cfg!(target_os = "macos") {
+        macos::dist(config, &macos::Options { channel, notes, profile, source })
+    } else if cfg!(windows) {
+        dist::dist(config, &dist::Options { unsigned, channel, notes, programs, profile, source })
+    } else {
+        anyhow::bail!("no release is made on this platform (docs/releasing.md)")
+    }
+}
+
+/// Everything a version bump needs: the commit, named and checked; `dist`, the tag, `publish`, the GitHub release.
+/// `unsigned`: before Authenticode signing is set up, a setup without signatures.
+fn release(config: &Config, channel: &str, notes: String, unsigned: bool) -> anyhow::Result<()> {
     let version = release_version()?;
     let tag = format!("desktop-v{version}");
-
-    // The release names a commit: one that is committed, pushed, and not released yet.
-    if !allow_dirty {
-        let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
-        anyhow::ensure!(changes.is_empty(), "changes are not committed (--allow-dirty to release them anyway):\n{changes}");
+    let source = commit::Source::clean(root())?;
+    println!("Releasing {version} from {}", source.named());
+    if channel == orbiters_update::STABLE {
+        source.on_main()?;
+    } else {
+        source.push()?;
     }
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-    anyhow::ensure!(channel != orbiters_update::STABLE || branch == "main", "the stable channel is released from main, not {branch}");
-    anyhow::ensure!(git(&["tag", "--list", &tag])?.is_empty(), "{tag} exists: bump the version first (cargo xtask bump <version>)");
-    let _ = git(&["fetch", "--quiet", "origin"]);
-    let pushed = git(&["branch", "--remotes", "--contains", "HEAD"])?;
-    anyhow::ensure!(!pushed.is_empty(), "this commit is not pushed: push it first, the release names it");
+    source.push_contracts()?;
+    source.may_tag(&tag)?;
     publish::ensure_newer(&version, channel)?;
 
-    let dist = dist::dist(config, &dist::Options { unsigned, channel: channel.into(), notes: notes.clone(), programs: None, profile: Profile::Stable })?;
-    publish::publish(config, &version, channel, false)?;
-
-    let tagged = git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")]).and_then(|_| git(&["push", "origin", &tag]));
-    match tagged {
-        Ok(_) => println!("Tagged {tag}."),
-        Err(e) => {
-            println!("The release is out, but tagging it failed ({e:#}): git tag -a {tag} -m \"Orbiters - N4N0 {version}\" && git push origin {tag}, then cargo xtask github");
-            return Ok(());
-        }
-    }
+    let dist = make(config, &source, unsigned, channel, notes.clone(), None, Profile::Stable)?;
+    // The tag first: it is the version's, taken once, before anybody hears of the release.
+    source.tag(&tag, &format!("Orbiters - N4N0 {version}"))?;
+    let published = publish::publish(config, &version, channel, false)?;
     publish::github(&version, &notes, unsigned)?;
-    println!("\nOrbiters - N4N0 {version} is released on {channel} and GitHub ({}).", dist.display());
+    published.served()?;
+    println!("\nOrbiters - N4N0 {version} is released on {channel} and GitHub ({}), from {}.", dist.display(), source.commit);
     Ok(())
 }
 
@@ -524,35 +546,28 @@ fn next_dev_version(current: &str) -> anyhow::Result<String> {
     Ok(v.to_string())
 }
 
-/// A development build (`cargo xtask bump --dev` first, committed): built with [`Profile::Dev`] and packed as a
-/// release, put in the development environment's feed on this computer, where installed apps switched to the
-/// development environment find it within two minutes, then pushed, tagged and made a GitHub pre-release.
-fn release_dev(config: &Config, channel: &str, notes: String, allow_dirty: bool) -> anyhow::Result<()> {
+/// A development build (`cargo xtask bump --dev` first, committed): its commit is named and pushed, built with
+/// [`Profile::Dev`] and packed as a release, tagged, put in the development environment's feed on this computer, where
+/// installed apps switched to the development environment find it within two minutes, and made a GitHub pre-release.
+fn release_dev(config: &Config, channel: &str, notes: String) -> anyhow::Result<()> {
     let version = release_version()?;
     anyhow::ensure!(is_development(&version), "{version} is not a development version: cargo xtask bump --dev, commit, then release --dev");
-    if !allow_dirty {
-        let changes = git(&["status", "--porcelain", "--untracked-files=no"])?;
-        anyhow::ensure!(changes.is_empty(), "changes are not committed (--allow-dirty to build them anyway):\n{changes}");
-    }
-    orbiters_update::set_development(true);
-    publish::ensure_newer(&version, channel)?;
-    let notes = if notes.is_empty() { format!("Development build {version} ({})", git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default()) } else { notes };
-    let dist = if cfg!(target_os = "macos") {
-        macos::dist(config, &macos::Options { channel: channel.into(), notes: notes.clone(), profile: Profile::Dev })?
-    } else {
-        dist::dist(config, &dist::Options { unsigned: true, channel: channel.into(), notes: notes.clone(), programs: None, profile: Profile::Dev })?
-    };
-    publish::publish_dev(config, &version, channel, false)?;
-    // Every build Enzo is to try is also on GitHub's releases (a pre-release), tagged on the pushed commit.
     let tag = format!("desktop-v{version}");
-    git(&["-C", "contracts", "push", "origin", "HEAD:main"])?;
-    git(&["push", "origin", "HEAD"])?;
-    if git(&["tag", "--list", &tag])?.is_empty() {
-        git(&["tag", "--annotate", &tag, "--message", &format!("Orbiters - N4N0 {version}")])?;
-    }
-    git(&["push", "origin", &tag])?;
+    let source = commit::Source::clean(root())?;
+    println!("Releasing {version} from {}", source.named());
+    source.may_tag(&tag)?;
+    publish::ensure_newer_dev(config, &version, channel)?;
+    // Before the build, which is long: the version is claimed in seconds, and origin has what the release names.
+    source.push_contracts()?;
+    source.push()?;
+    let notes = if notes.is_empty() { format!("Development build {version} ({})", source.short()) } else { notes };
+    let dist = make(config, &source, true, channel, notes.clone(), None, Profile::Dev)?;
+    // Every build Enzo is to try is also on GitHub's releases (a pre-release), tagged on that commit.
+    source.tag(&tag, &format!("Orbiters - N4N0 {version}"))?;
+    let published = publish::publish_dev(config, &version, channel, false)?;
     publish::github(&version, &notes, true)?;
-    println!("\nOrbiters - N4N0 {version} is in the development environment ({}) and on GitHub's releases.", dist.display());
+    published.served()?;
+    println!("\nOrbiters - N4N0 {version} is in the development environment ({}) and on GitHub's releases, from {}.", dist.display(), source.commit);
     Ok(())
 }
 
@@ -573,6 +588,45 @@ mod tests {
         }
         for kept in ["CARGO", "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"] {
             assert!(!inherited_from_cargo_run(kept), "{kept}");
+        }
+    }
+
+    /// The feed is the configured folder, or the server's beside the main checkout; one that is not there is said, never made
+    /// beside a worktree (2026-11-24), and a Mac without a server has none.
+    #[test]
+    fn the_development_feed_is_the_one_that_is_served() {
+        let at = std::env::temp_dir().join(format!("xtask-feed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        let (main, worktree) = (at.join("main"), at.join("elsewhere").join("worktree"));
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        let git = |args: &[&str]| output(Command::new("git").current_dir(&main).args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]).args(args)).unwrap();
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&["worktree", "add", "-q", "--detach", worktree.to_str().unwrap()]);
+        for root in [&main, &worktree] {
+            assert!(format!("{:#}", dev_feed(None, root, false).expect_err("no server")).contains("ORBITERS_DEV_DOWNLOADS"));
+            assert_eq!(dev_feed(None, root, true).unwrap(), None, "a Mac without a server");
+        }
+        std::fs::create_dir_all(at.join("server")).unwrap();
+        let feed = at.join("server/docker-data/downloads/desktop");
+        std::fs::create_dir_all(&feed).unwrap();
+        for root in [&main, &worktree] {
+            assert_eq!(dev_feed(None, root, false).unwrap().unwrap().canonicalize().unwrap(), feed.canonicalize().unwrap(), "{}", root.display());
+        }
+        let configured = at.join("configured");
+        assert!(dev_feed(Some(&configured), &main, true).is_err(), "a configured folder that is not there");
+        std::fs::create_dir_all(&configured).unwrap();
+        assert_eq!(dev_feed(Some(&configured), &main, false).unwrap(), Some(configured));
+        let _ = std::fs::remove_dir_all(&at);
+    }
+
+    /// There is no release of what is not committed.
+    #[test]
+    fn a_release_allows_no_changes() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        for line in [&["release", "--allow-dirty"][..], &["release", "--dev", "--allow-dirty"]] {
+            assert!(format!("{:#}", run_command(&args(line)).expect_err("a dirty release")).contains("a release is a commit"));
         }
     }
 

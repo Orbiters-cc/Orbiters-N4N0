@@ -2021,6 +2021,63 @@ mod tests {
         assert!(widgets::control(&ctx, "All tools").is_none(), "and nothing of Home is drawn yet");
     }
 
+    /// What a frame of Home allocates at rest, and how long it takes (microseconds).
+    fn a_frame(h: &mut Harness) -> (u64, f64) {
+        for _ in 0..240 {
+            h.frame(Vec::new());
+        }
+        let from = std::time::Instant::now();
+        let made = crate::test_alloc::count(|| (0..60).for_each(|_| h.frame(Vec::new())));
+        (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+    }
+
+    /// DPG-6: a frame of Home costs the rows in view, however many friends: each row that could be joined made a set of
+    /// all of them.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_home_costs_the_friends_in_view() {
+        let frame = |friends: usize| {
+            let (mut h, place, _) = friends_in_instances(false);
+            let mut data = (*h.state.launcher_mut().data_for_tests()).clone();
+            let like = data.friends.iter().find(|f| f.name == "Nova Sample").unwrap().clone();
+            // (In a friends' instance of one of them: asked whether its owner is a friend.)
+            let place = orbiters_core::launcher::Place { instance_id: "5~friends(usr_many_7)~region(eu)".into(), access: orbiters_core::launcher::InstanceAccess::Friends, ..place };
+            data.friends = (0..friends)
+                .map(|i| {
+                    let mut f = like.clone();
+                    (f.id, f.name) = (format!("usr_many_{i}"), format!("Friend {i}"));
+                    f.whereabouts = orbiters_core::launcher::Whereabouts::World(place.clone());
+                    f
+                })
+                .collect();
+            h.state.launcher_mut().set_data(Arc::new(data));
+            a_frame(&mut h)
+        };
+        let ((few, few_us), (many, many_us)) = (frame(40), frame(1500));
+        println!("Home, 40 friends: {few} allocations, {few_us:.0} us a frame; 1500 friends: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 20, "{many} allocations a frame with 1500 friends, {few} with 40");
+    }
+
+    /// DPG-8: the previous instances' sheet copied the whole history twice a frame, to draw some eight rows of it.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_frame_of_the_previous_instances_costs_the_rows_in_view() {
+        widgets::watch_controls();
+        let frame = |visits: usize| {
+            let (mut h, _, _) = friends_in_instances(false);
+            let rows = (0..visits)
+                .map(|i| crate::pages::launcher::previous::Visit { world_id: format!("wrld_00000000-0000-4000-8000-{i:012}"), instance: format!("{i}~region(eu)"), name: format!("World {i}"), at: 1_794_990_000 - i as u64 })
+                .collect();
+            h.state.launcher_mut().places.previous.stand_in_rows(rows);
+            h.settle();
+            click(&mut h, "Previous instances");
+            a_frame(&mut h)
+        };
+        let ((few, few_us), (many, many_us)) = (frame(40), frame(4000));
+        println!("40 visits: {few} allocations, {few_us:.0} us a frame; 4000 visits: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 20, "{many} allocations a frame over 4000 visits, {few} over 40");
+    }
+
     /// DPG-2: Home drew itself at the monitor's rate for as long as it said "Connecting to VRChat…", which lasts until
     /// Orbiters answers: a whole evening offline, in use or behind VRChat. It stands still at rest, and behind another
     /// window; in use its spinner moves at the decorations' rate.

@@ -263,17 +263,18 @@ pub fn working(ctx: &Context) -> f64 {
     clock(ctx, DECOR_FPS)
 }
 
-/// How often a window in view but not in use shows how far something it has to look at is ([`working_read`]).
-pub const READ_EVERY: Duration = Duration::from_secs(1);
+/// How often something in progress that has to be looked at is ([`working_read`]): in a window in use, and in one that
+/// only shows.
+pub const READ_EVERY: Duration = Duration::from_millis(200);
+pub const READ_AWAY: Duration = Duration::from_secs(1);
 
 /// [`working`], for what is known only by looking at it (a worker's percentage, a list read by a thread that has no
-/// window to wake): while nothing is done in the window but it shows, looked at once a second.
-pub fn working_read(ctx: &Context) -> f64 {
-    let t = working(ctx);
-    if (!is_live(ctx) || is_resting(ctx)) && ctx.input(|i| i.viewport().visible()) != Some(false) {
-        ctx.request_repaint_after(READ_EVERY);
+/// window to wake): looked at now and then while the window shows.
+pub fn working_read(ctx: &Context) {
+    let used = is_live(ctx) && !is_resting(ctx);
+    if ctx.input(|i| i.viewport().visible()) != Some(false) {
+        ctx.request_repaint_after(if used { READ_EVERY } else { READ_AWAY });
     }
-    t
 }
 
 /// Easing curves.
@@ -412,18 +413,21 @@ mod tests {
         let at = |t: f64, live: bool, read: bool| {
             frame(&ctx, t, vec![], |ctx| {
                 set_live(ctx, live);
-                if read { working_read(ctx) } else { working(ctx) };
+                if read {
+                    working_read(ctx);
+                } else {
+                    working(ctx);
+                }
             })
         };
-        for read in [false, true] {
-            let used = at(1.0, true, read);
-            assert!(used <= shared && used + Duration::from_millis(20) > shared, "{used:?}");
-        }
-        let away = if cfg!(debug_assertions) { READ_EVERY + Duration::from_millis(20) } else { READ_EVERY };
+        // (egui takes a predicted frame off what is asked.)
+        let about = |asked: Duration, wanted: Duration| asked <= wanted && asked + Duration::from_millis(40) > wanted;
+        let (moves, reads) = (at(1.0, true, false), at(1.1, true, true));
+        assert!(about(moves, shared) && about(reads, READ_EVERY), "in use: {moves:?}, {reads:?}");
         for (t, live) in [(2.0, false), (2.0 + REST_AFTER + 1.0, true)] {
             assert_eq!(at(t, live, false), Duration::MAX, "no frame, live {live}");
             let looked = at(t + 0.1, live, true);
-            assert!(looked <= away && looked > shared * 2, "{looked:?}, live {live}");
+            assert!(about(looked, READ_AWAY), "{looked:?}, live {live}");
         }
     }
 

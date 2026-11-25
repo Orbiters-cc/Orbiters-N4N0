@@ -83,7 +83,7 @@ pub struct State {
     log_shown: usize,
     log: Log,
     /// What the search finds, for the text, the language and what can show here it was looked for with.
-    found: Option<((String, orbiters_i18n::Language, registry::Open), Vec<registry::Found>)>,
+    results: Option<((String, orbiters_i18n::Language, registry::Open), Vec<registry::Found>)>,
     /// Tests: the rows drawn last frame (their card's English title, their label, where), and the cards.
     /// The arrows moved the lit result this frame: it is brought into view.
     keyed: bool,
@@ -287,11 +287,11 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let words = registry::words(&state.query);
     // Looked for again when the text, the language or what can show here changed: it reads some 150 entries' words.
     let key = (state.query.clone(), orbiters_i18n::language(), open);
-    if state.found.as_ref().is_none_or(|(of, _)| *of != key) {
+    if state.results.as_ref().is_none_or(|(of, _)| *of != key) {
         let found = registry::search(&state.query, &open);
-        state.found = Some((key, found));
+        state.results = Some((key, found));
     }
-    let found = state.found.as_ref().map(|(_, found)| found.clone()).unwrap_or_default();
+    let found = state.results.as_ref().map(|(_, found)| found.clone()).unwrap_or_default();
     let searching = !words.is_empty();
     state.limit = state.limit.max(RESULTS);
     let search_focused = state.search_id.is_some_and(|id| ctx.memory(|m| m.has_focus(id)));
@@ -2258,7 +2258,7 @@ fn notice_log(ui: &mut Ui, shown: &mut usize, log: &mut Log) {
             let one_line = entry.text.replace('\n', " ");
             let text_colour = if entry.kind == "detail" { theme::fg_3() } else { theme::fg_2() };
             widgets::text_truncated(p, pos2(time.right() + 12.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(&one_line, 12.5).color(text_colour), row.right() - time.right() - 20.0);
-            ui.interact(row, id.with(("row", entry.at, one_line.len())), Sense::hover()).on_hover_text(&entry.text);
+            ui.interact(row, Id::unique("settings-notice-log").with(("row", entry.at, one_line.len())), Sense::hover()).on_hover_text(&entry.text);
         }
     }
     if entries.len() > *shown {

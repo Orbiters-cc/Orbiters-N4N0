@@ -2307,6 +2307,45 @@ mod tests {
         OffsetDateTime::from_unix_timestamp(t).unwrap().format(&time::format_description::well_known::Rfc3339).unwrap()
     }
 
+    /// DPG-11: a frame of Events copied every event of the list, description and all.
+    #[test]
+    fn a_frame_of_events_costs_the_cards_in_view() {
+        let frame = |n: i64| {
+            let ctx = egui::Context::default();
+            orbiters_ui::install(&ctx);
+            let ctl: crate::backend::Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+            let snap = (*ctl.view()).clone();
+            let mut state = State { fixture: Some(String::new()), ..Default::default() };
+            let base: community::Cards = serde_json::from_str(include_str!("../../../orbiters-core/tests/fixtures/events.json")).unwrap();
+            state.cards = (0..n)
+                .map(|i| {
+                    let mut c = base.items[0].clone();
+                    c.id = format!("event-{i}");
+                    (c.starts_at, c.ends_at) = (Some(iso(now() + 3600 * (i + 1))), Some(iso(now() + 3600 * (i + 2))));
+                    c
+                })
+                .collect();
+            let mut time = 0.0;
+            let mut draw = |state: &mut State| {
+                time += 1.0 / 60.0;
+                let input = egui::RawInput { time: Some(time), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 820.0))), ..Default::default() };
+                let mut toasts = orbiters_ui::toast::Toasts::default();
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    show(ui, &mut cx, state);
+                });
+                output.textures_delta.clear();
+            };
+            (0..240).for_each(|_| draw(&mut state));
+            let from = std::time::Instant::now();
+            let made = crate::test_alloc::count(|| (0..60).for_each(|_| draw(&mut state)));
+            (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+        };
+        let ((few, few_us), (many, many_us)) = (frame(30), frame(400));
+        println!("30 events: {few} allocations, {few_us:.0} us a frame; 400 events: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 40, "{many} allocations a frame over 400 events, {few} over 30");
+    }
+
     #[test]
     fn phases_follow_the_website() {
         let (s, e) = (iso(T), iso(T + 7200));

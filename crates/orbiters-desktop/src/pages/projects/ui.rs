@@ -112,7 +112,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     } else if let Some(y) = state.scroll_fix.take() {
         scroll = scroll.vertical_scroll_offset(y);
     }
-    state.row_places.clear();
+    state.rows_placed = 0;
     let out = scroll.show(&mut gu, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: PAD_X as i8, right: edge.round() as i8, top: 0, bottom: 104 }).show(ui, |ui| {
             ui.add_space(placed.content_top - page.top());
@@ -120,6 +120,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             gallery(ui, cx, state);
         });
     });
+    state.row_places.truncate(state.rows_placed);
     // While a scan adds rows (and when it ends and sorts), the first project in view stays where it is on screen: what
     // grows above it scrolls the gallery by as much (AGENTS.md: progressive galleries keep the visible item).
     let (offset, top) = (out.state.clamped_offset().y, out.inner_rect.top());
@@ -344,7 +345,7 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[&Project]) {
         // takes room or gives it back, the cards reflow instead of jumping.
         // Only the place springs: a card's size is set at once (AGENTS.md: no spring on layout dimensions).
         let target = [(i % cols) as f32 * (card_w + GAP), (i / cols) as f32 * (card_h + GAP)];
-        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(card_w, card_h))));
+        state.place_row(&p.path, Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(card_w, card_h)));
         let [x, y] = anim::spring(&ctx, Id::unique(("project-card-place", &p.path)), target, Spring::SOFT);
         let cw = card_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(cw, (cw * 0.5625).round() + CARD_BODY));
@@ -565,7 +566,7 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[&Project]) {
     let mut picked = None;
     for (i, &p) in list.iter().take(shown).enumerate() {
         let target = [(i % cols) as f32 * (row_w + 12.0), (i / cols) as f32 * (row_h + 12.0)];
-        state.row_places.push((p.path.clone(), Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h))));
+        state.place_row(&p.path, Rect::from_min_size(area.min + vec2(target[0], target[1]), vec2(row_w, row_h)));
         let [x, y] = anim::spring(&ctx, Id::unique(("found-place", &p.path)), target, Spring::SOFT);
         let rw = row_w;
         let r = Rect::from_min_size(area.min + vec2(x, y), vec2(rw, row_h));
@@ -761,7 +762,7 @@ mod order_tests {
     fn project(name: &str, modified: u64) -> Project {
         Project { path: std::path::PathBuf::from(format!("C:/P/{name}")), name: name.into(), modified, ..Default::default() }
     }
-    fn names(list: &[Project]) -> Vec<String> {
+    fn names(list: &[&Project]) -> Vec<String> {
         list.iter().map(|p| p.name.clone()).collect()
     }
 
@@ -780,6 +781,63 @@ mod order_tests {
         assert_eq!(anchor_shift(Some(&anchor), &frame2), Some(110.0));
         // Nothing moved: nothing to do.
         assert_eq!(anchor_shift(Some(&anchor), &[(p("b"), 50.0)]), None);
+    }
+
+    /// A frame of the gallery over `n` projects of which each has `avatars`, its panel showing the first with `packages`
+    /// offered, at rest: what it allocates, and how long it takes (microseconds).
+    fn frame_over(n: u64, avatars: usize, packages: usize) -> (u64, f64) {
+        use orbiters_projects::{avatars::Avatar, vpm};
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = (*ctl.view()).clone();
+        let mut state = State::default();
+        state.fixture = true;
+        state.u6.stand_in_for_tests();
+        state.scan.projects = (0..n)
+            .map(|i| Project {
+                path: PathBuf::from(format!("Q:/Not/Here/P{i}")),
+                name: format!("Project {i}"),
+                unity: "2022.3.22f1".into(),
+                registered: true,
+                modified: 100_000 - i,
+                avatars: (0..avatars).map(|a| Avatar { id: format!("avtr_{i}_{a}"), name: format!("Avatar {a}"), ..Default::default() }).collect(),
+                ..Default::default()
+            })
+            .collect();
+        state.selected = Some(PathBuf::from("Q:/Not/Here/P0"));
+        state.view.packages = (0..packages)
+            .map(|i| vpm::Package { name: format!("com.sample.package{i}"), display_name: format!("Package {i}"), versions: (0..40).map(|v| format!("1.{v}.0")).collect(), ..Default::default() })
+            .collect();
+        let mut time = 0.0;
+        let mut draw = |state: &mut State| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput { time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                show(ui, &mut cx, state);
+            });
+            output.textures_delta.clear();
+        };
+        (0..240).for_each(|_| draw(&mut state));
+        assert_eq!(state.row_places.len(), n as usize);
+        let from = std::time::Instant::now();
+        let made = crate::test_alloc::count(|| (0..60).for_each(|_| draw(&mut state)));
+        (made / 60, from.elapsed().as_secs_f64() * 1e6 / 60.0)
+    }
+
+    /// DPG-9: a frame of Unity projects copied every project (twice, with all its avatars) and every package of every
+    /// repository with all its versions, whatever was in view.
+    #[test]
+    fn a_frame_of_projects_costs_what_is_in_view() {
+        let (few, few_us) = frame_over(30, 3, 20);
+        let (many, many_us) = frame_over(300, 30, 20);
+        println!("30 projects: {few} allocations, {few_us:.0} us a frame; 300 projects: {many}, {many_us:.0} us");
+        assert!(many <= few + few / 10 + 60, "{many} allocations a frame over 300 projects, {few} over 30");
+        let (offered, offered_us) = frame_over(30, 3, 400);
+        println!("400 packages offered: {offered} allocations, {offered_us:.0} us a frame");
+        assert!(offered <= few + few / 10 + 120, "{offered} allocations a frame with 400 packages offered, {few} with 20");
     }
 
     /// PROJECTS-18: while a scan runs, a newer project found later goes at the end and no row moves; once it ends, the

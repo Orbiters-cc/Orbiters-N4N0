@@ -12,6 +12,7 @@ use orbiters_core::{bundle, reconstruction, visited};
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// What Orbiters takes per picture, and per request.

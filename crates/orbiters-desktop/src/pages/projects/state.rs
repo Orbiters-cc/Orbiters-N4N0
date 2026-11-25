@@ -324,6 +324,8 @@ pub struct State {
     pub(super) places: [std::collections::HashMap<PathBuf, usize>; 2],
     /// Each card's and row's place in the gallery this frame (its layout place, before any spring), in screen points.
     pub(super) row_places: Vec<(PathBuf, egui::Rect)>,
+    /// How many of them this frame placed so far ([`State::place_row`]).
+    pub(super) rows_placed: usize,
     /// The first project in view and its place in the gallery's content, kept while a scan adds rows (verifier, point 8).
     pub(super) scroll_anchor: Option<(PathBuf, f32)>,
     /// A one-time scroll that keeps that project where it was.
@@ -479,6 +481,7 @@ impl Default for State {
             bridge_changes: None,
             places: Default::default(),
             row_places: vec![],
+            rows_placed: 0,
             scroll_anchor: None,
             scroll_fix: None,
             was_scanning: false,
@@ -571,6 +574,20 @@ impl State {
     /// Where the control `name` was drawn last frame, if it was.
     pub(super) fn anchor(&self, name: &str) -> Rect {
         self.anchors.get(name).copied().unwrap_or(Rect::NOTHING)
+    }
+    /// The frame's next row or card is `path`'s, at `rect`: the same ones as the frame before, most of the time, whose
+    /// paths are kept.
+    pub(super) fn place_row(&mut self, path: &std::path::Path, rect: egui::Rect) {
+        match self.row_places.get_mut(self.rows_placed) {
+            Some((was, at)) => {
+                if was.as_path() != path {
+                    *was = path.to_path_buf();
+                }
+                *at = rect;
+            }
+            None => self.row_places.push((path.to_path_buf(), rect)),
+        }
+        self.rows_placed += 1;
     }
     /// Starts reading the pictures the last window kept, once (every core decodes them: not beside the window's first
     /// frame, where the page's making started it).

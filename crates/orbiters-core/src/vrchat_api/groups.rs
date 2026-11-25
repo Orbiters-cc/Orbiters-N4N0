@@ -998,11 +998,11 @@ mod tests {
     #[test]
     fn a_refusal_keeps_vrchats_own_words() {
         let (mut c, _) = mock_signed_in(vec![
-            raw_response(403, r#"{"error":{"message":"\"You must have 2FA enabled to be given this role.\"","status_code":403}}"#),
-            raw_response(409, r#"{"error":"Already\u202e there","status_code":409}"#),
+            raw_response(403, &json!({"error": {"message": "\"You must have 2FA enabled to be given this role.\"", "status_code": 403}}).to_string()),
+            raw_response(409, &json!({"error": "Already\u{202e} there", "status_code": 409}).to_string()),
             raw_response(400, "<html>"),
-            raw_response(200, r#"["grol_a"]"#),
-            raw_response(502, r#"{"error":{"message":"down"}}"#),
+            raw_response(200, &json!(["grol_a"]).to_string()),
+            raw_response(502, &json!({"error": {"message": "down"}}).to_string()),
         ]);
         let mut give = || (c.set_member_role(G, U, "grol_a", true, go()), c.take_group_refusal());
         let said = |status: u16, words: &str| Some(Refusal { status, words: words.into() });
@@ -1014,7 +1014,7 @@ mod tests {
         // A part read beside a group that was refused is no refusal of the group.
         let mut part = role_json("grol_b", "Staff", 1, &[]);
         part.as_object_mut().unwrap().remove("permissions");
-        let (mut c, _) = mock_signed_in(vec![raw_response(200, &json!({"id": G, "name": "x", "roles": [part]}).to_string()), raw_response(403, r#"{"error":{"message":"no"}}"#)]);
+        let (mut c, _) = mock_signed_in(vec![raw_response(200, &json!({"id": G, "name": "x", "roles": [part]}).to_string()), raw_response(403, &json!({"error": {"message": "no"}}).to_string())]);
         assert!(c.group(G).is_ok() && c.take_group_refusal().is_none());
     }
 

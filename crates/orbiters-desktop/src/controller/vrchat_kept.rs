@@ -10,7 +10,7 @@ use super::vrchat_data::Scope;
 use super::vrchat_login::Bell;
 use super::vrchat_scope::{By, Stamp};
 use super::{groups, Controller, Shared};
-use orbiters_core::group_events::{self, CalendarEvent};
+use orbiters_core::group_events::{self, CalendarEvent, EVENTS_KEPT};
 use orbiters_core::groups::GroupCard;
 use orbiters_core::launcher::{LauncherState, Possible, Source};
 use orbiters_core::vrchat_store::{self as store, kind, Account, Change, Record, Store, World, ONLY};
@@ -23,8 +23,6 @@ use std::time::Duration;
 const GATHER: Duration = Duration::from_millis(1500);
 /// When the list was last live is written again this often while nothing else is.
 const SEEN_EVERY: i64 = 300;
-/// A group's events kept, the latest.
-const EVENTS_KEPT: usize = 300;
 /// The folder VRChat's pictures were kept in before 0.3.10 (`worlds::profile_pictures` moves what is shown of it), and how
 /// long what is not shown stays there.
 const BEFORE: &str = "profile-pictures";
@@ -272,13 +270,16 @@ impl Controller {
             }
             (Request::Open { group }, Reply::Opened(page)) => changes.extend(Change::put(kind::GROUP, group, at, by, page)),
             (Request::Members { group, query, offset: 0 }, Reply::Members(m)) if query.trim().is_empty() => changes.extend(Change::put(kind::MEMBERS, group, at, by, m)),
-            (Request::Events { group, month, offset }, Reply::Events(page)) => {
+            (Request::Events { group, .. }, Reply::Events(page)) => {
                 let mut list = open.store.get::<Vec<CalendarEvent>>(kind::EVENTS, group).map(|r| r.value).unwrap_or_default();
-                group_events::merge(&mut list, *month, *offset, page);
+                group_events::merge(&mut list, page);
                 list.drain(..list.len().saturating_sub(EVENTS_KEPT));
                 changes.extend(Change::put(kind::EVENTS, group, at, by, &list));
             }
-            (Request::KeepEvents { group, told }, Reply::Cancelled) => changes.extend(Change::put(kind::TOLD, group, at, by, told)),
+            (Request::KeepEvents { group, events, told }, Reply::Cancelled) => {
+                changes.extend(Change::put(kind::EVENTS, group, at, by, events));
+                changes.extend(Change::put(kind::TOLD, group, at, by, told));
+            }
             (Request::Posts { group, offset: 0 }, Reply::Posts(p)) => changes.extend(Change::put(kind::POSTS, group, at, by, p)),
             _ => {}
         }
@@ -547,10 +548,12 @@ mod tests {
         keep(groups::Request::Events { group: one.clone(), month: None, offset: 0 }, events(vec![event("cal_a", "2026-11-10T20:00:00Z"), event("cal_b", "2026-12-10T20:00:00Z")], true));
         keep(groups::Request::Events { group: one.clone(), month: Some(month), offset: 0 }, events(vec![event("cal_c", "2026-11-12T20:00:00Z")], false));
         let told = group_events::Told { cards: vec![orbiters_core::community::Card { id: "e1".into(), calendar_id: Some("cal_c".into()), ..Default::default() }], pages: vec![] };
-        keep(groups::Request::KeepEvents { group: one.clone(), told: Box::new(told.clone()) }, groups::Reply::Cancelled);
         let read = || Store::read(&t.0, &account).unwrap();
-        let kept = read().get::<Vec<CalendarEvent>>(kind::EVENTS, &one).unwrap().value;
-        assert_eq!(kept.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["cal_c", "cal_b"]);
+        let kept = || read().get::<Vec<CalendarEvent>>(kind::EVENTS, &one).unwrap().value.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        assert_eq!(kept(), ["cal_a", "cal_c", "cal_b"]);
+        // Once looked at whole: as it is.
+        keep(groups::Request::KeepEvents { group: one.clone(), events: vec![event("cal_c", "2026-11-12T20:00:00Z")], told: Box::new(told.clone()) }, groups::Reply::Cancelled);
+        assert_eq!(kept(), ["cal_c"]);
         assert_eq!(read().get::<group_events::Told>(kind::TOLD, &one).unwrap().value, told);
         assert_eq!(read().get::<groups::Page>(kind::GROUP, &card(1, "").id).unwrap().value, page);
         assert_eq!(read().get::<orbiters_core::vrchat_api::Members>(kind::MEMBERS, &card(1, "").id).unwrap().value.raw, 7);

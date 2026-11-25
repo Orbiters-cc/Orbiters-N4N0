@@ -52,6 +52,10 @@ pub(crate) struct EventList {
     /// Past events shown.
     past: usize,
     heights: HashMap<String, f32>,
+    /// The first month of the two being looked at whole, what VRChat gave since, and whether it is done (to be kept).
+    looking: Option<Month>,
+    seen: HashSet<String>,
+    looked: bool,
     pub told: Told,
 }
 
@@ -77,6 +81,8 @@ impl EventList {
         let month = Month::of(now);
         self.started = true;
         self.past = self.past.max(PAST_PAGE);
+        self.looking = Some(month);
+        self.seen.clear();
         self.queue = VecDeque::from([(None, 0), (Some(month), 0), (Some(month.after()), 0)]);
     }
 
@@ -111,11 +117,19 @@ impl EventList {
             }
             _ => return,
         };
-        let new = group_events::merge(&mut self.items, month, offset, &page);
+        self.seen.extend(page.items.iter().map(|e| e.id.clone()));
+        let new = group_events::merge(&mut self.items, &page);
         if page.more && page.raw > 0 && offset + page.raw < EVENTS_MAX {
             // The rest of the same list, before anything else.
             self.queue.push_front((month, offset + page.raw));
             return;
+        }
+        // All of this month and the next was read: what none of it gave is not on the calendar any more.
+        if self.looking.is_some_and(|first| month == Some(first.after())) {
+            if let Some(first) = self.looking.take() {
+                group_events::prune(&mut self.items, first, &self.seen);
+                self.looked = true;
+            }
         }
         if month.is_some() && month == self.earlier.map(Month::after) {
             self.empty = if new > 0 { 0 } else { self.empty + 1 };
@@ -408,11 +422,15 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, scope: &Scope, a
             let entries = o.events.shown(now);
             o.events.told.follow(&ctx, cx, entries, staged);
             // Kept for the next start, once what is on its way came.
-            if o.events.told.changed && o.events.told.reading.is_none() && !o.events.told.list.running() {
-                o.events.told.changed = false;
+            let quiet = o.events.told.reading.is_none() && !o.events.told.list.running() && !o.events.busy();
+            if (o.events.told.changed || o.events.looked) && quiet {
+                (o.events.told.changed, o.events.looked) = (false, false);
                 let name = o.group_name();
                 let told = o.events.told.to_keep(&o.events.items, &o.id, &name);
-                jobs.ask(&ctx, cx.ctl, scope, Kind::KeepEvents(o.id.clone()), Request::KeepEvents { group: o.id.clone(), told: Box::new(told) });
+                // The calendar as it is once looked at whole: what is gone from it is not shown at the next start.
+                let items = &o.events.items;
+                let events = items[items.len().saturating_sub(group_events::EVENTS_KEPT)..].to_vec();
+                jobs.ask(&ctx, cx.ctl, scope, Kind::KeepEvents(o.id.clone()), Request::KeepEvents { group: o.id.clone(), events, told: Box::new(told) });
             }
         }
     }
@@ -772,10 +790,32 @@ mod tests {
         assert_eq!(l.due(), Some((Some(month), 0)));
         l.answer(Some(month), 0, page(vec![CalendarEvent { title: "Renamed".into(), ..at("b", now + DAY) }], false));
         assert_eq!(l.due(), Some((Some(month.after()), 0)));
+        assert!(!l.looked);
         l.answer(Some(month.after()), 0, page(vec![], false));
-        assert!(!l.busy());
-        assert_eq!(l.items.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), ["a", "Renamed", "c"]);
+        assert!(!l.busy() && l.looked);
+        assert_eq!(l.items.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(), ["a", "Renamed", "c"], "what any of the reads gave stays");
         assert_eq!(l.past_count(now), 1);
+        // Read again: one that none of the reads gives any more goes, once they are all read; a failed look takes nothing away.
+        // (The middle of next month: well inside the two that are looked at whole, whatever day it is.)
+        let mid = OffsetDateTime::from_unix_timestamp(now).unwrap().date();
+        let mid = time::Date::from_calendar_date(Month::of(now).after().year, time::Month::try_from(Month::of(now).after().month).unwrap(), 15).unwrap_or(mid).midnight().assume_utc().unix_timestamp();
+        group_events::merge(&mut l.items, &Events { raw: 1, items: vec![at("gone", mid)], more: false });
+        let reads = [(None, vec![at("a", now - DAY), at("b", now + DAY), at("c", now + 2 * DAY)]), (Some(month), vec![]), (Some(month.after()), vec![])];
+        for failing in [true, false] {
+            l.again();
+            l.begin(now);
+            for (which, items) in reads.clone() {
+                assert_eq!(l.due(), Some((which, 0)));
+                if failing && which == Some(month) {
+                    l.answer(which, 0, Reply::Failed(Failure::Offline));
+                    break;
+                }
+                l.answer(which, 0, page(items, false));
+            }
+            assert_eq!(l.items.iter().any(|e| e.title == "gone"), failing);
+            l.failed = None;
+        }
+        assert_eq!(l.items.len(), 3);
     }
 
     /// A read that failed waits for the person, then goes on from where it was.

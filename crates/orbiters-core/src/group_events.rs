@@ -100,14 +100,11 @@ impl Month {
 /// Events of a calendar held at most, the latest.
 pub const EVENTS_MAX: usize = 1000;
 
-/// Takes a page of a calendar (whole, or of a `month`) into `list`, soonest first: each event once, as VRChat last gave it;
-/// one of that month that its whole list does not have any more goes (the month's first and last day left alone: VRChat's
-/// month may be another time zone's). How many are new.
-pub fn merge(list: &mut Vec<CalendarEvent>, month: Option<Month>, offset: usize, page: &Events) -> usize {
-    if let (Some(m), 0, false) = (month, offset, page.more) {
-        let (from, to) = (m.start() + 86_400, m.after().start() - 86_400);
-        list.retain(|e| !e.start().is_some_and(|s| s >= from && s < to) || page.items.iter().any(|p| p.id == e.id));
-    }
+/// Events kept for the next start, the latest.
+pub const EVENTS_KEPT: usize = 300;
+
+/// Takes a page of a calendar into `list`, soonest first: each event once, as VRChat last gave it. How many are new.
+pub fn merge(list: &mut Vec<CalendarEvent>, page: &Events) -> usize {
     let mut new = 0;
     for e in &page.items {
         match list.iter().position(|x| x.id == e.id) {
@@ -122,6 +119,15 @@ pub fn merge(list: &mut Vec<CalendarEvent>, month: Option<Month>, offset: usize,
     let over = list.len().saturating_sub(EVENTS_MAX);
     list.drain(..over);
     new
+}
+
+/// Takes out of `list` what `seen` does not have of `month` and the one after, once all that VRChat gives of them was read:
+/// deleted or moved away. Their first and last day are left alone (VRChat's month may be another time zone's), and every other
+/// month is. Whether anything went.
+pub fn prune(list: &mut Vec<CalendarEvent>, month: Month, seen: &std::collections::HashSet<String>) -> bool {
+    let (from, to, before) = (month.start() + 86_400, month.after().after().start() - 86_400, list.len());
+    list.retain(|e| seen.contains(&e.id) || !e.start().is_some_and(|s| s >= from && s < to));
+    list.len() != before
 }
 
 /// What Orbiters says of a group's events, as kept to show at the next start: the cards of those that are its own, and the
@@ -242,28 +248,28 @@ mod tests {
         assert_eq!(january.date(), "2027-01-15T12:00:00.000Z");
     }
 
-    /// Each event once, as last given; a month's whole list takes away what it no longer has, and only within that month.
+    /// Each event once, as last given, whatever page it came in; what a whole look at two months did not give goes from those
+    /// two alone.
     #[test]
-    fn a_page_is_taken_into_the_list() {
+    fn pages_are_taken_into_the_list_and_what_is_gone_goes() {
         let at = |id: &str, start: &str| CalendarEvent { id: id.into(), title: id.into(), starts_at: Some(start.into()), ..Default::default() };
-        let page = |items: Vec<CalendarEvent>, more: bool| Events { raw: items.len(), items, more };
+        let page = |items: Vec<CalendarEvent>| Events { raw: items.len(), items, more: false };
         let ids = |l: &[CalendarEvent]| l.iter().map(|e| e.id.clone()).collect::<Vec<_>>().join(" ");
-        let november = Some(Month { year: 2026, month: 11 });
         let mut l = Vec::new();
-        let all = vec![at("d", "2026-12-04T20:00:00Z"), at("b", "2026-11-10T20:00:00Z"), at("a", "2026-10-10T20:00:00Z"), at("c", "2026-11-20T20:00:00Z"), at("e", "2026-11-30T23:30:00Z")];
-        assert_eq!(merge(&mut l, None, 0, &page(all, true)), 5);
-        assert_eq!(ids(&l), "a b c e d", "soonest first");
-        // A part of the calendar, or of the month, takes nothing away.
-        assert_eq!(merge(&mut l, None, 5, &page(vec![], false)), 0);
-        assert_eq!(merge(&mut l, november, 0, &page(vec![at("b", "2026-11-11T20:00:00Z")], true)), 0);
-        assert_eq!(merge(&mut l, november, 100, &page(vec![], false)), 0);
-        assert_eq!(ids(&l), "a b c e d");
+        let all = vec![at("d", "2026-12-04T20:00:00Z"), at("b", "2026-11-10T20:00:00Z"), at("a", "2026-10-10T20:00:00Z"), at("c", "2026-11-20T20:00:00Z"), at("e", "2026-12-31T23:30:00Z"), at("f", "2027-01-05T20:00:00Z")];
+        assert_eq!(merge(&mut l, &page(all)), 6);
+        assert_eq!(ids(&l), "a b c d e f", "soonest first");
+        assert_eq!(merge(&mut l, &page(vec![at("b", "2026-11-11T20:00:00Z"), at("g", "2026-11-12T20:00:00Z")])), 1);
+        assert_eq!(merge(&mut l, &page(vec![])), 0);
+        assert_eq!(ids(&l), "a b g c d e f", "nothing goes by a page alone");
         assert_eq!(l[1].starts_at.as_deref(), Some("2026-11-11T20:00:00Z"), "moved, not twice");
-        // The month whole: what it has no more is gone, its last day and the other months left alone.
-        assert_eq!(merge(&mut l, november, 0, &page(vec![at("b", "2026-11-11T20:00:00Z"), at("f", "2026-11-12T20:00:00Z")], false)), 1);
-        assert_eq!(ids(&l), "a b f e d");
-        let many = (0..EVENTS_MAX + 5).map(|i| at(&format!("m{i:05}"), &format!("2027-01-01T{:02}:{:02}:00Z", i / 60 % 24, i % 60))).collect();
-        merge(&mut l, None, 0, &page(many, false));
+        let november = Month { year: 2026, month: 11 };
+        let seen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<_>>();
+        assert!(prune(&mut l, november, &seen(&["b", "g"])));
+        assert_eq!(ids(&l), "a b g e f", "the last day and the other months left alone");
+        assert!(!prune(&mut l, november, &seen(&["b", "g"])));
+        let many = (0..EVENTS_MAX + 5).map(|i| at(&format!("m{i:05}"), &format!("2027-02-01T{:02}:{:02}:00Z", i / 60 % 24, i % 60))).collect();
+        merge(&mut l, &page(many));
         assert_eq!(l.len(), EVENTS_MAX, "the latest");
         assert!(!l.iter().any(|e| e.id == "a"));
         assert!(Told::default().fits() && !Told { cards: vec![Card::default(); Told::MAX + 1], ..Default::default() }.fits());

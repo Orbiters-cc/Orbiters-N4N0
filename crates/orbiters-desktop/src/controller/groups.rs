@@ -33,7 +33,7 @@ use super::Controller;
 pub use super::groups_ledger::{Answer, By, Closing, Entry, Evidence, Key, Kind, Ledger, Not, State, Stop, Target, Warning};
 use super::groups_ledger::{known_id, FORMAT, SETTLES_AFTER_MS};
 use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Beside, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Membership, Missing, Part, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, RoleField, Why};
-use orbiters_core::group_events::{Events, Month, Told};
+use orbiters_core::group_events::{CalendarEvent, Events, Month, Told, EVENTS_KEPT};
 use orbiters_core::vrchat_api::{Client, GroupFailure, GroupRefusal, GroupFile, GroupInventory, Held, Leave, Members, Posts};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -89,8 +89,9 @@ pub enum Request {
     Posts { group: String, offset: usize },
     /// A page of a group's calendar, whole or a month of it (read only).
     Events { group: String, month: Option<Month>, offset: usize },
-    /// What Orbiters says of a group's events, as the window read it, to show at the next start: nothing is asked of VRChat.
-    KeepEvents { group: String, told: Box<Told> },
+    /// A group's calendar as the window has it once looked at whole, and what Orbiters says of it, to show at the next start:
+    /// nothing is asked of VRChat.
+    KeepEvents { group: String, events: Vec<CalendarEvent>, told: Box<Told> },
     /// A page of the account's own pictures.
     Inventory { tag: FileTag, offset: usize },
     /// A picture of the page (a member's, a banner), in memory only.
@@ -786,7 +787,7 @@ impl Controller {
             }
             Request::Posts { group, offset } => self.groups_read(&scope, |c| c.group_posts(&group, offset)).map(Reply::Posts),
             Request::Events { group, month, offset } => self.groups_read(&scope, |c| c.group_events(&group, month, offset)).map(Reply::Events),
-            Request::KeepEvents { group, told } => if g::is_group_id(&group) && told.fits() { Ok(Reply::Cancelled) } else { Err(Failure::TooLarge) },
+            Request::KeepEvents { group, events, told } => if g::is_group_id(&group) && events.len() <= EVENTS_KEPT && told.fits() { Ok(Reply::Cancelled) } else { Err(Failure::TooLarge) },
             Request::Inventory { tag, offset } => self.groups_read(&scope, |c| c.inventory(tag, offset)).map(Reply::Inventory),
             Request::Picture { url } => self
                 .groups_read(&scope, |c| c.image(&url).map_err(|e| if e == orbiters_core::vrchat_api::Error::UnsafeUrl { GroupFailure::NotFound } else { GroupFailure::Unavailable }))

@@ -1294,16 +1294,7 @@ fn recorded_backup(record: Option<&serde_json::Value>, project: &Path) -> Option
     let name = backup.file_name()?.to_string_lossy().into_owned();
     let id = name.strip_prefix(BACKUP_PREFIX)?;
     let beside = backup.parent().is_some_and(|parent| key(parent) == key(project));
-    let real = std::fs::symlink_metadata(&backup).is_ok_and(|m| {
-        #[cfg(windows)]
-        let reparse = {
-            use std::os::windows::fs::MetadataExt;
-            m.file_attributes() & 0x400 != 0
-        };
-        #[cfg(not(windows))]
-        let reparse = false;
-        m.is_dir() && !m.file_type().is_symlink() && !reparse
-    });
+    let real = std::fs::symlink_metadata(&backup).is_ok_and(|m| m.is_dir() && !crate::owned::is_link(&m));
     // The very folder the repair set aside, by identity: a folder restored or put at that name later is not it.
     let same = serde_json::from_value::<crate::owned::FileId>(record?["backup_id"].clone()).is_ok_and(|was| crate::owned::is_same(&backup, was));
     (is_cache_id(id) && beside && real && same).then_some(backup)

@@ -35,17 +35,11 @@ fn stamp(meta: &std::fs::Metadata, file: Option<&std::fs::File>) -> u64 {
     born ^ generation.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-/// Whether `meta` (from `symlink_metadata`) is a link, a junction or another reparse point.
+/// Whether `meta` (from `symlink_metadata`) is a link or a junction: what stands for another place. Windows marks other files and
+/// folders the same way that stand for nothing else (a cloud drive's placeholder, a deduplicated file): they are what they seem (PRJ-34).
 pub fn is_link(meta: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        meta.file_type().is_symlink()
-    }
+    // On Windows: a reparse point whose tag is a name surrogate.
+    meta.file_type().is_symlink()
 }
 
 /// The identity of what is at `path` itself (a link's own, never its target's).
@@ -232,6 +226,37 @@ mod tests {
         assert!(!is_same(&a, id));
         let file = std::fs::File::create(temp.path().join("f")).unwrap();
         assert_eq!(id_of_file(&file).unwrap(), id_of(&temp.path().join("f")).unwrap());
+    }
+
+    /// PRJ-34: a reparse point that stands for no other place (here one of a made-up tag, as a cloud drive's placeholder is of its own)
+    /// is no link; a junction is one.
+    #[cfg(windows)]
+    #[test]
+    fn a_reparse_point_that_stands_for_nothing_is_no_link() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::IO::DeviceIoControl;
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        let temp = tempfile::tempdir().unwrap();
+        let (file, target, link) = (temp.path().join("placeholder"), temp.path().join("target"), temp.path().join("link"));
+        // REPARSE_GUID_DATA_BUFFER: a tag of nobody's (no Microsoft bit, no name surrogate), 4 bytes of data, a GUID, the data.
+        let buffer = [0x0000_1234u32, 4, 1, 2, 3, 4, 7];
+        let f = std::fs::OpenOptions::new().write(true).create(true).custom_flags(0x0020_0000).open(&file).unwrap();
+        let mut got = 0u32;
+        // SAFETY: the buffer is as long as it is said to be, and the handle is open for the call.
+        unsafe { DeviceIoControl(HANDLE(f.as_raw_handle()), FSCTL_SET_REPARSE_POINT, Some(buffer.as_ptr().cast()), std::mem::size_of_val(&buffer) as u32, None, 0, Some(&mut got), None) }.unwrap();
+        drop(f);
+        let meta = std::fs::symlink_metadata(&file).unwrap();
+        {
+            use std::os::windows::fs::MetadataExt;
+            assert!(meta.file_attributes() & 0x400 != 0, "a reparse point");
+        }
+        assert!(!is_link(&meta) && !crate::discovery::is_link(&meta));
+        std::fs::create_dir(&target).unwrap();
+        junction::create(&target, &link).unwrap();
+        assert!(is_link(&std::fs::symlink_metadata(&link).unwrap()));
+        assert!(!is_link(&std::fs::symlink_metadata(&target).unwrap()));
     }
 
     /// An identity as a record keeps it: read back it is the same, and one kept before `born` was there is still read.

@@ -199,17 +199,7 @@ pub(crate) fn asks_permission(path: &Path) -> bool {
         && path.parent().is_some_and(|parent| dirs::home_dir().as_deref() == Some(parent))
         && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g)) // i18n: not shown (folder names and a macOS query the scan skips or asks for)
 }
-pub fn is_link(m: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        m.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(windows))]
-    {
-        m.file_type().is_symlink()
-    }
-}
+pub use crate::owned::is_link;
 pub fn is_project(path: &Path) -> bool {
     path.join("ProjectSettings/ProjectVersion.txt").is_file() && !unfinished_copy(path)
 }

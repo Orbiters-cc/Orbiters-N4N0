@@ -2355,6 +2355,7 @@ pub(super) fn avatar_gun_shots(out: &Path) -> anyhow::Result<()> {
     }
     // Desktop mode: the first change's card in the bottom right corner of a VRChat window (a made-up evening sky), at the
     // size and place desk_notice gives it, with nothing in its way.
+    #[cfg(windows)]
     for (name, face, hover) in faces.iter().filter(|(n, _, _)| matches!(*n, "changed" | "first" | "first-pointed" | "first-turned-off")) {
         let (w, h) = (hd.x as u32, hd.y as u32);
         let (rect, zoom) = crate::overlay::orbit::desk_notice::rect_of(hd, crate::avatar_gun_ui::size(face));

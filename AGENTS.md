@@ -16,6 +16,8 @@
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
+- **Every change keeps `cargo check` passing for the Mac** (main did not compile there from 0ee59341 to 2026-11-25; the tag 0.3.10 does
+  not). From Windows: `scripts/linux/check.sh mac` (`setup` first; it type-checks without a Mac); what is Windows' alone stays behind `cfg(windows)`.
 - **The VRChat bridge on a Mac observes and travels only** (`docs/vrchat-bridge.md`, "On a Mac"). What a computer's bridge can
   do is `bridge/caps.rs`, never `cfg` in shared logic: Windows has every capability (keep it so: its tools, guide and tests are
   unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side
@@ -27,8 +29,9 @@
   **Set aside** button: never a lock for ever, never "nothing"; one slot for the computer, a lock beside the gate's file, held from
   before the gate is read again and the start decided until how its game ended is known and kept, also against this very N4N0, and
   while the wait after an early end cannot be written, until that wait is over; the lock's own file says a start from before it is
-  made, so that an N4N0 that dies leaves it as an early end to whoever takes the slot next), only with obelisk-cli 0.1.13 or later (the record's `shown` frames
-  are its renderer evidence, `--no-saved-arguments` what every start is made with; Home's Play holds to the same `obelisk::LEAST`), arrives only once the local player is in its own destination in its own held log, closes with
+  made, so that an N4N0 that dies leaves it as an early end to whoever takes the slot next), only with obelisk-cli 0.1.14 or later (the record's `shown` frames
+  are its renderer evidence, `--no-saved-arguments` what every start is made with, and before 0.1.14 VRChat could crash under heavy loading,
+  `docs/mac-performance.md`; Home's Play holds to the same `obelisk::LEAST`), arrives only once the local player is in its own destination in its own held log, closes with
   `steam quit --session` and never `--force`. A stall, a quit that does not finish or a lost renderer of any session the engine
   runs is captured once (`controller/incident.rs`, `<logs>/incidents/`, Settings' Log says where): look there before guessing. VRChat's freeze about 5 s after the
   avatar loaded was Neptune's render server refusing an upload over 64 MiB: fixed in Orbiters-cc/neptune (branch `orbiters`) and

@@ -105,3 +105,28 @@ fn a_conversation_not_read_when_its_member_was_not_known_is_theirs_again() {
         t.shutdown(&n);
     }
 }
+
+// --- N4N-2: notes that did not fit ---
+
+/// Every note reaches the model whole before it is dropped.
+#[test]
+fn a_note_the_model_was_not_told_stays_for_the_next_turn() {
+    let (t, n, _device) = ready();
+    let notes: Vec<String> = (0..5).map(|i| format!("NOTE-{i} {} END-{i}", "\u{1F600}".repeat(900))).collect();
+    n.n4n0.lock().unwrap().notes.extend(notes.iter().map(|text| orbiters_n4n0_core::context::Note { text: text.clone(), taint: Default::default() }));
+    let mut told = vec![0; notes.len()];
+    for _ in 0..3 {
+        let (base, bodies) = orbiters(vec![done(json!([{ "role": "user", "content": "x" }]), json!([]))]);
+        t.sign_in(base, "orbit-a");
+        n.asked("tell me something nice".into(), "typed");
+        turn_ended(&n, &bodies, 1);
+        let summary = bodies.lock().unwrap()[0]["context"]["summary"].as_str().unwrap().to_string();
+        for (i, note) in notes.iter().enumerate() {
+            assert_eq!(summary.contains(&format!("NOTE-{i} ")), summary.contains(note), "NOTE-{i} in part");
+            told[i] += summary.contains(note) as usize;
+        }
+    }
+    assert_eq!(told, [1; 5], "each told once, whole");
+    assert!(n.n4n0.lock().unwrap().notes.is_empty());
+    t.shutdown(&n);
+}

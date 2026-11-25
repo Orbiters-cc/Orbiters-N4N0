@@ -585,7 +585,7 @@ impl N4n0Runtime {
         let others = read_for(&gone);
         let what: Vec<String> = gone.into_iter().map(|p| p.what).collect();
         self.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
-        self.note(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+        self.note("The owner's avatar changed before they answered: Orbiters - N4N0 did not", &what, ", nor ", others); // i18n: not shown
         self.confirmations.retain(|c| !c.approve_url.starts_with(LOCAL_APPROVAL));
         if kept.is_empty() {
             self.pending_at = None;
@@ -832,9 +832,9 @@ impl N4n0Runtime {
         }
     }
 
-    /// What the assistant is told at its next turn, and whose words it may quote.
-    fn note(&mut self, text: String, taint: Taint) {
-        self.notes.push(context::Note { text, taint });
+    /// What the assistant is told at its next turn (`lead`, then the outcomes), and whose words it may quote.
+    fn note(&mut self, lead: &str, outcomes: &[String], joint: &str, taint: Taint) {
+        self.notes.extend(context::Note::of(lead, outcomes, joint, taint));
     }
 
     pub(crate) fn line(&mut self, who: N4n0Who, text: impl Into<String>) {
@@ -2969,7 +2969,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             let (all, mut others) = crate::conversation::merged(full, marks, &sent, some, conversation, tools_run.taint);
             rt.conversation = assistant::trim(all, MAX_CONVERSATION);
             rt.conversation_others = others.split_off(others.len() - rt.conversation.len());
-            // What the assistant was told with this turn has been heard.
+            // What the assistant was told with this turn (each note whole) has been heard.
             for i in heard.into_iter().rev().filter(|i| *i < rt.notes.len()).collect::<Vec<_>>() {
                 rt.notes.remove(i);
             }
@@ -2982,7 +2982,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
                 let others = read_for(&stale);
                 let what: Vec<String> = stale.into_iter().map(|p| p.what).collect();
                 rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
-                rt.note(format!("The owner's avatar changed before they answered: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+                rt.note("The owner's avatar changed before they answered: Orbiters - N4N0 did not", &what, ", nor ", others); // i18n: not shown
             }
             let (question, on_panel) = questions(&tools_run.waiting);
             if !shown.is_empty() {
@@ -3006,7 +3006,7 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             // Nothing of the turn stays in the conversation (calls without results would refuse every next turn),
             // nor waits for a yes; what its tools did is told at the next turn.
             if !tools_run.done.is_empty() {
-                rt.note(format!("Your last answer did not arrive; before that, Orbiters - N4N0 did: {}.", tools_run.done.join(", ")), tools_run.taint.max(Taint::labels(tools_run.named_labels))); // i18n: not shown
+                rt.note("Your last answer did not arrive; before that, Orbiters - N4N0 did:", &tools_run.done, ", ", tools_run.taint.max(Taint::labels(tools_run.named_labels))); // i18n: not shown
             }
             let from_server = e.downcast_ref::<AssistantError>().map(|a| (a.message.clone(), a.on_panel.clone()));
             if from_server.is_none() {
@@ -3287,7 +3287,7 @@ impl Fence<'_> {
                 let mut rt = self.n4n0.lock().unwrap();
                 rt.line(N4n0Who::Note, tr!("Not done: {what}", what = what.join("; ")));
                 let why = if reply.is_some() { "said no" } else { "asked something else" }; // i18n: not shown
-                rt.note(format!("Since your last answer the owner {why}: Orbiters - N4N0 did not {}.", what.join(", nor ")), others); // i18n: not shown
+                rt.note(&format!("Since your last answer the owner {why}: Orbiters - N4N0 did not"), &what, ", nor ", others); // i18n: not shown
                 if reply.is_some() {
                     rt.show(tr_latin("OK, I won't."));
                 }
@@ -3325,11 +3325,11 @@ impl Fence<'_> {
         let mut rt = self.n4n0.lock().unwrap();
         if !done.is_empty() {
             rt.line(N4n0Who::Note, tr!("Done: {what}", what = done.join("; ")));
-            rt.note(format!("Since your last answer the owner said yes, and Orbiters - N4N0 did: {}.", done.join(", ")), others); // i18n: not shown
+            rt.note("Since your last answer the owner said yes, and Orbiters - N4N0 did:", &done, ", ", others); // i18n: not shown
         }
         if !failed.is_empty() {
             rt.line(N4n0Who::Error, tr!("Not done: {what}", what = failed.join("; ")));
-            rt.note(format!("Since your last answer the owner said yes, but Orbiters - N4N0 could not: {}.", failed.join(", ")), Taint::Others); // i18n: not shown
+            rt.note("Since your last answer the owner said yes, but Orbiters - N4N0 could not:", &failed, ", ", Taint::Others); // i18n: not shown
         }
         rt.show(if failed.is_empty() { tr_latin("Done.") } else { tr_latin("I couldn't do it: see Orbiters - N4N0.") });
         drop(rt);

@@ -218,7 +218,7 @@ impl History {
         let mut changed = false;
         let mut budget = READ_BUDGET;
         for (name, path) in &logs {
-            let Ok(mut file) = File::open(path) else { continue };
+            let Ok(file) = File::open(path) else { continue };
             let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
             // A log shorter than what was read of it was replaced: read again.
             let from = self.logs.get(name).copied().filter(|&from| from <= len).unwrap_or(0);
@@ -231,14 +231,16 @@ impl History {
             }
             let mut events = Vec::new();
             // Only joins and room names count here: other lines are let go after a look at their first bytes.
-            let (read, _) = crate::vrchat_log::read_lines(&mut file, from, end, budget, |line| {
+            let mut lines = crate::vrchat_log::Lines::at(from);
+            let _ = lines.read(&file, end, budget, |line| {
                 let joins =
                     crate::vrchat_log::message(line).is_some_and(|m| m.starts_with(b"[Behaviour] Joining ") || m.starts_with(b"[Behaviour] Entering Room: "));
                 if let Some(e) = joins.then(|| crate::vrchat_log::parse_bytes(line)).flatten() {
                     events.push(e);
                 }
             });
-            budget = budget.saturating_sub(read - from);
+            let read = lines.taken();
+            budget = budget.saturating_sub(lines.position() - from);
             for e in &events {
                 changed |= self.observe(e);
             }

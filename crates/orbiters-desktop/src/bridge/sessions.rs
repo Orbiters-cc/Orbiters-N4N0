@@ -471,24 +471,6 @@ pub fn complete_args(head: &str) -> Option<Vec<String>> {
     (args.len() == count).then_some(args)
 }
 
-/// Who a VRChat's log says is signed in: `Preforming post login checks for <name> (usr_…)` (sic, VRChat's spelling).
-pub fn signed_in(text: &str) -> Option<(String, String)> {
-    text.lines().rev().find_map(|l| {
-        let rest = l.split_once("post login checks for ")?.1;
-        let (name, id) = rest.rsplit_once(" (")?;
-        let id = id.trim_end().strip_suffix(')')?;
-        id.starts_with("usr_").then(|| (id.to_string(), name.to_string()))
-    })
-}
-
-/// Whether a VRChat's log says it waits at its sign-in page: no saved account (`No cached credentials found`), or a saved
-/// one refused, and nobody signed in since.
-pub fn needs_sign_in(text: &str) -> bool {
-    let asked = text.rfind("No cached credentials found").or_else(|| text.rfind("AuthSelectionPage OnPageShown"));
-    let signed = text.rfind("post login checks for ");
-    asked.is_some_and(|a| signed.is_none_or(|s| s < a))
-}
-
 /// The OSCQuery port a VRChat's log says it advertises.
 pub fn query_port(text: &str) -> Option<u16> {
     text.lines().find_map(|l| l.split_once("of type OSCQuery on ").and_then(|(_, p)| p.trim().parse().ok()))
@@ -670,15 +652,15 @@ mod tests {
     #[test]
     fn what_a_vrchat_log_says_of_its_account_and_its_ports() {
         // As in profile 1's log of 2026-11-15, before and after Enzo signed in.
-        let out = "2026.11.15 01:00:32 Debug      -  [Authentication - X] No cached credentials found, transitioning to provider selection.\n\
-                   2026.11.15 01:00:32 Warning    -  VP AuthSelectionPage OnPageShown()\n";
-        assert!(needs_sign_in(out));
-        assert_eq!(signed_in(out), None);
-        let in_ = format!("{out}2026.11.15 01:09:12 Debug      -  [Authentication - X] Preforming post login checks for Orbiters (usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3)\n");
-        assert!(!needs_sign_in(&in_));
-        assert_eq!(signed_in(&in_), Some(("usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3".into(), "Orbiters".into())));
-        let spaced = "x Preforming post login checks for blackorbit 552a (usr_f5ff7d6e-58a9-49e9-8c73-a142139d552a)";
-        assert_eq!(signed_in(spaced).unwrap().1, "blackorbit 552a");
+        let mut account = orbiters_core::vrchat_log::Account::default();
+        account.read(
+            "2026.11.15 01:00:32 Debug      -  [Authentication - X] No cached credentials found, transitioning to provider selection.\n\
+             2026.11.15 01:00:32 Warning    -  VP AuthSelectionPage OnPageShown()\n",
+        );
+        assert!(account.signed_out && account.who.is_none());
+        account.read("2026.11.15 01:09:12 Debug      -  [Authentication - X] Preforming post login checks for Sample 552a (usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3)\n");
+        assert!(!account.signed_out && account.sure);
+        assert_eq!(account.who, Some(("usr_dfc96b2c-1aec-4775-9557-eef94a7f02c3".into(), "Sample 552a".into())));
         let head = "2026.11.15 01:00:29 Debug      -  Launching with args: 3\n\
                     2026.11.15 01:00:29 Debug      -  Arg: C:\\VRChat\\VRChat.exe\n\
                     2026.11.15 01:00:29 Debug      -  Arg: --profile=1\n\

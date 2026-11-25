@@ -10,6 +10,7 @@
 //! them: the person's own by default, or the one they choose on the Capture page ([`super::Controller::choose_vrchat`]).
 
 use crate::bridge::sessions::{self, Driver, VrchatRun};
+use orbiters_core::vrchat_log::{Lines, LogEvent, LogWatcher};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -32,22 +33,50 @@ const WHOLE_LOOKS: usize = 64;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LogFacts {
     pub args: Option<Vec<String>>,
-    pub read_to: u64,
-    /// Who it last said is signed in: a label while `sure` is not set.
-    pub account: Option<(String, String)>,
-    /// Whether `account` is who is signed in now, for certain: it is the last thing the log says of a sign-in, and the log was
-    /// read to its end at the last look.
-    pub sure: bool,
-    /// It asked for a sign-in, and nobody signed in since.
-    pub signed_out: bool,
+    /// Who it says is signed in, as far as it was read.
+    pub account: orbiters_core::vrchat_log::Account,
     pub world: Option<String>,
     pub query: Option<u16>,
     pub osc_in: Option<u16>,
     pub vr_disabled: bool,
     /// It could not be read at the last look: read anew at the next.
     pub unread: bool,
-    /// More of it is there than a look reads: what it says last is not known yet.
+    /// More of it is there than a look reads, or it is in the middle of a line too long to keep: what it says last is not known
+    /// yet.
     pub behind: bool,
+}
+
+/// A log as it is followed here: what it said, and how far it was read.
+#[derive(Default)]
+struct Followed {
+    facts: LogFacts,
+    lines: Lines,
+}
+
+impl Followed {
+    /// Reads on, [`CHUNK`] at most. Whether more of it is there.
+    fn read_on(&mut self, log: &Path) -> bool {
+        // Cut shorter, or not to be read: what it said before is not what it says now.
+        let Ok((file, len)) = std::fs::File::open(log).and_then(|f| f.metadata().map(|m| m.len()).map(|len| (f, len))) else { return self.unreadable() };
+        if std::mem::take(&mut self.facts.unread) || len < self.lines.position() {
+            *self = Self::default();
+        }
+        let mut text = String::new();
+        let read = self.lines.read(&file, len, CHUNK, |line| {
+            text.push_str(&String::from_utf8_lossy(line));
+            text.push('\n');
+        });
+        self.facts.read(&text);
+        let Ok(to_end) = read else { return self.unreadable() };
+        self.facts.behind = !to_end || self.lines.skipping();
+        !to_end
+    }
+
+    fn unreadable(&mut self) -> bool {
+        self.facts.account.sure = false;
+        self.facts.unread = true;
+        false
+    }
 }
 
 impl LogFacts {
@@ -56,13 +85,7 @@ impl LogFacts {
         if self.args.is_none() {
             self.args = sessions::complete_args(text);
         }
-        if let Some(account) = sessions::signed_in(text) {
-            self.account = Some(account);
-        }
-        if let Some(said) = orbiters_core::vrchat_log::sign_in(text) {
-            self.sure = said.is_some() && said == self.account;
-        }
-        self.signed_out = signed_out(text).unwrap_or(self.signed_out);
+        self.account.read(text);
         if let Some(world) = text.lines().rev().find_map(|l| l.split_once("[Behaviour] Entering Room: ").map(|(_, w)| w.trim().to_string())) {
             self.world = Some(world);
         }
@@ -94,14 +117,6 @@ impl LogFacts {
         let args = self.args.as_deref()?;
         Some(args.iter().any(|a| a == "--no-vr") || self.vr_disabled)
     }
-}
-
-/// What a part of a VRChat's log says last of a sign-in: nobody is signed in (it asked for one), somebody is; `None` where it
-/// says neither.
-pub(crate) fn signed_out(text: &str) -> Option<bool> {
-    let asked = ["No cached credentials found", "AuthSelectionPage OnPageShown"].iter().filter_map(|said| text.rfind(said)).max(); // i18n: not shown (VRChat's log lines)
-    let signed = text.rfind("post login checks for ");
-    (asked.is_some() || signed.is_some()).then(|| asked > signed)
 }
 
 /// Whether a log made at `created` can be that of a VRChat started at `start` (Unix nanoseconds): made at its start or after it,
@@ -287,10 +302,10 @@ pub(crate) fn run_of(pid: u32, started_ns: u64, log: Option<&Path>, facts: Optio
         log: log.map(Path::to_path_buf),
         osc_in: osc.map(|o| o.0).or(facts.osc_in).unwrap_or(sessions::VRCHAT_OSC_IN),
         query: facts.query.map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
-        account: facts.account.clone(),
-        account_sure: facts.sure && !facts.behind,
+        account: facts.account.who.clone(),
+        account_sure: facts.account.sure && !facts.behind,
         log_sure: false,
-        signed_out: facts.signed_out,
+        signed_out: facts.account.signed_out,
         one_profile: facts.args.as_deref().is_some_and(|args| orbiters_core::vrchat_launch::profile_told(args) == Some(profile)),
         world: facts.world.clone(),
         desktop: facts.desktop(),
@@ -302,7 +317,7 @@ pub(crate) fn run_of(pid: u32, started_ns: u64, log: Option<&Path>, facts: Optio
 /// The roster as the watcher keeps it between looks.
 #[derive(Default)]
 pub(crate) struct Roster {
-    facts: HashMap<PathBuf, LogFacts>,
+    logs: HashMap<PathBuf, Followed>,
     matched: HashMap<u32, PathBuf>,
     /// The VRChats (process, start) whose log was once found to be theirs for certain: a later one changes nothing of that.
     certain: Vec<(u32, u64)>,
@@ -323,25 +338,37 @@ impl Roster {
 
     /// [`Self::scan`] until every log is read up to its end, or it is too much to read now.
     pub(crate) fn scan_whole(&mut self, procs: &[(u32, u64)], dir: Option<&Path>) -> Vec<VrchatRun> {
+        self.look(procs, dir);
         for _ in 0..WHOLE_LOOKS {
-            let runs = self.scan(procs, dir, |_| None);
-            if !self.facts.values().any(|facts| facts.behind) {
-                return runs;
+            if !self.read_on() {
+                break;
             }
         }
-        self.scan(procs, dir, |_| None)
+        self.runs(procs, |_| None)
     }
 
     /// Every VRChat in `procs` (process, start), with what its log in `dir` said. `camera` asks a VRChat's OSCQuery tree
     /// whether its camera is open (only asked with two VRChats or more: the picker's mark).
     pub(crate) fn scan(&mut self, procs: &[(u32, u64)], dir: Option<&Path>, camera: impl Fn(SocketAddr) -> Option<bool>) -> Vec<VrchatRun> {
+        self.look(procs, dir);
+        self.read_on();
+        self.runs(procs, camera)
+    }
+
+    /// Reads every log followed on, a look's worth of each. Whether more of one is there.
+    fn read_on(&mut self) -> bool {
+        self.logs.iter_mut().fold(false, |more, (log, followed)| followed.read_on(log) | more)
+    }
+
+    /// Matches the VRChats in `procs` with the logs in `dir`.
+    fn look(&mut self, procs: &[(u32, u64)], dir: Option<&Path>) {
         let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let lives = self.seen.look(procs, now);
         if procs.is_empty() {
             self.matched.clear();
-            self.facts.clear();
+            self.logs.clear();
             self.certain.clear();
-            return Vec::new();
+            return;
         }
         let earliest = procs.iter().map(|(_, s)| *s).filter(|s| *s > 0).min().unwrap_or(0);
         let earliest_seen = lives.iter().map(|life| life.start).filter(|s| *s > 0).min().unwrap_or(earliest);
@@ -381,36 +408,19 @@ impl Roster {
                 self.certain.push(*one);
             }
         }
-        let used: Vec<PathBuf> = self.matched.values().cloned().collect();
-        self.facts.retain(|l, _| used.contains(l));
-        for log in &used {
-            let facts = self.facts.entry(log.clone()).or_default();
-            // Cut shorter, or not to be read: what it said before is not what it says now.
-            let len = std::fs::File::open(log).and_then(|f| f.metadata()).map(|m| m.len());
-            match len {
-                Ok(len) if len >= facts.read_to => {}
-                Ok(_) => *facts = LogFacts::default(),
-                Err(_) => {
-                    facts.sure = false;
-                    facts.unread = true;
-                    continue;
-                }
-            }
-            if std::mem::take(&mut facts.unread) {
-                *facts = LogFacts::default();
-            }
-            let from = facts.read_to;
-            let (text, consumed) = read_log_from(log, from, CHUNK);
-            facts.read_to += consumed;
-            facts.read(&text);
-            // Read up to its end: what is left is a line still being written.
-            facts.behind = len.is_ok_and(|len| len - from > CHUNK);
+        let Roster { logs, matched, .. } = self;
+        logs.retain(|log, _| matched.values().any(|used| used == log));
+        for log in matched.values() {
+            logs.entry(log.clone()).or_default();
         }
+    }
+
+    fn runs(&self, procs: &[(u32, u64)], camera: impl Fn(SocketAddr) -> Option<bool>) -> Vec<VrchatRun> {
         let mut runs: Vec<VrchatRun> = procs
             .iter()
             .map(|(pid, start)| {
                 let log = self.matched.get(pid);
-                let mut run = run_of(*pid, *start, log.map(PathBuf::as_path), log.and_then(|l| self.facts.get(l)));
+                let mut run = run_of(*pid, *start, log.map(PathBuf::as_path), log.and_then(|l| self.logs.get(l)).map(|l| &l.facts));
                 run.log_sure = self.certain.contains(&(*pid, *start));
                 run
             })
@@ -425,37 +435,48 @@ impl Roster {
     }
 }
 
-/// A VRChat log's whole lines from byte `from`, at most `most` bytes of them, and how many bytes of the file they are.
-/// The bytes, not the text's length: a byte that is not UTF-8 becomes three bytes of text, and the next read started
-/// that much further, in the middle of a later line (C-6, CTL2-6). A line longer than `most` is passed over whole once it
-/// has ended (before, an empty read advanced nothing and the same bytes were read again on every look, for good).
-pub(super) fn read_log_from(path: &Path, from: u64, most: u64) -> (String, u64) {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else { return (String::new(), 0) };
-    if file.seek(SeekFrom::Start(from)).is_err() {
-        return (String::new(), 0);
+/// VRChat's log as the app follows it: its target's ([`sessions::Sides::target`]), never a side session's or another VRChat's.
+/// Whatever the app reads of the world it is in, it reads through one of these.
+pub(crate) struct TargetLog {
+    log: LogWatcher,
+    dir: Option<PathBuf>,
+    sides: Arc<sessions::Sides>,
+    target: Option<(u32, Option<PathBuf>)>,
+}
+
+impl TargetLog {
+    /// Of the logs in `dir` (`None`: VRChat's own folder).
+    pub(crate) fn new(dir: Option<PathBuf>, sides: Arc<sessions::Sides>) -> Self {
+        Self { log: Self::watcher(&dir, &sides), dir, sides, target: None }
     }
-    let mut bytes = Vec::new();
-    let _ = (&mut file).take(most).read_to_end(&mut bytes);
-    if let Some(last) = bytes.iter().rposition(|b| *b == b'\n') {
-        let end = last + 1;
-        return (String::from_utf8_lossy(&bytes[..end]).into_owned(), end as u64);
+
+    fn watcher(dir: &Option<PathBuf>, sides: &Arc<sessions::Sides>) -> LogWatcher {
+        let mut log = LogWatcher::new(dir.clone());
+        let sides = sides.clone();
+        log.set_skip(Arc::new(move |path: &Path| sides.skips_log(path)));
+        log
     }
-    if (bytes.len() as u64) < most {
-        // The line is still being written: read again from here next time.
-        return (String::new(), 0);
-    }
-    // One line longer than a read: its end is looked for, and the whole line passed over.
-    let mut skipped = bytes.len() as u64;
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        match file.read(&mut buf) {
-            Ok(0) | Err(_) => return (String::new(), 0),
-            Ok(n) => match buf[..n].iter().position(|b| *b == b'\n') {
-                Some(i) => return (String::new(), skipped + i as u64 + 1),
-                None => skipped += n as u64,
-            },
+
+    /// [`LogWatcher::poll`] of the target's log.
+    pub(crate) fn poll(&mut self) -> Vec<LogEvent> {
+        let target = self.sides.target().map(|t| (t.pid, t.log));
+        if target != self.target {
+            // Another VRChat followed: its log from its last world, as at a start (never its whole past as news).
+            let followed = &self.log.state.log_file;
+            if target.as_ref().is_some_and(|(_, log)| log.is_some() && followed.is_some() && log != followed) {
+                self.log = Self::watcher(&self.dir, &self.sides);
+            }
+            self.target = target;
         }
+        self.log.poll()
+    }
+}
+
+impl std::ops::Deref for TargetLog {
+    type Target = LogWatcher;
+
+    fn deref(&self) -> &LogWatcher {
+        &self.log
     }
 }
 
@@ -649,26 +670,52 @@ fn send_streaming(to: SocketAddr, on: bool) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// C-6 / CTL2-6: the offset moves by the file's bytes (a byte that is not UTF-8 is one byte, not three of text), and a
-    /// line longer than a read is passed over once it ended, the next one read.
+    /// C-6 / CTL2-6: the log is read on by the file's bytes (a byte that is not UTF-8 is one byte, not three of text), and a line
+    /// longer than a look is passed over once it ended, the next one read. BRG-4: while it has not ended it is read once, proves
+    /// nothing, and its tail is never read as a line of its own (COR-1).
     #[test]
     fn the_log_is_read_on_in_file_bytes_and_past_an_overlong_line() {
-        let file = std::env::temp_dir().join(format!("orbiters-log-{}.txt", std::process::id()));
-        let mut bytes = b"name \xE9t\xE9\nnext line\npartial".to_vec();
-        std::fs::write(&file, &bytes).unwrap();
-        let (text, consumed) = read_log_from(&file, 0, 1 << 20);
-        assert_eq!(consumed, "name \u{e9}t\u{e9}\nnext line\n".len() as u64 - 2, "the bytes of the file, not of the text");
-        assert!(text.ends_with("next line\n"));
-        let (rest, more) = read_log_from(&file, consumed, 1 << 20);
-        assert_eq!((rest.as_str(), more), ("", 0), "a line still being written waits");
-        // A line longer than a read, then an ordinary one.
-        bytes = vec![b'x'; 100];
-        bytes.extend_from_slice(b"\nafter\n");
-        std::fs::write(&file, &bytes).unwrap();
-        let (skipped, past) = read_log_from(&file, 0, 16);
-        assert_eq!((skipped.as_str(), past), ("", 101));
-        assert_eq!(read_log_from(&file, past, 16), ("after\n".to_string(), 6));
-        let _ = std::fs::remove_file(&file);
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        let world = |name: &[u8]| [&b"2026.11.15 13:40:00 Debug      -  [Behaviour] Entering Room: "[..], name].concat();
+        std::fs::write(&path, [OWN_LOG.as_bytes(), &world(b"n\xE9t\xE9"), b"\n2026.11.15 13:40:01 Debug      -  partial"].concat()).unwrap();
+        let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+        let mut roster = Roster::default();
+        let look = |roster: &mut Roster| {
+            let run = shown(&roster.scan_whole(&[(7, born)], Some(&dir))[0], None, None);
+            (run.world, run.account_id)
+        };
+        let me = || Some("usr_1339e525-d75d-4832-9104-98dd89287681".to_string());
+        assert_eq!(look(&mut roster), (Some("n\u{fffd}t\u{fffd}".into()), me()));
+        let mut log = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        // A line that does not end, longer than several looks, with what would be VRChat's record at each place a read could end.
+        log.write_all(&vec![b'x'; (2 * CHUNK) as usize]).unwrap();
+        assert_eq!(look(&mut roster), (Some("n\u{fffd}t\u{fffd}".into()), None), "in the middle of a line: nothing is proven");
+        let position = roster.logs[&path].lines.position();
+        assert_eq!(position, std::fs::metadata(&path).unwrap().len(), "read once, to its end");
+        assert!(!roster.read_on() && roster.logs[&path].lines.position() == position);
+        log.write_all(b"2026.11.15 13:41:00 Debug      -  [Authentication - x] Preforming post login checks for Other (usr_2)\n").unwrap();
+        assert_eq!(look(&mut roster).1, me(), "its end is no line of VRChat's");
+        log.write_all(&[&world(b"after")[..], b"\n"].concat()).unwrap();
+        assert_eq!(look(&mut roster), (Some("after".into()), me()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// COR-1: a line that is no record of VRChat's (a further line of a script's message) names no account, whatever it says.
+    #[test]
+    fn a_line_that_is_no_record_names_no_account() {
+        let dir = std::env::temp_dir().join(format!("orbiters-roster-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("output_log_2026-11-15_13-38-44.txt");
+        for fake in ["[Authentication - x] Preforming post login checks for Other (usr_2)", "Preforming post login checks for Other (usr_2)", "x [Authentication - x] Preforming post login checks for Other (usr_2)"] {
+            std::fs::write(&path, format!("{OWN_LOG}2026.11.15 13:50:00 Debug      -  [World] a message\n{fake}\n")).unwrap();
+            let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
+            let run = shown(&Roster::default().scan_whole(&[(7, born)], Some(&dir))[0], None, None);
+            assert_eq!((run.account_id, run.account.as_deref()), (None, Some("blackorbit")), "{fake}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The heads of the two logs of 2026-11-15 13:48, as VRChat wrote them (abridged to what is read).
@@ -765,15 +812,13 @@ mod tests {
         assert_eq!(id(&f), (Some("usr_2".into()), false));
         // R5: a later sign-in whose line names nobody, and a script's, take the account with them (its name stays a label).
         f.read("2026.11.15 14:03:00 Debug      -  [Authentication - x] Preforming post login checks for other\n");
-        assert_eq!((id(&f), f.account.as_ref().map(|a| a.1.as_str())), ((None, false), Some("other")));
+        assert_eq!((id(&f), f.account.who.as_ref().map(|a| a.1.as_str())), ((None, false), Some("other")));
         f.read("2026.11.15 14:04:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
         assert_eq!(id(&f), (Some("usr_2".into()), false));
         f.read("2026.11.15 14:05:00 Debug      -  [World] post login checks for blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)\n");
         assert_eq!(id(&f), (None, false));
         let several = facts(&OWN_LOG.replace("--watch-worlds", "--profile=1"));
         assert_eq!(id(&several), (None, false));
-        assert_eq!(signed_out("No cached credentials found\npost login checks for a (usr_1)\nAuthSelectionPage OnPageShown\n"), Some(true));
-        assert_eq!(signed_out("nothing"), None);
     }
 
     #[test]

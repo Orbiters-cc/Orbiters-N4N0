@@ -473,7 +473,7 @@ fn a_conversation_outlives_a_restart_for_its_member_only() {
     assert!(!conversation.is_empty() && question_shown(&t).is_some());
     until("the conversation is kept", || n.files.conversation.exists());
     let kept = std::fs::read(&n.files.conversation).unwrap();
-    assert!(!cfg!(windows) || !String::from_utf8_lossy(&kept).contains("Hello there"), "sealed");
+    assert!(!String::from_utf8_lossy(&kept).contains("Hello there"), "sealed");
     let restart = || {
         let platform = Platform {
             clipboard: Box::new(FakeClipboard),

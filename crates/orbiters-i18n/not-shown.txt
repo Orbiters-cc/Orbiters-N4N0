@@ -16,6 +16,7 @@ crates/orbiters-n4n0-core/src/intents/quick.rs
 # The words that name a group of the assistant's tools, matched and never shown (r23).
 crates/orbiters-n4n0-core/src/intents/route.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
+crates/orbiters-n4n0/src/tests_1124.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
 crates/orbiters-n4n0/src/tests_fix3.rs
 crates/orbiters-n4n0/src/tests_fix4.rs

@@ -2335,8 +2335,13 @@ impl N4n0 {
     /// belongs to the next one (verify-r21 3, verify2-r21 M1). What is under way stops and nothing of it comes back. Only
     /// through [`crate::Paused::forget_account`]: nothing acts meanwhile.
     pub(crate) fn forget_account(&self, epoch: u64) {
-        self.voice_forget();
         self.drop_kept_conversation();
+        self.forget_said(epoch);
+    }
+
+    /// [`N4n0::forget_account`] but for what is kept in the file.
+    pub(crate) fn forget_said(&self, epoch: u64) {
+        self.voice_forget();
         {
             let mut rt = self.n4n0.lock().unwrap();
             rt.account_epoch = epoch;

@@ -1,15 +1,21 @@
 //! A member's conversation with N4N0 across restarts of the app (verify3-r21 M5): what was said, in a private file sealed for this
-//! user of this computer (on Windows: DPAPI), under the Orbiters identity's epoch, which belongs to one member and outlives the service. Only what was
+//! user of this computer ([`orbiters_core::sealed`]), under the Orbiters identity's epoch, which belongs to one member and outlives the service. Only what was
 //! said: what N4N0 asked, what waits to be sent again and what a turn was doing are never brought back.
+//!
+//! A file goes only once it was read and is another member's, or when the conversation ends (New conversation, a sign-out, another
+//! member). One that cannot be read now (N4N-1) stays, is tried again, and is kept aside (`.bad-…`) by what is written in its place.
 
 use crate::fence::Fence;
 use crate::runtime::{N4n0, N4n0Runtime};
 use crate::status::{N4n0Line, N4n0Who, SignedAs};
+use orbiters_i18n::{mark, tr};
 use orbiters_n4n0_core::context::Taint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const LABEL: &[u8] = b"Orbiters N4N0 conversation";
+/// What the person reads of a conversation that could not be read.
+const NOT_READ: &str = mark("What you and N4N0 said before could not be read: it is kept, and tried again later.");
 
 #[derive(Serialize, Deserialize)]
 struct Kept {
@@ -46,23 +52,38 @@ impl Kept {
         Kept { epoch, conversation: rt.conversation.clone(), others: Some(rt.conversation_others.iter().copied().map(Mark::Known).collect()), lines: rt.lines.iter().filter(said).cloned().collect() }
     }
 
-    fn read(file: &std::path::Path) -> Option<Self> {
-        let sealed = std::fs::read(file).ok()?;
-        serde_json::from_slice(&orbiters_core::open_for_user(&sealed, LABEL).ok()?).ok()
+    /// What was said, then what was said since.
+    fn then(self, since: Kept) -> Self {
+        let marks = [self.taints(), since.taints()].concat().into_iter().map(Mark::Known).collect();
+        Kept { epoch: since.epoch, conversation: [self.conversation, since.conversation].concat(), others: Some(marks), lines: [self.lines, since.lines].concat() }
     }
 
-    fn write(&self, file: &std::path::Path) -> anyhow::Result<()> {
-        let sealed = orbiters_core::seal_for_user(&serde_json::to_vec(self)?, LABEL)?;
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
+    /// `None`: nothing is kept. An error: something is, and it could not be read now (said in the log).
+    fn read(file: &std::path::Path) -> Result<Option<Self>, anyhow::Error> {
+        let read = orbiters_core::sealed::read(file, LABEL);
+        if let Err(e) = &read {
+            eprintln!("N4N0's conversation could not be read: {e:#}"); // i18n: not shown
         }
-        Ok(orbiters_core::write_atomic_private(file, &sealed)?)
+        read
+    }
+
+    fn write(&self, file: &std::path::Path) {
+        if let Err(e) = orbiters_core::sealed::write(file, self, LABEL) {
+            eprintln!("N4N0's conversation could not be kept: {e:#}"); // i18n: not shown
+        }
+    }
+
+    fn taints(&self) -> Vec<Taint> {
+        self.others.as_ref().filter(|o| o.len() == self.conversation.len()).map_or_else(|| vec![Taint::Others; self.conversation.len()], |o| o.iter().map(|m| m.taint()).collect())
     }
 
     /// What was said goes on, before what was said since.
     fn restore(self, rt: &mut N4n0Runtime) {
-        rt.conversation_others = self.others.filter(|o| o.len() == self.conversation.len()).map_or_else(|| vec![Taint::Others; self.conversation.len()], |o| o.into_iter().map(Mark::taint).collect());
-        rt.conversation = self.conversation;
+        let mut marks = self.taints();
+        marks.append(&mut rt.conversation_others);
+        rt.conversation_others = marks;
+        let since = std::mem::replace(&mut rt.conversation, self.conversation);
+        rt.conversation.extend(since);
         let after = std::mem::take(&mut *rt.lines);
         *rt.lines = self.lines;
         rt.lines.extend(after);
@@ -72,7 +93,9 @@ impl Kept {
 /// What a member had said when who is signed in was no longer known: in memory, theirs alone, until it is known again.
 pub(crate) struct Parked {
     member: String,
-    kept: Kept,
+    kept: Option<Kept>,
+    /// The file could not be read then: it stays, theirs when it is of this epoch.
+    unread: Option<u64>,
 }
 
 /// The conversation after a turn, with whose words were read where each message was said: `full` (and its `marks`) before it,
@@ -102,10 +125,22 @@ impl Fence<'_> {
         if self.host.signed_as() != SignedAs::Member {
             return;
         }
-        let kept = Kept::of(&self.n4n0.lock().unwrap(), self.epoch());
-        let written = kept.write(&self.files.conversation);
-        if let Err(e) = written {
-            eprintln!("N4N0's conversation could not be kept: {e:#}"); // i18n: not shown
+        let file = &self.files.conversation;
+        // What the last run kept could not be read: it may be by now, and goes before what was said since.
+        let mut found = false;
+        if orbiters_core::was_unreadable(file) {
+            if self.n4n0.lock().unwrap().thinking() {
+                // Its end keeps it all.
+                return;
+            }
+            if let Ok(Some(kept)) = Kept::read(file).map(|kept| kept.filter(|k| k.epoch == self.epoch())) {
+                kept.restore(&mut self.n4n0.lock().unwrap());
+                found = true;
+            }
+        }
+        Kept::of(&self.n4n0.lock().unwrap(), self.epoch()).write(file);
+        if found {
+            self.publish();
         }
     }
 }
@@ -113,20 +148,28 @@ impl Fence<'_> {
 impl N4n0 {
     /// Nothing of a conversation is kept any more (New conversation, another member).
     pub(crate) fn drop_kept_conversation(&self) {
-        match std::fs::remove_file(&self.files.conversation) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("N4N0's conversation could not be removed: {e}"), // i18n: not shown
-            _ => {}
+        Self::removed(orbiters_core::sealed::remove(&self.files.conversation));
+    }
+
+    /// The file alone goes: it was read.
+    fn drop_conversation_file(&self) {
+        Self::removed(std::fs::remove_file(&self.files.conversation));
+    }
+
+    fn removed(removed: std::io::Result<()>) {
+        if let Err(e) = removed.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+            eprintln!("N4N0's conversation could not be removed: {e}"); // i18n: not shown
         }
     }
 
     /// The conversation kept for `epoch`, when there is one and nothing was said since the start.
     pub(crate) fn resume_account(&self, epoch: u64) {
-        if !self.files.conversation.exists() {
-            return;
-        }
-        let Some(kept) = Kept::read(&self.files.conversation).filter(|k| k.epoch == epoch) else {
-            // Another member's (or not readable): not theirs to keep.
-            return self.drop_kept_conversation();
+        let kept = match Kept::read(&self.files.conversation) {
+            Ok(None) => return,
+            // Another member's: not theirs to keep.
+            Ok(Some(kept)) if kept.epoch != epoch => return self.drop_conversation_file(),
+            Ok(Some(kept)) => kept,
+            Err(_) => return self.add_line(N4n0Who::Note, tr(NOT_READ)),
         };
         {
             let mut rt = self.n4n0.lock().unwrap();
@@ -142,30 +185,54 @@ impl N4n0 {
     /// [`crate::Paused::park_account`].
     pub(crate) fn park_account(&self, epoch: u64, member: Option<&str>) {
         if let Some(member) = member {
-            let kept = {
+            let said = {
                 let rt = self.n4n0.lock().unwrap();
-                let said = Kept::of(&rt, rt.account_epoch);
-                // Nothing said since the start: what the last run kept of theirs.
-                if said.conversation.is_empty() && said.lines.is_empty() {
-                    Kept::read(&self.files.conversation).filter(|k| k.epoch == rt.account_epoch)
-                } else {
-                    Some(said)
-                }
+                Kept::of(&rt, rt.account_epoch)
             };
-            *self.parked.lock().unwrap() = kept.map(|kept| Parked { member: member.to_string(), kept });
+            let theirs = said.epoch;
+            let mut kept = Some(said).filter(|said| !said.conversation.is_empty() || !said.lines.is_empty());
+            // Nothing said since the start: what the last run kept of theirs.
+            if kept.is_none() {
+                kept = Kept::read(&self.files.conversation).unwrap_or(None).filter(|k| k.epoch == theirs);
+            }
+            let unread = orbiters_core::was_unreadable(&self.files.conversation).then_some(theirs);
+            *self.parked.lock().unwrap() = Some(Parked { member: member.to_string(), kept, unread });
         }
-        self.forget_account(epoch);
+        // What waits, in memory or unread, is not for the next one to see; it goes when it is not theirs.
+        if self.parked.lock().unwrap().as_ref().is_none_or(|p| p.unread.is_none()) {
+            self.drop_conversation_file();
+        }
+        self.forget_said(epoch);
     }
 
     /// [`crate::Paused::establish_account`].
     pub(crate) fn establish_account(&self, epoch: u64, member: &str) {
-        self.forget_account(epoch);
-        let Some(mut parked) = self.parked.lock().unwrap().take().filter(|p| p.member == member) else { return };
-        parked.kept.epoch = epoch;
-        if let Err(e) = parked.kept.write(&self.files.conversation) {
-            eprintln!("N4N0's conversation could not be kept: {e:#}"); // i18n: not shown
+        let Some(Parked { mut kept, unread, .. }) = self.parked.lock().unwrap().take().filter(|p| p.member == member) else {
+            return self.forget_account(epoch);
+        };
+        self.forget_said(epoch);
+        let file = &self.files.conversation;
+        if let Some(theirs) = unread {
+            match Kept::read(file) {
+                Ok(Some(earlier)) if earlier.epoch == theirs => {
+                    kept = Some(match kept {
+                        Some(since) => earlier.then(since),
+                        None => earlier,
+                    });
+                }
+                Ok(_) => self.drop_conversation_file(),
+                // Their epoch is another one now: aside, it is not taken for another member's.
+                Err(_) => {
+                    Self::removed(orbiters_core::sealed::set_aside(file));
+                    self.add_line(N4n0Who::Note, tr(NOT_READ));
+                }
+            }
         }
-        parked.kept.restore(&mut self.n4n0.lock().unwrap());
+        if let Some(mut kept) = kept {
+            kept.epoch = epoch;
+            kept.write(file);
+            kept.restore(&mut self.n4n0.lock().unwrap());
+        }
         self.publish();
     }
 

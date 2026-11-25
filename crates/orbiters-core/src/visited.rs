@@ -624,6 +624,9 @@ impl ShotIndex {
                 if self.files.get(&path).is_some_and(|f| f.size == size && f.modified == modified) {
                     continue;
                 }
+                // What the file that was there said is not what this one says: while this one cannot be read (being written,
+                // or no picture), the path has none.
+                changed |= self.files.remove(&path).is_some();
                 if let Some(info) = read_shot(&path) {
                     self.files.insert(path, ShotEntry { size, modified, info, sha256: None, clean_sha256: None });
                     changed = true;
@@ -838,6 +841,32 @@ mod tests {
     /// `cargo test -p orbiters-core reads_this_computers_vrchat_history -- --ignored --nocapture`
     #[test]
     #[ignore]
+    /// COR-23: a screenshot replaced by a file that cannot be read (being written, or no picture) keeps nothing of the picture
+    /// before it: not its world, not the hash Orbiters may know that one by. Once it can be read, it is what it says.
+    #[test]
+    fn a_replaced_screenshot_that_cannot_be_read_keeps_nothing_of_the_one_before() {
+        let dir = std::env::temp_dir().join(format!("orbiters-replaced-shot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("VRChat_2026-10-18_20-37-40.794_3840x2160.png");
+        let paths = std::slice::from_ref(&path);
+        std::fs::write(&path, png_with_xmp("<vrc:WorldID>wrld_before</vrc:WorldID>")).unwrap();
+        let mut index = ShotIndex::default();
+        assert!(index.refresh(std::slice::from_ref(&dir)) && index.hash(paths));
+        let before = index.shots()[0].clone();
+        assert!(before.sha256.is_some() && before.clean_sha256.is_some());
+        std::fs::write(&path, b"being written").unwrap();
+        assert!(index.refresh(std::slice::from_ref(&dir)), "it is no more what was read");
+        assert!(!index.hash(paths) && index.every_shot().is_empty() && index.fingerprints().next().is_none());
+        assert!(!index.refresh(std::slice::from_ref(&dir)), "still not to be read: nothing changed");
+        std::fs::write(&path, png_with_xmp("<vrc:WorldID>wrld_after</vrc:WorldID>")).unwrap();
+        assert!(index.refresh(std::slice::from_ref(&dir)) && index.hash(paths));
+        let after = index.shots()[0].clone();
+        assert_eq!(after.info.world_id.as_deref(), Some("wrld_after"));
+        assert!(after.sha256.is_some() && after.sha256 != before.sha256);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn reads_this_computers_vrchat_history() {
         let mut h = History::default();
         let t = std::time::Instant::now();

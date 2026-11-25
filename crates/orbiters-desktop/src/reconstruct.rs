@@ -5,7 +5,7 @@
 
 use crate::worker::sibling_exe;
 use orbiters_core::reconstruction::Event;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
@@ -56,8 +56,7 @@ impl ReconstructHandle {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("reconstruct-stdout".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            for line in crate::worker::records(stdout, "reconstruct") {
                 // A report with a number written as null (NaN) still ends the run (`Event::from_line`).
                 match Event::from_line(&line) {
                     Some(e) => on_event(e),
@@ -66,12 +65,7 @@ impl ReconstructHandle {
             }
             on_exit();
         })?;
-        std::thread::Builder::new().name("reconstruct-stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                on_log(line);
-            }
-        })?;
+        std::thread::Builder::new().name("reconstruct-stderr".into()).spawn(move || crate::worker::log_lines(stderr).for_each(on_log))?;
         Ok(Self { child, stdin })
     }
 
@@ -91,5 +85,43 @@ impl Drop for ReconstructHandle {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// XCT-15: a line of a driver's in the system's code page ends neither the events (the run was taken for over while it
+    /// went on) nor the draining of its stderr.
+    #[test]
+    fn a_line_that_is_not_utf8_ends_neither_its_events_nor_its_log() {
+        let heard = |stderr: bool| {
+            let (done, over) = std::sync::mpsc::channel::<()>();
+            let (events, logs) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+            let (e, l) = (events.clone(), logs.clone());
+            let output = b"p\xE9riph\xE9rique\r\n{\"event\":\"pausing\"}\r\nlast\r\n";
+            // (The log's thread ends when its closure goes.)
+            let logged = done.clone();
+            let mut handle = ReconstructHandle::spawn_command(
+                crate::worker::stand_in(output, stderr),
+                move |event| e.lock().unwrap().push(format!("{event:?}")),
+                move |line| {
+                    l.lock().unwrap().push(line);
+                    let _ = &logged;
+                },
+                move || drop(done),
+            )
+            .unwrap();
+            assert_eq!(over.recv_timeout(std::time::Duration::from_secs(30)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected), "both pipes were read to their end");
+            handle.cancel();
+            let heard = (events.lock().unwrap().clone(), logs.lock().unwrap().clone());
+            heard
+        };
+        let (events, _) = heard(false);
+        assert_eq!(events, ["Pausing"], "the event after the odd line arrives");
+        let (_, logs) = heard(true);
+        assert_eq!(logs, ["p\u{FFFD}riph\u{FFFD}rique", "{\"event\":\"pausing\"}", "last"]);
     }
 }

@@ -26,7 +26,6 @@ use crate::link_between::{Between, Line};
 use crate::service::Service;
 use anyhow::Context as _;
 use orbiters_core::settings::Settings;
-use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -131,7 +130,7 @@ fn start(name: &'static str, role: Role, mode: &str, extra: &[&str], service: &E
     let (out, heard) = (process.stdout.take().context("its output")?, said.clone());
     let (done, output_done) = std::sync::mpsc::channel();
     std::thread::Builder::new().name("link-smoke-reader".into()).spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
+        for line in crate::worker::log_lines(out) {
             let mut said = heard.lock().unwrap();
             if let Some(digest) = line.strip_prefix("state ") {
                 said.state = Some(digest.trim().to_string());

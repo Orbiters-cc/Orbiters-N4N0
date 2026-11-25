@@ -424,7 +424,6 @@ pub fn pause() {
 /// Starts the first waiting session's preparation when none runs, on the integrated GPU with `integrated`. `on_log`
 /// gets its log lines; `on_exit` runs once it has exited (the service then looks for its next work).
 pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on_exit: impl FnOnce() + Send + 'static) -> anyhow::Result<bool> {
-    use std::io::{BufRead, BufReader};
     let mut guard = BACKGROUND.lock().unwrap_or_else(|e| e.into_inner());
     let b = guard.get_or_insert_with(Background::default);
     if b.running.is_some() {
@@ -489,11 +488,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
         let logging = fail_point(1).and_then(|()| {
             std::thread::Builder::new()
                 .name("upload-prep-log".into())
-                .spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        on_log(line);
-                    }
-                })
+                .spawn(move || crate::worker::log_lines(stderr).for_each(on_log))
                 .map_err(anyhow::Error::from)
         });
         if let Err(e) = logging {

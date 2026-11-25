@@ -231,8 +231,20 @@ fn scoped_world_work(
 pub const OWNED_BATCH: usize = 16;
 pub type Result = std::result::Result<Response, String>;
 
-// Cache refreshes and upload publication share the same lock, including their temporary files.
-static PICTURE_CACHE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The lock of one kept picture's file, held while it is fetched anew or replaced, its temporary file included: nobody waits
+/// for another picture's, and a picture put on VRChat is never replaced by what was fetched before it.
+fn picture_lock(file: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, Mutex, Weak};
+    static LOCKS: Mutex<std::collections::BTreeMap<PathBuf, Weak<Mutex<()>>>> = Mutex::new(std::collections::BTreeMap::new());
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(lock) = locks.get(file).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(file.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
 
 impl Controller {
     pub fn vrchat_data(self: &Shared, scope: Scope, request: Request) -> Result {
@@ -245,7 +257,6 @@ impl Controller {
         if scope != Scope::of(&self.view()) {
             return Err(tr("The account changed. Please try again.").into());
         }
-        let _pictures = matches!(&request, Request::Avatars { .. } | Request::Worlds { .. }).then(|| PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner()));
         let source = self.vrchat_source();
         let result = (|| -> anyhow::Result<Response> {
             Ok(match request {
@@ -284,6 +295,13 @@ impl Controller {
                         }
                     } else {
                         let server = if scope.development { Server::Development } else { Server::Production };
+                        // Each one's file, in one order (two batches of the same ones).
+                        let kept = orbiters_projects::data_dir().join("avatar-thumbnails").join(if scope.development { "development" } else { "production" });
+                        let mut files: Vec<PathBuf> = missing.iter().map(|id| kept.join(format!("{}.image", orbiters_projects::avatars::filename(id)))).collect();
+                        files.sort();
+                        files.dedup();
+                        let locks: Vec<_> = files.iter().map(|file| picture_lock(file)).collect();
+                        let _ours: Vec<_> = locks.iter().map(|lock| lock.lock().unwrap_or_else(|e| e.into_inner())).collect();
                         match orbiters_projects::network::thumbnails(server, missing) {
                             Ok(paths) => {
                                 for (id, t) in paths {
@@ -631,7 +649,6 @@ pub(crate) fn fit_picture(bytes: &[u8]) -> anyhow::Result<image::RgbImage> {
 /// avatar's Toolkit picture and Orbiters' cached thumbnails of it, each only where one was kept, and a world's cached
 /// thumbnail.
 fn keep_picture(data: &Path, id: &str, png: &[u8]) {
-    let _guard = PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let name = orbiters_projects::avatars::filename(id);
     let files: Vec<PathBuf> = match Kind::of(id) {
         Some(Kind::Avatar) => std::iter::once(data.join("Avatars").join(format!("{name}.png")))
@@ -642,6 +659,8 @@ fn keep_picture(data: &Path, id: &str, png: &[u8]) {
         None => vec![],
     };
     for file in files {
+        let lock = picture_lock(&file);
+        let _ours = lock.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = file.with_extension("tmp");
         let written =
             file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&tmp, png)).and_then(|()| std::fs::rename(&tmp, &file));
@@ -653,14 +672,21 @@ fn keep_picture(data: &Path, id: &str, png: &[u8]) {
     }
 }
 
-/// Share avatar and world fetches across callers, windows and sessions. Serialize the check/fetch/write
-/// so concurrent IPC requests cannot both miss the same cache entry. A failed refresh retains the old picture.
+/// Share avatar and world fetches across callers, windows and sessions. Serialize one picture's check/fetch/write so that
+/// concurrent IPC requests cannot both miss the same cache entry; a kept one is read without waiting. A failed refresh retains
+/// the old picture.
 fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Option<Vec<u8>>>) -> anyhow::Result<Option<super::vrchat_login::Picture>> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let kept = std::fs::read(file).ok().and_then(|b| avatar_picture(&b));
-    let fresh = std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
-    if fresh && kept.is_some() {
+    let read = || std::fs::read(file).ok().and_then(|b| avatar_picture(&b));
+    let fresh = || std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() < 86400);
+    if fresh() {
+        if let Some(kept) = read() {
+            return Ok(Some(kept));
+        }
+    }
+    let lock = picture_lock(file);
+    let _ours = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let kept = read();
+    if fresh() && kept.is_some() {
         return Ok(kept);
     }
     // An avatar VRChat had no picture for (or refused) is not asked for again before a day has passed.
@@ -728,6 +754,49 @@ mod tests {
         assert!(cached_avatar_picture(&file, fetch).unwrap().is_some());
         assert_eq!(calls.get(), 2);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// DCT-5: while one picture is fetched, a kept one is read, another one is fetched, and a picture put on VRChat is kept; what
+    /// was being fetched of that very one never replaces it, and it is fetched once.
+    #[test]
+    fn a_slow_picture_holds_up_no_other() {
+        use std::sync::mpsc;
+        let data = std::env::temp_dir().join(format!("orbiters-slow-picture-{}", uuid::Uuid::new_v4()));
+        let file = |id: &str| data.join("world-thumbnails").join(format!("{}.image", orbiters_projects::avatars::filename(id)));
+        let id = |n: u32| format!("wrld_00000000-0000-4000-8000-{n:012}");
+        let png = |colour: u8| encoded(image::RgbaImage::from_pixel(4, 3, image::Rgba([colour, colour, colour, 255])));
+        assert!(cached_avatar_picture(&file(&id(1)), || Ok(Some(png(1)))).unwrap().is_some());
+        let (begun, slow) = mpsc::channel();
+        let (go, wait) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let (file, id, png) = (&file, &id, &png);
+            scope.spawn(move || {
+                cached_avatar_picture(&file(&id(2)), || {
+                    begun.send(()).unwrap();
+                    let _ = wait.recv_timeout(std::time::Duration::from_secs(20));
+                    Ok(Some(png(2)))
+                })
+            });
+            slow.recv().unwrap();
+            let (done, others) = mpsc::channel();
+            let data = &data;
+            scope.spawn(move || {
+                let kept = cached_avatar_picture(&file(&id(1)), || panic!("kept")).unwrap().is_some();
+                let other = cached_avatar_picture(&file(&id(3)), || Ok(Some(png(3)))).unwrap().is_some();
+                keep_picture(data, &id(4), &png(4));
+                done.send(kept && other && file(&id(4)).is_file()).unwrap();
+            });
+            let others = others.recv_timeout(std::time::Duration::from_secs(5));
+            // Put on VRChat while its old one is still being fetched; and asked for once more.
+            let replaced = scope.spawn(move || keep_picture(data, &id(2), &png(200)));
+            let again = scope.spawn(move || cached_avatar_picture(&file(&id(2)), || panic!("fetched twice")));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            go.send(()).unwrap();
+            replaced.join().unwrap();
+            assert!(again.join().unwrap().unwrap().is_some());
+            assert_eq!(others, Ok(true), "nothing waited for it");
+            assert_eq!(std::fs::read(file(&id(2))).unwrap(), png(200), "the one put there stays");
+        });
+        std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
     fn projects_missing_picture_expires_and_errors_are_not_cached() {

@@ -993,7 +993,7 @@ impl Controller {
 }
 
 #[cfg(test)]
-#[path = "avatar_gun_permits.rs"]
+#[path = "avatar_gun_tests.rs"]
 mod permits;
 
 #[cfg(test)]

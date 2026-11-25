@@ -1252,8 +1252,10 @@ impl super::Controller {
         }
         drop(rt);
         drop(gone);
-        // A call that began has its phases' times to look at.
-        self.rests.wake("calls");
+        // A call that began elsewhere (a command, an event) has its phases' times to look at.
+        if std::thread::current().name() != Some("calls") {
+            self.rests.wake("calls");
+        }
         for text in said {
             self.n4n0_say(&text);
         }

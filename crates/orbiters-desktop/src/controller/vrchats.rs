@@ -832,13 +832,18 @@ mod tests {
         assert_eq!(id(&f), (None, true), "signed out in the game");
         f.read("2026.11.15 14:01:00 Debug      -  [Behaviour] Entering Room: FRONTLINE KIZUNA\n");
         assert_eq!(id(&f), (None, true));
+        // COR-1: after a world, a sign-in is words a world's script can write: it proves nobody (its name stays a label).
         f.read("2026.11.15 14:02:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
-        assert_eq!(id(&f), (Some("usr_2".into()), false));
-        // R5: a later sign-in whose line names nobody, and a script's, take the account with them (its name stays a label).
-        f.read("2026.11.15 14:03:00 Debug      -  [Authentication - x] Preforming post login checks for other\n");
         assert_eq!((id(&f), f.account.who.as_ref().map(|a| a.1.as_str())), ((None, false), Some("other")));
+        f.read("2026.11.15 14:05:00 Debug      -  [World] post login checks for blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)\n");
+        assert_eq!(id(&f), (None, false));
+        // R5: a later sign-in whose line names nobody, and a script's, take the account with them, before any world too.
+        let mut f = facts(&OWN_LOG[..OWN_LOG.find("[Behaviour]").unwrap()]);
+        assert_eq!(id(&f), (mine.clone(), false));
+        f.read("2026.11.15 14:03:00 Debug      -  [Authentication - x] Preforming post login checks for other\n");
+        assert_eq!((id(&f), f.account.who.as_ref().map(|a| a.1.as_str())), ((None, false), Some("blackorbit")));
         f.read("2026.11.15 14:04:00 Debug      -  [Authentication - x] Preforming post login checks for other (usr_2)\n");
-        assert_eq!(id(&f), (Some("usr_2".into()), false));
+        assert_eq!(id(&f), (Some("usr_2".into()), false), "VRChat's own, before a world");
         f.read("2026.11.15 14:05:00 Debug      -  [World] post login checks for blackorbit (usr_1339e525-d75d-4832-9104-98dd89287681)\n");
         assert_eq!(id(&f), (None, false));
         let several = facts(&OWN_LOG.replace("--watch-worlds", "--profile=1"));
@@ -1024,7 +1029,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("output_log_2026-11-15_13-38-44.txt");
         let filler = format!("{}\n", "x".repeat(1023)).repeat((CHUNK / 1024) as usize);
-        std::fs::write(&path, [OWN_LOG, &filler, "2026.11.15 13:39:00 Debug      -  [Authentication - x] Preforming post login checks for Sample (usr_00000000-0000-4000-8000-00000000000b)\n"].concat()).unwrap();
+        // (Before its first world: what VRChat alone writes.)
+        let head = &OWN_LOG[..OWN_LOG.find("2026.11.15 13:39:42").unwrap()];
+        std::fs::write(&path, [head, &filler, "2026.11.15 13:39:00 Debug      -  [Authentication - x] Preforming post login checks for Sample (usr_00000000-0000-4000-8000-00000000000b)\n"].concat()).unwrap();
         let born = made_at(&std::fs::metadata(&path).unwrap()).unwrap();
         let mut roster = Roster::default();
         let mut look = |whole: bool| shown(&if whole { roster.scan_whole(&[(7, born)], Some(&dir)) } else { roster.scan(&[(7, born)], Some(&dir), |_| None) }[0], None, None).account_id;

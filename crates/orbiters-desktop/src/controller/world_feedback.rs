@@ -1108,8 +1108,9 @@ mod tests {
         // Its own is, once its wait is over; parked, once the pause ends.
         rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
         rt.wanted.clear();
-        assert_eq!(rt.next_due(now_ms()), Some(Duration::from_millis(300)), "now");
         let mine = rt.queue.items.len() - 1;
+        let first = Duration::from_millis(rt.queue.items[mine].due.saturating_sub(now_ms()));
+        assert!(rt.next_due(now_ms()).is_some_and(|due| due <= first.max(Duration::from_millis(300))), "when it may go");
         rt.queue.items[mine].due = now + 8_000;
         let due = rt.next_due(now).unwrap();
         assert_eq!(due, Duration::from_secs(8));

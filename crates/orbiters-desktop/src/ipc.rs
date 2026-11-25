@@ -1248,7 +1248,7 @@ pub(crate) mod tests {
         assert!(text.starts_with(r#"{"type":"changes","parts":{"capture":{"#) && text.ends_with("}}\n"), "{text}");
         assert!(!text.contains("settings"), "what did not change does not travel: {text}");
         write_state(&mut f, Some(&later), &later).unwrap();
-        assert_eq!(String::from_utf8(f).unwrap(), "{\"type\":\"changes\",\"parts\":{}}\n", "a publish that changed nothing is still told");
+        assert_eq!(String::from_utf8(f).unwrap(), "", "nothing changed: nothing is written (XCT-18)");
     }
 
     /// A stand-in service for one client: says hello back with `first`, then hands the test the stream to write on.
@@ -1367,7 +1367,10 @@ pub(crate) mod tests {
         client.update_local(|s| s.vrchat_login.busy = true);
         let shown = Instant::now();
         assert!(client.snapshot().vrchat_login.busy);
-        assert!(until(|| !client.snapshot().vrchat_login.busy));
+        while client.snapshot().vrchat_login.busy && shown.elapsed() < AHEAD_FOR * 2 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!client.snapshot().vrchat_login.busy);
         assert!(shown.elapsed() >= AHEAD_FOR, "{:?}", shown.elapsed());
         assert!(Arc::ptr_eq(&client.snapshot(), &client.state.lock().unwrap().service));
     }

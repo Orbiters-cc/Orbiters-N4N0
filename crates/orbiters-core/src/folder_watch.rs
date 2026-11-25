@@ -70,7 +70,8 @@ mod windows_watch {
                 // SAFETY: handles that stay open for the wait.
                 let woken = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
                 let i = woken.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
-                let again = |i: usize| watched[i].there == watched[i].wanted.is_dir();
+                // One followed from above is followed anew at each change there: a folder made below may be the next one down.
+                let again = |i: usize| watched[i].there && watched[i].wanted.is_dir();
                 // SAFETY: the handle that was signalled, still open.
                 let followed = woken != WAIT_FAILED && i < watched.len() && again(i) && unsafe { FindNextChangeNotification(watched[i].handle) }.is_ok();
                 if !followed {

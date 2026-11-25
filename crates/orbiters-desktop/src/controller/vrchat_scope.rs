@@ -187,6 +187,11 @@ fn drop_foreign(st: &mut Status, rt: &mut Runtime, now: Option<&Stamp>) {
     *st = Status { revision: st.revision, waiting: had, restoring: had, error, recovery, ..Status::default() };
 }
 
+/// The made-up state of `--publish-cost` (`controller/publish_cost.rs`), with an account's picture the size of the one VRChat gives.
+pub(super) fn stand_in_picture(s: &mut Snapshot, picture: super::vrchat_login::Picture) {
+    s.vrchat_login.picture = Some(picture);
+}
+
 /// At each publish, with the state held, before it goes out: what is not the current member's of VRChat does not
 /// (`now`: the member this very state is for; none, when nobody's account is known).
 pub(super) fn enforce(s: &mut Snapshot, rt: &mut Runtime, now: Option<&Stamp>) {

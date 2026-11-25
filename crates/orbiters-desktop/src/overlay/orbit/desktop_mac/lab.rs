@@ -1,6 +1,6 @@
 //! `--orbit-lab`: the Mac's overlay with no game, no service and no person, for `tools/mac-overlay/check.py`. Everything it does is in a private folder ([`crate::harness`]).
 //!
-//! - `frames <testdata> <out> <width> <height>` writes `wheel.bgra`, `qm.bgra` and `none.bgra`: pictures of that size with the real frames of VRChat's menus in their places.
+//! - `frames <testdata> <out> <width> <height>` writes `wheel.bgra`, `qm.bgra`, `none.bgra`, `beside.bgra` and `camera.bgra`: pictures of that size with the real frames of VRChat's menus in their places.
 //! - `desk <launcher's process> [<the engine's host folder>]` turns the overlay's loop over the window of that process's window server, with a keyboard read from its standard input: `press esc|r|option|1..9`,
 //!   `let go ...`, `button down|up`, `scroll` (a notch of the wheel), `point <zone>` (the pointer over that part, while the keyboard is ours), `click`, `type <code>`, `say`, `cpu`, `quit`. Each change of what it
 //!   does, and each `say`, is a line of JSON on its standard output.
@@ -153,12 +153,29 @@ pub fn frame(data: &Path, shows: Shows, client: Vec2) -> anyhow::Result<Picture>
     Ok(out)
 }
 
+/// A window's whole picture with VRChat's camera panel in its middle: a real frame, as high as the window, its sides cut or drawn out.
+fn camera_frame(data: &Path, w: usize, h: usize) -> anyhow::Result<Picture> {
+    let image = image::open(data.parent().unwrap_or(data).join("testdata_camera/desktop/panel-flying.jpg"))?.to_rgba8();
+    let (iw, ih) = image.dimensions();
+    let real = Picture { width: iw as usize, height: ih as usize, bgra: image.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect() };
+    let k = ih as f32 / h as f32;
+    let left = (iw as f32 - w as f32 * k) / 2.0;
+    let mut bgra = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            bgra.extend(real.at(left + (x as f32 + 0.5) * k - 0.5, (y as f32 + 0.5) * k - 0.5));
+        }
+    }
+    Ok(Picture { width: w, height: h, bgra })
+}
+
 fn frames(data: &Path, out: &Path, w: u32, h: u32) -> anyhow::Result<()> {
     std::fs::create_dir_all(out)?;
     for (shows, name) in Shows::ALL {
         let picture = frame(data, shows, vec2(w as f32, h as f32))?;
         std::fs::write(out.join(format!("{name}.bgra")), &picture.bgra)?;
     }
+    std::fs::write(out.join("camera.bgra"), &camera_frame(data, w as usize, h as usize)?.bgra)?;
     Ok(())
 }
 
@@ -326,6 +343,17 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
                     keys.held.borrow_mut().retain(|held| *held != code);
                 }
                 ["button", to] => keys.button.set(*to == "down"),
+                // The engine gives VRChat's stream camera, and VRChat says over OSC that its camera is open, or closed, or nothing yet.
+                ["camera", said] => {
+                    let mut view = stub.view.lock().unwrap();
+                    let snap = Arc::make_mut(&mut view);
+                    snap.launcher.camera = true;
+                    snap.camera_open_said = match *said {
+                        "open" => Some(true),
+                        "closed" => Some(false),
+                        _ => None,
+                    };
+                }
                 ["scroll"] => keys.scrolls.set(keys.scrolls.get() + 1),
                 ["pick", how, rest] => {
                     let mut view = stub.view.lock().unwrap();
@@ -338,6 +366,16 @@ fn desk(launcher: u32, host: Option<PathBuf>) -> anyhow::Result<()> {
                 ["place", zone] => println!("{}", serde_json::json!({ "place": place(&desk, zone, None) })),
                 ["place", zone, action] => println!("{}", serde_json::json!({ "place": place(&desk, zone, Some(action)) })),
                 ["spot", zone] => println!("{}", serde_json::json!({ "spot": desk.windows.list.iter().find(|(z, w)| format!("{z:?}") == *zone && w.shown()).and_then(|(_, w)| w.spot()) })),
+                // Whose window is in front under the pointer: a real click is for ours and the game's alone, never for a question of macOS's that lies over them.
+                ["top"] => {
+                    let (x, y) = panel::pointer_at();
+                    let server = desk.finder.server();
+                    let top = crate::bridge::mac::on_screen().unwrap_or_default().into_iter().find(|w| {
+                        (0..1000).contains(&w.layer) && w.width > 40.0 && w.height > 40.0 && x >= w.x && x < w.x + w.width && y >= w.y && y < w.y + w.height
+                    });
+                    let whose = top.map_or("none", |w| if w.owner == std::process::id() { "ours" } else if Some(w.owner) == server { "game" } else { "other" });
+                    println!("{}", serde_json::json!({ "top": whose }));
+                }
                 ["scale"] => println!("{}", serde_json::json!({ "scale": desk.last.map(|g| g.scale) })),
                 ["client"] => println!("{}", serde_json::json!({ "client": desk.last.map(|g| [g.client().x, g.client().y]) })),
                 // The pointer over the control of a part that does `action`, as macOS' own pointer goes.

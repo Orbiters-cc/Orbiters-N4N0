@@ -130,6 +130,7 @@ class Check:
         self.host.mkdir(mode=0o700)
         frees = b"--free-unconfined-pointer" in pathlib.Path(wsd).read_bytes()
         self.free = frees and not self.a.no_channel
+        self.lets_go, self.takes = ("pointer given back (focus lost)", "pointer held by the game (focus back") if frees else ("focus lost, relative mouse suspended", "relative mouse resumed")
         options = (["--free-unconfined-pointer"] if frees else []) + (["--pointer-socket", str(self.host / "pointer.sock")] if self.free else [])
         self.note("the engine", "lets the pointer go" + ("" if self.free else ", its word of it not given") if frees else "holds the pointer")
         subprocess.run(["open", "-n", "--stderr", str(self.log), "--stdout", str(self.log), str(self.app), "--args", "--dir", str(self.dir)] + options + (["--render-percent", str(self.a.render_percent)] if self.a.render_percent < 100 else []), check=True)
@@ -150,6 +151,12 @@ class Check:
         self.note("the game draws", f"{self.size[0]} x {self.size[1]}")
         subprocess.run([self.a.app, "--orbit-lab", "frames", str(TESTDATA), str(frames), str(self.size[0]), str(self.size[1])], check=True, stdout=subprocess.DEVNULL)
         self.game.say("ready")
+        # (a question of macOS's waiting for somebody keeps the keyboard from an app that opens by itself: a click on it, as a person would. Its window is over the whole screen.)
+        if not self.game.wait(lambda l: l == "focus 1", 4) and self.mouse.allowed and self.wait_log("[fullscreen-on]", 1):
+            # (at the screen's foot on the left, where no question of macOS's is)
+            self.note("another window had the keyboard", "clicked on the game's")
+            self.mouse.move(6, 700); time.sleep(0.1)
+            self.mouse.post(1); time.sleep(0.08); self.mouse.post(2)
         there = self.ok("the game's window has the keyboard, full screen", bool(self.game.wait(lambda l: l == "focus 1", 10)) and bool(self.wait_log("relative mouse on", 5)), self.tail())
         if frees:
             self.game.say("lock")
@@ -248,8 +255,11 @@ class Check:
         return self.doing(lambda d: d["open"] is None and not d["looking"] and not d["shown"], 5)
 
     def click(self):
-        """A real click where the pointer is, when macOS allows it of the program this runs in."""
-        if not self.mouse.allowed:
+        """A real click where the pointer is, when macOS allows it of the program this runs in, and only on a window of ours or of the game's: with a question of macOS's over
+        them (it lies over every window, whatever its level, and waits for a person), an event of our own instead."""
+        if not self.mouse.allowed or self.answer("top", "top") == "other":
+            if self.mouse.allowed and "another program's window" not in self.notes:
+                self.note("another program's window", "lies over part of them: no real click there")
             self.tell("click")
             return
         self.tell("button down"); self.mouse.post(1); time.sleep(0.08)
@@ -337,6 +347,7 @@ class Check:
         rests, seen = self.close_menu()
         self.ok("VRChat's menu gone: the parts go, and no picture runs", rests is not None, str(seen))
         self.quick_menu()
+        self.camera(base)
         self.desk.end()
         self.start_desk()
         self.game.say("show none")
@@ -346,6 +357,58 @@ class Check:
         self.ok("the game ended: nothing shows, and the overlay is alive", gone is not None and self.desk.p.poll() is None, str(seen))
         self.note("processor with no game, % of a core", round(self.cpu(5), 2))
         self.tell("quit")
+
+    def camera(self, base):
+        """VRChat's camera, where the engine gives its stream: the column beside its panel, and the ring's sixth cell."""
+        self.desk.end()
+        self.start_desk()
+        self.game.say("show none")
+        self.game.say("lock")
+        # (it was put away in the Dock a moment ago)
+        subprocess.run(["open", str(self.app)])
+        time.sleep(0.6)
+        self.mouse.move(6, 700); time.sleep(0.2)
+        if self.answer("top", "top") == "game":
+            self.mouse.post(1); time.sleep(0.08); self.mouse.post(2)
+        self.tell("camera nothing")
+        time.sleep(2.5)
+        rests, seen = self.doing(lambda d: not d["looking"] and not d["shown"], 4)
+        self.ok("with its camera closed, no picture is taken for it", rests is not None, str(seen))
+        since = len(self.desk.lines)
+        self.game.say("show camera")
+        self.game.say("free" if self.free else "lock")
+        self.tell("camera open")
+        column, took = self.doing(lambda d: d["open"] == "Camera" and len(d["shown"]) >= 4, 4, since)
+        self.ok("VRChat says its camera is open: the column is beside its panel", column is not None, str(took))
+        if column:
+            self.note("from VRChat's word to the column, seconds", round(took, 3))
+            time.sleep(0.8)
+            self.save("camera")
+            rate, zero = self.shown_rate(2)
+            self.ok("the game's frames go on beside it", rate > 0.9 * base and zero == 0, f"{rate} of {base}, {zero}")
+            self.note("processor with the camera's column up, % of a core", round(self.cpu(5), 2))
+            if not self.free:
+                self.tell("press option")
+                self.doing(lambda d: d["pointing"] and d["keyboard"], 2)
+            heard, since = len(self.game.lines), len(self.desk.lines)
+            there = self.over("CameraPeople") is True
+            caught, seen = self.doing(lambda d: d["catching"] == 1, 2)
+            self.ok("its first tile is under the pointer", there and caught is not None, f"{there} {seen} {self.answer('place CameraPeople', 'place')} {self.mouse.where()}")
+            self.click()
+            took = self.desk.wait(lambda l: '"n4n0 ' in l and "Photo" in l, 3, since)
+            self.ok("a click on it asks for a 3D picture of people", bool(took), str([l for _, l in self.desk.lines[since:] if "said" in l][:4]))
+            self.ok("with no click of it in the game", not any(l.startswith("button") for _, l in self.game.lines[heard:]))
+            self.tell("let go option")
+        since = len(self.desk.lines)
+        self.game.say("show none")
+        self.tell("camera closed")
+        gone, seen = self.doing(lambda d: d["open"] is None and not d["shown"] and not d["looking"], 4, since)
+        self.ok("closed: the column goes, and no picture runs", gone is not None, str(seen))
+        open_, took = self.open_wheel()
+        self.ok("round the wheel, the 3D pictures cell is there", open_ is not None and len(open_["shown"]) >= 7, str(open_ and open_["shown"]) + str(took))
+        time.sleep(0.6)
+        self.save("ring-with-pictures")
+        self.close_menu()
 
     def gesture(self, base):
         """The ring picked by the mouse's movement alone, while the game holds the pointer."""
@@ -427,7 +490,7 @@ class Check:
         self.tell("press option")
         points, took = self.doing(lambda d: d["held"] and d["keyboard"] and d["pointing"], 2)
         self.ok("Left Option takes the keyboard and points", points is not None, str(took))
-        self.ok("the engine lets the pointer go", self.wait_log("focus lost, relative mouse suspended", 2, at), self.tail())
+        self.ok("the engine lets the pointer go", self.wait_log(self.lets_go, 2, at), self.tail())
         self.ok("the game hears its window lost the keyboard, and stays the app in front", bool(self.game.wait(lambda l: l == "focus 0", 2, heard)) and not any(l == "deactivated" for _, l in self.game.lines[heard:]))
         order = self.answer("order", "order")
         self.ok("the game's window stays at its full-screen level", order[-1][0] == "game" and order[-1][1] == 25, str(order))
@@ -438,7 +501,7 @@ class Check:
         at, heard = len(self.log.read_text()), len(self.game.lines)
         self.tell("let go option")
         back, _ = self.doing(lambda d: not d["held"] and d["catching"] == 0, 2)
-        self.ok("let go, the game has its mouse again at once", back is not None and self.wait_log("focus back, relative mouse resumed", 2, at) and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)))
+        self.ok("let go, the game has its mouse again at once", back is not None and self.wait_log(self.takes, 2, at) and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)))
 
     def page_from_the_wheel(self, base):
         self.tap("2")
@@ -468,7 +531,7 @@ class Check:
             at = len(self.log.read_text())
             self.tell("type 53")
             gone, _ = self.doing(lambda d: not d["sheet"] and not d["held"], 3)
-            self.ok("Esc closes the page, and the game has its keyboard again", gone is not None and self.wait_log("pointer held by the game (focus back" if self.free else "relative mouse resumed", 2, at))
+            self.ok("Esc closes the page, and the game has its keyboard again", gone is not None and self.wait_log(self.takes, 2, at))
         self.close_menu()
         # VRChat's wheel a little off its place, and smaller: found where it is, with the ring round it there.
         time.sleep(0.5)
@@ -554,7 +617,7 @@ class Check:
                 self.click()
                 back, seen = self.doing(lambda d: d["sheet"] and not d["keyboard"] and not d["held"], 3)
                 self.ok("a click on the game gives it the keyboard, with the field still up", back is not None and bool(self.game.wait(lambda l: l == "focus 1", 2, heard)), str(seen))
-                self.ok("the game heard that click", bool(self.game.wait(lambda l: l == "button 0 1" or l.startswith("button"), 2, heard)))
+                self.ok("the game heard that click, or another program's window lay there", "another program's window" in self.notes or bool(self.game.wait(lambda l: l == "button 0 1" or l.startswith("button"), 2, heard)))
                 self.over("Takeover"); self.click()
                 again, seen = self.doing(lambda d: d["sheet"] and d["keyboard"], 3)
                 self.ok("and a press on the page takes it again", again is not None, str(seen))

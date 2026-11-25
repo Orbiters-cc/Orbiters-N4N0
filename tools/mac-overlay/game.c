@@ -2,8 +2,8 @@
  * the pointer (relative mouse, its cursor hidden) while it has the keyboard, and shows pictures at the size the server tells its clients, at 60 a second, which the server
  * stretches over the screen as it does a game's.
  *
- * Usage: game SOCKET FOLDER      FOLDER has wheel.bgra, qm.bgra, none.bgra, beside.bgra of that size (the first line said is "size W H").
- * Commands on its standard input: show wheel|qm|none|beside, lock (the pointer confined to one pixel, as while playing and in the wheel), free (to nothing: the whole window, as
+ * Usage: game SOCKET FOLDER      FOLDER has wheel.bgra, qm.bgra, none.bgra, beside.bgra, camera.bgra of that size (the first line said is "size W H").
+ * Commands on its standard input: show wheel|qm|none|beside|camera, lock (the pointer confined to one pixel, as while playing and in the wheel), free (to nothing: the whole window, as
  * in the Quick Menu), stop (no more frames), go, window X Y W H (in pixels of the server), quit.
  * It says what it hears: focus 0|1, deactivated, key CODE DOWN, button N DOWN, resize W H, and every half second "shown N zero M" (frames macOS showed, and did not).
  * Built with the header of the engine's sources: cc -I <voile-lkd>/wsd. Nothing of it is in this repository.
@@ -26,7 +26,7 @@
 #define BUFFERS 3
 static int sock;
 static uint32_t width, height, stride; /* stride: a row's bytes, as a linear texture of Metal's takes them */
-static uint8_t *pictures[4], *pixels[BUFFERS];
+static uint8_t *pictures[5], *pixels[BUFFERS];
 static int busy[BUFFERS], now_shown = 2, going = 1;
 static uint64_t shown, zero, serial;
 
@@ -125,7 +125,7 @@ static void clip(int locked) {
 static int command(char *line) {
   char name[16];
   int x, y, w, h;
-  if (sscanf(line, "show %15s", name) == 1) now_shown = !strcmp(name, "wheel") ? 0 : !strcmp(name, "qm") ? 1 : !strcmp(name, "beside") ? 3 : 2;
+  if (sscanf(line, "show %15s", name) == 1) now_shown = !strcmp(name, "wheel") ? 0 : !strcmp(name, "qm") ? 1 : !strcmp(name, "beside") ? 3 : !strcmp(name, "camera") ? 4 : 2;
   else if (!strncmp(line, "lock", 4)) clip(1);
   else if (!strncmp(line, "free", 4)) clip(0);
   else if (!strncmp(line, "stop", 4)) going = 0;
@@ -156,8 +156,8 @@ int main(int argc, char **argv) {
   /* the pictures are made once the size is known */
   char line[128];
   if (!fgets(line, sizeof line, stdin)) return 1;
-  const char *names[4] = {"wheel", "qm", "none", "beside"};
-  for (int i = 0; i < 4; i++) pictures[i] = read_picture(argv[2], names[i]);
+  const char *names[5] = {"wheel", "qm", "none", "beside", "camera"};
+  for (int i = 0; i < 5; i++) pictures[i] = read_picture(argv[2], names[i]);
   for (uint32_t i = 0; i < BUFFERS; i++) attach(i);
   struct { struct wsd_window_create c; char title[16]; } made = {{WIN, width, height, WSD_STYLE_BORDERLESS}, "overlay check"};
   say(WSD_WINDOW_CREATE, &made, sizeof made.c + 13, -1);

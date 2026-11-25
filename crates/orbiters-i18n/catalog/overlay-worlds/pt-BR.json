@@ -277,5 +277,6 @@
   "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "A ponte de IA do Orbiters está usando o VRChat com a sua conta neste computador: vá quando ela terminar.",
   "VRChat could not be started there: {error}": "Não foi possível abrir o VRChat lá: {error}",
   "The instance could not be made: {e}": "Não foi possível criar a instância: {e}",
-  "The VRChat on this computer is not known to be yours: its log cannot be read.": "Não se sabe se o VRChat deste computador é o seu: não é possível ler o registro dele."
+  "The VRChat on this computer is not known to be yours: its log cannot be read.": "Não se sabe se o VRChat deste computador é o seu: não é possível ler o registro dele.",
+  "The 3D view stopped. Show it again.": "A visão 3D parou. Mostre de novo."
 }

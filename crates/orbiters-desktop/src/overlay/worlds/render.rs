@@ -385,29 +385,22 @@ impl FaceRenderer {
     /// pictures are compared with offline.
     pub fn render_view(&mut self, camera: &orbiters_reconstruct::camera::Camera, count: usize) -> anyhow::Result<Vec<u8>> {
         self.gpu.count = count.min(self.total).max(1.min(self.total));
-        // A picture asked once is drawn again where the renderer's sort was short for it: it is sized by the picture before, and one that shows far more (all of a
-        // capture after a near part of it) had its farther splats left out, with nothing to draw it again as [`FaceRenderer::finish`] has the headset's faces drawn
-        // again (round 20: a capture in a hand came out as the middle of itself).
-        let mut pixels = Vec::new();
-        for attempt in 0..3 {
-            self.gpu.step(camera, self.background, Target::None, None)?;
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("3d-worlds reference view"), // i18n: not shown (a GPU debug label)
-                size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            Self::present_on(&self.gpu, self.transparent, &texture.create_view(&Default::default()));
-            pixels = read_texture(&self.device, &self.queue, &texture)?;
-            if attempt == 2 || !self.gpu.needs_redraw() {
-                break;
-            }
-        }
-        Ok(pixels)
+        // A picture asked once is drawn whole: the renderer's sort is sized by the picture before, and one that shows far more (all of a capture after a
+        // near part of it) had its farther splats left out, with nothing to draw it again as [`FaceRenderer::finish`] has the headset's faces drawn again
+        // (round 20: a capture in a hand came out as the middle of itself).
+        self.gpu.render(camera, self.background)?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3d-worlds reference view"), // i18n: not shown (a GPU debug label)
+            size: wgpu::Extent3d { width: camera.width, height: camera.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        Self::present_on(&self.gpu, self.transparent, &texture.create_view(&Default::default()));
+        read_texture(&self.device, &self.queue, &texture)
     }
 }
 

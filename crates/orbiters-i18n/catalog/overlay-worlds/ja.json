@@ -277,5 +277,6 @@
   "Orbiters' AI bridge is using VRChat with your account on this computer: go there once it is done.": "このコンピューターではOrbitersのAIブリッジがあなたのアカウントでVRChatを使用中です。終わってから移動してください。",
   "VRChat could not be started there: {error}": "そこでVRChatを起動できませんでした：{error}",
   "The instance could not be made: {e}": "インスタンスを作成できませんでした：{e}",
-  "The VRChat on this computer is not known to be yours: its log cannot be read.": "このコンピューターのVRChatがあなたのものか分かりません。ログを読み取れません。"
+  "The VRChat on this computer is not known to be yours: its log cannot be read.": "このコンピューターのVRChatがあなたのものか分かりません。ログを読み取れません。",
+  "The 3D view stopped. Show it again.": "3Dビューが停止しました。もう一度表示してください。"
 }

@@ -491,14 +491,7 @@ pub(super) fn redraw_picture(session: &Path, window: (wgpu::Device, wgpu::Queue)
         let map = SkyMap::read(&sky_file)?;
         gpu.set_sky(Some((map.width, &map.rgb)))?;
     }
-    let mut image = Vec::new();
-    for _ in 0..=REDRAW_CHECKS {
-        gpu.step(&camera, [0.0; 3], Target::None, None)?;
-        image = gpu.read_image()?;
-        if !gpu.needs_redraw() {
-            break;
-        }
-    }
+    let image = orbiters_reconstruct::train::render(&mut gpu, &camera, [0.0; 3])?;
     let rgb: Vec<u8> = image.iter().flat_map(|p| [0, 1, 2].map(|c| (p[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8)).collect();
     let qoi = orbiters_core::contracts::qoi::encode(&rgb, camera.width, camera.height, 3);
     // Only while the file still holds the edit drawn (a newer save draws its own).

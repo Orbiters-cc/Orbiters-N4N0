@@ -354,5 +354,7 @@
   "The bridge's keys could not be read ({error}), so it stays closed until they can be.": "Não foi possível ler as chaves da ponte ({error}), então ela fica fechada até que possam ser lidas.",
   "The bridge's keys could not be read ({error}), so it stays closed until they can be, or until you reset the token.": "Não foi possível ler as chaves da ponte ({error}), então ela fica fechada até que possam ser lidas, ou até você redefinir o token.",
   "A new token: the bridge's unreadable keys were kept aside ({path}); the agents it was added to are updated.": "Um novo token: as chaves ilegíveis da ponte foram separadas ({path}); os agentes aos quais ela foi adicionada são atualizados.",
-  "The bridge's keys could not be reset: {error}": "Não foi possível redefinir as chaves da ponte: {error}"
+  "The bridge's keys could not be reset: {error}": "Não foi possível redefinir as chaves da ponte: {error}",
+  "This capture was reconstructed again while the file was made: nothing was saved. Try again to export the new splats.": "Esta captura foi reconstruída de novo enquanto o arquivo era criado: nada foi salvo. Tente de novo para exportar os novos splats.",
+  "its last reconstruction was only partly saved (a file was open in another program): reconstruct it again to export it": "a última reconstrução dela só foi salva em parte (um arquivo estava aberto em outro programa): reconstrua de novo para exportar"
 }

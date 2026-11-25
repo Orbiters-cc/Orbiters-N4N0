@@ -31,8 +31,14 @@ Failures say why and give a way on:
   Select splats first.
 - Splat edits saved again while the file is made: it is not saved (it would not be what the view shows now), and **Try
   again** exports the edits there are now. The edits' generation is read again just before the rename.
-- Not enough room on the disk: the file is made in memory first. It is written only if the disk keeps 64 MB free after
-  it (**Choose another place** offers the same name elsewhere). A disk that fills during the write gives the same message.
+- The capture reconstructed again while the file is made: not saved either, and **Try again** exports the new splats. What
+  is compared is the identity shares compare (`upload_prep::ResultIdentity`: its report, its PLY's length and time, its
+  edits), read before the PLY and again just before the rename: two reconstructions without edits have the same edit
+  generation. A result left half replaced (a file of it was held) is no one result: it is not exported until it is
+  reconstructed again.
+- Not enough room on the disk: the file's size is known before it is written (an SPZ's as what it compresses, at most), and
+  it is written only if the disk keeps 64 MB free after it (**Choose another place** offers the same name elsewhere). A disk
+  that fills during the write gives the same message.
 - A place N4N0 may not write in (a read-only file in the way, a protected folder, a file of that name open in another
   program, a folder gone with its drive), or anywhere inside the capture's own folder (reconstructing it again deletes
   its previous `reconstruction/` folder whole, folders in it included; deleting the capture deletes the rest for good):
@@ -40,7 +46,8 @@ Failures say why and give a way on:
 - Every splat hidden or deleted: said so (nothing to export).
 - Anything else (no splats, a damaged PLY): what happened, and Try again.
 
-The file is written beside its name (`<name>.<n>.part`, a new file of its own: never a file already there, nor another
+The PLY is read and the file made a few MB at a time, straight into the part: the splats are the only whole copy of the
+capture in memory, and a stop takes effect between two pieces. The file is written beside its name (`<name>.<n>.part`, a new file of its own: never a file already there, nor another
 export's; flushed to the disk) and renamed over it, so an export that fails or is stopped never leaves a truncated file
 under the chosen name and never a part file; a file that was in the way stays as it was. A dialog closed, or let go of
 by its page, stops its export. Only the app quitting mid-write can leave a part file (the chosen name stays as it was). Code: `crates/orbiters-desktop/src/splat_export.rs` (the export), `src/pages/splat_export.rs` (the dialog);

@@ -342,9 +342,29 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     let fingerprint = crate::upload_prep::Fingerprint::read(session, &result).ok();
     drop(stage);
     let stage = PrepStage::new("cache read"); // i18n: not shown
-    let cached = fingerprint.as_ref().and_then(|fingerprint| Some((crate::upload_prep::load(&result, fingerprint, key)?, fingerprint.generation()?.to_string())));
+    let view = crate::upload_prep::ViewInputs::read(session).ok();
+    let cached = fingerprint.as_ref().and_then(|fingerprint| Some((fingerprint, crate::upload_prep::load(&result, fingerprint, view.as_ref(), key)?, fingerprint.generation()?.to_string())));
     drop(stage);
-    if let Some(((files, metadata), generation)) = cached {
+    if let Some((fingerprint, cached, generation)) = cached {
+        let files = cached.files;
+        let metadata = match cached.metadata {
+            Some(metadata) => metadata,
+            // What the start view stands on changed since (the tracking removed, put back): made again, and kept with the trees.
+            None => {
+                let stage = PrepStage::new("start view"); // i18n: not shown
+                let (g, _, read) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
+                anyhow::ensure!(read == generation, "{}", tr("Its splat edits kept changing while it was being prepared: share it again once they are done."));
+                let metadata = prepared_metadata(session, &g)?;
+                drop(g);
+                if view.is_some() && crate::upload_prep::ViewInputs::read(session).ok() == view {
+                    if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
+                        eprintln!("Could not cache upload preparation: {e:#}");
+                    }
+                }
+                drop(stage);
+                metadata
+            }
+        };
         let stage = PrepStage::new("sky");
         let sky = crate::upload_prep::sky(&result).map(|p| crate::upload_prep::Pinned::copy(&p)).transpose()?;
         drop(stage);
@@ -356,10 +376,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     let (g, _, generation) = orbiters_reconstruct::edit::read_edited(&result.join(reconstruction::PLY_FILE))?;
     drop(stage);
     let stage = PrepStage::new("start view"); // i18n: not shown
-    let (views, start) = crate::views::recorded(session)?;
-    let (v, ground) = crate::views::eye_level(session, &g, &views[start]);
-    let depth = crate::views::depth_ahead(&g, &v);
-    let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
+    let metadata = prepared_metadata(session, &g)?;
     drop(stage);
     let stage = PrepStage::new("session cameras"); // i18n: not shown
     let cameras = orbiters_reconstruct::tree_tune::session_cameras(session)?;
@@ -386,14 +403,6 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
         }
     }
     let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
-    let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
-    let report = reconstruction::read_report(session);
-    let recorded = bundle::read_manifest(session).map(|m| m.created_utc).ok();
-    let metadata = serde_json::json!({
-        "view": { "position": flip(v.position), "target": flip(target), "floor": ground.floor, "eyeHeight": ground.eye_height },
-        "quality": report.and_then(|r| r.psnr_held_out),
-        "capturedAt": recorded,
-    });
     let stage = PrepStage::new("sky");
     let sky = crate::upload_prep::sky(&result).map(|p| crate::upload_prep::Pinned::copy(&p)).transpose()?;
     drop(stage);
@@ -403,13 +412,33 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     if let Some(fingerprint) = fingerprint.as_ref().filter(|f| gpu.is_some() && f.generation() == Some(generation.as_str())) {
         let stage = PrepStage::new("cache write"); // i18n: not shown
         if crate::upload_prep::Fingerprint::read(session, &result).ok().as_ref() == Some(fingerprint) {
-            if let Err(e) = crate::upload_prep::save(&result, fingerprint, &files, &metadata) {
+            // The metadata under what its view was made from, while that is what is still there.
+            let view = view.filter(|v| crate::upload_prep::ViewInputs::read(session).ok().as_ref() == Some(v));
+            if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
                 eprintln!("Could not cache upload preparation: {e:#}");
             }
         }
         drop(stage);
     }
     Ok(Prepared { files, sky, metadata, generation, identity })
+}
+
+/// An upload's metadata of `session`, whose splats without what their edits leave out are `g`: the start view, its ground and
+/// eye height, the held-out quality and when it was recorded. All of it is made from the sources of
+/// crate::upload_prep::Fingerprint and crate::upload_prep::ViewInputs, which the cache answers for.
+fn prepared_metadata(session: &Path, g: &orbiters_reconstruct::gaussians::Gaussians) -> anyhow::Result<serde_json::Value> {
+    let (views, start) = crate::views::recorded(session)?;
+    let (v, ground) = crate::views::eye_level(session, g, &views[start]);
+    let depth = crate::views::depth_ahead(g, &v);
+    let target = [v.position[0] + v.forward[0] * depth, v.position[1] + v.forward[1] * depth, v.position[2] + v.forward[2] * depth];
+    let flip = |p: [f32; 3]| [p[0], p[1], -p[2]];
+    let report = reconstruction::read_report(session);
+    let recorded = bundle::read_manifest(session).map(|m| m.created_utc).ok();
+    Ok(serde_json::json!({
+        "view": { "position": flip(v.position), "target": flip(target), "floor": ground.floor, "eyeHeight": ground.eye_height },
+        "quality": report.and_then(|r| r.psnr_held_out),
+        "capturedAt": recorded,
+    }))
 }
 
 
@@ -433,6 +462,114 @@ mod tests {
         ctl.forget_maps();
         assert!(ctl.maps().is_none());
         assert!(!ctl.store_maps(second, None, &list(3)), "a fetch from before the sign-out");
+    }
+
+    /// DAP-2: a preparation answered by the cache starts where a fresh one would, without the trees being made again: at the floor
+    /// and eye height its tracking gives, changed or put back. Freeing its space (the real one) keeps what was measured, for
+    /// the cache and for a reconstruction made after it; 1.6 m is for a capture that never had tracking.
+    #[test]
+    fn a_cached_preparation_starts_where_a_fresh_one_would() {
+        use crate::upload_prep::{Fingerprint, ViewInputs, load, save};
+        use orbiters_core::contracts::manifest;
+        use orbiters_core::contracts::frame_record::{FrameRecord, record_flags};
+        use orbiters_core::contracts::performance::{self, parameters, skeleton_frames};
+        use orbiters_reconstruct::{gpu::DeviceOptions, ground};
+        let session = std::env::temp_dir().join(format!("orbiters-prep-{}", uuid::Uuid::new_v4()));
+        let result = reconstruction::dir(&session);
+        std::fs::create_dir_all(&result).unwrap();
+        // A level floor at y = -4 all around, the camera a metre above it.
+        let mut g = orbiters_reconstruct::gaussians::Gaussians::default();
+        for i in -16..=16 {
+            for j in -16..=16 {
+                g.push([i as f32 * 0.25, -4.0, j as f32 * 0.25], [(0.15f32).ln(), (0.002f32).ln(), (0.15f32).ln()], [1.0, 0.0, 0.0, 0.0], 2.0, [0.5; 3]);
+            }
+        }
+        orbiters_reconstruct::ply::write(&result.join(reconstruction::PLY_FILE), &g).unwrap();
+        let record = FrameRecord {
+            flags: record_flags::STRIP_OK | record_flags::KEYFRAME,
+            keyframe_index: 0,
+            width: 160,
+            height: 90,
+            capture_time_ns: 1_000_000_000,
+            camera_to_world: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -3.0, 0.0, 0.0, 1.0, 0.0],
+            projection: [1.0, 1.78, 0.0, 0.0],
+            ..Default::default()
+        };
+        // Two, a minute apart: no 3D picture (which opens as its camera framed it).
+        let later = FrameRecord { keyframe_index: 1, game_time: 60.0, ..record };
+        std::fs::write(session.join(manifest::FRAMES_FILE), [record.to_bytes(), later.to_bytes()].concat()).unwrap();
+        let tracking = |eye_height: f32, hips: f32| {
+            let mut table = parameters::Table::new();
+            table.parameters.push(parameters::ParameterInfo { id: 3, name: "EyeHeightAsMeters".into(), address: "/avatar/parameters/EyeHeightAsMeters".into(), kind: parameters::Kind::Float });
+            std::fs::write(session.join(performance::PARAMETERS_TABLE), serde_json::to_vec(&table).unwrap()).unwrap();
+            let change = parameters::Change { time_ns: 0, id: 3, flags: 0, value: parameters::Value::Float(eye_height) };
+            std::fs::write(session.join(performance::PARAMETERS_FILE), [parameters::header().to_vec(), change.to_bytes().to_vec()].concat()).unwrap();
+            let frame = skeleton_frames::Frame { time_ns: 0, game_time: 0.0, avatar: 1, hips: [0.0, hips, 0.0], rotations: [None; orbiters_core::contracts::skeleton::BONES] };
+            std::fs::write(session.join(performance::SKELETON_FILE), [skeleton_frames::header().to_vec(), frame.to_bytes().to_vec()].concat()).unwrap();
+        };
+        tracking(1.1, -3.5);
+        let description = manifest::SessionManifest::new("test".into(), "2026-11-25T00:00:00Z".into(), "0");
+        std::fs::write(session.join(manifest::MANIFEST_FILE), serde_json::to_vec(&description).unwrap()).unwrap();
+        std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&reconstruction::Report::default()).unwrap()).unwrap();
+        let tree_fixture = || {
+            let mut bytes = orbiters_reconstruct::tree::MAGIC.to_vec();
+            bytes.extend_from_slice(&orbiters_reconstruct::tree::VERSION.to_le_bytes());
+            bytes.resize(32, 0);
+            bytes
+        };
+        let trees = PreviewFiles { vrchat_pc: tree_fixture(), vrchat_quest: tree_fixture(), vrchat_coarse: tree_fixture() };
+        let cached = || {
+            let fingerprint = Fingerprint::read(&session, &result).unwrap();
+            let view = ViewInputs::read(&session).unwrap();
+            load(&result, &fingerprint, Some(&view), 1).expect("the trees").metadata.expect("its metadata")
+        };
+        // What a fresh preparation says of the view, whatever is cached.
+        let fresh = || prepared_metadata(&session, &g).unwrap();
+        save(&result, &Fingerprint::read(&session, &result).unwrap(), Some(&ViewInputs::read(&session).unwrap()), &trees, &fresh()).unwrap();
+        let prepared = || prepare(&session, DeviceOptions::default()).unwrap();
+        assert_eq!(prepared().metadata, fresh());
+        let eye = |m: &serde_json::Value| (m["view"]["eyeHeight"].as_f64().unwrap() * 100.0).round();
+        assert_eq!(eye(&fresh()), 110.0);
+        // Another avatar's tracking put back over it, then the first's: each time the fresh answer, kept with the trees, which
+        // are the same.
+        let check = |what: &str, height: f64| {
+            let p = prepared();
+            assert_eq!(p.metadata, fresh(), "{what}");
+            assert_eq!(eye(&p.metadata), height, "{what}");
+            assert_eq!(p.files.vrchat_pc.len(), trees.vrchat_pc.len(), "{what}: the trees cached");
+            assert_eq!(cached(), p.metadata, "{what}: kept for the next share");
+            p.metadata
+        };
+        tracking(2.0, -3.2);
+        check("changed", 200.0);
+        tracking(1.1, -3.5);
+        let measured = check("put back", 110.0);
+        // Free space: the tracking goes, where the view starts does not.
+        let streams = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE];
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        assert!(streams.iter().all(|f| !session.join(f).exists()), "the tracking is gone");
+        assert_eq!(check("freed", 110.0), measured);
+        assert!(session.join(orbiters_core::measured::FILE).is_file());
+        assert_eq!(ground::find(&session, &g, [0.0, -3.0, 0.0], Some(1_000_000_000)).source, ground::Source::Hips, "its hips too");
+        // And again (nothing left to measure), and with no cache at all.
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        assert_eq!(check("freed again", 110.0), measured);
+        assert_eq!(fresh(), measured);
+
+        // Freed by a version that kept nothing: what its cache measured stands.
+        std::fs::remove_file(session.join(orbiters_core::measured::FILE)).unwrap();
+        assert_eq!(eye(&prepared().metadata), 110.0, "measured while its tracking was there");
+        // The same from a cache of before its inputs were recorded.
+        save(&result, &Fingerprint::read(&session, &result).unwrap(), None, &trees, &measured).unwrap();
+        assert_eq!(prepared().metadata, measured);
+        // A capture that never had tracking, freed or not: the fallback (and a new result, so no cache of another).
+        std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&reconstruction::Report { gaussians: 1, ..Default::default() }).unwrap()).unwrap();
+        save(&result, &Fingerprint::read(&session, &result).unwrap(), Some(&ViewInputs::read(&session).unwrap()), &trees, &fresh()).unwrap();
+        check("never tracked", 160.0);
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        check("never tracked, freed", 160.0);
+        assert!(!session.join(orbiters_core::measured::FILE).exists());
+        std::fs::remove_dir_all(&session).unwrap();
     }
 
     /// Local preparation only; never contacts a server. Run in release mode, one GPU test at a time.

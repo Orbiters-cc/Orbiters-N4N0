@@ -53,8 +53,8 @@ const PERFORMANCE: [&str; 8] = [
 ];
 
 /// What a 3D view reads in its session folder: never a capture file, whatever the manifest names as its video.
-const VIEW_FILES: [&str; 6] =
-    [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE, reconstruction::DIR, reconstruction::OLD_DIR];
+const VIEW_FILES: [&str; 7] =
+    [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE, crate::measured::FILE, reconstruction::DIR, reconstruction::OLD_DIR];
 
 /// The part of the capture `name` (an entry of a session folder) is, or `None` for what the 3D view needs and for what
 /// the capture did not write. `video` is the manifest's `capture.video`, taken only as a file of the folder itself and
@@ -190,8 +190,9 @@ pub fn trimmed(dir: &Path) -> bool {
 }
 
 /// Deletes a session's capture files for good ([`capture_files`]), keeping its 3D view; `freed` hears the bytes of what
-/// goes as it goes. Refused for a session without a finished reconstruction: nothing would be left to see. Returns
-/// the bytes freed; on an error, what went before it stays gone.
+/// goes as it goes. What the view stands on of the avatar's streams is measured and kept first ([`crate::measured`]).
+/// Refused for a session without a finished reconstruction: nothing would be left to see. Returns the bytes freed; on an
+/// error, what went before it stays gone.
 pub fn keep_only_view(dir: &Path, freed: &mut dyn FnMut(u64)) -> anyhow::Result<u64> {
     trim(dir, &|_| true, freed)
 }
@@ -215,6 +216,10 @@ fn trim(dir: &Path, takes: &dyn Fn(Part) -> bool, freed: &mut dyn FnMut(u64)) ->
     anyhow::ensure!(reconstruction::settle_replacing(&reconstruction::result_dir(dir)), "{}", tr("Its last reconstruction was only partly saved (a file was open in another program): reconstruct it again before deleting its capture."));
     let plan: Vec<PathBuf> = capture_files(dir).into_iter().filter(|e| takes(e.part)).map(|e| e.path).collect();
     check_plan(dir, &plan)?;
+    if takes(Part::Performance) {
+        // Where the person stood and how tall they were, before the streams that say so go: nothing goes if it cannot be kept.
+        crate::measured::keep(dir)?;
+    }
     // Only what the plan holds moves: the keyframes folder as the listing spelt it (a `KEYFRAMES` folder that is not the
     // capture's is never renamed through a case-insensitive lookup; night2, the verifier).
     let named = |name: &str| plan.iter().find(|p| p.file_name().is_some_and(|n| n == name)).cloned();
@@ -254,7 +259,7 @@ fn check_plan(dir: &Path, plan: &[PathBuf]) -> anyhow::Result<()> {
     // The splats themselves, whatever name they resolve to (a link to `final.ply`, a stored `SPLATS.PLY`).
     anyhow::ensure!(std::fs::metadata(view.join(reconstruction::PLY_FILE)).is_ok_and(|m| m.is_file()), "{}", tr("This session has no 3D view to keep: reconstruct it first."));
     let mut found = Kept::default();
-    for f in [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE] {
+    for f in [MANIFEST_FILE, FRAMES_FILE, THUMBNAIL_FILE, crate::bundle::PICTURE_THUMBNAIL_FILE, crate::measured::FILE] {
         keep_resolved(&dir.join(f), &mut found)?;
     }
     keep_resolved(&view, &mut found)?;

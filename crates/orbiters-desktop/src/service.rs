@@ -138,6 +138,27 @@ impl Service {
             .map(|_| ())
     }
 
+    /// The service's own looks, each on a thread: the overlay and the panels' processes, tracking smoothing, Windows' sound
+    /// devices while SteamVR runs, a recording's coverage on the desktop.
+    pub(crate) fn keep(self: &Arc<Self>) -> std::io::Result<()> {
+        let svc = self.clone();
+        std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
+            svc.keep_overlay();
+            svc.keep_orbit();
+            svc.keep_steamvr_start();
+            svc.keep_tracking();
+            std::thread::sleep(Duration::from_secs(2));
+        })?;
+        let svc = self.clone();
+        std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
+        // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
+        let ctl = self.ctl.clone();
+        std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
+        // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
+        crate::coverage_window::start(self.ctl.clone());
+        Ok(())
+    }
+
     /// How many clients of `role` are linked now.
     pub(crate) fn linked(&self, role: Role) -> usize {
         self.links.lock().unwrap().iter().filter(|l| l.role == role).count()
@@ -240,7 +261,8 @@ impl Service {
     /// what it does now goes to N4N0's Tracking page. Run every keeper turn, at once when the settings change
     /// (`follow_tracking`) and when the overlay says which device is which.
     fn keep_tracking(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        // A run over private folders (`--idle-service`) never takes the driver's block from the app the person runs.
+        if self.quitting.load(Ordering::Relaxed) || orbiters_core::paths::roots().is_some() {
             return;
         }
         let snap = self.ctl.view();
@@ -1161,21 +1183,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         service.show_window(true);
     }
 
-    let svc = service.clone();
-    std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
-        svc.keep_overlay();
-        svc.keep_orbit();
-        svc.keep_steamvr_start();
-        svc.keep_tracking();
-        std::thread::sleep(Duration::from_secs(2));
-    })?;
-    let svc = service.clone();
-    std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
-    // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
-    let ctl = service.ctl.clone();
-    std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
-    // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
-    crate::coverage_window::start(service.ctl.clone());
+    service.keep()?;
 
     #[cfg(windows)]
     tray_loop(&service)?;

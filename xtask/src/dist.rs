@@ -27,6 +27,8 @@ const FACE_MODEL: &str = "crates/orbiters-reconstruct/assets/faces-v1-int8.onnx"
 /// Tracking smoothing's SteamVR driver (`orbiters-smooth-driver`), which the app installs for SteamVR when it is
 /// switched on.
 const DRIVER: &str = "driver_orbiters_smooth.dll";
+/// What it may weigh, in bytes: three times what it does.
+const DRIVER_MOST: u64 = 1 << 20;
 /// The licences, from the repository's root.
 const DOCUMENTS: [&str; 3] = ["LICENSE.md", "THIRD_PARTY_LICENSES.md", "THIRD_PARTY_NOTICES.md"];
 /// The C runtime the programs link to, shipped beside them (Microsoft allows it, app-local).
@@ -104,6 +106,9 @@ pub fn dist(config: &Config, options: &Options<'_>) -> anyhow::Result<PathBuf> {
     let face_model = crate::root().join(FACE_MODEL);
     copy(&face_model, &stage.join(face_model.file_name().expect("a file")))?;
     copy(&bin.join(DRIVER), &stage.join(DRIVER))?;
+    // Loaded into SteamVR's server: the app's translations got into it once (2.9 MB of it), through one text of the crate they share.
+    let driver_size = std::fs::metadata(stage.join(DRIVER))?.len();
+    anyhow::ensure!(driver_size < DRIVER_MOST, "{DRIVER} is {driver_size} bytes: more than a driver with nothing of the app in it ({DRIVER_MOST})");
     ours.push(stage.join(DRIVER));
     check_staged(&stage, &version)?;
     let runtime = vcruntime(config)?;

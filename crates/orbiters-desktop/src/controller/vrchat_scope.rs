@@ -254,6 +254,15 @@ impl Controller {
         Some((Api::new(server), token, Stamp { epoch: self.identity_epoch(), owner }))
     }
 
+    /// Pictures of the page: what the state is about to say of VRChat is the member `member`'s (a digest), who is the one
+    /// signed in to Orbiters here.
+    pub(crate) fn stand_in_vrchat_member(&self, member: &str) {
+        let stamp = Stamp { epoch: self.identity_epoch(), owner: Owner { member: member.to_string() } };
+        let mut rt = self.vrchat_login.lock().unwrap();
+        rt.at_launch = Some(stamp.owner.clone());
+        (rt.status_for, rt.list_for) = (Some(stamp.clone()), Some(stamp));
+    }
+
     /// The VRChat session signed in and allowed for the Orbiters member now, and whose it is.
     pub(super) fn vrchat_session(&self) -> Option<Session> {
         let (client, stamp) = self.vrchat_granted()?;
@@ -336,10 +345,36 @@ impl Controller {
             let changed = state != *s.launcher;
             if changed {
                 *s.launcher = state;
+                // Written a moment later (controller/vrchat_kept.rs).
+                self.vrchat_kept.bell.ring();
             }
             changed
         });
         written
+    }
+
+    /// Home's list as it was last on show for this very member and account, while the session saved here is being restored
+    /// as that account (REQUEST28): only onto nobody's list, and only while the sign-in says that account was verified for
+    /// that member and is on its way back. VRChat's own read takes its place.
+    pub(super) fn publish_kept_list(&self, stamp: &Stamp, user: &str, list: LauncherState) -> bool {
+        self.update_if(|s| {
+            let now = self.vrchat_stamp_of(&s.account);
+            let login = &s.vrchat_login;
+            let connecting = login.user.is_none() && (login.waiting || login.restoring);
+            let theirs = login.known.as_ref().is_some_and(|u| u.id == user) && login.verified_for == Some(stamp.said(Some(user)));
+            if !same(now.as_ref(), Some(stamp)) || !connecting || !theirs || matches!(s.launcher.source, Source::SignedIn { .. }) {
+                return false;
+            }
+            if list.kept.is_none() || !matches!(&list.source, Source::SignedIn { user_id, .. } if user_id == user) {
+                return false;
+            }
+            let mut state = list;
+            carry(&s.launcher, &mut state);
+            state.verified_for = Some(stamp.said(Some(user)));
+            self.vrchat_login.lock().unwrap().list_for = Some(stamp.clone());
+            *s.launcher = state;
+            true
+        })
     }
 
     /// Home's list as VRCX's or VRCNext's copy on this computer gives it, changed: only while no VRChat account is signed in

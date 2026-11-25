@@ -50,6 +50,7 @@ mod vrchat_login;
 mod launcher;
 mod groups;
 mod launcher_real;
+mod vrchat_kept;
 mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
@@ -2549,6 +2550,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
     groups::append(&mut scenarios);
+    vrchat_kept::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
     // REQUEST21 2: Settings in sub-tabs, with its search.
     settings_r21::append(&mut scenarios);
@@ -2605,6 +2607,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "r21" && sc.name.starts_with("r21-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "kept" && sc.name.starts_with("kept-"))
                 && !(o == "groups" && sc.name.starts_with("groups-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
@@ -2620,6 +2623,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if layers.is_some() && (sc.name.ends_with("-live") || sc.name.starts_with("real-")) {
             continue;
         }
+        vrchat_kept::prepare(&mut sc);
         let mut size = vec2(width, height);
         if layers.is_some() {
             // The narrow windows' scenes, in one.
@@ -2723,6 +2727,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
+    vrchat_kept::member(&ctl, sc);
     ctl.set_snapshot(sc.snapshot.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
@@ -2792,6 +2797,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
         }
         launcher::stage(&ctx, &mut app, sc.name, f, sc.frames, t);
         groups::stage(&ctx, &mut app, sc.name, &sc.snapshot, f);
+        vrchat_kept::stage(&mut app, sc.name, f);
         launcher_real::stage(&ctx, &mut app, sc.name, f);
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {

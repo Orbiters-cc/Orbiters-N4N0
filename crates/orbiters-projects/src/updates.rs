@@ -6,7 +6,6 @@
 use orbiters_i18n::tr;
 use std::collections::HashMap;
 use std::path::Path;
-use vrc_get_vpm::io::DefaultProjectIo;
 use vrc_get_vpm::unity_project::pending_project_changes::PackageChange;
 use vrc_get_vpm::unity_project::AddPackageOperation;
 use vrc_get_vpm::{PackageCollection, PackageInfo, UnityProject, VersionSelector};
@@ -95,15 +94,13 @@ pub fn is_sdk(name: &str) -> bool {
 /// Checks the project at `path` against the repositories as they were last downloaded (`vpm::view` with `refresh`
 /// downloads them again). Reads only.
 pub async fn check(root: &Path, path: &Path) -> anyhow::Result<Check> {
-    // vrc-get's UnityProject::load rewrites a manifest holding the "3.2-3.8" range spelling an old vrc-get wrote; an
-    // automatic check must not change the project, so such a project is left to an explicit change.
-    let manifest = std::fs::read(path.join("Packages/vpm-manifest.json"))?;
-    const REWRITTEN: &[u8] = br#""3.2-3.8""#;
-    if manifest.windows(REWRITTEN.len()).any(|w| w == REWRITTEN) {
+    // An automatic check must not change the project: one VPM's loader would rewrite is left to an explicit change.
+    std::fs::metadata(path.join("Packages/vpm-manifest.json"))?;
+    if !crate::vpm::loads_unchanged(path)? {
         return Ok(Check { skipped: Some(tr("Its package list uses an old range spelling; change a package once to check for updates.").into()), ..Default::default() });
     }
     let (_, packages) = crate::vpm::collection(root, false).await?;
-    let project = UnityProject::load(DefaultProjectIo::new(path.into())).await?;
+    let project = UnityProject::load(crate::disk::project_io(path)?).await?;
     Ok(Check { stable: find(&project, &packages, false).await, prerelease: find(&project, &packages, true).await, skipped: None })
 }
 

@@ -13,6 +13,12 @@ dirs.workspace = true
 uuid.workspace = true
 time.workspace = true
 orbiters-core.workspace = true
+# The release key a served Unity 6 release list is checked against (unity6::matrix), and its Ed25519 check.
+orbiters-update = { workspace = true, features = ["signing"] }
+ring = "0.17"
+base64 = "0.22"
+# A local package archive's own manifest (unity6::payload).
+flate2 = { workspace = true }
 vrc-get-vpm = { version = "=0.0.17", features = ["experimental-project-management", "experimental-unity-management"] }
 # Reads Creator Companion's and ALCOM's project list (theirs.rs), with the reader vrc-get itself has; never writes it.
 vrc-get-litedb = { version = "=0.3.0-beta.8", default-features = false }
@@ -50,5 +56,6 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }
 
 [dev-dependencies]
-ring = "0.17"
+# Tests of it have their own app data and VCC folder, never the person's.
+orbiters-core = { workspace = true, features = ["test-support"] }
 tempfile = "3"

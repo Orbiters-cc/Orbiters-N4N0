@@ -49,6 +49,10 @@ fn problem(state: &State, project: &Project) -> Option<String> {
     if location != d.location.trim() || name != &d.name {
         return None;
     }
+    // A share, a place inside another project: said before anything is measured or copied.
+    if let Some(why) = d.refused.clone().filter(|_| !*exists) {
+        return Some(why);
+    }
     if *exists {
         return Some(tr!("{location} has a folder named {name} already: choose another name.", location = d.location.trim(), name = name));
     }
@@ -78,7 +82,8 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
             let dir = PathBuf::from(&location);
             let exists = !name.is_empty() && dir.join(&name).exists();
             let free = size::free_space(&dir);
-            (location, name, exists, free)
+            let refused = templates::refused_place(&dir, &name);
+            ((location, name, exists, free), refused)
         });
     }
 }
@@ -102,6 +107,28 @@ pub(super) fn copy_problem(ctx: &egui::Context, state: &mut State, project: &Pro
         None if !place => Some(tr("Checking required disk space…").into()),
         None => None,
     }
+}
+
+/// For the New dialog's templates: why a project cannot be made at that place, once looked at.
+pub(super) fn place_problem(ctx: &egui::Context, state: &mut State) -> Option<String> {
+    if state.fixture {
+        return None;
+    }
+    if let Some((key, refused)) = state.new_place.take() {
+        state.new_refused = Some((key, refused));
+    }
+    let key = (state.new_location.trim().to_string(), state.new_name.clone());
+    match &state.new_refused {
+        Some((k, refused)) if *k == key => return refused.clone(),
+        _ => {}
+    }
+    if !state.new_place.running() {
+        state.new_place = Job::spawn(ctx, move || {
+            let refused = templates::refused_place(Path::new(&key.0), &key.1);
+            (key, refused)
+        });
+    }
+    None
 }
 
 /// About what the copy takes, once the project was measured.

@@ -52,6 +52,37 @@ pub(crate) struct MemberList {
     failed: Option<Failure>,
     total: Option<u32>,
     started: bool,
+    /// What shows is of a read before: its first page takes its place when it comes (nothing blanks meanwhile).
+    again: bool,
+}
+
+impl MemberList {
+    /// Read again from the start, what is there shown until then.
+    fn read_again(&mut self) {
+        (self.again, self.started, self.loading, self.offset, self.more, self.failed) = (!self.items.is_empty(), false, false, 0, false, None);
+    }
+    fn take(&mut self, m: orbiters_core::vrchat_api::Members) {
+        if std::mem::take(&mut self.again) {
+            self.items.clear();
+            self.seen.clear();
+            self.people.clear();
+        }
+        for item in m.items {
+            if self.items.len() >= MEMBERS_MAX || !self.seen.insert(row_of(&item)) {
+                continue;
+            }
+            // Their row of another membership goes: what VRChat gave later is who they are now.
+            if !self.people.insert(item.user_id.clone()) {
+                self.items.retain(|m| m.user_id != item.user_id);
+            }
+            self.items.push(item);
+        }
+        // Offsets advance by what VRChat gave, kept or not (M8).
+        self.offset += m.raw;
+        self.total = m.total;
+        self.more = m.raw >= PAGE && m.total.is_none_or(|t| (self.offset as u32) < t) && self.items.len() < MEMBERS_MAX;
+        self.failed = None;
+    }
 }
 
 #[derive(Default)]
@@ -64,6 +95,28 @@ pub(crate) struct PostList {
     loading: bool,
     failed: Option<Failure>,
     started: bool,
+    /// As [`MemberList`]'s.
+    again: bool,
+}
+
+impl PostList {
+    fn read_again(&mut self) {
+        (self.again, self.started, self.loading, self.offset, self.more, self.failed) = (!self.items.is_empty(), false, false, 0, false, None);
+    }
+    fn take(&mut self, p: orbiters_core::vrchat_api::Posts) {
+        if std::mem::take(&mut self.again) {
+            self.items.clear();
+            self.seen.clear();
+        }
+        for item in p.items {
+            if self.items.len() < POSTS_MAX && self.seen.insert(item.id.clone()) {
+                self.items.push(item);
+            }
+        }
+        self.offset += p.raw;
+        self.more = p.raw >= PAGE && p.total.is_none_or(|t| (self.offset as u32) < t) && self.items.len() < POSTS_MAX;
+        self.failed = None;
+    }
 }
 
 pub(crate) struct RoleEditor {
@@ -141,6 +194,8 @@ pub(crate) struct Open {
     pub id: String,
     pub card: GroupCard,
     pub page: Option<Page>,
+    /// The page shown is from a read before ([`Open::as_kept`]): its lists are read once it is read again.
+    kept: bool,
     failed: Option<Failure>,
     asked: bool,
     pub tab: Tab,
@@ -175,6 +230,7 @@ impl Open {
             id: card.id.clone(),
             card,
             page: None,
+            kept: false,
             failed: None,
             asked: false,
             tab: if composer.is_some() { Tab::Posts } else { Tab::Look },
@@ -192,6 +248,22 @@ impl Open {
             me_name: String::new(),
             #[cfg(test)]
             rows_built: 0,
+        }
+    }
+
+    /// The page, its first members and posts as they were last read on this computer: shown at once, read again behind.
+    pub(crate) fn as_kept(&mut self, scope: &crate::controller::vrchat_data::Scope) {
+        use orbiters_core::vrchat_store::kind;
+        let Some(page) = super::kept::<Page>(scope, kind::GROUP, &self.id).filter(|p| p.group.id == self.id) else { return };
+        self.page = Some(page);
+        self.kept = true;
+        if let Some(m) = super::kept::<orbiters_core::vrchat_api::Members>(scope, kind::MEMBERS, &self.id) {
+            self.members.take(m);
+            self.members.read_again();
+        }
+        if let Some(p) = super::kept::<orbiters_core::vrchat_api::Posts>(scope, kind::POSTS, &self.id) {
+            self.posts.take(p);
+            self.posts.read_again();
         }
     }
 
@@ -229,33 +301,22 @@ impl Open {
         match (kind, reply) {
             (Kind::Open(id), Reply::Opened(p)) if id == self.id => {
                 self.page = Some(*p);
+                self.kept = false;
                 self.failed = None;
-                // What was listed may have changed: read again.
-                self.members = MemberList { query: std::mem::take(&mut self.members.query), ..Default::default() };
-                self.posts = PostList::default();
+                // What was listed may have changed: read again, what is there shown until then.
+                if self.members.asked.is_empty() {
+                    self.members.read_again();
+                } else {
+                    self.members = MemberList { query: std::mem::take(&mut self.members.query), ..Default::default() };
+                }
+                self.posts.read_again();
                 self.events.again();
             }
             (Kind::Open(id), Reply::Failed(f)) if id == self.id => self.failed = Some(f),
             (Kind::Members { group, query, offset }, reply) if group == self.id && query == self.members.asked && offset == self.members.offset => {
                 self.members.loading = false;
                 match reply {
-                    Reply::Members(m) => {
-                        for item in m.items {
-                            if self.members.items.len() >= MEMBERS_MAX || !self.members.seen.insert(row_of(&item)) {
-                                continue;
-                            }
-                            // Their row of another membership goes: what VRChat gave later is who they are now.
-                            if !self.members.people.insert(item.user_id.clone()) {
-                                self.members.items.retain(|m| m.user_id != item.user_id);
-                            }
-                            self.members.items.push(item);
-                        }
-                        // Offsets advance by what VRChat gave, kept or not (M8).
-                        self.members.offset += m.raw;
-                        self.members.total = m.total;
-                        self.members.more = m.raw >= PAGE && m.total.is_none_or(|t| (self.members.offset as u32) < t) && self.members.items.len() < MEMBERS_MAX;
-                        self.members.failed = None;
-                    }
+                    Reply::Members(m) => self.members.take(m),
                     Reply::Failed(f) => self.members.failed = Some(f),
                     _ => {}
                 }
@@ -263,16 +324,7 @@ impl Open {
             (Kind::Posts { group, offset }, reply) if group == self.id && offset == self.posts.offset => {
                 self.posts.loading = false;
                 match reply {
-                    Reply::Posts(p) => {
-                        for item in p.items {
-                            if self.posts.items.len() < POSTS_MAX && self.posts.seen.insert(item.id.clone()) {
-                                self.posts.items.push(item);
-                            }
-                        }
-                        self.posts.offset += p.raw;
-                        self.posts.more = p.raw >= PAGE && p.total.is_none_or(|t| (self.posts.offset as u32) < t) && self.posts.items.len() < POSTS_MAX;
-                        self.posts.failed = None;
-                    }
+                    Reply::Posts(p) => self.posts.take(p),
                     Reply::Failed(f) => self.posts.failed = Some(f),
                     _ => {}
                 }
@@ -596,7 +648,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     if let Some(open) = state.open.as_mut() {
         open.me_id = scope.vrchat_user().unwrap_or_default().to_string();
         open.me_name = cx.snap.vrchat_login.user.as_ref().map(|u| u.display_name.clone()).unwrap_or_default();
-        if !open.asked && !staged {
+        if !open.asked && !staged && !state.held {
             open.asked = true;
             state.jobs.ask(&ctx, cx.ctl, &scope, Kind::Open(open.id.clone()), Request::Open { group: open.id.clone() });
         }
@@ -1069,7 +1121,7 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         }
         let wanted = if o.members.query.trim().chars().count() >= 3 { o.members.query.trim().to_string() } else { String::new() };
         let reading = jobs.busy_with(|k| matches!(k, Kind::Members { group, .. } if *group == o.id));
-        if !staged && !reading && (!o.members.started || (wanted != o.members.asked && now - o.members.typed_at > 0.45)) {
+        if !staged && !o.kept && !reading && (!o.members.started || (wanted != o.members.asked && now - o.members.typed_at > 0.45)) {
             ask_members(&ctx, cx, jobs, scope, o);
         } else if wanted != o.members.asked {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
@@ -1181,7 +1233,7 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         unread(ui, super::missing_text(Missing::Member), "members", acts);
     }
     let Some(o) = state.open.as_ref() else { return };
-    if o.members.loading {
+    if o.members.loading && !o.members.again {
         note(ui, tr("Loading members…"), theme::FG_3);
     } else if o.members.more && widgets::Button::new(tr("Load more members")).id_salt("members-more").show(ui).clicked() {
         acts.push(Act::MoreMembers);
@@ -1521,7 +1573,7 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
     {
         let State { open, jobs, .. } = state;
         let Some(o) = open.as_mut() else { return };
-        if !o.posts.started && !staged {
+        if !o.posts.started && !staged && !o.kept {
             o.posts.started = true;
             o.posts.loading = true;
             jobs.ask(&ctx, cx.ctl, scope, Kind::Posts { group: o.id.clone(), offset: 0 }, Request::Posts { group: o.id.clone(), offset: 0 });
@@ -1606,7 +1658,7 @@ fn posts(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::vrc
         }
     }
     let items_empty = o.posts.items.is_empty();
-    if o.posts.loading {
+    if o.posts.loading && !o.posts.again {
         note(ui, tr("Loading posts…"), theme::FG_3);
     } else if items_empty && o.posts.failed.is_none() && o.posts.started {
         note(ui, tr("No posts yet."), theme::FG_3);

@@ -34,6 +34,8 @@ pub(super) enum Modal {
     Duplicate(PathBuf),
     /// A package change that conflicted, and the plan solving it.
     Conflict,
+    /// Try on Unity 6, for the project in this folder.
+    Unity6(PathBuf),
 }
 /// The Duplicate dialog's choices: the copy's name and where it goes, Library taken along, and what was found of that
 /// place (on a worker, when they change).
@@ -47,7 +49,9 @@ pub(super) struct Dup {
     pub library: bool,
     /// The (location, name) last checked: whether that folder exists already, and the room on its disk.
     pub checked: Option<(String, String, bool, Option<u64>)>,
-    pub check: Job<(String, String, bool, Option<u64>)>,
+    pub check: Job<((String, String, bool, Option<u64>), Option<String>)>,
+    /// Why no copy can be made at the place last checked (a share, inside another project).
+    pub refused: Option<String>,
     /// The folder dialog of its location.
     pub pick: Job<Option<PathBuf>>,
 }
@@ -58,6 +62,8 @@ pub(super) struct Flow {
     pub unity_open: bool,
     pub result: Option<setup::ResultFile>,
     pub packages_only: bool,
+    /// What the person is told before uploading from this project.
+    pub warning: Option<String>,
     pub acknowledged: bool,
 }
 pub(super) enum Outcome {
@@ -211,6 +217,9 @@ pub struct State {
     pub(super) repo_headers: String,
     pub(super) new_name: String,
     pub(super) new_location: String,
+    /// Why no new project can be made at (location, name), as looked at on a worker.
+    pub(super) new_place: Job<((String, String), Option<String>)>,
+    pub(super) new_refused: Option<((String, String), Option<String>)>,
     pub(super) new_unity: String,
     pub(super) template_index: usize,
     pub(super) duplicate: bool,
@@ -312,6 +321,10 @@ pub struct State {
     pub(super) scroll_fix: Option<f32>,
     /// Whether a scan ran last frame (its final sort is followed too).
     pub(super) was_scanning: bool,
+    /// VRChat's move to Unity 6: standings, trials, editors, the Try on Unity 6 sheet (`unity6`).
+    pub(super) u6: super::unity6::U6,
+    /// Counts the scan's updates taken in (what depends on the list of projects is rebuilt only when it changes).
+    pub(super) scan_serial: u64,
 }
 impl Default for State {
     fn default() -> Self {
@@ -394,6 +407,8 @@ impl Default for State {
             repo_headers: String::new(),
             new_name: String::new(),
             new_location: String::new(),
+            new_place: Job::default(),
+            new_refused: None,
             new_unity: String::new(),
             template_index: 0,
             duplicate: false,
@@ -455,6 +470,8 @@ impl Default for State {
             scroll_anchor: None,
             scroll_fix: None,
             was_scanning: false,
+            u6: Default::default(),
+            scan_serial: 0,
         }
     }
 }
@@ -463,6 +480,9 @@ impl Drop for State {
         self.cancel.store(true, Ordering::Relaxed);
         self.copy_cancel.store(true, Ordering::Relaxed);
         self.size_cancel.store(true, Ordering::Relaxed);
+        if let Some(run) = &self.u6.run {
+            run.cancel.store(true, Ordering::Relaxed);
+        }
     }
 }
 /// Mixer's package, from the Orbiters repository.
@@ -690,6 +710,7 @@ impl State {
             self.refresh(ctx, false);
         }
         self.poll_thumbs(ctx);
+        self.poll_unity6(ctx, cx);
         let environment = crate::controller::vrchat_data::Scope::of(cx.snap);
         // Another account or VRChat session: every picture is asked for again, the ones shown staying until their
         // replacements arrive (a sign-in must not blank the page's covers first).
@@ -707,7 +728,10 @@ impl State {
                     // A list read before a change made here would undo it.
                     ScanEvent::Hidden(list) if self.hidden_changes == 0 => self.hidden = list,
                     ScanEvent::Hidden(_) => {}
-                    ScanEvent::Update(scan) => self.scan = scan,
+                    ScanEvent::Update(scan) => {
+                        self.scan = scan;
+                        self.scan_serial += 1;
+                    }
                     ScanEvent::Done(result) => {
                         done = true;
                         match result {
@@ -1056,8 +1080,9 @@ impl State {
                 cx.ctl.upload_pictures(id, name, paths);
             }
         }
-        if let Some(checked) = self.dup.check.take() {
+        if let Some((checked, refused)) = self.dup.check.take() {
             self.dup.checked = Some(checked);
+            self.dup.refused = refused;
         }
     }
     /// Looks up (then, when it changed or is old, measures) the size of the project in `path`, once per visit of the
@@ -1248,16 +1273,22 @@ impl State {
         self.flow = None;
         self.pending = Some((project.name.clone(), avatar.name.clone(), nano));
         self.task(ctx, if nano { tr("Installing My Avatar and preparing N4N0…") } else { tr("Installing My Avatar…") }, move || {
+            // It ends in an upload of the avatar: leave for that first, from the project as it is now.
+            let leave = orbiters_projects::unity6::authority::upload(&orbiters_projects::data_dir(), &project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
             orbiters_projects::runtime()?.block_on(vpm::install_my_avatar(&orbiters_projects::vcc_dir(), &project.path))?;
+            // Asked again now that its packages changed (a request asks it itself, when it is written).
+            if !nano {
+                leave.still(&project.path).map_err(|why| anyhow::anyhow!("{why}"))?;
+            }
             let request = if nano {
                 let r = setup::request(avatar.clone(), server.n4n0_gallery_asset_id().unwrap(), server.api(), env!("ORBITERS_VERSION"))?;
-                setup::write(&project.path, &r)?;
+                setup::write(&project.path, &r, &leave)?;
                 Some(r.id)
             } else {
                 None
             };
             let unity_open = orbiters_projects::unity_open(&project.path);
-            Ok(Outcome::Setup(Flow { project, avatar, request, unity_open, result: None, packages_only: !nano, acknowledged: false }))
+            Ok(Outcome::Setup(Flow { project, avatar, request, unity_open, result: None, packages_only: !nano, acknowledged: false, warning: leave.warning }))
         });
     }
     /// The registered projects' copies of the avatar `id`, with their projects.
@@ -1487,6 +1518,7 @@ impl State {
                 installed: vec![],
             }),
             packages_only,
+            warning: None,
             acknowledged: true,
         };
         let now = discovery::now();
@@ -1776,6 +1808,7 @@ impl State {
         }
         self.stage_panel(name);
         super::vrchat_picture::stage(self, name);
+        self.stage_unity6(name);
         if self.modal.is_some() {
             self.modal_serial = 1;
             self.modal_origin = Rect::from_center_size(ctx.content_rect().center() + egui::vec2(0.0, 120.0), egui::vec2(180.0, 44.0));

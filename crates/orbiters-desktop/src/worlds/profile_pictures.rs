@@ -2,12 +2,15 @@
 //! time I open Orbiters N4N0"), for every page that shows one through [`super::Picture::Profile`]: the friends list and
 //! its boops and invite requests, the account's own profile card, a person's profile, Sharing's friend chips.
 //!
-//! - **Kept small, one per person.** A picture is kept at most [`SIDE`] pixels on its longer side (the largest place one
-//!   shows is the profile's 104-point picture), as PNG, in `<cache>/profile-pictures/`: `u-<usr id>.pic` for a person's
-//!   picture (one file each: a new picture replaces the old one), `k-<digest>.pic` for one that is nobody's. Each file
-//!   names the picture it holds (the VRChat file and version, or a digest of another address; never the address).
-//!   A photo-like picture is about 20-35 KB: 224 friends cost about 5 to 8 MB. The folder is capped at [`CAP_BYTES`]: past it, the files used longest ago go.
-//! - **Shown at once.** A picture kept is read and decoded on a loader thread, without the network. A person whose
+//! - **Kept by what they are.** Everything from VRChat's file hosts (faces, icons, groups' icons and banners) is kept in the
+//!   account's own folder on this computer, `<cache>/vrchat/<account>/pictures/` (`orbiters_core::vrchat_store`), named by
+//!   its VRChat file and version: another address of the same picture is the same file, never downloaded again. Beside what
+//!   VRChat sent, a small copy ready to be shown (QOI: quick to decode) at the size it is drawn ([`Size`]). Where no VRChat
+//!   account is (VRCX's or VRCNext's copy of the friends), `<cache>/vrchat-local-pictures/`. Past the size Settings allows
+//!   ([`set_cap`]), the ones used longest ago go. Signing out removes the account's. Pictures kept before 0.3.10 (in
+//!   `profile-pictures/`) move there as they are shown.
+//! - **Shown at once.** A picture kept is in the very frame that asks for it ([`Profiles::now`]: a few a frame, all of the
+//!   first screen in the first one), without the network; the others of a long scroll come from the loader threads. A person whose
 //!   picture changed (another file or version in VRChat's address) shows the picture kept until the new one arrived.
 //! - **Completed from VRCX and VRCNext** ([`orbiters_core::picture_sources`]), when they keep exactly that picture,
 //!   before anything is downloaded.
@@ -20,17 +23,19 @@
 
 use egui::ColorImage;
 use image::RgbaImage;
+use orbiters_contracts::qoi;
 use orbiters_core::picture_sources::OtherCaches;
+pub use orbiters_core::vrchat_store::{picture_key, Account, Kept, Size};
 use std::collections::HashSet;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
-/// The longer side a picture is kept at, in pixels.
+/// The longer side a person's picture is kept at, in pixels.
 pub const SIDE: u32 = 128;
-/// The kept pictures' folder at most (about 1 500 people).
-pub const CAP_BYTES: u64 = 32 << 20;
+/// What the kept pictures of an account take at most, unless Settings says otherwise.
+pub const CAP_BYTES: u64 = 256 << 20;
 /// Pictures asked of VRChat at once.
 pub const FETCHERS: usize = 2;
 /// A picture asked for by a page within this long is on screen: asked before the background ones.
@@ -42,11 +47,8 @@ const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const LONGEST_BACKOFF: Duration = Duration::from_secs(300);
 /// A background picture that failed this often is not asked again in this run (a page showing it still asks).
 const BACKGROUND_TRIES: u8 = 3;
-/// The folder is measured at most this often.
-const EVICT_EVERY: Duration = Duration::from_secs(20);
+/// The start of a picture kept before 0.3.10.
 const MAGIC: &[u8; 8] = b"ORBPIC1\n";
-/// The mark a folder gets once the decoration previews it kept before REQUEST20 were swept ([`Store::sweep_previews`]).
-const SWEPT: &str = ".previews-swept-1";
 
 /// A line in `logs/profile-pictures.log` (kept under 1 MB, the one before renamed `.old`): what happened to a person's
 /// picture. Only [`who`], the kind of address ([`kind`]), the outcome and VRChat's answer: never an address (VRChat's
@@ -83,14 +85,6 @@ fn reason(error: &str) -> String {
     if short.trim().is_empty() { "no reason given".into() } else { short.trim().to_string() } // i18n: not shown (a log line)
 }
 
-/// What names a picture: its VRChat file and version (the same picture at any size), or a digest of another address.
-pub fn picture_key(url: &str) -> String {
-    match orbiters_core::picture_sources::vrchat_file(url) {
-        Some((file, version)) => format!("{file}/{version}"),
-        None => format!("url-{}", digest(url)),
-    }
-}
-
 fn digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(text.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
@@ -99,6 +93,12 @@ fn digest(text: &str) -> String {
 /// A picture's bytes (PNG, JPEG or WebP) at most [`SIDE`] pixels on its longer side; None when they are not a whole
 /// picture (cut short, another kind of file).
 pub fn small(bytes: &[u8]) -> Option<RgbaImage> {
+    smaller(bytes, Size::Face)
+}
+
+/// [`small`], at `size`.
+pub fn smaller(bytes: &[u8], size: Size) -> Option<RgbaImage> {
+    let side = size.pixels();
     // A JPEG cut short decodes to a grey bottom without an error: one without its end marker is not taken.
     if bytes.starts_with(&[0xFF, 0xD8]) {
         let end = bytes.iter().rposition(|b| !matches!(b, 0 | b' ' | b'\t' | b'\n' | b'\r')).map_or(0, |i| i + 1);
@@ -116,192 +116,86 @@ pub fn small(bytes: &[u8]) -> Option<RgbaImage> {
     if picture.width() == 0 || picture.height() == 0 {
         return None;
     }
-    Some(if picture.width() > SIDE || picture.height() > SIDE { picture.thumbnail(SIDE, SIDE) } else { picture }.to_rgba8())
+    Some(if picture.width() > side || picture.height() > side { picture.thumbnail(side, side) } else { picture }.to_rgba8())
 }
 
 fn color(image: &RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], image.as_raw())
 }
 
-/// What is kept for a person's picture.
-pub enum Kept {
-    /// That picture.
-    Exact(RgbaImage),
-    /// The person's picture before (shown until the new one arrived).
-    Older(RgbaImage),
-    Nothing,
+/// What Settings allows the kept pictures ([`set_cap`]).
+static CAP: AtomicU64 = AtomicU64::new(CAP_BYTES);
+
+/// What the kept pictures may take, as Settings has it now.
+pub fn set_cap(bytes: u64) {
+    if CAP.swap(bytes, Ordering::Relaxed) != bytes {
+        for (_, p) in shared().iter() {
+            p.store.pictures.set_cap(bytes);
+        }
+    }
 }
 
-/// The kept pictures' folder.
+/// The kept pictures of an account (or of none).
 pub struct Store {
-    dir: PathBuf,
-    cap: u64,
-    /// The files marked used in this run (once each: a file is not written to at every read).
-    touched: Mutex<HashSet<PathBuf>>,
-    measured: Mutex<Option<Instant>>,
+    pictures: orbiters_core::vrchat_store::Pictures,
+    /// Where they were kept before 0.3.10.
+    before: Option<PathBuf>,
+}
+
+fn decode(body: &[u8]) -> Option<RgbaImage> {
+    let (head, rgba) = qoi::decode_rgba_max(body, 4 << 20).ok()?;
+    RgbaImage::from_raw(head.width, head.height, rgba)
 }
 
 impl Store {
+    #[cfg(test)]
     pub fn at(dir: PathBuf, cap: u64) -> Self {
-        Self { dir, cap, touched: Mutex::default(), measured: Mutex::default() }
-    }
-
-    fn file(&self, user: Option<&str>, key: &str) -> PathBuf {
-        match user.filter(|u| orbiters_core::vrchat_accounts::is_user_id(u)) {
-            Some(user) => self.dir.join(format!("u-{user}.pic")),
-            None => self.dir.join(format!("k-{}.pic", digest(key))),
-        }
-    }
-
-    /// The name of the picture in a kept file, and (`whole`) its PNG.
-    fn read(path: &Path, whole: bool) -> Option<(String, Vec<u8>)> {
-        let mut file = std::fs::File::open(path).ok()?;
-        let mut head = [0u8; 10];
-        file.read_exact(&mut head).ok()?;
-        if &head[..8] != MAGIC {
-            return None;
-        }
-        let mut key = vec![0u8; u16::from_le_bytes([head[8], head[9]]) as usize];
-        file.read_exact(&mut key).ok()?;
-        let mut png = Vec::new();
-        if whole {
-            file.take(8 << 20).read_to_end(&mut png).ok()?;
-        }
-        Some((String::from_utf8(key).ok()?, png))
+        Self { pictures: orbiters_core::vrchat_store::Pictures::at(dir, cap), before: None }
     }
 
     /// The picture at `url` for `user` (a `usr_…` id, or none), as kept.
-    pub fn get(&self, user: Option<&str>, url: &str) -> Kept {
+    pub fn get(&self, user: Option<&str>, url: &str, size: Size) -> Kept<RgbaImage> {
+        self.pictures.small_copy(user, url, size, decode)
+    }
+
+    /// Whether exactly that picture is kept.
+    pub fn has(&self, url: &str, size: Size) -> bool {
+        self.pictures.has(url, size)
+    }
+
+    /// Keeps `image` as the picture at `url` for `user`, and what VRChat sent.
+    pub fn put(&self, user: Option<&str>, url: &str, size: Size, image: &RgbaImage, sent: Option<&[u8]>) -> bool {
+        self.pictures.put(user, url, size, &qoi::encode(image.as_raw(), image.width(), image.height(), 4), sent)
+    }
+
+    /// The picture made again from what VRChat sent, or as it was kept before 0.3.10.
+    fn again(&self, user: Option<&str>, url: &str, size: Size) -> Option<RgbaImage> {
+        // A wide copy is not made of a thumbnail's bytes (the same picture, asked at a face's size).
+        let whole = self.pictures.original_copy(url).and_then(|b| smaller(&b, size)).filter(|i| size == Size::Face || i.width().max(i.height()) > 2 * SIDE);
+        if let Some(image) = whole {
+            self.put(user, url, size, &image, None);
+            return Some(image);
+        }
+        if size != Size::Face {
+            return None;
+        }
+        let dir = self.before.as_ref()?;
         let key = picture_key(url);
-        let path = self.file(user, &key);
-        let Some((kept, png)) = Self::read(&path, true) else { return Kept::Nothing };
-        let Some(image) = image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok().map(|i| i.to_rgba8()) else {
-            // Our own file, damaged: made again.
-            let _ = std::fs::remove_file(&path);
-            return Kept::Nothing;
+        let file = match user.filter(|u| orbiters_core::vrchat_accounts::is_user_id(u)) {
+            Some(user) => dir.join(format!("u-{user}.pic")),
+            None => dir.join(format!("k-{}.pic", digest(&key))),
         };
-        if kept == key {
-            self.touch(&path);
-            Kept::Exact(image)
-        } else {
-            Kept::Older(image)
+        let bytes = std::fs::read(&file).ok()?;
+        let rest = bytes.strip_prefix(&MAGIC[..])?;
+        let n = u16::from_le_bytes([*rest.first()?, *rest.get(1)?]) as usize;
+        if rest.get(2..2 + n)? != key.as_bytes() {
+            return None;
         }
-    }
-
-    /// Whether exactly that picture is kept (its name only is read).
-    pub fn has(&self, user: Option<&str>, url: &str) -> bool {
-        let key = picture_key(url);
-        Self::read(&self.file(user, &key), false).is_some_and(|(kept, _)| kept == key)
-    }
-
-    /// Keeps `image` as the picture at `url` for `user`, replacing what was kept for them.
-    pub fn put(&self, user: Option<&str>, url: &str, image: &RgbaImage) -> bool {
-        let key = picture_key(url);
-        let mut png = Vec::with_capacity(16 << 10);
-        if image::DynamicImage::ImageRgba8(image.clone()).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
-            return false;
+        let image = image::load_from_memory_with_format(&rest[2 + n..], image::ImageFormat::Png).ok()?.to_rgba8();
+        if self.put(user, url, size, &image, None) {
+            let _ = std::fs::remove_file(file);
         }
-        let mut bytes = Vec::with_capacity(png.len() + key.len() + 10);
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&(key.len() as u16).to_le_bytes());
-        bytes.extend_from_slice(key.as_bytes());
-        bytes.extend_from_slice(&png);
-        let path = self.file(user, &key);
-        let written = std::fs::create_dir_all(&self.dir).is_ok() && orbiters_core::write_atomic(&path, &bytes).is_ok();
-        if written {
-            self.touched.lock().unwrap_or_else(|e| e.into_inner()).insert(path);
-            let due = {
-                let mut measured = self.measured.lock().unwrap_or_else(|e| e.into_inner());
-                let due = measured.is_none_or(|at| at.elapsed() >= EVICT_EVERY);
-                if due {
-                    *measured = Some(Instant::now());
-                }
-                due
-            };
-            if due {
-                self.evict();
-            }
-        }
-        written
-    }
-
-    /// Once per folder (it is marked after): the pictures kept for nobody (`k-` files, never a person's `u-` file) with
-    /// see-through pixels go. Before REQUEST20 the friends list drew VRChat's shop PREVIEW of each icon frame and nameplate
-    /// (the decoration around a grey stand-in person on a dark disc, or with grey stand-in lines) and kept it here as a
-    /// picture of nobody; a decoration is drawn with its own asset since, so those files would only wait for the cap. A
-    /// see-through picture of nobody is that shape (a photo is opaque); one that was something else is asked again when
-    /// shown. Our folder only: VRCX's and VRCNext's are never written. Returns how many went.
-    pub fn sweep_previews(&self) -> usize {
-        let mark = self.dir.join(SWEPT);
-        if mark.exists() {
-            return 0;
-        }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return 0 };
-        let mut gone = 0;
-        for e in entries.flatten() {
-            let path = e.path();
-            let nobodys = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("k-") && n.ends_with(".pic"));
-            if !nobodys {
-                continue;
-            }
-            let see_through = Self::read(&path, true)
-                .and_then(|(_, png)| image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok())
-                .is_some_and(|i| i.to_rgba8().pixels().any(|p| p.0[3] < 255));
-            if see_through && std::fs::remove_file(&path).is_ok() {
-                gone += 1;
-            }
-        }
-        if std::fs::create_dir_all(&self.dir).is_ok() {
-            let _ = std::fs::write(&mark, b"");
-        }
-        gone
-    }
-
-    /// A kept picture shown now is used: it goes last when the folder is too large.
-    fn touch(&self, path: &Path) {
-        if self.touched.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf()) {
-            if let Ok(file) = std::fs::File::options().write(true).open(path) {
-                let _ = file.set_modified(SystemTime::now());
-            }
-        }
-    }
-
-    /// Past [`Store::cap`], the files used longest ago go until a quarter is free (and leftovers of an interrupted
-    /// write older than an hour).
-    pub fn evict(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return };
-        let mut files: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
-        for e in entries.flatten() {
-            let Ok(meta) = e.metadata() else { continue };
-            if !meta.is_file() {
-                continue;
-            }
-            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let path = e.path();
-            if path.extension().is_some_and(|x| x == "tmp") {
-                if SystemTime::now().duration_since(modified).unwrap_or_default() > Duration::from_secs(3600) {
-                    let _ = std::fs::remove_file(&path);
-                }
-                continue;
-            }
-            if path.extension().is_some_and(|x| x == "pic") {
-                files.push((modified, meta.len(), path));
-            }
-        }
-        let mut total: u64 = files.iter().map(|f| f.1).sum();
-        if total <= self.cap {
-            return;
-        }
-        files.sort_by_key(|f| f.0);
-        for (_, size, path) in files {
-            if total <= self.cap / 4 * 3 {
-                break;
-            }
-            if std::fs::remove_file(&path).is_ok() {
-                total -= size;
-                self.touched.lock().unwrap_or_else(|e| e.into_inner()).remove(&path);
-            }
-        }
+        Some(image)
     }
 }
 
@@ -508,12 +402,12 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
         };
         // Kept meanwhile (another page, VRCX's copy): no network.
         let (whose, what) = (who(job.user.as_deref()), kind(&job.url));
-        let outcome = match store.get(job.user.as_deref(), &job.url) {
+        let outcome = match store.get(job.user.as_deref(), &job.url, Size::Face) {
             Kept::Exact(image) => Outcome::Got(image),
             _ => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (job.via)(&job.url))) {
                 Ok(Ok(bytes)) => match small(&bytes) {
                     Some(image) => {
-                        store.put(job.user.as_deref(), &job.url, &image);
+                        store.put(job.user.as_deref(), &job.url, Size::Face, &image, Some(&bytes));
                         note(&format!("fetched {whose} {what}")); // i18n: not shown (a log line)
                         Outcome::Got(image)
                     }
@@ -567,6 +461,19 @@ fn work(line: &(Mutex<Line>, Condvar), store: &Store) {
     }
 }
 
+type Shared = Vec<(Option<Account>, Arc<Profiles>)>;
+
+/// Those of the accounts asked about in this process.
+fn shared() -> std::sync::MutexGuard<'static, Shared> {
+    static SHARED: Mutex<Shared> = Mutex::new(Vec::new());
+    SHARED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The account on show is `account`: what this process holds of another's goes (what asks for its pictures ends with it).
+pub fn only(account: Option<&Account>) {
+    shared().retain(|(a, _)| a.is_none() || a.as_ref() == account);
+}
+
 /// The kept pictures, VRCX's and VRCNext's, and the asking.
 pub struct Profiles {
     store: Arc<Store>,
@@ -581,27 +488,64 @@ impl Profiles {
         Arc::new(Self { fetcher: Fetcher::new(store.clone()), store, others, warming: Arc::default() })
     }
 
-    /// This app's: in its cache folder (a test's own in tests), VRCX's and VRCNext's of this computer (none in tests).
-    pub fn shared() -> &'static Arc<Profiles> {
-        static SHARED: OnceLock<Arc<Profiles>> = OnceLock::new();
-        SHARED.get_or_init(|| {
-            let store = Store::at(orbiters_core::paths::cache_dir().join("profile-pictures"), CAP_BYTES);
-            let swept = store.sweep_previews();
-            if swept > 0 {
-                note(&format!("swept {swept} decoration previews kept before (once)")); // i18n: not shown (a log line)
-            }
-            Self::new(Arc::new(store), OtherCaches::on_this_computer())
-        })
+    /// The pictures of `account` in this process (of none: this computer's own, of a list read from VRCX or VRCNext).
+    pub fn of(account: Option<&Account>) -> Arc<Profiles> {
+        let mut all = shared();
+        if let Some(i) = all.iter().position(|(a, _)| a.as_ref() == account) {
+            // The ones asked last are last.
+            let found = all.remove(i);
+            all.push(found);
+            return all.last().unwrap().1.clone();
+        }
+        let cap = CAP.load(Ordering::Relaxed);
+        let cache = orbiters_core::paths::cache_dir();
+        let pictures = match account {
+            Some(account) => orbiters_core::vrchat_store::Pictures::of(&orbiters_core::vrchat_store::root(), account, cap),
+            None => orbiters_core::vrchat_store::Pictures::at(cache.join("vrchat-local-pictures"), cap),
+        };
+        let made = Self::new(Arc::new(Store { pictures, before: Some(cache.join("profile-pictures")) }), OtherCaches::on_this_computer());
+        all.push((account.cloned(), made.clone()));
+        // Another account's go from memory (its threads with them) once two more were there since.
+        if all.len() > 3 {
+            all.remove(0);
+        }
+        made
+    }
+
+    /// The picture at `url`, kept and ready: read here and now (a small file, a fraction of a millisecond), or the person's
+    /// before it, or not there. The caller says how many a frame.
+    pub fn now(&self, url: &str, user: Option<&str>, size: Size) -> Kept<ColorImage> {
+        match self.store.get(user, url, size) {
+            Kept::Exact(i) => Kept::Exact(color(&i)),
+            Kept::Older(i) => Kept::Older(color(&i)),
+            Kept::Nothing => Kept::Nothing,
+        }
+    }
+
+    /// Whether the picture at `url` is kept at that size.
+    pub fn has(&self, url: &str, size: Size) -> bool {
+        self.store.has(url, size)
+    }
+
+    /// A picture VRChat sent (`bytes`, already made `image`), kept: another asker's than [`Fetcher`]'s.
+    pub fn keep_sent(&self, url: &str, size: Size, image: &RgbaImage, bytes: &[u8]) -> bool {
+        self.store.put(None, url, size, image, Some(bytes))
     }
 
     /// The picture at `url` of `user`, on a loader thread: `Some` when kept (or in VRCX's or VRCNext's copy); else
     /// `interim` is handed the person's picture before (if one is kept) and `reply` gets the picture once asked of
     /// VRChat through `via` (None: it cannot be asked, `reply` is told at once).
     pub fn load(&self, url: &str, user: Option<&str>, via: Option<Fetch>, interim: impl FnOnce(ColorImage), reply: Reply) -> Option<ColorImage> {
-        match self.store.get(user, url) {
+        let before = match self.store.get(user, url, Size::Face) {
             Kept::Exact(image) => return Some(color(&image)),
-            Kept::Older(image) => interim(color(&image)),
-            Kept::Nothing => {}
+            Kept::Older(image) => Some(image),
+            Kept::Nothing => None,
+        };
+        if let Some(image) = self.store.again(user, url, Size::Face) {
+            return Some(color(&image));
+        }
+        if let Some(image) = before {
+            interim(color(&image));
         }
         if let Some(image) = self.from_elsewhere(url, user) {
             return Some(color(&image));
@@ -617,13 +561,13 @@ impl Profiles {
     fn from_elsewhere(&self, url: &str, user: Option<&str>) -> Option<RgbaImage> {
         let (_, bytes) = self.others.find(url)?;
         let image = small(&bytes)?;
-        self.store.put(user, url, &image);
+        self.store.put(user, url, Size::Face, &image, None);
         Some(image)
     }
 
     /// Keeps `image` as the picture at `url` of `user` (pictures of the page: a cache filled with made-up people).
     pub fn keep(&self, url: &str, user: Option<&str>, image: &RgbaImage) -> bool {
-        self.store.put(user, url, image)
+        self.store.put(user, url, Size::Face, image, None)
     }
 
     /// A page asked again for a picture being asked of VRChat: it is on screen.
@@ -634,7 +578,6 @@ impl Profiles {
     /// The pictures a page will show (the whole friends list, in its order): those not kept are taken from VRCX's and
     /// VRCNext's copies, the rest asked of VRChat in the background. On a thread of its own; a newer list replaces this.
     pub fn warm(self: &Arc<Self>, items: Vec<(String, Option<String>)>, via: Fetch) {
-        use std::sync::atomic::Ordering;
         let generation = self.warming.fetch_add(1, Ordering::AcqRel) + 1;
         let me = self.clone();
         // A new list, or the session back: asked again at once.
@@ -647,7 +590,7 @@ impl Profiles {
                 if me.warming.load(Ordering::Acquire) != generation {
                     return;
                 }
-                if me.store.has(user.as_deref(), &url) {
+                if me.store.has(&url, Size::Face) || me.store.again(user.as_deref(), &url, Size::Face).is_some() {
                     kept += 1;
                     continue;
                 }
@@ -666,7 +609,9 @@ impl Profiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::path::Path;
+    use std::time::SystemTime;
 
     const A: &str = "usr_00000000-0000-4000-8000-00000000000a";
     const B: &str = "usr_00000000-0000-4000-8000-00000000000b";
@@ -750,16 +695,17 @@ mod tests {
         assert!(near(colour_of(&shown.expect("kept")), [200, 40, 90]));
         // The same picture at another size (VRChat's 256 thumbnail of that file and version) is the same picture.
         let thumb = url(1, 1).replace("/api/1/file/", "/api/1/image/").replace("/1/file", "/1/256");
-        assert!(again.store.has(Some(A), &thumb));
-        let size: u64 = std::fs::read_dir(temp.0.join("profile-pictures")).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
-        assert!(size < 16 << 10, "a one-colour picture is small on disk: {size}");
+        assert!(again.store.has(&thumb, Size::Face));
+        assert!(matches!(again.now(&thumb, Some(A), Size::Face), Kept::Exact(_)), "in the very frame that asks");
+        let size: u64 = walk(&temp.0.join("profile-pictures")).iter().map(|f| f.metadata().unwrap().len()).sum();
+        assert!(size < 32 << 10, "a one-colour picture is small on disk: {size}");
     }
 
     #[test]
     fn a_changed_picture_shows_the_old_one_until_the_new_one_arrived_and_replaces_it() {
         let temp = Temp::new();
         let p = profiles(&temp.0, none());
-        assert!(p.store.put(Some(A), &url(1, 1), &image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255]))));
+        assert!(p.store.put(Some(A), &url(1, 1), Size::Face, &image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255])), None));
         let (via, calls) = counting(Some(picture(64, 64, [10, 10, 220], image::ImageFormat::Jpeg)));
         let (reply, got) = reply_channel();
         let mut interim = None;
@@ -768,39 +714,57 @@ mod tests {
         assert!(near(colour_of(&interim.expect("the old picture meanwhile")), [10, 200, 10]));
         assert!(near(colour_of(&got.recv_timeout(Duration::from_secs(10)).unwrap().unwrap()), [10, 10, 220]));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(p.store.has(Some(A), &url(2, 1)) && !p.store.has(Some(A), &url(1, 1)), "replaced, one file a person");
+        assert!(p.store.has(&url(2, 1), Size::Face), "kept");
         // A new version of the same file is a change too.
-        assert!(matches!(p.store.get(Some(A), &url(2, 2)), Kept::Older(_)));
-        // B's picture is B's own.
-        assert!(matches!(p.store.get(Some(B), &url(2, 1)), Kept::Nothing));
+        assert!(matches!(p.store.get(Some(A), &url(2, 2), Size::Face), Kept::Older(_)));
+        // The very same picture of B is the same file; another of theirs never shows A's.
+        assert!(matches!(p.store.get(Some(B), &url(2, 1), Size::Face), Kept::Exact(_)));
+        assert!(matches!(p.store.get(Some(B), &url(2, 2), Size::Face), Kept::Nothing));
     }
 
+    /// A picture whose small copy went (or is of another version's making) is made again from what VRChat sent; one kept
+    /// before 0.3.10 moves here: neither is asked again.
     #[test]
-    fn past_the_cap_the_pictures_used_longest_ago_go() {
+    fn what_is_on_this_computer_is_not_asked_again() {
         let temp = Temp::new();
-        let store = Store::at(temp.0.clone(), CAP_BYTES);
-        let noise = |seed: u32| image::RgbaImage::from_fn(SIDE, SIDE, |x, y| {
-            let v = (x * 7919 + y * 104_729 + seed * 13).wrapping_mul(2_654_435_761);
-            image::Rgba([v as u8, (v >> 8) as u8, (v >> 16) as u8, 255])
-        });
-        let users: Vec<String> = (0..8).map(|n| format!("usr_00000000-0000-4000-8000-{n:012}")).collect();
-        for (n, user) in users.iter().enumerate() {
-            assert!(store.put(Some(user), &url(n as u32 + 1, 1), &noise(n as u32)));
-            let file = store.file(Some(user), &picture_key(&url(n as u32 + 1, 1)));
-            // Used n hours ago, newest last.
-            std::fs::File::options().write(true).open(&file).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600 * (8 - n as u64))).unwrap();
+        let mut store = Store::at(temp.0.join("new"), CAP_BYTES);
+        let before = temp.0.join("profile-pictures");
+        store.before = Some(before.clone());
+        let p = Profiles::new(Arc::new(store), none());
+        let never = || -> (Fetch, Reply) { (Arc::new(|_: &str| panic!("not asked")), Box::new(|_: Option<ColorImage>| panic!("shown at once"))) };
+        // As it was kept before: one file a person, and one for nobody's.
+        std::fs::create_dir_all(&before).unwrap();
+        for (name, n, rgb) in [(format!("u-{A}.pic"), 80, [200, 10, 10]), (format!("k-{}.pic", digest(&picture_key(&url(81, 1)))), 81, [10, 10, 200])] {
+            let key = picture_key(&url(n, 1));
+            let png = picture(32, 32, rgb, image::ImageFormat::Png);
+            std::fs::write(before.join(name), [&MAGIC[..], &(key.len() as u16).to_le_bytes(), key.as_bytes(), &png].concat()).unwrap();
         }
-        let one = std::fs::metadata(store.file(Some(&users[0]), &picture_key(&url(1, 1)))).unwrap().len();
-        let capped = Store::at(temp.0.clone(), one * 5);
-        capped.evict();
-        let kept: Vec<bool> = users.iter().enumerate().map(|(n, u)| capped.has(Some(u), &url(n as u32 + 1, 1))).collect();
-        assert_eq!(kept.iter().filter(|k| **k).count(), 3, "down to three quarters of the cap: {kept:?}");
-        assert_eq!(kept, [false, false, false, false, false, true, true, true], "the oldest went");
-        // A kept picture shown is used now: it stays when the others go.
-        let reread = Store::at(temp.0.clone(), one * 2);
-        assert!(matches!(reread.get(Some(&users[5]), &url(6, 1)), Kept::Exact(_)));
-        reread.evict();
-        assert!(reread.has(Some(&users[5]), &url(6, 1)) && !reread.has(Some(&users[6]), &url(7, 1)));
+        for (n, user, rgb) in [(80, Some(A), [200, 10, 10]), (81, None, [10, 10, 200])] {
+            let (via, reply) = never();
+            assert!(near(colour_of(&p.load(&url(n, 1), user, Some(via), |_| panic!("the same picture"), reply).expect("as it was kept")), rgb));
+            assert!(matches!(p.now(&url(n, 1), user, Size::Face), Kept::Exact(_)), "kept here from then on, in the very frame");
+        }
+        assert_eq!(std::fs::read_dir(&before).unwrap().count(), 0, "moved");
+        // From what was sent.
+        let sent = picture(512, 256, [90, 200, 40], image::ImageFormat::Png);
+        assert!(p.store.put(None, &url(82, 1), Size::Face, &small(&sent).unwrap(), Some(&sent)));
+        let copies = || -> Vec<PathBuf> { walk(&temp.0.join("new")).into_iter().filter(|f| f.extension().is_some_and(|e| e == "s")).collect() };
+        let there = copies().len();
+        for f in copies() {
+            std::fs::write(f, b"damaged").unwrap();
+        }
+        let (via, reply) = never();
+        assert!(near(colour_of(&p.load(&url(82, 1), None, Some(via), |_| {}, reply).expect("made again")), [90, 200, 40]));
+        assert_eq!(there, 3);
+        // A wide copy is made of it too; never of a face's bytes.
+        assert!(p.store.again(None, &url(82, 1), Size::Wide).is_some_and(|i| i.width() == 512));
+        let face = picture(128, 128, [1, 2, 3], image::ImageFormat::Png);
+        p.store.put(None, &url(83, 1), Size::Face, &small(&face).unwrap(), Some(&face));
+        assert!(p.store.again(None, &url(83, 1), Size::Wide).is_none());
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir).map(|e| e.flatten().flat_map(|e| if e.path().is_dir() { walk(&e.path()) } else { vec![e.path()] }).collect()).unwrap_or_default()
     }
 
     /// A fake VRCX folder: `ImageCache/<file id>/<version>.png`, settled an hour ago.
@@ -823,7 +787,7 @@ mod tests {
         let shown = p.load(&url(3, 2), Some(A), Some(never), |_| {}, Box::new(|_: Option<ColorImage>| panic!("shown at once"))).expect("from VRCX");
         assert_eq!(shown.size, [SIDE as usize, 96]);
         assert!(near(colour_of(&shown), [250, 180, 20]));
-        assert!(p.store.has(Some(A), &url(3, 2)), "kept in ours");
+        assert!(p.store.has(&url(3, 2), Size::Face), "kept in ours");
         assert_eq!(std::fs::read(images.join("file_00000000-0000-4000-8000-000000000003").join("2.png")).unwrap(), before);
         assert_eq!(std::fs::read_dir(&images).unwrap().count(), 1, "nothing added to VRCX's folder");
     }
@@ -954,47 +918,16 @@ mod tests {
         let temp = Temp::new();
         let images = fake_vrcx(&temp.0, 40, 1, &picture(64, 64, [200, 200, 0], image::ImageFormat::Png));
         let p = profiles(&temp.0, OtherCaches::at(Some(images), None));
-        assert!(p.store.put(Some(B), &url(41, 1), &image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 1, 1, 255]))));
+        assert!(p.store.put(Some(B), &url(41, 1), Size::Face, &image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 1, 1, 255])), None));
         let (via, calls) = counting(Some(picture(16, 16, [9, 9, 9], image::ImageFormat::Png)));
         p.warm(vec![(url(40, 1), Some(A.to_string())), (url(41, 1), Some(B.to_string())), (url(42, 1), None)], via);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !(p.store.has(None, &url(42, 1)) && p.store.has(Some(A), &url(40, 1))) && Instant::now() < deadline {
+        while !(p.store.has(&url(42, 1), Size::Face) && p.store.has(&url(40, 1), Size::Face)) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(p.store.has(Some(A), &url(40, 1)), "from VRCX");
-        assert!(p.store.has(None, &url(42, 1)), "asked in the background");
+        assert!(p.store.has(&url(40, 1), Size::Face), "from VRCX");
+        assert!(p.store.has(&url(42, 1), Size::Face), "asked in the background");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "only the one nobody kept");
-    }
-
-    /// A made-up see-through picture: a ring of colour around a clear middle and clear corners (a decoration's shape).
-    fn see_through(rgb: [u8; 3]) -> image::RgbaImage {
-        image::RgbaImage::from_fn(32, 32, |x, y| {
-            let d = ((x as f32 - 15.5).powi(2) + (y as f32 - 15.5).powi(2)).sqrt();
-            if (11.0..15.0).contains(&d) { image::Rgba([rgb[0], rgb[1], rgb[2], 255]) } else { image::Rgba([0, 0, 0, 0]) }
-        })
-    }
-
-    #[test]
-    fn decoration_previews_kept_before_are_swept_once_and_peoples_pictures_stay() {
-        let temp = Temp::new();
-        let store = Store::at(temp.0.join("profile-pictures"), CAP_BYTES);
-        let opaque = image::RgbaImage::from_pixel(8, 8, image::Rgba([40, 90, 160, 255]));
-        // Before REQUEST20: a frame's shop preview and a nameplate's, kept for nobody; a person's see-through VRC+ icon;
-        // a person's photo kept for nobody (Sharing's chips, a boop's other picture).
-        assert!(store.put(None, &url(50, 1), &see_through([0, 220, 120])));
-        assert!(store.put(None, &url(51, 1), &see_through([200, 40, 200])));
-        assert!(store.put(Some(A), &url(52, 1), &see_through([250, 250, 250])));
-        assert!(store.put(None, &url(53, 1), &opaque));
-        assert_eq!(store.sweep_previews(), 2);
-        assert!(!store.has(None, &url(50, 1)) && !store.has(None, &url(51, 1)), "the previews went");
-        assert!(store.has(Some(A), &url(52, 1)), "a person's picture is never swept, see-through or not");
-        assert!(store.has(None, &url(53, 1)), "a photo of nobody stays");
-        // Once: a decoration kept from now on (its own asset, see-through) stays.
-        assert!(store.put(None, &url(54, 1), &see_through([0, 0, 255])));
-        assert_eq!(store.sweep_previews(), 0);
-        assert!(store.has(None, &url(54, 1)));
-        // An empty or missing folder: nothing to do, and no error.
-        assert_eq!(Store::at(temp.0.join("never-made"), CAP_BYTES).sweep_previews(), 0);
     }
 
     #[test]
@@ -1022,12 +955,12 @@ mod tests {
         p.warm(vec![(url(61, 1), Some(B.to_string()))], via.clone());
         let image = got.recv_timeout(Duration::from_secs(3)).expect("asked again at once").expect("the picture");
         assert!(near(colour_of(&image), [30, 160, 90]));
-        assert!(p.store.has(Some(A), &url(60, 1)));
+        assert!(p.store.has(&url(60, 1), Size::Face));
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !p.store.has(Some(B), &url(61, 1)) && Instant::now() < deadline {
+        while !p.store.has(&url(61, 1), Size::Face) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(p.store.has(Some(B), &url(61, 1)), "the background goes on too");
+        assert!(p.store.has(&url(61, 1), Size::Face), "the background goes on too");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 

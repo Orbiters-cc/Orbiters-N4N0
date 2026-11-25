@@ -1,0 +1,5 @@
+# REQUEST28 (stream r28-vrchat-cache, 2026-11-25): what was last read from VRChat kept and shown at once (vrchat_store,
+# controller/vrchat_kept.rs, worlds/at_once.rs). Kept here so that areas translated side by side never edit the same file.
+crates/orbiters-desktop/src/worlds/at_once.rs
+crates/orbiters-desktop/src/controller/vrchat_kept.rs
+crates/orbiters-core/src/vrchat_store.rs

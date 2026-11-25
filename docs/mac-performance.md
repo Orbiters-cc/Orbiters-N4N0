@@ -273,6 +273,17 @@ VRChat gains is not known until it is started with and without.
 2. The CPU power spent while the game plays (the ring's and the engine's spinning waits, N4N0's own window), since it is GPU clock.
 3. The Low Power Mode session above, before any change to `wsd`.
 
+## obelisk-cli 0.1.14: the crashes under heavy loading (2026-11-25)
+
+One engine file changes, `fexdarwin-run` (the emulator; every other engine file is 0.1.8's to 0.1.13's, byte for byte). Before it, a thread that was
+paused and resumed, as the game's garbage collector does to every thread, could run one instruction twice or lose part of its processor state: under
+heavy loading on many threads that crashed VRChat. It now pauses a thread only at exact instruction boundaries. N4N0 starts VRChat with nothing older
+(`obelisk::LEAST`).
+
+Measured with VRChat on 2026-11-25 on one Mac with that very engine file (put in place of 0.1.13's; no game was started with 0.1.14's build of the
+program itself): 10 cold starts and 25 quick starts and quits without a crash or a hang, and 5 minutes in a public world with 18 players without a
+crash. Before it: 2 crashes in 8 cold starts. No frame rate was measured for it. Not addressed: the rare freeze of the whole process from a late ptrace attach stop.
+
 ## Results: 2026-11-23, 11:28 to 12:12, the first with the screen unlocked (obelisk-cli 0.1.8)
 
 The same Mac (MacBook Air M3), world, avatar and settings as below, the screen **unlocked** and VRChat shown. Files

@@ -286,10 +286,10 @@ How it is one verified game (`controller/bridge_mac.rs`):
   `start_wait` with `retry_after_s`, and the instance already made is **kept** (`Run::kept`, 15 minutes) with any failure before
   the launch (a `close_timeout`, a refused start): the next `go_to_world` to the same world and region resumes it instead of making
   another. Each start has a launch id; its outcome is kept by that id for whoever made it. The bridge starts nothing with an
-  obelisk-cli older than 0.1.13 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
+  obelisk-cli older than 0.1.14 (`obelisk::LEAST`; it needs the record's `shown`, below, from 0.1.5, a game that starts on one
   complete set of engine files from 0.1.9, from 0.1.10 no file of them replaced while anything of the engine runs and `steam
   play --steam-id`, from 0.1.11 one lock for the whole library and a repair compared with its archive, from 0.1.12 a lock file that cannot be
-  written held like any other and a release that lost its Wine named, and from 0.1.13 `--no-saved-arguments`); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
+  written held like any other and a release that lost its Wine named, from 0.1.13 `--no-saved-arguments`, and from 0.1.14 the fix of the crashes under heavy loading); Home's Play neither, after trying to get the newest. A reservation is the computer's, not the process's: the
   slot is a lock beside the gate's file, held from before a start is decided (the gate read again from its file, added to what this
   run knows) until how its game ended is known and kept there, so that two N4N0s (a cold start of both) never both reserve, neither
   creates an instance for a start the other makes, and neither decides on a gate the other has since closed. A launch whose program

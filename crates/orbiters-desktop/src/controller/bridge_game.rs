@@ -425,6 +425,11 @@ impl crate::bridge::projects::Host for RealProjectsHost {
     }
 }
 
+/// Who `vrchat_identity` says is signed in, and on which server, as the keeper knows them.
+fn identity_of((api, token): &(orbiters_core::account::Api, String)) -> String {
+    format!("{}|{token}", api.url(""))
+}
+
 /// What the keeper asks of the controller.
 struct RealFlag {
     ctl: Weak<Controller>,
@@ -433,12 +438,12 @@ struct RealFlag {
 impl Flag for RealFlag {
     fn identity(&self) -> Option<String> {
         let ctl = self.ctl.upgrade()?;
-        ctl.vrchat_identity().map(|(api, token)| format!("{}|{token}", api.url("")))
+        ctl.vrchat_identity().map(|one| identity_of(&one))
     }
 
-    fn ask(&self) -> anyhow::Result<bool> {
+    fn ask(&self, identity: &str) -> anyhow::Result<bool> {
         let ctl = self.ctl.upgrade().ok_or_else(|| anyhow::anyhow!("the app is closing"))?; // i18n: not shown (the keeper reads only whether it failed: features.rs Grant::answered)
-        let (api, token) = ctl.vrchat_identity().ok_or_else(|| anyhow::anyhow!("signed out"))?; // i18n: not shown (the keeper reads only whether it failed: features.rs Grant::answered)
+        let (api, token) = ctl.vrchat_identity().filter(|one| identity_of(one) == identity).ok_or_else(|| anyhow::anyhow!("signed out"))?; // i18n: not shown (the keeper reads only whether it failed: features.rs Grant::answered)
         api.member_feature(&token, orbiters_core::features::VRCHAT_BRIDGE)
     }
 

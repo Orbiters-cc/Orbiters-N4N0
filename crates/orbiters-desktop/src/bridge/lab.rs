@@ -1107,7 +1107,7 @@ impl super::keeper::Flag for LabFlag {
         self.signed_in.load(Ordering::Relaxed).then(|| self.api.url(""))
     }
 
-    fn ask(&self) -> anyhow::Result<bool> {
+    fn ask(&self, _identity: &str) -> anyhow::Result<bool> {
         self.api.member_feature("orbit-lab", orbiters_core::features::VRCHAT_BRIDGE)
     }
 

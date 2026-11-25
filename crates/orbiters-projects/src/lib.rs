@@ -227,14 +227,27 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
     c
 }
 
+/// Whether Unity has the project at `path` open, asked by reading only: never through the write guard, wherever the project is.
 pub fn unity_open(path: &Path) -> bool {
     let lock = path.join("Temp/UnityLockfile");
     #[cfg(not(unix))]
-    return lock.exists() && disk::open(std::fs::OpenOptions::new().write(true), lock).is_err();
+    return lock_held(&lock);
     // Unity's lock file is no exclusive open here: anyone can open it, and it stays behind after a crash. What tells is
     // a lock held on it, or an editor whose command line names the project.
     #[cfg(unix)]
     return lock_held(&lock) || editor::of(&editor::running(), path, false).is_some();
+}
+
+/// Whether another process has `file` open to write, or to itself alone: a read that shares the file with no writer meets it. A read
+/// refused for another reason (no right to the file) says nothing of the kind.
+#[cfg(windows)]
+fn lock_held(file: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const SHARE_READ_AND_DELETE: u32 = 1 | 4;
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+    let opened = std::fs::OpenOptions::new().read(true).share_mode(SHARE_READ_AND_DELETE).open(file);
+    opened.is_err_and(|e| matches!(e.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)))
 }
 
 /// Whether a process holds a lock on `file`. `F_GETLK` takes none itself, so asking cannot get in the way of Unity
@@ -649,6 +662,43 @@ mod open_tests {
         let args = |c: std::process::Command| (c.get_program().to_os_string(), c.get_args().map(|a| a.to_os_string()).collect::<Vec<_>>());
         assert_eq!(args(reveal_command(temp.path())), ("/usr/bin/open".into(), vec![temp.path().as_os_str().to_os_string()]));
         assert_eq!(args(reveal_command(&file)), ("/usr/bin/open".into(), vec!["-R".into(), file.as_os_str().to_os_string()]));
+    }
+
+    /// Whether Unity is open is only read: a project in Creator Companion's folder, or a lock file there is no right to, is not busy.
+    #[cfg(windows)]
+    #[test]
+    fn a_lock_file_left_behind_is_not_unity_wherever_the_project_is() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("VCC");
+        disk::companion(&root);
+        for project in [temp.path().join("Project"), root.join("Templates/Mine")] {
+            let lock = project.join("Temp/UnityLockfile");
+            std::fs::create_dir_all(project.join("Temp")).unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "no lock file");
+            std::fs::write(&lock, "").unwrap();
+            let before = std::fs::metadata(&lock).unwrap().modified().unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: left behind", project.display());
+            for share in [0, 1, 3, 7] {
+                let held = std::fs::OpenOptions::new().write(true).share_mode(share).open(&lock).unwrap();
+                assert!(unity_open(&project) && unity6::gate::unity_holds(&project), "{}: held, sharing {share}", project.display());
+                drop(held);
+            }
+            // Read-only, and then nobody's to read.
+            let mut rights = std::fs::metadata(&lock).unwrap().permissions();
+            rights.set_readonly(true);
+            std::fs::set_permissions(&lock, rights.clone()).unwrap();
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: read-only", project.display());
+            #[allow(clippy::permissions_set_readonly_false)]
+            rights.set_readonly(false);
+            std::fs::set_permissions(&lock, rights).unwrap();
+            let icacls = |what: &str| hidden_command("icacls").arg(&lock).args([what, "*S-1-1-0:(R,W)"]).output().unwrap();
+            assert!(icacls("/deny").status.success());
+            assert!(std::fs::File::open(&lock).is_err(), "the fixture");
+            assert!(!unity_open(&project) && !unity6::gate::unity_holds(&project), "{}: no right to it", project.display());
+            assert!(hidden_command("icacls").arg(&lock).args(["/remove:d", "*S-1-1-0"]).output().unwrap().status.success());
+            assert_eq!(std::fs::metadata(&lock).unwrap().modified().unwrap(), before);
+        }
     }
 
     #[cfg(unix)]

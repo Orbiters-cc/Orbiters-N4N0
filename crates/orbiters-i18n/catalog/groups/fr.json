@@ -345,5 +345,8 @@
   "Dance": "Danse",
   "Gaming": "Jeux",
   "Wellness": "Bien-être",
-  "Other": "Autre"
+  "Other": "Autre",
+  "VRChat refused this change of the member's roles: nothing changed.": "VRChat a refusé ce changement des rôles du membre : rien n’a changé.",
+  "VRChat's answer: “{words}” (error {status})": "Réponse de VRChat : « {words} » (erreur {status})",
+  "VRChat refused it without saying why (error {status}).": "VRChat l’a refusé sans dire pourquoi (erreur {status})."
 }

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 mod avatars;
 mod groups;
 mod social;
-pub use groups::{art_body, EVENTS_PAGE as GROUP_EVENTS_PAGE, file_md5 as group_file_md5, post_create_body, role_create_body, role_update_body, Failure as GroupFailure, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
+pub use groups::{art_body, EVENTS_PAGE as GROUP_EVENTS_PAGE, file_md5 as group_file_md5, post_create_body, role_create_body, role_update_body, Failure as GroupFailure, Refusal as GroupRefusal, FileDetail as GroupFile, Inventory as GroupInventory, Members, Posts, PAGE as GROUP_PAGE, UPLOAD_MAX as GROUP_UPLOAD_MAX};
 pub use social::{boop_body, own_profile_body, own_status_body};
 
 const BASE: &str = "https://api.vrchat.cloud/api/1";
@@ -863,6 +863,8 @@ pub struct Client {
     recheck_delay: Duration,
     /// Asking again after a 401 that the look said was not the session's end: a second one is not looked into again.
     retrying: bool,
+    /// What VRChat said when it refused the last group call (none: it did not refuse it).
+    group_refusal: Option<groups::Refusal>,
 }
 impl Client {
     pub fn new(allowed: Arc<Gate>) -> Self {
@@ -899,6 +901,7 @@ impl Client {
             ended: None,
             recheck_delay: Duration::from_secs(2),
             retrying: false,
+            group_refusal: None,
         }
     }
     pub fn operation(&self, deadline: Instant) -> Operation { self.allowed.operation(deadline) }
@@ -1047,6 +1050,7 @@ impl Client {
             ended: self.ended.take(),
             recheck_delay: self.recheck_delay,
             retrying: false,
+            group_refusal: None,
         };
         next.set_user(user);
         next

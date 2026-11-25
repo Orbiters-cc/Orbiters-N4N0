@@ -33,8 +33,8 @@ use super::Controller;
 pub use super::groups_ledger::{Answer, By, Closing, Entry, Evidence, Key, Kind, Ledger, Not, State, Stop, Target, Warning};
 use super::groups_ledger::{known_id, FORMAT, SETTLES_AFTER_MS};
 use orbiters_core::groups::{self as g, Action, Actor, ArtSlot, Authority, Beside, Catalogue, FileTag, Group, GroupCard, InventoryFile, Member, Membership, Missing, Part, PermissionInfo, Permit, Post, PostDraft, Role, RoleChange, RoleDraft, RoleEdit, RoleField, Why};
-use orbiters_core::group_events::{Events, Month};
-use orbiters_core::vrchat_api::{Client, GroupFailure, GroupFile, GroupInventory, Held, Leave, Members, Posts};
+use orbiters_core::group_events::{CalendarEvent, Events, Month, Told, EVENTS_KEPT};
+use orbiters_core::vrchat_api::{Client, GroupFailure, GroupRefusal, GroupFile, GroupInventory, Held, Leave, Members, Posts};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,6 +89,9 @@ pub enum Request {
     Posts { group: String, offset: usize },
     /// A page of a group's calendar, whole or a month of it (read only).
     Events { group: String, month: Option<Month>, offset: usize },
+    /// A group's calendar as the window has it once looked at whole, and what Orbiters says of it, to show at the next start:
+    /// nothing is asked of VRChat.
+    KeepEvents { group: String, events: Vec<CalendarEvent>, told: Box<Told> },
     /// A page of the account's own pictures.
     Inventory { tag: FileTag, offset: usize },
     /// A picture of the page (a member's, a banner), in memory only.
@@ -522,7 +525,8 @@ pub enum Reply {
     Inventory(GroupInventory),
     Picture(#[serde(with = "super::vrchat_login::bytes_b64")] Vec<u8>),
     Prepared(Box<Sealed>),
-    Outcome { op: String, outcome: Outcome },
+    /// `said`: what VRChat itself answered, when it is VRChat that refused.
+    Outcome { op: String, outcome: Outcome, #[serde(default)] said: Option<GroupRefusal> },
     /// This very write may already have been sent: that one.
     MaySent { op: String },
     /// The account's entries, how many records cannot be read that may be its own, and what can be put back from here of
@@ -766,7 +770,7 @@ impl Controller {
             rt.running += 1;
         }
         let _slot = Slot(self);
-        let (turn, asked) = (self.kept_turn(), matches!(request, Request::Discover | Request::Hydrate { .. } | Request::Open { .. } | Request::Members { .. } | Request::Posts { .. }).then(|| request.clone()));
+        let (turn, asked) = (self.kept_turn(), matches!(request, Request::Discover | Request::Hydrate { .. } | Request::Open { .. } | Request::Members { .. } | Request::Posts { .. } | Request::Events { .. } | Request::KeepEvents { .. }).then(|| request.clone()));
         let reply = match request {
             Request::Discover => self.groups_discover(&scope).map(Reply::Discovered),
             Request::Hydrate { ids } => self.groups_hydrate(&scope, ids).map(Reply::Hydrated),
@@ -783,16 +787,17 @@ impl Controller {
             }
             Request::Posts { group, offset } => self.groups_read(&scope, |c| c.group_posts(&group, offset)).map(Reply::Posts),
             Request::Events { group, month, offset } => self.groups_read(&scope, |c| c.group_events(&group, month, offset)).map(Reply::Events),
+            Request::KeepEvents { group, events, told } => if g::is_group_id(&group) && events.len() <= EVENTS_KEPT && told.fits() { Ok(Reply::Cancelled) } else { Err(Failure::TooLarge) },
             Request::Inventory { tag, offset } => self.groups_read(&scope, |c| c.inventory(tag, offset)).map(Reply::Inventory),
             Request::Picture { url } => self
                 .groups_read(&scope, |c| c.image(&url).map_err(|e| if e == orbiters_core::vrchat_api::Error::UnsafeUrl { GroupFailure::NotFound } else { GroupFailure::Unavailable }))
                 .and_then(|bytes| if bytes.len() > PICTURE_MAX { Err(Failure::TooLarge) } else { Ok(Reply::Picture(bytes)) }),
             Request::Prepare { write } => self.groups_prepare(link, &scope, write),
             Request::Commit { op, digest } => {
-                let outcome = self.groups_commit(link, &scope, &op, &digest);
+                let (outcome, said) = self.groups_commit(link, &scope, &op, &digest);
                 // The ledger keeps how it ended; another account is told only that it is not its to know (B3).
-                let outcome = if self.groups_live(&scope) { outcome } else { Outcome::Unknown };
-                return Reply::Outcome { op, outcome };
+                let (outcome, said) = if self.groups_live(&scope) { (outcome, said) } else { (Outcome::Unknown, None) };
+                return Reply::Outcome { op, outcome, said };
             }
             Request::Cancel { op } => {
                 self.groups.lock().unwrap().end_unsent(|i| i.sealed.op == op && i.link == link);
@@ -1290,25 +1295,25 @@ impl Controller {
     }
 
     /// The sealed write `op`, once, as it was shown (`digest`).
-    fn groups_commit(&self, link: u64, scope: &Scope, op: &str, digest: &str) -> Outcome {
+    fn groups_commit(&self, link: u64, scope: &Scope, op: &str, digest: &str) -> (Outcome, Option<GroupRefusal>) {
         let book = self.groups_book();
         let intent = {
             let mut rt = self.groups.lock().unwrap();
             let Some(at) = rt.intents.iter().position(|i| i.sealed.op == op) else {
-                return Outcome::Refused(if rt.used.iter().any(|u| u == op) { Failure::Duplicate } else { Failure::Expired });
+                return (Outcome::Refused(if rt.used.iter().any(|u| u == op) { Failure::Duplicate } else { Failure::Expired }), None);
             };
             // Another window's (or the overlay's) sealed write is not this one's to send.
             if rt.intents[at].link != link || rt.intents[at].scope != *scope {
-                return Outcome::Refused(Failure::Expired);
+                return (Outcome::Refused(Failure::Expired), None);
             }
             // What was shown is not what is sealed: nothing goes, and it is over.
             if rt.intents[at].sealed.digest() != digest {
                 rt.end_unsent(|i| i.sealed.op == op);
-                return Outcome::Refused(Failure::Changed);
+                return (Outcome::Refused(Failure::Changed), None);
             }
             let target = rt.intents[at].sealed.write.target();
             if rt.writing.contains(&target) {
-                return Outcome::Refused(Failure::Busy);
+                return (Outcome::Refused(Failure::Busy), None);
             }
             let intent = rt.intents.remove(at);
             rt.used.push_back(op.to_string());
@@ -1329,7 +1334,7 @@ impl Controller {
             }
         }
         let mut going = Going(self, &book, op.to_string(), intent.sealed.write.target(), false);
-        let (gone, beside) = self.groups_dispatch(scope, &intent);
+        let (gone, beside, said) = self.groups_dispatch(scope, &intent);
         let (outcome, state, by, made) = match gone {
             Gone::Stopped(f) => (Outcome::Refused(f), State::Refused, Some(By::BeforeSending), None),
             Gone::Sent(Ok(done)) => {
@@ -1352,21 +1357,27 @@ impl Controller {
         book.end(op, state, by, made, beside);
         going.4 = true;
         drop_staged(&intent.sealed.write);
-        outcome
+        // VRChat's own words, only with VRChat's own "no".
+        let said = said.filter(|_| matches!(outcome, Outcome::Refused(Failure::Api(GroupFailure::Forbidden | GroupFailure::Invalid | GroupFailure::NotFound))));
+        (outcome, said)
     }
 
     /// Under the client's lock, for this very account: see [`Controller::groups_step`].
-    fn groups_dispatch(&self, scope: &Scope, intent: &Intent) -> (Gone, Beside) {
-        let Ok(user) = scope_user(scope) else { return (Gone::Stopped(Failure::SignedOut), Beside::default()) };
+    fn groups_dispatch(&self, scope: &Scope, intent: &Intent) -> (Gone, Beside, Option<GroupRefusal>) {
+        let Ok(user) = scope_user(scope) else { return (Gone::Stopped(Failure::SignedOut), Beside::default(), None) };
         let source = self.vrchat_source();
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut beside = Beside::default();
+        let mut said = None;
         // The scope is looked at inside, before the request and not after: what was sent is never called "not sent".
         let sent = source.personal_until(&user, || true, deadline, |c| {
             if !self.groups_live(scope) || self.view().vrchat_login.presence() != Presence::SignedIn {
                 return Ok(Gone::Stopped(Failure::AccountChanged));
             }
-            Ok(match self.groups_step(c, scope, &user, intent, &mut beside) {
+            c.take_group_refusal();
+            let step = self.groups_step(c, scope, &user, intent, &mut beside);
+            said = c.take_group_refusal();
+            Ok(match step {
                 Ok(sent) => Gone::Sent(sent),
                 Err(f) => Gone::Stopped(f),
             })
@@ -1377,7 +1388,7 @@ impl Controller {
             Err(orbiters_core::vrchat_api::Error::Disabled) => Gone::Stopped(Failure::AccountChanged),
             Err(_) => Gone::Stopped(Failure::SignedOut),
         };
-        (gone, beside)
+        (gone, beside, said)
     }
 
     /// The send, in this order: the reads that decide it and are not the last; the ledger marked `Dispatched` on the

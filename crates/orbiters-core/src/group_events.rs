@@ -1,12 +1,12 @@
 //! A group's events (REQUEST28): its VRChat calendar as `GET /calendar/{group}` gives it, read only, and which of Orbiters'
 //! events each one is.
 //!
-//! Orbiters keeps the calendar entry it made for an event (`cal_…`, the event's `calendar` delivery) and gives it to no one
-//! but the event's organiser, so the two are told to be the same by it when Orbiters gives it, and otherwise by the group
-//! and the start: the same start, with the same title or the group's own name as the host ([`candidate`]), then, once
+//! Orbiters keeps the calendar entry it made for an event (`cal_…`) and says which of its events each entry is
+//! ([`crate::account::Api::events_of_calendar`]). Against a server from before that, the two are told to be the same by the
+//! group and the start: the same start, with the same title or the group's own name as the host ([`candidate`]), then, once
 //! Orbiters' page of it is read, the very group ([`is_of`]). Never by the start alone.
 
-use crate::community::{Card, Overview};
+use crate::community::{Card, Invites, Overview};
 use crate::groups as g;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
@@ -86,9 +86,65 @@ impl Month {
     pub fn after(self) -> Self {
         if self.month >= 12 { Self { year: self.year + 1, month: 1 } } else { Self { month: self.month + 1, ..self } }
     }
+    /// When it starts (Unix seconds, UTC).
+    fn start(self) -> i64 {
+        let month = time::Month::try_from(self.month.clamp(1, 12)).unwrap_or(time::Month::January);
+        time::Date::from_calendar_date(self.year, month, 1).map_or(0, |d| d.midnight().assume_utc().unix_timestamp())
+    }
     /// The date VRChat is asked the month of: its middle, the same month in every time zone.
     pub fn date(self) -> String {
         format!("{:04}-{:02}-15T12:00:00.000Z", self.year.clamp(2000, 9999), self.month.clamp(1, 12))
+    }
+}
+
+/// Events of a calendar held at most, the latest.
+pub const EVENTS_MAX: usize = 1000;
+
+/// Events kept for the next start, the latest.
+pub const EVENTS_KEPT: usize = 300;
+
+/// Takes a page of a calendar into `list`, soonest first: each event once, as VRChat last gave it. How many are new.
+pub fn merge(list: &mut Vec<CalendarEvent>, page: &Events) -> usize {
+    let mut new = 0;
+    for e in &page.items {
+        match list.iter().position(|x| x.id == e.id) {
+            Some(i) => list[i] = e.clone(),
+            None => {
+                list.push(e.clone());
+                new += 1;
+            }
+        }
+    }
+    list.sort_by(|a, b| (a.start().unwrap_or(i64::MAX), &a.id).cmp(&(b.start().unwrap_or(i64::MAX), &b.id)));
+    let over = list.len().saturating_sub(EVENTS_MAX);
+    list.drain(..over);
+    new
+}
+
+/// Takes out of `list` what `seen` does not have of `month` and the one after, once all that VRChat gives of them was read:
+/// deleted or moved away. Their first and last day are left alone (VRChat's month may be another time zone's), and every other
+/// month is. Whether anything went.
+pub fn prune(list: &mut Vec<CalendarEvent>, month: Month, seen: &std::collections::HashSet<String>) -> bool {
+    let (from, to, before) = (month.start() + 86_400, month.after().after().start() - 86_400, list.len());
+    list.retain(|e| seen.contains(&e.id) || !e.start().is_some_and(|s| s >= from && s < to));
+    list.len() != before
+}
+
+/// What Orbiters says of a group's events, as kept to show at the next start: the cards of those that are its own, and the
+/// pages read of them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Told {
+    pub cards: Vec<Card>,
+    pub pages: Vec<(Overview, Option<Invites>)>,
+}
+
+impl Told {
+    /// How many of each are kept, and how large it is at most (bytes).
+    pub const MAX: usize = 200;
+    const BYTES: usize = 2 << 20;
+    pub fn fits(&self) -> bool {
+        self.cards.len() <= Self::MAX && self.pages.len() <= Self::MAX && serde_json::to_vec(self).is_ok_and(|v| v.len() <= Self::BYTES)
     }
 }
 
@@ -190,6 +246,33 @@ mod tests {
         let january = Month { year: 2027, month: 1 };
         assert_eq!((january.before(), Month { year: 2026, month: 12 }.after()), (Month { year: 2026, month: 12 }, january));
         assert_eq!(january.date(), "2027-01-15T12:00:00.000Z");
+    }
+
+    /// Each event once, as last given, whatever page it came in; what a whole look at two months did not give goes from those
+    /// two alone.
+    #[test]
+    fn pages_are_taken_into_the_list_and_what_is_gone_goes() {
+        let at = |id: &str, start: &str| CalendarEvent { id: id.into(), title: id.into(), starts_at: Some(start.into()), ..Default::default() };
+        let page = |items: Vec<CalendarEvent>| Events { raw: items.len(), items, more: false };
+        let ids = |l: &[CalendarEvent]| l.iter().map(|e| e.id.clone()).collect::<Vec<_>>().join(" ");
+        let mut l = Vec::new();
+        let all = vec![at("d", "2026-12-04T20:00:00Z"), at("b", "2026-11-10T20:00:00Z"), at("a", "2026-10-10T20:00:00Z"), at("c", "2026-11-20T20:00:00Z"), at("e", "2026-12-31T23:30:00Z"), at("f", "2027-01-05T20:00:00Z")];
+        assert_eq!(merge(&mut l, &page(all)), 6);
+        assert_eq!(ids(&l), "a b c d e f", "soonest first");
+        assert_eq!(merge(&mut l, &page(vec![at("b", "2026-11-11T20:00:00Z"), at("g", "2026-11-12T20:00:00Z")])), 1);
+        assert_eq!(merge(&mut l, &page(vec![])), 0);
+        assert_eq!(ids(&l), "a b g c d e f", "nothing goes by a page alone");
+        assert_eq!(l[1].starts_at.as_deref(), Some("2026-11-11T20:00:00Z"), "moved, not twice");
+        let november = Month { year: 2026, month: 11 };
+        let seen = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<std::collections::HashSet<_>>();
+        assert!(prune(&mut l, november, &seen(&["b", "g"])));
+        assert_eq!(ids(&l), "a b g e f", "the last day and the other months left alone");
+        assert!(!prune(&mut l, november, &seen(&["b", "g"])));
+        let many = (0..EVENTS_MAX + 5).map(|i| at(&format!("m{i:05}"), &format!("2027-02-01T{:02}:{:02}:00Z", i / 60 % 24, i % 60))).collect();
+        merge(&mut l, &page(many));
+        assert_eq!(l.len(), EVENTS_MAX, "the latest");
+        assert!(!l.iter().any(|e| e.id == "a"));
+        assert!(Told::default().fits() && !Told { cards: vec![Card::default(); Told::MAX + 1], ..Default::default() }.fits());
     }
 
     #[test]

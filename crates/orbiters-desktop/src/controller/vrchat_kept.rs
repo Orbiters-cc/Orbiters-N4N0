@@ -10,6 +10,7 @@ use super::vrchat_data::Scope;
 use super::vrchat_login::Bell;
 use super::vrchat_scope::{By, Stamp};
 use super::{groups, Controller, Shared};
+use orbiters_core::group_events::{self, CalendarEvent, EVENTS_KEPT};
 use orbiters_core::groups::GroupCard;
 use orbiters_core::launcher::{LauncherState, Possible, Source};
 use orbiters_core::vrchat_store::{self as store, kind, Account, Change, Record, Store, World, ONLY};
@@ -106,6 +107,8 @@ fn source(request: &groups::Request) -> &'static str {
         groups::Request::Discover | groups::Request::Hydrate { .. } => "my groups", // i18n: not shown (a record's words)
         groups::Request::Open { .. } => "a group",                                  // i18n: not shown (a record's words)
         groups::Request::Members { .. } => "a group's members",                     // i18n: not shown (a record's words)
+        groups::Request::Events { .. } => "a group's calendar",                     // i18n: not shown (a record's words)
+        groups::Request::KeepEvents { .. } => "Orbiters' events",                   // i18n: not shown (a record's words)
         _ => "a group's posts",                                                     // i18n: not shown (a record's words)
     }
 }
@@ -251,7 +254,7 @@ impl Controller {
                 let cards: Vec<GroupCard> = cards.iter().map(|c| before.iter().find(|b| b.id == c.id && b.named && !c.named).map_or_else(|| c.clone(), |b| GroupCard { owner: c.owner, permissions: c.permissions.clone(), ..b.clone() })).collect();
                 changes.extend(Change::put(kind::GROUPS, ONLY, at, by, &cards));
                 let ids: Vec<String> = cards.into_iter().map(|c| c.id).collect();
-                for kind in [kind::GROUP, kind::MEMBERS, kind::POSTS, kind::EVENTS] {
+                for kind in [kind::GROUP, kind::MEMBERS, kind::POSTS, kind::EVENTS, kind::TOLD] {
                     changes.push(Change::Only { kind, ids: ids.clone() });
                 }
             }
@@ -267,6 +270,16 @@ impl Controller {
             }
             (Request::Open { group }, Reply::Opened(page)) => changes.extend(Change::put(kind::GROUP, group, at, by, page)),
             (Request::Members { group, query, offset: 0 }, Reply::Members(m)) if query.trim().is_empty() => changes.extend(Change::put(kind::MEMBERS, group, at, by, m)),
+            (Request::Events { group, .. }, Reply::Events(page)) => {
+                let mut list = open.store.get::<Vec<CalendarEvent>>(kind::EVENTS, group).map(|r| r.value).unwrap_or_default();
+                group_events::merge(&mut list, page);
+                list.drain(..list.len().saturating_sub(EVENTS_KEPT));
+                changes.extend(Change::put(kind::EVENTS, group, at, by, &list));
+            }
+            (Request::KeepEvents { group, events, told }, Reply::Cancelled) => {
+                changes.extend(Change::put(kind::EVENTS, group, at, by, events));
+                changes.extend(Change::put(kind::TOLD, group, at, by, told));
+            }
             (Request::Posts { group, offset: 0 }, Reply::Posts(p)) => changes.extend(Change::put(kind::POSTS, group, at, by, p)),
             _ => {}
         }
@@ -527,7 +540,21 @@ mod tests {
         // A search and a later page are not the first one.
         keep(groups::Request::Members { group: card(1, "").id, query: "ada".into(), offset: 0 }, groups::Reply::Members(orbiters_core::vrchat_api::Members { raw: 1, ..Default::default() }));
         keep(groups::Request::Members { group: card(1, "").id, query: String::new(), offset: 50 }, groups::Reply::Members(orbiters_core::vrchat_api::Members { raw: 2, ..Default::default() }));
+        // The calendar: every page of it, merged; what Orbiters says of it.
+        let one = card(1, "").id;
+        let event = |id: &str, at: &str| CalendarEvent { id: id.into(), title: id.into(), starts_at: Some(at.into()), ..Default::default() };
+        let events = |items: Vec<CalendarEvent>, more: bool| groups::Reply::Events(group_events::Events { raw: items.len(), items, more });
+        let month = group_events::Month { year: 2026, month: 11 };
+        keep(groups::Request::Events { group: one.clone(), month: None, offset: 0 }, events(vec![event("cal_a", "2026-11-10T20:00:00Z"), event("cal_b", "2026-12-10T20:00:00Z")], true));
+        keep(groups::Request::Events { group: one.clone(), month: Some(month), offset: 0 }, events(vec![event("cal_c", "2026-11-12T20:00:00Z")], false));
+        let told = group_events::Told { cards: vec![orbiters_core::community::Card { id: "e1".into(), calendar_id: Some("cal_c".into()), ..Default::default() }], pages: vec![] };
         let read = || Store::read(&t.0, &account).unwrap();
+        let kept = || read().get::<Vec<CalendarEvent>>(kind::EVENTS, &one).unwrap().value.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        assert_eq!(kept(), ["cal_a", "cal_c", "cal_b"]);
+        // Once looked at whole: as it is.
+        keep(groups::Request::KeepEvents { group: one.clone(), events: vec![event("cal_c", "2026-11-12T20:00:00Z")], told: Box::new(told.clone()) }, groups::Reply::Cancelled);
+        assert_eq!(kept(), ["cal_c"]);
+        assert_eq!(read().get::<group_events::Told>(kind::TOLD, &one).unwrap().value, told);
         assert_eq!(read().get::<groups::Page>(kind::GROUP, &card(1, "").id).unwrap().value, page);
         assert_eq!(read().get::<orbiters_core::vrchat_api::Members>(kind::MEMBERS, &card(1, "").id).unwrap().value.raw, 7);
         // Read again: a card not named this time keeps its name; a group left goes, its page with it.
@@ -535,5 +562,6 @@ mod tests {
         let cards = read().get::<Vec<GroupCard>>(kind::GROUPS, ONLY).unwrap().value;
         assert_eq!(cards, [card(2, "Two")]);
         assert!(read().get::<groups::Page>(kind::GROUP, &card(1, "").id).is_none());
+        assert!(read().get::<Vec<CalendarEvent>>(kind::EVENTS, &one).is_none() && read().get::<group_events::Told>(kind::TOLD, &one).is_none());
     }
 }

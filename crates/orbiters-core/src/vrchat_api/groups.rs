@@ -8,7 +8,8 @@
 //! What is never sent: the legacy announcement routes (`G/announcement`, whose POST replaces every announcement: B1),
 //! `updateGroupPost` (it carries the audience whole and takes no condition: verify3 Blocker 4), `nameplateId` (B4), and a
 //! null. Every write goes in the [`WRITES`] family, whose lost answers are "outcome unknown" (B2), through
-//! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]): no server text reaches a notice.
+//! the client's pacing and shared 429 back-off. Errors are local codes ([`Failure`]); VRChat's own words of a refusal are kept
+//! beside ([`Refusal`]), for the person it refused to read them (REQUEST28).
 use super::*;
 use crate::group_events::{is_event_id, CalendarEvent, Events, Month};
 use crate::groups::{self as g, ArtSlot, FileTag, Group, GroupCard, InventoryFile, Member, MyMember, PermissionInfo, Post, PostDraft, Role, RoleChange, RoleDraft, RoleField, Visibility};
@@ -24,7 +25,7 @@ pub const EVENTS_PAGE: usize = 100;
 /// A picture uploaded from this computer is this large at most.
 pub const UPLOAD_MAX: usize = 10 * 1024 * 1024;
 
-/// Why a group call did not give what it asked for: local codes, worded by the interface. No server text.
+/// Why a group call did not give what it asked for: local codes, worded by the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
     /// Not signed in to VRChat (or its session ended).
@@ -45,6 +46,25 @@ pub enum Failure {
     Unknown,
     /// VRChat's answer to a read could not be read.
     BadAnswer,
+}
+
+/// What VRChat itself answered when it refused a group call: its words as they are (cleaned as any text of VRChat's), for
+/// the person it refused, and no one else.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    pub status: u16,
+    /// Empty when VRChat gave none.
+    pub words: String,
+}
+
+/// The answers that are VRChat's "no" to this very request.
+const REFUSED: [u16; 16] = [400, 402, 403, 404, 405, 406, 409, 410, 412, 413, 415, 422, 423, 424, 428, 451];
+
+fn refusal_words(body: &[u8]) -> String {
+    let v: Value = serde_json::from_slice(body).unwrap_or_default();
+    let m = v["error"]["message"].as_str().or(v["error"].as_str()).or(v["message"].as_str()).unwrap_or_default().trim();
+    // VRChat puts some of its messages in quotes of their own.
+    g::text(m.strip_prefix('"').and_then(|m| m.strip_suffix('"')).unwrap_or(m), 400)
 }
 
 impl Failure {
@@ -501,15 +521,26 @@ impl Client {
         if write && leave.is_none() {
             return Err(Failure::Disabled);
         }
+        self.group_refusal = None;
         self.authenticated().map_err(|e| Failure::of(e, false))?;
         let family = if write { WRITES } else if path.starts_with("/file") { "files" } else { READS };
-        let r = self.request_with(family, method, format!("{BASE}{path}"), None, body, form, &[400, 403, 404], leave).map_err(|e| Failure::of(e, write))?;
+        let sent = self.request_with(family, method, format!("{BASE}{path}"), None, body, form, &REFUSED, leave);
+        self.group_refusal = match &sent {
+            Ok(r) if REFUSED.contains(&r.status) => Some(Refusal { status: r.status, words: refusal_words(&r.body) }),
+            Err(Error::Refused(status, words)) => Some(Refusal { status: *status, words: g::text(words, 400) }),
+            _ => None,
+        };
+        let r = sent.map_err(|e| Failure::of(e, write))?;
         match r.status {
-            400 => Err(Failure::Invalid),
             403 => Err(Failure::Forbidden),
             404 => Err(Failure::NotFound),
+            s if REFUSED.contains(&s) => Err(Failure::Invalid),
             _ => Ok(r.body),
         }
+    }
+    /// What VRChat said when it refused the last call of this module, taken.
+    pub fn take_group_refusal(&mut self) -> Option<Refusal> {
+        self.group_refusal.take()
     }
     fn group_read(&mut self, path: &str) -> GroupResult<Value> {
         let body = self.group_call("GET", path, None, None, None)?;
@@ -576,6 +607,7 @@ impl Client {
         if found.id != group {
             return Err(Failure::BadAnswer);
         }
+        // (What refuses that second look is no refusal of this one.)
         // A role that came in part with the group is read from the roles' own list, once: what is not there either stays
         // as it is, and withholds only what needs it.
         if found.roles.as_ref().is_some_and(|r| r.iter().any(|r| !r.whole)) {
@@ -586,6 +618,7 @@ impl Client {
                     }
                 }
             }
+            self.group_refusal = None;
         }
         Ok(found)
     }
@@ -959,6 +992,30 @@ mod tests {
         assert_eq!(c.group_roles(G), Err(Failure::Forbidden));
         assert_eq!(c.group_roles(G), Err(Failure::NotFound));
         assert_eq!(c.create_role(G, &RoleDraft::default(), go()), Err(Failure::Invalid));
+    }
+
+    /// REQUEST28: what VRChat says when it refuses is kept word for word beside the code, for that call alone.
+    #[test]
+    fn a_refusal_keeps_vrchats_own_words() {
+        let (mut c, _) = mock_signed_in(vec![
+            raw_response(403, &json!({"error": {"message": "\"You must have 2FA enabled to be given this role.\"", "status_code": 403}}).to_string()),
+            raw_response(409, &json!({"error": "Already\u{202e} there", "status_code": 409}).to_string()),
+            raw_response(400, "<html>"),
+            raw_response(200, &json!(["grol_a"]).to_string()),
+            raw_response(502, &json!({"error": {"message": "down"}}).to_string()),
+        ]);
+        let mut give = || (c.set_member_role(G, U, "grol_a", true, go()), c.take_group_refusal());
+        let said = |status: u16, words: &str| Some(Refusal { status, words: words.into() });
+        assert_eq!(give(), (Err(Failure::Forbidden), said(403, "You must have 2FA enabled to be given this role.")));
+        assert_eq!(give(), (Err(Failure::Invalid), said(409, "Already there")));
+        assert_eq!(give(), (Err(Failure::Invalid), said(400, "")), "refused, and no words");
+        assert_eq!(give(), (Ok(vec!["grol_a".to_string()]), None), "done: nothing of the one before");
+        assert_eq!(give(), (Err(Failure::Unknown), None), "an answer that is not VRChat's no");
+        // A part read beside a group that was refused is no refusal of the group.
+        let mut part = role_json("grol_b", "Staff", 1, &[]);
+        part.as_object_mut().unwrap().remove("permissions");
+        let (mut c, _) = mock_signed_in(vec![raw_response(200, &json!({"id": G, "name": "x", "roles": [part]}).to_string()), raw_response(403, &json!({"error": {"message": "no"}}).to_string())]);
+        assert!(c.group(G).is_ok() && c.take_group_refusal().is_none());
     }
 
     /// B2: a write's 5xx, unreadable answer or lost connection is "unknown", a read's is not.

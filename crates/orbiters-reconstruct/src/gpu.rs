@@ -483,6 +483,17 @@ pub struct MemorySeen {
     pub heap: Option<u64>,
 }
 
+impl MemorySeen {
+    /// What the card has free, every process counted: the process's headroom, and no more than the heap less what Windows
+    /// says the adapter holds. Where Windows does not say, the headroom alone.
+    pub fn card_free(&self) -> Option<u64> {
+        match (self.headroom, self.heap, self.adapter_used) {
+            (Some(headroom), Some(heap), Some(used)) => Some(headroom.min(heap.saturating_sub(used))),
+            (headroom, ..) => headroom,
+        }
+    }
+}
+
 /// Windows' own count of an adapter's dedicated memory in use, every process's (what Task Manager shows).
 #[cfg(windows)]
 pub mod adapter_memory {
@@ -555,6 +566,19 @@ pub mod adapter_memory {
             assert_eq!(matching(&twice, luid), None, "ambiguous: unknown");
             // Windows' counters answer on this machine without a device (no adapter matches a made-up LUID).
             assert_eq!(dedicated_used([0xee; 8]), None);
+        }
+
+        /// REC-3: 14.9 GB of process headroom on a card with 6.9 GB free (RECONSTRUCT-17) is 6.9 GB; without Windows' count,
+        /// or a heap to take it from, the headroom is all there is to go by.
+        #[test]
+        fn what_the_game_holds_is_not_free() {
+            use super::super::MemorySeen;
+            let seen = MemorySeen { headroom: Some(14_900), adapter_used: Some(9_100), heap: Some(16_000) };
+            assert_eq!(seen.card_free(), Some(6_900));
+            assert_eq!(MemorySeen { headroom: Some(3_000), ..seen }.card_free(), Some(3_000));
+            assert_eq!(MemorySeen { adapter_used: Some(17_000), ..seen }.card_free(), Some(0));
+            assert_eq!(MemorySeen { adapter_used: None, ..seen }.card_free(), Some(14_900));
+            assert_eq!(MemorySeen { headroom: None, ..seen }.card_free(), None);
         }
     }
 }
@@ -1099,12 +1123,26 @@ impl Gpu {
     /// process's alone, as the extension defines it, and whether the budget shrinks for what other programs hold is the
     /// driver's business: on NVIDIA 616.92 it did not (RECONSTRUCT-17, 14.9 GB "free" on a card with 6.9 GB free). So
     /// this is not the card's free memory; what the whole adapter holds is recorded beside it in the run's report
-    /// ([`Gpu::memory_seen`]), and decisions still take this figure until a run compares the two.
+    /// ([`Gpu::memory_seen`]). What a run must have (its budget) still takes this figure until a run compares the two; what
+    /// it can do without (the keyframes) takes [`Gpu::card_free`].
     #[cfg(not(target_vendor = "apple"))]
     pub fn free_memory(&self) -> Option<u64> {
         let free = self.process_headroom();
         let _ = self.memory_seen.get_or_init(|| self.memory_now(free));
         free
+    }
+
+    /// Graphics memory free on this device's adapter now, what the game and every other program hold counted
+    /// ([`MemorySeen::card_free`]); on a Mac, [`Gpu::free_memory`].
+    pub fn card_free(&self) -> Option<u64> {
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            self.memory_now(self.process_headroom()).card_free()
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            self.free_memory()
+        }
     }
 
     /// What graphics memory looked like when the run first asked [`Gpu::free_memory`], `None` before it did.
@@ -2700,6 +2738,14 @@ impl Gpu {
             .par_iter()
             .map(|img| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("keyframe"), contents: bytemuck::cast_slice(img), usage: wgpu::BufferUsages::STORAGE }))
             .collect();
+    }
+
+    /// Gives the keyframes' graphics memory back ([`Gpu::set_keyframes`]): the buffers, and the kept bind groups that hold
+    /// them. Steps upload their pixels again.
+    pub fn release_keyframes(&mut self) {
+        self.keyframes = Vec::new();
+        self.resident_target = None;
+        self.forget_binds();
     }
 
     /// The sky map's gradient from this colour step's pixel gradients, then its Adam step (at the splats' step) on the
@@ -4436,6 +4482,43 @@ mod tests {
         assert!(score > 50.0, "a render scored against itself: {score} dB");
         // What it drew whole in the end is no dropped step.
         assert_eq!(gpu.overflows, 0);
+    }
+
+    /// REC-3: the keyframes' memory goes back whole, the bind groups that held it too, and the steps after it are the same.
+    #[test]
+    fn released_keyframes_give_their_memory_back_and_steps_go_on() {
+        let Some(mut gpu) = devices().into_iter().next() else { return };
+        let (g, cam) = scene(2000, 640, 360, 93);
+        gpu.upload(&g);
+        let px = 640 * 360;
+        gpu.set_mask(640, 360, &vec![1.0; px]).expect("mask");
+        let images: Vec<Vec<u32>> = (0..64).map(|k| vec![0xff00_0000 | k * 3; px]).collect();
+        let color = |k: usize| Target::Color { rgba: &images[k], scene_pixels: px as f32, weight: 1.0, ssim: 0.2, robust: 0.0 };
+        gpu.step(&cam, [0.0; 3], color(5), None).expect("step");
+        let uploaded = gpu.read_d_pixel().expect("gradients");
+        let held = |gpu: &Gpu| gpu.device.generate_allocator_report().map(|r| r.total_allocated_bytes);
+        let before = held(&gpu);
+        gpu.set_keyframes(&images.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        for k in 0..64 {
+            gpu.resident_target = Some(k);
+            gpu.step(&cam, [0.0; 3], color(k), None).expect("step");
+        }
+        gpu.resident_target = Some(5);
+        gpu.step(&cam, [0.0; 3], color(5), None).expect("step");
+        assert_eq!(gpu.read_d_pixel().expect("gradients"), uploaded, "a resident keyframe trains as an uploaded one");
+        gpu.wait_readbacks().expect("counts");
+        let with = held(&gpu);
+        gpu.release_keyframes();
+        wait_for_gpu(&gpu.device, "the release").expect("poll");
+        gpu.resident_target = Some(5);
+        gpu.step(&cam, [0.0; 3], color(5), None).expect("step");
+        assert_eq!(gpu.read_d_pixel().expect("gradients"), uploaded, "and so after the release");
+        wait_for_gpu(&gpu.device, "the release").expect("poll");
+        if let (Some(before), Some(with), Some(after)) = (before, with, held(&gpu)) {
+            let keyframes = (64 * px * 4) as u64;
+            assert!(with >= before + keyframes, "{before} then {with} with {keyframes} of keyframes");
+            assert!(after < with - keyframes * 9 / 10, "{with} with the keyframes, {after} after their release");
+        }
     }
 
     /// REC-15: a count whose wait ended without it keeps its slot (its map is still the driver's): the step that needs the

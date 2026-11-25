@@ -173,6 +173,25 @@ fn a_held_root_stays_where_it_is() {
 }
 
 /// What replaced the file or folder made is never removed in its place.
+/// PRJ-2: a copy makes more folders than a Mac app may open files (256): where holding one open keeps nobody from anything, none is.
+#[cfg(unix)]
+#[test]
+fn folders_made_cost_no_open_file() {
+    let open = || std::fs::read_dir("/dev/fd").unwrap().count();
+    let temp = tempfile::tempdir().unwrap();
+    let (_, new, root) = trial(temp.path());
+    let before = open();
+    let made: Vec<_> = (0..600).map(|i| (i.to_string(), root.make_dir(Path::new(&i.to_string())).unwrap())).collect();
+    // (Other tests open files meanwhile.)
+    assert!(open() < before + 200, "{} open files for {} folders", open() - before, made.len());
+    for (name, (id, held)) in made {
+        drop(held);
+        assert!(root.remove(Path::new(&name), id, true).unwrap());
+    }
+    drop(root);
+    assert!(new.remove().unwrap());
+}
+
 #[test]
 fn only_what_was_made_is_removed() {
     let temp = tempfile::tempdir().unwrap();

@@ -457,8 +457,14 @@ pub enum Role {
     Migrated,
 }
 
-/// A folder made during a copy, held while this lives.
-pub struct HeldDir(#[allow(dead_code)] File);
+/// A folder made during a copy, held while this lives (Windows: nobody can rename, move or delete it meanwhile). Elsewhere holding
+/// it open keeps nobody from anything, and a process may only open so many files (256 for a Mac app, and a copy makes thousands of
+/// folders: PRJ-2): nothing is held, each use asks again ([`WriteRoot::inside`]).
+pub struct HeldDir {
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    held: File,
+}
 
 /// A file being made.
 pub struct NewFile {
@@ -554,7 +560,14 @@ impl WriteRoot {
     pub fn make_dir(&self, rel: &Path) -> io::Result<(FileId, HeldDir)> {
         let (parent, name) = split(rel)?;
         let made = self.inside(sys::open_at(&self.dir(parent)?, name, Want::NewDir, false)?, rel)?;
-        Ok((id_of_file(&made)?, HeldDir(made)))
+        let id = id_of_file(&made)?;
+        Ok((
+            id,
+            HeldDir {
+                #[cfg(windows)]
+                held: made,
+            },
+        ))
     }
 
     /// A new file at `rel`: never one that is there.

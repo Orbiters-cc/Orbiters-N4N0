@@ -24,7 +24,7 @@
 #define WIN 1u
 #define BUFFERS 3
 static int sock;
-static uint32_t width, height;
+static uint32_t width, height, stride; /* stride: a row's bytes, as a linear texture of Metal's takes them */
 static uint8_t *pictures[3], *pixels[BUFFERS];
 static int busy[BUFFERS], now_shown = 2, going = 1;
 static uint64_t shown, zero, serial;
@@ -65,7 +65,7 @@ static uint8_t *read_picture(const char *folder, const char *name) {
 }
 
 static void attach(uint32_t i) {
-  size_t size = (size_t)width * height * 4;
+  size_t size = (size_t)stride * height;
   char name[40];
   snprintf(name, sizeof name, "/orbo-%d-%u", getpid(), i);
   int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -74,7 +74,7 @@ static void attach(uint32_t i) {
   if (ftruncate(fd, (off_t)size)) die("ftruncate");
   pixels[i] = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (pixels[i] == MAP_FAILED) die("mmap");
-  struct wsd_buffer_attach a = {i + 1, width, height, width * 4, WSD_FMT_BGRA8, 0, 0, size};
+  struct wsd_buffer_attach a = {i + 1, width, height, stride, WSD_FMT_BGRA8, 0, 0, size};
   say(WSD_BUFFER_ATTACH, &a, sizeof a, fd);
 }
 
@@ -101,7 +101,7 @@ static void each(uint32_t type, const uint8_t *d, uint32_t n) {
   switch (type) {
     case WSD_EV_HELLO: {
       const struct wsd_hello_reply *r = (const void *)d;
-      if (!width) { width = r->display_width_px; height = r->display_height_px; printf("size %u %u\n", width, height); }
+      if (!width) { width = r->display_width_px; height = r->display_height_px; stride = (width * 4 + 255) & ~255u; printf("size %u %u\n", width, height); }
       break;
     }
     case WSD_EV_FOCUS: printf("focus %u\n", ((const struct wsd_window_flag *)d)->value); break;
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
   flag(WSD_RELATIVE_MOUSE, 1);
   fcntl(0, F_SETFL, O_NONBLOCK);
   uint64_t due = now_ns(), said = due;
-  size_t size = (size_t)width * height * 4, got = 0;
+  size_t got = 0;
   for (;;) {
     if (!hear(each)) { printf("gone\n"); return 0; }
     ssize_t n = read(0, line + got, sizeof line - 1 - got);
@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
       due = (t - due > 50000000 ? t : due) + 16666667;
       for (int i = 0; going && i < BUFFERS; i++) {
         if (busy[i]) continue;
-        memcpy(pixels[i], pictures[now_shown], size);
+        for (uint32_t y = 0; y < height; y++) memcpy(pixels[i] + (size_t)y * stride, pictures[now_shown] + (size_t)y * width * 4, width * 4);
         ((uint32_t *)pixels[i])[0] = 0xff000000u | (uint32_t)(serial * 40503u & 0xffffff); /* never twice the same frame */
         busy[i] = 1;
         struct wsd_present p = {WIN, (uint32_t)i + 1, ++serial, now_ns()};

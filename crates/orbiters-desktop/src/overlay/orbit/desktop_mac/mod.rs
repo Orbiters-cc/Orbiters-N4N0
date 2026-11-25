@@ -33,9 +33,9 @@ use game::{Finder, Game, Shot};
 use keyboard::{Keys, Source};
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEventMask, NSEventModifierFlags, NSEventType, NSWorkspace};
-use objc2_foundation::{NSActivityOptions, NSDate, NSDefaultRunLoopMode, NSProcessInfo};
+use objc2_foundation::{NSActivityOptions, NSDate, NSDefaultRunLoopMode, NSNotification, NSProcessInfo};
 use orbiters_i18n::mark;
 use panel::{Arrow, Hold, Layer, PanelWindow};
 use pointing::{Pointing, Turn};
@@ -48,11 +48,17 @@ use std::time::{Duration, Instant};
 const REST: Duration = Duration::from_millis(33);
 /// With the mouse on the parts, a part moving, or a menu looked for.
 const TURN: Duration = Duration::from_millis(8);
-/// At rest the game's window is asked for this often (a key pressed asks at once).
-const WINDOW_EVERY: Duration = Duration::from_millis(250);
-/// How often the windows' order is looked at while another app is in front, and macOS's permission while the game is.
+/// The game's window is asked of macOS this often at rest (a key pressed asks at once), and with parts up or a menu looked for: each time is a message to the window server.
+const WINDOW_EVERY: Duration = Duration::from_secs(1);
+const WINDOW_EVERY_UP: Duration = Duration::from_millis(50);
+/// The app in front is asked for when macOS says another came there, and this often all the same.
+const FRONT_EVERY: Duration = Duration::from_millis(500);
+/// How often the windows' order is looked at while another app is in front, and where ours really are.
 const ORDER_EVERY: Duration = Duration::from_millis(250);
-const ALLOWED_EVERY: Duration = Duration::from_secs(2);
+const PLACES_EVERY: Duration = Duration::from_millis(500);
+/// macOS's permission is asked for at a key that looks, and this often with the game in front.
+const ALLOWED_EVERY: Duration = Duration::from_secs(10);
+const ALLOWED_AT_A_KEY: Duration = Duration::from_secs(1);
 /// How long the engine takes at most to let the pointer go once ours has the keyboard (3 to 7 ms were measured).
 const LETS_GO: Duration = Duration::from_millis(40);
 /// The keyboard macOS did not give ours this long after it was asked for went to another window.
@@ -97,12 +103,21 @@ fn stay_awake() {
 
 /// The app was opened again (from the Finder, the Dock or Spotlight) and macOS told this process of it, which is one of the app's: its window is to show.
 static OPENED: AtomicBool = AtomicBool::new(false);
+/// Another app came in front since this was last asked.
+static FRONT_CHANGED: AtomicBool = AtomicBool::new(true);
 
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "OrbitersOverlayDelegate"]
     struct Delegate;
+
+    impl Delegate {
+        #[unsafe(method(frontChanged:))]
+        fn front_changed(&self, _: &NSNotification) {
+            FRONT_CHANGED.store(true, Ordering::Release);
+        }
+    }
 
     unsafe impl NSObjectProtocol for Delegate {}
 
@@ -178,6 +193,7 @@ struct Windows {
     order: Vec<Zone>,
     layer: Option<Layer>,
     looked: Option<Instant>,
+    placed: Option<Instant>,
     /// Pictures given to windows so far.
     painted: u64,
     /// A part that would have covered the game's whole window, left out.
@@ -228,9 +244,14 @@ impl Windows {
         self.left_out = showing.iter().zip(&may).find(|(_, may)| !**may).map(|((zone, _, _), _)| *zone);
         let showing: Vec<(Zone, [i32; 2], u8)> = showing.into_iter().zip(may).filter(|(_, may)| *may).map(|(s, _)| s).collect();
         let mut came = false;
+        // macOS moves windows as displays change: where each really is, is asked now and then.
+        let ask = self.placed.is_none_or(|t| now.duration_since(t) >= PLACES_EVERY);
+        if ask {
+            self.placed = Some(now);
+        }
         for (zone, spot, alpha) in &showing {
             if let Some(w) = self.list.get_mut(zone) {
-                came |= w.place(game, *spot, *alpha);
+                came |= w.place(game, *spot, *alpha, ask);
             }
         }
         let order: Vec<Zone> = showing.iter().map(|(z, _, _)| *z).collect();
@@ -268,10 +289,13 @@ impl Windows {
 /// The overlay's loop on a Mac, turn by turn ([`run`]; the lab turns it with a keyboard and a game of its own).
 pub struct Desk {
     mtm: MainThreadMarker,
+    /// Kept: AppKit and its notifications hold no delegate.
     _delegate: Retained<Delegate>,
     backend: Ctl,
     source: Box<dyn Source>,
     finder: Finder,
+    in_front: Option<u32>,
+    front_asked: Option<Instant>,
     asked_window: Option<Instant>,
     last: Option<Game>,
     windows: Windows,
@@ -320,6 +344,9 @@ impl Desk {
         // SAFETY: NSObject's init, on a freshly allocated object.
         let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
         app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        let centre = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: the method is this class's own and takes the notification; the delegate lives as long as the process.
+        unsafe { centre.addObserver_selector_name_object(&delegate, sel!(frontChanged:), Some(objc2_app_kit::NSWorkspaceDidActivateApplicationNotification), None) };
         app.finishLaunching();
         let now = Instant::now();
         Self {
@@ -329,6 +356,8 @@ impl Desk {
             backend,
             source,
             finder: Finder::default(),
+            in_front: None,
+            front_asked: None,
             asked_window: None,
             last: None,
             windows: Windows::default(),
@@ -404,9 +433,14 @@ impl Desk {
         out
     }
 
-    /// The app in front.
-    fn front() -> Option<u32> {
-        NSWorkspace::sharedWorkspace().frontmostApplication().and_then(|a| u32::try_from(a.processIdentifier()).ok())
+    /// The app in front. (Whose process it is, macOS is asked over its launch services: not at each turn.)
+    fn front(&mut self, now: Instant) -> Option<u32> {
+        let due = self.front_asked.is_none_or(|t| now.duration_since(t) >= FRONT_EVERY);
+        if FRONT_CHANGED.swap(false, Ordering::AcqRel) || due {
+            self.front_asked = Some(now);
+            self.in_front = NSWorkspace::sharedWorkspace().frontmostApplication().and_then(|a| u32::try_from(a.processIdentifier()).ok());
+        }
+        self.in_front
     }
 
     fn press(&mut self, down: bool, snap: &Snapshot) {
@@ -485,7 +519,8 @@ impl Desk {
         let snap = self.backend.view();
         // What is pressed this turn was pressed on pictures of the member shown before it.
         self.backend.shown(self.settling.turn(snap.n4n0.account_epoch, now), orbiters_n4n0::Surface::Overlay);
-        let front = self.finder.server().is_some_and(|s| Self::front() == Some(s));
+        let in_front = self.front(now);
+        let front = self.finder.server().is_some_and(|s| in_front == Some(s));
         let holding = self.hold.held();
         let keys = if front {
             self.keys.turn(&*self.source, now)
@@ -496,8 +531,8 @@ impl Desk {
         let back = front && !self.was_front;
         self.was_front = front;
         let resting = !self.watcher.wants_frames() && self.panels.is_empty();
-        let due = self.asked_window.is_none_or(|t| now.duration_since(t) >= WINDOW_EVERY);
-        if !resting || due || back || keys.menu.is_some() || keys.unknown {
+        let due = self.asked_window.is_none_or(|t| now.duration_since(t) >= if resting { WINDOW_EVERY } else { WINDOW_EVERY_UP });
+        if due || back || keys.menu.is_some() || keys.unknown {
             self.asked_window = Some(now);
             self.last = self.finder.find(snap.launcher.desktop_game);
         }
@@ -506,7 +541,8 @@ impl Desk {
         let there = found.is_some();
         self.look_due = front && (self.look_due || back || there && !self.was_there);
         self.was_there = there;
-        if front && self.allowed.1.is_none_or(|t| now.duration_since(t) >= ALLOWED_EVERY) {
+        let allowed_every = if keys.menu.is_some() { ALLOWED_AT_A_KEY } else { ALLOWED_EVERY };
+        if front && self.allowed.1.is_none_or(|t| now.duration_since(t) >= allowed_every) {
             let was = self.allowed.0;
             self.allowed = (!self.refused && crate::bridge::mac::screen_recording() != Some(false), Some(now));
             if was != self.allowed.0 {

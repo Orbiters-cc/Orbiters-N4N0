@@ -151,16 +151,19 @@ const APART: Duration = Duration::from_millis(500);
 impl Keys {
     /// A turn with the game in front.
     pub fn turn(&mut self, source: &dyn Source, now: Instant) -> Said {
-        let mut menu = None;
-        for (was, (code, key)) in self.was.iter_mut().zip([(ESC, MenuKey::Esc), (source.r(), MenuKey::R)]) {
-            let down = source.down(code);
-            if down && !*was {
-                menu = menu.or(Some(key));
-            }
-            *was = down;
-        }
         let downs = source.downs();
         let went = downs.wrapping_sub(self.downs.replace(downs).unwrap_or(downs));
+        let mut menu = None;
+        // With no key gone down and neither held, there is nothing to ask of each.
+        if went > 0 || self.was != [false; 2] {
+            for (was, (code, key)) in self.was.iter_mut().zip([(ESC, MenuKey::Esc), (source.r(), MenuKey::R)]) {
+                let down = source.down(code);
+                if down && !*was {
+                    menu = menu.or(Some(key));
+                }
+                *was = down;
+            }
+        }
         let mut unknown = false;
         if went > 0 {
             if (0..128).filter(|k| !MODIFIERS.contains(k)).any(|k| source.down(k)) {

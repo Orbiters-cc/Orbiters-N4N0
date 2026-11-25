@@ -284,6 +284,9 @@ fn filter_of(window: u32, owner: u32) -> Result<Retained<AnyObject>, Trouble> {
 /// A running picture of the window.
 struct Stream {
     stream: Retained<AnyObject>,
+    config: Retained<AnyObject>,
+    /// The pace its frames are asked at.
+    pace: i32,
     _output: Retained<Output>,
     /// macOS ended it.
     ended: Arc<AtomicBool>,
@@ -294,7 +297,8 @@ impl Stream {
         let ended = Arc::new(AtomicBool::new(false));
         let output = Output::alloc().set_ivars(OutputIvars { shared: shared.clone(), answers: answers.clone(), last: Mutex::new(None), ended: ended.clone() });
         // SAFETY: NSObject's init on a freshly allocated object; then ScreenCaptureKit's own classes, methods and argument types.
-        let (stream, output) = unsafe {
+        let pace = pace(ask);
+        let (stream, config, output) = unsafe {
             let output: Retained<Output> = msg_send![super(output), init];
             let config: Retained<AnyObject> = msg_send![class!(SCStreamConfiguration), new];
             let () = msg_send![&config, setWidth: ask.shot.width as usize];
@@ -303,7 +307,7 @@ impl Stream {
             // The game alone: no pointer in it, no shadow round it (the picture is the window's frame, to the pixel).
             let () = msg_send![&config, setShowsCursor: false];
             let () = msg_send![&config, setQueueDepth: 3isize];
-            let () = msg_send![&config, setMinimumFrameInterval: CMTime { value: 1, timescale: 60, flags: 1, epoch: 0 }];
+            let () = msg_send![&config, setMinimumFrameInterval: CMTime { value: 1, timescale: pace, flags: 1, epoch: 0 }];
             let () = msg_send![&config, setColorSpaceName: kCGColorSpaceSRGB];
             for (has, off) in [(objc2::sel!(setIgnoreShadowsSingleWindow:), true), (objc2::sel!(setScalesToFit:), true)] {
                 let can: bool = msg_send![&config, respondsToSelector: has];
@@ -322,7 +326,7 @@ impl Stream {
             if !added {
                 return Err(trouble(error));
             }
-            (stream, output)
+            (stream, config, output)
         };
         let (tx, rx) = mpsc::channel();
         let done = RcBlock::new(move |error: *mut NSError| {
@@ -333,11 +337,37 @@ impl Stream {
         unsafe {
             let () = msg_send![&stream, startCaptureWithCompletionHandler: &*done];
         }
-        let this = Self { stream, _output: output, ended };
+        let this = Self { stream, config, pace, _output: output, ended };
         match rx.recv_timeout(ANSWERS_WITHIN) {
             Ok(Ok(())) => Ok(this),
             Ok(Err(why)) => Err(why),
             Err(_) => Err(Trouble::Failed("macOS did not start the picture".into())), // i18n: not shown (a log's line)
+        }
+    }
+}
+
+/// How many frames a second are worth taking: every one of a game's just after a key, which is when a menu opens or closes, and while one shows what looks every 60 ms need.
+fn pace(ask: &Ask) -> i32 {
+    if ask.every.is_zero() {
+        60
+    } else {
+        20
+    }
+}
+
+impl Stream {
+    /// Its frames at another pace from now on.
+    fn follow(&mut self, ask: &Ask) {
+        let pace = pace(ask);
+        if pace == self.pace {
+            return;
+        }
+        self.pace = pace;
+        let done = RcBlock::new(|_: *mut NSError| {});
+        // SAFETY: ScreenCaptureKit's own classes, methods, block and argument types; a stream that ended only says so.
+        unsafe {
+            let () = msg_send![&self.config, setMinimumFrameInterval: CMTime { value: 1, timescale: pace, flags: 1, epoch: 0 }];
+            let () = msg_send![&self.stream, updateConfiguration: &*self.config, completionHandler: &*done];
         }
     }
 }
@@ -423,9 +453,12 @@ fn run(shared: &Arc<Shared>, answers: &mpsc::Sender<Answer>) {
                     break;
                 }
                 let ended = stream.as_ref().is_some_and(|(_, s)| s.ended.load(Ordering::Acquire));
-                let changed = match (&*asked, &stream) {
+                let changed = match (&*asked, &mut stream) {
                     (None, None) => false,
-                    (Some(a), Some((now, _))) => !same(a, now),
+                    (Some(a), Some((now, running))) if same(a, now) => {
+                        running.follow(a);
+                        false
+                    }
                     _ => true,
                 };
                 if ended || changed {

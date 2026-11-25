@@ -157,6 +157,8 @@ pub struct PanelWindow {
     shown: bool,
     /// Its corner over the game's picture, and its alpha, as last put.
     at: Option<([i32; 2], u8)>,
+    /// The frame it was given.
+    frame: Option<NSRect>,
     catches: bool,
 }
 
@@ -167,7 +169,7 @@ impl PanelWindow {
         let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)));
         view.setWantsLayer(true);
         panel.setContentView(Some(&view));
-        Self { panel, view, px, pixels: vec![0; px[0] as usize * px[1] as usize * 4], stale: false, shown: false, at: None, catches: false }
+        Self { panel, view, px, pixels: vec![0; px[0] as usize * px[1] as usize * 4], stale: false, shown: false, at: None, frame: None, catches: false }
     }
 
     pub fn px(&self) -> [u32; 2] {
@@ -251,20 +253,21 @@ impl PanelWindow {
         self.stale = false;
     }
 
-    /// Puts it at `spot` over the game's picture, with its newest pixels. Says whether it came into view.
-    pub fn place(&mut self, game: &Game, spot: [i32; 2], alpha: u8) -> bool {
+    /// Puts it at `spot` over the game's picture, with its newest pixels (`ask`: macOS is asked where it really is). Says whether it came into view.
+    pub fn place(&mut self, game: &Game, spot: [i32; 2], alpha: u8, ask: bool) -> bool {
         if self.stale {
             self.upload();
         }
         let (w, h) = (f64::from(self.px[0]) / game.scale, f64::from(self.px[1]) / game.scale);
         let (left, top) = game.point(pos2(spot[0] as f32, spot[1] as f32));
-        let (frame, now) = (to_appkit(left, top, w, h), self.panel.frame());
-        // Asked of the window itself: macOS moves windows as displays change.
-        if now.size != frame.size {
+        let frame = to_appkit(left, top, w, h);
+        let was = if ask || !self.shown { Some(self.panel.frame()) } else { self.frame };
+        if was.is_none_or(|was| was.size != frame.size) {
             self.panel.setFrame_display(frame, true);
-        } else if now.origin != frame.origin {
+        } else if was.is_some_and(|was| was.origin != frame.origin) {
             self.panel.setFrameOrigin(frame.origin);
         }
+        self.frame = Some(frame);
         if self.at.is_none_or(|(_, was)| was != alpha) {
             self.panel.setAlphaValue(f64::from(alpha) / 255.0);
         }
@@ -434,7 +437,7 @@ impl Arrow {
         });
         let tip = super::super::desk_shared::arrow::TIP.to_vec2() * (px as f32 / ARROW as f32);
         let spot = at - tip;
-        if window.place(game, [spot.x.round() as i32, spot.y.round() as i32], 255) {
+        if window.place(game, [spot.x.round() as i32, spot.y.round() as i32], 255, false) {
             // Above every part, and not moved in the order while it shows.
             window.panel.setLevel(level + 1);
             window.panel.orderFrontRegardless();

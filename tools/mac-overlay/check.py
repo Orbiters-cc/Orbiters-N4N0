@@ -316,6 +316,8 @@ class Check:
             subprocess.run(["open", str(self.app)])
             front, seen = self.doing(lambda d: d["shown"] and d["keyboard"], 5)
             self.ok("the game back in front: the page has the mouse again", front is not None, str(seen))
+            # (the engine raises its window a moment after it comes in front; ours follow at their next look at it)
+            time.sleep(0.3)
             order = self.answer("order", "order")
             self.ok("and the parts are above its full-screen level again", all(w[1] == 26 for w in order if w[0] == "ours") and any(w[0] == "ours" for w in order), str(order))
 

@@ -219,6 +219,7 @@ impl ReadRoot {
 /// A folder (or file) the original can see: a trial never goes into it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Protected {
+    /// `None`: what a link of it says and that is not there.
     pub id: Option<FileId>,
     pub real: PathBuf,
     /// As a person writes it.
@@ -322,8 +323,12 @@ impl Destination {
         if held.remote() || sys::final_path(&held.dir).is_err() {
             return Err(Refused::NotLocal);
         }
+        // The folder to be made.
+        let new = missing.iter().fold(held.real.clone(), |at, m| at.join(m)).join(name);
         for p in protected {
-            if p.id == Some(held.id) || sys::within(&held.real, &p.real) {
+            // (Where a link leads that is not there: a folder made there, or around it, would be what it leads to.)
+            let nowhere = p.id.is_none() && (sys::within(&new, &p.real) || sys::within(&p.real, &new));
+            if p.id == Some(held.id) || sys::within(&held.real, &p.real) || nowhere {
                 return Err(Refused::Shared(p.shown.clone()));
             }
         }

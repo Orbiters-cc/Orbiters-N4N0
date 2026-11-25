@@ -14,5 +14,6 @@
   "Could not record the package change before making it: nothing was changed": "Não foi possível registrar a mudança de pacotes antes de fazê-la: nada foi alterado",
   "A package change of this project ended halfway (Orbiters closed during it). {problems}": "Uma mudança de pacotes deste projeto parou no meio (o Orbiters fechou durante ela). {problems}",
   "{name} could not be put back from {from} to {to}: {why}": "Não foi possível devolver {name} de {from} para {to}: {why}",
-  "{name} may be the new one: what the project had is kept in {path}. Restore installs the version the project's list has.": "{name} pode ser o novo: o que o projeto tinha fica em {path}. Restaurar instala a versão que está na lista do projeto."
+  "{name} may be the new one: what the project had is kept in {path}. Restore installs the version the project's list has.": "{name} pode ser o novo: o que o projeto tinha fica em {path}. Restaurar instala a versão que está na lista do projeto.",
+  "Links that lead nowhere were left out: {files}": "Links que não levam a lugar nenhum foram deixados de fora: {files}"
 }

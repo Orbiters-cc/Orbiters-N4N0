@@ -482,7 +482,7 @@ pub fn prepare(p: Prepare, cancel: &AtomicBool, progress: &SharedProgress) -> an
 
 /// The progress of a comparison of `total` entries, one step at a time.
 fn comparing(progress: &SharedProgress, total: usize) -> impl Fn(&Path) + '_ {
-    *progress.lock().unwrap() = Progress { copied: 0, total, file: String::new(), phase: mark("Comparing every file with the original").into() };
+    *progress.lock().unwrap() = Progress { copied: 0, total, file: String::new(), phase: mark("Comparing every file with the original").into(), ..Default::default() };
     move |at| {
         let mut p = progress.lock().unwrap();
         p.copied = (p.copied + 1).min(p.total);

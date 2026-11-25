@@ -90,6 +90,14 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
     }
 }
 
+/// What a finished copy says, with the links it left out.
+pub(super) fn with_left_out(said: String, progress: &templates::SharedProgress) -> String {
+    match progress.lock().unwrap().left_out() {
+        Some(left_out) => format!("{said}. {left_out}"),
+        None => said,
+    }
+}
+
 /// For the New dialog's "Copy a project" (PROJECTS-3): the same checks as Duplicate for a copy of `project`, without
 /// Library, named `name` in `location`. `None` once the copy may start; else what is in the way (or that the checks are
 /// still running).
@@ -265,11 +273,12 @@ pub(super) fn footer(ui: &mut Ui, state: &mut State, path: &Path) {
             let path = orbiters_projects::runtime()?.block_on(templates::duplicate(&root, &source, &parent, &name, keep, &cancel, &progress))?;
             // Ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
             let later = if keep.library { vec![] } else { templates::packages_only_in_library(&path) };
-            if later.is_empty() {
-                Ok(Outcome::Added(path, tr!("{name} is ready, in Orbiters' list", name = name)))
+            let said = if later.is_empty() {
+                tr!("{name} is ready, in Orbiters' list", name = name)
             } else {
-                Ok(Outcome::Added(path, tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
-            }
+                tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))
+            };
+            Ok(Outcome::Added(path, with_left_out(said, &progress)))
         });
     }
     if busy {

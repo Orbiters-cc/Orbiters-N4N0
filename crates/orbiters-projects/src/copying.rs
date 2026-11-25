@@ -2,7 +2,7 @@
 //! ([`crate::unity6::gate`]), and taking back exactly what was put in it.
 
 use crate::owned::FileId;
-use crate::templates::{Marker, Progress, SharedProgress, INCOMPLETE};
+use crate::templates::{Marker, SharedProgress, INCOMPLETE};
 use crate::unity6::gate::{HeldDir, NewFolder, WriteRoot};
 use crate::unity6::payload::{Item, Payload};
 use orbiters_i18n::{mark, tr};
@@ -118,7 +118,8 @@ fn put(payload: &Payload, root: &WriteRoot, made: &mut Made, cancel: &AtomicBool
             }
         }
         copied += 1;
-        *progress.lock().unwrap() = Progress { copied, total, file: at.display().to_string(), phase: mark("Copying project").into() };
+        let mut now = progress.lock().unwrap();
+        (now.copied, now.total, now.file, now.phase) = (copied, total, at.display().to_string(), mark("Copying project").into());
     }
     Ok(())
 }

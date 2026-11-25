@@ -314,6 +314,7 @@ impl State {
                         total: 4310,
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                         phase: String::from(orbiters_i18n::mark("Copying project")),
+                    ..Default::default()
                     }));
                     self.u6.run = Some(Run { shown: true, recorded: Arc::new(Mutex::new(Some("trial-1".into()))), job: Default::default(), cancel: Default::default(), progress });
                 }

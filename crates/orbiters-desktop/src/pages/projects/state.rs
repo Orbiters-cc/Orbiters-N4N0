@@ -1663,6 +1663,7 @@ impl State {
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                     phase: String::from(mark("Copying project")),
+                    ..Default::default()
                 };
             }
             "projects-search" => self.query = "avatar".into(),
@@ -1791,6 +1792,7 @@ impl State {
                     total: 4310,
                     file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                     phase: String::from(mark("Copying project")),
+                    ..Default::default()
                 };
             }
             "projects-avatars" => {
@@ -1985,6 +1987,7 @@ impl State {
                         total: 4310,
                         file: "Assets/MasculineCanine/Textures/Body_Albedo.png".into(),
                         phase: String::from(mark("Copying project")),
+                    ..Default::default()
                     };
                 }
             }

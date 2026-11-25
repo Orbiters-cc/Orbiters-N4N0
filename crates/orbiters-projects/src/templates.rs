@@ -32,6 +32,15 @@ pub struct Progress {
     pub total: usize,
     pub file: String,
     pub phase: String,
+    /// Links of the project that lead nowhere: they are not in the copy.
+    pub left_out: Vec<PathBuf>,
+}
+impl Progress {
+    /// What a finished copy says of the links it left out.
+    pub fn left_out(&self) -> Option<String> {
+        let files: Vec<String> = self.left_out.iter().map(|p| p.display().to_string()).collect();
+        (!files.is_empty()).then(|| tr!("Links that lead nowhere were left out: {files}", files = copying::named(&files)))
+    }
 }
 pub type SharedProgress = Arc<Mutex<Progress>>;
 
@@ -377,6 +386,7 @@ async fn make(
     // What its files and folders take on that disk, whose units count (PRJ-4), and some left free: of the very list that is copied.
     let required = payload.need.room(crate::size::unit(parent).unwrap_or(4096));
     anyhow::ensure!(free >= required, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free)));
+    progress.lock().unwrap().left_out.clone_from(&payload.nowhere);
     // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
     let mut record = crate::copies::Held::begin(&app, source, &destination)?;
     let filled = fill(&payload, place, &destination, cancel, progress, true, &mut |new| record.made(new.id));
@@ -943,6 +953,35 @@ mod tests {
         let copy = made_from(temp.path(), &source, "Copy").unwrap();
         let files = walkdir::WalkDir::new(&copy).into_iter().flatten().filter(|e| e.file_type().is_file()).count();
         assert_eq!(files as u64, need.files);
+    }
+
+    /// PRJ-7: a link whose target is gone (an external package removed, an old development link) does not stop the copy.
+    #[test]
+    fn a_link_to_nothing_does_not_stop_a_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let gone = temp.path().join("Gone");
+        std::fs::create_dir(&gone).unwrap();
+        #[cfg(windows)]
+        junction::create(&gone, source.join("Assets/Old")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&gone, source.join("Assets/Old")).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        // One that leads back to where it is.
+        #[cfg(windows)]
+        junction::create(source.join("Assets"), source.join("Assets/Again")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(source.join("Assets"), source.join("Assets/Again")).unwrap();
+        let progress: SharedProgress = Arc::new(Mutex::default());
+        let rt = crate::runtime().unwrap();
+        // Never where a link of the project says: the copy would be what it links to.
+        assert!(rt.block_on(duplicate(&temp.path().join("vcc"), &source, temp.path(), "Gone", Keep::default(), &AtomicBool::new(false), &progress)).is_err());
+        let copy = rt.block_on(duplicate(&temp.path().join("vcc"), &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &progress)).unwrap();
+        assert!(copy.join("Assets/a.txt").is_file() && std::fs::symlink_metadata(copy.join("Assets/Old")).is_err() && std::fs::symlink_metadata(copy.join("Assets/Again")).is_err());
+        let said = progress.lock().unwrap().left_out().unwrap();
+        assert!(said.contains("Old") && said.contains("Again"), "named: {said}");
+        assert!(duplication_need(&source, Keep::default(), &AtomicBool::new(false)).is_ok());
     }
 
     /// What was put in the copy while it ran is not the copy's: it stays, named, when the copy fails.

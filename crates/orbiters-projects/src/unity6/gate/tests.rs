@@ -567,7 +567,7 @@ mod source {
 /// What only reads. A path is let through when one of these is it, or begins it (ending in `::`).
 const READS: &[&str] = &[
     // Reading files, their names and what they are.
-    "std::fs", "std::fs::read", "std::fs::read_to_string", "std::fs::read_dir", "std::fs::metadata", "std::fs::symlink_metadata", "std::fs::canonicalize", "std::fs::Metadata", "std::fs::File::open",
+    "std::fs", "std::fs::read", "std::fs::read_to_string", "std::fs::read_dir", "std::fs::metadata", "std::fs::symlink_metadata", "std::fs::canonicalize", "std::fs::read_link", "std::fs::Metadata", "std::fs::File::open",
     // Not files at all.
     "std::io::Read", "std::io::Write", "std::io::Error", "std::io::ErrorKind::", "std::io::Result", "std::io::copy", "std::io::sink", "std::io::BufRead", "std::io::BufReader", "std::io::BufReader::", "std::io",
     "std::io::Error::", "std::path::", "std::collections::", "std::sync::", "std::ffi::", "std::time::", "std::ops::", "std::fmt::", "std::cell::", "std::mem::", "std::ptr::", "std::env::temp_dir", "std::env::var_os", "std::env::consts::",

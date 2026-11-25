@@ -554,11 +554,12 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             // A copy is ready only when nothing it needs has to come from elsewhere first (PROJECTS-22).
             let later = if duplicate { templates::packages_only_in_library(&path) } else { vec![] };
-            if later.is_empty() {
-                Ok(Outcome::Added(path.clone(), tr!("{name} is ready, in Orbiters' list", name = name)))
+            let said = if later.is_empty() {
+                tr!("{name} is ready, in Orbiters' list", name = name)
             } else {
-                Ok(Outcome::Added(path.clone(), tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))))
-            }
+                tr!("{name} is copied and listed, but Unity must download {packages} again when it first opens it", name = name, packages = later.join(", "))
+            };
+            Ok(Outcome::Added(path.clone(), super::duplicate::with_left_out(said, &progress)))
         });
         let _ = id;
     }

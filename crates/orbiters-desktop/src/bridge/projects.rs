@@ -1641,7 +1641,8 @@ impl Projects {
         self.spawn(Lane::Action, label, Some(location.join(&name)), true, Progress::Copy(progress), cancel, None, args, call, move || {
             let path = block_on(templates::duplicate(&orbiters_projects::vcc_dir(), &source, &location, &name, keep, &c, &p))
                 .map_err(|e| failed("duplicate_failed", e, "Read the message: a copy kept and listed is said there, and unity_list_projects shows it."))?;
-            Ok(json!({ "path": path, "listed": true, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
+            let left_out = p.lock().unwrap().left_out.clone();
+            Ok(json!({ "path": path, "listed": true, "links_to_nothing_left_out": left_out, "in_creator_companion": false, "note": "It is in Orbiters' list; VCC and ALCOM list it once the person adds its folder there. Its scenes keep their blueprint IDs: uploads from it update the same avatars and worlds." }))
         })
     }
 

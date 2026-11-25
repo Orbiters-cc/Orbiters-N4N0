@@ -84,6 +84,9 @@ pub struct Payload {
     /// What it takes on a disk (PRJ-4).
     pub need: Need,
     pub linked: Vec<Linked>,
+    /// Links that lead nowhere (what they led to was removed) or back to a folder they are in: Unity does without, and so does a copy
+    /// that is not [`Making::strict`] (PRJ-7).
+    pub nowhere: Vec<PathBuf>,
     pub outside: Vec<Outside>,
     /// Local packages whose `Packages/manifest.json` entry is changed in the copy.
     pub localized: Vec<String>,
@@ -122,6 +125,8 @@ struct Scan<'a> {
     out: Payload,
     /// The folders being gone through, so that a link to one of them is refused instead of followed for ever.
     open: Vec<crate::owned::FileId>,
+    /// The folders the links followed to here are in.
+    ways: Vec<Protected>,
 }
 
 impl Scan<'_> {
@@ -147,6 +152,10 @@ impl Scan<'_> {
                         }
                     }
                     Err(_) if out => continue,
+                    Err(_) if !self.how.strict && self.leads_nowhere(root, &from) => {
+                        self.out.nowhere.push(to);
+                        continue;
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -160,14 +169,22 @@ impl Scan<'_> {
                 }
                 Kind::Link { dir: true } => {
                     let target = self.out.roots[root].follow_dir(&from)?;
-                    if self.open.contains(&target.id) || self.open.len() > DEEPEST {
+                    let here = Protected { id: None, real: self.out.roots[root].protected().real.join(rel), shown: PathBuf::new() };
+                    let back = self.open.contains(&target.id) || std::iter::once(&here).chain(&self.ways).any(|way| target.holds(way));
+                    if back && !self.how.strict {
+                        self.out.nowhere.push(to);
+                        continue;
+                    }
+                    if back || self.open.len() > DEEPEST {
                         anyhow::bail!("{}", tr!("The link {path} leads back to a folder it is in: a copy of it would have no end.", path = to.display()));
                     }
                     self.open.push(target.id);
+                    self.ways.push(here);
                     self.out.roots.push(target);
                     let new = self.out.roots.len() - 1;
                     self.put(to.clone(), Item::Dir);
                     self.folder(new, Path::new(""), &to, depth + 1, project)?;
+                    self.ways.pop();
                     self.open.pop();
                 }
                 Kind::File { .. } | Kind::Link { dir: false } => {
@@ -181,6 +198,24 @@ impl Scan<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the link `rel` of root `root` leads to nothing that is there. Where it says is no place for the copy either: made there,
+    /// the copy would be what the original links to.
+    fn leads_nowhere(&mut self, root: usize, rel: &Path) -> bool {
+        let link = self.out.roots[root].shown.join(rel);
+        if link.exists() {
+            return false;
+        }
+        let to = std::fs::read_link(&link).ok().and_then(|to| Some(link.parent()?.join(to)));
+        // Its place, from the nearest folder of it that is there.
+        let there = to.as_deref().and_then(|to| to.ancestors().find(|a| a.is_dir()).map(|a| (a, to.strip_prefix(a).unwrap_or(Path::new("")))));
+        if let Some((above, rest)) = there {
+            if let Ok(p) = ReadRoot::open(above).map(|r| r.protected()) {
+                self.out.protected.push(Protected { id: None, real: p.real.join(rest), shown: p.shown.join(rest) });
+            }
+        }
+        true
     }
 
     fn put(&mut self, at: PathBuf, item: Item) {
@@ -215,7 +250,7 @@ fn size_of(file: &mut ReadFile) -> anyhow::Result<u64> {
 pub fn scan(original: &Path, how: Making, cancel: &AtomicBool) -> anyhow::Result<Payload> {
     let root = ReadRoot::open(original).map_err(|e| anyhow::anyhow!("{}", tr!("{path} cannot be read: {error}", path = original.display(), error = e)))?;
     let (id, protected) = (root.id, root.protected());
-    let mut scan = Scan { cancel, how, out: Payload::of(root, protected), open: vec![id] };
+    let mut scan = Scan { cancel, how, out: Payload::of(root, protected), open: vec![id], ways: vec![] };
     scan.folder(0, Path::new(""), Path::new(""), 1, true)?;
     if how.strict {
         for needed in NEEDED {
@@ -561,6 +596,7 @@ impl Payload {
             bytes: 0,
             need: Need::default(),
             linked: vec![],
+            nowhere: vec![],
             outside: vec![],
             localized: vec![],
             protected: vec![protected],
@@ -626,7 +662,7 @@ impl Payload {
     pub fn restored(stage: &Path, names: &[std::ffi::OsString], cancel: &AtomicBool) -> anyhow::Result<Payload> {
         let root = ReadRoot::open(stage)?;
         let (id, protected) = (root.id, root.protected());
-        let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
+        let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id], ways: vec![] };
         for name in names {
             let at = Path::new("Packages").join(name); // i18n: not shown (a folder's name)
             scan.put(at.clone(), Item::Dir);
@@ -812,7 +848,7 @@ pub fn content_of(project: &Path, cancel: &AtomicBool) -> anyhow::Result<Content
             let Some(library) = &library else { continue };
             let root = ReadRoot::open(&library.shown.join(CACHE).join(&folder.name))?;
             let (id, protected) = (root.id, root.protected());
-            let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id] };
+            let mut scan = Scan { cancel, how: Making::default(), out: Payload::of(root, protected), open: vec![id], ways: vec![] };
             scan.folder(0, Path::new(""), &Path::new("Packages").join(&name), 2, false)?; // i18n: not shown (a folder's name)
             out.add(scan.out.content(cancel)?);
         }

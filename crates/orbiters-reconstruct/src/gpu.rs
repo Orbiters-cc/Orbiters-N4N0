@@ -4452,9 +4452,11 @@ mod tests {
             let mut gpu = devices().into_iter().next()?;
             gpu.upload(g);
             gpu.set_mask(640, 360, &mask).expect("mask");
-            Some(gpu.visibility(cams, [0.0; 3], 0.02).expect("visibility"))
+            Some(gpu.visibility(cams, [0.0; 3], 0.001).expect("visibility"))
         };
-        let (g, away, dense) = away_then_dense();
+        let (mut g, away, dense) = away_then_dense();
+        // Faint, so that a view shows most of what is in front of it, not only its first layer.
+        g.opacity_logits.fill(crate::gaussians::logit(0.03));
         // Its first view waits for its count: nothing is dropped.
         let Some(alone) = round(&[dense], &g) else { return };
         // Dense in the middle, and views after it: the counts read back at the round's end are those of the last ones.

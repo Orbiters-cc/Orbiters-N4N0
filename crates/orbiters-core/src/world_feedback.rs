@@ -270,7 +270,7 @@ pub enum Action {
     Report { comment: u64, reason: Option<String> },
 }
 
-/// An action waiting, for a world, since `since`, tried `tries` times, next at `due` (Unix milliseconds).
+/// An action waiting, for a world, since `since` (the last change it holds), tried `tries` times, next at `due` (Unix milliseconds).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub world: String,
@@ -417,6 +417,8 @@ impl Queue {
                         waiting.merge(&set);
                     }
                     p.due = p.due.max(due);
+                    // It waits since this change: an old one it goes with (offline a day) does not take it along.
+                    p.since = now_ms;
                     // Another number: an answer to the values sent before does not take these later ones away.
                     p.op = next_op();
                     return;
@@ -575,6 +577,24 @@ pub fn client_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// COR-5: a change made just before an old one it goes with would be dropped is sent all the same, its own day ahead of it;
+    /// the server's wait it was under stays.
+    #[test]
+    fn a_fresh_change_is_not_dropped_with_an_old_one() {
+        let day = DROP_AFTER.as_millis() as u64;
+        let mut queue = Queue::default();
+        queue.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }), 0);
+        queue.items[0].due = day + 30_000;
+        queue.push(WORLD, Action::Set(Set { liked: Some(false), ..Default::default() }), day - 500);
+        queue.expire(day + 2_000);
+        assert_eq!(queue.items.len(), 1, "the new change is there");
+        assert_eq!(queue.items[0].due, day + 30_000);
+        queue.retry(0, day + 40_000);
+        assert_eq!(queue.items.len(), 1);
+        queue.expire(2 * day - 500);
+        assert!(queue.items.is_empty(), "a day after it");
+    }
 
     /// VR1115 labels, a real check against the development server on this computer, never production: it takes a label
     /// from the Orbiters account saved for it (read only), shows it as the member's own, and takes it back; an id outside the

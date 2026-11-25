@@ -60,7 +60,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
             changed |= widgets::segmented(ui, "translate-provider", &mut t.provider, &options, true);
         });
         match t.provider {
-            TranslateProvider::ThisComputer => wrapped(ui, tr("An AI app on this computer: LM Studio, Ollama or llama.cpp's server, with a model loaded. Nothing leaves your computer."), 13.0, theme::FG_2, false),
+            TranslateProvider::ThisComputer => wrapped(ui, tr("An AI app on this computer: LM Studio, Ollama or llama.cpp's server, with a model loaded. Nothing leaves your computer."), 13.0, theme::fg_2(), false),
             TranslateProvider::Address => {
                 widgets::field(ui, tr("Address"), Some(tr("An OpenAI-compatible server on your network, such as LM Studio's.")), 260.0, |ui| {
                     let r = widgets::text_field(ui, "translate-server", &mut t.server, "http://192.168.1.20:1234", 260.0, true);
@@ -72,7 +72,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
             TranslateProvider::Orbiters => {
                 // Here one agreement covers both places the text is read (verify-r15 B7): VR, and VRChat's window on the desktop, each asked for until then.
                 let agreed = t.orbiters_agreed && t.orbiters_agreed_window;
-                wrapped(ui, orbiters_notice_both(), 13.0, if agreed { theme::FG_2 } else { theme::FG }, !agreed);
+                wrapped(ui, orbiters_notice_both(), 13.0, if agreed { theme::fg_2() } else { theme::fg() }, !agreed);
                 if !agreed && Button::new(tr("I agree")).size(Size::Sm).id_salt("translate-agree").show(ui).clicked() {
                     t.orbiters_agreed = true;
                     t.orbiters_agreed_window = true;
@@ -101,18 +101,18 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, draft: &mut Settings) -> bool {
         });
         widgets::separator(ui);
         let facts = TranslateFacts { enabled: t.enabled, provider: t.provider, target: t.target.clone().unwrap_or_else(|| orbiters_i18n::language().tag().to_string()), keep_english: t.keep_english, agreed: t.orbiters_agreed, status: (**status).clone() };
-        wrapped(ui, &status_words(&facts), 14.0, theme::FG, true);
+        wrapped(ui, &status_words(&facts), 14.0, theme::fg(), true);
         if let Some(advice) = small_model_advice(&facts) {
-            wrapped(ui, &advice, 13.0, theme::FG_2, false);
+            wrapped(ui, &advice, 13.0, theme::fg_2(), false);
         }
         if let crate::state::TranslateState::Problem { detail: Some(detail), .. } = &status.state {
-            wrapped(ui, detail, 12.0, theme::FG_3, false);
+            wrapped(ui, detail, 12.0, theme::fg_3(), false);
         }
         if t.enabled && status.look_ms.is_some() {
             let ms = status.look_ms.unwrap_or(0);
-            wrapped(ui, &orbiters_i18n::tr!("A look costs {ms} ms of one processor core.", ms = ms), 12.0, theme::FG_3, false);
+            wrapped(ui, &orbiters_i18n::tr!("A look costs {ms} ms of one processor core.", ms = ms), 12.0, theme::fg_3(), false);
         }
-        wrapped(ui, tr("In VR: All tools, Translation."), 12.0, theme::FG_3, false);
+        wrapped(ui, tr("In VR: All tools, Translation."), 12.0, theme::fg_3(), false);
     });
     changed
 }

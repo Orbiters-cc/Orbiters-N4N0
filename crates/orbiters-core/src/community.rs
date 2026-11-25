@@ -49,6 +49,48 @@ pub struct Card {
     pub discord: Option<Host>,
     pub world: Option<World>,
     pub steps: u32,
+    /// The VRChat calendar entry made for it (`cal_…`), when Orbiters says (it does not yet: `crate::group_events`).
+    pub calendar_id: Option<String>,
+}
+
+/// A slot of an event's staff and who holds it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Staff {
+    pub name: String,
+    pub people: Vec<Person>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Person {
+    pub username: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Prize {
+    /// A place ("1st"), as the organiser wrote or numbered it.
+    pub place: Option<serde_json::Value>,
+    pub title: String,
+}
+
+impl Prize {
+    pub fn place(&self) -> String {
+        match &self.place {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// An event's staff and prizes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Details {
+    pub staff: Vec<Staff>,
+    pub prizes: Vec<Prize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -110,6 +152,13 @@ pub struct Overview {
     pub steps: Vec<Step>,
     /// VRChat could not name every world yet: ask again shortly.
     pub worlds_pending: bool,
+    pub details: Details,
+    /// The VRChat calendar entry made for it (`cal_…`), its Discord event and announcement, and how many signed up, when
+    /// Orbiters says (it does not yet).
+    pub calendar_id: Option<String>,
+    pub discord_event_url: Option<String>,
+    pub discord_announcement_url: Option<String>,
+    pub signups: Option<u32>,
 }
 
 /// The member's invite status for each step (`pending`, `sending`, `sent`, `uncertain`, `failed`, `withdrawn`), and why

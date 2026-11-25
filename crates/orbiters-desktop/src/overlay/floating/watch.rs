@@ -118,15 +118,15 @@ impl Watch {
 pub fn paint(p: &egui::Painter, hover: bool, open: bool) {
     let c = PX as f32 / 2.0;
     let centre = pos2(c, c);
-    let ring = if open { theme::ACCENT } else { theme::FG_3 };
-    let ring = if hover { theme::mix(ring, theme::FG, 0.45) } else { ring };
-    p.circle_filled(centre, c - 4.0, theme::alpha(theme::INK_950, 0.94));
+    let ring = if open { theme::accent() } else { theme::fg_3() };
+    let ring = if hover { theme::mix(ring, theme::fg(), 0.45) } else { ring };
+    p.circle_filled(centre, c - 4.0, theme::alpha(theme::ink_950(), 0.94));
     if hover {
         p.circle_filled(centre, c - 10.0, theme::white(0.08));
     }
     // (egui strokes a circle outside its radius: the ring is its rim.)
     p.circle_stroke(centre, c - 9.0, Stroke::new(if hover { 9.0 } else { 7.0 }, ring));
-    n4n0_logo::paint(p, egui::Rect::from_center_size(centre, n4n0_logo::size_for_width(PX as f32 * 0.5)), theme::MARK);
+    n4n0_logo::paint(p, egui::Rect::from_center_size(centre, n4n0_logo::size_for_width(PX as f32 * 0.5)), theme::mark());
 }
 
 #[cfg(test)]

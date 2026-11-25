@@ -1,12 +1,12 @@
 //! The projects of the Unity projects page: Orbiters' own list (`unity-gallery.json` in its data folder), with those Creator
 //! Companion and ALCOM list, which are only read. Adding, duplicating, creating and removing change Orbiters' list alone: nothing
 //! of theirs is written, and what is there stays there.
-use crate::discovery::key;
+use crate::discovery::{key, same};
 use crate::theirs::{self, Part};
 use crate::own;
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -15,7 +15,7 @@ use std::sync::Mutex;
 struct List {
     /// Added, duplicated or created in Orbiters.
     projects: Vec<Entry>,
-    /// Taken off in Orbiters ([`key`]), whoever else lists them: until they are added here again.
+    /// Taken off in Orbiters, whoever else lists them: until they are added here again.
     #[serde(default)]
     removed: BTreeSet<String>,
 }
@@ -28,16 +28,17 @@ struct Entry {
 
 impl List {
     fn set(&mut self, path: &Path, add: bool) {
-        let k = key(path);
+        self.removed.retain(|r| !same(Path::new(r), path));
         if !add {
-            self.projects.retain(|p| key(&p.path) != k);
-            self.removed.insert(k);
-            return;
-        }
-        self.removed.remove(&k);
-        if !self.projects.iter().any(|p| key(&p.path) == k) {
+            self.projects.retain(|p| !same(&p.path, path));
+            self.removed.insert(path.to_string_lossy().into_owned());
+        } else if !self.projects.iter().any(|p| same(&p.path, path)) {
             self.projects.push(Entry { path: path.into(), added: crate::discovery::now() });
         }
+    }
+
+    fn removes(&self, path: &Path) -> bool {
+        self.removed.iter().any(|r| same(Path::new(r), path))
     }
 }
 
@@ -107,12 +108,18 @@ fn set(root: &Path, path: &Path, add: bool) -> anyhow::Result<()> {
 
 /// Puts the project at `path` on Orbiters' list. Nothing of it is read but that it is one, and nothing of it is written.
 pub fn add(root: &Path, path: &Path) -> anyhow::Result<()> {
+    use crate::unity6::authority::{allow, Action};
+    allow(&crate::data_dir(), path, Action::List).map_err(|why| anyhow::anyhow!("{why}"))?;
     anyhow::ensure!(crate::discovery::is_project(path), "{}", tr("Choose a Unity project containing ProjectSettings/ProjectVersion.txt."));
-    set(root, path, true)
+    set(root, path, true)?;
+    crate::copies::listed(&crate::data_dir(), path);
+    Ok(())
 }
 
 /// Takes the project at `path` off the page: its files stay, and Creator Companion and ALCOM list it as before.
 pub fn remove(root: &Path, path: &Path) -> anyhow::Result<()> {
+    use crate::unity6::authority::{allow, Action};
+    allow(&crate::data_dir(), path, Action::Unlist).map_err(|why| anyhow::anyhow!("{why}"))?;
     set(root, path, false)
 }
 
@@ -149,14 +156,20 @@ pub fn listed(root: &Path) -> Listed {
         let _ = own::change(&seen_file(root), Seen::default, |s: &mut Seen| *s = now.clone());
     }
     let shared: HashSet<String> = now.settings.iter().chain(&now.database).map(|p| key(p)).collect();
-    let mut had = HashSet::new();
-    let all = list.projects.into_iter().map(|e| e.path).chain(now.database).chain(now.settings);
-    let projects = all.filter(|p| !list.removed.contains(&key(p)) && had.insert(key(p))).collect();
+    // Once each, however it is spelled; two folders whose names differ only by case (where a disk keeps those apart) are two.
+    let mut had: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut projects = vec![];
+    for p in list.projects.iter().map(|e| e.path.clone()).chain(now.database).chain(now.settings).filter(|p| !list.removes(p)) {
+        let alike = had.entry(key(&p)).or_default();
+        if !alike.iter().any(|other| same(other, &p)) {
+            alike.push(p.clone());
+            projects.push(p);
+        }
+    }
     Listed { projects, shared, companion: !nothing, warning }
 }
 
 /// Whether the project at `path` is on the page.
 pub fn lists(root: &Path, path: &Path) -> bool {
-    let k = key(path);
-    listed(root).projects.iter().any(|p| key(p) == k)
+    listed(root).projects.iter().any(|p| same(p, path))
 }

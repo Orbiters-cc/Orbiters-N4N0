@@ -147,11 +147,43 @@ impl std::ops::BitOrAssign for Taint {
     }
 }
 
-/// What Orbiters - N4N0 did or heard, for the assistant's next turn, and whose words it quotes.
+/// What Orbiters - N4N0 did or heard, for the assistant's next turn, and whose words it quotes. Told whole or not yet: it is at most
+/// [`NOTE_UNITS`], which a request always has room for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Note {
     pub text: String,
     pub taint: Taint,
+}
+
+/// UTF-16 units of a note.
+const NOTE_UNITS: usize = 2000;
+
+impl Note {
+    pub fn new(text: &str, taint: Taint) -> Self {
+        Self { text: cut(text, NOTE_UNITS), taint }
+    }
+
+    /// `lead` and the `outcomes` it is about, in as many notes as they need: each outcome is whole in one of them.
+    pub fn of(lead: &str, outcomes: &[String], joint: &str, taint: Taint) -> Vec<Self> {
+        let room = NOTE_UNITS - units(lead) - 2;
+        let mut notes: Vec<String> = Vec::new();
+        for outcome in outcomes {
+            let outcome = cut(outcome, room);
+            match notes.last_mut().filter(|n| units(n) + units(joint) + units(&outcome) <= room) {
+                Some(note) => note.extend([joint, &outcome]),
+                None => notes.push(outcome),
+            }
+        }
+        notes.into_iter().map(|n| Self { text: format!("{lead} {n}."), taint }).collect()
+    }
+}
+
+/// `text` in at most `max` units, an ellipsis ending what was cut.
+fn cut(text: &str, max: usize) -> String {
+    if units(text) <= max {
+        return text.to_string();
+    }
+    format!("{}…", crate::assistant::utf16_prefix(text, max - 1))
 }
 
 /// What a turn is told, and whose words are in it.
@@ -159,7 +191,7 @@ pub struct Note {
 pub struct Told {
     pub text: String,
     pub taint: Taint,
-    /// Which of the notes it carries.
+    /// Which of the notes it carries, whole.
     pub notes: Vec<usize>,
 }
 
@@ -241,13 +273,6 @@ impl Moment {
         if self.saved_videos > 0 {
             out.push_str(&format!("The owner has {} saved videos.\n", self.saved_videos)); // i18n: not shown
         }
-        // Those this request may hear; the others wait for one that may.
-        let notes: Vec<usize> = (0..self.notes.len()).filter(|i| needs.takes(self.notes[*i].taint)).collect();
-        for note in notes.iter().map(|i| &self.notes[*i]) {
-            taint |= note.taint;
-            out.push_str(note.text.trim_end());
-            out.push('\n');
-        }
         // What other people chose, as data. Keys go in in alphabetical order: serde_json keeps insertion order in the
         // app (vrc-get-vpm turns on its preserve_order) and sorts them elsewhere, and both must read the same.
         let mut block = serde_json::Map::new();
@@ -265,12 +290,24 @@ impl Moment {
         if let Some(world) = self.world_name.as_ref().filter(|_| needs.world) {
             block.insert("world".into(), Value::String(data(world, NAME_CHARS)));
         }
+        let mut chosen = String::new();
         if !block.is_empty() {
             taint |= Taint::Others;
-            out.push_str(DATA_NOTE);
-            out.push_str(&Value::Object(block).to_string());
+            chosen = format!("{DATA_NOTE}{}\n", Value::Object(block));
+        }
+        // The notes this request may hear, the oldest first, while one fits whole (N4N-2): the others wait for a next one.
+        let mut notes = Vec::new();
+        for (i, note) in self.notes.iter().enumerate().filter(|(_, n)| needs.takes(n.taint)) {
+            let text = note.text.trim_end();
+            if units(&out) + units(text) + 1 + units(&chosen) > crate::assistant::SUMMARY_UNITS {
+                break;
+            }
+            taint |= note.taint;
+            notes.push(i);
+            out.push_str(text);
             out.push('\n');
         }
+        out.push_str(&chosen);
         // The controls last, in what is left, each by its place in the avatar's menu.
         if needs.avatar && !self.controls.is_empty() {
             let note = if self.controls_from_manifest { CONTROLS_NOTE } else { PARAMETERS_NOTE };
@@ -386,6 +423,46 @@ mod tests {
         both |= Taint::Others;
         both |= Taint::Labels;
         assert_eq!(both, Taint::Others);
+    }
+
+    /// N4N-2: a note is carried whole or not at all, and only those carried are said to be; what does not fit waits.
+    #[test]
+    fn notes_are_told_whole_or_wait() {
+        // Two units a character.
+        let mut m = Moment { vrchat_running: true, world_name: Some("W".repeat(120)), ..Default::default() };
+        m.notes = (0..5).map(|i| Note::new(&format!("N{i} {} E{i}", "\u{1F600}".repeat(700)), if i == 4 { Taint::Others } else { Taint::None })).collect();
+        m.notes.insert(1, Note::new(&"x".repeat(9000), Taint::Labels));
+        let mut heard: Vec<Vec<Note>> = Vec::new();
+        while !m.notes.is_empty() {
+            let told = m.told(Needs::ALL);
+            assert!(units(&told.text) <= crate::assistant::SUMMARY_UNITS && !told.notes.is_empty());
+            assert!(told.text.ends_with("}\n"), "what follows them is whole too");
+            for (i, note) in m.notes.iter().enumerate() {
+                assert_eq!(told.text.contains(note.text.trim_end()), told.notes.contains(&i), "{i}");
+                assert!(told.notes.contains(&i) || !told.text.contains(&note.text[..3]), "a part of {i}");
+            }
+            // In their order.
+            assert_eq!(told.notes, (0..told.notes.len()).collect::<Vec<_>>());
+            heard.push(told.notes.iter().rev().map(|i| m.notes.remove(*i)).collect());
+        }
+        assert!(heard.len() > 1 && heard.iter().map(Vec::len).sum::<usize>() == 6);
+        // Others' words are read only with the note that quotes them.
+        m.notes = vec![Note::new(&"a".repeat(2000), Taint::None), Note::new(&"b".repeat(2000), Taint::None), Note::new(&"c".repeat(2000), Taint::Others)];
+        m.world_name = None;
+        assert_eq!((m.told(Needs::ALL).notes, m.told(Needs::ALL).taint), (vec![0, 1], Taint::None));
+    }
+
+    #[test]
+    fn what_was_done_is_split_between_notes_by_outcome() {
+        let done: Vec<String> = (0..30).map(|i| format!("set \"Clothes / Item {i}\" {}", "é".repeat(150))).collect();
+        let notes = Note::of("Orbiters - N4N0 did:", &done, ", ", Taint::Labels);
+        assert!(notes.len() > 1 && notes.iter().all(|n| units(&n.text) <= NOTE_UNITS && n.text.starts_with("Orbiters - N4N0 did: set") && n.taint == Taint::Labels));
+        for outcome in &done {
+            assert_eq!(notes.iter().filter(|n| n.text.contains(outcome)).count(), 1, "{outcome}");
+        }
+        assert_eq!(Note::of("Did:", &["a".into(), "b".into()], ", ", Taint::None)[0].text, "Did: a, b.");
+        let long = Note::of("Did:", &["x".repeat(9000)], ", ", Taint::None);
+        assert!(long.len() == 1 && units(&long[0].text) <= NOTE_UNITS && long[0].text.ends_with("…."));
     }
 
     #[test]

@@ -91,7 +91,7 @@ pub(super) fn section(ui: &mut Ui, state: &mut State) -> bool {
     if state.suggestions.total() == 0 && !loading {
         art::caps(ui, tr("Suggested"));
         if state.catalog.errors.is_empty() {
-            widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(tr("No suggestion right now."), 12.5).color(theme::FG_3));
+            widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 10.0), Align2::LEFT_CENTER, &Txt::new(tr("No suggestion right now."), 12.5).color(theme::fg_3()));
             ui.add_space(20.0);
             return false;
         }
@@ -130,7 +130,7 @@ pub(super) fn section(ui: &mut Ui, state: &mut State) -> bool {
     if pinned_top || pinned_bottom {
         // What passes under it cannot be pressed through it either.
         let fill = if pinned_top { across(band.top(), band.bottom() + BAND_ROOM) } else { across(band.top() - BAND_ROOM, band.bottom()) };
-        ui.painter().rect_filled(fill, 0.0, theme::INK_850);
+        ui.painter().rect_filled(fill, 0.0, theme::ink_850());
         let _ = ui.interact(fill, id.with("band"), Sense::click());
     }
     let mut bu = ui.new_child(UiBuilder::new().max_rect(band).layout(egui::Layout::top_down(egui::Align::Min)).id_salt("repo-cards-band"));
@@ -211,12 +211,12 @@ pub(super) fn section(ui: &mut Ui, state: &mut State) -> bool {
 
     // The soft edge of what passes the band, over it, and of a list going on past the bottom of the view.
     if pinned_top {
-        fade(ui, across(band.bottom() + BAND_ROOM, band.bottom() + BAND_ROOM + BAND_FADE), theme::INK_850, Color32::TRANSPARENT);
+        fade(ui, across(band.bottom() + BAND_ROOM, band.bottom() + BAND_ROOM + BAND_FADE), theme::ink_850(), Color32::TRANSPARENT);
     } else if pinned_bottom {
-        fade(ui, across(band.top() - BAND_ROOM - BAND_FADE, band.top() - BAND_ROOM), Color32::TRANSPARENT, theme::INK_850);
+        fade(ui, across(band.top() - BAND_ROOM - BAND_FADE, band.top() - BAND_ROOM), Color32::TRANSPARENT, theme::ink_850());
     }
     if !pinned_bottom && ui.min_rect().bottom() + shift > view.bottom() + 1.0 {
-        fade(ui, across(view.bottom() - BAND_FADE, view.bottom()), Color32::TRANSPARENT, theme::INK_850);
+        fade(ui, across(view.bottom() - BAND_FADE, view.bottom()), Color32::TRANSPARENT, theme::ink_850());
     }
     retry
 }
@@ -239,9 +239,9 @@ fn heading(ui: &mut Ui, state: &State, loading: bool) {
     let (total, shown) = (state.suggestions.total(), state.suggestions.hits().len());
     let working = state.acting().map(str::to_string).or_else(|| (loading && total == 0).then(|| tr("Loading…").to_string()));
     if let Some(label) = working {
-        let t = Txt::new(label, 11.5).color(theme::FG_2);
+        let t = Txt::new(label, 11.5).color(theme::fg_2());
         let title_end = widgets::text_truncated(p, r.right_center(), Align2::RIGHT_CENTER, &t, r.width() - 110.0);
-        feedback::spinner(p, pos2(title_end.left() - 11.0, r.center().y), 5.0, 1.6, theme::ACCENT);
+        feedback::spinner(p, pos2(title_end.left() - 11.0, r.center().y), 5.0, 1.6, theme::accent());
         return;
     }
     let count = if state.suggestions.searching() {
@@ -253,7 +253,7 @@ fn heading(ui: &mut Ui, state: &State, loading: bool) {
         p,
         r.right_center(),
         Align2::RIGHT_CENTER,
-        &Txt::new(count, 11.5).color(if state.suggestions.searching() && shown > 0 { theme::ACCENT } else { theme::FG_3 }),
+        &Txt::new(count, 11.5).color(if state.suggestions.searching() && shown > 0 { theme::accent() } else { theme::fg_3() }),
     );
 }
 
@@ -267,7 +267,7 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
     let body = ui.interact(r, id, Sense::hover());
     let hover = anim::toggle(ui.ctx(), id.with("hover"), body.contains_pointer(), Spring::SOFT);
     let p = ui.painter().clone();
-    widgets::frame(&p, r, CARD_RADIUS, theme::mix(theme::surface_soft(), theme::alpha(theme::INK_750, 0.8), hover));
+    widgets::frame(&p, r, CARD_RADIUS, theme::mix(theme::surface_soft(), theme::alpha(theme::ink_750(), 0.8), hover));
 
     let icon = Rect::from_min_size(r.min + vec2(PAD, PAD), vec2(40.0, 40.0));
     state.repo_icons_wanted.push(l.url.clone());
@@ -279,7 +279,7 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
         widgets::text_truncated(&p, pos2(x, icon.center().y), Align2::LEFT_CENTER, &name, text_w);
     } else {
         widgets::text_truncated(&p, pos2(x, icon.center().y - 9.0), Align2::LEFT_CENTER, &name, text_w);
-        widgets::text_truncated(&p, pos2(x, icon.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(&l.owner, 11.5).color(theme::FG_3), text_w);
+        widgets::text_truncated(&p, pos2(x, icon.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(&l.owner, 11.5).color(theme::fg_3()), text_w);
     }
 
     // Two lines under them; a package it was found through takes the second.
@@ -290,21 +290,21 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
     if l.description.is_empty() {
         // Nothing to say about it (a server that does not say yet): where its feed is, in a quieter voice.
         let address = l.url.trim_start_matches("https://").trim_start_matches("http://");
-        widgets::text_truncated(&p, pos2(left, lines_top + 8.5), Align2::LEFT_CENTER, &Txt::new(address, 11.5).color(theme::FG_4), wide);
+        widgets::text_truncated(&p, pos2(left, lines_top + 8.5), Align2::LEFT_CENTER, &Txt::new(address, 11.5).color(theme::fg_4()), wide);
     } else {
-        let mut job = Txt::new(&l.description, 12.0).color(theme::FG_2).line_height(17.0).job(wide);
+        let mut job = Txt::new(&l.description, 12.0).color(theme::fg_2()).line_height(17.0).job(wide);
         job.wrap.max_rows = description_rows;
         job.wrap.break_anywhere = description_rows == 1;
-        p.galley(pos2(left, lines_top), p.layout_job(job), theme::FG_2);
+        p.galley(pos2(left, lines_top), p.layout_job(job), theme::fg_2());
     }
     if let Some(package) = &hit.because {
         let y = lines_top + 17.0 + 8.5;
-        widgets::icon(&p, pos2(left + 6.5, y), glyph::PACKAGE, 13.0, theme::ACCENT);
+        widgets::icon(&p, pos2(left + 6.5, y), glyph::PACKAGE, 13.0, theme::accent());
         widgets::text_truncated(
             &p,
             pos2(left + 18.0, y),
             Align2::LEFT_CENTER,
-            &Txt::new(package, 12.0).weight(weight::MEDIUM).color(theme::ACCENT),
+            &Txt::new(package, 12.0).weight(weight::MEDIUM).color(theme::accent()),
             wide - 18.0,
         );
     }
@@ -316,8 +316,8 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
     let mut pressed = false;
     let mut button_left = r.right() - PAD;
     if adding {
-        let t = widgets::text(&p, pos2(button_left, foot_y), Align2::RIGHT_CENTER, &Txt::new(tr("Adding…"), 12.0).color(theme::FG_2));
-        feedback::spinner(&p, pos2(t.left() - 13.0, foot_y), 6.5, 2.0, theme::ACCENT);
+        let t = widgets::text(&p, pos2(button_left, foot_y), Align2::RIGHT_CENTER, &Txt::new(tr("Adding…"), 12.0).color(theme::fg_2()));
+        feedback::spinner(&p, pos2(t.left() - 13.0, foot_y), 6.5, 2.0, theme::accent());
         button_left = t.left() - 24.0;
     } else {
         let b = Button::new(if added { tr("Added") } else { tr("Add") })
@@ -341,8 +341,8 @@ fn card(ui: &mut Ui, state: &mut State, suggestions: &Suggestions, hit: &Hit, r:
             0 => tr("No packages").to_string(),
             n => tr_n("{count} package", "{count} packages", n as u64),
         };
-        widgets::icon(&p, pos2(left + 6.5, foot_y), glyph::PACKAGE, 13.0, theme::FG_4);
-        widgets::text_truncated(&p, pos2(left + 18.0, foot_y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::FG_3), button_left - 8.0 - left - 18.0);
+        widgets::icon(&p, pos2(left + 6.5, foot_y), glyph::PACKAGE, 13.0, theme::fg_4());
+        widgets::text_truncated(&p, pos2(left + 18.0, foot_y), Align2::LEFT_CENTER, &Txt::new(label, 11.5).color(theme::fg_3()), button_left - 8.0 - left - 18.0);
     }
     // Only now, as only one card in a frame is hovered: the whole of what is cut short, and where it comes from. Not for
     // the card that happens to stop under the pointer when the list stops scrolling.
@@ -393,7 +393,7 @@ fn nothing_found(ui: &mut Ui, state: &mut State, area: Rect) {
     let top = area.top() + 18.0;
     let p = ui.painter().clone();
     let tile = Rect::from_center_size(pos2(c, top + 24.0), vec2(48.0, 48.0));
-    art::tile(&p, tile, orbiters_ui::icons::MAGNIFYING_GLASS, theme::FG_3);
+    art::tile(&p, tile, orbiters_ui::icons::MAGNIFYING_GLASS, theme::fg_3());
     let query = state.repo_query.trim();
     widgets::text_truncated(
         &p,
@@ -406,7 +406,7 @@ fn nothing_found(ui: &mut Ui, state: &mut State, area: Rect) {
         &p,
         pos2(c, top + 90.0),
         Align2::CENTER_CENTER,
-        &Txt::new(tr("Try fewer words, or the name of a package, a repository or its owner."), 12.5).color(theme::FG_3),
+        &Txt::new(tr("Try fewer words, or the name of a package, a repository or its owner."), 12.5).color(theme::fg_3()),
         area.width() - 48.0,
     );
     let b = Button::new(tr("Clear the search")).icon(orbiters_ui::icons::X).size(Size::Sm).id_salt("repo-search-clear");
@@ -435,7 +435,7 @@ fn unreachable(ui: &mut Ui, state: &mut State) -> bool {
         &p,
         pos2(c, top + 84.0),
         Align2::CENTER_CENTER,
-        &Txt::new(tr("Your repositories still work, and you can add one by its address above."), 12.5).color(theme::FG_3),
+        &Txt::new(tr("Your repositories still work, and you can add one by its address above."), 12.5).color(theme::fg_3()),
         w - 48.0,
     );
     let _ = ui.interact(title, Id::unique("repo-cards-unreachable"), Sense::hover()).on_hover_text(state.catalog.errors.join("\n"));

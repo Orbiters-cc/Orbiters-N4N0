@@ -430,7 +430,7 @@ fn post(body: &Value) -> anyhow::Result<Results> {
             .timeout_global(Some(Duration::from_secs(8)))
             .http_status_as_error(false)
             .build()
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            .header("User-Agent", &format!("Orbiters-N4N0/{}", orbiters_core::app_version()))
             .send_json(body)
     };
     let mut response = send(body)?;

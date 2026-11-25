@@ -23,12 +23,14 @@ pub enum Group {
     Capture,
     Vrchat,
     Language,
+    Appearance,
     Privacy,
     App,
 }
 
 impl Group {
-    pub const ALL: [Group; 9] = [Group::Account, Group::N4n0, Group::Voice, Group::Vr, Group::Capture, Group::Vrchat, Group::Language, Group::Privacy, Group::App];
+    pub const ALL: [Group; 10] =
+        [Group::Account, Group::Appearance, Group::N4n0, Group::Voice, Group::Vr, Group::Capture, Group::Vrchat, Group::Language, Group::Privacy, Group::App];
 
     /// Its name in links (`settings:<id>`): never changes.
     pub fn id(self) -> &'static str {
@@ -40,6 +42,7 @@ impl Group {
             Group::Capture => "capture",
             Group::Vrchat => "vrchat",
             Group::Language => "language",
+            Group::Appearance => "appearance",
             Group::Privacy => "privacy",
             Group::App => "app",
         }
@@ -54,6 +57,7 @@ impl Group {
             Group::Capture => mark("Capture & storage"),
             Group::Vrchat => mark("VRChat & performance"),
             Group::Language => mark("Language & translation"),
+            Group::Appearance => mark("Appearance"),
             Group::Privacy => mark("Privacy & feedback"),
             Group::App => mark("App & updates"),
         }
@@ -73,6 +77,7 @@ impl Group {
             Group::Capture => mark("How captures are recorded, what they keep, and where they are stored."),
             Group::Vrchat => mark("How VRChat starts and runs, and what helps its frame rate."),
             Group::Language => mark("The language of the app, and translation in VR."),
+            Group::Appearance => mark("The colors, the font and the background of Orbiters - N4N0."),
             Group::Privacy => mark("What N4N0 shares, and the reports that help the beta."),
             Group::App => mark("The window, starting, updates, and every notice shown."),
         })
@@ -87,6 +92,7 @@ impl Group {
             Group::Capture => icons::APERTURE,
             Group::Vrchat => icons::GAUGE,
             Group::Language => icons::GLOBE,
+            Group::Appearance => icons::PALETTE,
             Group::Privacy => icons::SHIELD_CHECK,
             Group::App => icons::INFO,
         }
@@ -263,6 +269,7 @@ impl Entry {
     }
 }
 
+use super::appearance;
 use crate::controller::explorer::{EXPLORER_POINTS, NOTICES_SWITCH, NOTICES_SWITCH_WHY};
 use orbiters_n4n0_core::menu::CALLS_SOON;
 use Group::*;
@@ -288,6 +295,23 @@ pub static ENTRIES: &[Entry] = &[
         .rows(&[mark("Username"), mark("Password"), mark("Authenticator code"), mark("Email code"), mark("Recovery code")])
         .gate(Gate::VrchatLogin)
         .whole().controls(&["vrchat-username", "vrchat-factor-code", mark("Show the password"), mark("Hide the password")]),
+    // Appearance.
+    e("appearance.reset", Appearance, appearance::PREVIEW, appearance::RESET, mark("The colors, the font, the size and the background, as they were."), mark("default theme restore original undo")).controls(&[mark("Reset")]),
+    e("appearance.palette", Appearance, appearance::COLOURS, mark("Palette"), mark("The surfaces, the accent and the background's colors together."), mark("theme color scheme dark Aurora Ember Lagoon Daydream")).controls(&["appearance-palette"]),
+    e("appearance.accent", Appearance, appearance::COLOURS, mark("Accent"), mark("The main action, what is selected, and switches that are on."), mark("green highlight color button theme")).controls(&["appearance-accent"]),
+    e("appearance.own-accent", Appearance, appearance::COLOURS, mark("Your own accent"), mark("Any color, kept readable on every surface."), mark("hue hex code picker custom color contrast")).controls(&["appearance-accent-code", "appearance-hue"]),
+    e("appearance.surfaces", Appearance, appearance::COLOURS, mark("Surfaces"), mark("What the greys of pages and cards lean to."), mark("tint grey black OLED neutral dark")).controls(&["appearance-tint"]),
+    e("appearance.menus", Appearance, appearance::COLOURS, mark("Menus in VRChat"), mark("Whether Orbiters' panels beside VRChat's menus have the app's accent or their own."), mark("overlay quick menu panels color accent VR")).gate(Gate::Around).controls(&["appearance-menus"]),
+    e("appearance.font", Appearance, appearance::FONT, appearance::FONT, mark("The letters of the whole app: Orbiters' own, or one of those it brings."), mark("typeface text letters Inter Nunito Montserrat readable dyslexia")).controls(&["appearance-font"]).whole(),
+    e("appearance.own-font", Appearance, appearance::FONT, appearance::OWN_FONT, mark("Any font installed here, drawn at Orbiters' size so pages keep their layout."), mark("system font installed Windows typeface")).controls(&[mark("Choose a font"), mark("Hide"), "appearance-font-search", "appearance-installed"]),
+    e("appearance.size", Appearance, appearance::FONT, mark("Size"), mark("Of the text and everything in the window."), mark("zoom scale bigger smaller large text")).controls(&["appearance-size"]),
+    e("appearance.background", Appearance, appearance::BACKGROUND, appearance::BACKGROUND, mark("Behind the window's pages: the backgrounds of profiles on orbiters.cc"), mark("wallpaper animated shards waves ASCII window light profile")).controls(&["appearance-background"]).whole(),
+    e("appearance.background-colors", Appearance, appearance::BACKGROUND, mark("Background's colors"), mark("The colors the background is drawn in."), mark("wallpaper palette color"))
+        .needs("appearance.background", appearance::needs_background)
+        .controls(&["appearance-background-colors"]),
+    e("appearance.motion", Appearance, appearance::BACKGROUND, mark("Motion"), appearance::MOTION_WHY, mark("animate animation motion still wallpaper performance game frame rate"))
+        .needs("appearance.background", appearance::needs_background)
+        .controls(&["appearance-motion"]),
     // N4N0 companion.
     e("n4n0.enabled", N4n0, "N4N0", "N4N0", mark("The panel, the AFK message, carried and held parameters, saved videos."), mark("on off enable disable companion bot")).controls(&["n4n0-enabled"]),
     e("n4n0.show-bot", N4n0, "N4N0", mark("Show N4N0"), mark("The bot beside your head, its beams and its panel, for everyone around. Off, N4N0's menu still opens, before your eyes as ever. Show N4N0 in your Action Menu does the same."), mark("bot hide visible beams")).controls(&["n4n0-bot"]),
@@ -382,6 +406,7 @@ pub static ENTRIES: &[Entry] = &[
     e("capture.tracking-rate", Capture, mark("Performance"), mark("Tracking rate"), mark("Device poses recorded per second."), mark("Hz frequency poses")).gate(Gate::Camera).controls(&["perf-rate"]),
     e("storage.free", Capture, mark("Storage"), mark("Free up space"), mark("What the captures and 3D pictures take, and deleting what they no longer need."), mark("disk space delete clean")).controls(&[mark("Free up space")]),
     e("storage.limit", Capture, mark("Storage"), mark("Storage limit"), mark("Recording stops when the library reaches it (0 = no limit)."), mark("disk space GB quota library")).controls(&["limit"]),
+    e("storage.vrchat-pictures", Capture, mark("Storage"), mark("Friends' and groups' pictures"), mark("VRChat's pictures, kept on this computer so that they show at once. Past this, the ones seen longest ago go; signing out of VRChat removes them all."), mark("VRChat cache disk space MB")).controls(&["vrchat-pictures"]),
     e("storage.folder", Capture, mark("Storage"), mark("Captures folder"), "", mark("folder path directory location drive")).controls(&[mark("Change")]),
     e("storage.raw-folder", Capture, mark("Storage"), mark("Raw captures folder"), mark("Where Mixer's capture simulator writes."), mark("folder path directory Mixer")).controls(&[mark("Change")]),
     // VRChat & performance.

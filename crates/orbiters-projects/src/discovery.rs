@@ -35,7 +35,7 @@ pub struct Project {
     pub unity: String,
     pub kind: Kind,
     pub modified: u64,
-    /// On the page's list ([`crate::gallery`]), not only found on a disk.
+    /// On the page's list ([`crate::gallery`], a Unity 6 trial's own record), not only found on a disk.
     pub registered: bool,
     /// Creator Companion or ALCOM list it.
     #[serde(default)]
@@ -78,6 +78,30 @@ pub fn fingerprint(path: &Path) -> u64 {
 }
 pub fn key(path: &Path) -> String {
     path.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// Whether two paths are one project's: the same however they are spelled, but not two folders whose names differ only by case
+/// where a disk keeps those apart.
+pub fn same(a: &Path, b: &Path) -> bool {
+    key(a) == key(b) && !apart(a, b)
+}
+
+/// Two folders there, whatever their names say.
+fn apart(a: &Path, b: &Path) -> bool {
+    let plain = |p: &Path| p.to_string_lossy().replace('/', "\\");
+    plain(a) != plain(b) && crate::owned::id_of(a).ok().zip(crate::owned::id_of(b).ok()).is_some_and(|(a, b)| a != b)
+}
+
+/// For tests: a folder whose disk keeps names that differ by case apart, where this computer can make one.
+#[cfg(test)]
+pub(crate) fn by_case(dir: &Path) -> bool {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("fsutil.exe").args(["file", "setCaseSensitiveInfo"]).arg(dir).arg("enable").output();
+    std::fs::create_dir(dir.join("probe")).unwrap();
+    let apart = !dir.join("PROBE").exists();
+    std::fs::remove_dir(dir.join("probe")).unwrap();
+    apart
 }
 
 pub fn parse_version(text: &str) -> Option<String> {
@@ -338,10 +362,21 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     scan.warnings = listed.warning.iter().cloned().collect();
     scan.companion = listed.companion;
     let registered = listed.projects;
-    let known = Known { listed: registered.iter().map(|p| key(p)).collect(), shared: listed.shared };
-    let mut found: HashMap<String, PathBuf> = scan.projects.iter().map(|p| (key(&p.path), p.path.clone())).collect();
+    let mut known = Known { shared: listed.shared, ..Default::default() };
+    let mut found = HashMap::new();
     for p in &registered {
-        found.insert(key(p), p.clone());
+        known.listed.insert(put(&mut found, p.clone()));
+    }
+    for p in &scan.projects {
+        keep(&mut found, p.path.clone());
+    }
+    // Orbiters' own records: the Unity 6 trials, and copies that are not on the list, wherever they are.
+    let app = crate::data_dir();
+    for p in crate::unity6::trial::folders(&app) {
+        known.trials.insert(keep(&mut found, p));
+    }
+    for p in crate::copies::folders(&app) {
+        known.copies.insert(keep(&mut found, p));
     }
     rebuild(&mut scan, &found, &known);
     scan.status = tr("Finding nearby projects").into();
@@ -350,7 +385,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     let mut roots = HashSet::new();
     for p in &seeds {
         if is_project(p) {
-            found.insert(key(p), p.clone());
+            keep(&mut found, p.clone());
         }
         if let Some(parent) = p.parent() {
             roots.insert(parent.to_path_buf());
@@ -371,7 +406,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         #[cfg(target_os = "macos")]
         {
             for p in if orbiters_core::paths::roots().is_none() { spotlight_projects() } else { Vec::new() } {
-                found.insert(key(&p), p);
+                keep(&mut found, p);
             }
             rebuild(&mut scan, &found, &known);
             publish(&scan);
@@ -425,25 +460,57 @@ fn in_dot_folder(path: &Path) -> bool {
     path.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
 
-/// What is known of the projects from the lists, by [`key`].
+/// What is shown wherever it is, by its place among what was found.
 #[derive(Default)]
 struct Known {
     /// On Orbiters' page ([`crate::gallery`]).
     listed: HashSet<String>,
-    /// Creator Companion or ALCOM list it.
+    /// Creator Companion or ALCOM list it ([`key`]).
     shared: HashSet<String>,
+    /// Unity 6 trials, in the gallery by Orbiters' own record.
+    trials: HashSet<String>,
+    /// Copies that could not be listed yet.
+    copies: HashSet<String>,
+}
+
+/// Where `p` is among what was found: by its name whatever its case, or, where a disk keeps two folders apart whose names differ
+/// by case only, by its very name.
+fn place(found: &HashMap<String, PathBuf>, p: &Path) -> String {
+    let k = key(p);
+    match found.get(&k) {
+        Some(other) if apart(other, p) => format!("={}", p.to_string_lossy().replace('/', "\\")),
+        _ => k,
+    }
+}
+
+/// Puts `p` among what was found, in the place of another spelling of it.
+fn put(found: &mut HashMap<String, PathBuf>, p: PathBuf) -> String {
+    let k = place(found, &p);
+    found.insert(k.clone(), p);
+    k
+}
+
+/// The same, keeping the spelling that is there.
+fn keep(found: &mut HashMap<String, PathBuf>, p: PathBuf) -> String {
+    let k = place(found, &p);
+    found.entry(k.clone()).or_insert(p);
+    k
 }
 
 fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
-    let old: HashMap<_, _> = scan.projects.iter().map(|p| (key(&p.path), (p.avatars.clone(), p.worlds.clone()))).collect();
+    let mut old: HashMap<String, _> = HashMap::new();
+    for p in &scan.projects {
+        // (A folder that differs by case only has its own, under its very name.)
+        old.insert(place(found, &p.path), (p.avatars.clone(), p.worlds.clone()));
+    }
     scan.projects = found
         .iter()
         // A project found earlier inside a dot-folder (a cache from before PROJECTS-9, a seed) is not proposed again;
         // one the person registered stays wherever it is.
-        .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && !in_dot_folder(p)))
+        .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && (known.trials.contains(*k) || known.copies.contains(*k) || !in_dot_folder(p))))
         .map(|(k, p)| {
-            let mut project = describe(p.clone(), known.listed.contains(k), &mut scan.scenes);
-            project.shared = known.shared.contains(k);
+            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut scan.scenes);
+            project.shared = known.shared.contains(&key(p));
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
         })
@@ -499,7 +566,7 @@ fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(DiskEvent::Found(p)) => {
-                found.insert(key(&p), p);
+                keep(found, p);
             }
             Ok(DiskEvent::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 finished = true;
@@ -556,7 +623,7 @@ fn walk(
             if let Some(tx) = events {
                 let _ = tx.send(DiskEvent::Found(p.clone()));
             }
-            found.insert(key(&p), p);
+            keep(found, p);
             continue;
         }
         if depth.is_some_and(|max| d >= max) {
@@ -572,7 +639,15 @@ fn walk(
 }
 
 pub fn find_editor(version: &str) -> Option<PathBuf> {
-    find_editor_in(version, crate::hub_data_dir().as_deref(), &default_editor_folders(), &crate::vcc_dir())
+    crate::unity6::editors::find(version).usable().map(|c| c.program.clone())
+}
+
+/// Every program this computer's Unity Hub, VCC and ALCOM files name for `version`, in the order they are tried, each
+/// with where it was named. Hints only ([`crate::unity6::editors`] asks each program what it is), and absolute paths
+/// only: an empty or relative setting names nothing (an empty `secondaryInstallPath.json` must not become a path in
+/// the current folder).
+pub fn editor_hints(version: &str) -> Vec<(PathBuf, crate::unity6::editors::Hint)> {
+    hints_in(version, crate::hub_data_dir().as_deref(), &default_editor_folders(), &crate::vcc_dir())
 }
 
 /// The folders under which Unity Hub puts editors by itself.
@@ -608,29 +683,41 @@ fn editor_program(path: PathBuf) -> PathBuf {
     }
 }
 
-/// [`find_editor`] with its places given.
+/// [`find_editor`] with its places given (tests: the app goes through [`crate::unity6::editors::find`]).
+#[cfg(test)]
 fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) -> Option<PathBuf> {
+    use crate::unity6::editors::{find_with, probe, Hint};
     // Search only the requested version: opening another editor could upgrade a project.
-    let mut candidates = vec![];
+    if let Some(c) = find_with(version, hints_in(version, hub, folders, vcc), &probe).usable() {
+        return Some(c.program.clone());
+    }
+    let more = database_editors_in(version, vcc).into_iter().map(|p| (p, Hint::VccDatabase)).collect();
+    find_with(version, more, &probe).usable().map(|c| c.program.clone())
+}
+
+/// [`editor_hints`] with its places given.
+fn hints_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &Path) -> Vec<(PathBuf, crate::unity6::editors::Hint)> {
+    use crate::unity6::editors::Hint;
+    let mut candidates: Vec<(PathBuf, Hint)> = vec![];
     // Unity Hub names the folder after the version alone, with the architecture too when two are installed side by side
     // (`-arm64`, `-x86_64`). Unity for Apple silicon first: the other one runs under Rosetta, if at all.
     let suffixes: &[&str] = if cfg!(target_os = "macos") { &["-arm64", "", "-x86_64"] } else { &[""] };
     for folder in folders {
-        candidates.extend(suffixes.iter().map(|s| editor_in_folder(&folder.join(format!("{version}{s}")))));
+        candidates.extend(suffixes.iter().map(|s| (editor_in_folder(&folder.join(format!("{version}{s}"))), Hint::HubFolder)));
     }
     if let Some(hub) = hub {
         if let Ok(s) = std::fs::read_to_string(hub.join("editors-v2.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                editor_entries(&v, version, &mut candidates);
+                let mut listed = vec![];
+                editor_entries(&v, version, &mut listed);
+                candidates.extend(listed.into_iter().map(|p| (p, Hint::HubList)));
             }
         }
         if let Ok(s) = std::fs::read_to_string(hub.join("secondaryInstallPath.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                for value in [v.as_str(), v["secondaryInstallPath"].as_str()] {
-                    if let Some(p) = value {
-                        for suffix in suffixes {
-                            candidates.push(editor_in_folder(&PathBuf::from(p).join(format!("{version}{suffix}"))));
-                        }
+                for p in [v.as_str(), v["secondaryInstallPath"].as_str()].into_iter().flatten().map(str::trim).filter(|p| !p.is_empty()) {
+                    for suffix in suffixes {
+                        candidates.push((editor_in_folder(&PathBuf::from(p).join(format!("{version}{suffix}"))), Hint::HubSecondary));
                     }
                 }
             }
@@ -639,28 +726,35 @@ fn find_editor_in(version: &str, hub: Option<&Path>, folders: &[PathBuf], vcc: &
         #[cfg(target_os = "macos")]
         for file in [hub.join("settings.json"), PathBuf::from("/Library/Application Support/Unity/config/services-config.json")] {
             let settings: serde_json::Value = std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            if let Some(p) = settings["machineWideSecondaryInstallLocation"].as_str().filter(|p| !p.is_empty()) {
-                candidates.extend(suffixes.iter().map(|s| editor_in_folder(&PathBuf::from(p).join(format!("{version}{s}")))));
+            if let Some(p) = settings["machineWideSecondaryInstallLocation"].as_str().filter(|p| !p.trim().is_empty()) {
+                candidates.extend(suffixes.iter().map(|s| (editor_in_folder(&PathBuf::from(p).join(format!("{version}{s}"))), Hint::HubSecondary)));
             }
         }
     }
     if let Ok(s) = std::fs::read_to_string(vcc.join("settings.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if let Some(p) = v["preferredUnityEditors"][version].as_str() {
-                candidates.push(if cfg!(target_os = "macos") { editor_program(PathBuf::from(p)) } else { PathBuf::from(p) });
+            if let Some(p) = v["preferredUnityEditors"][version].as_str().filter(|p| !p.trim().is_empty()) {
+                candidates.push((if cfg!(target_os = "macos") { editor_program(PathBuf::from(p)) } else { PathBuf::from(p) }, Hint::VccSettings));
             }
         }
     }
-    if let Some(p) = candidates.iter().find(|p| p.is_file()) {
-        return Some(p.clone());
-    }
-    // Editors VCC or ALCOM found or were given (outside Unity Hub's lists), as their database records them.
-    let wanted = vrc_get_vpm::version::UnityVersion::parse(version)?;
+    candidates.retain(|(p, _)| p.is_absolute());
+    candidates
+}
+
+/// Editors of `version` VCC or ALCOM found or were given (outside Unity Hub's lists), as their database records them.
+pub fn database_editors(version: &str) -> Vec<PathBuf> {
+    database_editors_in(version, &crate::vcc_dir())
+}
+
+fn database_editors_in(version: &str, vcc: &Path) -> Vec<PathBuf> {
+    let Some(wanted) = vrc_get_vpm::version::UnityVersion::parse(version) else { return vec![] };
     crate::theirs::editors(vcc)
         .into_iter()
         .filter(|(v, _)| vrc_get_vpm::version::UnityVersion::parse(v) == Some(wanted))
         .map(|(_, p)| if cfg!(target_os = "macos") { editor_program(p) } else { p })
-        .find(|p| p.is_file())
+        .filter(|p| p.is_absolute())
+        .collect()
 }
 fn editor_entries(v: &serde_json::Value, version: &str, out: &mut Vec<PathBuf>) {
     match v {
@@ -904,6 +998,76 @@ mod retained_lists {
         assert_eq!(kept, wanted);
     }
 
+    /// Orbiters' own: a Unity 6 trial is in the list without any list of VCC's, and says so; a copy not listed yet is found wherever
+    /// it is. Neither makes another project of its name.
+    #[test]
+    fn orbiters_own_projects_are_shown_by_its_own_record() {
+        let temp = tempfile::Builder::new().prefix("own").tempdir().unwrap();
+        let make = |at: &str| {
+            let p = temp.path().join(at);
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+            p
+        };
+        let (trial, copy, listed, plain) = (make(".a/Trial"), make(".b/Copy"), make("Listed"), make("Plain"));
+        let mut found = HashMap::new();
+        let mut known = Known::default();
+        known.listed.insert(put(&mut found, listed.clone()));
+        known.shared.insert(key(&listed));
+        keep(&mut found, plain.clone());
+        for p in [&trial, &listed] {
+            known.trials.insert(keep(&mut found, p.clone()));
+        }
+        known.copies.insert(keep(&mut found, copy.clone()));
+        let mut scan = Scan::default();
+        rebuild(&mut scan, &found, &known);
+        let of = |p: &Path| scan.projects.iter().find(|x| x.path == p).map(|x| (x.registered, x.shared));
+        assert_eq!(of(&trial), Some((true, false)), "in the gallery, by Orbiters' own record");
+        assert_eq!(of(&listed), Some((true, true)), "a trial the person added in VCC");
+        assert_eq!((of(&copy), of(&plain)), (Some((false, false)), Some((false, false))));
+        assert_eq!(scan.projects.len(), 4);
+    }
+
+    /// Fourth verification, Major 8: two folders whose names differ by case only are two projects, where a disk keeps them apart;
+    /// two spellings of one are one.
+    #[test]
+    fn folders_that_differ_by_case_are_told_apart_where_a_disk_does() {
+        let temp = tempfile::Builder::new().prefix("case").tempdir().unwrap();
+        let disk = by_case(temp.path());
+        println!("a disk that tells names apart by case: {disk}");
+        let (a, b) = (temp.path().join("Avatar"), temp.path().join("AVATAR"));
+        for p in [&a, &b] {
+            std::fs::create_dir_all(p.join("ProjectSettings")).unwrap();
+            std::fs::write(p.join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 2022.3.22f1\n").unwrap();
+        }
+        let apart = crate::owned::id_of(&a).unwrap() != crate::owned::id_of(&b).unwrap();
+        assert_eq!((apart, same(&a, &b), same(&a, &a)), (disk, !disk, true));
+        // Orbiters' list has both, and takes off the one named.
+        let vcc = temp.path().join("vcc");
+        let listed = || crate::gallery::listed(&vcc).projects;
+        crate::gallery::add(&vcc, &a).unwrap();
+        crate::gallery::add(&vcc, &b).unwrap();
+        let mut both = listed();
+        both.sort();
+        assert_eq!(both, if disk { vec![b.clone(), a.clone()] } else { vec![a.clone()] });
+        crate::gallery::remove(&vcc, &a).unwrap();
+        assert_eq!(listed(), if disk { vec![b.clone()] } else { vec![] });
+        let mut found = HashMap::new();
+        let first = put(&mut found, a.clone());
+        assert_eq!(keep(&mut found, PathBuf::from(a.to_string_lossy().replace('\\', "/"))), first, "other separators are the same");
+        let second = keep(&mut found, b.clone());
+        assert_eq!((first != second, found.len()), (apart, if apart { 2 } else { 1 }));
+        let known = Known { listed: [first.clone()].into_iter().collect(), ..Default::default() };
+        let mut scan = Scan::default();
+        rebuild(&mut scan, &found, &known);
+        assert_eq!(scan.projects.iter().filter(|p| p.registered).count(), 1, "the listed one alone");
+        // The same without a disk of either kind: two folders there, one name.
+        let mut apart: HashMap<String, PathBuf> = [(key(&a), temp.path().to_path_buf())].into();
+        assert_ne!(place(&apart, &a), key(&a));
+        apart.insert(key(&a), a.clone());
+        assert_eq!(place(&apart, &a), key(&a));
+    }
+
     /// PROJECTS-7: 740 publishes over a scan of a minute write the cache a dozen times, not 740.
     #[test]
     fn a_scan_writes_its_cache_now_and_then() {
@@ -966,5 +1130,40 @@ mod retained_lists {
         std::fs::write(&world, scene("VRCWorld again", WORLD)).unwrap();
         read_again(&mut scan);
         assert_eq!(shown(&scan), (vec![OTHER_AVATAR.to_string()], vec![WORLD.to_string()]));
+    }
+}
+
+#[cfg(test)]
+mod editor_hint_tests {
+    use super::*;
+
+    /// M8: Unity Hub's files are hints. An empty or relative install folder names no program (it would be a path in the
+    /// current folder), and a program found where a hint says is used only for its own version.
+    #[test]
+    fn empty_and_relative_hints_name_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let vcc = temp.path().join("vcc");
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::create_dir_all(&vcc).unwrap();
+        // What this PC's Hub had: an empty secondary path, no editors-v2.json.
+        std::fs::write(hub.join("secondaryInstallPath.json"), "\"\"").unwrap();
+        std::fs::write(vcc.join("settings.json"), serde_json::json!({ "preferredUnityEditors": { "6000.0.67f1": "", "2022.3.22f1": "Editors/Unity.exe" } }).to_string()).unwrap();
+        for version in ["6000.0.67f1", "2022.3.22f1"] {
+            let hints = hints_in(version, Some(&hub), &[], &vcc);
+            assert!(hints.iter().all(|(p, _)| p.is_absolute()), "{hints:?}");
+            assert!(hints.is_empty(), "{hints:?}");
+        }
+        assert_eq!(find_editor_in("6000.0.67f1", Some(&hub), &[], &vcc), None);
+        // A real folder named in it: its version's program, from that folder.
+        let editors = temp.path().join("Editors");
+        let program = editor_in_folder(&editors.join("6000.0.67f1"));
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "stand-in").unwrap();
+        std::fs::write(hub.join("secondaryInstallPath.json"), serde_json::json!(editors).to_string()).unwrap();
+        let hints = hints_in("6000.0.67f1", Some(&hub), &[], &vcc);
+        assert_eq!(hints, vec![(program.clone(), crate::unity6::editors::Hint::HubSecondary)]);
+        assert_eq!(find_editor_in("6000.0.67f1", Some(&hub), &[], &vcc), Some(program), "found, its version unread: usable, not verified");
+        assert_eq!(find_editor_in("2022.3.22f1", Some(&hub), &[], &vcc), None, "only the version asked for");
     }
 }

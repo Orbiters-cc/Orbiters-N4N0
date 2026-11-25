@@ -332,7 +332,7 @@ impl Tone {
             Tone::Ok => theme::OK,
             Tone::Warn => theme::WARN,
             Tone::Danger => theme::DANGER,
-            Tone::Off => theme::FG_4,
+            Tone::Off => theme::fg_4(),
             Tone::Rec => theme::REC,
             Tone::Info => theme::CYAN,
         }
@@ -537,28 +537,28 @@ impl<'a> Button<'a> {
         let r = bg.height() * 0.5;
         let fg = match self.variant {
             Variant::Primary => {
-                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover));
-                theme::ON_ACCENT
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::accent(), theme::accent_hover(), hover));
+                theme::on_accent()
             }
             Variant::Secondary => {
-                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::control(), theme::INK_600, hover));
-                theme::FG
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::control(), theme::ink_600(), hover));
+                theme::fg()
             }
             Variant::Ghost => {
                 painter.rect_filled(bg, theme::radius(r), theme::white(0.06 * hover));
-                theme::mix(theme::FG_2, theme::FG, hover)
+                theme::mix(theme::fg_2(), theme::fg(), hover)
             }
             Variant::Danger => {
                 painter.rect_filled(bg, theme::radius(r), theme::alpha(theme::DANGER, 0.15 + 0.07 * hover));
                 theme::DANGER
             }
             Variant::Stop => {
-                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::DANGER, theme::FG, 0.12 * hover));
-                theme::INK_900
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::DANGER, theme::fg(), 0.12 * hover));
+                theme::ink_900()
             }
             Variant::Glass => {
-                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::surface_strong(), theme::INK_700, hover));
-                theme::FG
+                painter.rect_filled(bg, theme::radius(r), theme::mix(theme::surface_strong(), theme::ink_700(), hover));
+                theme::fg()
             }
             Variant::Warn => {
                 painter.rect_filled(bg, theme::radius(r), theme::alpha(theme::WARN, 0.16 + 0.08 * hover));
@@ -656,9 +656,9 @@ impl<'a> IconButton<'a> {
             p.circle_filled(r.center(), r.width() * 0.5, c);
         }
         let (bg, fg) = if self.danger {
-            (theme::alpha(theme::DANGER, 0.15 * hover), theme::mix(theme::FG_2, theme::DANGER, hover))
+            (theme::alpha(theme::DANGER, 0.15 * hover), theme::mix(theme::fg_2(), theme::DANGER, hover))
         } else {
-            (theme::white(0.08 * hover), theme::mix(theme::FG_2, theme::FG, hover))
+            (theme::white(0.08 * hover), theme::mix(theme::fg_2(), theme::fg(), hover))
         };
         p.circle_filled(r.center(), r.width() * 0.5, bg);
         icon(p, r.center(), self.glyph, self.icon_size, fg);
@@ -694,7 +694,7 @@ impl<'a, T> SegOption<'a, T> {
 /// The width of each option of a [`segmented`] control, as it lays them out.
 fn segment_widths<T>(ui: &Ui, options: &[SegOption<'_, T>], small: bool) -> Vec<f32> {
     let (pad_x, size) = if small { (12.0, 12.0) } else { (14.0, 13.0) };
-    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
+    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::fg_2());
     options
         .iter()
         .map(|o| {
@@ -740,7 +740,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
     let key = salt_key(&id_salt);
     let id = ui.scope_id().with(id_salt);
     let (item_h, size) = if small { (28.0, 12.0) } else { (32.0, 13.0) };
-    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::FG_2);
+    let badge_txt = |b: &str| Txt::new(b.to_uppercase(), 9.5).weight(weight::SEMIBOLD).tracking(0.04).color(theme::fg_2());
     let widths = fit_segments(segment_widths(ui, options, small), if small { 12.0 } else { 14.0 }, ui.available_width());
     let track_w = widths.iter().sum::<f32>() + 8.0;
     let (track, _) = ui.allocate_exact_size(vec2(track_w, item_h + 8.0), Sense::hover());
@@ -775,7 +775,7 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         let w = w.clamp(0.0, (track.width() - 8.0).max(0.0));
         let l = l.clamp(4.0, (track.width() - 4.0 - w).max(4.0));
         let pill = Rect::from_min_size(pos2(track.left() + l, r.top()), vec2(w, r.height()));
-        painter.rect_filled(pill, theme::radius(pill.height() * 0.5), theme::INK_600);
+        painter.rect_filled(pill, theme::radius(pill.height() * 0.5), theme::ink_600());
     }
 
     for (i, o) in options.iter().enumerate() {
@@ -784,9 +784,9 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, id_salt: impl egui::AsIdSalt,
         let target = if active {
             Color32::WHITE
         } else if hovered {
-            theme::FG_2
+            theme::fg_2()
         } else {
-            theme::FG_3
+            theme::fg_3()
         };
         let color = anim::color(ui.ctx(), id.with(("c", i)), target, Spring::SNAPPY);
         let mut p = ui.painter().clone();
@@ -861,7 +861,7 @@ pub fn toggle(ui: &mut Ui, id_salt: impl egui::AsIdSalt, on: &mut bool) -> bool 
     let press = anim::toggle(ctx, id.with("p"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let track = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.08 * press));
     let p = ui.painter();
-    p.rect_filled(track, theme::radius(track.height() * 0.5), theme::mix(theme::INK_600, theme::ACCENT, fill));
+    p.rect_filled(track, theme::radius(track.height() * 0.5), theme::mix(theme::ink_600(), theme::accent(), fill));
     let knob_r = 10.0 * (1.0 - 0.08 * press);
     let x = track.left() + 4.0 + knob_r + k * (track.width() - 8.0 - knob_r * 2.0);
     let c = pos2(x, track.center().y);
@@ -913,12 +913,12 @@ pub fn slider(
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.09));
     if fill_t > 0.0 {
         let fill = Rect::from_min_size(bar.min, vec2((bar.width() * fill_t).max(6.0), bar.height()));
-        p.rect_filled(fill, theme::radius(3.0), theme::ACCENT);
+        p.rect_filled(fill, theme::radius(3.0), theme::accent());
     }
     let c = pos2(bar.left() + bar.width() * knob_t, bar.center().y);
     let r = 9.0 + 1.0 * hover;
     p.circle_filled(c, r, Color32::WHITE);
-    let label = Txt::new(format(*value), 12.5).color(theme::FG_2);
+    let label = Txt::new(format(*value), 12.5).color(theme::fg_2());
     text(p, pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, &label);
     resp.on_hover_cursor(CursorIcon::PointingHand);
     changed
@@ -965,13 +965,13 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
     let ring = anim::toggle(ui.ctx(), id.with("ring"), focused, Spring::SNAPPY);
     let p = ui.painter().clone();
     // The website's input: a flat zinc field, a green ring while focused.
-    p.rect_filled(rect, theme::radius(radius), theme::INK_750);
+    p.rect_filled(rect, theme::radius(radius), theme::ink_750());
     if ring > 0.01 {
-        p.rect_stroke(rect, theme::radius(radius), Stroke::new(2.0, theme::alpha(theme::ACCENT, 0.8 * ring)), StrokeKind::Outside);
+        p.rect_stroke(rect, theme::radius(radius), Stroke::new(2.0, theme::alpha(theme::accent(), 0.8 * ring)), StrokeKind::Outside);
     }
     let mut inner = rect.shrink2(vec2(12.0, 0.0));
     if let Some(glyph) = leading {
-        icon(&p, pos2(rect.left() + 18.0, rect.center().y), glyph, 15.0, theme::FG_4);
+        icon(&p, pos2(rect.left() + 18.0, rect.center().y), glyph, 15.0, theme::fg_4());
         inner.min.x = rect.left() + 34.0;
     }
     if clear {
@@ -981,9 +981,9 @@ fn field_frame(ui: &mut Ui, rect: Rect, id: Id, value: &mut String, hint: &str, 
     let edit = egui::TextEdit::singleline(value)
         .id(id)
         .frame(egui::Frame::NONE)
-        .hint_text(egui::RichText::new(hint.to_string()).color(theme::FG_4).font(font.clone()))
+        .hint_text(egui::RichText::new(hint.to_string()).color(theme::fg_4()).font(font.clone()))
         .font(font)
-        .text_color(theme::FG)
+        .text_color(theme::fg())
         .desired_width(inner.width())
         .margin(egui::Margin::ZERO)
         .align(egui::Align2::LEFT_CENTER);
@@ -1010,7 +1010,7 @@ pub fn status_chip(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, label: &str, va
         Tone::Danger => (theme::alpha(theme::DANGER, 0.1), theme::DANGER),
         Tone::Rec => (theme::alpha(theme::REC, 0.12), theme::REC),
         Tone::Info => (theme::alpha(theme::CYAN, 0.1), theme::CYAN),
-        Tone::Off => (theme::white(0.05), theme::FG_4),
+        Tone::Off => (theme::white(0.05), theme::fg_4()),
     };
     let bg = anim::color(ui.ctx(), id.with("bg"), bg, Spring::SOFT);
     let fg = anim::color(ui.ctx(), id.with("fg"), fg, Spring::SOFT);
@@ -1025,7 +1025,7 @@ pub fn status_chip(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, label: &str, va
         pos2(x, rect.center().y + 9.0),
         Align2::LEFT_CENTER,
         value,
-        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::FG),
+        &Txt::new("", 13.0).weight(weight::MEDIUM).color(theme::fg()),
         max_w,
     );
 }
@@ -1082,9 +1082,9 @@ pub fn stat_tile(ui: &mut Ui, rect: Rect, id: Id, stat: &Stat<'_>) {
     let hover = anim::toggle(ui.ctx(), id.with("hover"), resp.hovered(), Spring::SOFT);
     let r = rect;
     let p = ui.painter();
-    frame(p, r, theme::TILE_RADIUS, theme::mix(theme::surface(), theme::INK_800, hover));
+    frame(p, r, theme::TILE_RADIUS, theme::mix(theme::surface(), theme::ink_800(), hover));
     text(p, r.left_top() + vec2(16.0, 22.0), Align2::LEFT_CENTER, &Txt::caps(label));
-    icon(p, r.right_top() + vec2(-24.0, 22.0), glyph, 16.0, accent.unwrap_or(theme::FG_4));
+    icon(p, r.right_top() + vec2(-24.0, 22.0), glyph, 16.0, accent.unwrap_or(theme::fg_4()));
     text_truncated(
         p,
         pos2(r.left() + 16.0, r.center().y + 2.0),
@@ -1092,12 +1092,12 @@ pub fn stat_tile(ui: &mut Ui, rect: Rect, id: Id, stat: &Stat<'_>) {
         &Txt::new(number, 28.0).weight(weight::SEMIBOLD).tracking(-0.01),
         r.width() - 32.0,
     );
-    text_truncated(p, pos2(r.left() + 16.0, r.bottom() - 20.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), r.width() - 32.0);
+    text_truncated(p, pos2(r.left() + 16.0, r.bottom() - 20.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::fg_3()), r.width() - 32.0);
 }
 
 /// Small rounded tag with an optional icon (counts on session cards).
 pub fn pill(ui: &mut Ui, glyph: Option<&str>, label: &str) -> Response {
-    let t = Txt::new(label, 11.5).color(theme::FG_2);
+    let t = Txt::new(label, 11.5).color(theme::fg_2());
     let ts = text_size(ui, &t);
     let w = ts.x + 16.0 + if glyph.is_some() { 16.0 } else { 0.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
@@ -1105,7 +1105,7 @@ pub fn pill(ui: &mut Ui, glyph: Option<&str>, label: &str) -> Response {
     p.rect_filled(rect, theme::radius(10.0), theme::white(0.06));
     let mut x = rect.left() + 8.0;
     if let Some(g) = glyph {
-        icon(p, pos2(x + 6.0, rect.center().y), g, 12.0, theme::FG_4);
+        icon(p, pos2(x + 6.0, rect.center().y), g, 12.0, theme::fg_4());
         x += 16.0;
     }
     text(p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &t);
@@ -1114,14 +1114,14 @@ pub fn pill(ui: &mut Ui, glyph: Option<&str>, label: &str) -> Response {
 
 /// Paints a small tag with its left edge centred on `left_center`; returns its width.
 pub fn pill_at(painter: &Painter, ui: &Ui, left_center: Pos2, glyph: Option<&str>, label: &str) -> f32 {
-    let t = Txt::new(label, 11.5).color(theme::FG_2);
+    let t = Txt::new(label, 11.5).color(theme::fg_2());
     let ts = text_size(ui, &t);
     let w = ts.x + 16.0 + if glyph.is_some() { 16.0 } else { 0.0 };
     let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - 10.0), vec2(w, 20.0));
     painter.rect_filled(rect, theme::radius(10.0), theme::white(0.06));
     let mut x = rect.left() + 8.0;
     if let Some(g) = glyph {
-        icon(painter, pos2(x + 6.0, rect.center().y), g, 12.0, theme::FG_4);
+        icon(painter, pos2(x + 6.0, rect.center().y), g, 12.0, theme::fg_4());
         x += 16.0;
     }
     text(painter, pos2(x, rect.center().y), Align2::LEFT_CENTER, &t);
@@ -1133,13 +1133,13 @@ pub fn section_header(ui: &mut Ui, glyph: &str, title: &str, subtitle: Option<&s
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
     let p = ui.painter();
     let tile = Rect::from_min_size(pos2(rect.left(), rect.center().y - 18.0), vec2(36.0, 36.0));
-    p.rect_filled(tile, theme::radius(11.0), theme::alpha(theme::ACCENT, 0.12));
-    icon(p, tile.center(), glyph, 17.0, theme::ACCENT);
+    p.rect_filled(tile, theme::radius(11.0), theme::alpha(theme::accent(), 0.12));
+    icon(p, tile.center(), glyph, 17.0, theme::accent());
     let x = tile.right() + 12.0;
     match subtitle {
         Some(sub) => {
             text(p, pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(title, 15.5).weight(weight::SEMIBOLD));
-            text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), rect.right() - x);
+            text_truncated(p, pos2(x, rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::fg_3()), rect.right() - x);
         }
         None => {
             text(p, pos2(x, rect.center().y), Align2::LEFT_CENTER, &Txt::new(title, 15.5).weight(weight::SEMIBOLD));
@@ -1154,7 +1154,7 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     let text_w = (width - control_width - 24.0).max(120.0);
     let label_txt = Txt::new(label, 13.5).weight(weight::MEDIUM);
     let label_g = ui.painter().layout_job(label_txt.job(text_w));
-    let desc_g = description.map(|d| ui.painter().layout_job(Txt::new(d, 12.0).color(theme::FG_3).line_height(18.0).job(text_w)));
+    let desc_g = description.map(|d| ui.painter().layout_job(Txt::new(d, 12.0).color(theme::fg_3()).line_height(18.0).job(text_w)));
     let text_h = label_g.size().y + desc_g.as_ref().map(|g| g.size().y + 2.0).unwrap_or(0.0);
     let h = text_h.max(36.0) + 28.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
@@ -1167,10 +1167,10 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     });
     let p = ui.painter();
     let mut y = rect.center().y - text_h * 0.5;
-    p.galley(pos2(rect.left(), y), label_g.clone(), theme::FG);
+    p.galley(pos2(rect.left(), y), label_g.clone(), theme::fg());
     y += label_g.size().y + 2.0;
     if let Some(g) = desc_g {
-        p.galley(pos2(rect.left(), y), g, theme::FG_3);
+        p.galley(pos2(rect.left(), y), g, theme::fg_3());
     }
     let control_rect = Rect::from_min_max(pos2(rect.right() - control_width, rect.top()), rect.max);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
@@ -1200,7 +1200,7 @@ pub fn progress(ui: &mut Ui, id: Id, fraction: f32, height: f32) {
         } else if fraction > 0.7 {
             p.rect_filled(fill, theme::radius(height * 0.5), theme::WARN);
         } else {
-            p.rect_filled(fill, theme::radius(height * 0.5), theme::ACCENT);
+            p.rect_filled(fill, theme::radius(height * 0.5), theme::accent());
         }
     }
 }
@@ -1220,7 +1220,7 @@ pub fn entrance(ui: &Ui, id: Id, start: f64, index: usize) -> (f32, f32) {
 
 /// A colour of its own for each name, for people without a picture (one of the theme's accents).
 pub fn name_color(name: &str) -> Color32 {
-    let palette = [theme::CYAN, theme::VIOLET, theme::INDIGO, theme::BLUE, theme::PURPLE, theme::ACCENT, theme::WARN, theme::REC];
+    let palette = [theme::CYAN, theme::VIOLET, theme::INDIGO, theme::BLUE, theme::PURPLE, theme::accent(), theme::WARN, theme::REC];
     let hash = name.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619));
     palette[hash as usize % palette.len()]
 }
@@ -1246,10 +1246,10 @@ pub fn avatar(painter: &Painter, rect: Rect, picture: Option<&egui::TextureHandl
 
 /// A count on a control (requests waiting): a green pill centred on `center`; returns its rect.
 pub fn count_badge(painter: &Painter, center: Pos2, count: usize) -> Rect {
-    let t = Txt::new(if count > 99 { "99+".to_string() } else { count.to_string() }, 10.5).weight(weight::BOLD).color(theme::ON_ACCENT);
+    let t = Txt::new(if count > 99 { "99+".to_string() } else { count.to_string() }, 10.5).weight(weight::BOLD).color(theme::on_accent());
     let w = painter.layout_job(t.job(f32::INFINITY)).size().x;
     let r = Rect::from_center_size(center, vec2((w + 10.0).max(18.0), 18.0));
-    painter.rect_filled(r, theme::radius(9.0), theme::ACCENT);
+    painter.rect_filled(r, theme::radius(9.0), theme::accent());
     text(painter, r.center(), Align2::CENTER_CENTER, &t);
     r
 }
@@ -1369,15 +1369,15 @@ impl<'a> Chip<'a> {
         if !self.enabled {
             p.multiply_opacity(0.45);
         }
-        let idle = theme::mix(theme::control(), theme::INK_600, hover);
-        let chosen = theme::alpha(theme::ACCENT, 0.16 + 0.06 * hover);
+        let idle = theme::mix(theme::control(), theme::ink_600(), hover);
+        let chosen = theme::alpha(theme::accent(), 0.16 + 0.06 * hover);
         p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(idle, chosen, k));
-        let fg = theme::mix(theme::mix(theme::FG_2, theme::FG, hover), theme::FG, k);
+        let fg = theme::mix(theme::mix(theme::fg_2(), theme::fg(), hover), theme::fg(), k);
         if let Some(picture) = self.person {
             let a = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(24.0, 24.0));
             avatar(&p, a, picture, self.label);
             if k > 0.01 {
-                p.circle_stroke(a.center(), 12.75, Stroke::new(1.5, theme::alpha(theme::ACCENT, k)));
+                p.circle_stroke(a.center(), 12.75, Stroke::new(1.5, theme::alpha(theme::accent(), k)));
             }
         } else if let Some(g) = self.glyph {
             icon(&p, pos2(r.left() + 19.0, r.center().y), g, 14.0, self.tone.unwrap_or(fg));
@@ -1387,11 +1387,11 @@ impl<'a> Chip<'a> {
         let end = pos2(r.right() - 16.0, r.center().y);
         if self.removable {
             p.circle_filled(end, 10.0, theme::white(0.1 * x_hover));
-            icon(&p, end, icons::X, 12.0, theme::mix(theme::FG_3, theme::FG, x_hover));
+            icon(&p, end, icons::X, 12.0, theme::mix(theme::fg_3(), theme::fg(), x_hover));
         } else if k > 0.01 {
             let mut cp = p.clone();
             cp.multiply_opacity(k);
-            icon(&cp, end + vec2(0.0, 4.0 * (1.0 - sel)), icons::CHECK, 13.0, theme::ACCENT);
+            icon(&cp, end + vec2(0.0, 4.0 * (1.0 - sel)), icons::CHECK, 13.0, theme::accent());
         }
         let resp = if self.enabled { resp.on_hover_cursor(CursorIcon::PointingHand) } else { resp };
         ChipResponse { pressed: act && !over_x, removed: act && over_x, response: resp }

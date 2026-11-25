@@ -19,7 +19,7 @@ use super::tools::{paused_failure, Answer};
 use super::Call;
 use orbiters_core::account::Server;
 use orbiters_projects::discovery::{self, Kind, Project, Scan};
-use orbiters_projects::{blender, coherent, editor, gallery, git, hidden, missing, network, size, storage, templates, updates, vpm};
+use orbiters_projects::{blender, coherent, editor, gallery, git, hidden, missing, network, size, storage, templates, unity6, updates, vpm};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -224,6 +224,7 @@ pub const GUIDE: &str = "# Unity projects\n\n\
 These tools do what Orbiters - N4N0's Unity projects tab does, and what you change shows in the tab. The tab lists Creator Companion's and ALCOM's projects and package repositories with Orbiters' own; nothing of theirs is ever changed, so what is added or removed here stays in Orbiters (the packages of a project are the project's own files, and change for every program).\n\n\
 - `unity_list_projects` lists the projects found on this computer (`listed` ones are in the tab's list, the others were found on a disk; `in_creator_companion` says whether VCC or ALCOM list it). `refresh: true` looks again in a job.\n\
 - `unity_get_project` with a project's `path`: its installed packages, updates (and those held back, with why), Update all's plan, Unity's editor, its disk, Git, Blender files, previews and worlds.\n\
+- Unity 6: each project's `unity_line` says where it stands from its own files (`on_2022`, `on_unity6`, `editor_and_sdk_differ`, `sdk_missing`, ...), its SDK, whether that is a beta, and the Unity 6 trials Orbiters recorded of it (`trials`) or as it (`trial_of`). These are facts to read: no tool migrates a project, opens Unity 6 or uploads. A trial keeps its original's content IDs (`upload_warning`): once uploaded from Unity 6, that content can no longer be uploaded from 2022, so say so before suggesting an upload. The person starts a trial in the tab (Try on Unity 6), and Creator Companion migrates it.\n\
 - Packages: `unity_find_packages` for what the repositories offer; `unity_change_packages` to install (a version or the newest), remove, update one, update all, or restore what is missing. A change that conflicts comes back with the plan that makes it coherent: show it to the person if it removes anything, then `apply_plan`. A change that fails because no repository lists a package: `unity_missing_packages` looks for the repositories that have it and adds them.\n\
 - `unity_repositories` lists, adds (by URL), removes, turns on and off, and downloads again the VPM repositories; `suggest` searches Orbiters' catalog of known ones.\n\
 - `unity_editor` opens a project in Unity, brings it forward, asks it to Save & Exit, or (with `confirm`) kills it.\n\
@@ -440,6 +441,48 @@ fn a_link_into_a_share_is_refused_without_touching_the_share() {
     assert_eq!(resolve_locally(Path::new("/Users/me/New/../../me/Linked"), &table, &fs), Some(PathBuf::from("/Users/me/Linked")), "past a missing part, the rest is taken as written, never looked at");
 }
 
+/// The listed project `given` names: the one of that very path; else, of the one alike (another case, other separators), only when
+/// it is the only one and is the same folder (or neither is there, and nothing tells them apart).
+fn the_listed_one<'a>(listed: &'a [PathBuf], given: &Path) -> Option<&'a PathBuf> {
+    if let Some(exact) = listed.iter().find(|p| p.as_path() == given) {
+        return Some(exact);
+    }
+    let mut alike = listed.iter().filter(|p| discovery::key(p) == discovery::key(given));
+    let (one, more) = (alike.next()?, alike.next().is_some());
+    let same = match (orbiters_projects::owned::id_of(one), orbiters_projects::owned::id_of(given)) {
+        (Ok(a), Ok(b)) => a == b,
+        // Where a disk keeps names apart by case, one that is there is not one that is not.
+        (Err(_), Err(_)) => true,
+        _ => false,
+    };
+    (!more && same).then_some(one)
+}
+
+#[cfg(test)]
+#[test]
+fn a_project_to_take_off_is_the_very_one_named() {
+    let temp = std::env::temp_dir().join(format!("orbiters-bridge-listed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let (a, b) = (temp.join("Avatar"), temp.join("Other"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let upper = PathBuf::from(a.to_string_lossy().replace("Avatar", "AVATAR"));
+    let listed = vec![a.clone(), b.clone()];
+    assert_eq!(the_listed_one(&listed, &a), Some(&a));
+    // Another spelling of it, where that is the same folder; on a disk that keeps them apart it names nothing.
+    assert_eq!(the_listed_one(&listed, &upper), upper.exists().then_some(&a));
+    // Two that differ by case only: neither is guessed at by a third spelling.
+    let mixed = PathBuf::from(a.to_string_lossy().replace("Avatar", "aVATAR"));
+    let both = vec![a.clone(), upper.clone()];
+    assert_eq!(the_listed_one(&both, &mixed), None);
+    assert_eq!(the_listed_one(&both, &upper), Some(&upper));
+    // Not there any more: by the only spelling like it.
+    let gone = temp.join("Gone");
+    assert_eq!(the_listed_one(std::slice::from_ref(&gone), &temp.join("GONE")), Some(&gone));
+    assert_eq!(the_listed_one(&listed, &temp.join("Nothing")), None);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
 /// B2: the mount table is read by each thread into its own buffer: many at once give the same table.
 #[cfg(all(test, target_os = "macos"))]
 #[test]
@@ -567,6 +610,63 @@ impl Editors {
     }
 }
 
+/// The Unity 6 transition's read-only facts of the project at `path` (REQUEST22): its standing from its own files, and
+/// the trials Orbiters recorded of it or as it. No tool migrates, opens Unity 6 or uploads.
+fn unity_line_json(path: &Path, matrix: &unity6::matrix::Matrix, trials: &[(unity6::trial::Job, unity6::trial::Status)]) -> Value {
+    use unity6::standing::{Content, State};
+    // Policy facts come from the built-in release list only (verification's major 7).
+    let _ = matrix;
+    let s = unity6::standing::read(path, &unity6::matrix::Matrix::built_in());
+    let state = match s.state {
+        State::NotVrchat => "not_vrchat",
+        State::LegacySdk => "legacy_sdk_in_assets",
+        State::EditorUnknown => "editor_unknown",
+        State::SdkMissing => "sdk_missing",
+        State::SdkIncomplete => "sdk_incomplete",
+        State::On2022 => "on_2022",
+        State::OnUnity6 => "on_unity6",
+        State::Disagree => "editor_and_sdk_differ",
+        State::OtherLine => "other_line",
+        State::LineUnknown => "line_unknown",
+    };
+    // By identity, wherever it is now and whatever it is called (the window asks the same): a folder replaced at a recorded
+    // path is not the one recorded, and one renamed since still is.
+    let now = std::fs::canonicalize(path).ok().and_then(|p| orbiters_projects::owned::id_of(&p).ok());
+    let here = |place: &unity6::trial::Place| now.is_some() && place.id == now;
+    let as_trial = trials.iter().find(|(j, s)| !matches!(s, unity6::trial::Status::Replaced) && (here(j.unity6()) || here(&j.trial)));
+    let of_it: Vec<Value> = trials
+        .iter()
+        .filter(|(j, _)| here(&j.source))
+        .map(|(j, st)| json!({ "trial": j.unity6().path, "status": st.name(), "made": j.created }))
+        .collect();
+    let mut out = json!({
+        "state": state,
+        "editor": s.editor.text,
+        "editor_revision": s.editor.revision,
+        "sdk_installed": s.sdk.installed,
+        "sdk_locked": s.sdk.locked,
+        "sdk_requested": s.sdk.requested,
+        "sdk_needs_line": s.sdk.needs,
+        "sdk_missing": s.sdk.missing,
+        "sdk_not_at_locked_version": s.sdk.mismatched,
+        "beta": s.beta,
+        "content": s.sdk.content.map(|c| match c { Content::Avatars => "avatars", Content::Worlds => "worlds", Content::Base => "base" }),
+        "history": if as_trial.is_some() { "a Unity 6 trial Orbiters recorded" } else { "not recorded by Orbiters" },
+        "trial_of": as_trial.map(|(j, st)| json!({
+            "original": j.source.path,
+            "original_is_still_there": match j.source.verified() { Some(true) => "yes", Some(false) if j.source.path.exists() => "replaced", Some(false) => "missing", None => "cannot_tell" },
+            "status": st.name(),
+            "made": j.created,
+            "can_be_opened_or_changed": matches!(st, unity6::trial::Status::OnUnity6) && j.migrated.as_ref().is_none_or(|m| here(m)),
+        })),
+        "trials": of_it,
+    });
+    if as_trial.is_some() {
+        out["upload_warning"] = json!("This trial keeps its original's avatar and world IDs: once one is uploaded from Unity 6, VRChat no longer lets it be uploaded from Unity 2022. Test with Build & Test, or give the trial a test ID of its own first.");
+    }
+    out
+}
+
 fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, editors: &Editors) -> Value {
     let size = size::lookup(&project.path).size;
     let things = |list: &[orbiters_projects::avatars::Avatar]| -> Vec<Value> {
@@ -587,6 +687,31 @@ fn project_json(project: &Project, hidden: &std::collections::BTreeSet<String>, 
         "unity_editor": editors.json(&project.path),
         "size": size.map(|s| json!({ "total": s.total, "library": s.library, "files": s.files })),
     })
+}
+
+/// The trial target and the dated facts of the transition, the same in both tools (verification's minor 1).
+fn unity6_target_json(matrix: &unity6::matrix::Matrix) -> Value {
+    let Some(t) = matrix.unity6_target() else { return Value::Null };
+    json!({
+        "sdk": t.sdk,
+        "unity": t.unity,
+        "changeset": t.changeset,
+        "channel": match t.channel { unity6::matrix::Channel::Beta => "beta", unity6::matrix::Channel::Stable => "stable" },
+        "hub_link": t.hub_link(),
+        "guide": "https://vrc-beta-docs.netlify.app/sdk/upgrade/unity-6000/",
+        "unity6_stable_since": matrix.data.events.unity6_stable,
+        "unity2022_uploads_end": matrix.data.events.unity2022_retirement,
+        "release_list_checked": matrix.data.verified,
+    })
+}
+
+/// The release list kept in app data and the trials recorded there (read only, no network).
+fn unity6_facts() -> (unity6::matrix::Matrix, Vec<(unity6::trial::Job, unity6::trial::Status)>) {
+    let dir = orbiters_projects::data_dir();
+    let matrix = unity6::matrix::load(&dir, unity6::key().as_ref());
+    let record = unity6::trial::read(&dir);
+    let trials = record.jobs.iter().map(|j| (j.clone(), unity6::trial::status(&dir, &record, j))).filter(|(_, s)| !matches!(s, unity6::trial::Status::Abandoned)).collect();
+    (matrix, trials)
 }
 
 fn version_is_prerelease(version: &str) -> bool {
@@ -827,8 +952,7 @@ impl Projects {
         if !on_a_local_drive(&path) {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", path.display()), "Pass the project's path as unity_list_projects gives it."));
         }
-        let key = discovery::key(&path);
-        if let Some(found) = self.scan().projects.into_iter().find(|p| discovery::key(&p.path) == key) {
+        if let Some(found) = self.scan().projects.into_iter().find(|p| discovery::same(&p.path, &path)) {
             return Ok(found);
         }
         if !discovery::is_project(&path) {
@@ -872,12 +996,19 @@ impl Projects {
         let include_hidden = args["include_hidden"].as_bool().unwrap_or(false);
         let query = text(args, "query").map(str::to_lowercase);
         let editors = Editors::look();
+        let (matrix, trials) = unity6_facts();
         let projects: Vec<Value> = scan
             .projects
             .iter()
             .filter(|p| include_hidden || !hidden::contains(&hidden, &p.path))
             .filter(|p| query.as_ref().is_none_or(|q| orbiters_core::search::Query::new(q).matches(&p.name) || p.path.to_string_lossy().to_lowercase().contains(q)))
-            .map(|p| project_json(p, &hidden, &editors))
+            .map(|p| {
+                let mut v = project_json(p, &hidden, &editors);
+                if !p.missing {
+                    v["unity_line"] = unity_line_json(&p.path, &matrix, &trials);
+                }
+                v
+            })
             .collect();
         let scanning = self.jobs.lock().unwrap().list.iter().any(|j| j.lane == Lane::Scan && !j.done());
         Ok(json!({
@@ -886,6 +1017,7 @@ impl Projects {
             "last_full_scan": scan.last_full,
             "scanning": scanning,
             "scan_job": started,
+            "unity6_target": unity6_target_json(&matrix),
             "vcc_folder": root(),
         }))
     }
@@ -896,6 +1028,11 @@ impl Projects {
         let hidden = hidden::load();
         let editors = Editors::look();
         let mut out = project_json(&project, &hidden, &editors);
+        if !project.missing {
+            let (matrix, trials) = unity6_facts();
+            out["unity_line"] = unity_line_json(&project.path, &matrix, &trials);
+            out["unity6_target"] = unity6_target_json(&matrix);
+        }
         if project.missing {
             out["next"] = json!("Its folder is missing: connect its disk, or remove it from the list with unity_manage_project.");
             return Ok(out);
@@ -1278,7 +1415,7 @@ impl Projects {
                 if let Some(job) = self.moving_library(&project.path) {
                     return Err(Failure::new("library_moving", format!("Job {job} is moving the Library of {}.", project.name), "Unity can open it once that ends (unity_get_job)."));
                 }
-                let opened = orbiters_projects::open_project(&project).map_err(|e| failed("open_failed", e, "Tell the person what it says: a Unity version to install with Unity Hub, a disk to connect."))?;
+                let opened = orbiters_projects::open_project_from_bridge(&project).map_err(|e| failed("open_failed", e, "Tell the person what it says: a Unity version to install with Unity Hub, a disk to connect."))?;
                 Ok(json!({
                     "opened": true,
                     "already_open": opened.already_open,
@@ -1384,7 +1521,7 @@ impl Projects {
             return Err(bad(format!("{} is not an absolute path on a drive of this computer.", given.display()), "Pass the listed project's path as unity_list_projects gives it."));
         }
         let listed = gallery::listed(root).projects;
-        let Some(exact) = listed.iter().find(|p| discovery::key(p) == discovery::key(given)) else {
+        let Some(exact) = the_listed_one(&listed, given) else {
             return Err(Failure::new("not_listed", format!("{} is not in the project list.", given.display()), "unity_list_projects says which projects are listed."));
         };
         let name = exact.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1584,6 +1721,14 @@ impl Projects {
             }
             _ => return Err(bad("what must be mixer, toolkit, my_avatar or n4n0.", "Pass one of those.")),
         };
+        // Everything that would be refused at the end is refused before anything is done.
+        let dir = orbiters_projects::data_dir();
+        use unity6::authority::{allow, Action, Caller};
+        let refuse = |why: String| Failure::new("refused", why, "Tell the person: nothing was done.");
+        allow(&dir, &path, Action::Packages).map_err(refuse)?;
+        if open_unity {
+            allow(&dir, &path, Action::Open(Caller::Bridge)).map_err(refuse)?;
+        }
         let request: Arc<Mutex<Option<String>>> = Arc::default();
         let probe = {
             let (request, path) = (request.clone(), path.clone());
@@ -1599,6 +1744,11 @@ impl Projects {
         let project_now = project.clone();
         self.spawn(Lane::Action, label, Some(path.clone()), false, Progress::None, Arc::default(), Some(probe), args, call, move || {
             let root = root();
+            // What leads to an upload from VRChat's SDK panel asks leave for it first (Mixer does not).
+            let leave = match what.as_str() {
+                "mixer" => None,
+                _ => Some(unity6::authority::upload(&dir, &path).map_err(|why| Failure::new("refused", why, "Tell the person: nothing was done."))?),
+            };
             let installed = match what.as_str() {
                 "mixer" => block_on(vpm::install_orbiters(&root, &path, &[MIXER])),
                 "toolkit" => block_on(vpm::install_orbiters(&root, &path, &[TOOLKIT])),
@@ -1614,9 +1764,16 @@ impl Projects {
             if outcome["conflict"] == json!(true) {
                 return Ok(outcome);
             }
-            if let (Some(avatar), Some(asset)) = (avatar, server.n4n0_gallery_asset_id()) {
+            // Asked again now that its packages changed.
+            if let Some(leave) = &leave {
+                leave.still(&path).map_err(|why| Failure::new("refused", why, "Its packages are installed; nothing else was done. Tell the person."))?;
+            }
+            if let Some(warning) = leave.as_ref().and_then(|l| l.warning.as_ref()) {
+                outcome["upload_warning"] = json!(warning);
+            }
+            if let (Some(avatar), Some(asset), Some(leave)) = (avatar, server.n4n0_gallery_asset_id(), &leave) {
                 let r = orbiters_projects::setup::request(avatar, asset, server.api(), env!("ORBITERS_VERSION")).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
-                orbiters_projects::setup::write(&path, &r).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
+                orbiters_projects::setup::write(&path, &r, leave).map_err(|e| failed("setup_failed", e, "Tell the person."))?;
                 outcome["setup_request"] = json!(r.id);
                 outcome["next"] = json!("The Toolkit in Unity adds N4N0 to the avatar and saves the scene: open the project (unity_editor open), then unity_get_job shows the setup's result under result.now.");
                 *request.lock().unwrap() = Some(r.id);
@@ -1625,7 +1782,7 @@ impl Projects {
                 // The person came back meanwhile: Unity is not opened in front of them.
                 outcome["unity"] = json!({ "opened": false, "error": "the person is using the computer: open it later with unity_editor open" });
             } else if open_unity {
-                match orbiters_projects::open_project(&project_now) {
+                match orbiters_projects::open_project_from_bridge(&project_now) {
                     Ok(opened) => outcome["unity"] = json!({ "opened": true, "already_open": opened.already_open }),
                     Err(e) => outcome["unity"] = json!({ "opened": false, "error": format!("{e:#}") }),
                 }
@@ -2186,5 +2343,164 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orbiters-bridge-projects-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+}
+
+#[cfg(test)]
+mod unity6_tests {
+    use super::*;
+
+    fn call() -> Call {
+        Call { client_gone: Arc::new(AtomicBool::new(false)), stop_at_start: 0 }
+    }
+    use unity6::trial::{Job, Phase, Place, Status, Target};
+
+    fn project(at: &Path, editor: &str, sdk: &str, line: &str) {
+        std::fs::create_dir_all(at.join("ProjectSettings")).unwrap();
+        std::fs::create_dir_all(at.join("Packages/com.vrchat.base")).unwrap();
+        std::fs::create_dir_all(at.join("Packages/com.vrchat.avatars")).unwrap();
+        std::fs::write(at.join("ProjectSettings/ProjectVersion.txt"), format!("m_EditorVersion: {editor}\n")).unwrap();
+        let lock = json!({ "dependencies": { "com.vrchat.avatars": { "version": sdk } }, "locked": { "com.vrchat.base": { "version": sdk }, "com.vrchat.avatars": { "version": sdk } } });
+        std::fs::write(at.join("Packages/vpm-manifest.json"), lock.to_string()).unwrap();
+        for name in ["com.vrchat.base", "com.vrchat.avatars"] {
+            std::fs::write(at.join("Packages").join(name).join("package.json"), json!({ "name": name, "version": sdk, "unity": line }).to_string()).unwrap();
+        }
+    }
+
+    /// M14: the bridge reads the same standing as the tab, and the trials' record; it changes nothing.
+    #[test]
+    fn a_projects_unity_line_comes_from_its_files_and_the_trials_record() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-unity6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let original = temp.join("Avatar");
+        let trial = temp.join("Avatar (Unity 6)");
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        project(&trial, "6000.0.67f1", "3.11.0-beta.1", "6000.0");
+        let m = unity6::matrix::Matrix::built_in();
+        let v = unity_line_json(&original, &m, &[]);
+        assert_eq!((v["state"].as_str(), v["sdk_installed"].as_str(), v["beta"].as_bool(), v["content"].as_str()), (Some("on_2022"), Some("3.10.6"), Some(false), Some("avatars")));
+        assert_eq!(v["history"], "not recorded by Orbiters");
+        assert!(v["upload_warning"].is_null() && v["trial_of"].is_null());
+        let place = |p: &Path, name: &str| Place { path: p.to_path_buf(), id: orbiters_projects::owned::id_of(p).ok(), name: name.into() };
+        let job = Job {
+            id: "1".repeat(32),
+            created: 1_763_800_000,
+            source: place(&original, "Avatar"),
+            trial: place(&trial, "Avatar (Unity 6)"),
+            phase: Phase::Ready,
+            target: Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() },
+            error: None,
+            differences: vec![],
+            attempts: vec![],
+            migrated: None,
+            beside: None,
+            localized: vec![],
+            linked: vec![],
+            content: vec![],
+            content_unsure: vec![],
+            guid: String::new(),
+            manifest: None,
+            import_high: 0,
+        };
+        let trials = vec![(job.clone(), Status::OnUnity6)];
+        let v = unity_line_json(&original, &m, &trials);
+        assert_eq!(v["trials"].as_array().unwrap().len(), 1);
+        assert_eq!(v["trials"][0]["status"], "on_unity6", "a stable name, not a debug string");
+        let v = unity_line_json(&trial, &m, &trials);
+        assert_eq!((v["state"].as_str(), v["beta"].as_bool()), (Some("on_unity6"), Some(true)));
+        assert_eq!(v["trial_of"]["original"], json!(original));
+        assert_eq!(v["trial_of"]["original_is_still_there"], "yes");
+        assert!(v["upload_warning"].as_str().unwrap().contains("Unity 2022"));
+        // Verification major 10: another folder put at the original's path is not its original any more.
+        std::fs::rename(&original, temp.join("Avatar moved")).unwrap();
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        assert!(unity_line_json(&original, &m, &trials)["trials"].as_array().unwrap().is_empty());
+        assert_eq!(unity_line_json(&trial, &m, &trials)["trial_of"]["original_is_still_there"], "replaced");
+        // Second verification major 10: the original, renamed, keeps its trials here as in the window.
+        assert_eq!(unity_line_json(&temp.join("Avatar moved"), &m, &trials)["trials"].as_array().unwrap().len(), 1);
+        // Verification minor 1: both tools say the target and its dated facts the same way.
+        let projects = Projects::default();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let data = |a: Answer| match a {
+            Answer::Data(v) => v,
+            _ => panic!("data"),
+        };
+        let list = data(projects.call("unity_list_projects", &json!({}), &call(), None).unwrap());
+        let get = data(projects.call("unity_get_project", &json!({ "path": original }), &call(), None).unwrap());
+        assert_eq!(list["unity6_target"], get["unity6_target"]);
+        assert_eq!((list["unity6_target"]["channel"].as_str(), list["unity6_target"]["unity2022_uploads_end"].is_null()), (Some("beta"), true));
+        assert_eq!(list["projects"][0]["unity_line"]["state"], "on_2022");
+        assert!(GUIDE.contains("unity_line") && GUIDE.contains("no tool migrates"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Verification blocker 3: the bridge's own commands against a trial that waits for Creator Companion: its packages
+    /// are not changed and Unity is not opened, and what it answers says why.
+    #[test]
+    fn the_bridges_commands_refuse_a_waiting_trial() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-trial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let original = temp.join("Avatar");
+        project(&original, "2022.3.22f1", "3.10.6", "2022.3");
+        std::fs::create_dir_all(original.join("Assets")).unwrap();
+        std::fs::write(original.join("Packages/manifest.json"), r#"{"dependencies":{}}"#).unwrap();
+        std::fs::write(original.join("ProjectSettings/ProjectSettings.asset"), "PlayerSettings:\n  productGUID: 0\n").unwrap();
+        let target = Target { sdk: "3.11.0-beta.1".into(), unity: "6000.0.67f1".into(), changeset: "78a1c2bbeb6a".into() };
+        let dir = orbiters_projects::data_dir();
+        let job = unity6::trial::prepare(
+            unity6::trial::Prepare { dir: &dir, source: &original, parent: &temp, name: "Avatar (Unity 6)", target, open: &|_| false, budget: &|_, _| Ok(0), recorded: &|_| {} },
+            &AtomicBool::new(false),
+            &Default::default(),
+        )
+        .unwrap();
+        let projects = Projects::default();
+        let at = job.trial.path.clone();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
+        let said = |r: Result<Answer, Failure>| match r {
+            Err(f) => format!("{} {}", f.code, f.message),
+            Ok(Answer::Data(v)) => v.to_string(),
+            Ok(_) => panic!("data"),
+        };
+        let changed = said(projects.call("unity_change_packages", &json!({ "path": at, "action": "restore", "wait_s": 20 }), &call(), None));
+        assert!(changed.contains("Creator Companion"), "{changed}");
+        let opened = said(projects.call("unity_editor", &json!({ "path": at, "action": "open" }), &call(), None));
+        assert!(opened.contains("open_failed") && opened.contains("Creator Companion"), "{opened}");
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
+        // Toolkit, My Avatar, Mixer: refused before anything is done.
+        for what in ["toolkit", "my_avatar", "mixer"] {
+            let said = said(projects.call("unity_add_orbiters", &json!({ "path": at, "what": what, "wait_s": 20 }), &call(), None));
+            assert!(said.contains("refused") && said.contains("Creator Companion"), "{what}: {said}");
+        }
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
+        unity6::trial::abandon(&dir, &job.id).unwrap();
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Second verification N4: no tool opens a project on Unity 6, trial or not, and the optional open of another tool is
+    /// refused before that tool does anything. (No such editor exists: nothing can start.)
+    #[test]
+    fn no_tool_opens_a_unity6_project() {
+        let temp = std::env::temp_dir().join(format!("orbiters-bridge-u6-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let at = temp.join("Six");
+        project(&at, "6000.0.99f9", "3.11.0-beta.1", "6000.0");
+        std::fs::create_dir_all(at.join("Assets")).unwrap();
+        let projects = Projects::default();
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }], ..Default::default() });
+        let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
+        let said = |r: Result<Answer, Failure>| match r {
+            Err(f) => format!("{} {}", f.code, f.message),
+            Ok(Answer::Data(v)) => v.to_string(),
+            Ok(_) => panic!("data"),
+        };
+        let opened = said(projects.call("unity_editor", &json!({ "path": at, "action": "open" }), &call(), None));
+        assert!(opened.contains("open_failed") && opened.contains("Unity 6") && !opened.contains("not installed"), "{opened}");
+        for what in ["mixer", "toolkit", "my_avatar"] {
+            let added = said(projects.call("unity_add_orbiters", &json!({ "path": at, "what": what, "open_unity": true, "wait_s": 20 }), &call(), None));
+            assert!(added.contains("refused") && added.contains("Unity 6"), "{what}: {added}");
+        }
+        assert_eq!(std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap(), manifest, "nothing changed");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

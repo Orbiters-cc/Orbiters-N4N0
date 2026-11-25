@@ -816,17 +816,17 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
             let lit = if note.offer.is_some() { 1.0 } else { 0.0 };
             let r = r.shrink(1.5 * press);
             let p = ui.painter();
-            p.rect_filled(r, theme::radius(12.0), theme::mix(theme::black(0.55 * k), theme::alpha(theme::INK_900, 0.9 * k), lit));
+            p.rect_filled(r, theme::radius(12.0), theme::mix(theme::black(0.55 * k), theme::alpha(theme::ink_900(), 0.9 * k), lit));
             if lit > 0.0 {
-                p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::ACCENT, (0.14 + 0.1 * hover) * k));
+                p.rect_filled(r, theme::radius(12.0), theme::alpha(theme::accent(), (0.14 + 0.1 * hover) * k));
             }
-            let fg = theme::mix(theme::mix(theme::FG_2, theme::ACCENT, lit), theme::FG, hover * 0.4);
+            let fg = theme::mix(theme::mix(theme::fg_2(), theme::accent(), lit), theme::fg(), hover * 0.4);
             let warn = note.glyph == icons::WARNING;
             if note.spinner {
-                feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(if lit > 0.0 { theme::ACCENT } else { theme::FG_2 }, k));
+                feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(if lit > 0.0 { theme::accent() } else { theme::fg_2() }, k));
                 ctx.request_repaint();
             } else {
-                let tone = if warn { theme::WARN } else { theme::mix(theme::FG_3, theme::ACCENT, lit) };
+                let tone = if warn { theme::WARN } else { theme::mix(theme::fg_3(), theme::accent(), lit) };
                 widgets::icon(p, pos2(r.left() + 15.0, r.center().y - 1.5 * hover * lit), note.glyph, 12.0, theme::alpha(tone, k));
             }
             widgets::text_truncated(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &txt.color(theme::alpha(fg, k)), r.width() - 25.0 - 10.0);
@@ -839,7 +839,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
         if notes.is_empty() && busy {
             let r = Rect::from_center_size(pos2(corner - 14.0, rect.top() + 24.0), vec2(28.0, 28.0));
             ui.painter().circle_filled(r.center(), 14.0, theme::black(0.5));
-            feedback::spinner(ui.painter(), r.center(), 7.0, 2.0, theme::FG_2);
+            feedback::spinner(ui.painter(), r.center(), 7.0, 2.0, theme::fg_2());
         }
         if let Some(v) = act {
             let installed = toolkit.as_ref().and_then(|t| t.0.clone());
@@ -851,7 +851,7 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
     }
     if window_open {
         // The window grew out of here: its place stays dimmed until it is back.
-        feedback::fill_corners(ui.painter(), rect, radii, theme::INK_950);
+        feedback::fill_corners(ui.painter(), rect, radii, theme::ink_950());
         return;
     }
     let resp = ui.interact(rect, id, Sense::click_and_drag());
@@ -976,12 +976,12 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 ChipState::Ready(_) => (icons::CUBE, tr!("Opening {name}…", name = ch.name), true),
                 _ => (icons::CUBE, tr!("Building {name} from the project's files…", name = ch.name), true),
             };
-            let txt = Txt::new(&text, 13.0).weight(weight::MEDIUM).color(theme::alpha(theme::FG, pk));
+            let txt = Txt::new(&text, 13.0).weight(weight::MEDIUM).color(theme::alpha(theme::fg(), pk));
             let w = (widgets::text_size(ui, &txt).x + 56.0).min(f.rect.width() - 80.0);
             let r = Rect::from_center_size(f.rect.center(), vec2(w, 40.0));
             paint::fill_squircle(ui.painter(), r, theme::squircle(20.0), theme::black(0.65 * pk));
             if spin {
-                feedback::spinner(ui.painter(), pos2(r.left() + 22.0, r.center().y), 6.0, 1.8, theme::alpha(theme::ACCENT, pk));
+                feedback::spinner(ui.painter(), pos2(r.left() + 22.0, r.center().y), 6.0, 1.8, theme::alpha(theme::accent(), pk));
                 ctx.request_repaint();
             } else {
                 widgets::icon(ui.painter(), pos2(r.left() + 22.0, r.center().y), glyph, 14.0, theme::alpha(theme::WARN, pk));
@@ -1012,7 +1012,7 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let shown = !c.touched && ctx.input(|i| i.time) - pv.opened_at < HINT_S;
         let hk = anim::toggle(&ctx, wid.with("hint"), shown, Spring::SOFT) * f.content;
         if hk > 0.01 {
-            let txt = Txt::new(tr("Drag to turn  ·  right-drag to move  ·  scroll to zoom  ·  double-click to frame"), 12.0).color(theme::alpha(theme::FG_2, hk));
+            let txt = Txt::new(tr("Drag to turn  ·  right-drag to move  ·  scroll to zoom  ·  double-click to frame"), 12.0).color(theme::alpha(theme::fg_2(), hk));
             let w = widgets::text_size(ui, &txt).x + 32.0;
             let y = f.rect.bottom() - 26.0 - if scenes.chips.len() > 1 { 52.0 } else { 0.0 } + 8.0 * (1.0 - hk);
             let r = Rect::from_center_size(pos2(f.rect.center().x, y), vec2(w, 30.0));
@@ -1117,8 +1117,8 @@ fn chrome(
             if k > 0.01 || hk > 0.01 {
                 paint::fill_nested_squircle(&p, row, theme::squircle(19.0), r, theme::white(0.13 * k + 0.05 * hk * (1.0 - k)));
             }
-            let fg = if offered { theme::mix(theme::FG_2, theme::FG, k) } else { theme::FG_3 };
-            let glyph_tint = if offered { theme::mix(theme::FG_3, theme::ACCENT, k) } else { theme::alpha(theme::FG_3, 0.6) };
+            let fg = if offered { theme::mix(theme::fg_2(), theme::fg(), k) } else { theme::fg_3() };
+            let glyph_tint = if offered { theme::mix(theme::fg_3(), theme::accent(), k) } else { theme::alpha(theme::fg_3(), 0.6) };
             widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), glyph, 13.0, glyph_tint);
             widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt.color(fg));
             let tip = match (on, offered) {
@@ -1144,7 +1144,7 @@ fn chrome(
         .unwrap_or_default();
     let sub = [project.name.as_str(), saved.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ·  ");
     let title = Txt::new(&scene_name, 16.0).weight(weight::SEMIBOLD).tracking(-0.01);
-    let subt = Txt::new(&sub, 12.0).color(theme::FG_3);
+    let subt = Txt::new(&sub, 12.0).color(theme::fg_3());
     let max_w = (rect.width() * 0.5).max(200.0);
     let w = (widgets::text_size(ui, &title).x.max(widgets::text_size(ui, &subt).x) + 72.0).min(max_w);
     let chip = Rect::from_min_size(rect.min + vec2(14.0, 14.0), vec2(w, 54.0));
@@ -1184,7 +1184,7 @@ fn chrome(
     let mut x = rect.left() + 14.0;
     let y = rect.bottom() - 14.0 - 15.0;
     for fact in &facts {
-        let txt = Txt::new(fact, 12.0).color(theme::FG_2);
+        let txt = Txt::new(fact, 12.0).color(theme::fg_2());
         let fw = widgets::text_size(ui, &txt).x + 24.0;
         let r = Rect::from_min_size(pos2(x, y - 15.0), vec2(fw, 30.0));
         p.rect_filled(r, theme::radius(15.0), theme::black(0.5));
@@ -1196,7 +1196,7 @@ fn chrome(
     if skipped > 0 {
         let r = Rect::from_min_size(pos2(x, y - 15.0), vec2(30.0, 30.0));
         p.circle_filled(r.center(), 15.0, theme::black(0.5));
-        widgets::icon(&p, r.center(), icons::INFO, 14.0, theme::FG_3);
+        widgets::icon(&p, r.center(), icons::INFO, 14.0, theme::fg_3());
         let n = |k: &str| s.skipped.get(k).copied().unwrap_or(0);
         let mut reasons = Vec::new();
         if n("budget") > 0 {
@@ -1242,11 +1242,11 @@ fn chrome(
         let selected = scenes.selected.as_deref();
         let txt_of = |ch: &SceneChip| {
             let on = Some(ch.guid.as_str()) == selected;
-            Txt::new(&ch.name, 12.5).weight(if on { weight::SEMIBOLD } else { weight::MEDIUM }).color(if on { theme::FG } else { theme::FG_2 })
+            Txt::new(&ch.name, 12.5).weight(if on { weight::SEMIBOLD } else { weight::MEDIUM }).color(if on { theme::fg() } else { theme::fg_2() })
         };
         let width_of = |ch: &SceneChip| widgets::text_size(ui, &txt_of(ch)).x + 28.0 + if ch.state.marked() { 18.0 } else { 0.0 };
         let more_label = tr!("All scenes · {n}", n = n);
-        let more_txt = Txt::new(&more_label, 12.5).weight(weight::MEDIUM).color(theme::FG_2);
+        let more_txt = Txt::new(&more_label, 12.5).weight(weight::MEDIUM).color(theme::fg_2());
         let more_w = widgets::text_size(ui, &more_txt).x + 44.0;
         let side = (bw + 60.0).max(x - rect.left() + 12.0);
         let room = rect.width() - 2.0 * side - 8.0;
@@ -1291,7 +1291,7 @@ fn chrome(
                 let mut tx = r.left() + 14.0;
                 match &ch.state {
                     ChipState::Building => {
-                        feedback::spinner(&p, pos2(tx + 5.0, r.center().y), 5.0, 1.6, theme::FG_3);
+                        feedback::spinner(&p, pos2(tx + 5.0, r.center().y), 5.0, 1.6, theme::fg_3());
                         ui.ctx().request_repaint();
                         tx += 18.0;
                     }
@@ -1319,7 +1319,7 @@ fn chrome(
                     p.rect_filled(r, theme::radius(15.0), theme::white(0.07 * hk));
                 }
                 widgets::text(&p, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &more_txt);
-                widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), super::art::glyph::CARET_UP, 11.0, theme::FG_3);
+                widgets::icon(&p, pos2(r.right() - 16.0, r.center().y), super::art::glyph::CARET_UP, 11.0, theme::fg_3());
                 let pressed = widgets::activated(&resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr("Every scene of the project")));
                 let details: Vec<String> = scenes.chips.iter().map(|ch| ch.state.detail().to_string()).collect();
                 let items: Vec<orbiters_ui::popup::Item> = scenes
@@ -1357,12 +1357,12 @@ fn chrome(
     // facts, after them, only in the room the scenes' chips leave (it never takes one of their places), the title's
     // tooltip saying the same when it does not fit.
     if matches!(source, Some(Source::Built(_) | Source::Stale(_))) {
-        let txt = Txt::new(tr("Built from files"), 12.0).color(theme::FG_3);
+        let txt = Txt::new(tr("Built from files"), 12.0).color(theme::fg_3());
         let fw = widgets::text_size(ui, &txt).x + 24.0 + 18.0;
         if note_x + fw <= note_end {
             let r = Rect::from_min_size(pos2(note_x, y - 15.0), vec2(fw, 30.0));
             p.rect_filled(r, theme::radius(15.0), theme::black(0.35));
-            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), icons::CUBE, 12.0, theme::FG_3);
+            widgets::icon(&p, pos2(r.left() + 19.0, r.center().y), icons::CUBE, 12.0, theme::fg_3());
             widgets::text(&p, pos2(r.left() + 31.0, r.center().y), Align2::LEFT_CENTER, &txt);
             ui.interact(r, Id::unique("project-preview-built"), Sense::hover()).on_hover_text(
                 tr("Built by Orbiters - N4N0 from the project's files, without Unity: close to what Unity shows, not exact (no normal maps, animators or what tools do at upload). Orbiters Toolkit draws the exact one each time the scene is saved in Unity."),

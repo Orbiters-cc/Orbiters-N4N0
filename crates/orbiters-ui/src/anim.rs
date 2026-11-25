@@ -184,6 +184,12 @@ pub const DECOR_FPS: f32 = 15.0;
 /// draws nothing until something changes.
 pub const REST_AFTER: f64 = 30.0;
 
+/// Nothing was done in the window for [`REST_AFTER`]: looping decorations rest ([`clock`] stands).
+pub fn is_resting(ctx: &Context) -> bool {
+    let t = now(ctx);
+    ctx.data_mut(|d| t - *d.get_temp_mut_or_insert_with(input_id(), || t) >= REST_AFTER)
+}
+
 /// Seconds that advance only while the window is live and was used in the last [`REST_AFTER`] seconds: looping
 /// animations read it, so they pause where they are instead of jumping. Asks for the next frame at the shared
 /// [`DECOR_FPS`] (or `fps` when that is lower).

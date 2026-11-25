@@ -163,7 +163,7 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 
 /// The dimmed window behind an open window (`area`: what it covers).
 pub fn paint_backdrop(painter: &Painter, area: Rect, f: &Frame) {
-    painter.rect_filled(area, 0.0, theme::alpha(theme::INK_950, 0.72 * f.backdrop));
+    painter.rect_filled(area, 0.0, theme::alpha(theme::ink_950(), 0.72 * f.backdrop));
 }
 
 /// The window's surface and its shadow, which grows in as it opens (both as opaque as the window, [`Frame::shape`]).

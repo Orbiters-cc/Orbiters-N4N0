@@ -42,7 +42,7 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
                 acts.push((Item::new(tr("Save & Exit Unity")).icon(icons::FLOPPY_DISK), ProjectAct::SaveExit));
                 acts.push((Item::new(tr("Kill Unity…")).icon(icons::X_CIRCLE).danger(), ProjectAct::Kill));
             }
-        } else if project.registered && !project.missing && !busy {
+        } else if project.registered && !project.missing && !busy && !state.u6.waiting(&project.path) {
             acts.push((Item::new(tr("Open in Unity")).icon(icons::PLAY), ProjectAct::Open));
         } else if !project.registered && !busy {
             acts.push((Item::new(tr("Add to my projects")).icon(icons::PLUS), ProjectAct::Add));
@@ -66,7 +66,8 @@ pub(super) fn project_items(state: &State, project: &Project, opening: bool) -> 
         if state.is_hidden(&project.path) { Item::new(tr("Show this project")).icon(EYE) } else { Item::new(tr("Hide this project")).icon(icons::EYE_SLASH) },
         ProjectAct::Hide,
     ));
-    if project.registered && !busy {
+    // A trial is Orbiters' own record: its card forgets it.
+    if project.registered && !busy && state.u6.trial_at(&project.path).is_none() {
         acts.push((Item::new(tr("Remove from the list")).icon(glyph::TRASH_SIMPLE).danger(), ProjectAct::Remove));
     }
     acts
@@ -207,7 +208,7 @@ pub(super) fn row_menu(ui: &Ui, cx: &mut Cx, state: &mut State, project: &Projec
         RowAct::ChangePicture => super::vrchat_picture::change(&ctx, cx, state, a),
         RowAct::AddN4n0 | RowAct::MyAvatar => {
             let n4n0 = acts[k].2 == RowAct::AddN4n0;
-            state.modal_fill = if n4n0 { theme::control() } else { theme::INK_850 };
+            state.modal_fill = if n4n0 { theme::control() } else { theme::ink_850() };
             state.install(&ctx, project.clone(), a.clone(), n4n0, server(cx), row.rect);
         }
         RowAct::Blender(i) => super::blend::open(&ctx, state, &links[i]),

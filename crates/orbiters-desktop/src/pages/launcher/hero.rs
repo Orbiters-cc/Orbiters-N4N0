@@ -98,10 +98,10 @@ fn joining(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, joining: &Joinin
     if failed {
         widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
     } else {
-        orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::ACCENT);
+        orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::accent());
     }
     let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
-    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::FG_2), text.width());
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::fg_2()), text.width());
     ui.interact(text, Id::unique("launcher-joining"), Sense::hover()).on_hover_text(line);
     let clock = anim::time(ui.ctx());
     if button.is_some_and(|b| b.show_at(ui, at).clicked()) {
@@ -123,7 +123,7 @@ fn picture_lost(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, session: &s
     widgets::frame(&p, rect, 16.0, theme::surface_soft());
     widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN);
     let line = tr("VRChat's picture stopped on this Mac and will not come back: restart it.");
-    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), at.left() - rect.left() - 58.0);
     let clicked = button.show_at(ui, at).on_hover_text(tr("Asks VRChat to quit, as its own Quit does, then starts it again as Home started it.")).clicked();
     if clicked {
         state.act(cx, anim::time(ui.ctx()), Action::RestartLostGame { session: session.to_owned() });
@@ -147,9 +147,9 @@ fn engine_trouble(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, trouble: 
     let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let p = ui.painter().clone();
     widgets::frame(&p, rect, 16.0, theme::surface_soft());
-    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), if trouble.repairing { icons::INFO } else { icons::WARNING_CIRCLE }, 17.0, if trouble.repairing { theme::FG_3 } else { theme::WARN });
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), if trouble.repairing { icons::INFO } else { icons::WARNING_CIRCLE }, 17.0, if trouble.repairing { theme::fg_3() } else { theme::WARN });
     let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
-    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::FG_2), text.width());
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line.clone(), 13.0).color(theme::fg_2()), text.width());
     let told = if trouble.paths.is_empty() { line } else { trouble.paths.join("\n") };
     ui.interact(text, Id::unique("launcher-engine-files"), Sense::hover()).on_hover_text(told);
     if let Some(button) = button {
@@ -168,9 +168,9 @@ fn low_power(ui: &mut Ui, rect: Rect) {
     let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let p = ui.painter().clone();
     widgets::frame(&p, rect, 16.0, theme::surface_soft());
-    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::INFO, 17.0, theme::FG_3);
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::INFO, 17.0, theme::fg_3());
     let line = tr("Low Power Mode is on while this Mac is plugged in: VRChat may run slower.");
-    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+    widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), at.left() - rect.left() - 58.0);
     if button.show_at(ui, at).clicked() {
         crate::mac_display::open_battery_settings();
     }
@@ -199,10 +199,10 @@ fn mac_setup(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize, next: u3
         match button {
             Some(_) => widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, theme::WARN),
             None => {
-                orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::ACCENT);
+                orbiters_ui::feedback::spinner(&p, pos2(rect.left() + 26.0, rect.center().y), 8.0, 2.0, theme::accent());
             }
         }
-        widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), at.left() - rect.left() - 58.0);
+        widgets::text_truncated(&p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), at.left() - rect.left() - 58.0);
         if button.is_some_and(|b| b.show_at(ui, at).clicked()) {
             state.act(cx, anim::time(ui.ctx()), Action::InstallEngine { profile: next });
         }
@@ -224,9 +224,9 @@ fn start_trouble(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, trouble: &
     let at = Rect::from_min_size(pos2(rect.right() - 12.0 - bw, rect.center().y - 16.0), vec2(bw, 32.0));
     let p = ui.painter().clone();
     widgets::frame(&p, rect, 16.0, theme::surface_soft());
-    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, if trouble.blocks { theme::WARN } else { theme::FG_3 });
+    widgets::icon(&p, pos2(rect.left() + 26.0, rect.center().y), icons::WARNING_CIRCLE, 17.0, if trouble.blocks { theme::WARN } else { theme::fg_3() });
     let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(at.left() - 12.0, rect.bottom()));
-    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), text.width());
+    widgets::text_truncated(&p, pos2(text.left(), rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), text.width());
     ui.interact(text, Id::unique("launcher-trouble-file"), Sense::hover()).on_hover_text(trouble.file.clone());
     if let Some(button) = button {
         let clicked = button.show_at(ui, at).on_hover_text(tr("Moves it into the folder Set aside, beside VRChat's engine records: nothing is deleted.")).clicked();
@@ -254,10 +254,10 @@ fn chip_label(p: &GameProfile) -> String {
 
 fn chip_icon(p: &GameProfile) -> (&'static str, egui::Color32) {
     match (p.running, p.starting) {
-        (Some(LaunchMode::Vr), _) => (icons::VIRTUAL_REALITY, theme::ACCENT),
-        (Some(LaunchMode::Desktop), _) => (icons::DESKTOP, theme::ACCENT),
+        (Some(LaunchMode::Vr), _) => (icons::VIRTUAL_REALITY, theme::accent()),
+        (Some(LaunchMode::Desktop), _) => (icons::DESKTOP, theme::accent()),
         (None, Some(_)) => (icons::HOURGLASS_MEDIUM, theme::WARN),
-        (None, None) => (icons::USER, theme::FG_3),
+        (None, None) => (icons::USER, theme::fg_3()),
     }
 }
 
@@ -312,14 +312,14 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) -> (
                 } else {
                     tr(crate::controller::launcher::CANNOT_START)
                 };
-                widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::FG_2), rect.width() - 60.0);
+                widgets::text_truncated(p, pos2(rect.left() + 46.0, rect.center().y), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(theme::fg_2()), rect.width() - 60.0);
             });
             return (play, index + 1);
         }
         _ => {}
     }
     // The chips, wrapped in rows when the page is narrow.
-    let caption = Txt::new(tr("VRChat profile"), 12.5).weight(weight::MEDIUM).color(theme::FG_3);
+    let caption = Txt::new(tr("VRChat profile"), 12.5).weight(weight::MEDIUM).color(theme::fg_3());
     let caption_w = widgets::text_size(ui, &caption).x + 14.0;
     let new = states::new_profile(&offered);
     let new_label = tr("Another profile");
@@ -403,7 +403,7 @@ fn hero_profiles(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) -> (
         }
         if let Some(line) = hint {
             let y = top + chips_h.max(CHIP_H) + 4.0 + hint_h * 0.5;
-            widgets::text_truncated(ui.painter(), pos2(rect.left() + 2.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::FG_3), rect.width());
+            widgets::text_truncated(ui.painter(), pos2(rect.left() + 2.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.5).color(theme::fg_3()), rect.width());
         }
     });
     if let Some(invite) = invite {
@@ -450,13 +450,13 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
     // The one button of a Mac is the green one.
     let primary = mode == LaunchMode::Vr || !VR_HERE;
     let (fill, fg, fg2) = if running {
-        (theme::alpha(theme::ACCENT, 0.14), theme::FG, theme::FG_2)
+        (theme::alpha(theme::accent(), 0.14), theme::fg(), theme::fg_2())
     } else if grey {
-        (theme::control(), theme::FG_2, theme::FG_2)
+        (theme::control(), theme::fg_2(), theme::fg_2())
     } else if primary {
-        (theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover), theme::ON_ACCENT, theme::alpha(theme::ON_ACCENT, 0.72))
+        (theme::mix(theme::accent(), theme::accent_hover(), hover), theme::on_accent(), theme::alpha(theme::on_accent(), 0.72))
     } else {
-        (theme::mix(theme::control(), theme::INK_600, hover), theme::FG, theme::FG_3)
+        (theme::mix(theme::control(), theme::ink_600(), hover), theme::fg(), theme::fg_3())
     };
     let radius = if big { 20.0 } else { 16.0 };
     widgets::frame(&p, r, radius, fill);
@@ -472,7 +472,7 @@ fn play_button(ui: &mut Ui, rect: Rect, mode: LaunchMode, play: PlayState, big: 
             paint::arc(&p, c, 12.0, t * 6.0, 1.9, 2.5, fg);
             ctx.request_repaint();
         } else if running {
-            widgets::icon(&p, c, glyph, 24.0, theme::ACCENT);
+            widgets::icon(&p, c, glyph, 24.0, theme::accent());
             widgets::status_dot(&p, c + vec2(17.0, 15.0), widgets::Tone::Ok, true);
         } else {
             widgets::icon(&p, c, glyph, 24.0, fg);
@@ -534,7 +534,7 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
     // A soft green edge says it is for the person, now.
     paint::shadow(&p, rect, 20.0, vec2(0.0, 10.0), 28.0, -8.0, theme::black(0.35));
     widgets::frame(&p, rect, 20.0, theme::surface_strong());
-    paint::stroke_squircle(&p, rect, theme::squircle(20.0), egui::Stroke::new(1.0, theme::alpha(theme::ACCENT, 0.35)));
+    paint::stroke_squircle(&p, rect, theme::squircle(20.0), egui::Stroke::new(1.0, theme::alpha(theme::accent(), 0.35)));
     let pad = 16.0;
     let pic_h = rect.height() - 2.0 * pad;
     let pic_w = (pic_h * 16.0 / 9.0).min(rect.width() * 0.4);
@@ -547,9 +547,9 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             let c = widgets::name_color(place.as_ref().map_or("", |pl| pl.world_name.as_str()));
             paint::fill_convex(&p, &paint::squircle_points(pic, theme::squircle(14.0)), |at| {
                 let t = ((at.x - pic.left()) / pic.width() + (at.y - pic.top()) / pic.height()) * 0.5;
-                theme::mix(theme::alpha(c, 0.35), theme::INK_800, t)
+                theme::mix(theme::alpha(c, 0.35), theme::ink_800(), t)
             });
-            widgets::icon(&p, pic.center(), icons::GLOBE_HEMISPHERE_WEST, 30.0, theme::alpha(theme::FG, 0.5));
+            widgets::icon(&p, pic.center(), icons::GLOBE_HEMISPHERE_WEST, 30.0, theme::alpha(theme::fg(), 0.5));
         }
     }
     // The instance on the picture.
@@ -559,11 +559,11 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
             chips = if chips.is_empty() { region_tag(&pl.region) } else { format!("{chips} · {}", region_tag(&pl.region)) };
         }
         if !chips.is_empty() {
-            let txt = Txt::new(chips, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let txt = Txt::new(chips, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
             let w = widgets::text_size(ui, &txt).x + 30.0;
             let chip = Rect::from_min_size(pic.left_bottom() + vec2(8.0, -30.0), vec2(w, 22.0));
             p.rect_filled(chip, theme::radius(11.0), theme::black(0.6));
-            widgets::icon(&p, pos2(chip.left() + 12.0, chip.center().y), super::access_icon(pl.access), 12.0, theme::FG);
+            widgets::icon(&p, pos2(chip.left() + 12.0, chip.center().y), super::access_icon(pl.access), 12.0, theme::fg());
             widgets::text(&p, pos2(chip.left() + 22.0, chip.center().y), Align2::LEFT_CENTER, &txt);
         }
     }
@@ -576,9 +576,9 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
     let icon = state.picture(&invite.from_icon);
     widgets::avatar(&p, from, icon.as_ref(), &invite.from_name);
     let who = orbiters_i18n::tr!("{name} invited you", name = invite.from_name);
-    let w = widgets::text_truncated(&p, pos2(from.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(who, 13.0).weight(weight::MEDIUM).color(theme::FG_2), room - 70.0);
+    let w = widgets::text_truncated(&p, pos2(from.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(who, 13.0).weight(weight::MEDIUM).color(theme::fg_2()), room - 70.0);
     let when = super::super::ago(&ctx, invite.received_at.max(0) as u64, state.now().max(0) as u64);
-    widgets::text(&p, pos2(w.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(format!("· {when}"), 12.0).color(theme::FG_4));
+    widgets::text(&p, pos2(w.right() + 8.0, from.center().y), Align2::LEFT_CENTER, &Txt::new(format!("· {when}"), 12.0).color(theme::fg_4()));
     let close = Rect::from_center_size(pos2(right - 12.0, from.center().y), vec2(30.0, 30.0));
     if widgets::activated(&widgets::IconButton::new(icons::X, orbiters_i18n::mark("Dismiss")).size(30.0, 14.0).id_salt(("launcher-invite-x", &invite.id)).show_at(ui, close)) {
         state.act(cx, clock, Action::Dismiss { id: invite.id.clone() });
@@ -588,7 +588,7 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
     widgets::text_truncated(&p, pos2(x, rect.top() + pad + 46.0), Align2::LEFT_CENTER, &Txt::new(world, 22.0).weight(weight::SEMIBOLD).tracking(-0.015), right - x);
     if !invite.message.trim().is_empty() {
         let quote = format!("“{}”", invite.message.trim());
-        widgets::text_truncated(&p, pos2(x, rect.top() + pad + 76.0), Align2::LEFT_CENTER, &Txt::new(quote, 13.5).color(theme::FG_2), right - x);
+        widgets::text_truncated(&p, pos2(x, rect.top() + pad + 76.0), Align2::LEFT_CENTER, &Txt::new(quote, 13.5).color(theme::fg_2()), right - x);
     }
     // Both Play buttons, or Join while VRChat runs.
     let bh = 44.0;
@@ -625,7 +625,7 @@ fn invite_card(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, invite: &Inv
     let more = state.data.invites.iter().filter(|i| i.kind == InviteKind::Invite && !state.dismissed.contains(&i.id)).count().saturating_sub(1);
     if more > 0 {
         let t = orbiters_i18n::tr!("{n} more invites", n = more);
-        widgets::text(&p, pos2(right, by + bh * 0.5), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(theme::FG_4));
+        widgets::text(&p, pos2(right, by + bh * 0.5), Align2::RIGHT_CENTER, &Txt::new(t, 12.0).color(theme::fg_4()));
     }
 }
 
@@ -670,8 +670,8 @@ fn steam_sign_in(ui: &mut Ui, rect: Rect, qr_url: &str) {
         tr("The download starts by itself after that."),
     ];
     for (i, line) in lines.into_iter().enumerate() {
-        widgets::text_truncated(&p, pos2(x, rect.top() + 72.0 + 24.0 * i as f32), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(if i == 0 || i == 3 { theme::FG_3 } else { theme::FG_2 }), room);
+        widgets::text_truncated(&p, pos2(x, rect.top() + 72.0 + 24.0 * i as f32), Align2::LEFT_CENTER, &Txt::new(line, 13.0).color(if i == 0 || i == 3 { theme::fg_3() } else { theme::fg_2() }), room);
     }
-    orbiters_ui::feedback::spinner(&p, pos2(x + 8.0, rect.bottom() - 26.0), 7.0, 2.0, theme::ACCENT);
-    widgets::text_truncated(&p, pos2(x + 24.0, rect.bottom() - 26.0), Align2::LEFT_CENTER, &Txt::new(tr("Waiting for your phone…"), 12.5).color(theme::FG_3), room - 24.0);
+    orbiters_ui::feedback::spinner(&p, pos2(x + 8.0, rect.bottom() - 26.0), 7.0, 2.0, theme::accent());
+    widgets::text_truncated(&p, pos2(x + 24.0, rect.bottom() - 26.0), Align2::LEFT_CENTER, &Txt::new(tr("Waiting for your phone…"), 12.5).color(theme::fg_3()), room - 24.0);
 }

@@ -52,7 +52,7 @@ pub struct Look {
 }
 
 impl Look {
-    /// Ours, with the accent chosen in Settings: Orbiters' ink, from under `theme::INK_950` to a cooler ink under `INK_800`, darker than the
+    /// Ours, with the accent chosen in Settings: Orbiters' ink, from under `theme::ink_950()` to a cooler ink under `INK_800`, darker than the
     /// side panel around it (`INK_800`) so the frame reads as the near edge and the capture is lit against it.
     pub fn ours(accent: [u8; 3], retro: bool) -> Self {
         let c = |v: u8| v as f32 / 255.0;

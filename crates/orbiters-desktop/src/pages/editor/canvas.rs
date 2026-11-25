@@ -41,15 +41,15 @@ fn checker(ctx: &egui::Context, state: &mut State) -> egui::TextureId {
 pub(super) fn show(ed: &mut Editor, ui: &mut Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     let p = ui.painter().clone();
-    p.rect_filled(rect, theme::radius(theme::CARD_RADIUS), theme::INK_900);
+    p.rect_filled(rect, theme::radius(theme::CARD_RADIUS), theme::ink_900());
     let Some(full) = ed.loaded.as_ref().map(|l| l.full) else {
         match &ed.error {
             Some(e) => {
                 widgets::text_truncated(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(e, 13.0).color(theme::DANGER), rect.width() - 48.0);
             }
             None => {
-                feedback::spinner(&p, rect.center() - vec2(0.0, 18.0), 12.0, 2.5, theme::ACCENT);
-                widgets::text(&p, rect.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(if ed.source.remote.is_some() { tr("Downloading the picture at its full size…") } else { tr("Reading the picture…") }, 13.0).color(theme::FG_3));
+                feedback::spinner(&p, rect.center() - vec2(0.0, 18.0), 12.0, 2.5, theme::accent());
+                widgets::text(&p, rect.center() + vec2(0.0, 14.0), Align2::CENTER_CENTER, &Txt::new(if ed.source.remote.is_some() { tr("Downloading the picture at its full size…") } else { tr("Reading the picture…") }, 13.0).color(theme::fg_3()));
                 ctx.request_repaint();
             }
         }
@@ -106,11 +106,11 @@ fn picture(ed: &mut Editor, ui: &mut Ui, rect: Rect, full: (u32, u32)) {
     }
     // Making the preview of the latest change: a quiet spinner in the corner.
     if ed.preview.as_ref().is_some_and(|pv| pv.busy()) {
-        feedback::spinner(&p, pos2(rect.right() - 20.0, rect.top() + 20.0), 7.0, 2.0, theme::FG_3);
+        feedback::spinner(&p, pos2(rect.right() - 20.0, rect.top() + 20.0), 7.0, 2.0, theme::fg_3());
         ctx.request_repaint();
     }
     if ed.comparing {
-        let t = Txt::new(tr("Original"), 11.5).color(theme::FG);
+        let t = Txt::new(tr("Original"), 11.5).color(theme::fg());
         let w = widgets::text_size(ui, &t).x + 24.0;
         let r = Rect::from_min_size(pos2(frame.left() + 12.0, frame.top() + 12.0), vec2(w, 26.0));
         p.rect_filled(r, theme::radius(13.0), theme::black(0.6));
@@ -145,10 +145,10 @@ fn knob(p: &egui::Painter, at: Pos2, held: bool, square: bool) {
     if square {
         let q = Rect::from_center_size(at, vec2(r * 1.8, r * 1.8));
         p.rect_filled(q, theme::radius(3.0), Color32::WHITE);
-        p.rect_filled(q.shrink(3.0), theme::radius(2.0), theme::ACCENT);
+        p.rect_filled(q.shrink(3.0), theme::radius(2.0), theme::accent());
     } else {
         p.circle_filled(at, r, Color32::WHITE);
-        p.circle_filled(at, r - 3.0, theme::ACCENT);
+        p.circle_filled(at, r - 3.0, theme::accent());
     }
 }
 
@@ -156,7 +156,7 @@ fn knob(p: &egui::Painter, at: Pos2, held: bool, square: bool) {
 fn focus_reticle(p: &egui::Painter, at: Pos2, held: bool, distance: Option<f32>) {
     let r = if held { 19.0 } else { 16.0 };
     let shadow = Stroke::new(4.0, theme::black(0.35));
-    let line = Stroke::new(1.8, if held { theme::ACCENT } else { Color32::WHITE });
+    let line = Stroke::new(1.8, if held { theme::accent() } else { Color32::WHITE });
     p.circle_stroke(at, r, shadow);
     p.circle_stroke(at, r, line);
     for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
@@ -165,9 +165,9 @@ fn focus_reticle(p: &egui::Painter, at: Pos2, held: bool, distance: Option<f32>)
         p.line_segment([at + d * (r - 5.0), at + d * (r + 5.0)], line);
     }
     p.circle_filled(at, 4.5, theme::black(0.35));
-    p.circle_filled(at, 3.0, theme::ACCENT);
+    p.circle_filled(at, 3.0, theme::accent());
     if let Some(d) = distance {
-        let t = Txt::new(super::controls::distance_text(d), 11.5).color(theme::FG);
+        let t = Txt::new(super::controls::distance_text(d), 11.5).color(theme::fg());
         let w = p.layout_job(t.job(f32::INFINITY)).size().x + 16.0;
         let pill = Rect::from_min_size(pos2(at.x + r + 8.0, at.y - 11.0), vec2(w, 22.0));
         p.rect_filled(pill, theme::radius(11.0), theme::black(0.6));
@@ -219,7 +219,7 @@ fn handles(ed: &mut Editor, ui: &mut Ui, frame: Rect, size: (u32, u32)) {
     }
     if let Some(b) = text_box {
         let r = Rect::from_min_max(screen(frame, [b[0], b[1]]), screen(frame, [b[2], b[3]])).expand(6.0);
-        p.rect_stroke(r, theme::radius(6.0), Stroke::new(1.5, theme::alpha(theme::ACCENT, 0.9)), egui::StrokeKind::Middle);
+        p.rect_stroke(r, theme::radius(6.0), Stroke::new(1.5, theme::alpha(theme::accent(), 0.9)), egui::StrokeKind::Middle);
     } else if let Some((c, ring)) = center {
         let at = screen(frame, c);
         if let Some(rr) = ring {

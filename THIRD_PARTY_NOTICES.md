@@ -93,6 +93,13 @@ every crate built into the programs, and of the native libraries next to them, a
 | PaddleOCR PP-OCRv6 small text detector and recogniser (PaddlePaddle, ONNX exports `PaddlePaddle/PP-OCRv6_small_det_onnx`, `PaddlePaddle/PP-OCRv6_small_rec_onnx` on Hugging Face) | Apache-2.0 |
 | PaddleOCR PP-OCRv5 Korean and East Slavic recognisers (`PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx`, `PaddlePaddle/eslav_PP-OCRv5_mobile_rec_onnx`) | Apache-2.0 |
 
+## Backgrounds
+
+| Component | License |
+|---|---|
+| Aero Shards, Grainient, Gradient Waves, Pattern Waves and Gradient ASCII (React Bits, David Haz), the website's profile backgrounds, ported to WGSL in `crates/orbiters-ui/src/background` as part of this application | MIT + Commons Clause, see `crates/orbiters-ui/assets/licenses/react-bits.txt`: not to be sold, sublicensed or redistributed as components, ported ones included |
+| Window Light | Orbiters' own |
+
 ## Fonts
 
 | Component | License |
@@ -101,7 +108,9 @@ every crate built into the programs, and of the native libraries next to them, a
 | egui's fallback fonts (epaint_default_fonts): Ubuntu Light, Hack, Noto Emoji, emoji-icon-font | Ubuntu Font Licence 1.0, MIT / Bitstream Vera, SIL Open Font License 1.1, MIT |
 | Segoe UI Variable, Segoe UI, Cascadia Mono, Consolas (Windows) or the system's sans fonts (Linux) | Read from the system at run time, not distributed |
 | The photo editor's text fonts, embedded: Inter ExtraBold (The Inter Project Authors), and the Toolkit photoshoot's set from My Avatar: Bonbon (Cyreal), Creepster (Font Diner), Diplomata (The Diplomata Project Authors), JetBrains Mono (The JetBrains Mono Project Authors), Matemasie (The Matemasie-Font Project Authors), Monoton (Vernon Adams), Pirata One (Rodrigo Fuenzalida, Nicolas Massi), Plaster (Sorkin Type Co) | SIL Open Font License 1.1, see `crates/orbiters-ui/assets/fonts/<family>/OFL.txt` |
-| Fonts installed on the computer, offered to the photo editor's text | Read from the system when used, not distributed |
+| The interface's fonts to choose from (Settings, Appearance), embedded, their Latin letters: Inter (The Inter Project Authors), Atkinson Hyperlegible Next (The Atkinson Hyperlegible Next Project Authors), Nunito (The Nunito Project Authors), Montserrat (The Montserrat.Git Project Authors), JetBrains Mono (The JetBrains Mono Project Authors), from Google Fonts, subset with fontTools; none has a Reserved Font Name | SIL Open Font License 1.1, see `crates/orbiters-ui/assets/faces/<family>/OFL.txt` |
+| Roboto Slab (Google), the same | Apache-2.0, see `crates/orbiters-ui/assets/faces/RobotoSlab/LICENSE.txt` |
+| Fonts installed on the computer, offered to the photo editor's text and to the interface | Read from the system when used, not distributed |
 
 ## Protocols and formats implemented from their specifications
 

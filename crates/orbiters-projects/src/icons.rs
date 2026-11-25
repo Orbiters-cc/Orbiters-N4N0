@@ -272,12 +272,12 @@ where
     }
     let Some(client) = client else { return kept() };
     let image = fetch(client).await;
-    let _ = std::fs::create_dir_all(cache);
+    let _ = crate::disk::create_dir_all(cache);
     match &image {
         Some(i) => {
             let tmp = stem.with_extension("png.tmp");
-            if image::save_buffer_with_format(&tmp, &i.rgba, i.size[0], i.size[1], image::ExtendedColorType::Rgba8, image::ImageFormat::Png).is_ok() {
-                let _ = std::fs::rename(&tmp, &png);
+            if crate::disk::save_png(&tmp, &i.rgba, i.size) {
+                let _ = crate::disk::rename(&tmp, &png);
             }
         }
         // Nothing found where an icon was before (the site down for a moment): keep showing it, ask again tomorrow.

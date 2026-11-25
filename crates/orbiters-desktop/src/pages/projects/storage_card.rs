@@ -105,6 +105,19 @@ impl State {
 
     /// Open in Unity, from wherever it is offered. `quiet`: no word when it worked (the setup dialog goes on by itself).
     pub(super) fn open_unity(&mut self, ctx: &egui::Context, project: &Project, quiet: bool) {
+        self.open_unity_with(ctx, project, quiet, orbiters_projects::open_project);
+    }
+
+    /// Opens an original about to be tried on Unity 6: Orbiters moves nothing of it first.
+    pub(super) fn open_unity_as_is(&mut self, ctx: &egui::Context, project: &Project) {
+        self.open_unity_with(ctx, project, false, orbiters_projects::open_project_as_is);
+    }
+
+    fn open_unity_with(&mut self, ctx: &egui::Context, project: &Project, quiet: bool, open: fn(&Project) -> anyhow::Result<orbiters_projects::Opened>) {
+        if self.u6.waiting(&project.path) {
+            self.error = Some(tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").into());
+            return;
+        }
         if self.repairing(&project.path) {
             self.error = Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name));
             return;
@@ -116,7 +129,7 @@ impl State {
         }
         let p = project.clone();
         self.task(ctx, tr("Opening Unity…"), move || {
-            let opened = orbiters_projects::open_project(&p)?;
+            let opened = open(&p)?;
             if quiet {
                 return Ok(super::state::Outcome::Picked(None));
             }
@@ -301,15 +314,15 @@ fn para(ui: &mut Ui, txt: Txt) {
     let w = ui.available_width();
     let galley = ui.painter().layout_job(txt.job(w));
     let (r, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(r.min, galley, theme::FG);
+    ui.painter().galley(r.min, galley, theme::fg());
 }
 
 fn body(text: impl Into<String>) -> Txt {
-    Txt::new(text.into(), 12.5).color(theme::FG_2).line_height(18.0)
+    Txt::new(text.into(), 12.5).color(theme::fg_2()).line_height(18.0)
 }
 
 fn note(text: impl Into<String>) -> Txt {
-    Txt::new(text.into(), 11.5).color(theme::FG_3).line_height(16.0)
+    Txt::new(text.into(), 11.5).color(theme::fg_3()).line_height(16.0)
 }
 
 /// The card's frame: a tinted panel with its icon, `inside` below `top_left` at full width.
@@ -401,7 +414,7 @@ pub(super) fn card(ui: &mut Ui, state: &mut State, project: &Project) {
             None => {
                 let p = measuring.clone().unwrap_or_default();
                 let (r, _) = cu.allocate_exact_size(vec2(cu.available_width(), 22.0), Sense::hover());
-                feedback::spinner(cu.painter(), pos2(r.left() + 8.0, r.center().y), 6.0, 1.8, theme::ACCENT);
+                feedback::spinner(cu.painter(), pos2(r.left() + 8.0, r.center().y), 6.0, 1.8, theme::accent());
                 let text = tr!("Measuring the Library, to say what a repair would move: {detail}", detail = detail(&Progress { phase: Phase::Measuring, ..p }));
                 widgets::text_truncated(cu.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &note(text), r.width() - 22.0);
                 false
@@ -498,17 +511,17 @@ fn progress_card(ui: &mut Ui, state: &mut State) {
     let since = run.copying_since;
     let mut cancel = false;
     let mut anchor = None;
-    frame(ui, "progress", icons::HARD_DRIVE, theme::ACCENT, |cu| {
+    frame(ui, "progress", icons::HARD_DRIVE, theme::accent(), |cu| {
         let title = heading(&p, cancelling);
         let (r, _) = cu.allocate_exact_size(vec2(cu.available_width(), 20.0), Sense::hover());
-        feedback::spinner(cu.painter(), pos2(r.right() - 9.0, r.center().y), 6.0, 1.8, theme::ACCENT);
+        feedback::spinner(cu.painter(), pos2(r.right() - 9.0, r.center().y), 6.0, 1.8, theme::accent());
         widgets::text_truncated(cu.painter(), pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &Txt::new(title, 13.5).weight(weight::SEMIBOLD), r.width() - 24.0);
         if let Some(f) = p.fraction() {
             let (bar, _) = cu.allocate_exact_size(vec2(cu.available_width(), 6.0), Sense::hover());
             let pt = cu.painter();
             pt.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
             let f = anim::value(&ctx, Id::unique(("storage-progress", p.phase as u8)), f, Spring::SOFT).clamp(0.0, 1.0);
-            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
         }
         let mut says = detail(&p);
         if p.phase == Phase::Copying {

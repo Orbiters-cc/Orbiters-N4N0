@@ -1,0 +1,26 @@
+# VRChat's move to Unity 6 in the Unity projects tab (REQUEST22, stream r22/unity6): standings, the release list,
+# editors, the compatibility view, the Unity 6 trial and its pages. Texts added to files other areas cover
+# (orbiters-projects/src/lib.rs, pages/projects/ui.rs) are translated here too.
+# The files this area covers: every text in them is wrapped and translated (tests/coverage.rs).
+crates/orbiters-projects/src/unity6/mod.rs
+crates/orbiters-projects/src/unity6/standing.rs
+crates/orbiters-projects/src/unity6/matrix.rs
+crates/orbiters-projects/src/unity6/editors.rs
+crates/orbiters-projects/src/unity6/compat.rs
+crates/orbiters-projects/src/unity6/budget.rs
+crates/orbiters-projects/src/unity6/outcome.rs
+crates/orbiters-projects/src/unity6/trial.rs
+crates/orbiters-projects/src/unity6/authority.rs
+crates/orbiters-projects/src/unity6/journal.rs
+crates/orbiters-projects/src/unity6/payload.rs
+crates/orbiters-projects/src/unity6/gate/mod.rs
+crates/orbiters-projects/src/unity6/gate/sys_windows.rs
+crates/orbiters-projects/src/unity6/gate/sys_unix.rs
+crates/orbiters-projects/src/unity6/vcc.rs
+crates/orbiters-projects/src/unity6/content.rs
+crates/orbiters-projects/src/copies.rs
+crates/orbiters-projects/src/copying.rs
+crates/orbiters-projects/src/bundled_templates.rs
+crates/orbiters-desktop/src/pages/projects/unity6.rs
+crates/orbiters-desktop/src/pages/projects/unity6_card.rs
+crates/orbiters-desktop/src/pages/projects/unity6_sheet.rs

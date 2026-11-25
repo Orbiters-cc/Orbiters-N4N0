@@ -1008,7 +1008,7 @@ impl Fence<'_> {
         if !asked_en.is_empty() {
             note.push_str(&format!(" It asked the owner first about: {}.", asked_en.join(", "))); // i18n: not shown
         }
-        rt.notes.push(context::Note { text: note, taint: Default::default() });
+        rt.notes.push(context::Note::new(&note, Default::default()));
         drop(rt);
         if !asked.is_empty() {
             self.ask_owner(asked);

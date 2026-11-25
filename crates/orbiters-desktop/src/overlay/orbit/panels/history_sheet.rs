@@ -119,7 +119,7 @@ pub fn items(facts: &Facts) -> Vec<Item> {
 pub fn draw_page(p: &Painter, facts: &Facts) {
     let h = &facts.history;
     let x = BACK.right() + 18.0;
-    text(p, pos2(x, BACK.center().y - 10.0), Align2::LEFT_CENTER, tr(TITLE), 21.0, weight::BOLD, look::LABEL);
+    text(p, pos2(x, BACK.center().y - 10.0), Align2::LEFT_CENTER, tr(TITLE), 21.0, weight::BOLD, look::label());
     let sub = match h.state {
         HistoryState::Reading => tr("Reading VRChat's logs…").to_string(),
         HistoryState::Ready if h.count == 0 => tr(OPEN_WHY).to_string(),
@@ -129,7 +129,7 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
         ),
     };
     let font = look::font(15.0, weight::MEDIUM);
-    p.text(pos2(x, BACK.center().y + 11.0), Align2::LEFT_CENTER, fit(p, &sub, &font, 1000.0 - x), font, look::MUTED);
+    p.text(pos2(x, BACK.center().y + 11.0), Align2::LEFT_CENTER, fit(p, &sub, &font, 1000.0 - x), font, look::muted());
     if h.count > 0 {
         return;
     }
@@ -139,13 +139,13 @@ pub fn draw_page(p: &Painter, facts: &Facts) {
         HistoryState::Ready if !h.log_found => (icons::FILM_STRIP, tr("VRChat was not found"), tr("Videos show up here once VRChat ran on this computer.")),
         HistoryState::Ready => (icons::FILM_STRIP, tr("No video yet"), tr(EMPTY_WHY)),
     };
-    widgets::icon(p, c - vec2(0.0, 34.0), icon, 54.0, look::MUTED);
-    text(p, c + vec2(0.0, 22.0), Align2::CENTER_CENTER, first, 22.0, weight::BOLD, look::LABEL);
+    widgets::icon(p, c - vec2(0.0, 34.0), icon, 54.0, look::muted());
+    text(p, c + vec2(0.0, 22.0), Align2::CENTER_CENTER, first, 22.0, weight::BOLD, look::label());
     if !second.is_empty() {
-        let mut job = egui::text::LayoutJob::simple(second.to_string(), look::font(16.0, weight::MEDIUM), look::MUTED, 620.0);
+        let mut job = egui::text::LayoutJob::simple(second.to_string(), look::font(16.0, weight::MEDIUM), look::muted(), 620.0);
         job.halign = egui::Align::Center;
         let galley = p.layout_job(job);
-        p.galley(pos2(c.x, c.y + 44.0), galley, look::MUTED);
+        p.galley(pos2(c.x, c.y + 44.0), galley, look::muted());
     }
 }
 
@@ -160,10 +160,10 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
             let radius = look::radius(rect.height() / 2.0);
             p.rect_filled(rect, radius, if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             p.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 44 })), egui::StrokeKind::Inside);
-            widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::ARROW_LEFT, 22.0, look::LABEL);
+            widgets::icon(p, pos2(rect.left() + 26.0, rect.center().y), icons::ARROW_LEFT, 22.0, look::label());
             widgets::icon(p, pos2(rect.left() + 58.0, rect.center().y), icons::YOUTUBE_LOGO, 22.0, tool_tint(Action::Page(Target::YouTube)));
             let font = look::font(18.0, weight::SEMIBOLD);
-            p.text(pos2(rect.left() + 76.0, rect.center().y), Align2::LEFT_CENTER, fit(p, "YouTube", &font, rect.width() - 88.0), font, look::LABEL);
+            p.text(pos2(rect.left() + 76.0, rect.center().y), Align2::LEFT_CENTER, fit(p, "YouTube", &font, rect.width() - 88.0), font, look::label());
         }
         Look::HistoryRow(i) => {
             let Some(row) = row_of(i) else { return };
@@ -172,8 +172,8 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
             match row.picture {
                 Some(id) => squircle_picture(&list, picture, radii, id, cover_uv(picture.size()), if pressed { Color32::from_gray(200) } else { Color32::WHITE }),
                 None => {
-                    orbiters_ui::paint::fill_convex(&list, &orbiters_ui::paint::squircle_points_corners(picture, radii), |_| theme::INK_750);
-                    widgets::icon(&list, picture.center(), if row.youtube { icons::YOUTUBE_LOGO } else { icons::FILM_STRIP }, 40.0, look::MUTED);
+                    orbiters_ui::paint::fill_convex(&list, &orbiters_ui::paint::squircle_points_corners(picture, radii), |_| theme::ink_750());
+                    widgets::icon(&list, picture.center(), if row.youtube { icons::YOUTUBE_LOGO } else { icons::FILM_STRIP }, 40.0, look::muted());
                 }
             }
             if hovered {
@@ -186,11 +186,11 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
                 let wide = list.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size().x;
                 let chip = Rect::from_min_size(picture.right_bottom() - vec2(wide + 20.0, 32.0), vec2(wide + 12.0, 24.0));
                 list.rect_filled(chip, look::radius(6.0), Color32::from_black_alpha(190));
-                list.text(chip.center(), Align2::CENTER_CENTER, words, font, look::LABEL);
+                list.text(chip.center(), Align2::CENTER_CENTER, words, font, look::label());
             }
             let left = picture.right() + 16.0;
             let room = rect.right() - ACTION_W - 20.0 - left;
-            let colour = if row.link_only { look::MUTED } else { look::LABEL };
+            let colour = if row.link_only { look::muted() } else { look::label() };
             let mut job = egui::text::LayoutJob::simple(row.title.clone(), look::font(18.0, weight::BOLD), colour, room);
             job.wrap.max_rows = 2;
             job.wrap.break_anywhere = row.link_only;
@@ -226,7 +226,7 @@ pub fn draw_item(p: &Painter, item: &Item, facts: &Facts, hovered: bool, pressed
             list.rect_filled(rect, radius, if !can { look::TILE } else if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
             list.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_white_alpha(if can { 46 } else { 20 })), egui::StrokeKind::Middle);
             let (words, font) = fitted(p, tr("Drop in world"), 16.0, weight::SEMIBOLD, rect.width() - 24.0, 13.5);
-            list.text(rect.center(), Align2::CENTER_CENTER, words, font, if can { look::LABEL } else { theme::alpha(look::LABEL, 0.4) });
+            list.text(rect.center(), Align2::CENTER_CENTER, words, font, if can { look::label() } else { theme::alpha(look::label(), 0.4) });
         }
         _ => {}
     }
@@ -237,7 +237,7 @@ pub fn draw_round_button(p: &Painter, rect: Rect, hovered: bool, pressed: bool) 
     let fill = if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE };
     p.circle_filled(rect.center(), rect.width() / 2.0, fill);
     p.circle_stroke(rect.center(), rect.width() / 2.0 - 0.75, Stroke::new(1.0, Color32::from_white_alpha(if hovered { 110 } else { 44 })));
-    widgets::icon(p, rect.center(), icons::CLOCK_COUNTER_CLOCKWISE, rect.width() * 0.52, look::LABEL);
+    widgets::icon(p, rect.center(), icons::CLOCK_COUNTER_CLOCKWISE, rect.width() * 0.52, look::label());
 }
 
 /// N4N0's menu on the sheet shows YouTube's search, where History has the place of the menu's own Back.

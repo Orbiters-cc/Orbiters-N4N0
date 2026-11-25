@@ -21,7 +21,7 @@ pub const ASK_EVERY: Duration = Duration::from_secs(5 * 60);
 pub const PROOF_LASTS: Duration = Duration::from_secs(30 * 60);
 /// The port the bridge first tries, so that a client's configuration stays good; another when something else has it.
 const FIRST_PORT: u16 = 47615;
-/// Tells this file's use of Windows' protection from others'.
+/// Tells this file's use of the sealing from others'.
 const ENTROPY: &[u8] = b"Orbiters.N4N0 VRChat bridge";
 
 /// What the keeper asks the world.
@@ -58,16 +58,10 @@ impl Keys {
     /// opened (Windows' protection unavailable, a file being written, another user's): that is not "none", and new keys
     /// must not replace them, or every agent given the old token would be refused.
     pub fn load(file: &std::path::Path) -> Result<Option<Self>, String> {
-        let sealed = match std::fs::read(file) {
-            Ok(sealed) => sealed,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.to_string()),
-        };
-        let plain = orbiters_core::open_for_user(&sealed, ENTROPY).map_err(|e| format!("{e:#}"))?;
-        match serde_json::from_slice::<Keys>(&plain) {
-            Ok(keys) if !keys.token.is_empty() => Ok(Some(keys)),
-            Ok(_) => Err("no token in it".into()), // i18n: not shown (log detail)
-            Err(e) => Err(e.to_string()),
+        match orbiters_core::sealed::read::<Keys>(file, ENTROPY) {
+            Ok(Some(keys)) if keys.token.is_empty() => Err("no token in it".into()), // i18n: not shown (log detail)
+            Ok(keys) => Ok(keys),
+            Err(e) => Err(format!("{e:#}")),
         }
     }
 
@@ -103,17 +97,7 @@ impl Keys {
     }
 
     pub fn save(&self, file: &std::path::Path) -> Result<(), String> {
-        serde_json::to_vec(self)
-            .map_err(anyhow::Error::from)
-            .and_then(|plain| orbiters_core::seal_for_user(&plain, ENTROPY))
-            .and_then(|sealed| {
-                if let Some(dir) = file.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                orbiters_core::write_atomic_private(file, &sealed)?;
-                Ok(())
-            })
-            .map_err(|e| format!("{e:#}"))
+        orbiters_core::sealed::write(file, self, ENTROPY).map_err(|e| format!("{e:#}"))
     }
 }
 
@@ -470,10 +454,8 @@ mod tests {
         assert_eq!(keys.port, FIRST_PORT);
         assert_eq!(keys.token.len(), 64);
         assert_eq!(Keys::load_or_create(&file).unwrap(), keys, "the same across restarts");
-        if cfg!(windows) {
-            let on_disk = std::fs::read(&file).unwrap();
-            assert!(!String::from_utf8_lossy(&on_disk).contains(&keys.token));
-        }
+        let on_disk = std::fs::read(&file).unwrap();
+        assert!(!String::from_utf8_lossy(&on_disk).contains(&keys.token));
         // The verifier's case: a file that cannot be read (Windows' protection unavailable, a file half written) is not
         // "no keys": nothing replaces it, nothing new is handed out, and once readable the old keys are there.
         let before = std::fs::read(&file).unwrap();

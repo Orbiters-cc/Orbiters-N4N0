@@ -47,6 +47,8 @@ pub struct App {
     chat: crate::chat_bar::ChatBar,
     logo_glitch: Option<(f64, f32)>,
     logo_hovered: bool,
+    /// What lies behind the pages.
+    wallpaper: crate::appearance::Wallpaper,
     /// The page (and Home's feature) last told to the usage statistics.
     usage_here: Option<(Page, Option<orbiters_n4n0_core::menu::Page>)>,
     /// The usage statistics' notice was closed here (the service's settings say so a moment later).
@@ -122,6 +124,7 @@ impl App {
             chat: Default::default(),
             logo_glitch: None,
             logo_hovered: false,
+            wallpaper: Default::default(),
             usage_here: None,
             usage_told: false,
             #[cfg(target_os = "macos")]
@@ -315,10 +318,16 @@ impl App {
         let ctx = ui.ctx().clone();
         let snap = self.ctl.view();
         crate::language::follow(&snap.settings);
-        orbiters_ui::fonts::follow_language(&ctx);
+        {
+            let woken = ctx.clone();
+            crate::appearance::follow_in_window(&snap.settings, &mut self.wallpaper, move || woken.request_repaint());
+        }
+        self.follow_size(&ctx, snap.settings.appearance.size.zoom());
+        orbiters_ui::follow(&ctx);
         // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses,
         // production included (else Unity's switch would decide).
         crate::controller::follow_environment(snap.settings.development);
+        crate::worlds::profile_pictures::set_cap(u64::from(snap.settings.vrchat_pictures_mb.max(16)) << 20);
         let now = anim::time(&ctx);
         let started = *self.started.get_or_insert(now);
         if self.visit == 0 {
@@ -338,7 +347,13 @@ impl App {
             CaptureState::Recording | CaptureState::Paused | CaptureState::Starting => Mood::Recording,
             _ => Mood::Idle,
         };
-        glow::paint(ui.painter(), full, mood);
+        if self.wallpaper.covers(&snap.settings.appearance) {
+            // Nothing of the glow would be seen; its slow drift asks for no frames either.
+            ui.painter().rect_filled(full, 0.0, theme::ink_950());
+        } else {
+            glow::paint(ui.painter(), full, mood);
+        }
+        self.paint_background(ui, &snap, full, focused);
 
         let splash_t = now - started;
         let splash_on = self.show_splash && splash_t < SPLASH + SPLASH_FADE;
@@ -400,6 +415,34 @@ impl App {
         }
     }
 
+    /// The window's size of everything (Settings, Appearance): egui's zoom, and the smallest window the pages are laid out for at it.
+    fn follow_size(&mut self, ctx: &egui::Context, zoom: f32) {
+        if (ctx.zoom_factor() - zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(zoom);
+            if self.windowed {
+                // In points, which are as large as the zoom makes them: a larger interface needs a larger window, up to what a small
+                // screen has.
+                let least = vec2(1040.0, 700.0) * (1.0 / zoom).max(0.93);
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(least));
+            }
+        }
+    }
+
+    /// The background chosen, over the glow.
+    fn paint_background(&mut self, ui: &Ui, snap: &Snapshot, full: Rect, focused: bool) {
+        let a = &snap.settings.appearance;
+        let ctx = ui.ctx();
+        let motion = crate::appearance::Motion {
+            animate: a.animate,
+            while_playing: a.animate_while_playing,
+            reduced: snap.settings.reduce_motion || (a.background != orbiters_core::appearance::Background::None && crate::appearance::system_reduces_motion()),
+            focused: focused && !ctx.input(|i| i.viewport().minimized.unwrap_or(false) || i.viewport().occluded.unwrap_or(false)),
+            playing: snap.vrchat.running || snap.steamvr.running,
+            resting: anim::is_resting(ctx),
+        };
+        self.wallpaper.paint(ui.painter(), full, a, motion);
+    }
+
     /// The title strip; says where it put N4N0's bar (drawn after it, with the chat).
     fn title_bar(&mut self, ui: &mut Ui, snap: &Snapshot, rect: Rect) -> crate::chat_bar::layout::Strip {
         let ctx = ui.ctx().clone();
@@ -415,7 +458,7 @@ impl App {
             }
         }
         let p = ui.painter();
-        let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG_2);
+        let name = Txt::new("Orbiters - N4N0", 12.0).weight(weight::SEMIBOLD).tracking(0.025).color(theme::fg_2());
         // On a Mac the window's three buttons come first, where every Mac window has them.
         let lead = if cfg!(target_os = "macos") { MAC_BUTTONS_W } else { 16.0 };
         let r = widgets::text(p, pos2(rect.left() + lead, rect.center().y), Align2::LEFT_CENTER, &name);
@@ -442,7 +485,7 @@ impl App {
             pos2(r.right() + 8.0, rect.center().y),
             Align2::LEFT_CENTER,
             &sub,
-            &Txt::new("", 12.0).color(theme::FG_3),
+            &Txt::new("", 12.0).color(theme::fg_3()),
             // The world's name stops before N4N0's bar.
             (strip.free_until() - r.right() - 8.0).clamp(0.0, 420.0),
         );
@@ -470,9 +513,9 @@ impl App {
             let press = anim::toggle(&ctx, id.with(("press", i)), resp.is_pointer_button_down_on(), Spring::SNAPPY);
             let br = Rect::from_center_size(b.center(), b.size() * (1.0 - 0.14 * press));
             let (bg, fg) = if danger {
-                (theme::alpha(theme::REC, 0.85 * hover), theme::mix(theme::FG_3, egui::Color32::WHITE, hover))
+                (theme::alpha(theme::REC, 0.85 * hover), theme::mix(theme::fg_3(), egui::Color32::WHITE, hover))
             } else {
-                (theme::white(0.08 * hover), theme::mix(theme::FG_3, theme::FG, hover))
+                (theme::white(0.08 * hover), theme::mix(theme::fg_3(), theme::fg(), hover))
             };
             let p = ui.painter();
             p.rect_filled(br, theme::radius(8.0), bg);
@@ -507,7 +550,7 @@ impl App {
             let resp = ui.interact(Rect::from_center_size(c, vec2(18.0, 18.0)), id.with(("mac", i)), Sense::click()).on_hover_text(label);
             let down = resp.is_pointer_button_down_on();
             let p = ui.painter();
-            let fill = if focused || over { colour } else { theme::INK_600 };
+            let fill = if focused || over { colour } else { theme::ink_600() };
             p.circle_filled(c, 6.0, if down { theme::mix(fill, egui::Color32::BLACK, 0.25) } else { fill });
             p.circle_stroke(c, 6.0, egui::Stroke::new(0.5, theme::black(0.2)));
             if over {
@@ -550,7 +593,7 @@ impl App {
             Align2::LEFT_CENTER,
             &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02),
         );
-        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 11.5).color(theme::FG_3));
+        widgets::text(p, pos2(logo_rect.right() + 12.0, logo_rect.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new("Orbiters", 11.5).color(theme::fg_3()));
         let name_wide = widgets::text_size(ui, &Txt::new("N4N0", 17.0).weight(weight::SEMIBOLD).tracking(0.02)).x.max(widgets::text_size(ui, &Txt::new("Orbiters", 11.5)).x);
         self.update_button(ui, snap, pos2(inner.right(), logo_rect.center().y), logo_rect.right() + 12.0 + name_wide + 8.0, id.with("update"));
 
@@ -573,7 +616,7 @@ impl App {
         let p = ui.painter();
         p.rect_filled(pill, theme::radius(14.0), theme::white(0.07));
         let bar = Rect::from_center_size(pos2(pill.left() + 1.5, pill.center().y), vec2(3.0, 20.0));
-        p.rect_filled(bar, theme::radius(1.5), theme::ACCENT);
+        p.rect_filled(bar, theme::radius(1.5), theme::accent());
 
         let capturing = snap.is_capturing();
         for (i, (page, label, glyph)) in items.into_iter().enumerate() {
@@ -588,12 +631,12 @@ impl App {
             let target = if is_active {
                 egui::Color32::WHITE
             } else if resp.hovered() {
-                theme::FG_2
+                theme::fg_2()
             } else {
-                theme::FG_3
+                theme::fg_3()
             };
             let fg = anim::color(&ctx, id.with(("fg", i)), target, Spring::SNAPPY);
-            let icon_c = anim::color(&ctx, id.with(("ic", i)), if is_active { theme::ACCENT } else { target }, Spring::SNAPPY);
+            let icon_c = anim::color(&ctx, id.with(("ic", i)), if is_active { theme::accent() } else { target }, Spring::SNAPPY);
             let mut p = ui.painter().clone();
             p.multiply_opacity(alpha);
             let x = r.left() + 14.0 + 2.0 * press;
@@ -608,11 +651,11 @@ impl App {
             if page == Page::Sessions && capturing {
                 let tone = if snap.capture.state == CaptureState::Importing { widgets::Tone::Info } else { widgets::Tone::Rec };
                 let at = pos2(x + 18.0, r.center().y - 8.0);
-                p.circle_filled(at, 5.5, theme::INK_950);
+                p.circle_filled(at, 5.5, theme::ink_950());
                 widgets::status_dot(&p, at, tone, true);
             }
             if page == Page::Sessions && snap.storage.sessions > 0 {
-                let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::FG_3);
+                let t = Txt::new(snap.storage.sessions.to_string(), 11.0).color(theme::fg_3());
                 let s = widgets::text_size(ui, &t);
                 let badge = Rect::from_min_size(pos2(r.right() - 12.0 - s.x - 16.0, r.center().y - 10.0), vec2(s.x + 16.0, 20.0));
                 p.rect_filled(badge, theme::radius(10.0), theme::white(0.07));
@@ -623,7 +666,7 @@ impl App {
         // Status at the bottom: the version, and the development environment when it is the one in use.
         let bottom = inner.bottom() - 16.0;
         let version = if snap.settings.development { tr!("v{version} · development", version = snap.version) } else { format!("v{}", snap.version) };
-        let version = Txt::new(version, 11.0).color(if snap.settings.development { theme::WARN } else { theme::FG_4 });
+        let version = Txt::new(version, 11.0).color(if snap.settings.development { theme::WARN } else { theme::fg_4() });
         widgets::text(ui.painter(), pos2(inner.left() + 8.0, bottom - 6.0), Align2::LEFT_CENTER, &version);
         let osc = &snap.osc;
         let osc_tone = if osc.listening {
@@ -711,7 +754,7 @@ impl App {
             }
             _ => return,
         };
-        let words = |size: f32| Txt::new(label, size).weight(weight::SEMIBOLD).color(if live { theme::ON_ACCENT } else { theme::ACCENT });
+        let words = |size: f32| Txt::new(label, size).weight(weight::SEMIBOLD).color(if live { theme::on_accent() } else { theme::accent() });
         // Beside the name, in the room it leaves: a longer word ("Mettre à jour") first gives up the icon (a download keeps its ring, which is its progress), then a little size.
         let (room, wide) = (right_center.x - name_end, widgets::text_size(ui, &words(11.5)).x);
         let with_icon = fraction.is_some() || wide + 34.0 <= room;
@@ -726,16 +769,16 @@ impl App {
         let press = anim::toggle(&ctx, id.with("press"), live && resp.is_pointer_button_down_on(), Spring::SNAPPY);
         let shown = Rect::from_center_size(pill.center(), pill.size() * (1.0 - 0.06 * press));
         let p = ui.painter();
-        let fill = if live { theme::mix(theme::ACCENT, theme::ACCENT_HOVER, hover) } else { theme::alpha(theme::ACCENT, 0.14) };
+        let fill = if live { theme::mix(theme::accent(), theme::accent_hover(), hover) } else { theme::alpha(theme::accent(), 0.14) };
         p.rect_filled(shown, theme::radius(13.0), fill);
         let at = pos2(shown.left() + 13.0, shown.center().y);
         match fraction {
             Some(f) => {
-                orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::ACCENT, 0.3));
-                orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::ACCENT);
+                orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::accent(), 0.3));
+                orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::accent());
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
-            None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::ON_ACCENT } else { theme::ACCENT }),
+            None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::on_accent() } else { theme::accent() }),
             None => {}
         }
         widgets::text(p, pos2(shown.left() + lead, shown.center().y), Align2::LEFT_CENTER, &txt);
@@ -811,11 +854,11 @@ impl App {
 /// The chip that says this is a beta, its left end at `left_center`: the accent on a tint of it, as the website's badges are.
 pub(crate) fn beta_chip(ui: &Ui, left_center: egui::Pos2) -> Rect {
     let word = orbiters_i18n::tr_ctx("chip", "Beta").to_uppercase();
-    let txt = Txt::new(word, 10.0).weight(weight::BOLD).tracking(0.06).color(theme::ACCENT);
+    let txt = Txt::new(word, 10.0).weight(weight::BOLD).tracking(0.06).color(theme::accent());
     let size = widgets::text_size(ui, &txt);
     let chip = Rect::from_min_size(pos2(left_center.x, left_center.y - 9.0), vec2(size.x + 14.0, 18.0));
     let p = ui.painter();
-    p.rect_filled(chip, theme::radius(9.0), theme::alpha(theme::ACCENT, 0.16));
+    p.rect_filled(chip, theme::radius(9.0), theme::alpha(theme::accent(), 0.16));
     widgets::text(p, chip.center(), Align2::CENTER_CENTER, &txt);
     chip
 }
@@ -836,7 +879,7 @@ fn side_status(ui: &Ui, top_left: egui::Pos2, label: &str, text: &str, tone: wid
     let row = Rect::from_min_size(top_left, vec2(width, 40.0));
     widgets::status_dot(p, pos2(row.left() + 15.0, row.center().y), tone, tone == widgets::Tone::Ok);
     widgets::text(p, pos2(row.left() + 30.0, row.center().y - 8.0), Align2::LEFT_CENTER, &Txt::caps(label));
-    widgets::text_truncated(p, pos2(row.left() + 30.0, row.center().y + 8.0), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::FG_2), width - 40.0);
+    widgets::text_truncated(p, pos2(row.left() + 30.0, row.center().y + 8.0), Align2::LEFT_CENTER, &Txt::new(text, 12.0).color(theme::fg_2()), width - 40.0);
 }
 
 /// Opening moment: the mark draws itself in with its signal echoes, the name rises, then everything lifts away.
@@ -850,7 +893,7 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
         let (_, _) = ui.allocate_exact_size(full.size(), Sense::click_and_drag());
         let mut p = ui.painter().clone();
         p.multiply_opacity(fade);
-        p.rect_filled(full, 0.0, theme::INK_950);
+        p.rect_filled(full, 0.0, theme::ink_950());
         let start = anim::time(ctx) - t;
         let scale_k = anim::spring_from(ctx, Id::unique("orbiters-splash-scale"), [0.82], [1.0], Spring { stiffness: 180.0, damping: 18.0, mass: 1.0 })[0];
         let lift = 1.0 + 0.04 * (1.0 - fade);
@@ -866,9 +909,9 @@ fn splash(ctx: &egui::Context, full: Rect, t: f64) {
         tp.multiply_opacity(k);
         // The mark spells N4N0: under it, only who makes it.
         let y = logo_rect.bottom() + 24.0 + 14.0 * (1.0 - k);
-        let galley = tp.layout_job(Txt::new("ORBITERS", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::FG_3).job(f32::INFINITY));
+        let galley = tp.layout_job(Txt::new("ORBITERS", 13.0).weight(weight::MEDIUM).tracking(0.32).color(theme::fg_3()).job(f32::INFINITY));
         let at = pos2(full.center().x - galley.size().x * 0.5 + 0.16 * 13.0, y + 6.0 - galley.size().y * 0.5);
-        tp.galley(at, galley, theme::FG);
+        tp.galley(at, galley, theme::fg());
     });
 }
 
@@ -1022,7 +1065,7 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::INK_950.to_normalized_gamma_f32()
+        theme::ink_950().to_normalized_gamma_f32()
     }
 }
 

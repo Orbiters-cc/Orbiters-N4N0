@@ -1,6 +1,7 @@
 //! Shared logic of Orbiters - N4N0, used by the app and its workers.
 
 pub mod account;
+pub mod appearance;
 pub mod assets;
 pub mod bundle;
 pub mod call;
@@ -14,6 +15,7 @@ pub mod explorer;
 pub mod picture;
 pub mod features;
 pub mod gallery_talk;
+pub mod group_events;
 pub mod groups;
 pub mod here;
 pub mod keyframes;
@@ -40,6 +42,7 @@ pub mod protocol;
 pub mod proton;
 pub mod reconstruction;
 pub mod search;
+pub mod sealed;
 pub mod settings;
 pub mod shared_view;
 pub mod shares;
@@ -52,6 +55,7 @@ pub mod vrchat_api;
 pub mod vrchat_launch;
 pub mod vrchat_log;
 pub mod vrchat_source;
+pub mod vrchat_store;
 pub mod world_feedback;
 
 pub use orbiters_contracts as contracts;
@@ -134,29 +138,6 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     write_atomic_as(path, bytes, false)
 }
 
-/// `plain` protected for this user of this computer (Windows' DPAPI, with `entropy` telling this use from others; as it is
-/// elsewhere, where a private file is all there is).
-pub fn seal_for_user(plain: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
-    #[cfg(windows)]
-    return dpapi::crypt(plain, entropy, true);
-    #[cfg(not(windows))]
-    {
-        let _ = entropy;
-        Ok(plain.to_vec())
-    }
-}
-
-/// What [`seal_for_user`] protected: an error when it was not sealed for this user, or was tampered with.
-pub fn open_for_user(sealed: &[u8], entropy: &[u8]) -> anyhow::Result<Vec<u8>> {
-    #[cfg(windows)]
-    return dpapi::crypt(sealed, entropy, false);
-    #[cfg(not(windows))]
-    {
-        let _ = entropy;
-        Ok(sealed.to_vec())
-    }
-}
-
 /// [`write_atomic`] for a file only its owner may read (Unix permissions 0600; on Windows the folder's, which is the
 /// user's own): a credential.
 pub fn write_atomic_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -191,10 +172,7 @@ fn preserve_unreadable(path: &std::path::Path) -> std::io::Result<()> {
         mark_unreadable(path, false);
         return Ok(());
     }
-    let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let mut aside = path.as_os_str().to_owned();
-    aside.push(format!(".bad-{seconds}"));
-    match std::fs::rename(path, std::path::PathBuf::from(aside)) {
+    match move_aside(path) {
         Ok(()) => {
             mark_unreadable(path, false);
             Ok(())
@@ -249,27 +227,32 @@ pub fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io:
     std::fs::rename(from, to)
 }
 
-/// Reads a text file, `None` when there is none. A moment's lock by another program (an antivirus scan, a backup) is
-/// waited out, and bytes that are not UTF-8 are read as well as they can be rather than refused.
+/// Reads a text file, `None` when there is none. Bytes that are not UTF-8 are read as well as they can be rather than refused.
 pub fn read_text(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    match read_retrying(path) {
+        // A read that works now does not end "could not be read": what this process made without the file is still
+        // not the file, and the next write keeps the file beside first ([`preserve_unreadable`]).
+        Ok(bytes) => Ok(bytes.map(|b| String::from_utf8(b).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))),
+        Err(e) => {
+            // Until it is read again, a write must not replace it with what was made without it.
+            mark_unreadable(path, true);
+            Err(e)
+        }
+    }
+}
+
+/// Reads a file, `None` when there is none. A moment's lock by another program (an antivirus scan, a backup) is waited out.
+fn read_retrying(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
     let mut wait = std::time::Duration::from_millis(20);
     for attempt in 0..5 {
         match std::fs::read(path) {
-            // A read that works now does not end "could not be read": what this process made without the file is still
-            // not the file, and the next write keeps the file beside first ([`preserve_unreadable`]).
-            Ok(bytes) => {
-                return Ok(Some(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())));
-            }
+            Ok(bytes) => return Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) if attempt < 4 && (e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)) => {
                 std::thread::sleep(wait);
                 wait *= 2;
             }
-            Err(e) => {
-                // Until it is read again, a write must not replace it with what was made without it.
-                mark_unreadable(path, true);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         }
     }
     unreachable!("the last attempt returns")
@@ -353,11 +336,20 @@ impl Checkpoint {
 /// Keeps a copy of `path` beside it as `<name>.bad-<unix seconds>`: a file that could be read only in part, before the
 /// next save replaces it.
 pub fn keep_aside(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let aside = aside_of(path);
+    std::fs::copy(path, &aside).ok().map(|_| aside)
+}
+
+/// `<name>.bad-<unix seconds>` beside `path`.
+fn aside_of(path: &std::path::Path) -> std::path::PathBuf {
     let seconds = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let mut aside = path.as_os_str().to_owned();
     aside.push(format!(".bad-{seconds}"));
-    let aside = std::path::PathBuf::from(aside);
-    std::fs::copy(path, &aside).ok().map(|_| aside)
+    aside.into()
+}
+
+fn move_aside(path: &std::path::Path) -> std::io::Result<()> {
+    rename_retrying(path, &aside_of(path))
 }
 
 /// Makes a string safe as a single folder name on Windows and Linux: no reserved character, at most 80 characters,

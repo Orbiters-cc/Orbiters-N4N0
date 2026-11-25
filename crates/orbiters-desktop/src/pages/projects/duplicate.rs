@@ -49,6 +49,10 @@ fn problem(state: &State, project: &Project) -> Option<String> {
     if location != d.location.trim() || name != &d.name {
         return None;
     }
+    // A share, a place inside another project: said before anything is measured or copied.
+    if let Some(why) = d.refused.clone().filter(|_| !*exists) {
+        return Some(why);
+    }
     if *exists {
         return Some(tr!("{location} has a folder named {name} already: choose another name.", location = d.location.trim(), name = name));
     }
@@ -78,7 +82,8 @@ fn look(ctx: &egui::Context, state: &mut State, project: &Project) {
             let dir = PathBuf::from(&location);
             let exists = !name.is_empty() && dir.join(&name).exists();
             let free = size::free_space(&dir);
-            (location, name, exists, free)
+            let refused = templates::refused_place(&dir, &name);
+            ((location, name, exists, free), refused)
         });
     }
 }
@@ -102,6 +107,28 @@ pub(super) fn copy_problem(ctx: &egui::Context, state: &mut State, project: &Pro
         None if !place => Some(tr("Checking required disk space…").into()),
         None => None,
     }
+}
+
+/// For the New dialog's templates: why a project cannot be made at that place, once looked at.
+pub(super) fn place_problem(ctx: &egui::Context, state: &mut State) -> Option<String> {
+    if state.fixture {
+        return None;
+    }
+    if let Some((key, refused)) = state.new_place.take() {
+        state.new_refused = Some((key, refused));
+    }
+    let key = (state.new_location.trim().to_string(), state.new_name.clone());
+    match &state.new_refused {
+        Some((k, refused)) if *k == key => return refused.clone(),
+        _ => {}
+    }
+    if !state.new_place.running() {
+        state.new_place = Job::spawn(ctx, move || {
+            let refused = templates::refused_place(Path::new(&key.0), &key.1);
+            (key, refused)
+        });
+    }
+    None
 }
 
 /// About what the copy takes, once the project was measured.
@@ -144,7 +171,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
         None => String::new(),
     };
     let meta = format!("{}{size}", project.path.display());
-    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_3), w - 80.0);
+    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::fg_3()), w - 80.0);
 
     art::caps(ui, tr("Name of the copy"));
     widgets::text_field(ui, "dup-name", &mut state.dup.name, tr("My avatar copy"), w, false);
@@ -173,8 +200,8 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
             let sep = if loc.contains('\\') { '\\' } else { '/' };
             let target = format!("{}{sep}{}", loc.trim_end_matches(['/', '\\']), state.dup.name);
             let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-            widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), art::glyph::ARROW_RIGHT, 13.0, theme::FG_4);
-            widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::FG_3), w - 22.0);
+            widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), art::glyph::ARROW_RIGHT, 13.0, theme::fg_4());
+            widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::fg_3()), w - 22.0);
         }
         _ => {}
     }
@@ -190,9 +217,9 @@ pub(super) fn body(ui: &mut Ui, state: &mut State, path: &Path) {
     });
     if let (Some(need), Some((_, _, _, Some(free)))) = (needed(state, &project), state.dup.checked.as_ref()) {
         let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::HARD_DRIVE, 13.0, theme::FG_4);
+        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), icons::HARD_DRIVE, 13.0, theme::fg_4());
         let room = tr!("About {need} to copy · {free} free on that disk", need = format::bytes(need as f64), free = format::bytes(*free as f64));
-        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(room, 12.0).color(theme::FG_3), w - 22.0);
+        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(room, 12.0).color(theme::fg_3()), w - 22.0);
     }
     note(
         ui,

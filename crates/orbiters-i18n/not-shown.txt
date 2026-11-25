@@ -2,7 +2,9 @@
 # Scenes and sample data for renders.
 crates/orbiters-desktop/src/screenshot
 crates/orbiters-desktop/src/screenshot.rs
+crates/orbiters-desktop/src/pages/projects/unity6_fixtures.rs
 crates/orbiters-desktop/src/bench.rs
+crates/orbiters-desktop/src/background_bench.rs
 crates/orbiters-desktop/src/idle_frames.rs
 crates/orbiters-desktop/src/controller/publish_cost.rs
 crates/orbiters-desktop/src/controller/picture_repair.rs
@@ -16,6 +18,7 @@ crates/orbiters-n4n0-core/src/intents/quick.rs
 # The words that name a group of the assistant's tools, matched and never shown (r23).
 crates/orbiters-n4n0-core/src/intents/route.rs
 crates/orbiters-n4n0-core/src/intents/tests.rs
+crates/orbiters-n4n0/src/tests_1124.rs
 crates/orbiters-n4n0/src/tests_assistant.rs
 crates/orbiters-n4n0/src/tests_fix3.rs
 crates/orbiters-n4n0/src/tests_fix4.rs
@@ -95,6 +98,13 @@ crates/orbiters-desktop/src/pages/settings_tests.rs
 crates/orbiters-core/src/launcher_live.rs
 # The shared 3D view's protocol (its words are the contract's, never shown).
 crates/orbiters-core/src/shared_view.rs
+# The Unity 6 trial's tests: the generated matrix and the fixtures (r22).
+crates/orbiters-projects/src/unity6/hostile/tests.rs
+crates/orbiters-projects/src/unity6/trial/tests.rs
+crates/orbiters-projects/src/unity6/content/tests.rs
+crates/orbiters-projects/src/unity6/gate/tests.rs
+crates/orbiters-projects/src/unity6/payload/tests.rs
+crates/orbiters-projects/src/copies/tests.rs
 # VRChat groups' service tests (made-up groups and replies).
 crates/orbiters-desktop/src/controller/groups_tests.rs
 crates/orbiters-desktop/src/controller/groups_world.rs

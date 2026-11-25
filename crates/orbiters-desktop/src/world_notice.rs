@@ -101,31 +101,31 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, earns_one: bool, h
     let u = |x: f32, y: f32| at + vec2(x, y) * s;
     let card = Rect::from_min_size(at, CARD * s);
     let ground = if hover.is_some() { (ground + DARKER).min(0.96) } else { ground };
-    p.rect_filled(card, RADIUS * s, theme::alpha(theme::INK_950, ground));
+    p.rect_filled(card, RADIUS * s, theme::alpha(theme::ink_950(), ground));
     let close_left = CARD.x - CLOSE_W;
     let room = (close_left - 6.0 - PAD) * s;
     let title = tr(NOTICE_TITLE);
     let size = crate::mismatch::fitting(p, title, &[13.5 * s, 13.0 * s, 12.5 * s, 12.0 * s, 11.5 * s], room);
-    widgets::text_truncated(p, u(PAD, 21.0), Align2::LEFT_CENTER, &Txt::new(title, size).weight(weight::SEMIBOLD).color(theme::FG), room + 2.0 * s);
+    widgets::text_truncated(p, u(PAD, 21.0), Align2::LEFT_CENTER, &Txt::new(title, size).weight(weight::SEMIBOLD).color(theme::fg()), room + 2.0 * s);
     // The action, a small pill under the words.
     let take = tr(TAKE);
     let lead = 11.0 * s + 13.0 * s + 5.0 * s;
     let words_room = room - lead - 11.0 * s;
     let tsize = crate::mismatch::fitting(p, take, &[12.0 * s, 11.5 * s, 11.0 * s, 10.5 * s], words_room);
-    let words_w = p.layout_no_wrap(take.to_string(), egui::FontId::proportional(tsize), theme::INK_950).size().x.min(words_room);
+    let words_w = p.layout_no_wrap(take.to_string(), egui::FontId::proportional(tsize), theme::ink_950()).size().x.min(words_room);
     let pill = Rect::from_min_size(u(PAD - 3.0, 35.0), vec2(lead + words_w + 11.0 * s, 22.0 * s));
     let lit = hover == Some(Part::Take);
-    p.rect_filled(pill, pill.height() / 2.0, if lit { theme::mix(theme::ACCENT, theme::FG, 0.25) } else { theme::ACCENT });
-    widgets::icon(p, pos2(pill.left() + 11.0 * s + 6.5 * s, pill.center().y), icons::CUBE, 13.0 * s, theme::INK_950);
-    widgets::text_truncated(p, pos2(pill.left() + lead, pill.center().y), Align2::LEFT_CENTER, &Txt::new(take, tsize).weight(weight::SEMIBOLD).color(theme::INK_950), words_room + 2.0 * s);
+    p.rect_filled(pill, pill.height() / 2.0, if lit { theme::mix(theme::accent(), theme::fg(), 0.25) } else { theme::accent() });
+    widgets::icon(p, pos2(pill.left() + 11.0 * s + 6.5 * s, pill.center().y), icons::CUBE, 13.0 * s, theme::ink_950());
+    widgets::text_truncated(p, pos2(pill.left() + lead, pill.center().y), Align2::LEFT_CENTER, &Txt::new(take, tsize).weight(weight::SEMIBOLD).color(theme::ink_950()), words_room + 2.0 * s);
     if earns_one {
         let from = pill.right() + 8.0 * s;
         let left = u(close_left - 12.0, 0.0).x - from;
         let whole = tr(EARNED_ONE);
-        let fits = |t: &str, size: f32| p.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), theme::FG).size().x <= left;
+        let fits = |t: &str, size: f32| p.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), theme::fg()).size().x <= left;
         let said = [11.5 * s, 11.0 * s, 10.5 * s].into_iter().find(|&z| fits(whole, z)).map(|z| (whole, z)).or_else(|| fits("+1", 12.0 * s).then_some(("+1", 12.0 * s)));
         if let Some((t, z)) = said {
-            widgets::text(p, pos2(from, pill.center().y), Align2::LEFT_CENTER, &Txt::new(t, z).weight(weight::SEMIBOLD).color(theme::FG));
+            widgets::text(p, pos2(from, pill.center().y), Align2::LEFT_CENTER, &Txt::new(t, z).weight(weight::SEMIBOLD).color(theme::fg()));
         }
     }
     // The cross, at the card's right end, its part the whole height.
@@ -135,7 +135,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, earns_one: bool, h
     if on_close {
         p.circle_filled(zone.center(), 15.0 * s, theme::white(0.16));
     }
-    widgets::icon(p, zone.center(), icons::X, 15.0 * s, if on_close { theme::FG } else { theme::FG_2 });
+    widgets::icon(p, zone.center(), icons::X, 15.0 * s, if on_close { theme::fg() } else { theme::fg_2() });
 }
 
 /// On the window: its size in points, and how far from the window's edges.

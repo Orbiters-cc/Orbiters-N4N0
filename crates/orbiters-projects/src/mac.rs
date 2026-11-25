@@ -60,6 +60,14 @@ fn container(device: &str) -> Option<&str> {
     (end > 0).then(|| &name[..4 + end])
 }
 
+/// One name per pool of room: an APFS volume's container (its volumes share all its room), else the volume's mount.
+pub fn room_key(v: &Volume) -> String {
+    match (v.kind == "apfs").then(|| container(&v.device)).flatten() {
+        Some(c) => c.to_string(),
+        None => v.mount.display().to_string(),
+    }
+}
+
 /// Whether moving files from one volume to the other frees nothing: the same volume, or two APFS volumes of a container,
 /// which share all its room.
 pub fn share_room(a: &Volume, b: &Volume) -> bool {

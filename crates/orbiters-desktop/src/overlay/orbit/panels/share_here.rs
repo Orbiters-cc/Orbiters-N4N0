@@ -138,7 +138,7 @@ pub fn draw(p: &Painter, item: &Item, tile: &ShareTile, hovered: bool, pressed: 
                 }
                 None => {
                     p.rect_filled(picture, look::radius(6.0), look::HEADER);
-                    widgets::icon(p, picture.center(), icons::CUBE, 22.0, look::MUTED);
+                    widgets::icon(p, picture.center(), icons::CUBE, 22.0, look::muted());
                 }
             }
             // A capture in 3D, said as the gallery's tiles say it (not under the words of a share that stopped).
@@ -160,9 +160,9 @@ pub fn draw(p: &Painter, item: &Item, tile: &ShareTile, hovered: bool, pressed: 
             // Stopped: why, over its picture.
             if let Some(why) = reason(&tile.state) {
                 p.rect_filled(picture, look::radius(6.0), Color32::from_black_alpha(185));
-                let galley = wrapped(p, &why, 10.5, weight::MEDIUM, picture.width() - 14.0, picture.height() - 8.0, 8.5, look::LABEL);
+                let galley = wrapped(p, &why, 10.5, weight::MEDIUM, picture.width() - 14.0, picture.height() - 8.0, 8.5, look::label());
                 let at = pos2(picture.left() + 7.0, picture.center().y - galley.size().y / 2.0);
-                p.with_clip_rect(picture).galley(at, galley, look::LABEL);
+                p.with_clip_rect(picture).galley(at, galley, look::label());
             }
             let (glyph, tint, words) = label(&tile.state);
             let row = Rect::from_min_max(pos2(rect.left() + 8.0, picture.bottom() + 2.0), pos2(rect.right() - 8.0, rect.bottom() - 2.0));
@@ -170,19 +170,19 @@ pub fn draw(p: &Painter, item: &Item, tile: &ShareTile, hovered: bool, pressed: 
             let wide = p.layout_no_wrap(shown.clone(), font.clone(), Color32::WHITE).size().x + 20.0;
             let x = row.center().x - wide / 2.0;
             widgets::icon(p, pos2(x + 7.0, row.center().y), glyph, 14.0, tint);
-            p.text(pos2(x + 20.0, row.center().y), Align2::LEFT_CENTER, shown, font, if live || matches!(tile.state, TileState::Busy { .. }) { look::LABEL } else { look::MUTED });
+            p.text(pos2(x + 20.0, row.center().y), Align2::LEFT_CENTER, shown, font, if live || matches!(tile.state, TileState::Busy { .. }) { look::label() } else { look::muted() });
         }
         Look::ShareHereAsk => {
             // The first time only, as beside the camera: what sharing publicly means, then Cancel and Yes.
             p.rect_filled(rect, look::radius(look::TILE_RADIUS), look::PANEL);
             p.rect_stroke(rect.shrink(0.75), look::radius(look::TILE_RADIUS), Stroke::new(1.5, look::accent()), egui::StrokeKind::Middle);
             let room = Rect::from_min_max(rect.min + vec2(8.0, 7.0), pos2(rect.right() - 8.0, rect.bottom() - 6.0 - 40.0 - 6.0));
-            let galley = wrapped(p, tr(ASK_PUBLIC), 11.0, weight::MEDIUM, room.width(), room.height(), 8.5, look::LABEL);
-            p.with_clip_rect(room).galley(pos2(room.left(), room.center().y - galley.size().y / 2.0), galley, look::LABEL);
+            let galley = wrapped(p, tr(ASK_PUBLIC), 11.0, weight::MEDIUM, room.width(), room.height(), 8.5, look::label());
+            p.with_clip_rect(room).galley(pos2(room.left(), room.center().y - galley.size().y / 2.0), galley, look::label());
         }
         Look::ShareHereNo => {
             p.rect_filled(rect, look::radius(10.0), if pressed { look::TILE_DOWN } else if hovered { look::TILE_HOVER } else { look::TILE });
-            widgets::icon(p, rect.center(), icons::X, 16.0, look::LABEL);
+            widgets::icon(p, rect.center(), icons::X, 16.0, look::label());
         }
         Look::ShareHereYes => {
             let fill = if pressed { theme::mix(look::accent(), Color32::BLACK, 0.2) } else if hovered { theme::mix(look::accent(), Color32::WHITE, 0.12) } else { look::accent() };

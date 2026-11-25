@@ -230,8 +230,8 @@ pub(super) fn draw_booster_cell(p: &Painter, rect: Rect, level: Level, facts: &F
         fill: look::accent(),
         thumb: Color32::WHITE,
         accent: look::accent(),
-        label: look::MUTED,
-        label_on: look::LABEL,
+        label: look::muted(),
+        label_on: look::label(),
         font: look::font(20.0, weight::SEMIBOLD),
         font_on: look::font(21.0, weight::BOLD),
         track_h: 10.0,
@@ -250,7 +250,7 @@ pub(super) fn draw_booster_cell(p: &Painter, rect: Rect, level: Level, facts: &F
     if (hovered || pressed) && i != at {
         let c = pos2(rect.center().x, y);
         p.circle_filled(c, look.thumb_r + if pressed { 4.0 } else { 9.0 }, theme::alpha(look::accent(), if pressed { 0.32 } else { 0.18 }));
-        p.circle_filled(c, look.stop_r + 2.0, look::LABEL);
+        p.circle_filled(c, look.stop_r + 2.0, look::label());
     }
 }
 
@@ -271,7 +271,7 @@ pub(super) fn draw_booster(p: &Painter, facts: &Facts) {
         return;
     }
     let y = CELL_Y + CELL_HIGH + 10.0;
-    lines(p, pos2(X + 4.0, y), booster::level_line(b.held.unwrap_or(b.level)), 18.0, weight::MEDIUM, look::MUTED, WIDE - 8.0, 2);
+    lines(p, pos2(X + 4.0, y), booster::level_line(b.held.unwrap_or(b.level)), 18.0, weight::MEDIUM, look::muted(), WIDE - 8.0, 2);
     // What goes on now: a test under way (with its Stop), else the one status line that matters.
     match b.testing {
         Some((kind, left, with, manual)) => {
@@ -280,21 +280,21 @@ pub(super) fn draw_booster(p: &Painter, facts: &Facts) {
             widgets::icon(p, pos2(strip.left() + 26.0, strip.center().y), icons::GAUGE, 24.0, look::accent());
             let what = orbiters_i18n::tr!("Testing: {what}", what = booster::kind_name(kind));
             let font = look::font(19.0, weight::BOLD);
-            p.text(pos2(strip.left() + 50.0, strip.top() + 15.0), Align2::LEFT_CENTER, fit(p, &what, &font, strip.width() - 64.0), font, look::LABEL);
+            p.text(pos2(strip.left() + 50.0, strip.top() + 15.0), Align2::LEFT_CENTER, fit(p, &what, &font, strip.width() - 64.0), font, look::label());
             let side = if with { tr("with the change") } else { tr("without it, to compare") };
             let who = if manual { tr("you asked for it") } else { tr("started by the booster") };
             let line = orbiters_i18n::tr!("{seconds} s more, {side} · {who}", seconds = left, side = side, who = who);
             let font = look::font(15.0, weight::MEDIUM);
-            p.text(pos2(strip.left() + 50.0, strip.top() + 36.0), Align2::LEFT_CENTER, fit(p, &line, &font, strip.width() - 64.0), font, look::MUTED);
+            p.text(pos2(strip.left() + 50.0, strip.top() + 36.0), Align2::LEFT_CENTER, fit(p, &line, &font, strip.width() - 64.0), font, look::muted());
         }
         None => {
-            lines(p, pos2(X + 4.0, STRIP_Y + 6.0), &b.status, 22.0, weight::BOLD, look::LABEL, WIDE - 8.0, 2);
+            lines(p, pos2(X + 4.0, STRIP_Y + 6.0), &b.status, 22.0, weight::BOLD, look::label(), WIDE - 8.0, 2);
         }
     }
     if b.asking {
         let panel = Rect::from_min_max(pos2(X, PANEL_Y), pos2(X + WIDE, BOTTOM - 8.0));
         p.rect_filled(panel, look::radius(14.0), look::TILE);
-        lines(p, pos2(panel.left() + 18.0, panel.top() + 14.0), booster::avatars_question(), 22.0, weight::SEMIBOLD, look::LABEL, panel.width() - 36.0, 4);
+        lines(p, pos2(panel.left() + 18.0, panel.top() + 14.0), booster::avatars_question(), 22.0, weight::SEMIBOLD, look::label(), panel.width() - 36.0, 4);
         return;
     }
     let half = (WIDE - 12.0) / 2.0;
@@ -308,9 +308,9 @@ pub(super) fn draw_booster(p: &Painter, facts: &Facts) {
         draw_guide(p, pos2(right.left() + 16.0, right.top() + 12.0), right.width() - 32.0, b);
     } else if !b.to_put_back.is_empty() {
         let inside = pos2(right.left() + 16.0, right.top() + 12.0);
-        let mut y = lines(p, inside, tr("Put these back in VRChat's menu if you want them as they were:"), 17.0, weight::SEMIBOLD, look::LABEL, right.width() - 32.0, 2);
+        let mut y = lines(p, inside, tr("Put these back in VRChat's menu if you want them as they were:"), 17.0, weight::SEMIBOLD, look::label(), right.width() - 32.0, 2);
         for line in b.to_put_back.iter().take(5) {
-            y = lines(p, pos2(inside.x, y + 6.0), line, 15.5, weight::MEDIUM, look::MUTED, right.width() - 32.0, 1);
+            y = lines(p, pos2(inside.x, y + 6.0), line, 15.5, weight::MEDIUM, look::muted(), right.width() - 32.0, 1);
         }
     } else {
         draw_changed(p, right, b);
@@ -320,68 +320,68 @@ pub(super) fn draw_booster(p: &Painter, facts: &Facts) {
 /// What was measured here: the frames now, and the last comparison that ran to its end, the only place a gain can come from. No comparison, no gain.
 fn draw_measured(p: &Painter, card: Rect, b: &BoosterFacts) {
     let (x, width) = (card.left() + 16.0, card.width() - 32.0);
-    let mut y = lines(p, pos2(x, card.top() + 12.0), tr("Measured here"), 16.0, weight::BOLD, look::MUTED, width, 1);
+    let mut y = lines(p, pos2(x, card.top() + 12.0), tr("Measured here"), 16.0, weight::BOLD, look::muted(), width, 1);
     match b.measured {
         Some((fps, hz, half, filled)) => {
             let big = look::font(44.0, weight::BOLD);
-            let galley = p.layout_no_wrap(fps.to_string(), big, look::LABEL);
+            let galley = p.layout_no_wrap(fps.to_string(), big, look::label());
             let wide = galley.size().x;
-            p.galley(pos2(x, y + 2.0), galley, look::LABEL);
-            lines(p, pos2(x + wide + 10.0, y + 14.0), &orbiters_i18n::tr!("real frames a second at {hz} Hz", hz = hz), 16.0, weight::MEDIUM, look::LABEL, width - wide - 10.0, 2);
+            p.galley(pos2(x, y + 2.0), galley, look::label());
+            lines(p, pos2(x + wide + 10.0, y + 14.0), &orbiters_i18n::tr!("real frames a second at {hz} Hz", hz = hz), 16.0, weight::MEDIUM, look::label(), width - wide - 10.0, 2);
             y += 58.0;
             if half {
-                y = lines(p, pos2(x, y), tr("Half your headset's rate: SteamVR fills in the frames VRChat misses."), 15.0, weight::MEDIUM, look::MUTED, width, 2);
+                y = lines(p, pos2(x, y), tr("Half your headset's rate: SteamVR fills in the frames VRChat misses."), 15.0, weight::MEDIUM, look::muted(), width, 2);
             }
-            y = lines(p, pos2(x, y + 2.0), &orbiters_i18n::tr!("Filled in by SteamVR: {share} %", share = filled), 15.0, weight::MEDIUM, look::MUTED, width, 1);
+            y = lines(p, pos2(x, y + 2.0), &orbiters_i18n::tr!("Filled in by SteamVR: {share} %", share = filled), 15.0, weight::MEDIUM, look::muted(), width, 1);
         }
         None => {
-            y = lines(p, pos2(x, y + 6.0), tr("Measuring this scene…"), 20.0, weight::SEMIBOLD, look::LABEL, width, 1);
+            y = lines(p, pos2(x, y + 6.0), tr("Measuring this scene…"), 20.0, weight::SEMIBOLD, look::label(), width, 1);
         }
     }
     y += 14.0;
     match &b.comparison {
         Some(comparison) => {
             let said = booster::before_after(comparison);
-            y = lines(p, pos2(x, y), &orbiters_i18n::tr!("Last test: {what}", what = booster::kind_name(comparison.kind)), 15.0, weight::BOLD, look::MUTED, width, 1);
-            y = lines(p, pos2(x, y + 2.0), &said.figures, 22.0, weight::BOLD, look::LABEL, width, 1);
-            lines(p, pos2(x, y + 2.0), said.said, 15.5, weight::MEDIUM, look::LABEL, width, 2);
+            y = lines(p, pos2(x, y), &orbiters_i18n::tr!("Last test: {what}", what = booster::kind_name(comparison.kind)), 15.0, weight::BOLD, look::muted(), width, 1);
+            y = lines(p, pos2(x, y + 2.0), &said.figures, 22.0, weight::BOLD, look::label(), width, 1);
+            lines(p, pos2(x, y + 2.0), said.said, 15.5, weight::MEDIUM, look::label(), width, 2);
         }
         None => {
-            lines(p, pos2(x, y), tr("No gain measured yet: nothing has been compared here."), 15.5, weight::MEDIUM, look::MUTED, width, 2);
+            lines(p, pos2(x, y), tr("No gain measured yet: nothing has been compared here."), 15.5, weight::MEDIUM, look::muted(), width, 2);
         }
     }
     if b.streamer {
-        lines(p, pos2(x, card.bottom() - 42.0), booster::streamer_line(), 14.0, weight::MEDIUM, look::MUTED, width, 2);
+        lines(p, pos2(x, card.bottom() - 42.0), booster::streamer_line(), 14.0, weight::MEDIUM, look::muted(), width, 2);
     }
 }
 
 /// What the booster has changed on this computer right now, as read back: at Off, plainly nothing.
 fn draw_changed(p: &Painter, card: Rect, b: &BoosterFacts) {
     let (x, width) = (card.left() + 16.0, card.width() - 32.0);
-    let y = lines(p, pos2(x, card.top() + 12.0), tr("What it changes now"), 16.0, weight::BOLD, look::MUTED, width, 1);
+    let y = lines(p, pos2(x, card.top() + 12.0), tr("What it changes now"), 16.0, weight::BOLD, look::muted(), width, 1);
     if b.changed.is_empty() {
-        widgets::icon(p, pos2(x + 16.0, y + 30.0), icons::CHECK_CIRCLE, 30.0, if b.level == Level::Off { look::accent() } else { look::MUTED });
-        lines(p, pos2(x + 42.0, y + 16.0), tr("Nothing is changed"), 21.0, weight::BOLD, look::LABEL, width - 42.0, 1);
+        widgets::icon(p, pos2(x + 16.0, y + 30.0), icons::CHECK_CIRCLE, 30.0, if b.level == Level::Off { look::accent() } else { look::muted() });
+        lines(p, pos2(x + 42.0, y + 16.0), tr("Nothing is changed"), 21.0, weight::BOLD, look::label(), width - 42.0, 1);
         let why = if b.level == Level::Off { tr("Off: Orbiters only watches your frames.") } else { tr("Nothing here would help yet: it changes something only where it can measure a gain.") };
-        lines(p, pos2(x, y + 58.0), why, 15.5, weight::MEDIUM, look::MUTED, width, 3);
+        lines(p, pos2(x, y + 58.0), why, 15.5, weight::MEDIUM, look::muted(), width, 3);
         return;
     }
     let mut y = y + 4.0;
     for line in b.changed.iter().take(6) {
-        y = lines(p, pos2(x, y + 4.0), line, 15.5, weight::MEDIUM, look::LABEL, width, 2);
+        y = lines(p, pos2(x, y + 4.0), line, 15.5, weight::MEDIUM, look::label(), width, 2);
     }
 }
 
 /// Step 3's list: one item at a time. Its two figures only ever appear after Done, labelled as what they are.
 fn draw_guide(p: &Painter, at: Pos2, width: f32, b: &BoosterFacts) {
     // Step 3's list is advice the person follows in VRChat, and says so (F4).
-    let mut y = lines(p, at, tr("Advice: you change these yourself in VRChat"), 16.0, weight::BOLD, look::MUTED, width, 1) + 6.0;
+    let mut y = lines(p, at, tr("Advice: you change these yourself in VRChat"), 16.0, weight::BOLD, look::muted(), width, 1) + 6.0;
     if !b.guide.likely {
-        y = lines(p, pos2(at.x, y), tr("Nothing here is likely to help right now."), 16.0, weight::MEDIUM, look::MUTED, width, 1) + 4.0;
+        y = lines(p, pos2(at.x, y), tr("Nothing here is likely to help right now."), 16.0, weight::MEDIUM, look::muted(), width, 1) + 4.0;
     }
     if let Some(item) = b.guide.item() {
-        y = lines(p, pos2(at.x, y), booster::item_name(item), 22.0, weight::SEMIBOLD, look::LABEL, width, 2);
-        y = lines(p, pos2(at.x, y + 4.0), &b.item_now, 16.0, weight::MEDIUM, look::MUTED, width, 1);
+        y = lines(p, pos2(at.x, y), booster::item_name(item), 22.0, weight::SEMIBOLD, look::label(), width, 2);
+        y = lines(p, pos2(at.x, y + 4.0), &b.item_now, 16.0, weight::MEDIUM, look::muted(), width, 1);
     }
     if let Some((_, left)) = b.guide.measuring {
         y = lines(
@@ -390,27 +390,27 @@ fn draw_guide(p: &Painter, at: Pos2, width: f32, b: &BoosterFacts) {
             &orbiters_i18n::tr!("Measuring for {seconds} more seconds.", seconds = left.ceil() as u32),
             16.0,
             weight::MEDIUM,
-            look::LABEL,
+            look::label(),
             width,
             1,
         );
     }
     for m in b.guide.results.iter().rev().take(2) {
-        y = lines(p, pos2(at.x, y + 6.0), &booster::measured_words(m), 15.0, weight::MEDIUM, look::MUTED, width, 2);
+        y = lines(p, pos2(at.x, y + 6.0), &booster::measured_words(m), 15.0, weight::MEDIUM, look::muted(), width, 2);
     }
 }
 
 fn draw_details(p: &Painter, b: &BoosterFacts) {
     let mut y = 14.0;
-    y = lines(p, pos2(X, y), tr("What's changed right now"), 20.0, weight::BOLD, look::LABEL, WIDE, 1) + 6.0;
+    y = lines(p, pos2(X, y), tr("What's changed right now"), 20.0, weight::BOLD, look::label(), WIDE, 1) + 6.0;
     if b.changed.is_empty() {
-        y = lines(p, pos2(X, y), tr("Nothing is changed right now."), 17.0, weight::MEDIUM, look::MUTED, WIDE, 1) + 4.0;
+        y = lines(p, pos2(X, y), tr("Nothing is changed right now."), 17.0, weight::MEDIUM, look::muted(), WIDE, 1) + 4.0;
     }
     for line in b.changed.iter().take(7) {
-        y = lines(p, pos2(X, y), line, 17.0, weight::MEDIUM, look::MUTED, WIDE, 1) + 4.0;
+        y = lines(p, pos2(X, y), line, 17.0, weight::MEDIUM, look::muted(), WIDE, 1) + 4.0;
     }
     if let Some(times) = &b.times {
-        lines(p, pos2(X, y + 6.0), times, 17.0, weight::MEDIUM, look::LABEL, WIDE, 1);
+        lines(p, pos2(X, y + 6.0), times, 17.0, weight::MEDIUM, look::label(), WIDE, 1);
     }
 }
 

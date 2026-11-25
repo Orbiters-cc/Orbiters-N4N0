@@ -49,3 +49,4 @@ crates/orbiters-projects/src/gallery.rs
 crates/orbiters-projects/src/own.rs
 crates/orbiters-projects/src/repos.rs
 crates/orbiters-projects/src/theirs.rs
+crates/orbiters-projects/src/disk.rs

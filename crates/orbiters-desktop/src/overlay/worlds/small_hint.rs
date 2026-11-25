@@ -89,7 +89,7 @@ fn edged_icon(p: &Painter, at: Pos2, glyph: &str, size: f32, color: Color32) {
 }
 
 fn words(p: &Painter, at: Pos2, glyph: &str, first: &str, second: &str, on: f32) {
-    let lit = mix(theme::FG, orbit_look::accent(), on);
+    let lit = mix(theme::fg(), orbit_look::accent(), on);
     // White, every line: grey over a bright world was what read least.
     let text = Color32::WHITE;
     edged_icon(p, at + vec2(16.0, 32.0), glyph, 30.0, lit);
@@ -125,7 +125,7 @@ pub fn paint(p: &Painter, stage: Stage, seconds: f32) {
             let (first, second) = if near { (tr("Close your grip"), tr("It comes with your hand")) } else { (tr("Grip to take it"), tr("With either hand")) };
             let ink = if near { orbit_look::accent() } else { Color32::WHITE };
             edged_text(p, card.left_center() + vec2(122.0, -20.0), Align2::LEFT_CENTER, first, theme::font(32.0, weight::BOLD), ink);
-            edged_text(p, card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::FG);
+            edged_text(p, card.left_center() + vec2(122.0, 22.0), Align2::LEFT_CENTER, second, theme::font(22.0, weight::MEDIUM), theme::fg());
         }
     }
 }
@@ -159,15 +159,15 @@ pub fn paint_chip_with(p: &Painter, pointed: bool, lit: bool, glyph: &str) {
     // and Enzo asked for it above the capture, request 32).
     let ink = if pointed { orbit_look::accent() } else { theme::white(0.7) };
     let foot = pos2(page.center().x, CHIP_PX[1] as f32 - 9.0);
-    p.line_segment([page.center(), foot], egui::Stroke::new(7.0, theme::alpha(theme::INK_900, 0.8)));
+    p.line_segment([page.center(), foot], egui::Stroke::new(7.0, theme::alpha(theme::ink_900(), 0.8)));
     p.line_segment([page.center(), foot], egui::Stroke::new(3.0, ink));
-    p.circle_filled(foot, 8.0, theme::alpha(theme::INK_900, 0.8));
+    p.circle_filled(foot, 8.0, theme::alpha(theme::ink_900(), 0.8));
     p.circle_filled(foot, 5.5, ink);
-    p.circle_filled(page.center(), radius, theme::alpha(theme::INK_900, 0.95));
+    p.circle_filled(page.center(), radius, theme::alpha(theme::ink_900(), 0.95));
     let ring = if pointed || lit { orbit_look::accent() } else { theme::white(0.25) };
     p.circle_stroke(page.center(), radius - 1.5, egui::Stroke::new(3.0, ring));
     let size = if glyph == icons::X { radius * 1.05 } else { radius * 0.95 };
-    widgets::icon(p, page.center(), glyph, size, if pointed || lit { orbit_look::accent() } else { theme::FG });
+    widgets::icon(p, page.center(), glyph, size, if pointed || lit { orbit_look::accent() } else { theme::fg() });
 }
 
 pub struct HideChip {

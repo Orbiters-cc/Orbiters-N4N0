@@ -5,6 +5,9 @@
 //! session library; the controller is not started), without taking the focus, drives it with synthetic input and
 //! prints its frames each second and a summary: what docs/igpu-experiment.md measured with scripts/gpu-lab.
 //!
+//! `--backdrop <id>` (a background of Settings, Appearance) with `live` is a focused window with an animated background;
+//! `backgrounds` times each background alone, without a window ([`crate::background_bench`]).
+//!
 //! Scenarios: `idle` (Home, nothing moves: its music is looked at on a thread, which asks for a frame when it
 //! changed; `--idle-frames` counts every page's frames at rest without a window), `still` (Settings, no frame at all), `live` (Home as if focused, so looping animations run), `scroll` (Settings scrolled up and down), `pages`
 //! (another page every second), `splats` (the 3D view of the session whose folder name contains `--session`,
@@ -42,6 +45,9 @@ enum Scenario {
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    if args.first().map(String::as_str) == Some("backgrounds") {
+        return crate::background_bench::run(&args[1..]);
+    }
     let scenario = match args.first().map(String::as_str) {
         Some("idle") => Scenario::Idle,
         Some("still") => Scenario::Still,
@@ -59,6 +65,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut background = false;
     let mut position: Option<[f32; 2]> = None;
     let mut session = "New Generation".to_string();
+    let mut appearance = orbiters_core::appearance::AppearanceSettings::default();
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -81,6 +88,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--publish" => publish = it.next().context("--publish <hz>")?.parse()?,
             "--background" => background = true,
             "--watches" => WATCHES.store(true, std::sync::atomic::Ordering::Relaxed),
+            "--backdrop" => {
+                let id = it.next().context("--backdrop <website id>")?;
+                appearance.background = crate::appearance::BACKGROUNDS.into_iter().find(|b| crate::appearance::scene(*b).id() == id).context("no such background")?;
+            }
             "--alternate" => alternate = it.next().context("--alternate <s>")?.parse()?,
             "--session" => session = it.next().context("--session <name>")?.clone(),
             "--size" => {
@@ -94,7 +105,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let settings = Settings { consent_acknowledged: true, view_gpu, ..Default::default() };
+    let settings = Settings { consent_acknowledged: true, view_gpu, appearance, ..Default::default() };
     let sessions = controller::list_sessions(&settings.sessions_dir);
     let chosen = sessions.iter().find(|s| s.dir.file_name().is_some_and(|n| n.to_string_lossy().contains(&session))).map(|s| s.dir.clone());
     if matches!(scenario, Scenario::Splats | Scenario::SplatsStill) && chosen.is_none() {

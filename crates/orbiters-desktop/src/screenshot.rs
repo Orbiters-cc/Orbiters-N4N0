@@ -50,12 +50,14 @@ mod vrchat_login;
 mod launcher;
 mod groups;
 mod launcher_real;
+mod vrchat_kept;
 mod vr_audio;
 mod vrchat_bridge;
 mod worlds_overlay;
 mod quiet_prompt;
 mod chat_bar;
 mod settings_r21;
+mod appearance;
 mod avatar_gun;
 mod photos_capture;
 
@@ -215,6 +217,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
                 orbiters_i18n::pin_language(language);
                 orbiters_ui::fonts::prefer_language(language.tag());
             }
+            // Any scene in a look of Settings, Appearance.
+            "--appearance" => settings.appearance = it.next().and_then(|l| appearance::parse(l)).context("--appearance <palette>[:<font>[:<background>]]")?,
             "--text-report" => {
                 text_report = Some(TextReport(PathBuf::from(it.next().context("--text-report <file>")?)));
                 orbiters_ui::text_audit::turn_on();
@@ -224,6 +228,8 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     }
     let _text_report = text_report;
     settings.consent_acknowledged = true;
+    crate::appearance::follow(&settings, || {});
+    crate::overlay::orbit::panels::set_style(&crate::appearance::orbit(&settings));
     std::fs::create_dir_all(&out)?;
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);
@@ -2549,9 +2555,11 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     vrchat_bridge::append(&mut scenarios);
     launcher::append(&mut scenarios);
     groups::append(&mut scenarios);
+    vrchat_kept::append(&mut scenarios);
     launcher_real::append(&mut scenarios);
     // REQUEST21 2: Settings in sub-tabs, with its search.
     settings_r21::append(&mut scenarios);
+    appearance::append(&mut scenarios);
     avatar_gun::append(&mut scenarios);
     // REQUEST20 4: Previous instances' Invite me answered: sent from the person's own VRChat account, the instance closed,
     // full, VRChat's pace, its session expired (Connect VRChat), and Orbiters' account unable without one (Connect VRChat).
@@ -2604,7 +2612,9 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
             o != sc.name
                 && !(o == "vrchat-login" && sc.name.starts_with("vrchat-login-"))
                 && !(o == "r21" && sc.name.starts_with("r21-"))
+                && !(o == "appearance" && sc.name.starts_with("appearance-"))
                 && !(o == "editor" && sc.name.starts_with("editor-"))
+                && !(o == "kept" && sc.name.starts_with("kept-"))
                 && !(o == "groups" && sc.name.starts_with("groups-"))
                 && !(o == "launcher" && sc.name.starts_with("launcher-") && !sc.name.starts_with("launcher-small"))
                 && !(o == "sharing" && (sc.name.starts_with("gallery-") || sc.name.starts_with("world-share")))
@@ -2620,6 +2630,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
         if layers.is_some() && (sc.name.ends_with("-live") || sc.name.starts_with("real-")) {
             continue;
         }
+        vrchat_kept::prepare(&mut sc);
         let mut size = vec2(width, height);
         if layers.is_some() {
             // The narrow windows' scenes, in one.
@@ -2723,6 +2734,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
     let ctx = egui::Context::default();
     orbiters_ui::install(&ctx);
     let ctl = Controller::new(sc.snapshot.settings.clone());
+    vrchat_kept::member(&ctl, sc);
     ctl.set_snapshot(sc.snapshot.clone());
     let backend: Ctl = std::sync::Arc::new(Local::new(ctl.clone()));
     let mut world_opened = false;
@@ -2775,7 +2787,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
                 app.open_capture(part, t);
             }
             if sc.page == Page::Settings {
-                staged = settings_r21::stage(&mut app, sc.name, t);
+                staged = appearance::stage(&mut app, sc.name, t) || settings_r21::stage(&mut app, sc.name, t);
             }
             if sc.name.starts_with("avatar-gun") {
                 avatar_gun::stage(&ctx, &mut app, sc.name);
@@ -2792,6 +2804,7 @@ fn render(mut gpu: Option<&mut Offscreen>, sc: &Scenario, scale: f32, size: Vec2
         }
         launcher::stage(&ctx, &mut app, sc.name, f, sc.frames, t);
         groups::stage(&ctx, &mut app, sc.name, &sc.snapshot, f);
+        vrchat_kept::stage(&mut app, sc.name, f);
         launcher_real::stage(&ctx, &mut app, sc.name, f);
         // What the person does on this frame of a Unity projects scenario: a press where a control was drawn.
         if let Some(p) = release.take() {
@@ -4007,7 +4020,7 @@ fn overlay_shots(out: &std::path::Path, settings: &Settings) -> anyhow::Result<(
             if f == frames - 1 {
                 let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
                 let started = std::time::Instant::now();
-                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::ink_950()).to_vec();
                 let vertices: usize = prims
                     .iter()
                     .map(|p| match &p.primitive {
@@ -4226,7 +4239,7 @@ mod dashboard_tests {
             sw.set_textures(&mut full.textures_delta);
             if f == 89 {
                 let prims = ctx.tessellate(std::mem::take(&mut full.shapes), full.pixels_per_point);
-                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::INK_950).to_vec();
+                image = sw.paint(&prims, full.pixels_per_point, orbiters_ui::theme::ink_950()).to_vec();
             }
             sw.free_textures(&mut full.textures_delta);
         }

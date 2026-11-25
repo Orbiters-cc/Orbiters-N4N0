@@ -547,8 +547,9 @@ mod tests {
         // Free space: the tracking goes, where the view starts does not.
         let streams = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE];
         orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
-        assert!(streams.iter().all(|f| !session.join(f).exists()) && session.join(orbiters_core::measured::FILE).is_file());
+        assert!(streams.iter().all(|f| !session.join(f).exists()), "the tracking is gone");
         assert_eq!(check("freed", 110.0), measured);
+        assert!(session.join(orbiters_core::measured::FILE).is_file());
         assert_eq!(ground::find(&session, &g, [0.0, -3.0, 0.0], Some(1_000_000_000)).source, ground::Source::Hips, "its hips too");
         // And again (nothing left to measure), and with no cache at all.
         orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();

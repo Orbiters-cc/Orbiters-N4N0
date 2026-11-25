@@ -984,6 +984,19 @@ mod tests {
         assert!(duplication_need(&source, Keep::default(), &AtomicBool::new(false)).is_ok());
     }
 
+    /// PRJ-8: a cut copy that is renamed (or whose disk comes back under another letter) is still one.
+    #[test]
+    fn a_cut_copy_that_is_moved_is_still_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let copy = temp.path().join("Copy");
+        project(&copy, serde_json::json!({}));
+        let marker = Marker { copy: "x".into(), destination: copy.clone(), started: 1, folder: Some(crate::owned::id_of(&copy).unwrap()) };
+        std::fs::write(copy.join(INCOMPLETE), serde_json::to_vec(&marker).unwrap()).unwrap();
+        let moved = temp.path().join("Moved");
+        std::fs::rename(&copy, &moved).unwrap();
+        assert!(!crate::discovery::is_project(&moved));
+    }
+
     /// What was put in the copy while it ran is not the copy's: it stays, named, when the copy fails.
     #[test]
     fn a_failed_copy_keeps_what_is_not_its_own() {

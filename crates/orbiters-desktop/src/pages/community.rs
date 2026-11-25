@@ -93,6 +93,10 @@ pub struct State {
     /// Each card's picture as last drawn (by entry key).
     cards: HashMap<String, Rect>,
     changed: bool,
+    /// The event each gallery belongs to, of those that belong to one ([`State::index`]).
+    events: HashMap<u64, Card>,
+    /// Where each picture is in `feed` ([`State::index`]).
+    places: HashMap<u64, usize>,
     stand_ins: Vec<Picture>,
     fixture: bool,
     /// Screenshots: what the pictures' windows say (their replies and reactions) and the reaction hovered.
@@ -111,7 +115,32 @@ impl State {
         self.error = None;
         self.window = None;
         self.event = None;
+        self.changed();
+    }
+
+    /// The galleries or the feed are others: what is looked up in them is indexed again, and the page makes its list
+    /// again. (The grouping walked the whole feed for each of its pictures, twice a frame.)
+    fn changed(&mut self) {
         self.changed = true;
+        self.places = self.feed.items.iter().enumerate().rev().map(|(i, p)| (p.id, i)).collect();
+        self.events.clear();
+        let mut seen = std::collections::HashSet::new();
+        // Its own word for it, else its first picture's.
+        for g in self.galleries.iter().flat_map(Galleries::all) {
+            if seen.insert(g.id) {
+                if let Some(e) = &g.event {
+                    self.events.insert(g.id, e.clone());
+                }
+            }
+        }
+        seen.clear();
+        for p in &self.feed.items {
+            if seen.insert(p.gallery_id) {
+                if let Some(e) = &p.event {
+                    self.events.entry(p.gallery_id).or_insert_with(|| e.clone());
+                }
+            }
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -174,7 +203,7 @@ impl State {
         }
         self.galleries = Some(galleries);
         self.feed = feed;
-        self.changed = true;
+        self.changed();
     }
 
     /// Reads the galleries and their newest pictures when Photos & captures shows them (`wanted`), again when the
@@ -198,11 +227,11 @@ impl State {
                 self.answered = false;
                 self.error = None;
                 self.feed = community::Pictures::default();
-                self.changed = true;
                 if account_changed {
                     self.galleries = None;
                     self.galleries_job = ask_galleries(ctx, server, &owner);
                 }
+                self.changed();
                 self.fetch(ctx, server, false);
             } else if std::mem::take(&mut self.answered) {
                 // Orbiters answers again: what could not be read is asked again; what shows stays.
@@ -220,14 +249,14 @@ impl State {
                 Ok(g) => self.galleries = Some(g),
                 Err(e) => self.error = Some(e.to_string()),
             }
-            self.changed = true;
+            self.changed();
         }
         if let Some(r) = self.feed_job.take().and_then(|r| r.take_for(self.account.owner())) {
             match r {
                 Ok(page) => self.feed.append(page),
                 Err(e) => self.error = Some(e.to_string()),
             }
-            self.changed = true;
+            self.changed();
         }
         std::mem::take(&mut self.changed)
     }
@@ -282,13 +311,12 @@ impl State {
     }
 
     fn picture(&self, key: &str) -> Option<&community::Picture> {
-        let id = picture_id(key)?;
-        self.feed.items.iter().find(|p| p.id == id)
+        self.feed.items.get(*self.places.get(&picture_id(key)?)?)
     }
 
     /// The event a gallery belongs to: its own word for it, or its pictures'.
     fn event_of(&self, gallery: u64) -> Option<&Card> {
-        self.gallery(gallery).and_then(|g| g.event.as_ref()).or_else(|| self.feed.items.iter().find(|p| p.gallery_id == gallery).and_then(|p| p.event.as_ref()))
+        self.events.get(&gallery)
     }
 
     /// An event's gallery shows as one group, whatever the days its pictures span.
@@ -1336,6 +1364,7 @@ mod tests {
         let event = Card { id: "e1".into(), ..Default::default() };
         let picture = |id, gallery_id, event: Option<Card>| community::Picture { id, gallery_id, event, ..Default::default() };
         state.feed.items = vec![picture(1, 31, Some(event.clone())), picture(2, 12, None), picture(3, 31, Some(event.clone())), picture(4, 12, None)];
+        state.changed();
         let mut entries = state.entries(&orbiters_core::search::Query::new(""));
         let order = |e: &[Entry]| e.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
         state.gather(&mut entries);

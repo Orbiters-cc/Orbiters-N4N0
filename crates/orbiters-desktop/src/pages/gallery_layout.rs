@@ -4,7 +4,9 @@
 //! side as wide as their shape, each row as tall as fills the width (the website's Even rows); Grid, the same card for
 //! every item (its picture cropped to 16:9, what it is and who sees it under it). A picture's shape is its size from
 //! the listing, else its thumbnail's once decoded (springing there from 4:3, the website's stand-in, never jumping).
+use egui::emath::GuiRounding as _;
 use egui::{pos2, vec2, Id, Rect, Sense, Ui};
+use std::ops::Range;
 use orbiters_core::settings::GalleryLayout;
 use orbiters_i18n::{mark, tr};
 use orbiters_ui::{
@@ -120,6 +122,104 @@ pub fn arrange(layout: GalleryLayout, aspects: &[f32], width: f32, card_min: f32
         GalleryLayout::Masonry => masonry(aspects, width),
         GalleryLayout::Rows => rows(aspects, width),
         GalleryLayout::Grid => grid(aspects.len(), width, card_min, card_body),
+    }
+}
+
+/// What the places of a list's pictures come from: the same key, the same places.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Key {
+    /// The list's revision, its groups and their headings with it.
+    pub entries: u64,
+    /// The revision of the pictures' shapes (0 where the layout asks for none).
+    pub aspects: u64,
+    pub layout: GalleryLayout,
+    pub width: f32,
+    /// Between what is stacked in the list (egui's item spacing).
+    pub spacing: f32,
+}
+
+/// A group in the list: its entries, its heading's top and height, where it ends and its tallest picture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub entries: Range<usize>,
+    pub top: f32,
+    pub head: f32,
+    pub bottom: f32,
+    tallest: f32,
+}
+
+impl Group {
+    /// Its heading, in a list `width` wide, from the list's top left.
+    pub fn heading(&self, width: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, self.top), vec2(width, self.head))
+    }
+}
+
+/// Where the list's groups and pictures are, from the list's top left: made once for a [`Key`] and looked up at every
+/// frame by what is in view. (Every group was laid out twice a frame, with a key cloned for each picture.)
+pub struct Places {
+    pub key: Key,
+    /// Different for each one made.
+    pub made: u64,
+    pub groups: Vec<Group>,
+    /// Each entry's, by its place in the list. Their tops never go up along the list: groups are stacked, and a layout
+    /// puts each picture no higher than the one before.
+    pub cells: Vec<Rect>,
+    /// The list's, its last gap with it.
+    pub height: f32,
+}
+
+/// Between a group's heading and its pictures, and after them.
+const UNDER_HEADING: f32 = 12.0;
+const UNDER_GROUP: f32 = 32.0;
+
+impl Places {
+    /// `groups` of entries in the list's order, each under a heading as tall as `head` says of its first entry;
+    /// `aspect`: a picture's shape.
+    pub fn make(key: Key, made: u64, groups: &[Range<usize>], head: impl Fn(usize) -> f32, aspect: impl Fn(usize) -> f32, card_min: f32, card_body: f32) -> Self {
+        let mut out = Places { key, made, groups: Vec::with_capacity(groups.len()), cells: Vec::with_capacity(groups.last().map_or(0, |g| g.end)), height: 0.0 };
+        let mut aspects = Vec::new();
+        let mut y = 0.0f32;
+        for entries in groups {
+            let (top, head) = (y.round_ui(), head(entries.start));
+            aspects.clear();
+            if tiles(key.layout) {
+                aspects.extend(entries.clone().map(&aspect));
+            } else {
+                aspects.resize(entries.len(), 0.0);
+            }
+            let (cells, height) = arrange(key.layout, &aspects, key.width, card_min, card_body);
+            let area = (top + head + key.spacing + UNDER_HEADING).round_ui();
+            let tallest = cells.iter().map(Rect::height).fold(0.0, f32::max);
+            out.cells.extend(cells.into_iter().map(|c| c.translate(vec2(0.0, area))));
+            out.groups.push(Group { entries: entries.clone(), top, head, bottom: area + height, tallest });
+            y = area + height + key.spacing + UNDER_GROUP;
+        }
+        out.height = y;
+        out
+    }
+
+    /// The groups with something between `from` and `to`.
+    pub fn groups_within(&self, from: f32, to: f32) -> &[Group] {
+        let first = self.groups.partition_point(|g| g.bottom < from);
+        let end = self.groups.partition_point(|g| g.top <= to);
+        &self.groups[first.min(end)..end]
+    }
+
+    /// The entries of `group` that may show between `from` and `to`.
+    pub fn cells_within(&self, group: &Group, from: f32, to: f32) -> Range<usize> {
+        let cells = &self.cells[group.entries.clone()];
+        let first = cells.partition_point(|c| c.top() + group.tallest < from);
+        let end = cells.partition_point(|c| c.top() <= to);
+        group.entries.start + first.min(end)..group.entries.start + end
+    }
+
+    /// The topmost entry from `y` down and its top; of those at the same height, the one `key` orders first.
+    pub fn topmost<'k>(&self, y: f32, key: impl Fn(usize) -> &'k str) -> Option<(usize, f32)> {
+        let first = self.cells.partition_point(|c| c.top() < y);
+        let top = self.cells.get(first)?.top();
+        let same = self.cells[first..].iter().take_while(|c| c.top() == top).count();
+        (first..first + same).min_by(|a, b| key(*a).cmp(key(*b))).map(|i| (i, top))
     }
 }
 

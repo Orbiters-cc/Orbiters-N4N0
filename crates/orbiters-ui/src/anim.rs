@@ -376,6 +376,57 @@ mod tests {
         assert_eq!(v, [0.5, 3.0]);
     }
 
+    /// DPG-15: what a worker lands is one frame, and what lands together the same one. `request_repaint` is two.
+    #[test]
+    fn what_lands_from_outside_is_one_frame() {
+        let ctx = Context::default();
+        let mut t = 0.0;
+        let mut frames = |land: &dyn Fn(&Context)| {
+            for _ in 0..5 {
+                t += 0.01;
+                frame(&ctx, t, vec![], |_| {});
+            }
+            land(&ctx);
+            let mut drawn = 1;
+            t += 0.01;
+            while frame(&ctx, t, vec![], |_| {}) < Duration::from_secs(1) {
+                t += 0.01;
+                drawn += 1;
+            }
+            drawn
+        };
+        assert_eq!(frames(&|ctx| ctx.request_repaint()), 2);
+        assert_eq!(frames(&wake), 1);
+        assert_eq!(frames(&|ctx| (0..10).for_each(|_| wake(ctx))), 1);
+    }
+
+    /// DPG-2: something in progress moves at the decorations' rate in a window in use, and asks for nothing in one that
+    /// is not; what has to be looked at is, once a second, while the window shows.
+    #[test]
+    fn something_in_progress_keeps_to_the_shared_rate_and_rests() {
+        let ctx = Context::default();
+        for k in 0..5 {
+            frame(&ctx, k as f64 * 0.01, vec![], |ctx| set_live(ctx, true));
+        }
+        let shared = Duration::from_secs_f32(1.0 / DECOR_FPS);
+        let at = |t: f64, live: bool, read: bool| {
+            frame(&ctx, t, vec![], |ctx| {
+                set_live(ctx, live);
+                if read { working_read(ctx) } else { working(ctx) };
+            })
+        };
+        for read in [false, true] {
+            let used = at(1.0, true, read);
+            assert!(used <= shared && used + Duration::from_millis(20) > shared, "{used:?}");
+        }
+        let away = if cfg!(debug_assertions) { READ_EVERY + Duration::from_millis(20) } else { READ_EVERY };
+        for (t, live) in [(2.0, false), (2.0 + REST_AFTER + 1.0, true)] {
+            assert_eq!(at(t, live, false), Duration::MAX, "no frame, live {live}");
+            let looked = at(t + 0.1, live, true);
+            assert!(looked <= away && looked > shared * 2, "{looked:?}, live {live}");
+        }
+    }
+
     #[test]
     fn looping_decorations_share_a_rate_and_rest_without_input() {
         let ctx = Context::default();

@@ -778,6 +778,41 @@ mod tests {
         assert!(!f.see(&of(A::Expired { username: Some("Sam".into()) }, "development/2"), true).changed);
     }
 
+    /// DPG-2: what is in progress moves on the shared clock (`anim::working`, which a spinner and a shimmer read too):
+    /// nothing beside it asks for frames of its own, which is how Home drew itself at the monitor's rate for as long as
+    /// it said "Connecting to VRChat…".
+    #[test]
+    fn what_is_in_progress_asks_for_no_frames_of_its_own() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    let lines: Vec<&str> = source.lines().collect();
+                    for (n, line) in lines.iter().enumerate().filter(|(_, l)| !l.contains("contains(")) {
+                        if !["::spinner(", "::shimmer(", "anim::working("].iter().any(|w| line.contains(w)) {
+                            continue;
+                        }
+                        // (To the end of its block, at most.)
+                        let indent = |l: &str| l.len() - l.trim_start().len();
+                        let after = lines[n + 1..].iter().take(6).take_while(|l| l.trim().is_empty() || indent(l) >= indent(line));
+                        for (k, l) in after.enumerate() {
+                            if l.contains("request_repaint") || l.contains("anim::wake(") {
+                                out.push(format!("{}:{}: {}", path.display(), n + 2 + k, l.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        walk(&src.join("pages"), &mut found);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// DPG-1: a page draws from the settings the service sent (`cx.snap.settings`): it never reads the file, which the
     /// gallery did at every frame for every card that is only on Orbiters, to know the environment (and could find
     /// another than the one on show).

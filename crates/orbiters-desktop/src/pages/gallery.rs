@@ -18,6 +18,7 @@ use super::{
     Cx, Job,
 };
 use crate::controller::shares::{self as controller, Entry};
+use egui::emath::GuiRounding as _;
 use egui::{pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, Id, Order, Rect, Sense, TextureHandle, Ui, UiBuilder};
 use orbiters_core::{
     account::Server,
@@ -148,12 +149,22 @@ pub struct State {
     layout: GalleryLayout,
     layout_saved: Option<GalleryLayout>,
     /// The shape of each picture the listing gave no size for, once its thumbnail is decoded (by entry key).
-    aspects: HashMap<String, f32>,
-    scroll_anchor: Option<(String, f32)>,
+    aspects: Shapes,
+    /// The revision of `shown`: another one each time the list is made.
+    entries_rev: u64,
+    /// Where the list's groups and pictures are, made again when what they come from changed.
+    places: Option<arrangement::Places>,
+    /// How many times they were.
+    places_made: u64,
+    /// The topmost picture in view, its place in the list and the [`arrangement::Places`] it has it in.
+    scroll_anchor: Option<(String, f32, u64)>,
     scroll_offset: f32,
     layout_width: f32,
     local_dirty: bool,
-    layout_positions: HashMap<String, f32>,
+    /// How many of the feed's are someone else's.
+    shared_count: usize,
+    /// Where the open window's item was last found in the list.
+    dialog_at: usize,
     /// Screenshots: made-up local pictures added to this computer's (several shapes, a multi-layer picture).
     fixture_extra: Vec<Entry>,
     /// Screenshots: the made-up pictures alone, none of this computer's.
@@ -745,23 +756,6 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         }
         state.shown_key = None;
     }
-    if !state.fixture && !state.hash_job.running() {
-        let worlds: std::collections::HashSet<_> =
-            state.feed.items.iter().filter(|i| i.mine && i.picture.is_some() && i.source_key.is_some()).map(|i| i.world.id.as_str()).collect();
-        let paths: Vec<_> = state
-            .locals
-            .iter()
-            .filter(|e| e.source_key.is_none() && worlds.contains(e.world_id.as_str()))
-            .filter_map(|e| match &e.local {
-                Some(controller::Local::Picture(p)) if !state.hash_asked.contains(p) => Some(p.clone()),
-                _ => None,
-            })
-            .collect();
-        if !paths.is_empty() {
-            state.hash_asked.extend(paths.iter().cloned());
-            state.hash_job = Job::spawn(&ctx, move || crate::worlds::hashes(paths));
-        }
-    }
     // Screenshots read Orbiters' galleries and assets only from their fixtures (staged on their own).
     if state.community.poll(&ctx, cx, state.filter.communities() && !state.fixture) {
         state.shown_key = None;
@@ -806,6 +800,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
     } else {
         state.shown_key = Some(shown_key);
         state.select.list_changed();
+        state.entries_rev += 1;
+        state.shared_count = state.feed.items.iter().filter(|i| !i.mine).count();
+        hash_what_may_match(&ctx, state);
         let mut entries: Vec<Entry> = state
             .locals
             .iter()
@@ -885,28 +882,31 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
     let capture_h = capture.height(now);
     let capture_moved = if state.scroll_offset > 1.0 && state.scroll_offset >= state.capture_h { capture_h - state.capture_h } else { 0.0 };
     state.capture_h = capture_h;
-    let mut positions = HashMap::new();
+    let spacing = ui.spacing().item_spacing.y;
     if state.layout_width > 0.0 {
-        let mut y = top - page.top();
-        let spacing = ui.spacing().item_spacing.y;
-        for indices in groups(&entries, |e| state.community.whole(e) || assets::owns(&e.key)) {
-            y += state.community.header_height(&entries[indices[0]]).unwrap_or(52.0) + spacing + 12.0;
-            let aspects: Vec<_> = if tiles { indices.iter().map(|i| aspect(&ctx, &state.aspects, &entries[*i])).collect() } else { vec![0.0; indices.len()] };
-            let (cells, height) = arrangement::arrange(layout, &aspects, state.layout_width, CARD_MIN, CARD_BODY);
-            for (cell, i) in cells.iter().zip(&indices) { positions.insert(entries[*i].key.clone(), y + cell.top()); }
-            y += height + spacing + 32.0;
+        let key = state.places_key(layout, state.layout_width, spacing);
+        if state.places.as_ref().is_none_or(|p| p.key != key) {
+            state.places = Some(state.make_places(key, &entries));
         }
     }
+    // Where the picture held in view went, in the places made since it was last seen.
+    let anchor_moved = match (&state.scroll_anchor, &state.places) {
+        (Some((key, was, made)), Some(p)) if p.made != *made => entries.iter().position(|e| e.key == *key).map(|i| p.cells[i].top() - was),
+        _ => None,
+    };
     let mut scroll = egui::ScrollArea::vertical().id_salt("photos-captures");
     // A new search starts at the top of its results (not held at the picture that was in view).
     if super::new_search(&mut state.searched, &q) {
         scroll = scroll.vertical_scroll_offset(0.0);
-    } else if let Some(offset) = anchored_scroll_offset(state.scroll_offset, state.scroll_anchor.as_ref().map(|(key, _)| key.as_str()), &state.layout_positions, &positions) {
+    } else if let Some(offset) = anchored_scroll_offset(state.scroll_offset, anchor_moved) {
         scroll = scroll.vertical_scroll_offset(offset + capture_moved);
     } else if capture_moved.abs() > 0.1 {
         scroll = scroll.vertical_scroll_offset(state.scroll_offset + capture_moved);
     }
     let mut capture_out = None;
+    // (Out of the state while the cards change it; made for the width drawn where it is another than the last frame's.)
+    let places = state.places.take();
+    let mut drawn = None;
     let output = scroll
         .auto_shrink([false, false])
         .scroll_bar_rect(Rect::from_min_max(pos2(page.left(), top), page.max))
@@ -938,44 +938,59 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
                         empty_state(ui, cx, state.filter, !q.is_empty(), (page.bottom() - top) * 0.6);
                     }
                 }
-                let mut index = 0usize;
-                for indices in groups(&entries, |e| state.community.whole(e) || assets::owns(&e.key)) {
-                    let first = &entries[indices[0]];
-                    let last = &entries[*indices.last().unwrap()];
-                    let head_h = state.community.header_height(first).unwrap_or(52.0);
-                    let (r, _) = ui.allocate_exact_size(vec2(width, head_h), Sense::hover());
-                    let (r, a) = super::entering(ui, cx, 1 + index.min(8), r);
-                    let mut hu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("group-head", &first.key)));
-                    hu.multiply_opacity(a);
-                    if super::community::owns(&first.key) {
-                        let pictures = state.pictures.as_mut().expect("pictures");
-                        state.community.group_header(&mut hu, cx, pictures, first, last, indices.len(), !modal);
-                    } else if assets::owns(&first.key) {
-                        state.assets.group_header(&mut hu, cx, first, indices.len());
-                    } else {
-                        let (button, pressed) = group_header(&mut hu, first, last, indices.len());
-                        state.instance_buttons.insert(first.key.clone(), button);
-                        if pressed && !modal {
-                            instance_clicked = Some((first.clone(), button));
+                let key = state.places_key(layout, width, spacing);
+                if places.as_ref().is_none_or(|p| p.key.width != width) {
+                    drawn = Some(state.make_places(key, &entries));
+                }
+                let at = drawn.as_ref().or(places.as_ref()).expect("just made");
+                let base = ui.cursor().min.round_ui();
+                // What is in view, and a little around it (a card's shadow, a heading on its way in).
+                let (from, to) = (ui.clip_rect().top() - base.y - 24.0, ui.clip_rect().bottom() - base.y + 24.0);
+                // The first headings come in one after the other, whether they are in view or not; those after together.
+                for g in &at.groups {
+                    let _ = super::entering(ui, cx, 1 + g.entries.start.min(8), g.heading(width));
+                    if g.entries.start >= 8 {
+                        break;
+                    }
+                }
+                for group in at.groups_within(from, to) {
+                    let (start, count) = (group.entries.start, group.entries.len());
+                    let first = &entries[start];
+                    let last = &entries[group.entries.end - 1];
+                    let r = group.heading(width).translate(base.to_vec2());
+                    if ui.is_rect_visible(r.expand(24.0)) {
+                        let (r, a) = super::entering(ui, cx, 1 + start.min(8), r);
+                        let mut hu = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("group-head", &first.key)));
+                        hu.multiply_opacity(a);
+                        if super::community::owns(&first.key) {
+                            let pictures = state.pictures.as_mut().expect("pictures");
+                            state.community.group_header(&mut hu, cx, pictures, first, last, count, !modal);
+                        } else if assets::owns(&first.key) {
+                            state.assets.group_header(&mut hu, cx, first, count);
+                        } else {
+                            let (button, pressed) = group_header(&mut hu, first, last, count);
+                            match state.instance_buttons.get_mut(&first.key) {
+                                Some(b) => *b = button,
+                                None => drop(state.instance_buttons.insert(first.key.clone(), button)),
+                            }
+                            if pressed && !modal {
+                                instance_clicked = Some((first.clone(), button));
+                            }
                         }
                     }
-                    ui.add_space(12.0);
-                    // Each picture as its shape says (the grid's cards are all one).
-                    let aspects: Vec<f32> =
-                        if tiles { indices.iter().map(|i| aspect(&ctx, &state.aspects, &entries[*i])).collect() } else { vec![0.0; indices.len()] };
-                    let (cells, height) = arrangement::arrange(layout, &aspects, width, CARD_MIN, CARD_BODY);
-                    let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-                    for (n, i) in indices.iter().enumerate() {
-                        let e = &entries[*i];
-                        let r = cells[n].translate(area.min.to_vec2());
-                        index += 1;
+                    for i in at.cells_within(group, from, to) {
+                        let e = &entries[i];
+                        let r = at.cells[i].translate(base.to_vec2());
+                        let index = i + 1;
                         if !ui.is_rect_visible(r) {
                             continue;
                         }
                         if super::community::owns(&e.key) {
                             let pictures = state.pictures.as_mut().expect("pictures");
                             if e.size.is_none() {
-                                learn_aspect(&ctx, &mut state.aspects, e, pictures);
+                                if let Some(t) = e.picture.as_ref().and_then(|p| pictures.get(&ctx, p)) {
+                                    state.aspects.learn(&ctx, e, &t);
+                                }
                             }
                             let marks = state.select.marks(&e.key);
                             if let Some((thumb, resp)) = state.community.card(ui, cx, pictures, index, e, r, !modal, tiles, marks) {
@@ -994,7 +1009,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
                         }
                         let tex = e.picture.as_ref().and_then(|p| state.pictures.as_mut()?.get(&ctx, p));
                         if let (None, Some(t)) = (e.size, tex.as_ref()) {
-                            state.aspects.insert(e.key.clone(), t.size_vec2().x / t.size_vec2().y.max(1.0));
+                            state.aspects.learn(&ctx, e, t);
                         }
                         let from_tex = e.remote.as_ref().and_then(|i| i.from.as_ref()).and_then(|from| {
                             if state.fixture {
@@ -1065,7 +1080,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
                             });
                         }
                     }
-                    ui.add_space(32.0);
+                }
+                if !at.groups.is_empty() {
+                    ui.add_space(at.height);
                 }
                 let more_feed = state.filter.own() && state.feed.next.is_some() && state.error.is_none();
                 let more_community = state.filter.communities() && state.community.has_more() && state.community.error().is_none();
@@ -1136,7 +1153,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         });
     state.scroll_offset = output.state.clamped_offset().y;
     // (The groups' places are counted from under the capture element.)
-    let visible_top = state.scroll_offset + top - page.top() - capture_h;
+    let visible_top = state.scroll_offset - capture_h;
     if let Some(super::capture::Out::Review(dir)) = capture_out {
         let key = dir.to_string_lossy().to_string();
         match entries.iter().position(|e| e.key == key) {
@@ -1146,9 +1163,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
     }
     // The topmost item in view; of a row's items, all at the same height, always the same one (by its key): the map
     // gives them in an order of its own at each frame, and the anchor went from one to another without a scroll.
-    state.scroll_anchor = positions.iter().filter(|(_, y)| **y >= visible_top)
-        .min_by(|a, b| a.1.total_cmp(b.1).then_with(|| a.0.cmp(b.0))).map(|(key, y)| (key.clone(), *y));
-    state.layout_positions = positions;
+    // (In the places this frame's offset was for: drawn at another width, the next frame's offset keeps it in view there.)
+    let anchor = places.as_ref().and_then(|p| p.topmost(visible_top, |i| entries[i].key.as_str()).map(|(i, y)| (i, y, p.made)));
+    match (&mut state.scroll_anchor, anchor) {
+        (Some((key, y, made)), Some((i, top, of))) if *key == entries[i].key => (*y, *made) = (top, of),
+        (slot, anchor) => *slot = anchor.map(|(i, y, made)| (entries[i].key.clone(), y, made)),
+    }
+    state.places = drawn.or(places);
     super::under_top(&gu, cx, "photos-captures", from, top);
     if let Some(background) = &background {
         // The keys (Escape, Ctrl+A, Ctrl+C) are not the grid's under a window opened from a card's menu (Export,
@@ -1169,7 +1190,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         let mut hu = ui.new_child(UiBuilder::new().max_rect(head_r).id_salt("gallery-head"));
         hu.multiply_opacity(head_a);
         let mine = state.locals.len();
-        let shared = state.feed.items.iter().filter(|i| !i.mine).count();
+        let shared = state.shared_count;
         let communities = state.community.count();
         let assets = state.assets.count();
         let sub = if loading {
@@ -1285,9 +1306,15 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
     if let Some(d) = state.dialog.as_mut() {
         // The items before and after it in the gallery: arrows and ←/→ go through them (not through the communities' and
         // the assets' pictures, which have a window of their own).
-        let own: Vec<&Entry> = entries.iter().filter(|e| !super::community::owns(&e.key) && !assets::owns(&e.key)).collect();
-        let at = own.iter().position(|e| e.key == d.layers.card_key(&d.entry));
-        d.neighbours = (at.is_some_and(|i| i > 0), at.is_some_and(|i| i + 1 < own.len()));
+        let own = |e: &&Entry| !super::community::owns(&e.key) && !assets::owns(&e.key);
+        let card = d.layers.card_key(&d.entry);
+        if entries.get(state.dialog_at).is_none_or(|e| e.key != card) {
+            state.dialog_at = entries.iter().position(|e| e.key == card && own(&e)).unwrap_or(usize::MAX);
+        }
+        let at = (state.dialog_at < entries.len()).then_some(state.dialog_at);
+        let before = at.and_then(|i| entries[..i].iter().rev().find(own));
+        let after = at.and_then(|i| entries[i + 1..].iter().find(own));
+        d.neighbours = (before.is_some(), after.is_some());
         let typing = ctx.memory(|m| m.focused().is_some());
         let key = ctx.input(|i| {
             if i.key_pressed(egui::Key::ArrowLeft) {
@@ -1299,9 +1326,9 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
             }
         });
         let step = d.step.take().or((key != 0 && !typing && d.can_navigate()).then_some(key));
-        if let (Some(step), Some(i)) = (step, at) {
-            if let Some(next) = usize::try_from(i as i64 + step).ok().and_then(|j| own.get(j)) {
-                d.navigate((*next).clone(), step as f32);
+        if let Some(step) = step {
+            if let Some(next) = if step < 0 { before } else { after } {
+                d.navigate(next.clone(), step as f32);
             }
         }
         // Its card where the grid drew it this frame (it follows a scroll, another item's card); off screen, it closes
@@ -1399,7 +1426,7 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, capture: &mut super::ca
         state.roster_job = Job::spawn(&ctx, move || location.map(|l| orbiters_core::vrchat_accounts::instance_people(&l, taken)).unwrap_or_default());
     }
     if state.stage_instance && state.instance.is_none() {
-        if let Some(first) = groups(&entries, |e| state.community.whole(e)).first().map(|g| entries[g[0]].clone()) {
+        if let Some(first) = entries.first().cloned() {
             if let Some(anchor) = state.instance_buttons.get(&first.key).copied() {
                 let mut entry = first;
                 entry.instance = Some("12345~friends(usr_11111111-1111-1111-1111-111111111111)~region(eu)".into());
@@ -1737,27 +1764,76 @@ fn picture_radius(layout: GalleryLayout) -> f32 {
     }
 }
 
-/// Keep the anchor at its screen coordinate, while leaving normal scrolling and the top of the feed alone.
-fn anchored_scroll_offset(offset: f32, anchor: Option<&str>, before: &HashMap<String, f32>, after: &HashMap<String, f32>) -> Option<f32> {
-    if offset <= 1.0 { return None; }
-    let key = anchor?;
-    let delta = after.get(key)? - before.get(key)?;
+/// Keep the anchor, which `moved` this far in the list, at its screen coordinate, while leaving normal scrolling and the
+/// top of the feed alone.
+fn anchored_scroll_offset(offset: f32, moved: Option<f32>) -> Option<f32> {
+    let delta = moved.filter(|_| offset > 1.0)?;
     (delta.abs() > 0.1).then_some((offset + delta).max(0.0))
 }
 
-/// A picture's shape from metadata or its decoded thumbnail. Layout never uses an oscillating spring.
-fn aspect(_ctx: &egui::Context, known: &HashMap<String, f32>, e: &Entry) -> f32 {
-    if let Some([w, h]) = e.size.filter(|s| s[0] > 0 && s[1] > 0) {
-        return w as f32 / h as f32;
-    }
-    let target = known.get(&e.key).copied().unwrap_or(arrangement::STAND_IN);
-    target
+/// The shapes of the pictures the listing gave no size for, by entry key, and their revision.
+#[derive(Default)]
+struct Shapes {
+    known: HashMap<String, f32>,
+    rev: u64,
 }
 
-/// Keeps the shape of a picture the listing gave no size for, once its thumbnail is decoded.
-fn learn_aspect(ctx: &egui::Context, known: &mut HashMap<String, f32>, e: &Entry, pictures: &mut crate::worlds::Pictures) {
-    if let Some(t) = e.picture.as_ref().and_then(|p| pictures.get(ctx, p)) {
-        known.insert(e.key.clone(), t.size_vec2().x / t.size_vec2().y.max(1.0));
+impl Shapes {
+    /// A picture's shape from metadata or its decoded thumbnail. Layout never uses an oscillating spring.
+    fn of(&self, e: &Entry) -> f32 {
+        match e.size.filter(|s| s[0] > 0 && s[1] > 0) {
+            Some([w, h]) => w as f32 / h as f32,
+            None => self.known.get(&e.key).copied().unwrap_or(arrangement::STAND_IN),
+        }
+    }
+
+    /// Its thumbnail is decoded: the list takes its shape at the next frame.
+    fn learn(&mut self, ctx: &egui::Context, e: &Entry, t: &TextureHandle) {
+        let shape = t.size_vec2().x / t.size_vec2().y.max(1.0);
+        if self.known.get(&e.key) != Some(&shape) {
+            self.known.insert(e.key.clone(), shape);
+            self.rev += 1;
+            anim::wake(ctx);
+        }
+    }
+}
+
+impl State {
+    /// What the places of the list are made from ([`arrangement::Places`]).
+    fn places_key(&self, layout: GalleryLayout, width: f32, spacing: f32) -> arrangement::Key {
+        // (The communities' galleries decide the headings' heights: the list is made again when they change.)
+        let aspects = if arrangement::tiles(layout) { self.aspects.rev } else { 0 };
+        arrangement::Key { entries: self.entries_rev, aspects, layout, width, spacing }
+    }
+
+    fn make_places(&mut self, key: arrangement::Key, entries: &[Entry]) -> arrangement::Places {
+        self.places_made += 1;
+        let groups = groups(entries, |e| self.community.whole(e) || assets::owns(&e.key));
+        let head = |first: usize| self.community.header_height(&entries[first]).unwrap_or(52.0);
+        arrangement::Places::make(key, self.places_made, &groups, head, |i| self.aspects.of(&entries[i]), CARD_MIN, CARD_BODY)
+    }
+}
+
+/// This computer's pictures of the worlds the member has pictures of on Orbiters are hashed, each once, to find which
+/// they are. Looked at when the list is made: what decides it is what makes the list again.
+fn hash_what_may_match(ctx: &egui::Context, state: &mut State) {
+    if state.fixture || state.hash_job.running() {
+        return;
+    }
+    let worlds: std::collections::HashSet<_> =
+        state.feed.items.iter().filter(|i| i.mine && i.picture.is_some() && i.source_key.is_some()).map(|i| i.world.id.as_str()).collect();
+    let paths: Vec<_> = state
+        .locals
+        .iter()
+        .filter(|e| e.source_key.is_none() && worlds.contains(e.world_id.as_str()))
+        .filter_map(|e| match &e.local {
+            Some(controller::Local::Picture(p)) if !state.hash_asked.contains(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    if !paths.is_empty() {
+        state.hash_asked.extend(paths.iter().cloned());
+        state.hash_job = Job::spawn(ctx, move || crate::worlds::hashes(paths));
     }
 }
 
@@ -2279,17 +2355,16 @@ fn person_txt(name: &str) -> Txt {
 }
 
 /// Runs of pictures of one instance, or of one world (or gallery) and day; `whole` groups (an event's gallery) span days.
-fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<Vec<usize>> {
-    let mut groups: Vec<Vec<usize>> = Vec::new();
+fn groups(entries: &[Entry], whole: impl Fn(&Entry) -> bool) -> Vec<std::ops::Range<usize>> {
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
-        let same = groups.last().and_then(|g| g.first()).is_some_and(|j| {
-            let a = &entries[*j];
+        let same = groups.last().is_some_and(|g| {
+            let a = &entries[g.start];
             a.world_id == e.world_id && a.instance == e.instance && (a.instance.is_some() || a.taken / 86400 == e.taken / 86400 || whole(a))
         });
-        if same {
-            groups.last_mut().unwrap().push(i);
-        } else {
-            groups.push(vec![i]);
+        match groups.last_mut() {
+            Some(g) if same => g.end = i + 1,
+            _ => groups.push(i..i + 1),
         }
     }
     groups
@@ -2724,15 +2799,150 @@ mod tests {
         assert_eq!(copy_link(&e), None, "as shared: the link is copied at once");
     }
 
+    /// The page over `n` pictures of this computer, ten to an instance, at rest: what a frame allocates and takes (in
+    /// microseconds), and how many times the list was laid out over those frames.
+    fn frames_over(n: usize, layout: GalleryLayout) -> (u64, f64, u64) {
+        let root = std::env::temp_dir().join(format!("orbiters-gallery-frames-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(root.join("Sessions")).unwrap();
+        let history = root.join("visited-worlds.json");
+        orbiters_core::visited::History::default().save(&history).unwrap();
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let mut snap = (*ctl.view()).clone();
+        snap.settings.sessions_dir = root.join("Sessions");
+        let mut state = State { sources: Some((history.clone(), None)), filter: Filter::Mine, asked: Some((Filter::Mine, String::new())), ..Default::default() };
+        state.folders.set_sources(history, None);
+        state.layout = layout;
+        state.layout_saved = Some(snap.settings.photos_layout);
+        state.locals = (0..n)
+            .map(|i| {
+                let mut e = controller::remote_entry(orbiters_core::shares::Item::default());
+                e.remote = None;
+                e.key = format!("C:/Pictures/VRChat/picture-{i:06}.png");
+                e.local = Some(controller::Local::Picture(e.key.clone().into()));
+                e.world_id = format!("wrld_{}", i / 10);
+                e.world_name = format!("World {}", i / 10);
+                e.instance = Some(format!("{}~friends(usr_x)", i / 10));
+                e.taken = 1_790_000_000 - i as u64 * 60;
+                e.size = Some([1600 + 100 * (i as u32 % 5), 900]);
+                e
+            })
+            .collect();
+        // The list is not read again while this one is looked at.
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        state.local_job = Job::spawn(&ctx, move || {
+            let _ = held.recv();
+            super::super::ForAccount::new(&Default::default(), (std::time::Instant::now(), 0, Vec::new()))
+        });
+        let (mut capture, mut projects) = (super::super::capture::State::default(), super::super::projects::State::default());
+        let mut time = 0.0;
+        let mut frame = |state: &mut State| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput { time: Some(time), screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 820.0))), ..Default::default() };
+            let mut toasts = orbiters_ui::toast::Toasts::default();
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                show(ui, &mut cx, state, &mut capture, &mut projects);
+            });
+            output.textures_delta.clear();
+        };
+        for _ in 0..240 {
+            frame(&mut state);
+        }
+        assert_eq!(state.shown.len(), n);
+        let made = state.places_made;
+        let from = std::time::Instant::now();
+        let allocated = crate::test_alloc::count(|| (0..60).for_each(|_| frame(&mut state)));
+        let took = from.elapsed().as_secs_f64() * 1e6 / 60.0;
+        let made = state.places_made - made;
+        // The same pictures drawn in both, so what a frame costs can be compared.
+        assert!(state.cards.len() < 60, "{} cards drawn", state.cards.len());
+        drop(hold);
+        std::fs::remove_dir_all(&root).ok();
+        (allocated / 60, took, made)
+    }
+
+    /// DPG-3: a frame of the gallery costs what is in view, whatever the library. It laid every group out twice, made a
+    /// map of every picture's key, and drew every group's heading, at every frame.
+    #[test]
+    fn a_frame_costs_what_is_in_view_whatever_the_library() {
+        for layout in [GalleryLayout::Rows, GalleryLayout::Masonry, GalleryLayout::Grid] {
+            let (small, small_us, _) = frames_over(200, layout);
+            let (large, large_us, made) = frames_over(5000, layout);
+            println!("{layout:?}: 200 pictures {small} allocations {small_us:.0} us a frame, 5000 pictures {large} allocations {large_us:.0} us a frame");
+            assert_eq!(made, 0, "{layout:?}: nothing changed, nothing laid out again");
+            assert!(large <= small + small / 5 + 40, "{layout:?}: {large} allocations a frame over 5000 pictures, {small} over 200");
+        }
+    }
+
+    /// What every group laid out one after the other gave, as egui stacked them (DPG-3: the list's places are made once
+    /// and looked up), and what is looked up in them is what a walk over everything finds.
+    #[test]
+    fn the_places_of_the_list_are_those_egui_stacked() {
+        for layout in [GalleryLayout::Rows, GalleryLayout::Masonry, GalleryLayout::Grid] {
+            let groups = vec![0..3, 3..4, 4..40, 40..41, 41..90];
+            let aspect = |i: usize| [1.78f32, 0.5625, 1.0, 1.333, 2.2][i % 5];
+            let head = |first: usize| if first == 4 { 116.0 } else { 52.0 };
+            let (width, spacing) = (1013.37f32, 3.0f32);
+            let key = arrangement::Key { entries: 1, aspects: 1, layout, width, spacing };
+            let places = arrangement::Places::make(key, 1, &groups, head, aspect, CARD_MIN, CARD_BODY);
+            let ctx = egui::Context::default();
+            let (mut heads, mut cells, mut bottom, mut base) = (Vec::new(), Vec::new(), 0.0, egui::Pos2::ZERO);
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 820.0))), ..Default::default() }, |ui| {
+                (heads, cells) = (Vec::new(), Vec::new());
+                ui.spacing_mut().item_spacing.y = spacing;
+                ui.add_space(17.3);
+                base = ui.cursor().min.round_ui();
+                for g in &groups {
+                    heads.push(ui.allocate_exact_size(vec2(width, head(g.start)), Sense::hover()).0);
+                    ui.add_space(12.0);
+                    let aspects: Vec<f32> = g.clone().map(aspect).collect();
+                    let (rects, height) = arrangement::arrange(layout, &aspects, width, CARD_MIN, CARD_BODY);
+                    let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+                    cells.extend(rects.into_iter().map(|r| r.translate(area.min.to_vec2())));
+                    ui.add_space(32.0);
+                }
+                bottom = ui.cursor().top();
+            });
+            output.textures_delta.clear();
+            let same = |a: Rect, b: Rect| a.min.distance(b.min) < 0.002 && a.max.distance(b.max) < 0.002;
+            for (g, was) in places.groups.iter().zip(&heads) {
+                let is = g.heading(width).translate(base.to_vec2());
+                assert!(same(is, *was), "{layout:?}: {is:?}, {was:?}");
+            }
+            for (is, was) in places.cells.iter().zip(&cells) {
+                let is = is.translate(base.to_vec2());
+                assert!(same(is, *was), "{layout:?}: {is:?}, {was:?}");
+            }
+            assert!((base.y + places.height - bottom).abs() < 0.05, "{layout:?}");
+            let keys: Vec<String> = (0..90).map(|i| format!("k{}", (i * 37) % 90)).collect();
+            for step in 0..200 {
+                let from = step as f32 * places.height / 190.0 - 100.0;
+                let to = from + 700.0;
+                let shows = |r: &Rect| r.bottom() >= from && r.top() <= to;
+                let mut found = Vec::new();
+                for g in places.groups_within(from, to) {
+                    found.extend(places.cells_within(g, from, to).filter(|i| shows(&places.cells[*i])));
+                }
+                assert_eq!(found, (0..90).filter(|i| shows(&places.cells[*i])).collect::<Vec<_>>(), "{layout:?} from {from}");
+                let headings = places.groups.iter().filter(|g| shows(&g.heading(width))).count();
+                assert_eq!(places.groups_within(from, to).iter().filter(|g| shows(&g.heading(width))).count(), headings, "{layout:?} from {from}");
+                let topmost = (0..90).filter(|i| places.cells[*i].top() >= from).min_by(|a, b| places.cells[*a].top().total_cmp(&places.cells[*b].top()).then_with(|| keys[*a].cmp(&keys[*b])));
+                assert_eq!(places.topmost(from, |i| &keys[i]).map(|t| t.0), topmost, "{layout:?} from {from}");
+            }
+        }
+    }
+
     #[test]
     fn progressive_layout_keeps_the_visible_picture_at_the_same_screen_position() {
-        let before = HashMap::from([("visible".into(), 900.0)]);
-        let after = HashMap::from([("new".into(), 50.0), ("visible".into(), 1240.0)]);
-        let offset = anchored_scroll_offset(850.0, Some("visible"), &before, &after).unwrap();
-        assert_eq!(after["visible"] - offset, before["visible"] - 850.0);
-        assert!(anchored_scroll_offset(0.0, Some("visible"), &before, &after).is_none());
-        assert!(anchored_scroll_offset(850.0, Some("visible"), &before, &before).is_none());
-        assert!(anchored_scroll_offset(850.0, Some("removed"), &before, &after).is_none());
+        let (before, after) = (900.0, 1240.0);
+        let offset = anchored_scroll_offset(850.0, Some(after - before)).unwrap();
+        assert_eq!(after - offset, before - 850.0);
+        assert!(anchored_scroll_offset(0.0, Some(after - before)).is_none());
+        assert!(anchored_scroll_offset(850.0, Some(0.0)).is_none());
+        assert!(anchored_scroll_offset(850.0, None).is_none(), "removed, or nothing laid out again");
     }
 
     #[test]
@@ -2779,8 +2989,8 @@ mod tests {
             entry("a", None, 172796),
             entry("a", None, 86399),
         ];
-        assert_eq!(groups(&entries, |_| false), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]]);
-        assert_eq!(groups(&entries, |e| e.world_id == "a" && e.instance.is_none()), vec![vec![0, 1], vec![2], vec![3], vec![4, 5]]);
+        assert_eq!(groups(&entries, |_| false), vec![0..2, 2..3, 3..4, 4..5, 5..6]);
+        assert_eq!(groups(&entries, |e| e.world_id == "a" && e.instance.is_none()), vec![0..2, 2..3, 3..4, 4..6]);
     }
     #[test]
     fn instances_read_as_number_kind_and_region() {

@@ -1920,6 +1920,19 @@ mod tests {
             crate::pages::rest::asked(&output)
         }
 
+        /// What the next frame writes, a line each.
+        fn texts(&mut self) -> String {
+            self.time += 1.0 / 60.0;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1048.0, 780.0))), time: Some(self.time), ..Default::default() };
+            let (ctl, snap, toasts, state) = (&self.ctl, &self.snap, &mut self.toasts, &mut self.state);
+            let mut output = self.ctx.run_ui(input, |ui| {
+                let mut cx = Cx { ctl, snap, toasts: &mut *toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 40.0, go: None };
+                show(ui, &mut cx, state);
+            });
+            output.textures_delta.clear();
+            crate::pages::rest::texts(&output)
+        }
+
         /// Frames until what entered stands still.
         fn settle(&mut self) {
             for _ in 0..90 {
@@ -1978,6 +1991,38 @@ mod tests {
         let frames = crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new()));
         println!("YouTube's page at rest: {frames} frames a minute");
         assert!(frames <= 300, "YouTube's page, untouched: {frames} frames a minute");
+    }
+
+    /// DPG-2: Home drew itself at the monitor's rate for as long as it said "Connecting to VRChat…", which lasts until
+    /// Orbiters answers: a whole evening offline, in use or behind VRChat. It stands still at rest, and behind another
+    /// window; in use its spinner moves at the decorations' rate.
+    #[test]
+    fn home_connecting_to_vrchat_rests_too() {
+        for (live, focused) in [(true, "at rest"), (false, "behind another window")] {
+            let mut h = Harness::new();
+            let mut data = orbiters_core::launcher::LauncherState::default();
+            data.possible.play = true;
+            h.state.launcher_mut().set_data(Arc::new(data));
+            h.snap.vrchat_login.waiting = true;
+            h.snap.vrchat_login.known = Some(orbiters_core::vrchat_api::User { id: "usr_test".into(), display_name: "Tester".into(), ..Default::default() });
+            h.settle();
+            let texts = h.texts();
+            assert!(texts.contains("Connecting to VRChat as Tester…"), "{texts}");
+            orbiters_ui::anim::set_live(&h.ctx, live);
+            if live {
+                // Someone there: the spinner's frames, no more.
+                let from = h.time;
+                let mut t = from;
+                let mut frames = 0;
+                while t < from + 10.0 {
+                    t += h.frame_at(t, vec![Event::PointerMoved(pos2(500.0, 700.0 + (frames % 2) as f32))]).as_secs_f64().clamp(1.0 / 60.0, 0.5);
+                    frames += 1;
+                }
+                assert!(frames <= 10 * (orbiters_ui::anim::DECOR_FPS as usize + 2) + 60, "in use: {frames} frames in 10 s");
+            }
+            let from = h.time;
+            assert_eq!(crate::pages::rest::frames_a_minute(from, |t| h.frame_at(t, Vec::new())), 0, "{focused}");
+        }
     }
 
     /// Home's card names what plays and no more: a song going on is no change there, and is one on the music page.

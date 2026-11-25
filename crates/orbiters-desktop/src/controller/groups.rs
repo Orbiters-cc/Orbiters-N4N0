@@ -563,6 +563,10 @@ struct Filed {
 #[derive(Default)]
 pub(crate) struct Runtime {
     intents: Vec<Intent>,
+    /// The last prepare each window asked for, by its link: an earlier one still under way seals nothing, nor one whose link
+    /// closed.
+    prepares: HashMap<u64, u64>,
+    turns: u64,
     used: VecDeque<String>,
     pub(crate) ledger: Arc<Ledger>,
     /// What the last check of each operation offered the person.
@@ -809,7 +813,9 @@ impl Controller {
 
     /// A window's link closed: what it had sealed and not sent is over.
     pub fn groups_link_closed(&self, link: u64) {
-        self.groups.lock().unwrap().end_unsent(|i| i.link == link);
+        let mut rt = self.groups.lock().unwrap();
+        rt.prepares.remove(&link);
+        rt.end_unsent(|i| i.link == link);
     }
 
     /// Whose the record's entries are ([`Key::of`]): all of it the scope's own, never of whoever is signed in by now.
@@ -988,13 +994,20 @@ impl Controller {
     /// Fresh reads and the rules, sealed, written in the ledger as prepared, kept here under a one-use id.
     fn groups_prepare(&self, link: u64, scope: &Scope, write: Write) -> Result<Reply, Failure> {
         // A window has one sealed write at a time: whatever it had is over (B-E, B-F).
-        self.groups.lock().unwrap().end_unsent(|i| i.link == link);
+        let turn = {
+            let mut rt = self.groups.lock().unwrap();
+            rt.end_unsent(|i| i.link == link);
+            rt.turns += 1;
+            let turn = rt.turns;
+            rt.prepares.insert(link, turn);
+            turn
+        };
         self.groups_sweep_staged();
         let fail = write.clone();
-        self.groups_seal(link, scope, write).inspect_err(|_| drop_staged(&fail))
+        self.groups_seal(link, turn, scope, write).inspect_err(|_| drop_staged(&fail))
     }
 
-    fn groups_seal(&self, link: u64, scope: &Scope, write: Write) -> Result<Reply, Failure> {
+    fn groups_seal(&self, link: u64, turn: u64, scope: &Scope, write: Write) -> Result<Reply, Failure> {
         let key = self.groups_key(scope)?;
         let ready = self.groups_validate(scope, write)?;
         let book = self.groups_book();
@@ -1050,6 +1063,11 @@ impl Controller {
         .seal();
         book.prepare(entry).map_err(not)?;
         let mut rt = self.groups.lock().unwrap();
+        if rt.prepares.get(&link) != Some(&turn) {
+            // Its window closed, or asked for another since: over before it was shown.
+            rt.ledger.never_sent(&op);
+            return Err(Failure::Expired);
+        }
         if rt.intents.len() >= INTENTS_MAX {
             let oldest = rt.intents.iter().min_by_key(|i| i.at).map(|i| i.sealed.op.clone()).unwrap_or_default();
             rt.end_unsent(|i| i.sealed.op == oldest);

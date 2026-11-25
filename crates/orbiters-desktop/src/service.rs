@@ -555,7 +555,10 @@ impl Service {
                         std::thread::spawn(move || {
                             let _admitted = admitted;
                             let reply = ctl.groups(link, scope, request);
-                            mailbox.post(ToClient::Groups { id, reply });
+                            // Its link closed meanwhile: what it prepared is nobody's to send.
+                            if !mailbox.post(ToClient::Groups { id, reply }) {
+                                ctl.groups_link_closed(link);
+                            }
                         });
                     } else {
                         crate::controller::groups::not_taken_in(&request);

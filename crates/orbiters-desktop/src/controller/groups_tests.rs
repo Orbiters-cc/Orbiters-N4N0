@@ -576,6 +576,46 @@ fn a_sealed_picture_is_the_files_own() {
     assert_eq!(s.art, Some(SealedArt { file: None, sha256: sha256(&bytes), size: bytes.len() as u64, version: None }));
 }
 
+/// DCT-6: a prepare whose window closes, or asks for another, while it is checked seals nothing: no staged picture, no write to
+/// send, its record never sent; the window's newest is the one it has.
+#[test]
+fn a_prepare_overtaken_while_it_is_checked_seals_nothing() {
+    for closed in [true, false] {
+        let (c, w, sent) = world();
+        let write = the(&c, Kind::UploadIcon);
+        let Write::Upload { staged, .. } = &write else { unreachable!() };
+        let staged = staging_dir().join(&staged.name);
+        let newer = the(&c, Kind::ApplyIcon);
+        let (cc, (done, second)) = (c.clone(), std::sync::mpsc::channel());
+        w.lock().unwrap().then.push((
+            "/auth/user".into(),
+            Box::new(move |_| {
+                if closed {
+                    return cc.groups_link_closed(LINK);
+                }
+                // (It waits for the client this read holds: asked for after, sealed after.)
+                let before = cc.groups.lock().unwrap().turns;
+                let c2 = cc.clone();
+                std::thread::spawn(move || done.send(prepare(&c2, newer)).unwrap());
+                let start = Instant::now();
+                while cc.groups.lock().unwrap().turns == before && start.elapsed() < Duration::from_secs(60) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }),
+        ));
+        assert_eq!(prepare(&c, write), failed(Failure::Expired), "closed: {closed}");
+        assert!(!staged.exists(), "closed: {closed}");
+        let newest = if closed { None } else { Some(second.recv_timeout(Duration::from_secs(60)).unwrap().unwrap()) };
+        assert_eq!(c.groups.lock().unwrap().intents.iter().map(|i| i.sealed.op.clone()).collect::<Vec<_>>(), newest.iter().map(|s| s.op.clone()).collect::<Vec<_>>());
+        let key = c.groups_key(&scope(&c)).unwrap();
+        assert!(c.groups_book().of(&key).iter().all(|e| Some(&e.op) == newest.as_ref().map(|s| &s.op) || (e.state, e.by) == (State::Refused, Some(By::NeverSent))));
+        assert!(writes(&sent).is_empty());
+        if let Some(newest) = newest {
+            assert!(matches!(commit(&c, &newest), Outcome::Done(_)));
+        }
+    }
+}
+
 /// J3: a staged picture lives as long as what it is for: a refusal, a cancel, another prepare, the link, an end.
 #[test]
 fn a_staged_picture_goes_with_its_write() {

@@ -228,6 +228,7 @@ fn shots(args: &[String], picture_folders: Vec<PathBuf>) -> anyhow::Result<()> {
     let _text_report = text_report;
     settings.consent_acknowledged = true;
     crate::appearance::follow(&settings, || {});
+    crate::overlay::orbit::panels::set_style(&crate::appearance::orbit(&settings));
     std::fs::create_dir_all(&out)?;
     if only.as_deref() == Some("e2e") {
         return e2e(&mut Offscreen::new()?, &out, &settings, scale);

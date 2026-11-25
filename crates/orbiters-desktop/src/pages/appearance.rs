@@ -376,7 +376,7 @@ fn own_accent(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings) -> boo
         tr!("{code} is too dark to read here: {used} is used, the nearest that can be.", code = look::hex(set), used = look::hex(used))
     };
     let preset = ACCENTS.contains(&a.accent);
-    widgets::field(ui, tr("Your own accent"), Some(&note), 380.0, |ui| {
+    widgets::field(ui, tr("Your own accent"), Some(&note), 392.0, |ui| {
         ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
         let mut typed = state.hex.clone().unwrap_or_else(|| look::hex(set));
         let resp = widgets::text_field(ui, "appearance-accent-code", &mut typed, "#00da6d", 104.0, true);
@@ -390,7 +390,8 @@ fn own_accent(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings) -> boo
         } else if !resp.has_focus() {
             state.hex = None;
         }
-        // What it gives, beside the code.
+        // What it gives, beside the code (the field's own text ends inside its frame: the frame's room is added).
+        ui.add_space(12.0);
         let (chip, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
         ui.painter().circle_filled(chip.center(), 13.0, used);
         if !preset {
@@ -568,7 +569,7 @@ fn own_fonts(ui: &mut Ui, state: &mut State, chosen: Option<&str>) -> Option<Str
     let more = found.len() - shown;
     if more > 0 {
         ui.add_space(8.0);
-        let label = tr!("Show more ({count})", count = more);
+        let label = tr!("Show more ({count} more)", count = more);
         if Button::new(&label).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
             state.shown = shown + FONTS_FIRST * 4;
         }

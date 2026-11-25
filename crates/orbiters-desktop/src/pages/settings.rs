@@ -2216,7 +2216,10 @@ fn notice_log(ui: &mut Ui, shown: &mut usize, log: &mut Log) {
     let logs = orbiters_core::paths::logs_dir();
     // Read again only when the file changed: a watch looks at it once a second, and asks for the frame that shows it.
     let file = orbiters_core::notice_log::file(&logs);
-    let looked = log.watch.keep(ui.ctx(), &(), std::time::Duration::from_secs(1), || move || std::fs::metadata(&file).and_then(|m| m.modified()).ok());
+    let looked = log.watch.keep(ui.ctx(), &(), std::time::Duration::from_secs(1), || {
+        let file = file.clone();
+        move || std::fs::metadata(&file).and_then(|m| m.modified()).ok()
+    });
     let entries = match log.entries.take().filter(|_| looked.is_none()) {
         Some(entries) => entries,
         None => std::sync::Arc::new(orbiters_core::notice_log::newest(&logs, LOG_SHOWN)),

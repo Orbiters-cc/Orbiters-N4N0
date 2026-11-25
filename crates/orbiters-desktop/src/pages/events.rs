@@ -25,7 +25,7 @@ use orbiters_ui::widgets::{self, Button, Size, Tone, Variant};
 use orbiters_ui::{feedback, icons, logo, morph};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // When: this computer's time zone, countdowns.

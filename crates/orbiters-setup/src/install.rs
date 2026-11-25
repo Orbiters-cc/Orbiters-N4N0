@@ -723,6 +723,22 @@ const OWN_DATA: &[(&str, Kind)] = &[
     ("project-sizes.json", Kind::File),
     ("hidden-projects.json", Kind::File),
     ("unity-cache-folders.json", Kind::File),
+    // What a disk scan keeps for the next one, the records of copies and of projects being made, and the Unity 6 trials'
+    // (the copies' and trials' own folders are the person's, and stay).
+    ("unity-scenes.json", Kind::File),
+    ("unity-folders.bin", Kind::File),
+    ("project-copies", Kind::Folder),
+    ("project-stage", Kind::Folder),
+    ("unity6-trials.journal", Kind::File),
+    ("unity6-trials.lock", Kind::File),
+    ("unity6-leases", Kind::Folder),
+    ("unity6-logs", Kind::Folder),
+    ("unity6-data.json", Kind::File),
+    ("unity6-data.high.json", Kind::File),
+    ("unity6-data.lock", Kind::File),
+    ("unity6-vcc.json", Kind::File),
+    ("unity-editors-located.json", Kind::File),
+    ("unity-install", Kind::Folder),
     ("unity-templates", Kind::Folder),
     ("package-icons", Kind::Folder),
     ("project-pictures", Kind::Folder),
@@ -1190,6 +1206,12 @@ pub(crate) mod tests {
             "unity-gallery.damaged-0123abcd.json",
             "unity-gallery-shared.json",
             "unity-projects.json.4312-0.tmp",
+            "unity-scenes.json",
+            "unity-folders.bin",
+            "project-copies/0123.json",
+            "project-stage/0123.lock",
+            "unity6-trials.journal",
+            "unity6-logs/a/log.txt",
             "group-drafts/one/draft.json",
             "logs/perf.jsonl",
             "logs/shares.log",
@@ -1211,7 +1233,7 @@ pub(crate) mod tests {
         let failed = remove_own_data(&root, &["orbiters-desktop".into()]);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("hidden-projects.json") && root.join("hidden-projects.json/inside").is_dir());
-        for gone in ["vrchat-session.bin", "vrchat-session.bin.prev", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "vpm", "unity-gallery.json", "unity-gallery.previous.json", "unity-gallery.lock", "unity-gallery.damaged-0123abcd.json", "unity-gallery-shared.json", "unity-projects.json.4312-0.tmp", "group-drafts", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
+        for gone in ["vrchat-session.bin", "vrchat-session.bin.prev", "usage", "menu-reports", "orbit-vr-tune.json", "unity-projects.json", "project-pictures", "avatar-thumbnails", "world-thumbnails", "package-icons", "vpm", "unity-gallery.json", "unity-gallery.previous.json", "unity-gallery.lock", "unity-gallery.damaged-0123abcd.json", "unity-gallery-shared.json", "unity-projects.json.4312-0.tmp", "unity-scenes.json", "unity-folders.bin", "project-copies", "project-stage", "unity6-trials.journal", "unity6-logs", "group-drafts", "logs/perf.jsonl", "logs/shares.log", "logs/perf-report-20261119.json", "logs/orbiters-desktop.log", "logs/orbiters-desktop.old.log", "logs/vr-test-frames"] {
             assert!(std::fs::symlink_metadata(root.join(gone)).is_err(), "{gone} left");
         }
         for kept in ["account.json", "Avatars/avtr_a.json", "Mixer/inbox.json", "booster/journal.json", "logs/toolkit.log", "VCC/settings.json", "unity-gallery.txt", "unity-gallery-of-mine.json"] {

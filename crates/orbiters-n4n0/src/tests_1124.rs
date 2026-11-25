@@ -130,3 +130,75 @@ fn a_note_the_model_was_not_told_stays_for_the_next_turn() {
     assert!(n.n4n0.lock().unwrap().notes.is_empty());
     t.shutdown(&n);
 }
+
+// --- N4N-4: a handover and a server that takes its time ---
+
+/// A stand-in Orbiters that starts reading a request's body once `read` is set, then never answers: how much of it came.
+fn mute_orbiters(read: Arc<std::sync::atomic::AtomicBool>) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let (came, length) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (c, l) = (came.clone(), length.clone());
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                l.store(v.trim().parse().unwrap(), Ordering::SeqCst);
+            }
+            line.clear();
+        }
+        while !read.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut some = [0; 65536];
+        while let Ok(n) = reader.read(&mut some) {
+            if n == 0 {
+                break;
+            }
+            c.fetch_add(n, Ordering::SeqCst);
+        }
+    });
+    (base, came, length)
+}
+
+/// A request that left does not hold a sign-out while Orbiters has not answered; one still leaving does, so that nothing of it goes
+/// after the handover.
+#[test]
+fn a_handover_waits_for_a_request_to_leave_not_for_its_answer() {
+    // It left: the handover comes although nothing is answered.
+    let (t, n, _device) = ready();
+    let (base, came, length) = mute_orbiters(Arc::new(true.into()));
+    t.sign_in(base, "orbit-a");
+    n.asked("say something about the sea".into(), "typed");
+    until("the request", || length.load(Ordering::SeqCst) > 0 && came.load(Ordering::SeqCst) == length.load(Ordering::SeqCst));
+    let start = Instant::now();
+    t.switch_member(&n, None);
+    assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+    t.shutdown(&n);
+    // Still leaving (the other side reads nothing yet): the handover waits for all of it.
+    let (t, n, _device) = ready();
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (base, came, length) = mute_orbiters(read.clone());
+    t.sign_in(base, "orbit-a");
+    {
+        let mut rt = n.n4n0.lock().unwrap();
+        rt.conversation = vec![json!({ "role": "user", "content": "x".repeat(64 << 20) })];
+        rt.conversation_others = vec![Default::default()];
+    }
+    n.asked("say something about the sea".into(), "typed");
+    until("the request begins", || length.load(Ordering::SeqCst) > 0);
+    let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (t2, n2, done) = (t.clone(), n.clone(), over.clone());
+    let switching = std::thread::spawn(move || {
+        t2.switch_member(&n2, None);
+        done.store(true, Ordering::SeqCst);
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!over.load(Ordering::SeqCst), "before the request left");
+    read.store(true, Ordering::SeqCst);
+    switching.join().unwrap();
+    until("all of it", || came.load(Ordering::SeqCst) == length.load(Ordering::SeqCst));
+    t.shutdown(&n);
+}

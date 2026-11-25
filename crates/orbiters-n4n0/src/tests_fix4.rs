@@ -324,7 +324,7 @@ fn a_release_ends_only_its_own_press() {
 
 // --- P10: a handover and a request about to go ---
 
-/// A handover waits for a request already admitted to be with Orbiters, not for its answer; none is sent after one.
+/// A handover waits for a request already admitted to have left, not for its answer; none is sent after one.
 #[test]
 fn a_request_is_sent_before_a_handover_or_not_at_all() {
     let (t, n, _device) = ready();
@@ -347,7 +347,8 @@ fn a_request_is_sent_before_a_handover_or_not_at_all() {
     n.asked("say something about the sea".into(), "typed");
     until("the handover", || sent_then.lock().unwrap().is_some());
     assert!(!go.load(Ordering::SeqCst), "not once the answer was read");
-    assert_eq!(*sent_then.lock().unwrap(), Some(1), "with Orbiters before the handover");
+    // It left before the handover: it arrives with nothing more done here (the stand-in reads it a moment later).
+    until("the request", || bodies.lock().unwrap().len() == 1);
     go.store(true, Ordering::SeqCst);
     switching.lock().unwrap().take().unwrap().join().unwrap();
     std::thread::sleep(Duration::from_millis(200));

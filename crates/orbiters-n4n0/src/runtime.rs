@@ -2891,8 +2891,8 @@ fn turn(actor: Actor, api: Api, token: String, start: TurnStart) {
             time: local_time_iso(),
             display: display.then_some(Display { columns: contract::COLUMNS as u32, rows: contract::ROWS as u32 }),
         };
-        // Let in until it is with Orbiters: a handover comes before it (and nothing is sent) or after, never between
-        // (verify4-r21 P10). Not while the answer is read.
+        // Let in until it has left for Orbiters: a handover comes before it (and nothing is sent) or after, never between
+        // (verify4-r21 P10). Not while Orbiters takes its time, nor while the answer is read.
         let mut admitted = Some(fence);
         let request =
             Request { client: "desktop", messages: &conversation, input: input.take(), tool_results: std::mem::take(&mut results), tools: &tools, context };

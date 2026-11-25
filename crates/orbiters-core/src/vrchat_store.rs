@@ -55,6 +55,8 @@ pub mod kind {
     pub const MEMBERS: &str = "members";
     pub const POSTS: &str = "posts";
     pub const EVENTS: &str = "events";
+    /// What Orbiters says of a group's events.
+    pub const TOLD: &str = "events-on-orbiters";
     /// When the list was last live.
     pub const SEEN: &str = "seen";
 }

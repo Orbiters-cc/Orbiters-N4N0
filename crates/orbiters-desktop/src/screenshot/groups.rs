@@ -13,7 +13,7 @@ use orbiters_core::group_events::CalendarEvent;
 use orbiters_core::groups::*;
 use orbiters_core::vrchat_api::User;
 
-pub(super) const NAMES: [&str; 51] = [
+pub(super) const NAMES: [&str; 53] = [
     "groups-home-several",
     "groups-home-one",
     "groups-home-none",
@@ -61,13 +61,15 @@ pub(super) const NAMES: [&str; 51] = [
     "groups-edit-icons",
     "groups-events",
     "groups-events-orbiters",
+    "groups-events-member",
+    "groups-outcome-refused-role",
     "groups-events-past",
     "groups-events-empty",
     "groups-events-failed",
     "groups-confirm-two-factor",
 ];
 /// Also in French or Japanese (the name and a language).
-const TRANSLATED: [(&str, &str, &str); 16] = [
+const TRANSLATED: [(&str, &str, &str); 18] = [
     ("groups-look-fr", "groups-look", "fr"),
     ("groups-outcome-unknown-fr", "groups-outcome-unknown", "fr"),
     ("groups-outcome-not-shown-ja", "groups-outcome-not-shown", "ja"),
@@ -80,6 +82,8 @@ const TRANSLATED: [(&str, &str, &str); 16] = [
     ("groups-events-fr", "groups-events", "fr"),
     ("groups-events-ja", "groups-events", "ja"),
     ("groups-events-orbiters-fr", "groups-events-orbiters", "fr"),
+    ("groups-outcome-refused-role-fr", "groups-outcome-refused-role", "fr"),
+    ("groups-outcome-refused-role-ja", "groups-outcome-refused-role", "ja"),
     ("groups-events-orbiters-ja", "groups-events-orbiters", "ja"),
     ("groups-edit-banner-fr", "groups-edit-banner", "fr"),
     ("groups-members-roles-fr", "groups-members-roles", "fr"),
@@ -113,7 +117,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             open_detail: false,
             toasts: if base_name(name) == "groups-outcome-done" { vec![(orbiters_ui::toast::Kind::Success, "The member's roles are updated.")] } else { vec![] },
             pointer: None,
-            scroll: if home { 6000.0 } else if base_name(name) == "groups-roles-edit" { 430.0 } else if base_name(name) == "groups-events-past" { 6000.0 } else if base_name(name) == "groups-events-orbiters" { 440.0 } else { 0.0 },
+            scroll: if home { 6000.0 } else if base_name(name) == "groups-roles-edit" { 430.0 } else if base_name(name) == "groups-events-past" { 6000.0 } else if matches!(base_name(name), "groups-events-orbiters" | "groups-events-member") { 440.0 } else { 0.0 },
             world: None,
             home: None,
             library: None,
@@ -319,7 +323,7 @@ fn on_orbiters(e: &CalendarEvent) -> (orbiters_core::community::Card, orbiters_c
     let host = |id: Option<&str>, name: &str| Host { id: id.map(str::to_string), name: name.into(), ..Default::default() };
     let at = |minutes: i64| time::OffsetDateTime::from_unix_timestamp(e.start().unwrap() + minutes * 60).unwrap().format(&time::format_description::well_known::Rfc3339).ok();
     let step = |id: &str, title: &str, minutes: i64, world: &str| Step { id: id.into(), title: title.into(), starts_at: at(minutes), world: Some(World { name: Some(world.into()), ..Default::default() }), ..Default::default() };
-    let card = Card { id: id.clone(), title: e.title.clone(), starts_at: e.starts_at.clone(), ends_at: e.ends_at.clone(), ..Default::default() };
+    let card = Card { id: id.clone(), title: e.title.clone(), starts_at: e.starts_at.clone(), ends_at: e.ends_at.clone(), calendar_id: Some(e.id.clone()), ..Default::default() };
     let page = Overview {
         id,
         title: "Saturday showcase: the winter edition".into(),
@@ -334,6 +338,9 @@ fn on_orbiters(e: &CalendarEvent) -> (orbiters_core::community::Card, orbiters_c
         discord_event_url: Some("https://discord.com/events/1/2".into()),
         discord_announcement_url: Some("https://discord.com/channels/1/2/3".into()),
         signups: Some(23),
+        calendar_id: Some(e.id.clone()),
+        url: Some("https://orbiters.cc/events/11111111-1111-4111-8111-111111111111".into()),
+        signed_up: Some(true),
         steps: vec![Step { invite_open: true, ..step("main", "Gallery walk", 0, "Snowfall Gallery") }, step("stage", "Five minutes each", 45, "The Small Stage")],
         details: Details { staff: vec![Staff { name: "Hosts".into(), people: vec![Person { username: "Nova Lumen".into() }, Person { username: "Kite".into() }] }], prizes: vec![Prize { place: Some("1st".into()), title: "Your work on the group's banner for a week".into() }] },
         ..Default::default()
@@ -458,10 +465,11 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 "groups-posts-compose" => {
                     open.composer = Some(crate::pages::groups::Composer::new(PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
                 }
-                "groups-events" | "groups-events-orbiters" | "groups-events-past" => {
+                "groups-events" | "groups-events-orbiters" | "groups-events-member" | "groups-events-past" => {
                     let all = events();
                     let (card, page, invites) = on_orbiters(&all[1]);
-                    open.events.told.pages.insert(card.id.clone(), crate::pages::groups::Says::Is(Box::new(page), Some(invites)));
+                    let page = if n == "groups-events-member" { orbiters_core::community::Overview { signups: None, discord_event_url: None, discord_announcement_url: None, ..page } } else { page };
+                    open.events.told.pages.insert(card.id.clone(), (page, Some(invites)));
                     open.events.told.cards = vec![card];
                     open.events.stage(all);
                 }
@@ -529,6 +537,11 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                     if let Some(e) = entry(&Scope::of(snapshot), "op-post", Kind::DeletePost, Stands::Unknown, None) {
                         stage::entry(state, e, Some(crate::controller::groups::Observation::CannotTell(crate::controller::groups::Unclear::NotSeen)));
                     }
+                }
+                "groups-outcome-refused-role" => {
+                    let give = prepared(Write::MemberRole { group: G1.into(), user: members()[0].user_id.clone(), membership: members()[0].membership().unwrap(), role: "grol_mod".into(), add: true }, Some(r[2].clone()));
+                    let said = orbiters_core::vrchat_api::GroupRefusal { status: 403, words: "Made-up words: this is where VRChat's own answer shows".into() };
+                    state.said = Some(crate::pages::groups::refused_text(Some(&give), crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden), Some(&said)));
                 }
                 "groups-outcome-refused" => state.said = Some(crate::pages::groups::failure_text(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Forbidden))),
                 "groups-look-uploaded" => {

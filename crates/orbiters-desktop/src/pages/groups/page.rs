@@ -265,6 +265,14 @@ impl Open {
             self.posts.take(p);
             self.posts.read_again();
         }
+        self.events.as_kept(super::kept(scope, kind::EVENTS, &self.id), super::kept(scope, kind::TOLD, &self.id));
+    }
+    /// The page shown is from a read before: nothing of it is asked until it is read again.
+    pub(super) fn kept(&self) -> bool {
+        self.kept
+    }
+    pub(super) fn group_name(&self) -> String {
+        self.page.as_ref().map_or_else(|| self.card.name.clone(), |p| p.group.name.clone())
     }
 
     /// The new post being written is over: posted, or cancelled.

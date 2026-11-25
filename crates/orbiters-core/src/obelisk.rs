@@ -595,13 +595,15 @@ pub fn pointer_channel(host: &Path) -> PathBuf {
     host.join("pointer.sock")
 }
 
-/// The first obelisk-cli whose engine lets the mouse go in VRChat's menus and says so, and gives its stream camera's frames.
-pub const HOST_FEATURES: (u32, u32, u32) = (0, 1, 15);
+/// What `steam play` can ask of the engine for the programs outside it, for that launch alone (obelisk-cli 0.1.15): the mouse let go where VRChat does and said so on a
+/// channel, and its stream camera's frames.
+pub const FREE_POINTER: &str = "--free-pointer";
+pub const SHARED_TEXTURES: &str = "--shared-textures";
 
-/// Whether the obelisk-cli at `program` has [`HOST_FEATURES`], by its release folder's name (one that names no release: not known to).
-pub fn has_host_features(program: &Path) -> bool {
-    let version = program.parent().and_then(|f| f.file_name()).and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("obelisk-cli-")?.strip_suffix("-arm64"));
-    version.and_then(numbers).is_some_and(|v| v >= vec![HOST_FEATURES.0, HOST_FEATURES.1, HOST_FEATURES.2])
+/// Of those, what the program takes: those its `status` names among `steam play`'s options ([`Event::Status::play_options`]; one from before names none, and refuses a
+/// whole start for an option it does not know).
+pub fn host_options(play_options: &[String]) -> Vec<&'static str> {
+    [FREE_POINTER, SHARED_TEXTURES].into_iter().filter(|o| play_options.iter().any(|p| p == o)).collect()
 }
 
 /// The first obelisk-cli N4N0 starts VRChat with (0.1.14: a paused thread resumes where it stopped, which crashed VRChat under heavy
@@ -651,8 +653,8 @@ pub enum Phase {
 /// One line of what the program says (its JSON Lines), as far as N4N0 acts on it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    /// `status`: the Steam account signed in, if one is.
-    Status { account: Option<String>, steam_id: Option<String> },
+    /// `status`: the Steam account signed in, if one is, and the options `steam play` takes (0.1.15 and later say them).
+    Status { account: Option<String>, steam_id: Option<String>, play_options: Vec<String> },
     /// The address to show as a QR code, for the Steam app on the person's phone.
     Challenge { qr_url: String },
     SignedIn { account: String },
@@ -711,7 +713,9 @@ pub fn event(line: &str) -> Option<Event> {
     Some(match value.get("event")?.as_str()? {
         "status" => {
             let account = |field: &str| value.get("account").and_then(|a| a.get(field)).and_then(serde_json::Value::as_str).map(str::to_owned);
-            Event::Status { account: account("account_name"), steam_id: account("steam_id") }
+            let options = value.get("play_options").and_then(serde_json::Value::as_array);
+            let play_options = options.into_iter().flatten().filter_map(serde_json::Value::as_str).map(str::to_owned).collect();
+            Event::Status { account: account("account_name"), steam_id: account("steam_id"), play_options }
         }
         "challenge" => Event::Challenge { qr_url: Some(text("qr_url")).filter(|url| url.starts_with("https://"))? },
         "signed_in" => Event::SignedIn { account: text("account_name") },
@@ -830,14 +834,18 @@ mod tests {
         assert_eq!(render_size(58, (1920, 1080), (1920, 1080)), (1114, 626), "above the floor: as asked");
     }
 
-    /// The mouse and the camera of the engine from 0.1.15 on: an older one, and one whose folder says nothing, are as before.
+    /// The mouse and the camera are asked of an engine that says it takes it, each by itself: never by its version.
     #[test]
-    fn what_the_engine_gives_the_mac_s_side_is_known_by_its_release() {
-        let program = |v: &str| PathBuf::from(format!("/tools/obelisk-cli-{v}-arm64/obelisk-cli"));
-        for (v, has) in [("0.1.14", false), ("0.1.15", true), ("0.1.16", true), ("0.2.0", true), ("0.1.9", false), ("dev", false)] {
-            assert_eq!(has_host_features(&program(v)), has, "{v}");
-        }
-        assert!(!has_host_features(Path::new("/elsewhere/obelisk-cli")));
+    fn what_a_start_asks_of_the_engine_is_what_its_status_names() {
+        let options = |line: &str| match event(line) {
+            Some(Event::Status { play_options, .. }) => host_options(&play_options),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(options(r#"{"event":"status","version":"0.1.14","account":null,"keychain":"ok"}"#), [""; 0], "an older one says nothing of it");
+        let said = r#"{"event":"status","version":"0.1.15","account":null,"play_options":["--steam-id","--render-percent","--no-saved-arguments","--free-pointer","--shared-textures"]}"#;
+        assert_eq!(options(said), ["--free-pointer", "--shared-textures"]);
+        assert_eq!(options(r#"{"event":"status","version":"9.9.9","account":null,"play_options":["--shared-textures",4,"--other"]}"#), ["--shared-textures"]);
+        assert_eq!(options(r#"{"event":"status","version":"9.9.9","account":null,"play_options":"--free-pointer"}"#), [""; 0], "no list");
     }
 
     #[test]
@@ -1152,8 +1160,8 @@ mod tests {
 
     #[test]
     fn the_program_s_lines_are_read_as_what_n4n0_acts_on() {
-        assert_eq!(event(r#"{"event":"status","version":"0.1.0","account":null,"keychain":"ok"}"#), Some(Event::Status { account: None, steam_id: None }));
-        assert_eq!(event(r#"{"event":"status","account":{"steam_id":"7656","account_name":"someone"}}"#), Some(Event::Status { account: Some("someone".into()), steam_id: Some("7656".into()) }));
+        assert_eq!(event(r#"{"event":"status","version":"0.1.0","account":null,"keychain":"ok"}"#), Some(Event::Status { account: None, steam_id: None, play_options: Vec::new() }));
+        assert_eq!(event(r#"{"event":"status","account":{"steam_id":"7656","account_name":"someone"}}"#), Some(Event::Status { account: Some("someone".into()), steam_id: Some("7656".into()), play_options: Vec::new() }));
         assert_eq!(event(r#"{"event":"challenge","qr_url":"https://s.team/q/1/2"}"#), Some(Event::Challenge { qr_url: "https://s.team/q/1/2".into() }));
         assert_eq!(event(r#"{"event":"challenge","qr_url":"javascript:alert(1)"}"#), None, "only a web address is ever shown as a code");
         assert_eq!(event(r#"{"event":"signed_in","steam_id":"7656","account_name":"someone"}"#), Some(Event::SignedIn { account: "someone".into() }));

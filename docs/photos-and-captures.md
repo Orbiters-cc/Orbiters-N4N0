@@ -32,7 +32,8 @@ regions cannot be positioned reliably.
 
 ## VRChat's camera on a Mac
 
-Spout is Windows'. Where VRChat runs on Obelisk's engine (obelisk-cli 0.1.15), the engine's render server publishes each
+Spout is Windows'. Where VRChat runs on Obelisk's engine (obelisk-cli 0.1.15) and its start asked for it (`--shared-textures`: Home's do when
+"Use VRChat's mouse and camera" is on in Settings, Overlay & VR, the default), the engine's render server publishes each
 texture the game shares for Spout to programs of the same user, outside the game, in the session's host folder
 (`obelisk::host_folder`, named after the record's `game.pid`): `shared/<worker>.sock` says each texture's token, size and
 format and hands over read-only memory its finished pictures are copied into (Neptune's `docs/shared-textures.md`).

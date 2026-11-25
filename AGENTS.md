@@ -4,7 +4,8 @@
   has nothing to read on a Mac (`orbiters_core::osc::VRCHAT_RUNS_HERE`), and a new feature that needs it is hidden
   there; one that goes over OSC talks with the VRChat Home started on that Mac (on its loopback, `controller/lan.rs`), else with
   the one on the network (`orbiters_core::lan`). **Its stream camera is the exception**: from obelisk-cli 0.1.15 on the engine
-  publishes it (`orbiters-spout`'s `mac.rs`, `docs/photos-and-captures.md`), and what needs it asks `here::camera_frames()`, never
+  publishes it to a start that asks (`obelisk::host_options`: Home's, with the setting on and an engine whose `status` names the
+  options; with neither, a start is word for word the one of before) (`orbiters-spout`'s `mac.rs`, `docs/photos-and-captures.md`), and what needs it asks `here::camera_frames()`, never
   the build: with an engine from before all of it is hidden. It reads the session Home started alone, read-only, and connects
   only while something consumes (`tools/mac-spout/check.py` runs it on the engine's own Direct3D with no game). Native code goes behind
   `cfg(target_os = "macos")` beside the `cfg(windows)` path. `cargo xtask` on a Mac makes the Mac's release:
@@ -27,7 +28,7 @@
   `desk_shared.rs`, and check with `cargo check --target x86_64-pc-windows-gnu -p orbiters-desktop --tests`). Ordinary panels of ours over
   the engine's window, and nothing else: no event tap, no Accessibility, nothing sent to the game or `wsd`, no pointer warp while
   the game holds it, and **never windows that together cover all of the game's** (macOS stops showing it: `panel::uncovering`).
-  **No key points** with obelisk-cli 0.1.15 or later: its engine lets the mouse go where VRChat does (the Quick Menu) and says so on a
+  **No key points** with obelisk-cli 0.1.15 or later, when the start asked for it (`--free-pointer`, as above): its engine lets the mouse go where VRChat does (the Quick Menu) and says so on a
   read-only channel (`desktop_mac/channel.rs`), and the ring round the wheel, which holds the mouse, is picked by pushing past its rim
   (`gesture.rs`: its thresholds keep ordinary use of the wheel from ever picking ours; never let a click confirm). The game keeps its
   keyboard but while a text field of ours is up. Left Option is for an engine from before only. Screen Recording is the one

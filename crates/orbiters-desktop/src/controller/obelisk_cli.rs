@@ -197,6 +197,17 @@ pub(crate) fn read_lines_until(out: impl std::io::Read, stop: &AtomicBool, mut e
     }
 }
 
+/// What the program takes of [`obelisk::host_options`], by its own word (`status`); an error is no answer, not a "nothing".
+pub fn host_options(program: &Path) -> Result<Vec<&'static str>, String> {
+    let mut options = None;
+    run_for(program, &["status"], Duration::from_secs(5), |line| {
+        if let Some(Event::Status { play_options, .. }) = obelisk::event(line) {
+            options = Some(obelisk::host_options(&play_options));
+        }
+    })?;
+    options.ok_or_else(|| tr("What runs VRChat on this Mac stopped without saying why.").to_string())
+}
+
 fn spawn(program: &Path, args: &[&str]) -> std::io::Result<Child> {
     Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
 }
@@ -911,9 +922,9 @@ impl Play {
     /// Home's start: as [`Play::start`], drawn at `render_percent` (the engine's percent of the display's drawing
     /// resolution, for this launch only) when the program takes it; an older program starts the game at its own size.
     /// Started for the Steam account `steam`, or not at all, when one is named: the program checks it against the very session
-    /// it starts with.
-    pub fn start_rendered(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], render_percent: Option<u32>, steam: Option<u64>) -> Result<u64, Refused> {
-        self.start_full(program, library, args, std::time::SystemTime::now(), None, render_percent.filter(|_| obelisk::takes_render_percent(program)), steam)
+    /// it starts with. `host`: what it asks of the engine, each an option the program said it takes ([`host_options`]).
+    pub fn start_rendered(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], render_percent: Option<u32>, steam: Option<u64>, host: &[&'static str]) -> Result<u64, Refused> {
+        self.start_full(program, library, args, std::time::SystemTime::now(), None, render_percent.filter(|_| obelisk::takes_render_percent(program)), steam, host)
     }
 
     /// Reads the kept gate again from its file, adding it to what this run knows; whether it is to be written again.
@@ -1046,7 +1057,7 @@ impl Play {
     /// engine applies the installation's saved percentage, while the bridge measures its coordinates at 100 %).
     pub fn start_reserved(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], token: Option<u64>) -> Result<u64, Refused> {
         let full = obelisk::takes_render_percent(program).then_some(100);
-        self.start_full(program, library, args, std::time::SystemTime::now(), token, full, None)
+        self.start_full(program, library, args, std::time::SystemTime::now(), token, full, None, &[])
     }
 
     #[cfg(test)]
@@ -1055,11 +1066,11 @@ impl Play {
     }
 
     fn start_with(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>) -> Result<u64, Refused> {
-        self.start_full(program, library, args, now_is, token, None, None)
+        self.start_full(program, library, args, now_is, token, None, None, &[])
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>, steam: Option<u64>) -> Result<u64, Refused> {
+    fn start_full(self: &Arc<Self>, program: &Path, library: &Path, args: &[String], now_is: std::time::SystemTime, token: Option<u64>, render_percent: Option<u32>, steam: Option<u64>, host: &[&'static str]) -> Result<u64, Refused> {
         let mut now = self.now.lock().unwrap();
         if now.attached {
             return Err(Refused::Busy);
@@ -1089,6 +1100,7 @@ impl Play {
         // The arguments given here are the only ones of the player's: whatever the engine keeps for the installation (a
         // `--profile` among them) starts no game of N4N0's.
         command.push("--no-saved-arguments");
+        command.extend(host);
         if !args.is_empty() {
             command.push("--");
             command.extend(args.iter().map(String::as_str));
@@ -1800,7 +1812,7 @@ mod tests {
         let library = work.join("library");
         let mut status = None;
         run(&program, &["--library", library.to_str().unwrap(), "status"], &AtomicBool::new(false), |event| status = Some(event.clone())).unwrap();
-        assert_eq!(status, Some(Event::Status { account: None, steam_id: None }));
+        assert!(matches!(&status, Some(Event::Status { account: None, steam_id: None, play_options }) if obelisk::host_options(play_options).len() == 2), "{status:?}");
         let failure = run(&program, &["--library", library.to_str().unwrap(), "steam", "play", obelisk::STEAM_APP], &AtomicBool::new(false), |_| {}).unwrap_err();
         assert_eq!(failure.code, "not_signed_in");
         // A program someone else signed is refused.
@@ -2018,12 +2030,18 @@ mod tests {
         };
         let (new, new_said) = program_of("0.1.7");
         let play = Arc::new(Play::default());
-        let id = play.start_rendered(&new, &library, &args, Some(58), None).expect("starts");
+        let id = play.start_rendered(&new, &library, &args, Some(58), None, &[]).expect("starts");
         assert_eq!(said(&new_said), ["steam", "play", "438100", "--render-percent", "58", "--no-saved-arguments", "--", "-screen-fullscreen", "1"]);
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);
+        std::fs::remove_file(&new_said).unwrap();
+        // What it asks of the engine goes before the game's arguments too.
+        let id = play.start_rendered(&new, &library, &args, None, Some(7), &[obelisk::FREE_POINTER, obelisk::SHARED_TEXTURES]).expect("starts");
+        assert_eq!(said(&new_said), ["steam", "play", "438100", "--steam-id", "7", "--no-saved-arguments", "--free-pointer", "--shared-textures", "--", "-screen-fullscreen", "1"]);
+        let _ = wait_for(&play, id, |l| l.over);
+        clear(&play);
         let (old, old_said) = program_of("0.1.6");
-        let id = play.start_rendered(&old, &library, &args, Some(58), None).expect("starts");
+        let id = play.start_rendered(&old, &library, &args, Some(58), None, &[]).expect("starts");
         assert_eq!(said(&old_said), ["steam", "play", "438100", "--no-saved-arguments", "--", "-screen-fullscreen", "1"], "an older program: the engine's size");
         let _ = wait_for(&play, id, |l| l.over);
         clear(&play);

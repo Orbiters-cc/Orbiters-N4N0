@@ -77,7 +77,7 @@ impl OrbitPointing {
     pub fn words(self) -> &'static str {
         match self {
             Self::Free => orbiters_i18n::mark("Point and click, with no key: VRChat's Quick Menu leaves you the mouse. Around its wheel, push past the edge to a tool, then scroll one notch or rest on it."),
-            Self::LeftOption => orbiters_i18n::mark("Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. From Obelisk's engine 0.1.15 on, no key is needed."),
+            Self::LeftOption => orbiters_i18n::mark("Hold Left Option to point: the engine this VRChat started with keeps the mouse for it. With Obelisk's engine 0.1.15 or later and Use VRChat's mouse and camera on, no key is needed."),
         }
     }
 }

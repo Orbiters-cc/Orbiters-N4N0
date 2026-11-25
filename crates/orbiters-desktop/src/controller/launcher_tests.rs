@@ -2056,7 +2056,8 @@ fn a_mac_s_engine_files_are_said_on_home_and_repaired_from_it() {
 }
 
 /// A program in `root` that answers as obelisk-cli 0.1.14 does: `steam play` runs a game until `stop` is written, its session
-/// the next of `sessions`; `status` says the Steam account `account` holds; everything it was asked is in `asked`.
+/// the next of `sessions`; `status` says the Steam account `account` holds and what `options` adds to it; everything it was asked is
+/// in `asked`.
 #[cfg(target_os = "macos")]
 fn pretend_program(root: &std::path::Path) -> MacMachine {
     use std::os::unix::fs::PermissionsExt;
@@ -2069,7 +2070,7 @@ umask 077
 root=ROOT
 echo "$*" >> "$root/asked"
 case "$1 $2" in
-"status ") echo "{\"event\":\"status\",\"account\":{\"steam_id\":\"$(cat "$root/account")\",\"account_name\":\"n\"}}" ;;
+"status ") echo "{\"event\":\"status\",\"account\":{\"steam_id\":\"$(cat "$root/account")\",\"account_name\":\"n\"}$(cat "$root/options" 2>/dev/null)}" ;;
 "engine repair")
     echo '{"event":"engine_repairing","bytes_done":1,"bytes_total":2,"fraction":0.5}'
     if [ -e "$root/repairs" ]; then echo '{"event":"engine_repaired","voile":"v1","keyboard_layout":"mac","engine_files":[]}'; exit 0; fi
@@ -2104,6 +2105,8 @@ esac
         signed_out: std::sync::atomic::AtomicBool::new(false),
         home_launch: Mutex::default(),
         render: std::sync::atomic::AtomicU32::new(100),
+        mouse_and_camera: std::sync::atomic::AtomicBool::new(true),
+        host_options: Mutex::default(),
         restarting: Mutex::default(),
         repairing: std::sync::atomic::AtomicBool::new(false),
     }
@@ -2146,6 +2149,52 @@ fn the_panels_game_is_the_persons_own_and_never_the_bridges() {
     eventually(|| !machine.running().is_empty());
     assert_eq!(game(), None, "the bridge's");
     stop(2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Home's start asks the engine for the mouse and the camera when Settings lets it and the program says it takes them, each by
+/// itself; otherwise, and the bridge's always, the start is word for word the one of before.
+#[test]
+#[cfg(target_os = "macos")]
+fn home_s_start_asks_for_the_mouse_and_the_camera_of_a_program_that_takes_them() {
+    let root = std::env::temp_dir().join(format!("orbiters-mouse-and-camera-{}", std::process::id()));
+    let plays = |options: Option<&str>, on: bool, bridge: bool| {
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if let Some(options) = options {
+            std::fs::write(root.join("options"), options).unwrap();
+        }
+        let machine = pretend_program(&root);
+        machine.set_mouse_and_camera(on);
+        assert_eq!(machine.camera(None), on && options.is_some_and(|o| o.contains("--shared-textures")), "the camera is there when a start asks for it: {options:?}");
+        let args = ["--no-vr".to_string()];
+        match bridge {
+            true => machine.start_launch_reserved(&args, None).map(|_| ()).unwrap(),
+            false => machine.start_for(&args, &errand_of("usr_a")).unwrap(),
+        }
+        eventually(|| !machine.running().is_empty());
+        let game = machine.running()[0].0;
+        assert!(!machine.camera(Some(game)), "a game that runs without publishing anything gives none, whatever the next start asks");
+        let host = orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), game);
+        std::fs::create_dir_all(host.join("shared")).unwrap();
+        assert!(machine.camera(Some(game)), "one that publishes does, whatever Settings says now");
+        std::fs::remove_dir_all(&host).unwrap();
+        std::fs::write(root.join("stop-5e551011-0000-4000-8000-000000000001"), "").unwrap();
+        eventually(|| machine.running().is_empty() && !machine.play.starting() && machine.play.attached().is_none());
+        let asked = std::fs::read_to_string(root.join("asked")).unwrap();
+        let percent = |line: &str| line.split(' ').skip_while(|w| *w != "--render-percent").nth(1).map(str::to_owned);
+        let line = asked.lines().find(|l| l.starts_with("steam play")).unwrap().to_owned();
+        (line.replace(&format!("--render-percent {} ", percent(&line).unwrap_or_default()), ""), asked.lines().filter(|l| l.trim() == "status").count())
+    };
+    const BEFORE: &str = "steam play 438100 --no-saved-arguments -- --no-vr";
+    let both = r#","play_options":["--steam-id","--render-percent","--no-saved-arguments","--free-pointer","--shared-textures"]"#;
+    assert_eq!(plays(Some(both), true, false), ("steam play 438100 --no-saved-arguments --free-pointer --shared-textures -- --no-vr".into(), 1), "asked once for the release");
+    assert_eq!(plays(Some(r#","play_options":["--free-pointer"]"#), true, false).0, "steam play 438100 --no-saved-arguments --free-pointer -- --no-vr");
+    assert_eq!(plays(None, true, false).0, BEFORE, "an older program says nothing of them");
+    assert_eq!(plays(Some(both), false, false), (BEFORE.into(), 0), "off in Settings: not even asked about");
+    assert_eq!(plays(Some(both), true, true).0, BEFORE, "the bridge's");
+    // One that gives no answer starts the game as before.
+    assert_eq!(plays(Some("no JSON"), true, false).0, BEFORE);
     let _ = std::fs::remove_dir_all(&root);
 }
 

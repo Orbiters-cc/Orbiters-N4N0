@@ -446,6 +446,6 @@
   "Menu mismatch buttons": "メニューずれ報告ボタン",
   "Three buttons, on your wrist in VR and in a corner of VRChat's window on the desktop, to press when N4N0's menus do not match VRChat's; each press keeps a report on this computer, never what you type or say.": "VRでは手首に、デスクトップではVRChatのウィンドウの隅に出る3つのボタン。N4N0のメニューがVRChatと合わないときに押すと、レポートをこのコンピューターに保存します（入力や発話の内容は含みません）。",
   "no answer": "応答がありません",
-  "VRChat's camera comes to a Mac with Obelisk's engine 0.1.15 or later. Captures made elsewhere open here, in Photos & captures.": "MacでVRChatのカメラを使うには、Obeliskのエンジン0.1.15以降が必要です。ほかで撮ったキャプチャは、ここの「写真とキャプチャ」で開けます。",
+  "VRChat's camera comes to a Mac with Obelisk's engine 0.1.15 or later, and Use VRChat's mouse and camera on in Settings, Overlay & VR. Captures made elsewhere open here, in Photos & captures.": "MacでVRChatのカメラを使うには、Obeliskのエンジン0.1.15以降と、設定の「オーバーレイと VR」で「VRChatのマウスとカメラを使う」をオンにする必要があります。ほかで撮ったキャプチャは、ここの「写真とキャプチャ」で開けます。",
   "Ready: a capture is tagged with the world you are in": "準備完了：キャプチャには今いるワールドが記録されます"
 }

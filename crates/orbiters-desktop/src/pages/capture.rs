@@ -530,7 +530,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
             let name = state.finished.as_ref().and_then(|f| name_of(&f.dir)).unwrap_or_else(|| tr("Session").into());
             (orbiters_i18n::tr!("Saved · {name}", name = name), theme::OK)
         }
-        None if !here && cfg!(target_os = "macos") => (tr("VRChat's camera comes to a Mac with Obelisk's engine 0.1.15 or later. Captures made elsewhere open here, in Photos & captures.").into(), theme::fg_3()),
+        None if !here && cfg!(target_os = "macos") => (tr("VRChat's camera comes to a Mac with Obelisk's engine 0.1.15 or later, and Use VRChat's mouse and camera on in Settings, Overlay & VR. Captures made elsewhere open here, in Photos & captures.").into(), theme::fg_3()),
         None if !here => (tr("VRChat's camera comes over Spout, on Windows. Captures made there open here, in Photos & captures.").into(), theme::fg_3()),
         None if !consent => (tr("Read the capture notice before your first capture").into(), theme::fg_3()),
         None if !snap.vrchat.running => (tr("Start VRChat first: its camera takes the picture").into(), theme::fg_3()),

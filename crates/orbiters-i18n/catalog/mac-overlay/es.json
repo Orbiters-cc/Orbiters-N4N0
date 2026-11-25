@@ -18,5 +18,8 @@
   "Scroll one notch to open it": "Gira un paso para abrirla",
   "Rest on it to open it": "Quédate sobre ella para abrirla",
   "Push past the wheel's edge to a tool": "Empuja más allá del borde, hacia una herramienta",
-  "Push past the edge, or a number": "Más allá del borde, o un número"
+  "Push past the edge, or a number": "Más allá del borde, o un número",
+  "Use VRChat's mouse and camera": "Usar el ratón y la cámara de VRChat",
+  "Home's Play asks the engine that runs VRChat to leave you the mouse in its Quick Menu, so that Orbiters' parts need no key, and to show Orbiters its stream camera's picture. Only on this Mac: nothing is sent to the game. Off, VRChat starts without either, and Left Option points. It takes effect the next time VRChat starts.": "El botón Jugar de Inicio pide al motor que ejecuta VRChat que te deje el ratón en su menú rápido, para que los elementos de Orbiters no necesiten ninguna tecla, y que muestre a Orbiters la imagen de su Stream Camera. Solo en este Mac: no se envía nada al juego. Desactivado, VRChat se inicia sin ninguna de las dos cosas y se apunta con Opción izquierda. Se aplica la próxima vez que VRChat se inicie.",
+  "no key left option pointer spout stream camera engine obelisk launch": "sin tecla opción izquierda puntero spout stream cámara motor obelisk inicio"
 }

@@ -374,6 +374,7 @@ pub static ENTRIES: &[Entry] = &[
     e("vr.quick-menu", Vr, CARD_AROUND, mark("Around the Quick Menu"), AROUND_QUICK_MENU, mark("Quick Menu side tiles Esc")).gate(Gate::Around).controls(&["orbit-quick-menu"]),
     e("vr.wheel-pick", Vr, CARD_AROUND, mark("Open a tool around the wheel"), WHEEL_PICK, mark("scroll notch rest dwell hover push mouse no key")).gate(Gate::MacLooks).controls(&["orbit-wheel-pick"]),
     e("vr.wheel-rest", Vr, CARD_AROUND, mark("How long a rest opens it"), WHEEL_REST, mark("dwell time delay hover milliseconds")).gate(Gate::MacLooks).controls(&["orbit-wheel-rest"]),
+    e("vr.mouse-and-camera", Vr, CARD_AROUND, mark("Use VRChat's mouse and camera"), MOUSE_AND_CAMERA, mark("no key left option pointer spout stream camera engine obelisk launch")).gate(Gate::MacLooks).controls(&["orbit-mouse-and-camera"]),
     e("vr.keep-looks", Vr, CARD_AROUND, mark("Keep a picture when a menu is not found"), KEEP_LOOKS, mark("diagnostic log wheel ring missing picture frame")).gate(Gate::MacLooks).controls(&["orbit-keep-looks"]),
     e("vr.size", Vr, CARD_AROUND, mark("Panels' size in VR"), mark("If they sit too near or too far from VRChat's menu in your headset."), mark("scale bigger smaller distance")).gate(Gate::Headset).controls(&["orbit-vr-size"]),
     e("vr.motion", Vr, CARD_AROUND, mark("How they follow your hand in VR"), mark("The tiles around VRChat's menus each follow your hand on a little spring of their own."), mark("spring rigid follow hand")).gate(Gate::Headset).controls(&["orbit-vr-motion"]),
@@ -502,6 +503,7 @@ pub const AROUND_WHEEL: &str = if cfg!(target_os = "macos") {
 };
 pub const WHEEL_PICK: &str = mark("VRChat holds the mouse while its wheel is open, and a click presses its own slice. A tool lit past the wheel's edge opens with one notch of the scroll wheel, or when you rest on it; back inside the edge, nothing does.");
 pub const WHEEL_REST: &str = mark("A ring round the pointer closes meanwhile. Any movement starts it again.");
+pub const MOUSE_AND_CAMERA: &str = mark("Home's Play asks the engine that runs VRChat to leave you the mouse in its Quick Menu, so that Orbiters' parts need no key, and to show Orbiters its stream camera's picture. Only on this Mac: nothing is sent to the game. Off, VRChat starts without either, and Left Option points. It takes effect the next time VRChat starts.");
 pub const KEEP_LOOKS: &str = mark("To find out why Orbiters' parts do not come around VRChat's menus. After Esc or R with no menu found, VRChat's picture at that moment stays on this Mac, in the folder of Orbiters' logs, the newest 12 of them. Nothing is sent. Off by default.");
 pub const AROUND_QUICK_MENU: &str = if cfg!(target_os = "macos") {
     mark("Orbiters beside VRChat's own Quick Menu, opened with Esc, in full screen or in a window. Point and click, with no key.")

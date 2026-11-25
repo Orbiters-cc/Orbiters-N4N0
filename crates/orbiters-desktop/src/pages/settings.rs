@@ -2058,6 +2058,10 @@ fn orbit_settings(ui: &mut egui::Ui, snap: &Snapshot, orbit: &mut orbiters_core:
             }
         });
         widgets::separator(ui);
+        widgets::field(ui, tr("Use VRChat's mouse and camera"), Some(tr(registry::MOUSE_AND_CAMERA)), 48.0, |ui| {
+            apply |= widgets::toggle(ui, "orbit-mouse-and-camera", &mut orbit.mac_mouse_and_camera);
+        });
+        widgets::separator(ui);
         widgets::field(ui, tr("Keep a picture when a menu is not found"), Some(tr(registry::KEEP_LOOKS)), 48.0, |ui| {
             apply |= widgets::toggle(ui, "orbit-keep-looks", &mut orbit.keep_looks);
         });

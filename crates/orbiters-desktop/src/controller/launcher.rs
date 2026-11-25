@@ -96,6 +96,8 @@ pub trait Machine: Send + Sync {
     fn start(&self, args: &[String]) -> Result<(), String>;
     /// On a Mac, the render scale Home's next start asks for (25 to 100 %); nothing elsewhere.
     fn set_render_percent(&self, _percent: u32) {}
+    /// On a Mac, whether Home's starts ask the engine for the mouse and the camera (Settings); nothing elsewhere.
+    fn set_mouse_and_camera(&self, _on: bool) {}
     /// Starts one more VRChat beside those running, with these arguments (`--profile=N` among them): through VRChat's own
     /// launcher, as the bridge does, since Steam starts a game once.
     fn start_beside(&self, args: &[String]) -> Result<(), String> {
@@ -294,6 +296,10 @@ pub struct MacMachine {
     home_launch: std::sync::Mutex<Vec<HomeLaunch>>,
     /// The render scale Home's next Play asks for (Settings, `LaunchSettings::mac_render_percent`).
     render: std::sync::atomic::AtomicU32,
+    /// Home's next Play asks the engine for the mouse and the camera (Settings, `OrbitSettings::mac_mouse_and_camera`).
+    mouse_and_camera: AtomicBool,
+    /// What each program said it takes of them, or when it last gave no answer. Asked once for each release.
+    host_options: std::sync::Mutex<Option<(std::path::PathBuf, Result<Vec<&'static str>, Instant>)>>,
     /// The session being quit and started again: one at a time.
     restarting: std::sync::Mutex<Option<String>>,
     repairing: AtomicBool,
@@ -353,6 +359,8 @@ impl MacMachine {
             signed_out: AtomicBool::new(false),
             home_launch: std::sync::Mutex::new(Vec::new()),
             render: std::sync::atomic::AtomicU32::new(orbiters_core::obelisk::DEFAULT_RENDER_PERCENT),
+            mouse_and_camera: AtomicBool::new(true),
+            host_options: std::sync::Mutex::new(None),
             restarting: std::sync::Mutex::new(None),
             repairing: AtomicBool::new(false),
         }
@@ -510,7 +518,24 @@ impl MacMachine {
         #[cfg(not(target_os = "macos"))]
         let sizes: Option<((u32, u32), (u32, u32))> = None;
         let percent = sizes.map(|(backing, panel)| orbiters_core::obelisk::render_percent(render, backing.0, panel.0));
-        self.play.start_rendered(&program, &self.library, args, percent, steam)
+        self.play.start_rendered(&program, &self.library, args, percent, steam, &self.host_options(&program))
+    }
+
+    /// What a start of Home's asks the engine for: what Settings lets it and `program` says it takes. One that does not answer is
+    /// asked nothing, and again a minute later.
+    fn host_options(&self, program: &std::path::Path) -> Vec<&'static str> {
+        if !self.mouse_and_camera.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut said = self.host_options.lock().unwrap();
+        match said.as_ref().filter(|(of, _)| of == program) {
+            Some((_, Ok(options))) => return options.clone(),
+            Some((_, Err(at))) if at.elapsed() < Duration::from_secs(60) => return Vec::new(),
+            _ => {}
+        }
+        let options = super::obelisk_cli::host_options(program);
+        *said = Some((program.to_path_buf(), options.clone().map_err(|_| Instant::now())));
+        options.unwrap_or_default()
     }
 
     /// The same, with the reservation `token` the bridge took before it created the instance (`Play::reserve`).
@@ -591,9 +616,11 @@ impl Machine for MacMachine {
     }
 
     fn camera(&self, game: Option<u32>) -> bool {
-        // By its release; or by a session that publishes what its game shares, whatever started it.
-        self.program().is_some_and(|p| orbiters_core::obelisk::has_host_features(&p))
-            || game.is_some_and(|g| orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), g).join("shared").is_dir())
+        match game {
+            // The game that runs was started with it, or was not, whatever a next start asks.
+            Some(game) => orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), game).join("shared").is_dir(),
+            None => self.program().is_some_and(|p| self.host_options(&p).contains(&orbiters_core::obelisk::SHARED_TEXTURES)),
+        }
     }
 
     fn newest_launch(&self) -> Option<(u64, Option<u32>)> {
@@ -622,6 +649,10 @@ impl Machine for MacMachine {
 
     fn set_render_percent(&self, percent: u32) {
         self.render.store(percent, Ordering::Relaxed);
+    }
+
+    fn set_mouse_and_camera(&self, on: bool) {
+        self.mouse_and_camera.store(on, Ordering::Relaxed);
     }
 
     fn start(&self, args: &[String]) -> Result<(), String> {
@@ -1749,6 +1780,7 @@ impl Controller {
         let trouble = if here { machine.start_trouble() } else { None };
         let picture_lost = if here { machine.picture_lost() } else { None };
         let desktop_game = if here { machine.desktop_game(&running.iter().map(|(pid, _)| *pid).collect::<Vec<_>>()) } else { None };
+        machine.set_mouse_and_camera(view.settings.orbit.mac_mouse_and_camera);
         let camera = here && machine.camera(desktop_game);
         orbiters_core::here::engine_gives_camera(camera);
         let repairing = self.launcher.lock().unwrap().repairing;
@@ -3379,6 +3411,7 @@ impl Controller {
             return Notice::Sent { to: destination.map(|p| p.world_id).unwrap_or_default(), action: SentKind::Launch };
         }
         machine.set_render_percent(self.view().settings.launch.mac_render_percent);
+        machine.set_mouse_and_camera(self.view().settings.orbit.mac_mouse_and_camera);
         // Checked on what is launched: the account that is signed in, and the one of the profile it starts on.
         if errand.scoped() && !self.launcher_live(account) {
             return changed_account();

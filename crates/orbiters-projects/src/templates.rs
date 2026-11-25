@@ -997,6 +997,25 @@ mod tests {
         assert!(!crate::discovery::is_project(&moved));
     }
 
+    /// PRJ-9: a folder that only has a local package's name (another package, no package) is not taken for it.
+    #[test]
+    fn a_folder_of_the_packages_name_is_not_taken_for_the_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = temp.path().join("External");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("package.json"), r#"{"name":"my.tool","version":"1.0.0"}"#).unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({ "my.tool": "file:../../External" }));
+        std::fs::create_dir_all(source.join("Packages/my.tool")).unwrap();
+        std::fs::write(source.join("Packages/my.tool/package.json"), r#"{"name":"other.tool","version":"1.0.0"}"#).unwrap();
+        let dst = made_from(temp.path(), &source, "Copy").unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(dst.join("Packages/manifest.json")).unwrap()).unwrap();
+        let at = dst.join("Packages").join(manifest["dependencies"]["my.tool"].as_str().unwrap().strip_prefix("file:").unwrap());
+        let package: serde_json::Value = serde_json::from_slice(&std::fs::read(at.join("package.json")).unwrap()).unwrap();
+        assert_eq!(package["name"], "my.tool");
+        assert!(dst.join("Packages/my.tool/package.json").is_file(), "what was there stays");
+    }
+
     /// What was put in the copy while it ran is not the copy's: it stays, named, when the copy fails.
     #[test]
     fn a_failed_copy_keeps_what_is_not_its_own() {

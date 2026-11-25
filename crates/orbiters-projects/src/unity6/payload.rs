@@ -453,8 +453,19 @@ fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
         if folder && !scan.out.protected.contains(&p) {
             scan.out.protected.push(p);
         }
-        let target = PathBuf::from("Packages").join(if folder { name.clone() } else { format!("{name}.tgz") });
-        let taken = scan.out.items.keys().find(|k| k.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy())).cloned();
+        let at_of = |n: u32| PathBuf::from("Packages").join(match (folder, n) { // i18n: not shown (a folder's name)
+            (true, 1) => name.clone(),
+            (true, n) => format!("{name}.{n}"),
+            _ => format!("{name}.tgz"),
+        });
+        let in_place_of = |scan: &Scan, target: &Path| scan.out.items.keys().find(|k| k.to_string_lossy().eq_ignore_ascii_case(&target.to_string_lossy())).cloned();
+        // A folder that only has the package's name (another package, none) is not it: the package goes beside (PRJ-9).
+        let mut n = 1;
+        while folder && !strict && in_place_of(scan, &at_of(n)).is_some_and(|own| !names(scan, &own, &name)) {
+            n += 1;
+        }
+        let target = at_of(n);
+        let taken = in_place_of(scan, &target);
         let file = PathBuf::from(real.file_name().unwrap_or_default());
         match taken {
             Some(_) if strict => {
@@ -502,6 +513,12 @@ fn local_packages(scan: &mut Scan, original: &Path) -> anyhow::Result<()> {
         scan.out.items.insert(PathBuf::from(MANIFEST), Item::Made(serde_json::to_vec_pretty(&manifest)?));
     }
     Ok(())
+}
+
+/// Whether the folder at `at` of the copy says it is the package `name`.
+fn names(scan: &Scan, at: &Path, name: &str) -> bool {
+    let package = scan.read(&at.join("package.json")).ok().flatten();
+    package.and_then(|p| serde_json::from_slice::<serde_json::Value>(&p).ok()).is_some_and(|p| p["name"].as_str() == Some(name))
 }
 
 /// Whether the package at `at` of the copy is one Unity takes as `name`: its `package.json` an object that says that name and

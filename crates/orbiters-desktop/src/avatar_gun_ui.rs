@@ -227,7 +227,7 @@ pub fn paint_card(p: &Painter, at: Pos2, s: f32, ground: f32, card: &Card, pictu
             // The notice names the avatar it put on, between its line and Undo, where it has the room.
             let top = PAD - 1.0 + title_high + 4.0;
             if card.kind == CardKind::Changed && top + 15.0 <= PILL_Y - 3.0 {
-                words(p, u(WORDS, top), &card.detail(), &[11.5 * s, 11.0 * s], room, 1, false, theme::FG_3);
+                words(p, u(WORDS, top), &card.detail(), &[11.5 * s, 11.0 * s], room, 1, false, theme::fg_3());
             }
         }
         CardKind::Failed(_) | CardKind::Changing | CardKind::Undoing => {
@@ -264,9 +264,9 @@ fn paint_hint(p: &Painter, u: &impl Fn(f32, f32) -> Pos2, s: f32, card: &Card, h
     let panel = Rect::from_min_max(u(HINT_PANEL.min.x, HINT_PANEL.min.y), u(HINT_PANEL.max.x, HINT_PANEL.max.y));
     orbiters_ui::paint::fill_convex(p, &orbiters_ui::paint::squircle_points_corners(panel, [12.0 * s; 4]), |_| theme::white(0.07));
     let (glyph, ink) = match card.hint {
-        Hint::KeptOn => (icons::CHECK_CIRCLE, theme::ACCENT),
-        Hint::TurnedOff => (icons::SHIELD_CHECK, theme::FG_2),
-        Hint::Offered | Hint::None => (icons::CROSSHAIR, theme::ACCENT),
+        Hint::KeptOn => (icons::CHECK_CIRCLE, theme::accent()),
+        Hint::TurnedOff => (icons::SHIELD_CHECK, theme::fg_2()),
+        Hint::Offered | Hint::None => (icons::CROSSHAIR, theme::accent()),
     };
     let says = card.hint_says().unwrap_or_default();
     let room = (HINT_PANEL.max.x - 12.0 - HINT_WORDS_X) * s;
@@ -274,7 +274,7 @@ fn paint_hint(p: &Painter, u: &impl Fn(f32, f32) -> Pos2, s: f32, card: &Card, h
     match hint_pills(card) {
         Some((off, keep)) => {
             widgets::icon(p, u(HINT_PANEL.min.x + 18.0, HINT_PANEL.min.y + 19.0), glyph, 16.0 * s, ink);
-            words(p, u(HINT_WORDS_X, HINT_PANEL.min.y + 10.0), says, &sizes, room, 2, false, theme::FG_2);
+            words(p, u(HINT_WORDS_X, HINT_PANEL.min.y + 10.0), says, &sizes, room, 2, false, theme::fg_2());
             let scaled = |r: Rect| Rect::from_min_max(u(r.min.x, r.min.y), u(r.max.x, r.max.y));
             pill(p, scaled(off), tr(crate::controller::avatar_gun::TURN_OFF), icons::PROHIBIT, false, hover == Some(Part::TurnOff), s);
             pill(p, scaled(keep), tr(crate::controller::avatar_gun::KEEP_ON), icons::CHECK, false, hover == Some(Part::KeepOn), s);
@@ -288,7 +288,7 @@ fn paint_hint(p: &Painter, u: &impl Fn(f32, f32) -> Pos2, s: f32, card: &Card, h
                 p.layout_job(job).size().y / s
             };
             widgets::icon(p, u(HINT_PANEL.min.x + 18.0, mid), glyph, 16.0 * s, ink);
-            words(p, u(HINT_WORDS_X, mid - high / 2.0), says, &sizes, room, 2, false, theme::FG_2);
+            words(p, u(HINT_WORDS_X, mid - high / 2.0), says, &sizes, room, 2, false, theme::fg_2());
         }
     }
 }

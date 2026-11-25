@@ -47,9 +47,56 @@ pub struct Project {
     pub worlds: Vec<Avatar>,
 }
 
+/// A scan's projects, shared: a scan is handed on at each of its steps, and what is handed on is not copied (PRJ-11). Changing them
+/// copies them first when somebody else has them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(from = "Vec<Project>", into = "Vec<Project>")]
+pub struct Projects(Arc<Vec<Project>>);
+
+impl From<Vec<Project>> for Projects {
+    fn from(list: Vec<Project>) -> Self {
+        Self(Arc::new(list))
+    }
+}
+impl From<Projects> for Vec<Project> {
+    fn from(projects: Projects) -> Self {
+        Arc::unwrap_or_clone(projects.0)
+    }
+}
+impl FromIterator<Project> for Projects {
+    fn from_iter<T: IntoIterator<Item = Project>>(list: T) -> Self {
+        Vec::from_iter(list).into()
+    }
+}
+impl IntoIterator for Projects {
+    type Item = Project;
+    type IntoIter = std::vec::IntoIter<Project>;
+    fn into_iter(self) -> Self::IntoIter {
+        Vec::from(self).into_iter()
+    }
+}
+impl<'a> IntoIterator for &'a Projects {
+    type Item = &'a Project;
+    type IntoIter = std::slice::Iter<'a, Project>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+impl std::ops::Deref for Projects {
+    type Target = Vec<Project>;
+    fn deref(&self) -> &Vec<Project> {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Projects {
+    fn deref_mut(&mut self) -> &mut Vec<Project> {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Scan {
-    pub projects: Vec<Project>,
+    pub projects: Projects,
     pub last_full: u64,
     pub full_scan_ms: u64,
     pub directories: u64,
@@ -59,8 +106,6 @@ pub struct Scan {
     pub companion: bool,
     #[serde(skip)]
     pub status: String,
-    #[serde(default)]
-    pub scenes: SceneCache,
 }
 
 pub fn now() -> u64 {
@@ -205,6 +250,59 @@ pub fn describe(path: PathBuf, registered: bool, _scenes: &mut SceneCache) -> Pr
         worlds: vec![],
     }
 }
+/// What the scenes of the projects held when they were last read, so that one that did not change is not read again. The scan's own
+/// (PRJ-11: it was part of what a scan hands on, 1 MB copied at each step), in a file of its own.
+struct Scenes {
+    cache: SceneCache,
+    /// What was read of its file.
+    kept: u64,
+}
+
+impl Scenes {
+    fn file() -> PathBuf {
+        crate::data_dir().join("unity-scenes.json")
+    }
+
+    fn load() -> Scenes {
+        #[derive(Deserialize)]
+        struct Before {
+            scenes: SceneCache,
+        }
+        let kept = || serde_json::from_slice(&std::fs::read(Self::file()).ok()?).ok();
+        // Up to 0.3.10 it was with the projects.
+        let before = || Some(serde_json::from_slice::<Before>(&std::fs::read(crate::data_dir().join("unity-projects.json")).ok()?).ok()?.scenes);
+        let (cache, kept) = match kept() {
+            Some(cache) => (cache, true),
+            None => (before().unwrap_or_default(), false),
+        };
+        let kept = if kept { sum(&cache) } else { 0 };
+        Scenes { cache, kept }
+    }
+
+    /// Forgets the scenes of what is not among `projects` any more (PRJ-12).
+    fn keep_only(&mut self, projects: &[Project]) {
+        let there: HashSet<&Path> = projects.iter().map(|p| p.path.as_path()).collect();
+        self.cache.retain(|scene, _| scene.ancestors().any(|a| there.contains(a)));
+    }
+
+    fn save(&mut self) {
+        let now = sum(&self.cache);
+        if now != self.kept && crate::write_json(&Self::file(), &self.cache).is_ok() {
+            self.kept = now;
+        }
+    }
+}
+
+/// Differs when what a cache holds does.
+fn sum(cache: &SceneCache) -> u64 {
+    use std::hash::{Hash, Hasher};
+    cache.iter().fold(cache.len() as u64 + 1, |sum, (path, scene)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (path, scene.modified, scene.len, scene.avatars.len(), &scene.dependencies).hash(&mut h);
+        sum.wrapping_add(h.finish())
+    })
+}
+
 pub fn cached() -> Scan {
     std::fs::read(crate::data_dir().join("unity-projects.json")).ok().and_then(|s| serde_json::from_slice(&s).ok()).unwrap_or_default()
 }
@@ -366,6 +464,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
         notify(scan);
     };
+    let mut scenes = Scenes::load();
     let listed = crate::gallery::listed(&crate::vcc_dir());
     scan.warnings = listed.warning.iter().cloned().collect();
     scan.companion = listed.companion;
@@ -387,6 +486,7 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         known.copies.insert(keep(&mut found, p));
     }
     rebuild(&mut scan, &found, &known);
+    scenes.keep_only(&scan.projects);
     scan.status = tr("Finding nearby projects").into();
     publish(&scan);
     let seeds = seeds(&registered);
@@ -408,7 +508,8 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
     rebuild(&mut scan, &found, &known);
     publish(&scan);
     let mut enriched = HashSet::new();
-    enrich(&mut scan, cancel, &mut enriched, &mut publish);
+    enrich(&mut scan, &mut scenes.cache, cancel, &mut enriched, &mut publish);
+    scenes.save();
     if force || now().saturating_sub(scan.last_full) >= 3600 {
         scan.status = tr("Scanning fixed local disks").into();
         publish(&scan);
@@ -437,11 +538,12 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         }
         rebuild(&mut scan, &found, &known);
         publish(&scan);
-        enrich(&mut scan, cancel, &mut enriched, &mut publish);
+        enrich(&mut scan, &mut scenes.cache, cancel, &mut enriched, &mut publish);
     }
     for p in cut {
         crate::copies::adopt(&crate::data_dir(), &p);
     }
+    scenes.save();
     scan.status.clear();
     if !cancel.load(Ordering::Relaxed) {
         crate::write_json(&crate::data_dir().join("unity-projects.json"), &scan)?;
@@ -523,7 +625,7 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         // one the person registered stays wherever it is.
         .filter(|(k, p)| known.listed.contains(*k) || (is_project(p) && (known.trials.contains(*k) || known.copies.contains(*k) || !in_dot_folder(p))))
         .map(|(k, p)| {
-            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut scan.scenes);
+            let mut project = describe(p.clone(), known.listed.contains(k) || known.trials.contains(k), &mut SceneCache::new());
             project.shared = known.shared.contains(&key(p));
             (project.avatars, project.worlds) = old.get(k).cloned().unwrap_or_default();
             project
@@ -531,7 +633,7 @@ fn rebuild(scan: &mut Scan, found: &HashMap<String, PathBuf>, known: &Known) {
         .collect();
     scan.projects.sort_by_key(|p| (std::cmp::Reverse(p.registered), std::cmp::Reverse(p.modified)));
 }
-fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>, publish: &mut impl FnMut(&Scan)) {
+fn enrich(scan: &mut Scan, scenes: &mut SceneCache, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>, publish: &mut impl FnMut(&Scan)) {
     for i in 0..scan.projects.len() {
         if cancel.load(Ordering::Relaxed) {
             return;
@@ -543,15 +645,18 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>,
         let path = p.path.clone();
         scan.status = if p.kind == Kind::Worlds { tr!("Reading worlds in {project}", project = p.name) } else { tr!("Reading avatars in {project}", project = p.name) };
         publish(scan);
-        let (items, complete) = avatars::in_project_until(&path, &mut scan.scenes, cancel);
+        let (items, complete) = avatars::in_project_until(&path, scenes, cancel);
         // A readable Assets root does not guarantee its subfolders, scenes or prefabs were readable.
         if !complete {
             continue;
         }
         let (worlds, avatars): (Vec<Avatar>, Vec<Avatar>) = items.into_iter().partition(Avatar::is_world);
-        scan.projects[i].avatars = avatars;
-        scan.projects[i].worlds = worlds;
-        publish(scan);
+        // (Nothing is copied, nor handed on again, for a project that shows what it showed.)
+        if scan.projects[i].avatars != avatars || scan.projects[i].worlds != worlds {
+            let project = &mut scan.projects[i];
+            (project.avatars, project.worlds) = (avatars, worlds);
+            publish(scan);
+        }
     }
 }
 /// What a walk of `dir` finds.
@@ -919,6 +1024,42 @@ mod retained_lists {
         assert_eq!(kept, wanted);
     }
 
+    /// PRJ-11: a scan hands its projects on without copying them, and a project that shows what it showed copies none.
+    #[test]
+    fn a_scan_hands_its_projects_on_without_copying_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        std::fs::write(dir.path().join("Assets/Avatar.unity"), scene("Fox", AVATAR)).unwrap();
+        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), kind: Kind::Avatars, ..Default::default() }].into(), ..Default::default() };
+        let mut scenes = SceneCache::new();
+        let look = |scan: &mut Scan, scenes: &mut SceneCache| {
+            let mut handed = vec![];
+            enrich(scan, scenes, &AtomicBool::new(false), &mut HashSet::new(), &mut |s: &Scan| handed.push(s.clone()));
+            handed
+        };
+        assert_eq!(look(&mut scan, &mut scenes).len(), 2, "its avatars are new");
+        let before = scan.clone();
+        let handed = look(&mut scan, &mut scenes);
+        assert!(handed.len() == 1 && Arc::ptr_eq(&handed[0].projects.0, &before.projects.0) && Arc::ptr_eq(&scan.projects.0, &before.projects.0));
+        assert_eq!(scan.projects[0].avatars.len(), 1);
+        // What is in the cache and the file, and what the page has, stay what they are.
+        let written: Scan = serde_json::from_slice(&serde_json::to_vec(&scan).unwrap()).unwrap();
+        assert_eq!((written.projects.len(), &written.projects[0].avatars), (1, &scan.projects[0].avatars));
+        assert!(!serde_json::to_string(&scan).unwrap().contains("scenes"));
+        scan.projects.clear();
+        assert_eq!(before.projects.len(), 1, "what was handed on is not changed");
+        // PRJ-12: the scenes of a project that is not there any more are not kept.
+        let mut kept = Scenes { cache: scenes, kept: 0 };
+        kept.cache.insert(dir.path().join("Other/Assets/B.unity"), Default::default());
+        kept.cache.insert(PathBuf::from("Elsewhere/Assets/B.unity"), Default::default());
+        let all = sum(&kept.cache);
+        kept.keep_only(&before.projects);
+        assert_eq!(kept.cache.len(), 2);
+        assert_ne!(sum(&kept.cache), all);
+        kept.keep_only(&[]);
+        assert!(kept.cache.is_empty());
+    }
+
     /// Orbiters' own: a Unity 6 trial is in the list without any list of VCC's, and says so; a copy not listed yet is found wherever
     /// it is. Neither makes another project of its name.
     #[test]
@@ -1023,9 +1164,10 @@ mod retained_lists {
         let (avatar, world) = (assets.join("Avatar.unity"), assets.join("World.unity"));
         std::fs::write(&avatar, scene("Fox", AVATAR)).unwrap();
         std::fs::write(&world, scene("VRCWorld", WORLD)).unwrap();
-        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), name: "Project".into(), kind: Kind::Avatars, ..Default::default() }], ..Default::default() };
+        let mut scan = Scan { projects: vec![Project { path: dir.path().to_path_buf(), name: "Project".into(), kind: Kind::Avatars, ..Default::default() }].into(), ..Default::default() };
+        let mut scenes = SceneCache::new();
         let cancel = AtomicBool::new(false);
-        let read_again = |scan: &mut Scan| enrich(scan, &cancel, &mut HashSet::new(), &mut |_: &Scan| {});
+        let mut read_again = |scan: &mut Scan| enrich(scan, &mut scenes, &cancel, &mut HashSet::new(), &mut |_: &Scan| {});
         let shown = |scan: &Scan| {
             let ids = |list: &[Avatar]| list.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
             (ids(&scan.projects[0].avatars), ids(&scan.projects[0].worlds))

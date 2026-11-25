@@ -2424,7 +2424,7 @@ mod unity6_tests {
         assert_eq!(unity_line_json(&temp.join("Avatar moved"), &m, &trials)["trials"].as_array().unwrap().len(), 1);
         // Verification minor 1: both tools say the target and its dated facts the same way.
         let projects = Projects::default();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: original.clone(), name: "Avatar".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let data = |a: Answer| match a {
             Answer::Data(v) => v,
             _ => panic!("data"),
@@ -2459,7 +2459,7 @@ mod unity6_tests {
         .unwrap();
         let projects = Projects::default();
         let at = job.trial.path.clone();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Avatar (Unity 6)".into(), unity: "2022.3.22f1".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
         let said = |r: Result<Answer, Failure>| match r {
             Err(f) => format!("{} {}", f.code, f.message),
@@ -2491,7 +2491,7 @@ mod unity6_tests {
         project(&at, "6000.0.99f9", "3.11.0-beta.1", "6000.0");
         std::fs::create_dir_all(at.join("Assets")).unwrap();
         let projects = Projects::default();
-        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }], ..Default::default() });
+        *projects.scan.lock().unwrap() = Some(Scan { projects: vec![Project { path: at.clone(), name: "Six".into(), unity: "6000.0.99f9".into(), registered: true, ..Default::default() }].into(), ..Default::default() });
         let manifest = std::fs::read(at.join("Packages/vpm-manifest.json")).unwrap();
         let said = |r: Result<Answer, Failure>| match r {
             Err(f) => format!("{} {}", f.code, f.message),

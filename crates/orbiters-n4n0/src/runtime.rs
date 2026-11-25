@@ -40,6 +40,7 @@ use orbiters_n4n0_core::videos::{self, SavedVideo, Videos};
 use rosc::OscType;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher as _, BuildHasherDefault, DefaultHasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -52,6 +53,8 @@ const BUNDLE_MESSAGES: usize = 20;
 /// avatar's screen is open, and never less than the floor.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT_OPEN: Duration = Duration::from_millis(100);
+/// What nobody published by itself is handed to the interfaces this often at most.
+const REST_EVERY: Duration = Duration::from_millis(100);
 const MIN_WAIT: Duration = Duration::from_millis(4);
 /// What has arrived of an answer goes to the windows and sheets this often at most: faster than it can be read.
 const STREAM_EVERY: Duration = Duration::from_millis(60);
@@ -363,6 +366,10 @@ pub(crate) struct N4n0Runtime {
     /// Wakes the N4N0 thread before its next deadline (`woken`: a wake came while it was busy).
     wake: Arc<Condvar>,
     woken: bool,
+    /// When what nobody published by itself last was ([`N4n0::publish_rest`]).
+    rest_at: Option<Instant>,
+    /// What the ears follow, as the last step saw it.
+    ears: u64,
     /// Testing (the N4N0 page): the state N4N0 is held in, when every state began to show in turn, the owner acted as
     /// away.
     pub(crate) test_face: Option<N4n0Face>,
@@ -726,6 +733,18 @@ impl N4n0Runtime {
         due
     }
 
+    /// What the N4N0 thread's own steps change of the status, beside what they send to VRChat.
+    #[allow(clippy::type_complexity)]
+    fn glimpse(&self, now: Instant) -> impl PartialEq + use<> {
+        let s = &self.screen;
+        (
+            (self.face(), self.sender.as_ref().and_then(TextSender::current_text), self.listening.is_some(), self.enabled, self.test_face),
+            (s.countdown(now), s.available, s.card_view().map(|c| c.left), s.menu.open, s.menu.desktop_mode, s.menu_request, s.menu_toggle),
+            (s.photo_wait, s.dictation.clone(), self.mirror.view(now, crate::mirror::reach(false, &self.params)), self.voice.wake_offer),
+            (self.vrchat_running, self.tracking.clone(), self.tracking_note.clone(), self.versions.clone(), self.world_video.clone()),
+        )
+    }
+
     fn face(&self) -> N4n0Face {
         if let Some(face) = self.test_face {
             face
@@ -1020,8 +1039,10 @@ pub(crate) struct Device {
 /// N4N0 in an app: started once ([`N4n0::start`]), fed what VRChat says ([`N4n0::on_parameter`], [`N4n0::on_avatar`])
 /// and what the interfaces ask ([`N4n0::command`]), stopped when the app quits ([`N4n0::shutdown`]).
 pub struct N4n0 {
-    pub(crate) n4n0: Mutex<N4n0Runtime>,
+    pub(crate) n4n0: crate::held::Held,
     pub(crate) voice: Mutex<VoiceRuntime>,
+    /// Wakes the ears' thread ([`N4n0::start`]): something they follow may have changed.
+    pub(crate) ears: crate::voice::Bell,
     /// What a member had said as who is signed in stopped being known (`conversation.rs`).
     pub(crate) parked: Mutex<Option<crate::conversation::Parked>>,
     /// Capture admission and final dispatch share this owner with page and blocker changes.
@@ -1053,8 +1074,9 @@ impl N4n0 {
             n4n0.screen.mouse = mouse;
         }
         Arc::new(Self {
-            n4n0: Mutex::new(n4n0),
+            n4n0: crate::held::Held::new(n4n0),
             voice: Mutex::new(VoiceRuntime::default()),
+            ears: Default::default(),
             parked: Mutex::new(None),
             voice_lifecycle: parking_lot::ReentrantMutex::new(()),
             effects: parking_lot::RwLock::new(()),
@@ -1146,21 +1168,24 @@ impl N4n0 {
                     break;
                 }
                 // Asleep until the next step is due, or something wakes it (a page to show, a touch, an answer).
-                if !std::mem::take(&mut rt.woken) {
+                if !std::mem::take(&mut rt.quietly().woken) {
                     let most = if rt.screen.menu.open { MAX_WAIT_OPEN } else { MAX_WAIT };
                     let wait = due.saturating_duration_since(Instant::now()).clamp(MIN_WAIT, most);
-                    rt = wake.wait_timeout(rt, wait).unwrap().0;
-                    rt.woken = false;
+                    rt = rt.wait(&wake, wait);
+                    rt.quietly().woken = false;
                 }
             }
         });
-        // The ears follow VRChat and the settings apart, so the panel's steps never wait for them.
+        // The ears follow VRChat, the settings and what N4N0 does apart, so the panel's steps never wait for them: at each change
+        // ([`N4n0::ears_look`]) and when a wait of theirs ends, not in between.
         let n = self.clone();
-        let _ = std::thread::Builder::new().name("n4n0-watch".into()).spawn(move || {
+        let _ = std::thread::Builder::new().name("n4n0-ears".into()).spawn(move || {
             while !n.stopped() {
-                n.voice_follow();
-                n.publish();
-                std::thread::sleep(Duration::from_millis(100));
+                let due = n.voice_follow();
+                if n.n4n0.lock().unwrap().changed() {
+                    n.publish();
+                }
+                n.ears.wait(due);
             }
         });
     }
@@ -1176,9 +1201,12 @@ impl N4n0 {
             let rt = self.n4n0.lock().unwrap();
             (rt.pins_due.is_some_and(|t| t <= now), rt.screen.available)
         };
-        let (settings, walk, tracking, assistant) =
-            self.with_settings(|s| (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone(), s.n4n0.enabled.then_some(s.n4n0.assistant)));
+        let (settings, walk, tracking, assistant, mut ears) = self.with_settings(|s| {
+            let ears = BuildHasherDefault::<DefaultHasher>::default().hash_one(crate::voice::followed(&s.n4n0));
+            (TickSettings::of(&s.n4n0, pins_due), s.walk_boost.enabled, s.tracking.clone(), s.n4n0.enabled.then_some(s.n4n0.assistant), ears)
+        });
         let scene = self.host.scene();
+        ears = ears.wrapping_add((scene.vrchat as u64) << 8 | self.host.signed_as() as u64);
         // What the Tracking page shows, and the versions at the bottom of Home.
         let smoothing = self.host.smoothing();
         let app_version = self.host.app_version();
@@ -1202,14 +1230,15 @@ impl N4n0 {
         let default_state;
         {
             let mut rt = self.n4n0.lock().unwrap();
-            before = (
-                rt.face(),
-                rt.sender.as_ref().and_then(TextSender::current_text),
-                rt.listening.is_some(),
-                rt.screen.countdown(now),
-                rt.screen.available,
-                rt.screen.card_view().map(|c| c.left),
-            );
+            // (Its own steps write to it all the time: what they change that shows is looked at here.)
+            let mut changed = rt.changed();
+            before = rt.glimpse(now);
+            #[cfg(test)]
+            let whole = rt.status();
+            if rt.ears != ears {
+                rt.ears = ears;
+                changed = true;
+            }
             if rt.vrchat_running && !vrchat {
                 // VRChat closed: the avatar it wore goes with it.
                 rt.forget_avatar();
@@ -1335,14 +1364,14 @@ impl N4n0 {
             default_state = crate::states::tick(&mut rt, now);
             // The QR code scanner stops after its time without a link.
             qr_ended = crate::qr::tick(&mut rt, now);
-            after = (
-                rt.face(),
-                rt.sender.as_ref().and_then(TextSender::current_text),
-                rt.listening.is_some(),
-                rt.screen.countdown(now),
-                rt.screen.available,
-                rt.screen.card_view().map(|c| c.left),
-            );
+            after = rt.glimpse(now);
+            changed |= before != after || !out.is_empty();
+            rt.set_changed(changed);
+            #[cfg(test)]
+            if !changed {
+                let same = N4n0Status { photo_countdown: whole.photo_countdown, mirror: whole.mirror, ..rt.status() };
+                assert!(same == whole, "a step changed what shows unseen: {whole:?} {same:?}");
+            }
             due = rt.next_due(now, vrchat);
         }
         self.send(&out);
@@ -1393,7 +1422,23 @@ impl N4n0 {
         if before != after || screen_changed {
             self.publish();
         }
-        due
+        self.publish_rest(now).map_or(due, |at| due.min(at))
+    }
+
+    /// Hands over what was changed and not published since, or says when to.
+    fn publish_rest(&self, now: Instant) -> Option<Instant> {
+        {
+            let mut rt = self.n4n0.lock().unwrap();
+            if !rt.changed() {
+                return None;
+            }
+            if let Some(at) = rt.rest_at.map(|t| t + REST_EVERY).filter(|at| now < *at) {
+                return Some(at);
+            }
+            rt.quietly().rest_at = Some(now);
+        }
+        self.hand_over(false);
+        None
     }
 
     /// Shows the AFK message while VRChat says the person is away (and nothing else is up), takes it down after.
@@ -1445,16 +1490,24 @@ impl N4n0 {
 
     /// Publishes N4N0's state, and wakes the N4N0 thread: what changed (listening, an answer) shows at its next step.
     pub fn publish(&self) {
+        self.hand_over(true);
+    }
+
+    fn hand_over(&self, wake: bool) {
         let readiness = self.voice_readiness();
         let signed_as = self.host.signed_as();
         let status = {
             let mut rt = self.n4n0.lock().unwrap();
             rt.voice.readiness = readiness;
             rt.signed_as = signed_as;
-            rt.wake();
+            if wake {
+                rt.wake();
+            }
+            rt.set_changed(false);
             rt.status()
         };
         self.host.publish(status);
+        self.ears_look(readiness);
     }
 
     /// Wakes the N4N0 thread (an answer from YouTube, a thumbnail).
@@ -2672,6 +2725,8 @@ impl N4n0 {
             sender.hide();
         }
         rt.wake();
+        drop(rt);
+        self.ears.ring();
     }
 
     /// The latest values VRChat sent for `addresses` only (face tracking alone sends hundreds of others).
@@ -2789,7 +2844,7 @@ impl N4n0 {
 
     /// N4N0's state, for a change to the saved videos: refused while the list on disk could not be read (a save would
     /// replace it), which is tried again first.
-    fn videos_writable(&self) -> Result<std::sync::MutexGuard<'_, N4n0Runtime>, String> {
+    fn videos_writable(&self) -> Result<crate::held::Guard<'_>, String> {
         if self.n4n0.lock().unwrap().videos_unreadable.is_none() {
             return Ok(self.n4n0.lock().unwrap());
         }

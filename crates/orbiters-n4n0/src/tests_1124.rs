@@ -202,3 +202,83 @@ fn a_handover_waits_for_a_request_to_leave_not_for_its_answer() {
     until("all of it", || came.load(Ordering::SeqCst) == length.load(Ordering::SeqCst));
     t.shutdown(&n);
 }
+
+// --- N4N-3: nothing runs while nothing happens ---
+
+/// N4N0's threads run, the speech models on this device.
+fn started(n: &Shared) {
+    n.start();
+    n.n4n0.lock().unwrap().voice.installed = true;
+}
+
+/// What N4N0 hands over while nobody does anything, its threads running: nothing, with the assistant off as with it on and its ears
+/// there.
+#[test]
+fn nothing_is_handed_over_while_nothing_happens() {
+    for assistant in [false, true] {
+        let (t, n, device) = ready();
+        t.settings.lock().unwrap().n4n0.assistant = assistant;
+        t.sign_in("http://127.0.0.1:9/".into(), "orbit-a");
+        started(&n);
+        until("the ears follow", || device.ears.workers.lock().unwrap().len() == assistant as usize);
+        std::thread::sleep(Duration::from_millis(800));
+        let before = t.publishes.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(t.publishes.load(Ordering::SeqCst) - before, 0, "the assistant {assistant}");
+        t.shutdown(&n);
+    }
+}
+
+/// What nobody publishes by itself, a setting changed and VRChat closed are followed all the same.
+#[test]
+fn what_changes_unannounced_is_followed() {
+    let (t, n, device) = ready();
+    t.sign_in("http://127.0.0.1:9/".into(), "orbit-a");
+    started(&n);
+    let worker = |i: usize| device.ears.workers.lock().unwrap().get(i).cloned();
+    until("the ears start", || worker(0).is_some());
+    n.n4n0.lock().unwrap().line(N4n0Who::Note, "unannounced");
+    until("a line", || t.view().lines.iter().any(|l| l.text == "unannounced"));
+    t.settings.lock().unwrap().n4n0.mic_device = "another".into();
+    until("the microphone", || worker(0).unwrap().commands().iter().any(|c| matches!(c, VoiceCommand::Mic { mic: Some(m) } if m == "another")));
+    // Off and on in Settings.
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    until("the ears stop", || *worker(0).unwrap().dropped.lock().unwrap() && t.view().voice.readiness == VoiceReadiness::AssistantOff);
+    t.settings.lock().unwrap().n4n0.assistant = true;
+    until("they start again", || worker(1).is_some());
+    // VRChat closed and started, the member gone.
+    t.scene(|s| s.vrchat = false);
+    until("no ears without VRChat", || *worker(1).unwrap().dropped.lock().unwrap());
+    t.scene(|s| s.vrchat = true);
+    until("with it again", || worker(2).is_some());
+    *t.server.lock().unwrap() = None;
+    until("nobody is signed in", || *worker(2).unwrap().dropped.lock().unwrap() && t.view().voice.readiness == VoiceReadiness::SignIn);
+    t.shutdown(&n);
+}
+
+/// The ears look again by themselves when a wait of theirs ends: a worker kept for a while without VRChat, one that failed to start.
+#[test]
+fn the_ears_say_when_to_look_again() {
+    let (t, n, device) = ready();
+    t.sign_in("http://127.0.0.1:9/".into(), "orbit-a");
+    let in_a_while = |due: Option<Instant>, least: u64, most: u64| {
+        let left = due.expect("a wait").saturating_duration_since(Instant::now());
+        assert!(left >= Duration::from_secs(least) && left <= Duration::from_secs(most), "{left:?}");
+    };
+    assert!(n.voice_follow().is_none(), "VRChat runs: only a change matters");
+    t.scene(|s| s.vrchat = false);
+    assert!(n.voice_follow().is_none() && device.ears.workers.lock().unwrap().len() == 1);
+    // A sentence asked for meanwhile keeps a worker for a while.
+    n.app_talk(true, false, at(Surface::Window, None, shown_epoch(&t)), None);
+    in_a_while(n.voice_follow(), 60, 155);
+    // It stops on its own: again in a while.
+    t.scene(|s| s.vrchat = true);
+    device.ears.workers.lock().unwrap().last().unwrap().clone().crash(3, "gone");
+    n.n4n0.lock().unwrap().voice.error = None;
+    in_a_while(n.voice_follow(), 25, 30);
+    t.shutdown(&n);
+}
+
+fn at(surface: Surface, question: Option<u64>, epoch: u64) -> Option<Stamp> {
+    Some(Stamp { epoch, question, surface, seq: crate::next_input() })
+}

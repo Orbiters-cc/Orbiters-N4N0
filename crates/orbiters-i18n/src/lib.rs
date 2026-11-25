@@ -124,9 +124,16 @@ pub fn in_language<R>(language: Language, f: impl FnOnce() -> R) -> R {
 /// The catalogs built in: (area, language tag, its JSON).
 pub const CATALOGS: &[(&str, &str, &str)] = include!(concat!(env!("OUT_DIR"), "/catalogs.rs"));
 
+static TABLES: [OnceLock<HashMap<&'static str, &'static str>>; 5] = [const { OnceLock::new() }; 5];
+
+/// Whether `language`'s catalogue was read in this process: half a megabyte of JSON, some milliseconds and about a megabyte kept. For the tests of what must not read one.
+#[doc(hidden)]
+pub fn is_read(language: Language) -> bool {
+    TABLES[language as usize].get().is_some()
+}
+
 /// One language's texts, from every area. An area that is not valid JSON fails its test, and is left out here rather than taking the app down.
 fn table(language: Language) -> Option<&'static HashMap<&'static str, &'static str>> {
-    static TABLES: [OnceLock<HashMap<&'static str, &'static str>>; 5] = [const { OnceLock::new() }; 5];
     if language == Language::En {
         return None;
     }

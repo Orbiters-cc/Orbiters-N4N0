@@ -220,9 +220,15 @@ pub fn press(control: &str) {
     });
 }
 
-/// A control of the window pressed (`orbiters_ui::widgets::on_press`): its English name.
-pub(crate) fn widget_pressed(name: &'static str) {
-    press(name);
+/// A control of the window pressed (`orbiters_ui::widgets::on_press`), labelled `shown` in the language now: counted by its English name, when it has one
+/// ([`orbiters_i18n::control_name`]) and only while anything is counted at all.
+pub(crate) fn widget_pressed(shown: &str) {
+    if !enabled() {
+        return;
+    }
+    if let Some(name) = orbiters_i18n::control_name(shown) {
+        press(name);
+    }
 }
 
 /// What was noted since the last call.
@@ -250,6 +256,10 @@ pub fn forward(ctl: crate::backend::Ctl) {
     *LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ctl);
     STARTED.call_once(|| {
         let _ = std::thread::Builder::new().name("usage".into()).spawn(|| loop {
+            // The catalogue that tells the app's words is read here, not under the first press.
+            if enabled() {
+                let _ = orbiters_i18n::control_name("");
+            }
             std::thread::sleep(EVERY);
             let ctl = LINK.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             if let Some(ctl) = ctl {

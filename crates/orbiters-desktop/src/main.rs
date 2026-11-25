@@ -72,6 +72,8 @@ mod worlds;
 mod window;
 mod words;
 mod worker;
+#[cfg(test)]
+mod layers;
 #[cfg(all(test, windows))]
 mod test_crash;
 

@@ -16,13 +16,13 @@ const LAYERS: &[(&str, &[&str])] = &[
     // What the service does, with no interface.
     ("service", &["capture_picture", "controller", "mac_update", "mixer_inbox", "reconstruct", "upload_prep", "usage"]),
     // What the window and the overlay share.
-    ("surface", &["avatar_gun_picker", "avatar_gun_ui", "backend", "drag_out", "mac_cover", "mismatch", "shared_view_ui", "wake_offer", "window_rest", "world_notice", "worlds"]),
+    ("surface", &["appearance", "avatar_gun_picker", "avatar_gun_ui", "backend", "drag_out", "mac_cover", "mismatch", "shared_view_ui", "wake_offer", "window_rest", "world_notice", "worlds"]),
     ("overlay", &["coverage_window", "menu_host", "overlay", "qr"]),
     ("pages", &["chat_bar", "pages", "splat_export"]),
     // The programs: the service's process, the window's.
     ("programs", &["app", "mac", "service", "tray", "window"]),
     // What developers run.
-    ("developer", &["bench", "harness", "idle_frames", "link_between", "link_smoke", "screenshot"]),
+    ("developer", &["background_bench", "bench", "harness", "idle_frames", "link_between", "link_smoke", "screenshot"]),
 ];
 
 const BESIDE: (&str, &str) = ("overlay", "pages");
@@ -73,6 +73,7 @@ const KNOWN: &[(&str, &str, usize)] = &[
     ("window_rest.rs", "overlay", 3),
     ("worlds.rs", "overlay", 2),
     ("worlds.rs", "pages", 1),
+    ("worlds/at_once.rs", "overlay", 1),
 ];
 
 /// The layer of `module`, by its place from the bottom.

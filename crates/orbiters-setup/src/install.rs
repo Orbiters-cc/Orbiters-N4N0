@@ -1232,6 +1232,7 @@ pub(crate) mod tests {
             ("Models", "removed whole, by its own line"),
             ("logs", "by name (OWN_LOGS)"),
             ("group-kills", "a test's"),
+            ("u6-stand-ins", "the screenshot harness's, under the folders it gives itself"),
         ];
         fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
             for e in std::fs::read_dir(dir).unwrap().flatten() {

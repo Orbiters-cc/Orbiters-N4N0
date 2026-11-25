@@ -47,6 +47,9 @@ pub mod settings;
 pub mod shared_view;
 pub mod shares;
 pub mod slice;
+/// The app's own sources, for the tests that read them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod source;
 pub mod video_history;
 pub mod visited;
 pub mod voice;

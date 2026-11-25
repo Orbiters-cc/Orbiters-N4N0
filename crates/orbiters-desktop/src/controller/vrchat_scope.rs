@@ -601,33 +601,13 @@ mod tests {
             assert!(!writes(fine), "not a writer: {fine}");
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = vec![root.join("controller.rs"), root.join("service.rs")];
-        let mut dirs = vec![root.join("controller")];
-        while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(dir).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    files.push(path);
-                }
-            }
-        }
-        assert!(files.len() > 40, "the controller's sources: {}", files.len());
         let mut found = Vec::new();
-        for file in files.iter().filter(|f| f.is_file()) {
-            let name = file.file_name().unwrap().to_string_lossy().to_string();
-            if name == "vrchat_scope.rs" || name.ends_with("_tests.rs") || name == "tests.rs" {
-                continue;
-            }
-            let text = std::fs::read_to_string(file).unwrap();
+        let files: Vec<(String, String)> = orbiters_core::source::named(&root).into_iter().filter(|(name, _)| matches!(name.as_str(), "controller.rs" | "service.rs") || name.starts_with("controller/")).collect();
+        assert!(files.len() > 40, "the controller's sources: {}", files.len());
+        // (What tests do by hand is theirs: only what the app compiles is read.)
+        for (name, text) in files.iter().filter(|(name, _)| name != "controller/vrchat_scope.rs") {
             let lines: Vec<&str> = text.lines().collect();
-            // What tests of the file do by hand is theirs: they come last, after `#[cfg(test)]` on a module or an impl.
             for (i, line) in lines.iter().enumerate() {
-                let next = lines.get(i + 1).copied().unwrap_or_default();
-                if line.trim() == "#[cfg(test)]" && (next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("impl ")) {
-                    break;
-                }
                 // A chain over several lines is read as one.
                 let chain: String = std::iter::once(*line).chain(lines[i + 1..].iter().map(|l| l.trim()).take_while(|l| l.starts_with('.'))).collect();
                 if writes(&chain) {

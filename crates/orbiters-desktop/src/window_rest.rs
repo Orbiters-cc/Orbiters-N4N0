@@ -709,25 +709,15 @@ mod tests {
             ("pages/launcher/previous.rs:where-previous-history", "reads the previous instances (this computer's history) into memory"),
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = vec![root.join("app.rs"), root.join("window.rs"), root.join("views.rs"), root.join("worlds.rs"), root.join("media.rs"), root.join("window_rest.rs"), root.join("drag_out.rs")];
-        let mut dirs = vec![root.join("pages")];
-        while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    files.push(path);
-                }
-            }
-        }
+        // Only what the app compiles: its tests start no thread of the window.
         let mut unclassified = Vec::new();
-        for file in files.iter().filter(|f| f.exists()) {
-            let name = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
-            let text = std::fs::read_to_string(file).unwrap();
+        for (name, text) in orbiters_core::source::named(&root) {
+            let own = ["app.rs", "window.rs", "views.rs", "worlds.rs", "media.rs", "window_rest.rs", "drag_out.rs"];
+            if !(own.contains(&name.as_str()) || name.starts_with("pages/")) {
+                continue;
+            }
             let lines: Vec<&str> = text.lines().collect();
-            // Only the module's own code: its tests start no thread of the window.
-            let end = lines.iter().position(|l| l.trim_start().starts_with("mod tests")).unwrap_or(lines.len());
+            let end = lines.len();
             for (i, line) in lines[..end].iter().enumerate() {
                 if !(line.contains("thread::spawn(") || line.contains("thread::Builder::new()")) || line.trim_start().starts_with("//") {
                     continue;

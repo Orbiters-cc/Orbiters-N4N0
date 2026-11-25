@@ -1204,7 +1204,7 @@ mod tests {
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({}));
         let (root, app) = (temp.path().join("vcc"), crate::data_dir());
-        std::fs::write(&root, "x").unwrap();
+        let full = crate::own::full_for(&root);
         let at = temp.path().join(".hidden").join("Copy");
         let rt = crate::runtime().unwrap();
         let said = rt.block_on(duplicate(&root, &source, at.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map(|_| ()).map_err(|e| format!("{e:#}")).unwrap_err();
@@ -1214,7 +1214,7 @@ mod tests {
         assert_eq!((status, copy.error.as_deref()), (crate::copies::Status::Unlisted, Some(said.as_str())));
         assert!(crate::copies::folders(&app).contains(&at), "in the gallery though its folder begins with a dot");
         // The list is there again.
-        std::fs::remove_file(&root).unwrap();
+        drop(full);
         crate::copies::list(&app, &root, &copy.id).unwrap();
         assert!(mine().is_none() && is_registered(&root, &at));
     }

@@ -644,7 +644,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &m
         Ok(())
     });
     let blocked = w.e.root.join("vcc-file");
-    std::fs::write(&blocked, "x").unwrap();
+    let full = (trouble.act == Act::NoList).then(|| crate::own::full_for(&blocked));
     let vcc = if trouble.act == Act::NoList { &blocked } else { &w.e.vcc };
     let held = (trouble.act == Act::Locked).then(|| kept_from_all(&w.e.source.join("Assets/Big.bin")));
     // Nothing is downloaded in a test: a restore fails, or (its own step's trouble) puts one package there.
@@ -663,7 +663,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &m
     }));
     crate::templates::OFFLINE.with(|o| o.set(false));
     crate::templates::RESTORES.with(|r| *r.borrow_mut() = None);
-    drop(held);
+    drop((held, full));
     let changed = differences(&before, &w.tree(&skip));
     assert!(changed.is_empty(), "{name}: {changed:?}");
     assert_eq!(w.guarded(true), guarded, "{name}");
@@ -722,6 +722,7 @@ fn one_duplicate(w: &World, place: &Place, trouble: &DuplicateTrouble, calls: &m
         let _ = std::fs::remove_dir_all(if place.parent == nowhere { &nowhere } else { &made });
     }
     let _ = std::fs::remove_dir_all(&w.e.vcc);
+    let _ = std::fs::remove_dir_all(crate::own::dir(&w.e.vcc));
     found
 }
 

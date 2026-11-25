@@ -40,11 +40,11 @@ fn a_copy_is_recorded_until_it_is_listed() {
     let (c, s) = one(&e);
     assert_eq!((s, c.error.as_deref()), (Status::Unlisted, Some("the copy is there: no list")));
     assert_eq!(folders(&e.app), [at.clone()]);
-    std::fs::write(&e.vcc, "x").unwrap();
+    let full = crate::own::full_for(&e.vcc);
     assert!(list(&e.app, &e.vcc, &c.id).is_err());
     assert_eq!(one(&e).1, Status::Unlisted, "still there, with the new reason");
     assert_ne!(one(&e).0.error, c.error);
-    std::fs::remove_file(&e.vcc).unwrap();
+    drop(full);
     assert_eq!(list(&e.app, &e.vcc, &c.id).unwrap(), at);
     assert!(shown(&e.app).is_empty() && crate::unity6::trial::tests::listed(&e, &at));
     // Not there, another folder at its place, or a marker still in it.

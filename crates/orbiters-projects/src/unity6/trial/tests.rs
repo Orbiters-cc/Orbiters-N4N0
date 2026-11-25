@@ -142,12 +142,21 @@ pub(crate) fn store(e: &Env) -> Vec<(PathBuf, Vec<u8>)> {
 
 /// A store of Creator Companion's with two projects of the person's, in both files.
 pub(crate) fn their_store(e: &Env) {
+    use vrc_get_vpm::{environment::VccDatabaseConnection, io::DefaultEnvironmentIo, io::DefaultProjectIo, UnityProject};
     std::fs::create_dir_all(&e.vcc).unwrap();
-    for name in ["Theirs A", "Theirs B"] {
-        let at = e.root.join("Theirs").join(name);
-        copy_tree(&e.source, &at);
-        crate::gallery::add(&e.vcc, &at).unwrap();
+    let all = ["Theirs A", "Theirs B"].map(|name| e.root.join("Theirs").join(name));
+    for at in &all {
+        copy_tree(&e.source, at);
     }
+    std::fs::write(e.vcc.join("settings.json"), serde_json::json!({ "userProjects": all, "someoneElses": 1 }).to_string()).unwrap();
+    crate::runtime().unwrap().block_on(async {
+        let io = DefaultEnvironmentIo::new(e.vcc.clone().into());
+        let mut db = VccDatabaseConnection::connect(&io).await.unwrap();
+        for at in &all {
+            db.add_project(&UnityProject::load(DefaultProjectIo::new(at.clone().into())).await.unwrap()).await.unwrap();
+        }
+        db.save(&io).await.unwrap();
+    });
 }
 
 /// A whole scene of Unity's with one object uploaded as `id`.

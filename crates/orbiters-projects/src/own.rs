@@ -29,6 +29,21 @@ fn stand_ins() -> PathBuf {
     all
 }
 
+/// For tests: Orbiters' list for `root` cannot be saved (a disk with no room) until what this answers is dropped.
+#[cfg(test)]
+pub(crate) fn full_for(root: &Path) -> impl Drop {
+    struct Full(PathBuf);
+    impl Drop for Full {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    let lock = dir(root).join("unity-gallery.lock");
+    let _ = std::fs::remove_file(&lock);
+    std::fs::create_dir_all(&lock).unwrap();
+    Full(lock)
+}
+
 /// A short name for a text, the same on every run (FNV-1a).
 pub(crate) fn short(text: &str) -> String {
     format!("{:016x}", text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)))

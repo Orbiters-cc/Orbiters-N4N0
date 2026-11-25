@@ -415,11 +415,12 @@ struct ImageBuffers {
     d_pixel: wgpu::Buffer,
     target: wgpu::Buffer,
     ranges: wgpu::Buffer,
-    /// D-SSIM partial derivatives, three vec4s a pixel (training only).
-    partials: wgpu::Buffer,
-    /// Robust loss: each pixel's error and the mask of pixels kept this step (training only).
-    resid: wgpu::Buffer,
-    kept: wgpu::Buffer,
+    /// D-SSIM partial derivatives, three vec4s a pixel, made by the first colour step of this size that has the loss. Depth
+    /// grids and sizes that are only rendered held them for nothing (48 bytes a pixel).
+    partials: Option<wgpu::Buffer>,
+    /// Robust loss: each pixel's error and the mask of pixels kept this step, made by the first step of this size that has
+    /// it (a setting no shipped run has on: 8 bytes a pixel).
+    robust: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 
 /// Sort entries (two copies: the radix passes ping-pong) and the per-block digit histograms.
@@ -1981,9 +1982,8 @@ impl Gpu {
             d_pixel: storage(d, "d pixel", t * 16),
             target: storage(d, "target", t * 4),
             ranges: storage(d, "tile ranges", tiles * 8),
-            partials: storage(d, "ssim partials", t * 48),
-            resid: storage(d, "residual", t * 4),
-            kept: storage(d, "kept pixels", t * 4),
+            partials: None,
+            robust: None,
         });
     }
 
@@ -2476,9 +2476,9 @@ impl Gpu {
                 let bind = self.bind(&t.visibility, &[(0, &self.frame), (1, &proj), (2, &values[0]), (3, &ranges), (8, mask), (9, seen)]);
                 self.dispatch(&mut enc, &t.visibility, &bind, tiles);
             }
-            // Governed, the round went to the GPU already (and this encoder is empty).
+            // Governed, the round went to the GPU already (and this encoder is empty but for the count).
             let enc = self.pace(enc, 1)?;
-            self.queue.submit([enc.finish()]);
+            self.submit(enc, size, pipelined.map(|_| cap))?;
             return Ok(total);
         }
         self.section("forward");
@@ -2506,21 +2506,26 @@ impl Gpu {
                         target_buf
                     }
                 };
+                let pixels = (cam.width * cam.height) as u64;
+                let device = self.device.clone();
+                let i = self.image.as_mut().expect("image");
+                let partials = (ssim > 0.0).then(|| i.partials.get_or_insert_with(|| storage(&device, "ssim partials", pixels * 48)).clone());
+                let outliers = (robust > 0.0).then(|| i.robust.get_or_insert_with(|| (storage(&device, "residual", pixels * 4), storage(&device, "kept pixels", pixels * 4))).clone());
                 let t = self.training()?;
                 self.section("loss");
                 // The pixels this step trains on: the scene mask, less the robust loss's outlier blobs.
                 let mut used = mask.clone();
-                if robust > 0.0 {
-                    let bind = self.bind_cached(&t.robust_residual, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, &resid)]);
+                if let Some((resid, kept)) = &outliers {
+                    let bind = self.bind_cached(&t.robust_residual, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &mask), (4, resid)]);
                     self.dispatch(&mut enc, &t.robust_residual, &bind, groups((cam.width * cam.height) as usize));
-                    let bind = self.bind_cached(&t.robust_inliers, &[(0, &self.frame), (3, &mask), (4, &resid), (5, &kept)]);
+                    let bind = self.bind_cached(&t.robust_inliers, &[(0, &self.frame), (3, &mask), (4, resid), (5, kept)]);
                     self.dispatch(&mut enc, &t.robust_inliers, &bind, loss_tiles);
                     used = kept.clone();
                 }
-                if ssim > 0.0 {
-                    let bind = self.bind_cached(&t.ssim_partials, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials)]);
+                if let Some(partials) = &partials {
+                    let bind = self.bind_cached(&t.ssim_partials, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, partials)]);
                     self.dispatch(&mut enc, &t.ssim_partials, &bind, loss_tiles);
-                    let bind = self.bind_cached(&t.ssim_gradient, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &partials), (5, &d_pixel)]);
+                    let bind = self.bind_cached(&t.ssim_gradient, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, partials), (5, &d_pixel)]);
                     self.dispatch(&mut enc, &t.ssim_gradient, &bind, loss_tiles);
                 } else {
                     let bind = self.bind_cached(&t.loss_color, &[(0, &self.frame), (1, &out_color), (2, &target_buf), (3, &used), (4, &d_pixel)]);
@@ -2534,19 +2539,21 @@ impl Gpu {
                     self.forget_binds();
                 }
                 let (room, buf) = self.samples.clone().expect("samples");
-                // The samples, then zeros ("no sample") to the end: the kernel runs over the whole buffer. The queue's
-                // write lands before the encoder's clear runs.
+                // The samples, then zeros ("no sample") as far as the kernel's last workgroups reach. The queue's write lands
+                // before the encoder's clear runs.
                 if !samples.is_empty() {
                     self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(samples));
                 }
-                if samples.len() < room {
-                    enc.clear_buffer(&buf, (samples.len() * 16) as u64, None);
+                let over = groups(samples.len());
+                let reached = (over.0 as usize * over.1 as usize * 256).min(room);
+                if samples.len() < reached {
+                    enc.clear_buffer(&buf, (samples.len() * 16) as u64, Some(((reached - samples.len()) * 16) as u64));
                 }
                 enc.clear_buffer(&d_pixel, 0, None);
                 let t = self.training()?;
                 self.section("depth_loss");
                 let bind = self.bind_cached(&t.depth_loss, &[(0, &self.frame), (1, &out_color), (2, &buf), (3, &d_pixel)]);
-                self.dispatch(&mut enc, &t.depth_loss, &bind, groups(room));
+                self.dispatch(&mut enc, &t.depth_loss, &bind, over);
             }
             Target::None => {}
         }
@@ -3075,7 +3082,8 @@ impl Gpu {
     /// The pixels the last robust colour step kept (1) or left out (0).
     pub fn read_kept(&self) -> anyhow::Result<Vec<f32>> {
         let i = self.image.as_ref().with_context(|| tr("nothing rendered"))?;
-        self.read::<f32>(&i.kept, (i.width * i.height) as usize)
+        let (_, kept) = i.robust.as_ref().with_context(|| tr("nothing rendered"))?;
+        self.read::<f32>(kept, (i.width * i.height) as usize)
     }
 
     /// The last step's loss gradient per pixel (r, g, b, depth), for tests.

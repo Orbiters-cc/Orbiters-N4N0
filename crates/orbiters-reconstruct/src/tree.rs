@@ -7,7 +7,7 @@
 
 use crate::gaussians::{Gaussians, logit, rotation_matrix, sigmoid};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MAGIC: &[u8; 8] = orbiters_contracts::splat_tree::MAGIC;
 /// The file's version (crate::tree_file: 20-byte splat records, 64-byte boxes).
@@ -187,24 +187,29 @@ fn quaternion(m: [[f64; 3]; 3]) -> [f32; 4] {
 /// never the budget; finding the finest takes a pass over the group for each grid tried, on export's slowest loop,
 /// and is left to the rewrite of this search (a sort of the cells' keys, counted at every size at once).
 fn cluster(group: &[Moment], lo: [f64; 3], size: f64, target: usize) -> (Vec<Moment>, f64) {
-    let cells_at = |r: u64| {
+    let key = |m: &Moment, r: u64| {
         let cell = size / r as f64;
-        let key = |m: &Moment| {
-            let c = |k: usize| (((m.mean[k] - lo[k]) / cell).floor() as i64).clamp(0, r as i64 - 1) as u64;
-            (c(0) * r + c(1)) * r + c(2)
-        };
-        let mut cells: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (i, m) in group.iter().enumerate() {
-            cells.entry(key(m)).or_default().push(i);
-        }
-        cells
+        let c = |k: usize| (((m.mean[k] - lo[k]) / cell).floor() as i64).clamp(0, r as i64 - 1) as u64;
+        (c(0) * r + c(1)) * r + c(2)
     };
+    // A grid tried only has its occupied cells counted, as far as one past the target; whose splats they hold is for the
+    // grid taken.
+    let mut occupied: HashSet<u64> = HashSet::with_capacity(target + 1);
     let (mut low, mut high) = (1u64, 1u64 << 12);
     while low < high {
         let mid = (low + high).div_ceil(2);
-        if cells_at(mid).len() <= target { low = mid } else { high = mid - 1 }
+        occupied.clear();
+        let fits = group.iter().all(|m| {
+            occupied.insert(key(m, mid));
+            occupied.len() <= target
+        });
+        if fits { low = mid } else { high = mid - 1 }
     }
-    let mut cells: Vec<(u64, Vec<usize>)> = cells_at(low).into_iter().collect();
+    let mut cells: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, m) in group.iter().enumerate() {
+        cells.entry(key(m, low)).or_default().push(i);
+    }
+    let mut cells: Vec<(u64, Vec<usize>)> = cells.into_iter().collect();
     cells.sort_unstable_by_key(|c| c.0);
     let merged = cells.iter().map(|(_, members)| merge(&members.iter().map(|&i| group[i]).collect::<Vec<_>>())).collect();
     (merged, size / low as f64)
@@ -458,6 +463,37 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REC-19: counting a tried grid's cells as far as the target ends on the same grid, cells and merged splats as listing
+    /// every cell's members did.
+    #[test]
+    fn counting_cells_clusters_as_listing_their_members_did() {
+        let g = scene(3000);
+        let moments: Vec<Moment> = (0..g.len()).map(|i| Moment::of(&g, i)).collect();
+        let bits = |m: &Moment| -> Vec<u64> { m.mean.iter().chain(&m.cov).chain(&m.color).chain([&m.alpha]).map(|v| v.to_bits()).collect() };
+        for (n, target) in [(3008, 400), (3008, 752), (700, 1), (40, 39), (40, 40), (1, 1)] {
+            let (group, lo, size) = (&moments[..n], [-10.0, -10.0, -10.0], 20.0f64);
+            let cells_at = |r: u64| {
+                let cell = size / r as f64;
+                let mut cells: HashMap<u64, Vec<usize>> = HashMap::new();
+                for (i, m) in group.iter().enumerate() {
+                    let c = |k: usize| (((m.mean[k] - lo[k]) / cell).floor() as i64).clamp(0, r as i64 - 1) as u64;
+                    cells.entry((c(0) * r + c(1)) * r + c(2)).or_default().push(i);
+                }
+                cells
+            };
+            let (mut low, mut high) = (1u64, 1u64 << 12);
+            while low < high {
+                let mid = (low + high).div_ceil(2);
+                if cells_at(mid).len() <= target { low = mid } else { high = mid - 1 }
+            }
+            let mut cells: Vec<(u64, Vec<usize>)> = cells_at(low).into_iter().collect();
+            cells.sort_unstable_by_key(|c| c.0);
+            let before: Vec<Vec<u64>> = cells.iter().map(|(_, members)| bits(&merge(&members.iter().map(|&i| group[i]).collect::<Vec<_>>()))).collect();
+            let (merged, cell) = cluster(group, lo, size, target);
+            assert_eq!((merged.iter().map(bits).collect::<Vec<_>>(), cell), (before, size / low as f64), "{n} splats into {target}");
+        }
+    }
 
     /// A floor of `n` small splats and a few big ones above it.
     fn scene(n: usize) -> Gaussians {

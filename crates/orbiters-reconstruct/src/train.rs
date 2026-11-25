@@ -468,9 +468,9 @@ pub fn psnr(render: &[[f32; 4]], truth: &[u32], mask: &[f32]) -> f32 {
     (10.0 * (1.0 / mse).log10()) as f32
 }
 
-/// Renders the Gaussians on the GPU from a camera: (r, g, b, depth) per pixel.
+/// Renders the Gaussians on the GPU from a camera, every one of them ([`Gpu::render`]): (r, g, b, depth) per pixel.
 pub fn render(gpu: &mut Gpu, cam: &Camera, background: [f32; 3]) -> anyhow::Result<Vec<[f32; 4]>> {
-    gpu.step(cam, background, Target::None, None)?;
+    gpu.render(cam, background)?;
     gpu.read_image()
 }
 

@@ -943,15 +943,7 @@ fn shoot(
     let mut out = Vec::with_capacity(dofs.len());
     for dof in dofs {
         gpu.dof = *dof;
-        // Drawn again while the GPU's count says the frame left splats out.
-        let mut image = Vec::new();
-        for _ in 0..=REDRAW_CHECKS {
-            gpu.step(&camera, BACKGROUND, Target::None, None)?;
-            image = gpu.read_image()?;
-            if !gpu.needs_redraw() {
-                break;
-            }
-        }
+        let image = orbiters_reconstruct::train::render(&mut gpu, &camera, BACKGROUND)?;
         let rgba: Vec<u8> = image.iter().flat_map(|p| [byte(p[0]), byte(p[1]), byte(p[2]), 255]).collect();
         out.push(orbiters_ui::photo::Rgba8::new(camera.width, camera.height, rgba));
     }

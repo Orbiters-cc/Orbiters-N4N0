@@ -6,6 +6,8 @@
 //!   small window while the files are replaced, then the app again (in the tray with `--hidden`).
 //! - `--uninstall [--dir <folder>]`: what Windows' installed apps run (`orbiters-setup.exe`, the setup without
 //!   programs inside, kept in the install folder). It copies itself out of the folder first, to be able to remove it.
+//! - `--recover [--dir <folder>]`: what Windows runs at the next sign-in when an update was cut ([`swap`]): the version
+//!   that was there is put back, without a window.
 //! - `--silent`: no window (default choices; a running app is closed); `--dir` picks the folder of an install.
 //! - `--screenshots <folder> [--language <tag>]`: every page rendered offscreen, in a language.
 
@@ -13,6 +15,8 @@
 
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod swap;
 #[cfg(windows)]
 mod system;
 #[cfg(windows)]
@@ -43,11 +47,13 @@ pub struct Args {
     pub relocated: bool,
     /// This is an automatic update tried again at sign-in: it runs only when it is still newer than what is installed.
     pub retry: bool,
+    /// Only puts back what an update that was cut left.
+    pub recover: bool,
 }
 
 impl Args {
     fn parse(args: impl IntoIterator<Item = String>) -> Self {
-        let mut parsed = Args { mode: Mode::Install, silent: false, dir: None, relaunch: false, hidden: false, relocated: false, retry: false };
+        let mut parsed = Args { mode: Mode::Install, silent: false, dir: None, relaunch: false, hidden: false, relocated: false, retry: false, recover: false };
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -58,6 +64,7 @@ impl Args {
                 "--hidden" => parsed.hidden = true,
                 "--relocated" => parsed.relocated = true,
                 "--retry" => parsed.retry = true,
+                "--recover" => parsed.recover = true,
                 "--dir" => parsed.dir = args.next().map(PathBuf::from),
                 _ => {}
             }
@@ -163,6 +170,9 @@ fn main() {
         return;
     }
     let mut args = Args::parse(raw);
+    if args.recover {
+        std::process::exit(recover(&args));
+    }
     // The uninstaller started without asking for anything: it is there to uninstall.
     if payload.is_none() && args.mode == Mode::Install {
         args.mode = Mode::Uninstall;
@@ -237,6 +247,29 @@ fn relocate(args: &Args) -> i32 {
         Err(e) => {
             if !args.silent {
                 system::message(&orbiters_i18n::tr!("The uninstall could not start: {error}", error = e), false, true);
+            }
+            1
+        }
+    }
+}
+
+/// Puts back what an update that was cut left, at the sign-in after it. The app, which could not start with Windows meanwhile,
+/// starts if it is to.
+#[cfg(windows)]
+fn recover(args: &Args) -> i32 {
+    let Some(dir) = install_dir(args) else { return 1 };
+    match swap::recover(&dir) {
+        Ok(found) => {
+            if found && system::starts_with_windows_from(&dir) && !system::app_runs_from(&dir) {
+                relaunch(&dir, true);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e:#}");
+            // Tried again at the next one; the next setup tries too.
+            if let Some(command) = std::env::current_exe().ok().and_then(|me| swap::recover_command(&me, &dir)) {
+                let _ = system::schedule_recovery(&command);
             }
             1
         }
@@ -333,11 +366,16 @@ fn run_task(args: &Args, payload: Option<&'static [u8]>, progress: &install::Pro
             return r.map(drop);
         }
     };
-    let dir = result?;
-    if args.mode == Mode::Update && args.relaunch {
-        relaunch(&dir, args.hidden);
+    for note in progress.status().notes {
+        eprintln!("{note}");
     }
-    Ok(())
+    // After an update that did not finish too: it closed the app, and what is there is the version it was.
+    if args.mode == Mode::Update && args.relaunch {
+        if let Some(dir) = install_dir(args).filter(|d| result.is_ok() || !system::app_runs_from(d)) {
+            relaunch(&dir, args.hidden);
+        }
+    }
+    result.map(drop)
 }
 
 /// The app again, after an update.
@@ -382,7 +420,13 @@ fn fallback(args: &Args, payload: Option<&'static [u8]>) -> i32 {
         Ok(()) => {
             match args.mode {
                 Mode::Install => {
-                    system::message(&orbiters_i18n::tr!("Orbiters - N4N0 {version} is installed. Find it in the Start menu.", version = version), false, false);
+                    let notes = progress.status().notes;
+                    let said = if notes.is_empty() {
+                        orbiters_i18n::tr!("Orbiters - N4N0 {version} is installed. Find it in the Start menu.", version = version)
+                    } else {
+                        format!("{}\n\n{}", orbiters_i18n::tr!("Version {version} is in place.", version = version), notes.join("\n"))
+                    };
+                    system::message(&said, false, false);
                     relaunch(&target_dir(args), false);
                 }
                 Mode::Uninstall => {
@@ -434,5 +478,7 @@ mod tests {
         assert_eq!(u.mode, Mode::Uninstall);
         assert!(u.silent && !u.relocated);
         assert_eq!(Args::parse(Vec::new()).mode, Mode::Install);
+        let r = Args::parse(["--recover", "--dir", "C:/x"].map(String::from));
+        assert!(r.recover && r.dir == Some(PathBuf::from("C:/x")) && !a.recover && !u.recover);
     }
 }

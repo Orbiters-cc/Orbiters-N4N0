@@ -335,7 +335,8 @@ pub(crate) fn resolve_locally(path: &Path, mounts: &[(PathBuf, bool)], look: &dy
                     Component::ParentDir => Some("..".into()),
                     _ => None,
                 }).collect();
-                if target.is_absolute() {
+                // (From the root: these are a Mac's or Linux's paths, on whatever computer the tests run.)
+                if target.has_root() {
                     real = PathBuf::from("/");
                 }
                 todo.extend(rest);
@@ -422,7 +423,8 @@ fn a_link_into_a_share_is_refused_without_touching_the_share() {
     let looked = std::sync::Mutex::new(Vec::<PathBuf>::new());
     let fs = |p: &Path| {
         looked.lock().unwrap().push(p.to_path_buf());
-        match p.to_str().unwrap() {
+        // (Windows joins with its own separator.)
+        match p.to_str().unwrap().replace(std::path::MAIN_SEPARATOR, "/").as_str() {
             "/Users" | "/Users/me" | "/Users/me/Projects" => Part::Plain,
             "/Users/me/Linked" => Part::Link(PathBuf::from("/Volumes/Share/World")),
             "/Users/me/Up" => Part::Link(PathBuf::from("../me/Projects")),

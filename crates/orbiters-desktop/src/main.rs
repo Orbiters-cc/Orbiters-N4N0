@@ -72,6 +72,8 @@ mod worlds;
 mod window;
 mod words;
 mod worker;
+#[cfg(test)]
+mod layers;
 #[cfg(all(test, windows))]
 mod test_crash;
 
@@ -115,10 +117,10 @@ pub(crate) fn hold_the_mta() {
 }
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(windows)]
-    hold_the_mta();
     // The release's version, for the libraries too (orbiters-version says why it is given here).
     orbiters_version::set(env!("ORBITERS_VERSION"));
+    #[cfg(windows)]
+    hold_the_mta();
     sandbox_switches();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let private_roots = harness::prepare(&args)?;

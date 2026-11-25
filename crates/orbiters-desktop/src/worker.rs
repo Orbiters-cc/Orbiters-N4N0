@@ -54,40 +54,46 @@ pub fn keep_with_service(child: &Child) {
     let _ = child;
 }
 
-/// Reads a child's pipe line by line until it closes, each line without its `\r\n`. A line that is not UTF-8 (a native
-/// library writing to the inherited stderr in the system's code page: an accented path on a French Windows) is passed
-/// on with its odd bytes replaced: `BufRead::lines` ends on it, which took a living worker for gone (stdout) or stopped
-/// draining its stderr until the worker blocked on a full pipe.
-pub fn pipe_lines(pipe: impl Read, mut each: impl FnMut(String)) {
-    pipe_bytes(pipe, |line| each(String::from_utf8_lossy(line).into_owned()));
+/// A child's pipe, line by line until it closes, each line without its `\r\n`: the one reader of every process started
+/// here. A line that is not UTF-8 (a native library writing to the inherited stderr in the system's code page: an accented
+/// path on a French Windows) is passed on with its odd bytes replaced: `BufRead::lines` ends on it, which took a living
+/// worker for gone (stdout) or stopped draining its stderr until the worker blocked on a full pipe.
+pub fn log_lines(pipe: impl Read) -> impl Iterator<Item = String> {
+    Lines(BufReader::new(pipe)).map(|line| String::from_utf8_lossy(&line).into_owned())
 }
 
-/// [`pipe_lines`] for a protocol (a worker's events): a line that is not UTF-8 is passed over whole, with a note, and
-/// the next ones still arrive. Decoded with replacements it could have become a valid event with another file path in it
-/// (verify-controller).
-pub fn pipe_records(pipe: impl Read, what: &str, mut each: impl FnMut(String)) {
-    pipe_bytes(pipe, |line| match std::str::from_utf8(line) {
-        Ok(text) => each(text.to_string()),
-        Err(_) => eprintln!("{what}: a line of {} bytes that is not UTF-8, left out", line.len()),
-    });
+/// [`log_lines`] for a protocol (a worker's events): a line that is not UTF-8 is passed over whole, with a note (its length
+/// only: it may hold what someone said), and the next ones still arrive. Decoded with replacements it could have become a
+/// valid event with another file path in it (verify-controller).
+pub fn records(pipe: impl Read, what: &'static str) -> impl Iterator<Item = String> {
+    Lines(BufReader::new(pipe)).filter_map(move |line| match String::from_utf8(line) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            eprintln!("{what}: a line of {} bytes that is not UTF-8, left out", e.as_bytes().len());
+            None
+        }
+    })
 }
 
 /// A pipe's lines as bytes, without their `\r\n`, until it closes.
-fn pipe_bytes(pipe: impl Read, mut each: impl FnMut(&[u8])) {
-    let mut reader = BufReader::new(pipe);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => return,
-            Ok(_) => {
-                while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                    buf.pop();
+struct Lines<R: Read>(BufReader<R>);
+
+impl<R: Read> Iterator for Lines<R> {
+    type Item = Vec<u8>;
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let mut line = Vec::new();
+        loop {
+            match self.0.read_until(b'\n', &mut line) {
+                Ok(0) if line.is_empty() => return None,
+                Ok(_) => {
+                    while matches!(line.last(), Some(b'\n' | b'\r')) {
+                        line.pop();
+                    }
+                    return Some(line);
                 }
-                each(&buf);
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return,
         }
     }
 }
@@ -115,17 +121,17 @@ impl WorkerHandle {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("worker-stdout".into()).spawn(move || {
-            pipe_records(stdout, "worker", |line| {
+            for line in records(stdout, "worker") {
                 // A number written as null (NaN) costs its field, not the event: a lost `Stopped` would leave the
                 // session "being saved" (`WorkerEvent::from_line`).
                 match WorkerEvent::from_line(&line) {
                     Some(e) => on_event(e),
                     None => eprintln!("worker: unexpected output: {line}"),
                 }
-            });
+            }
             on_exit();
         })?;
-        std::thread::Builder::new().name("worker-stderr".into()).spawn(move || pipe_lines(stderr, on_log))?;
+        std::thread::Builder::new().name("worker-stderr".into()).spawn(move || log_lines(stderr).for_each(on_log))?;
         Ok(Self { child, stdin })
     }
 
@@ -172,8 +178,59 @@ impl Drop for WorkerHandle {
     }
 }
 
+/// A stand-in for a worker: a program that writes `output`, byte for byte, on its stdout (`stderr`: on its stderr) and ends.
+#[cfg(test)]
+pub(crate) fn stand_in(output: &[u8], stderr: bool) -> Command {
+    let file = std::env::temp_dir().join(format!("orbiters-stand-in-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+    std::fs::write(&file, output).unwrap();
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("cmd");
+        // Its file goes once it was said.
+        cmd.raw_arg(format!(r#"/S /C "type "{0}"{1} & del "{0}"""#, file.display(), if stderr { " 1>&2" } else { "" })); // i18n: not shown
+        cmd.creation_flags(0x0800_0000);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("cat '{0}'{1}; rm '{0}'", file.display(), if stderr { " 1>&2" } else { "" })); // i18n: not shown
+        cmd
+    };
+    cmd.stdin(Stdio::null());
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
+    /// XCT-15, DAP-20: what the readers of this crate are, not one of them by hand: a child's pipe read with `BufRead::lines`
+    /// ends at the first line that is not UTF-8.
+    #[test]
+    fn every_pipe_is_read_by_the_shared_reader() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Readers of what no process of ours pipes: (file, why).
+        const OTHERS: &[(&str, &str)] = &[
+            ("ipc.rs", "the link's own socket: what is not UTF-8 there is no message of ours, and the link ends"),
+            ("bridge/guard.rs", "its own standard input, a line the service writes"),
+            ("bridge/lab.rs", "a developer's command, its own standard input"),
+        ];
+        let mut found = Vec::new();
+        for (name, text) in orbiters_core::source::named(&src) {
+            if OTHERS.iter().any(|(f, _)| *f == name) {
+                continue;
+            }
+            // (A statement may be over several lines.)
+            for statement in text.split([';', '{']) {
+                let code = statement.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<String>();
+                if (code.contains("BufReader::new(") || code.contains("stdin()")) && code.contains(".lines()") {
+                    found.push(format!("{name}: {}", code.trim()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "read it with worker::records or worker::log_lines:\n{}", found.join("\n"));
+    }
+
     /// CTL-2: a line that is not UTF-8 is a line, not the end of the pipe; the lines after it (an event, 64 KB more)
     /// still arrive.
     #[test]
@@ -182,11 +239,11 @@ mod tests {
         input.extend(std::iter::repeat_n(b'x', 64 * 1024));
         input.extend_from_slice(b"\nlast");
         let mut lines = Vec::new();
-        super::pipe_lines(&input[..], |l| lines.push(l));
+        lines.extend(super::log_lines(&input[..]));
         // The worker's events: the line that is not UTF-8 (inside a quoted path, it would decode to another path) is
         // left out, the others arrive.
         let mut records = Vec::new();
-        super::pipe_records(&input[..], "test", |l| records.push(l));
+        records.extend(super::records(&input[..], "test"));
         assert_eq!(records.len(), 4, "the one line that is not UTF-8 is left out");
         assert_eq!(records[1], "{\"event\":1}");
         assert!(records.iter().all(|r| !r.contains('\u{FFFD}')));

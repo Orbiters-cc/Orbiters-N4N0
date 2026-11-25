@@ -1934,8 +1934,7 @@ pub(crate) mod tests {
     /// The owner's rule (never a scroll area inside another): the element draws none of its own.
     #[test]
     fn the_element_has_no_scroll_area_of_its_own() {
-        let source = include_str!("capture.rs");
-        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let code = orbiters_core::source::production(include_str!("capture.rs"));
         assert!(!code.contains(concat!("Scroll", "Area")), "the capture element scrolls with the page's list");
     }
 

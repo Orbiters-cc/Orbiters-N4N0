@@ -56,6 +56,11 @@ pub fn none_published(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| matches!(cause.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404))))
 }
 
+/// What a feed with no release of a channel answers ([`none_published`]).
+pub fn no_release() -> ureq::Error {
+    ureq::Error::StatusCode(404)
+}
+
 /// Downloads `artifact` (resolved against [`feed`]) to `to`, through `to` with `.part` added: a download that stopped
 /// goes on from where it was, and only a whole file of the right size and SHA-256 takes `to`'s name. `progress` hears
 /// the bytes there are of the size; `stop` ends it early (an error).

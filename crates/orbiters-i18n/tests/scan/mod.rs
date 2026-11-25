@@ -10,6 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// What of a source the app compiles: the same reader the other tests that read sources use (this crate is below theirs).
+#[path = "../../../orbiters-core/src/source.rs"]
+mod source;
+
 /// Calls whose text no person using the app reads. A macro by its `!`, as widgets may be called `error` or `info`; a call by its name, or the path it ends in.
 pub const NOT_SHOWN: &[&str] = &[
     // Logs and panics, for developers.
@@ -46,6 +50,8 @@ pub struct Literal {
 
 /// Every string in `source` outside tests, comments and attributes, and outside calls that are not shown.
 pub fn literals(source: &str) -> Vec<Literal> {
+    let source = source::production(source);
+    let source = source.as_str();
     let chars: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
     let (mut i, mut line) = (0, 1);
@@ -84,12 +90,11 @@ pub fn literals(source: &str) -> Vec<Literal> {
                     }
                 }
             }
-            // An attribute: tests are left out whole, the rest only as far as its bracket.
+            // An attribute, as far as its bracket (tests were left out whole).
             '#' if next == Some('[') || (next == Some('!') && chars.get(i + 2) == Some(&'[')) => {
                 let start = if next == Some('[') { i + 1 } else { i + 2 };
                 let mut depth = 0;
                 let mut j = start;
-                let mut text = String::new();
                 while j < chars.len() {
                     match chars[j] {
                         '[' => depth += 1,
@@ -102,48 +107,9 @@ pub fn literals(source: &str) -> Vec<Literal> {
                         '\n' => line += 1,
                         _ => {}
                     }
-                    text.push(chars[j]);
                     j += 1;
                 }
                 i = j + 1;
-                if text.contains("cfg(test)") || text == "[test" {
-                    // The item it is on: to its closing brace (or its semicolon).
-                    let mut depth = 0;
-                    while i < chars.len() {
-                        match chars[i] {
-                            '{' => depth += 1,
-                            '}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    i += 1;
-                                    break;
-                                }
-                            }
-                            ';' if depth == 0 => {
-                                i += 1;
-                                break;
-                            }
-                            '\n' => line += 1,
-                            // Braces in strings and characters would miscount.
-                            '"' => {
-                                i += 1;
-                                while i < chars.len() && chars[i] != '"' {
-                                    if chars[i] == '\\' {
-                                        i += 1;
-                                    }
-                                    if chars.get(i) == Some(&'\n') {
-                                        line += 1;
-                                    }
-                                    i += 1;
-                                }
-                            }
-                            '\'' if chars.get(i + 2) == Some(&'\'') => i += 2,
-                            '\'' if chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'') => i += 3,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                }
             }
             'r' | 'b' if matches!(next, Some('"') | Some('#') | Some('r')) && !path.chars().last().is_some_and(|p| p.is_alphanumeric() || p == '_') => {
                 // Raw and byte strings.

@@ -8,7 +8,7 @@ use orbiters_core::voice::{VoiceCommand, VoiceEvent};
 use orbiters_i18n::tr;
 use orbiters_n4n0::{Browser, Clipboard, Ears, Locale, Mouse, MouseState, Platform, Sounds, VoiceEnded, VoiceEvents, VoiceWorker};
 use orbiters_n4n0_core::menu::KeyboardLayout;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -344,21 +344,27 @@ impl Ears for VoiceProcess {
         let path = crate::worker::sibling_exe("orbiters-voice");
         anyhow::ensure!(path.is_file(), "{}", tr!("N4N0's voice worker was not found at {path}", path = path.display()));
         let mut cmd = Command::new(&path);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             // CREATE_NO_WINDOW, BELOW_NORMAL_PRIORITY_CLASS.
             cmd.creation_flags(0x0800_0000 | 0x0000_4000);
         }
+        Ok(Box::new(VoiceChild::spawn(cmd, events, ended)?))
+    }
+}
+
+impl VoiceChild {
+    /// Starts `cmd` as N4N0's ears (the program itself, or a test's stand-in for it).
+    fn spawn(mut cmd: Command, events: VoiceEvents, ended: VoiceEnded) -> anyhow::Result<Self> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
         crate::worker::keep_with_service(&child);
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         std::thread::Builder::new().name("voice-stdout".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            for line in crate::worker::records(stdout, "voice") {
                 match serde_json::from_str::<VoiceEvent>(&line) {
                     Ok(e) => events(e),
                     // Not the line: it may hold what someone said.
@@ -370,14 +376,13 @@ impl Ears for VoiceProcess {
         let last_line = Arc::new(Mutex::new(None));
         let last = last_line.clone();
         std::thread::Builder::new().name("voice-stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
+            for line in crate::worker::log_lines(stderr) {
                 let line = line.strip_prefix("voice: ").unwrap_or(&line).to_string();
                 eprintln!("voice: {line}");
                 *last.lock().unwrap() = Some(line);
             }
         })?;
-        Ok(Box::new(VoiceChild { child, stdin, last_line }))
+        Ok(VoiceChild { child, stdin, last_line })
     }
 }
 
@@ -428,6 +433,26 @@ impl Drop for VoiceChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DAP-20: a line that is not UTF-8 neither ends the voice's events (the worker was taken for gone) nor the draining
+    /// of its stderr.
+    #[test]
+    fn a_line_that_is_not_utf8_ends_neither_the_voice_nor_its_log() {
+        let (said, heard) = std::sync::mpsc::channel();
+        let worker = VoiceChild::spawn(crate::worker::stand_in(b"d\xE9faut\r\n{\"type\":\"speech\",\"active\":true}\r\n", false), Box::new(move |e| drop(said.send(e))), Box::new(|| {})).unwrap();
+        assert_eq!(heard.recv_timeout(Duration::from_secs(30)), Ok(VoiceEvent::Speech { active: true }), "the event after the odd line arrives");
+        drop(worker);
+        let (over, done) = std::sync::mpsc::channel::<()>();
+        let mut worker = VoiceChild::spawn(crate::worker::stand_in(b"voice: d\xE9faut\r\nvoice: after\r\n", true), Box::new(|_| {}), Box::new(move || drop(over))).unwrap();
+        assert!(done.recv_timeout(Duration::from_secs(30)).is_err());
+        assert!(worker.exit_code().is_some(), "the stand-in ended by itself");
+        // (Its log is read on a thread of its own: a moment after its end at most.)
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while worker.last_line().as_deref() != Some("after") && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(worker.last_line().as_deref(), Some("after"), "its log goes on after the odd line");
+    }
 
     #[test]
     fn this_computer_s_language_and_a_missing_worker() {

@@ -680,14 +680,10 @@ mod destructive_tests {
         let (mut checked, mut wrong) = (0, Vec::new());
         for path in all {
             let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
-            let source = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+            let source = orbiters_core::source::production(&std::fs::read_to_string(&path).unwrap());
             let lines: Vec<&str> = source.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 if line.trim_start().starts_with("//") || !(line.contains("Variant::Danger") || line.contains(".danger()")) {
-                    continue;
-                }
-                // (This test's own words.)
-                if name == "pages/states.rs" && lines[..n].contains(&"mod destructive_tests {") {
                     continue;
                 }
                 if NOT.iter().any(|(file, what)| name == *file && line.contains(what)) {

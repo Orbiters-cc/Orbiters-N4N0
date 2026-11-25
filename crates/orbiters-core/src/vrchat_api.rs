@@ -2489,7 +2489,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn transport_has_no_orbiters_api_or_credential_path() {
-        let source = include_str!("vrchat_api.rs").split("#[cfg(test)]").next().unwrap();
+        let source = crate::source::production(include_str!("vrchat_api.rs"));
         assert!(!source.contains("account::") && !source.contains("crate::account") && !source.contains("Bearer "));
     }
     #[test]

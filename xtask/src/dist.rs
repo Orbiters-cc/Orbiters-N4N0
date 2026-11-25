@@ -331,7 +331,8 @@ fn longer_before(before: &[u8]) -> bool {
 /// Whether `bytes` hold `version` as a whole version: not as the start of a longer one (0.3.6-dev.1 in 0.3.6-dev.16,
 /// 0.3.7 in 0.3.7-dev.3) nor as the end of one (0.3.6 in 10.3.6). A letter may touch it: the compiler packs string
 /// literals end to end (the capture worker's reads `0.3.6-dev.16o…`). So may a number that no version's could be the start of: `127.0.0.1:0` packed before 0.3.11-dev.10 in
-/// the call's, as no number of a version starts with a zero.
+/// the call's, as no number of a version starts with a zero. A `+` after it is no build metadata (Orbiters' versions
+/// have none): the driver packs a literal that starts with `+` there.
 fn says_version(bytes: &[u8], version: &str) -> bool {
     let needle = version.as_bytes();
     if needle.is_empty() {
@@ -340,7 +341,7 @@ fn says_version(bytes: &[u8], version: &str) -> bool {
     bytes.windows(needle.len()).enumerate().any(|(at, w)| {
         w == needle
             && !longer_before(&bytes[..at])
-            && !bytes.get(at + needle.len()).is_some_and(|a| matches!(a, b'0'..=b'9' | b'.' | b'-' | b'+'))
+            && !bytes.get(at + needle.len()).is_some_and(|a| matches!(a, b'0'..=b'9' | b'.' | b'-'))
     })
 }
 
@@ -385,6 +386,7 @@ mod tests {
         assert!(says_version(b"\x00\x000.3.6-dev.16\x00\n", "0.3.6-dev.16"));
         assert!(says_version(b"\x000.3.6-dev.16oneshot", "0.3.6-dev.16"), "a packed literal beside it");
         assert!(says_version(b"e0.3.6-dev.16\xc1", "0.3.6-dev.16"));
+        assert!(says_version(b"IVRDriverLog_001\x000.3.11-dev.11+d\x02", "0.3.11-dev.11"), "a literal that starts with + packed after it (the driver's, 2026-11-25)");
         assert!(!says_version(b"\x000.3.6-dev.15\x00", "0.3.6-dev.16"), "the version before");
         assert!(!says_version(b"\x000.3.6-dev.16\x00", "0.3.6-dev.1"), "a prefix of a longer one");
         assert!(!says_version(b"\x000.3.6-dev.1\x00", "0.3.6-dev.10"));

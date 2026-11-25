@@ -69,7 +69,7 @@ pub fn data(key: &str) -> Data {
     opened.unwrap_or_else(|| Arc::new(Static(BUNDLED[0].1)))
 }
 
-fn map(path: &Path) -> Option<Data> {
+pub(crate) fn map(path: &Path) -> Option<Data> {
     let file = std::fs::File::open(path).ok()?;
     // SAFETY: an installed font file is not changed while it is in use (Windows does not replace an open font file);
     // the bytes are only read.
@@ -107,7 +107,7 @@ pub fn system() -> Vec<FontInfo> {
     out
 }
 
-fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+pub(crate) fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
@@ -122,7 +122,7 @@ fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 }
 
 #[cfg(windows)]
-fn font_dirs() -> Vec<PathBuf> {
+pub(crate) fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows")).join("Fonts")];
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         dirs.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts"));
@@ -131,7 +131,7 @@ fn font_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn font_dirs() -> Vec<PathBuf> {
+pub(crate) fn font_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = ["/System/Library/Fonts", "/Library/Fonts"].iter().map(PathBuf::from).collect();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join("Library/Fonts"));
@@ -140,7 +140,7 @@ fn font_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn font_dirs() -> Vec<PathBuf> {
+pub(crate) fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join(".local/share/fonts"));

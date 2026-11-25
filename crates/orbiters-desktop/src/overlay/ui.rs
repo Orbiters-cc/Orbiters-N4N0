@@ -177,15 +177,15 @@ impl OverlayUi {
                     (Phase::Done { eye, span, .. }, _) => (tr!("Calibrated: eyes at {eye} m, hands {span} m apart.", eye = metres(*eye), span = metres(*span)), theme::OK),
                     (_, Some(c)) => (
                         tr!("Last: eyes at {eye} m, hands {span} m apart, {ago}.", eye = metres(c.head_height_m), span = metres(c.arm_span_m), ago = ago(c.utc_ms)),
-                        theme::FG_2,
+                        theme::fg_2(),
                     ),
-                    (_, None) => (tr("Not calibrated yet.").into(), theme::FG_2),
+                    (_, None) => (tr("Not calibrated yet.").into(), theme::fg_2()),
                 };
                 let galley = p.layout_job(Txt::new(line, 15.0).color(tone).line_height(21.0).job(body.width()));
                 p.galley(body.min, galley, tone);
                 let hint = tr("Not needed in VRChat: it sends your head and hands. In other games, press Calibrate and match the mirror.");
-                let galley = p.layout_job(Txt::new(hint, 13.0).color(theme::FG_3).line_height(19.0).job(body.width() - 170.0));
-                p.galley(pos2(body.left(), body.bottom() - 58.0), galley, theme::FG_3);
+                let galley = p.layout_job(Txt::new(hint, 13.0).color(theme::fg_3()).line_height(19.0).job(body.width() - 170.0));
+                p.galley(pos2(body.left(), body.bottom() - 58.0), galley, theme::fg_3());
                 let b = Button::new(tr("Calibrate")).icon(icons::PERSON).variant(Variant::Primary).enabled(snap.steamvr.running);
                 let w = b.desired_width(ui).max(150.0);
                 if b.width(w).show_at(ui, button_rect(w)).clicked() {
@@ -205,14 +205,14 @@ impl OverlayUi {
                         &p,
                         pos2(body.left() + 30.0, body.top() + 50.0),
                         Align2::CENTER_CENTER,
-                        &Txt::new(n.to_string(), 64.0).weight(weight::SEMIBOLD).color(theme::FG),
+                        &Txt::new(n.to_string(), 64.0).weight(weight::SEMIBOLD).color(theme::fg()),
                     );
                     body.left() + 80.0
                 } else {
                     body.left()
                 };
                 widgets::text(&p, pos2(x, body.top() + 38.0), Align2::LEFT_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD));
-                widgets::text(&p, pos2(x, body.top() + 66.0), Align2::LEFT_CENTER, &Txt::new(line, 14.0).color(theme::FG_2));
+                widgets::text(&p, pos2(x, body.top() + 66.0), Align2::LEFT_CENTER, &Txt::new(line, 14.0).color(theme::fg_2()));
                 let b = Button::new(tr("Cancel")).icon(icons::X).variant(Variant::Ghost);
                 let w = b.desired_width(ui).max(130.0);
                 if b.width(w).show_at(ui, button_rect(w)).clicked() {
@@ -235,7 +235,7 @@ impl OverlayUi {
         let extra = (boost.strength * WalkBoostSettings::MAX_EXTRA * 100.0).round();
         let big = if boost.enabled && boost.strength > 0.0 { format!("+{extra:.0} %") } else { tr("Off").to_string() };
         let center = pos2(left.center().x, left.top() + 150.0);
-        let tone = if boost.enabled && boost.strength > 0.0 { theme::ACCENT } else { theme::FG_3 };
+        let tone = if boost.enabled && boost.strength > 0.0 { theme::accent() } else { theme::fg_3() };
         widgets::text(&p, center, Align2::CENTER_CENTER, &Txt::new(big, 64.0).weight(weight::SEMIBOLD).color(tone));
         let (line, color) = if let Some(why) = &self.walk_unavailable {
             (tr!("SteamVR refused the controls: {why}", why = why), theme::WARN)
@@ -244,11 +244,11 @@ impl OverlayUi {
         } else if let Some(words) = boost.enabled.then(|| snap.steamvr.walk_path.and_then(crate::state::WalkPath::lesser_short)).flatten() {
             (tr(words).to_string(), theme::WARN)
         } else if !snap.vrchat.running {
-            (tr("Works in VRChat: start it to walk faster.").to_string(), theme::FG_3)
+            (tr("Works in VRChat: start it to walk faster.").to_string(), theme::fg_3())
         } else if !snap.vrchat.world.in_world {
-            (tr("Works once you are in a world.").to_string(), theme::FG_3)
+            (tr("Works once you are in a world.").to_string(), theme::fg_3())
         } else {
-            (tr("Push your stick: the room moves with you.").to_string(), theme::FG_3)
+            (tr("Push your stick: the room moves with you.").to_string(), theme::fg_3())
         };
         widgets::text_truncated(&p, pos2(left.center().x, center.y + 62.0), Align2::CENTER_CENTER, &Txt::new(line, 14.0).color(color), left.width() - 40.0);
 
@@ -276,7 +276,7 @@ impl OverlayUi {
             &p,
             pos2(left.left() + 22.0, left.bottom() - 28.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr("N4N0's Walk boost radial on your avatar sets it too."), 12.5).color(theme::FG_4),
+            &Txt::new(tr("N4N0's Walk boost radial on your avatar sets it too."), 12.5).color(theme::fg_4()),
             left.width() - 44.0,
         );
 
@@ -290,7 +290,7 @@ impl OverlayUi {
                 &p,
                 pos2(right.left() + 22.0, y + 36.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(sub, 13.0).color(theme::FG_3),
+                &Txt::new(sub, 13.0).color(theme::fg_3()),
                 right.width() - 44.0,
             );
             let area = Rect::from_min_size(pos2(right.left() + 22.0, y + 56.0), vec2(right.width() - 44.0, 40.0));
@@ -323,11 +323,11 @@ impl OverlayUi {
         y += 130.0;
         let g = p.layout_job(
             Txt::new(tr("Your play space follows you, and the chaperone stays on your room's walls. It goes back when you change world."), 13.5)
-                .color(theme::FG_3)
+                .color(theme::fg_3())
                 .line_height(19.0)
                 .job(right.width() - 44.0),
         );
-        p.galley(pos2(right.left() + 22.0, y + 8.0), g, theme::FG_3);
+        p.galley(pos2(right.left() + 22.0, y + 8.0), g, theme::fg_3());
     }
 
     fn n4n0(&mut self, ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, left: Rect, right: Rect) {
@@ -361,17 +361,17 @@ impl OverlayUi {
         let p = ui.painter().clone();
         let level = if n4n0.listening { n4n0.voice.level.clamp(0.0, 1.0) } else { 0.0 };
         if n4n0.listening || n4n0.thinking {
-            p.circle_filled(center, 100.0 + 14.0 * level, theme::alpha(theme::ACCENT, 0.10 + 0.15 * level));
+            p.circle_filled(center, 100.0 + 14.0 * level, theme::alpha(theme::accent(), 0.10 + 0.15 * level));
         }
         let fill = if !can_talk {
-            theme::INK_750
+            theme::ink_750()
         } else if held || n4n0.listening {
-            theme::ACCENT_HOVER
+            theme::accent_hover()
         } else {
-            theme::ACCENT
+            theme::accent()
         };
         p.circle_filled(center, if held { 84.0 } else { 88.0 }, fill);
-        widgets::icon(&p, center, icons::MICROPHONE, 64.0, if can_talk { theme::ON_ACCENT } else { theme::FG_3 });
+        widgets::icon(&p, center, icons::MICROPHONE, 64.0, if can_talk { theme::on_accent() } else { theme::fg_3() });
         let (title, sub) = if !settings.enabled || !settings.assistant {
             (tr("N4N0's assistant is off"), tr("Turn it on in Orbiters - N4N0 › Settings › Voice & assistant"))
         } else if !signed_in {
@@ -387,11 +387,11 @@ impl OverlayUi {
         };
         let y = disc.bottom() + 28.0;
         widgets::text_truncated(&p, pos2(left.center().x, y), Align2::CENTER_CENTER, &Txt::new(title, 20.0).weight(weight::SEMIBOLD), left.width() - 40.0);
-        widgets::text_truncated(&p, pos2(left.center().x, y + 28.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), left.width() - 40.0);
+        widgets::text_truncated(&p, pos2(left.center().x, y + 28.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::fg_3()), left.width() - 40.0);
         let quota = n4n0.quota.as_ref().filter(|q| q.limit > 0 && !q.own_key);
         if let Some(q) = quota {
             let line = tr!("{left} of {limit} free answers left today", left = q.limit.saturating_sub(q.used), limit = q.limit);
-            widgets::text(&p, pos2(left.center().x, left.bottom() - 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::FG_4));
+            widgets::text(&p, pos2(left.center().x, left.bottom() - 28.0), Align2::CENTER_CENTER, &Txt::new(line, 12.5).color(theme::fg_4()));
         }
         // VRChat sends avatar parameters only to OSC services it found: without them, a hand on N4N0 and the menu's
         // Talk button never arrive.
@@ -434,40 +434,40 @@ impl OverlayUi {
         if last.is_empty() {
             let g = p.layout_job(
                 Txt::new(tr("Nothing yet. Ask N4N0 to put your hoodie on, take a picture, or plan a movie night."), 15.0)
-                    .color(theme::FG_3)
+                    .color(theme::fg_3())
                     .line_height(21.0)
                     .job(body.width()),
             );
-            p.galley(body.min, g, theme::FG_3);
+            p.galley(body.min, g, theme::fg_3());
         }
         for line in last.into_iter().rev() {
             let (who, color) = match line.who {
-                N4n0Who::You => (tr("You"), theme::FG_3),
+                N4n0Who::You => (tr("You"), theme::fg_3()),
                 N4n0Who::Error => ("N4N0", theme::DANGER),
-                _ => ("N4N0", theme::ACCENT),
+                _ => ("N4N0", theme::accent()),
             };
             widgets::text(&p, pos2(body.left(), yy + 9.0), Align2::LEFT_CENTER, &Txt::caps(who).color(color));
             let g = p.layout_job(
-                Txt::new(&line.text, 15.0).color(if line.who == N4n0Who::You { theme::FG_2 } else { theme::FG }).line_height(21.0).job(body.width() - 56.0),
+                Txt::new(&line.text, 15.0).color(if line.who == N4n0Who::You { theme::fg_2() } else { theme::fg() }).line_height(21.0).job(body.width() - 56.0),
             );
             let h = g.size().y.min(64.0);
             if yy + h > body.bottom() {
                 break;
             }
-            p.galley(pos2(body.left() + 56.0, yy), g, theme::FG);
+            p.galley(pos2(body.left() + 56.0, yy), g, theme::fg());
             yy += h + 14.0;
         }
 
         // A question N4N0 asks cannot be answered on this tab, which does not show it whole: where it can (verify4-r21 P6).
         if n4n0.confirmations.iter().any(|c| c.is_local()) {
             let strip = Rect::from_min_max(pos2(said.left() + 14.0, said.bottom() - 70.0), pos2(said.right() - 14.0, said.bottom() - 14.0));
-            p.rect_filled(strip, theme::radius(14.0), theme::INK_750);
-            widgets::icon(&p, pos2(strip.left() + 24.0, strip.center().y), icons::SHIELD_CHECK, 18.0, theme::ACCENT);
+            p.rect_filled(strip, theme::radius(14.0), theme::ink_750());
+            widgets::icon(&p, pos2(strip.left() + 24.0, strip.center().y), icons::SHIELD_CHECK, 18.0, theme::accent());
             let open = Button::new(tr("Open its chat")).icon(icons::ARROW_SQUARE_OUT).variant(Variant::Primary).size(Size::Sm).id_salt("overlay-n4n0-question");
             let w = open.desired_width(ui);
             let at = Rect::from_min_size(pos2(strip.right() - 12.0 - w, strip.center().y - 17.0), vec2(w, 34.0));
-            let words = p.layout_job(Txt::new(tr("N4N0 asks you something: read and answer it in the chat of Orbiters' window."), 13.0).color(theme::FG_2).line_height(17.0).job(at.left() - strip.left() - 56.0));
-            p.galley(pos2(strip.left() + 44.0, strip.center().y - words.size().y / 2.0), words, theme::FG_2);
+            let words = p.layout_job(Txt::new(tr("N4N0 asks you something: read and answer it in the chat of Orbiters' window."), 13.0).color(theme::fg_2()).line_height(17.0).job(at.left() - strip.left() - 56.0));
+            p.galley(pos2(strip.left() + 44.0, strip.center().y - words.size().y / 2.0), words, theme::fg_2());
             if open.show_at(ui, at).clicked() {
                 ctl.show_page("chat");
             }
@@ -494,7 +494,7 @@ impl OverlayUi {
             Some(e) => tr!("The microphone did not start: {e}", e = e),
             None => tr("Your microphone in the headset, as others hear it").to_string(),
         };
-        widgets::text_truncated(&p, pos2(r0.left(), r0.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::FG_3), r0.width() - 80.0);
+        widgets::text_truncated(&p, pos2(r0.left(), r0.center().y + 12.0), Align2::LEFT_CENTER, &Txt::new(hint, 12.5).color(theme::fg_3()), r0.width() - 80.0);
         let mut on = self.hear.is_some() || self.hear_starting.is_some();
         let mut sw = ui
             .new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(r0.right() - 48.0, r0.center().y - 14.0), vec2(48.0, 28.0))).id_salt("overlay-hear"));
@@ -516,7 +516,7 @@ impl OverlayUi {
             &p,
             pos2(r1.left(), r1.center().y + 12.0),
             Align2::LEFT_CENTER,
-            &Txt::new(&settings.afk_message, 12.5).color(theme::FG_3),
+            &Txt::new(&settings.afk_message, 12.5).color(theme::fg_3()),
             r1.width() - 80.0,
         );
         let mut afk = settings.afk_message_enabled;
@@ -582,7 +582,7 @@ fn ago(utc_ms: u64) -> String {
 pub fn backdrop(ui: &Ui) {
     let rect = Rect::from_min_size(pos2(0.0, 0.0), SIZE);
     let p = ui.painter();
-    p.rect_filled(rect, 0.0, theme::INK_950);
+    p.rect_filled(rect, 0.0, theme::ink_950());
 }
 
 /// The header; returns where its state pill is (the Float button goes left of it).
@@ -590,7 +590,7 @@ fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) -> Rect {
     let p = ui.painter().clone();
     let recording = matches!(snap.capture.state, CaptureState::Recording | CaptureState::Paused);
     let mark = Rect::from_min_size(pos2(28.0, 26.0), n4n0_logo::size_for_width(44.0));
-    n4n0_logo::paint(&p, mark, theme::MARK);
+    n4n0_logo::paint(&p, mark, theme::mark());
     widgets::text(&p, pos2(mark.right() + 14.0, 38.0), Align2::LEFT_CENTER, &Txt::new("N4N0", 22.0).weight(weight::SEMIBOLD).tracking(0.02));
     let world = snap.vrchat.world.world_name.clone().filter(|_| snap.vrchat.world.in_world);
     let sub = match (&world, snap.vrchat.running) {
@@ -598,7 +598,7 @@ fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) -> Rect {
         (None, true) => tr("VRChat is running").into(),
         (None, false) => tr("VRChat is not running").into(),
     };
-    widgets::text_truncated(&p, pos2(mark.right() + 14.0, 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), 420.0);
+    widgets::text_truncated(&p, pos2(mark.right() + 14.0, 62.0), Align2::LEFT_CENTER, &Txt::new(sub, 13.5).color(theme::fg_3()), 420.0);
 
     // State on the right: REC with the elapsed time, paused, or ready.
     let (label, tone) = match snap.capture.state {
@@ -611,7 +611,7 @@ fn header(ui: &mut Ui, snap: &Snapshot, rect: Rect) -> Rect {
     };
     let elapsed = snap.capture.stats.as_ref().filter(|_| recording).map(|s| format::duration(s.elapsed_s));
     let lt = Txt::new(label, 13.0).weight(weight::SEMIBOLD).color(tone.color());
-    let et = elapsed.as_ref().map(|e| Txt::new(e, 13.0).weight(weight::MEDIUM).color(theme::FG));
+    let et = elapsed.as_ref().map(|e| Txt::new(e, 13.0).weight(weight::MEDIUM).color(theme::fg()));
     let w = 14.0 + 10.0 + 10.0 + widgets::text_size(ui, &lt).x + et.as_ref().map(|t| 10.0 + widgets::text_size(ui, t).x).unwrap_or(0.0) + 16.0;
     let r = Rect::from_min_size(pos2(rect.right() - 24.0 - w, 30.0), vec2(w, 32.0));
     p.rect_filled(r, theme::radius(16.0), theme::alpha(tone.color(), 0.14));
@@ -664,7 +664,7 @@ fn recorder(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         (_, CaptureState::Idle) => tr("Open VRChat's camera: Record is beside it.").into(),
         _ => tr("Saved as a session for Mixer").into(),
     };
-    widgets::text_truncated(&p, pos2(card.center().x, y + 34.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::FG_3), card.width() - 40.0);
+    widgets::text_truncated(&p, pos2(card.center().x, y + 34.0), Align2::CENTER_CENTER, &Txt::new(sub, 13.5).color(theme::fg_3()), card.width() - 40.0);
     if matches!(c.state, CaptureState::Recording | CaptureState::Paused) {
         let paused = c.state == CaptureState::Paused;
         let b = Button::new(if paused { tr("Resume") } else { tr("Pause") }).icon(if paused { icons::PLAY } else { icons::PAUSE }).size(Size::Md);
@@ -713,13 +713,13 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
         }
         let tile = Rect::from_center_size(pos2(r.left() + 30.0, r.center().y), vec2(40.0, 40.0));
         p.rect_filled(tile, theme::radius(12.0), theme::alpha(row.tone.color(), 0.12));
-        widgets::icon(&p, tile.center(), row.glyph, 19.0, if row.tone == Tone::Off { theme::FG_3 } else { row.tone.color() });
+        widgets::icon(&p, tile.center(), row.glyph, 19.0, if row.tone == Tone::Off { theme::fg_3() } else { row.tone.color() });
         widgets::text(&p, pos2(tile.right() + 14.0, r.center().y - 10.0), Align2::LEFT_CENTER, &Txt::new(row.name, 15.5).weight(weight::SEMIBOLD));
         widgets::text_truncated(
             &p,
             pos2(tile.right() + 14.0, r.center().y + 12.0),
             Align2::LEFT_CENTER,
-            &Txt::new(&row.status, 13.0).color(theme::FG_3),
+            &Txt::new(&row.status, 13.0).color(theme::fg_3()),
             r.width() - 190.0,
         );
         if let Some(level) = row.level {
@@ -752,7 +752,7 @@ fn streams(ui: &mut Ui, snap: &Snapshot, ctl: &Ctl, card: Rect) {
             p,
             pos2(card.right() - 22.0, card.top() + 28.0),
             Align2::RIGHT_CENTER,
-            &Txt::new(tr("Switches apply to the next recording"), 12.0).color(theme::FG_4),
+            &Txt::new(tr("Switches apply to the next recording"), 12.0).color(theme::fg_4()),
         );
     }
 }

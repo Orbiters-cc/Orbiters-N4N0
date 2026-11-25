@@ -35,6 +35,8 @@ pub struct Settings {
     pub consent_acknowledged: bool,
     /// Reduce motion in the interface.
     pub reduce_motion: bool,
+    /// How the app looks: colours, font, background.
+    pub appearance: crate::appearance::AppearanceSettings,
     /// The window minimised for long while VRChat runs closes to the tray to give its memory back, after a countdown
     /// with Keep open (Enzo's decision of 2026-11-19): on unless turned off in Settings.
     pub close_minimized_window: bool,
@@ -363,6 +365,8 @@ pub struct OrbitSettings {
     pub theme: MenuLook,
     /// The modern look's accent.
     pub accent: [u8; 3],
+    /// That accent was picked for these menus: they keep it. Otherwise they follow the app's (Settings, Appearance).
+    pub accent_own: bool,
     /// The retro look's one colour.
     pub retro_color: [u8; 3],
     /// The retro look leaves pictures in their colours.
@@ -387,6 +391,14 @@ impl OrbitSettings {
         self.around_wheel() || self.around_quick_menu()
     }
 
+    /// The accent as first set: not one anybody picked.
+    pub const FIRST_ACCENT: [u8; 3] = [0x00, 0xda, 0x6d];
+
+    /// These menus have an accent of their own (one picked before they could follow the app's counts).
+    pub fn has_own_accent(&self) -> bool {
+        self.accent_own || self.accent != Self::FIRST_ACCENT
+    }
+
     /// The smoothings measured in the headset to match VRChat's own menus (Quick Menu, wheel, in milliseconds): the
     /// defaults, which Reset puts back (REQUEST21). One source: [`OrbitSettings::default`].
     pub fn measured_smoothing() -> (f32, f32) {
@@ -409,7 +421,7 @@ impl OrbitSettings {
 
 impl Default for OrbitSettings {
     fn default() -> Self {
-        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
+        Self { camera_tiles: true, camera_pattern: false, immersive_turn: true, layout: OrbitLayout::Wing, theme: MenuLook::Modern, accent: [0x00, 0xda, 0x6d], accent_own: false, retro_color: [0x2b, 0xe3, 0x6a], retro_pictures: false, display: MenuDisplay::AvatarScreen, wheel: true, quick_menu: true, vr_size: 1.0, vr_motion: VrMotion::Springy, vr_smoothing_quick_menu_ms: 35.0, vr_smoothing_wheel_ms: 20.0 }
     }
 }
 
@@ -900,6 +912,7 @@ impl Default for Settings {
             split_on_world_change: true,
             consent_acknowledged: false,
             reduce_motion: false,
+            appearance: Default::default(),
             close_minimized_window: true,
             steamvr_overlay: true,
             n4n0: N4n0Settings::default(),

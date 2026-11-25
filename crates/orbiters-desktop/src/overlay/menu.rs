@@ -244,7 +244,7 @@ impl MenuOverlay {
         let menu = &self.host.menu;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         layout::fingerprint(menu, layout::Glyphs::Fonts).hash(&mut h);
-        (self.hover, self.pressed, self.behind, self.retro, orbiters_i18n::language() as u8).hash(&mut h);
+        (self.hover, self.pressed, self.behind, self.retro, orbiters_i18n::language() as u8, crate::appearance::drawn_in()).hash(&mut h);
         for pic in &layout::cached(ScreenPage::of(menu)).pictures {
             layout::picture_key(menu, pic).is_some_and(|key| self.host.picture(&key, self.retro).is_some()).hash(&mut h);
         }

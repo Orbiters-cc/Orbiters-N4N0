@@ -124,7 +124,7 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
         if levels.mics.is_empty() {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TILE_HIGH), Sense::hover());
             let said = if levels.read { tr("No microphone is plugged in or turned on.") } else { tr("Looking for microphones…") };
-            ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, said, theme::font(13.5, weight::MEDIUM), theme::FG_3);
+            ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, said, theme::font(13.5, weight::MEDIUM), theme::fg_3());
             return;
         }
         // What Windows says, once it says what was asked.
@@ -159,24 +159,24 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
             let hearing = bar > 0.45;
             let p = ui.painter();
             let back = if response.is_pointer_button_down_on() {
-                theme::INK_700
+                theme::ink_700()
             } else if response.hovered() {
-                theme::INK_750
+                theme::ink_750()
             } else {
-                theme::INK_800
+                theme::ink_800()
             };
             let radius = theme::radius(12.0);
             p.rect_filled(rect, radius, back);
             if is_default {
-                p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+                p.rect_stroke(rect.shrink(0.75), radius, Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
             }
             // The name gives way to "Default", as long as that is in the language.
-            let default_wide = if is_default { ui.painter().layout_no_wrap(tr_ctx("microphone", "Default").to_string(), theme::font(12.0, weight::SEMIBOLD), theme::ACCENT).size().x + 12.0 } else { 0.0 };
+            let default_wide = if is_default { ui.painter().layout_no_wrap(tr_ctx("microphone", "Default").to_string(), theme::font(12.0, weight::SEMIBOLD), theme::accent()).size().x + 12.0 } else { 0.0 };
             let room = rect.width() - 28.0 - default_wide.max(if is_default { 62.0 } else { 0.0 });
-            let name = p.layout_job(Txt::new(mic.endpoint.name.clone(), 13.5).weight(weight::MEDIUM).color(theme::FG).job_truncated(room));
-            p.galley(pos2(rect.left() + 14.0, rect.top() + 12.0), name, theme::FG);
+            let name = p.layout_job(Txt::new(mic.endpoint.name.clone(), 13.5).weight(weight::MEDIUM).color(theme::fg()).job_truncated(room));
+            p.galley(pos2(rect.left() + 14.0, rect.top() + 12.0), name, theme::fg());
             if is_default {
-                p.text(pos2(rect.right() - 14.0, rect.top() + 21.0), Align2::RIGHT_CENTER, tr_ctx("microphone", "Default"), theme::font(12.0, weight::SEMIBOLD), theme::ACCENT);
+                p.text(pos2(rect.right() - 14.0, rect.top() + 21.0), Align2::RIGHT_CENTER, tr_ctx("microphone", "Default"), theme::font(12.0, weight::SEMIBOLD), theme::accent());
             }
             let track = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 21.0), pos2(rect.right() - 14.0, rect.bottom() - 13.0));
             match mic.peak {
@@ -184,12 +184,12 @@ pub fn card(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State) {
                     p.rect_filled(track, theme::radius(4.0), theme::white(0.08));
                     if bar > 0.0 {
                         let lit = Rect::from_min_size(track.min, vec2((track.width() * bar).max(track.height()), track.height()));
-                        p.rect_filled(lit, theme::radius(4.0), if hearing { theme::ACCENT } else { theme::alpha(theme::ACCENT, 0.55) });
+                        p.rect_filled(lit, theme::radius(4.0), if hearing { theme::accent() } else { theme::alpha(theme::accent(), 0.55) });
                     }
                 }
                 // Held by another app for itself, say: it can still be chosen.
                 None => {
-                    p.text(track.left_center(), Align2::LEFT_CENTER, tr("Its level cannot be read now"), theme::font(12.0, weight::MEDIUM), theme::FG_3);
+                    p.text(track.left_center(), Align2::LEFT_CENTER, tr("Its level cannot be read now"), theme::font(12.0, weight::MEDIUM), theme::fg_3());
                 }
             }
             if widgets::activated(&response) && !is_default && state.setting.is_none() {

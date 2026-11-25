@@ -190,7 +190,7 @@ pub fn paint(ctx: &Context) {
         let tip = c + dir * 11.0;
         let side = vec2(-dir.y, dir.x) * 3.6;
         let base = c + dir * 6.5;
-        let color = if on { theme::ACCENT } else { theme::white(0.8) };
+        let color = if on { theme::accent() } else { theme::white(0.8) };
         p.add(Shape::convex_polygon(vec![tip, base + side, base - side], color, Stroke::NONE));
     }
     ctx.set_cursor_icon(cursor(going));

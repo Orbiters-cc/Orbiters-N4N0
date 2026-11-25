@@ -270,18 +270,18 @@ impl State {
             r.width() - 56.0,
         );
         let y = r.top() + 36.0;
-        let t = Txt::new(format!("{} · {}", tr(assets::kind_label(&a.asset.kind)), how(a)), 11.0).weight(weight::SEMIBOLD).color(theme::FG_2);
+        let t = Txt::new(format!("{} · {}", tr(assets::kind_label(&a.asset.kind)), how(a)), 11.0).weight(weight::SEMIBOLD).color(theme::fg_2());
         let tw = widgets::text_size(ui, &t).x;
         let pill = Rect::from_min_size(pos2(r.left(), y - 10.0), vec2(tw + 30.0, 20.0));
         p.rect_filled(pill, theme::radius(10.0), theme::white(0.06));
-        widgets::icon(&p, pos2(pill.left() + 11.0, pill.center().y), icons::TAG, 11.0, theme::ACCENT);
+        widgets::icon(&p, pos2(pill.left() + 11.0, pill.center().y), icons::TAG, 11.0, theme::accent());
         widgets::text(&p, pos2(pill.left() + 21.0, pill.center().y), Align2::LEFT_CENTER, &t);
         let when = super::super::local_time(a.date());
         let items = tr_n("{count} showcase picture", "{count} showcase pictures", count as u64);
         let b = IconButton::new(icons::ARROW_SQUARE_OUT, mark("Open on Orbiters")).size(32.0, 15.0).backdrop(theme::control()).id_salt(("asset-site", a.asset.id));
         let br = Rect::from_min_size(pos2(r.right() - 32.0, r.top() + 6.0), vec2(32.0, 32.0));
         let line = if when.is_empty() { items } else { tr!("{items} · latest {when}", items = items, when = when) };
-        widgets::text_truncated(&p, pos2(pill.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::FG_3), br.left() - pill.right() - 26.0);
+        widgets::text_truncated(&p, pos2(pill.right() + 10.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.0).color(theme::fg_3()), br.left() - pill.right() - 26.0);
         if sharing::pressed(b.show_at(ui, br)) {
             let link = format!("{}{}#gallery", server.website(), a.page());
             let result = crate::controller::open_url(&link);

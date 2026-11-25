@@ -287,7 +287,7 @@ impl State {
             widgets::segmented(&mut bu, "request-box", &mut self.outgoing_box, &[SegOption::new(false, &incoming_label), SegOption::new(true, tr_ctx("request", "Sent"))], true);
             let rr = Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), vec2(36.0, 36.0));
             if self.list.running() {
-                feedback::spinner(ui.painter(), rr.center(), 8.0, 2.0, theme::FG_2);
+                feedback::spinner(ui.painter(), rr.center(), 8.0, 2.0, theme::fg_2());
             } else if sharing::pressed(IconButton::new(icons::ARROW_CLOCKWISE, mark("Look for new requests")).id_salt("requests-refresh").show_at(ui, rr)) && !busy {
                 self.refresh(&ctx, server);
             }
@@ -356,9 +356,9 @@ impl State {
             .collect();
         let (pill_at, pills_h) = widgets::flow(&pill_w, inner, 28.0, 6.0);
         let message = (!request.message.trim().is_empty())
-            .then(|| ui.painter().layout_job(Txt::new(request.message.trim(), 13.0).color(theme::FG).line_height(19.0).job(inner - 40.0)));
+            .then(|| ui.painter().layout_job(Txt::new(request.message.trim(), 13.0).color(theme::fg()).line_height(19.0).job(inner - 40.0)));
         let warning = self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| tr(m).to_string());
-        let warning_g = warning.as_ref().map(|m| ui.painter().layout_job(Txt::new(m, 12.5).color(theme::FG_2).line_height(18.0).job(inner - 32.0)));
+        let warning_g = warning.as_ref().map(|m| ui.painter().layout_job(Txt::new(m, 12.5).color(theme::fg_2()).line_height(18.0).job(inner - 32.0)));
         let row_error = self.row_error.as_ref().filter(|(id, _)| *id == request.id).map(|(_, m)| tr(m).to_string());
         let mut h = 16.0 + 40.0 + 12.0 + pills_h;
         if let Some(g) = &message {
@@ -393,7 +393,7 @@ impl State {
         widgets::avatar(&p, ar, tex.as_ref(), &person.name);
         let x = ar.right() + 12.0;
         let when = crate::pages::ago(ui.ctx(), controller::unix(&request.created_at), now_secs());
-        let when_t = Txt::new(&when, 11.5).color(theme::FG_4);
+        let when_t = Txt::new(&when, 11.5).color(theme::fg_4());
         let when_w = widgets::text_size(ui, &when_t).x;
         widgets::text(&p, pos2(r.right() - 16.0, ar.top() + 9.0), Align2::RIGHT_CENTER, &when_t);
         widgets::text_truncated(
@@ -412,7 +412,7 @@ impl State {
             (Some(w), true, false) => tr!("You asked to share their 3D capture of {world}", world = w),
             (None, _, _) => tr("The item is no longer available").to_string(),
         };
-        widgets::text_truncated(&p, pos2(x, ar.top() + 29.0), Align2::LEFT_CENTER, &Txt::new(what, 12.5).color(theme::FG_3), r.right() - 16.0 - x);
+        widgets::text_truncated(&p, pos2(x, ar.top() + 29.0), Align2::LEFT_CENTER, &Txt::new(what, 12.5).color(theme::fg_3()), r.right() - 16.0 - x);
 
         // For whom.
         let mut y = r.top() + 16.0 + 40.0 + 12.0;
@@ -420,14 +420,14 @@ impl State {
             let pr = Rect::from_min_size(pos2(x, y) + *o, vec2(*pw, 28.0));
             p.rect_filled(pr, theme::radius(14.0), theme::control());
             match glyph {
-                Some(g) => widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), g, 13.0, theme::ACCENT),
+                Some(g) => widgets::icon(&p, pos2(pr.left() + 15.0, pr.center().y), g, 13.0, theme::accent()),
                 None => widgets::avatar(&p, Rect::from_center_size(pos2(pr.left() + 15.0, pr.center().y), vec2(20.0, 20.0)), None, name),
             }
             widgets::text(
                 &p,
                 pos2(pr.left() + if glyph.is_some() { 28.0 } else { 31.0 }, pr.center().y),
                 Align2::LEFT_CENTER,
-                &Txt::new(name, 12.0).weight(weight::MEDIUM).color(theme::FG_2),
+                &Txt::new(name, 12.0).weight(weight::MEDIUM).color(theme::fg_2()),
             );
         }
         y += pills_h;
@@ -437,9 +437,9 @@ impl State {
             y += 12.0;
             let mr = Rect::from_min_size(pos2(x, y), vec2(inner, g.size().y + 20.0));
             p.rect_filled(mr, theme::radius(14.0), theme::white(0.04));
-            widgets::icon(&p, pos2(mr.left() + 18.0, mr.top() + 19.0), icons::QUOTES, 14.0, theme::FG_4);
+            widgets::icon(&p, pos2(mr.left() + 18.0, mr.top() + 19.0), icons::QUOTES, 14.0, theme::fg_4());
             let gh = g.size().y;
-            p.galley(pos2(mr.left() + 34.0, mr.top() + 10.0), g, theme::FG);
+            p.galley(pos2(mr.left() + 34.0, mr.top() + 10.0), g, theme::fg());
             y += gh + 20.0;
         }
 
@@ -451,7 +451,7 @@ impl State {
             widgets::icon(&p, pos2(wr.left() + 24.0, wr.top() + 27.0), icons::SHIELD_WARNING, 16.0, theme::WARN);
             widgets::text(&p, pos2(wr.left() + 42.0, wr.top() + 27.0), Align2::LEFT_CENTER, &Txt::new(tr("Flagged as explicit"), 13.5).weight(weight::SEMIBOLD));
             let gh = g.size().y;
-            p.galley(pos2(wr.left() + 16.0, wr.top() + 16.0 + 22.0), g, theme::FG_2);
+            p.galley(pos2(wr.left() + 16.0, wr.top() + 16.0 + 22.0), g, theme::fg_2());
             let by = wr.top() + 16.0 + 22.0 + gh + 12.0;
             let anyway = Button::new(tr("Approve anyway"))
                 .icon(icons::CHECK)
@@ -482,8 +482,8 @@ impl State {
         let answering = self.active.as_ref().is_some_and(|(_, a)| a.id == request.id);
         let mut left = row.left();
         if answering {
-            feedback::spinner(&p, pos2(left + 9.0, row.center().y), 7.0, 2.0, theme::ACCENT);
-            widgets::text(&p, pos2(left + 24.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Answering…"), 12.5).color(theme::FG_2));
+            feedback::spinner(&p, pos2(left + 9.0, row.center().y), 7.0, 2.0, theme::accent());
+            widgets::text(&p, pos2(left + 24.0, row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Answering…"), 12.5).color(theme::fg_2()));
         } else if request.status == RequestStatus::Pending && !outgoing && warning.is_none() {
             let busy = self.active.is_some();
             let retry = row_error.is_some() && self.last.as_ref().is_some_and(|(r, _, _)| r.id == request.id);
@@ -507,7 +507,7 @@ impl State {
                 RequestStatus::Pending => (icons::CLOCK, tr!("Waiting for {name}", name = person.name), theme::WARN),
                 RequestStatus::Approved => (icons::CHECK_CIRCLE, tr_ctx("request", "Approved").to_string(), theme::OK),
                 RequestStatus::Denied => (icons::X_CIRCLE, tr_ctx("request", "Denied").to_string(), theme::DANGER),
-                RequestStatus::Cancelled => (icons::PROHIBIT, tr_ctx("request", "Cancelled").to_string(), theme::FG_3),
+                RequestStatus::Cancelled => (icons::PROHIBIT, tr_ctx("request", "Cancelled").to_string(), theme::fg_3()),
             };
             // When it was answered, the status and the time as one sentence.
             let label = match (&request.answered_at, request.status) {
@@ -558,7 +558,7 @@ fn empty(ui: &mut Ui, outgoing: bool) {
     let p = ui.painter();
     let tile = Rect::from_center_size(pos2(r.center().x, r.top() + 46.0), vec2(52.0, 52.0));
     p.rect_filled(tile, theme::radius(16.0), theme::white(0.05));
-    widgets::icon(p, tile.center(), icons::TRAY, 24.0, theme::FG_3);
+    widgets::icon(p, tile.center(), icons::TRAY, 24.0, theme::fg_3());
     let (title, text) = if outgoing {
         (tr("Nothing asked yet"), tr("Ask to share something a friend shared with you: their answer shows up here."))
     } else {
@@ -566,11 +566,11 @@ fn empty(ui: &mut Ui, outgoing: bool) {
     };
     widgets::text(p, pos2(r.center().x, tile.bottom() + 24.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
     let g = p.layout_job({
-        let mut job = Txt::new(text, 12.5).color(theme::FG_3).line_height(19.0).job(380.0);
+        let mut job = Txt::new(text, 12.5).color(theme::fg_3()).line_height(19.0).job(380.0);
         job.halign = egui::Align::Center;
         job
     });
-    p.galley(pos2(r.center().x, tile.bottom() + 42.0), g, theme::FG_3);
+    p.galley(pos2(r.center().x, tile.bottom() + 42.0), g, theme::fg_3());
 }
 
 #[cfg(test)]

@@ -61,13 +61,13 @@ pub(super) fn draw_mics(p: &Painter, facts: &Facts) {
     let name = look::font(19.0, weight::BOLD);
     for (row, text) in [tr("Your voice in recordings"), tr("Which microphone"), tr("N4N0 listens to")].into_iter().enumerate() {
         let room = NAME_W - 14.0;
-        p.text(pos2(X, ROWS_TOP + row as f32 * ROW_STEP + ROW_H / 2.0), Align2::LEFT_CENTER, fit(p, text, &name, room), name.clone(), look::LABEL);
+        p.text(pos2(X, ROWS_TOP + row as f32 * ROW_STEP + ROW_H / 2.0), Align2::LEFT_CENTER, fit(p, text, &name, room), name.clone(), look::label());
     }
     let font = look::font(14.5, weight::MEDIUM);
-    p.text(pos2(X, GRID_TOP - 13.0), Align2::LEFT_CENTER, fit(p, tr("Speak: the one that moves is the one hearing you. Press one to make it Windows' default."), &font, 1024.0 - X * 2.0), font, look::MUTED);
+    p.text(pos2(X, GRID_TOP - 13.0), Align2::LEFT_CENTER, fit(p, tr("Speak: the one that moves is the one hearing you. Press one to make it Windows' default."), &font, 1024.0 - X * 2.0), font, look::muted());
     if facts.mics.is_empty() {
         let font = look::font(16.0, weight::MEDIUM);
-        p.text(pos2(X, GRID_TOP + 24.0), Align2::LEFT_CENTER, tr("Looking for microphones…"), font, look::MUTED);
+        p.text(pos2(X, GRID_TOP + 24.0), Align2::LEFT_CENTER, tr("Looking for microphones…"), font, look::muted());
     }
 }
 
@@ -82,7 +82,7 @@ pub(super) fn draw_tile(p: &Painter, rect: Rect, mic: Option<&MicTile>, hovered:
     let word = tr_ctx("microphone", "Default");
     let small = look::font(13.0, weight::SEMIBOLD);
     let word_wide = if mic.default { p.layout_no_wrap(word.to_string(), small.clone(), look::accent()).size().x + 12.0 } else { 0.0 };
-    p.text(pos2(rect.left() + 16.0, rect.top() + 26.0), Align2::LEFT_CENTER, fit(p, &mic.name, &font, rect.width() - 32.0 - word_wide), font, look::LABEL);
+    p.text(pos2(rect.left() + 16.0, rect.top() + 26.0), Align2::LEFT_CENTER, fit(p, &mic.name, &font, rect.width() - 32.0 - word_wide), font, look::label());
     if mic.default {
         p.text(pos2(rect.right() - 16.0, rect.top() + 26.0), Align2::RIGHT_CENTER, word, small, look::accent());
     }
@@ -95,7 +95,7 @@ pub(super) fn draw_tile(p: &Painter, rect: Rect, mic: Option<&MicTile>, hovered:
         }
     } else {
         let font = look::font(13.0, weight::MEDIUM);
-        p.text(track.left_center(), Align2::LEFT_CENTER, tr("Its level cannot be read now"), font, look::MUTED);
+        p.text(track.left_center(), Align2::LEFT_CENTER, tr("Its level cannot be read now"), font, look::muted());
     }
 }
 

@@ -283,14 +283,14 @@ impl Calibrator {
 /// The mirror panel, `MIRROR_PX` points.
 pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
     let rect = Rect::from_min_size(Pos2::ZERO, vec2(MIRROR_PX[0] as f32, MIRROR_PX[1] as f32));
-    widgets::frame(p, rect.shrink(2.0), 28.0, theme::alpha(theme::INK_900, 0.94));
+    widgets::frame(p, rect.shrink(2.0), 28.0, theme::alpha(theme::ink_900(), 0.94));
     orbiters_ui::paint::stroke_squircle(p, rect.shrink(2.0), theme::squircle(28.0), Stroke::new(2.0, theme::white(0.10)));
     let Some(frame) = cal.frame else { return };
 
     // Heading.
     let (title, line, tone): (String, String, Color32) = match &cal.phase {
-        Phase::Waiting { .. } => (tr("Close the dashboard").into(), tr("Then face this mirror and stand straight.").into(), theme::FG),
-        Phase::Countdown { until } => (format!("{}", (until - now).ceil().max(1.0) as u32), tr("Put your hands on the two targets.").into(), theme::FG),
+        Phase::Waiting { .. } => (tr("Close the dashboard").into(), tr("Then face this mirror and stand straight.").into(), theme::fg()),
+        Phase::Countdown { until } => (format!("{}", (until - now).ceil().max(1.0) as u32), tr("Put your hands on the two targets.").into(), theme::fg()),
         Phase::Holding { check, held, .. } if check.all() => {
             let k = held.map_or(0.0, |h| ((now - h) / HOLD_S).clamp(0.0, 1.0));
             (if k >= 1.0 { tr("Got it").into() } else { tr("Hold it…").into() }, tr("Stay still for a moment.").into(), theme::OK)
@@ -298,10 +298,10 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
         Phase::Holding { check, .. } => (tr("T-pose").into(), tr(first_fix(check)).into(), theme::WARN),
         Phase::Done { eye, span, .. } => (tr("Calibrated").into(), tr!("Eyes at {eye} m, hands {span} m apart.", eye = metres(*eye), span = metres(*span)), theme::OK),
         Phase::Failed { reason, .. } => (tr("Not calibrated").into(), tr(reason).into(), theme::DANGER),
-        Phase::Idle => (String::new(), String::new(), theme::FG),
+        Phase::Idle => (String::new(), String::new(), theme::fg()),
     };
     widgets::text(p, pos2(rect.center().x, 62.0), Align2::CENTER_CENTER, &Txt::new(title, 44.0).weight(weight::SEMIBOLD).color(tone));
-    widgets::text(p, pos2(rect.center().x, 108.0), Align2::CENTER_CENTER, &Txt::new(line, 19.0).color(theme::FG_2));
+    widgets::text(p, pos2(rect.center().x, 108.0), Align2::CENTER_CENTER, &Txt::new(line, 19.0).color(theme::fg_2()));
     if let Phase::Holding { check, held: Some(h), .. } = &cal.phase {
         if check.all() {
             let k = ((now - h) / HOLD_S).clamp(0.0, 1.0) as f32;
@@ -334,7 +334,7 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
     let pulse = 0.5 + 0.5 * ((now * 4.0).sin() as f32);
     for (i, x) in [-span / 2.0, span / 2.0].into_iter().enumerate() {
         let on = cal.hand_on_target(i);
-        let c = if on { theme::OK } else { theme::FG };
+        let c = if on { theme::OK } else { theme::fg() };
         let r = ON_TARGET_M * s * if on { 1.0 } else { 0.9 + 0.1 * pulse };
         p.circle_filled(to(x, sh), r, theme::alpha(c, if on { 0.22 } else { 0.10 + 0.08 * pulse }));
         p.circle_stroke(to(x, sh), r, Stroke::new(3.0, theme::alpha(c, 0.9)));
@@ -343,7 +343,7 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
     for l in &cal.live {
         let [x, y] = frame.mirror_xy(l.position);
         let c = match (l.kind, l.ok) {
-            (Kind::Tracker, _) => theme::FG_2,
+            (Kind::Tracker, _) => theme::fg_2(),
             (_, true) => theme::OK,
             (_, false) => theme::WARN,
         };
@@ -359,7 +359,7 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
                     p.line_segment([at, to(tx, ty)], Stroke::new(2.0, theme::alpha(theme::WARN, 0.6)));
                 }
                 p.circle_filled(at, 0.05 * s, c);
-                widgets::text(p, at, Align2::CENTER_CENTER, &Txt::new(if i == 0 { "L" } else { "R" }, 0.05 * s).weight(weight::SEMIBOLD).color(theme::INK_950));
+                widgets::text(p, at, Align2::CENTER_CENTER, &Txt::new(if i == 0 { "L" } else { "R" }, 0.05 * s).weight(weight::SEMIBOLD).color(theme::ink_950()));
             }
             Kind::Tracker => {
                 p.rect_filled(Rect::from_center_size(at, vec2(0.06 * s, 0.06 * s)), theme::radius(0.015 * s), c);
@@ -387,10 +387,10 @@ pub fn paint_mirror(p: &Painter, cal: &Calibrator, now: f64) {
         let color = match ok {
             Some(true) => theme::OK,
             Some(false) => theme::WARN,
-            None => theme::FG_4,
+            None => theme::fg_4(),
         };
         widgets::icon(p, c, if *ok == Some(true) { icons::CHECK_CIRCLE } else { icons::CIRCLE }, 24.0, color);
-        widgets::text(p, pos2(c.x, c.y + 30.0), Align2::CENTER_CENTER, &Txt::new(tr(label), 15.0).color(if *ok == Some(true) { theme::FG } else { theme::FG_3 }));
+        widgets::text(p, pos2(c.x, c.y + 30.0), Align2::CENTER_CENTER, &Txt::new(tr(label), 15.0).color(if *ok == Some(true) { theme::fg() } else { theme::fg_3() }));
     }
 }
 
@@ -413,11 +413,11 @@ fn first_fix(c: &TPoseCheck) -> &'static str {
 pub fn paint_target(p: &Painter, label: &str, on: bool, now: f64) {
     let c = pos2(TARGET_PX as f32 / 2.0, TARGET_PX as f32 / 2.0);
     let pulse = 0.5 + 0.5 * ((now * 4.0).sin() as f32);
-    let color = if on { theme::OK } else { theme::FG };
+    let color = if on { theme::OK } else { theme::fg() };
     let r = if on { 70.0 } else { 62.0 + 8.0 * pulse };
     p.circle_filled(c, r, theme::alpha(color, if on { 0.30 } else { 0.12 + 0.10 * pulse }));
     p.circle_stroke(c, r - 3.0, Stroke::new(6.0, color));
-    widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(label, 44.0).weight(weight::SEMIBOLD).color(theme::FG));
+    widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new(label, 44.0).weight(weight::SEMIBOLD).color(theme::fg()));
 }
 
 #[cfg(test)]

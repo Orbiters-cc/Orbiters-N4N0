@@ -132,7 +132,7 @@ fn selectable(ui: &mut Ui, id: Id, rect: Rect, radius: f32, selected: bool) -> (
     let press = anim::toggle(ui.ctx(), id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.025 * press));
     let sel = art::selection(ui.painter(), id.with("ring"), r, radius, selected);
-    widgets::frame(ui.painter(), r, radius, theme::mix(theme::surface_soft(), theme::INK_750, hover.max(sel * 0.7)));
+    widgets::frame(ui.painter(), r, radius, theme::mix(theme::surface_soft(), theme::ink_750(), hover.max(sel * 0.7)));
     (resp, hover, sel)
 }
 
@@ -172,10 +172,10 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             p,
             pos2(x, row.center().y - 8.0),
             Align2::LEFT_CENTER,
-            &Txt::new(&r.name, 13.5).weight(weight::MEDIUM).color(if r.enabled { theme::FG } else { theme::FG_3 }),
+            &Txt::new(&r.name, 13.5).weight(weight::MEDIUM).color(if r.enabled { theme::fg() } else { theme::fg_3() }),
             tw,
         );
-        widgets::text_truncated(p, pos2(x, row.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(&r.url, 11.0).color(theme::FG_3), tw);
+        widgets::text_truncated(p, pos2(x, row.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(&r.url, 11.0).color(theme::fg_3()), tw);
         let sw = Rect::from_min_size(pos2(row.right() - 12.0 - 48.0, row.center().y - 14.0), vec2(48.0, 28.0));
         let mut enabled = r.enabled;
         if switch(ui, ("repo-enabled", &r.id), sw, &mut enabled, !busy) {
@@ -190,7 +190,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         }
         let slot = Rect::from_min_size(pos2(sw.left() - 12.0 - 90.0, row.center().y - 16.0), vec2(90.0, 32.0));
         if r.builtin {
-            let t = Txt::new(tr("Built in"), 11.0).color(theme::FG_3);
+            let t = Txt::new(tr("Built in"), 11.0).color(theme::fg_3());
             let tw = widgets::text_size(ui, &t).x + 18.0;
             let pr = Rect::from_min_size(pos2(slot.right() - tw, row.center().y - 10.0), vec2(tw, 20.0));
             ui.painter().rect_filled(pr, theme::radius(10.0), theme::white(0.05));
@@ -227,7 +227,7 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         ctx.data_mut(|d| d.insert_temp(open_id, open));
     }
     let k = anim::toggle(&ctx, open_id.with("k"), open, Spring::SOFT);
-    let fg = if hresp.hovered() { theme::FG } else { theme::FG_2 };
+    let fg = if hresp.hovered() { theme::fg() } else { theme::fg_2() };
     let c = pos2(hr.left() + 7.0, hr.center().y);
     let s = 3.5;
     let turn = k.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
@@ -246,13 +246,13 @@ fn repos(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         hu.set_clip_rect(area.intersect(ui.clip_rect()));
         hu.multiply_opacity(k.clamp(0.0, 1.0));
         let well = Rect::from_min_size(area.min, vec2(w, 88.0));
-        hu.painter().rect_filled(well, theme::radius(12.0), theme::INK_750);
+        hu.painter().rect_filled(well, theme::radius(12.0), theme::ink_750());
         let edit = egui::TextEdit::multiline(&mut state.repo_headers)
             .id(Id::unique("repo-headers-text"))
             .frame(egui::Frame::NONE)
-            .hint_text(egui::RichText::new(tr("One per line, e.g. Authorization: Bearer …")).color(theme::FG_4))
+            .hint_text(egui::RichText::new(tr("One per line, e.g. Authorization: Bearer …")).color(theme::fg_4()))
             .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-            .text_color(theme::FG)
+            .text_color(theme::fg())
             .desired_width(w - 24.0)
             .desired_rows(4);
         hu.put(well.shrink2(vec2(12.0, 10.0)), edit);
@@ -292,8 +292,8 @@ pub(super) fn add_repo(state: &mut State, ctx: &egui::Context, url: String, head
 /// A spinner and what runs, inside a dialog.
 fn progress_line(ui: &mut Ui, label: &str) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
-    feedback::spinner(ui.painter(), pos2(r.left() + 9.0, r.center().y), 7.0, 2.0, theme::ACCENT);
-    widgets::text(ui.painter(), pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::FG_2));
+    feedback::spinner(ui.painter(), pos2(r.left() + 9.0, r.center().y), 7.0, 2.0, theme::accent());
+    widgets::text(ui.painter(), pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(label, 12.5).color(theme::fg_2()));
 }
 
 // New project.
@@ -326,7 +326,7 @@ fn new_project(ui: &mut Ui, state: &mut State) {
             widgets::text_truncated(pt, pos2(x, r.center().y - 9.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 13.5).weight(weight::MEDIUM), w - 90.0);
             let what = if p.avatars.is_empty() { p.kind.label().to_string() } else { tr_n("{count} avatar", "{count} avatars", p.avatars.len() as u64) };
             let meta = tr!("Unity {version} · {what}", version = p.unity, what = what);
-            widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::FG_3), w - 90.0);
+            widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(meta, 11.5).color(theme::fg_3()), w - 90.0);
             if widgets::activated(&resp) {
                 state.duplicate_index = i;
                 if state.new_name.is_empty() || state.new_name.ends_with(" copy") || state.new_name == "My new avatar" { // i18n: not shown (the English suffix and default of a suggested folder name, matched as they were set)
@@ -373,7 +373,7 @@ fn new_project(ui: &mut Ui, state: &mut State) {
                 let x = r.left() + 14.0;
                 let tw = r.width() - 28.0 - 30.0;
                 widgets::text_truncated(pt, pos2(x, cover.bottom() + 17.0), Align2::LEFT_CENTER, &Txt::new(&t.name, 13.5).weight(weight::MEDIUM), tw);
-                widgets::text_truncated(pt, pos2(x, cover.bottom() + 35.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), tw);
+                widgets::text_truncated(pt, pos2(x, cover.bottom() + 35.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::fg_3()), tw);
                 art::check(pt, pos2(r.right() - 24.0, cover.bottom() + 26.0), sel);
             } else {
                 art::tile(pt, Rect::from_min_size(pos2(r.left() + 14.0, r.center().y - 20.0), vec2(40.0, 40.0)), g, tint);
@@ -385,7 +385,7 @@ fn new_project(ui: &mut Ui, state: &mut State) {
                     &Txt::new(&t.name, 13.5).weight(weight::MEDIUM),
                     r.right() - x - 30.0,
                 );
-                widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::FG_3), r.right() - x - 30.0);
+                widgets::text_truncated(pt, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(sub, 11.5).color(theme::fg_3()), r.right() - x - 30.0);
                 art::check(pt, pos2(r.right() - 16.0, r.top() + 16.0), sel);
             }
             if widgets::activated(&resp) {
@@ -421,8 +421,8 @@ fn new_project(ui: &mut Ui, state: &mut State) {
         let sep = if state.new_location.contains('\\') { '\\' } else { '/' };
         let target = format!("{}{sep}{}", state.new_location.trim_end_matches(['/', '\\']), state.new_name);
         let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
-        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), glyph::ARROW_RIGHT, 13.0, theme::FG_4);
-        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::FG_3), w - 22.0);
+        widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.center().y), glyph::ARROW_RIGHT, 13.0, theme::fg_4());
+        widgets::text_truncated(ui.painter(), pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(target, 12.0).color(theme::fg_3()), w - 22.0);
     }
 }
 
@@ -455,21 +455,21 @@ pub(super) fn creating(ui: &mut Ui, state: &State) {
         let label = state.acting().unwrap_or_default().to_string();
         let (r, _) = ui.allocate_exact_size(vec2(w, if p.total > 0 { 92.0 } else { 52.0 }), Sense::hover());
         let pt = ui.painter();
-        widgets::frame(pt, r, 14.0, theme::alpha(theme::ACCENT, 0.07));
-        feedback::spinner(pt, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::ACCENT);
+        widgets::frame(pt, r, 14.0, theme::alpha(theme::accent(), 0.07));
+        feedback::spinner(pt, pos2(r.left() + 22.0, r.top() + 26.0), 8.0, 2.2, theme::accent());
         let heading = if p.total > 0 { format!("{} · {:.0}%", tr(&p.phase), 100.0 * p.copied as f32 / p.total.max(1) as f32) } else { label };
         widgets::text(pt, pos2(r.left() + 42.0, r.top() + 26.0), Align2::LEFT_CENTER, &Txt::new(heading, 13.5).weight(weight::MEDIUM));
         if p.total > 0 {
             let bar = Rect::from_min_size(pos2(r.left() + 16.0, r.top() + 50.0), vec2(r.width() - 32.0, 6.0));
             pt.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
             let f = anim::value(&ctx, Id::unique("new-copy-progress"), p.copied as f32 / p.total.max(1) as f32, Spring::SOFT).clamp(0.0, 1.0);
-            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+            pt.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
             let files = tr!("{copied} of {total} files · {file}", copied = format::integer(p.copied as f64), total = format::integer(p.total as f64), file = p.file);
             widgets::text_truncated(
                 pt,
                 pos2(r.left() + 16.0, r.top() + 74.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(files, 11.5).color(theme::FG_3),
+                &Txt::new(files, 11.5).color(theme::fg_3()),
                 r.width() - 32.0,
             );
         }
@@ -478,10 +478,10 @@ pub(super) fn creating(ui: &mut Ui, state: &State) {
 
 pub(super) fn note(ui: &mut Ui, text: &str) {
     let w = ui.available_width();
-    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::FG_3).line_height(18.0).job(w - 22.0));
+    let g = ui.painter().layout_job(Txt::new(text, 12.0).color(theme::fg_3()).line_height(18.0).job(w - 22.0));
     let (r, _) = ui.allocate_exact_size(vec2(w, g.size().y), Sense::hover());
-    widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.top() + 9.0), icons::INFO, 13.0, theme::FG_4);
-    ui.painter().galley(pos2(r.left() + 22.0, r.top()), g, theme::FG_3);
+    widgets::icon(ui.painter(), pos2(r.left() + 7.0, r.top() + 9.0), icons::INFO, 13.0, theme::fg_4());
+    ui.painter().galley(pos2(r.left() + 22.0, r.top()), g, theme::fg_3());
 }
 
 pub(super) fn inline_warning(ui: &mut Ui, text: &str) {
@@ -621,13 +621,13 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let g = p.layout_job({
                 let mut job =
                     Txt::new(tr("Add your avatar's Unity project on the Unity projects page. An avatar shows up once it was uploaded and its scene saved."), 12.5)
-                        .color(theme::FG_3)
+                        .color(theme::fg_3())
                         .line_height(19.0)
                         .job(420.0);
                 job.halign = egui::Align::Center;
                 job
             });
-            p.galley(pos2(r.center().x, r.center().y - 6.0), g, theme::FG_3);
+            p.galley(pos2(r.center().x, r.center().y - 6.0), g, theme::fg_3());
             let b = Button::new(tr("Open Unity projects")).icon(glyph::ARROW_RIGHT).size(Size::Sm).id_salt("avatars-go-projects");
             let bw = b.desired_width(ui);
             if widgets::activated(&b.show_at(ui, Rect::from_min_size(pos2(r.center().x - bw * 0.5, r.bottom() - 52.0), vec2(bw, 32.0)))) {
@@ -649,7 +649,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         let thumb = Rect::from_min_size(r.min + vec2(6.0, 6.0), vec2(tw - 12.0, th - 6.0));
         art::avatar(pt, state, a, thumb, [13.0; 4], 1.0 + 0.04 * hover);
         if worn.as_ref() == Some(&a.id) {
-            let t = Txt::new(tr("Wearing now"), 10.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let t = Txt::new(tr("Wearing now"), 10.5).weight(weight::SEMIBOLD).color(theme::fg());
             let bw = widgets::text_size(ui, &t).x + 30.0;
             let br = Rect::from_min_size(thumb.min + vec2(8.0, 8.0), vec2(bw, 22.0));
             pt.rect_filled(br, theme::radius(11.0), theme::black(0.62));
@@ -665,7 +665,7 @@ fn avatar_picker(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             tw - 28.0,
         );
         let sub = if *n > 1 { tr!("In {n} projects", n = n) } else { p.name.clone() };
-        widgets::text_truncated(pt, pos2(r.left() + 14.0, thumb.bottom() + 40.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), tw - 28.0);
+        widgets::text_truncated(pt, pos2(r.left() + 14.0, thumb.bottom() + 40.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::fg_3()), tw - 28.0);
         if widgets::activated(&resp) {
             state.preselected = Some(a.id.clone());
         }
@@ -710,7 +710,7 @@ fn avatar_footer(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             ui.painter(),
             pos2(left.left(), left.center().y),
             Align2::LEFT_CENTER,
-            &Txt::new(tr!("Saved in {copies} places: you choose which next", copies = copies), 12.0).color(theme::FG_3),
+            &Txt::new(tr!("Saved in {copies} places: you choose which next", copies = copies), 12.0).color(theme::fg_3()),
             left.width() - 12.0,
         );
     }
@@ -734,17 +734,17 @@ fn project_choice(ui: &mut Ui, state: &mut State, avatar: &str) {
         let x = r.left() + 78.0;
         let tw = r.right() - 50.0 - x;
         widgets::text_truncated(pt, pos2(x, r.center().y - 17.0), Align2::LEFT_CENTER, &Txt::new(&p.name, 14.0).weight(weight::SEMIBOLD), tw);
-        widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::FG_3), tw);
+        widgets::text_truncated(pt, pos2(x, r.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(p.path.display().to_string(), 11.5).color(theme::fg_3()), tw);
         widgets::text_truncated(
             pt,
             pos2(x, r.center().y + 18.0),
             Align2::LEFT_CENTER,
-            &Txt::new(tr!("{scene} · edited {when}", scene = a.scene, when = crate::pages::ago(ui.ctx(), p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::FG_4),
+            &Txt::new(tr!("{scene} · edited {when}", scene = a.scene, when = crate::pages::ago(ui.ctx(), p.modified, orbiters_projects::discovery::now())), 11.5).color(theme::fg_4()),
             tw,
         );
         // A radio: a ring, filled with a check once chosen.
         let c = pos2(r.right() - 26.0, r.center().y);
-        pt.circle_stroke(c, 10.0, egui::Stroke::new(1.5, theme::mix(theme::FG_4, theme::ACCENT, sel.clamp(0.0, 1.0))));
+        pt.circle_stroke(c, 10.0, egui::Stroke::new(1.5, theme::mix(theme::fg_4(), theme::accent(), sel.clamp(0.0, 1.0))));
         art::check(pt, c, sel);
         if widgets::activated(&resp) {
             state.choice = Some((p.path.clone(), a.scene.clone()));
@@ -843,7 +843,7 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
     };
     // The state at the top: a big tinted disc whose icon pops in when the state changes.
     let w = ui.available_width();
-    let g = ui.painter().layout_job(Txt::new(&message, 13.0).color(theme::FG_2).line_height(20.0).job(w - 100.0));
+    let g = ui.painter().layout_job(Txt::new(&message, 13.0).color(theme::fg_2()).line_height(20.0).job(w - 100.0));
     let h = (g.size().y + 40.0).max(76.0);
     let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
     let pop = anim::spring_from(&ctx, Id::unique(("setup-pop", format!("{s:?}"))), [0.4], [1.0], Spring::BOUNCY)[0];
@@ -862,7 +862,7 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
         None => feedback::spinner(p, c, 13.0, 2.6, col),
     }
     widgets::text(p, pos2(r.left() + 92.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::new(headline, 17.0).weight(weight::SEMIBOLD));
-    p.galley(pos2(r.left() + 92.0, r.top() + 34.0), g, theme::FG_2);
+    p.galley(pos2(r.left() + 92.0, r.top() + 34.0), g, theme::fg_2());
 
     if let Some(warning) = state.flow.as_ref().and_then(|f| f.warning.clone()) {
         inline_warning(ui, &warning);
@@ -906,34 +906,34 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
             let done = matches!(step, Step::Done);
             p.line_segment(
                 [c + vec2(0.0, 12.0), c + vec2(0.0, 28.0)],
-                egui::Stroke::new(2.0, if done { theme::alpha(theme::ACCENT, 0.5) } else { theme::white(0.08) }),
+                egui::Stroke::new(2.0, if done { theme::alpha(theme::OK, 0.5) } else { theme::white(0.08) }),
             );
         }
         let k = anim::spring_from(&ctx, Id::unique(("setup-step", i, format!("{s:?}"))), [0.6], [1.0], Spring::BOUNCY)[0].clamp(0.0, 1.2);
         let (fg, weight) = match step {
             Step::Done => {
-                p.circle_filled(c, 11.0 * k, theme::ACCENT);
-                widgets::icon(p, c, icons::CHECK, 12.0 * k, theme::ON_ACCENT);
-                (theme::FG_2, weight::REGULAR)
+                p.circle_filled(c, 11.0 * k, theme::OK);
+                widgets::icon(p, c, icons::CHECK, 12.0 * k, theme::base::ON_ACCENT);
+                (theme::fg_2(), weight::REGULAR)
             }
             Step::Now => {
-                p.circle_filled(c, 11.0 * k, theme::alpha(theme::ACCENT, 0.18));
+                p.circle_filled(c, 11.0 * k, theme::alpha(theme::accent(), 0.18));
                 if s == Stage::Installing {
-                    feedback::spinner(p, c, 6.5, 2.0, theme::ACCENT);
+                    feedback::spinner(p, c, 6.5, 2.0, theme::accent());
                 } else {
-                    p.circle_filled(c, 4.5, theme::ACCENT);
+                    p.circle_filled(c, 4.5, theme::accent());
                 }
-                (theme::FG, weight::SEMIBOLD)
+                (theme::fg(), weight::SEMIBOLD)
             }
             Step::Waiting => {
-                p.circle_filled(c, 11.0 * k, theme::alpha(theme::ACCENT, 0.12));
-                feedback::spinner(p, c, 6.5, 2.0, theme::ACCENT);
-                (theme::FG, weight::SEMIBOLD)
+                p.circle_filled(c, 11.0 * k, theme::alpha(theme::accent(), 0.12));
+                feedback::spinner(p, c, 6.5, 2.0, theme::accent());
+                (theme::fg(), weight::SEMIBOLD)
             }
             Step::Later => {
                 p.circle_stroke(c, 10.0, egui::Stroke::new(1.5, theme::white(0.14)));
-                widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new((i + 1).to_string(), 11.0).color(theme::FG_4));
-                (theme::FG_3, weight::REGULAR)
+                widgets::text(p, c, Align2::CENTER_CENTER, &Txt::new((i + 1).to_string(), 11.0).color(theme::fg_4()));
+                (theme::fg_3(), weight::REGULAR)
             }
             Step::Stopped(t) => {
                 p.circle_filled(c, 11.0 * k, theme::alpha(t.color(), 0.2));

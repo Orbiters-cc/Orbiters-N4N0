@@ -46,11 +46,11 @@ pub fn label(e: &Entry) -> Option<String> {
 
 /// A small label with an icon on a picture (as the cards' badges); returns its width.
 pub fn badge(p: &Painter, ui: &Ui, at: Pos2, glyph: &str, text: &str, right: bool) -> f32 {
-    let t = Txt::new(text, 10.5).weight(weight::SEMIBOLD).tracking(0.025).color(theme::FG);
+    let t = Txt::new(text, 10.5).weight(weight::SEMIBOLD).tracking(0.025).color(theme::fg());
     let w = widgets::text_size(ui, &t).x + 20.0 + 15.0;
     let r = if right { Rect::from_min_size(pos2(at.x - w, at.y), vec2(w, 22.0)) } else { Rect::from_min_size(at, vec2(w, 22.0)) };
     p.rect_filled(r, theme::radius(11.0), theme::black(0.55));
-    widgets::icon(p, pos2(r.left() + 16.0, r.center().y), glyph, 12.0, theme::ACCENT);
+    widgets::icon(p, pos2(r.left() + 16.0, r.center().y), glyph, 12.0, theme::accent());
     widgets::text(p, pos2(r.left() + 25.0, r.center().y), Align2::LEFT_CENTER, &t);
     w
 }
@@ -135,7 +135,7 @@ impl LayerView {
         let ctx = ui.ctx().clone();
         let id = Id::unique(("gallery-layer-strip", &layered.key));
         let composite = layered.has_composite();
-        let name = |s: &str| Txt::new(s, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+        let name = |s: &str| Txt::new(s, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
         // Each chip: the picture (an icon, its word), each layer (its thumbnail, its name, its eye).
         let mut chips: Vec<(Option<usize>, f32)> = Vec::new();
         if composite {
@@ -197,7 +197,7 @@ impl LayerView {
             }
             match chip {
                 None => {
-                    widgets::icon(&fade, pos2(r.left() + 12.0 + 8.0, r.center().y), icons::IMAGES, 15.0, theme::FG);
+                    widgets::icon(&fade, pos2(r.left() + 12.0 + 8.0, r.center().y), icons::IMAGES, 15.0, theme::fg());
                     if !compact {
                         widgets::text(&fade, pos2(r.left() + 12.0 + 16.0 + 6.0, r.center().y), Align2::LEFT_CENTER, &name(tr("Picture")));
                     }
@@ -214,7 +214,7 @@ impl LayerView {
                     if !compact {
                         let mut t = name(&l.name);
                         if hidden {
-                            t = t.color(theme::FG_3);
+                            t = t.color(theme::fg_3());
                         }
                         widgets::text(&fade, pos2(thumb.right() + 7.0, r.center().y), Align2::LEFT_CENTER, &t);
                     }
@@ -223,7 +223,7 @@ impl LayerView {
                     let eh = anim::toggle(&ctx, id.with(("eye-hover", n)), er.hovered() && enabled, Spring::SNAPPY);
                     fade.circle_filled(eye.center(), 13.0, theme::white(0.1 * eh));
                     let glyph = if hidden { icons::EYE_SLASH } else { icons::EYE };
-                    widgets::icon(&fade, eye.center(), glyph, 14.0, theme::mix(if hidden { theme::FG_3 } else { theme::FG_2 }, theme::FG, eh));
+                    widgets::icon(&fade, eye.center(), glyph, 14.0, theme::mix(if hidden { theme::fg_3() } else { theme::fg_2() }, theme::fg(), eh));
                     if enabled && widgets::activated(&er) {
                         toggle = Some(*i);
                     }

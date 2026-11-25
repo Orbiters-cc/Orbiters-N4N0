@@ -43,7 +43,7 @@ fn para(ui: &mut Ui, txt: Txt) {
     let w = ui.available_width();
     let galley = ui.painter().layout_job(txt.job(w));
     let (r, _) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
-    ui.painter().galley(r.min, galley, theme::FG);
+    ui.painter().galley(r.min, galley, theme::fg());
 }
 
 pub(super) fn body(ui: &mut Ui, state: &mut State) {
@@ -64,7 +64,7 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
         art::caps(ui, tr("What conflicts"));
         for c in &plan.conflicts {
             let lines: Vec<String> = c.needed_by.iter().map(|n| tr!("{package} {version} accepts {range}", package = n.display_name, version = n.version, range = if n.range.is_empty() { tr("another version") } else { &n.range })).collect();
-            let body = Txt::new(lines.join("\n"), 12.0).color(theme::FG_3).line_height(18.0);
+            let body = Txt::new(lines.join("\n"), 12.0).color(theme::fg_3()).line_height(18.0);
             let galley = ui.painter().layout_job(body.job(w - 44.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, 34.0 + galley.size().y + 10.0), Sense::hover());
             let p = ui.painter();
@@ -77,13 +77,13 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
                 &Txt::new(format!("{} {}", c.display_name, c.version), 13.0).weight(weight::MEDIUM),
                 w - 52.0,
             );
-            p.galley(pos2(r.left() + 36.0, r.top() + 34.0), galley, theme::FG_3);
+            p.galley(pos2(r.left() + 36.0, r.top() + 34.0), galley, theme::fg_3());
         }
     }
     if solving {
         let (r, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
-        feedback::spinner(ui.painter(), pos2(r.left() + 12.0, r.center().y), 8.0, 2.0, theme::ACCENT);
-        widgets::text(ui.painter(), pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Solving again…"), 12.5).color(theme::FG_2));
+        feedback::spinner(ui.painter(), pos2(r.left() + 12.0, r.center().y), 8.0, 2.0, theme::accent());
+        widgets::text(ui.painter(), pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Solving again…"), 12.5).color(theme::fg_2()));
         return;
     }
     if let Some(e) = &plan.error {
@@ -121,12 +121,12 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
                     wanted = b.wanted
                 )
             };
-            let galley = ui.painter().layout_job(Txt::new(&text, 12.0).color(theme::FG_2).line_height(18.0).job(w - 44.0 - 150.0));
+            let galley = ui.painter().layout_job(Txt::new(&text, 12.0).color(theme::fg_2()).line_height(18.0).job(w - 44.0 - 150.0));
             let (r, _) = ui.allocate_exact_size(vec2(w, (galley.size().y + 24.0).max(56.0)), Sense::hover());
             let p = ui.painter();
             widgets::frame(p, r, 14.0, theme::alpha(theme::DANGER, 0.08));
             widgets::icon(p, pos2(r.left() + 20.0, r.top() + 20.0), icons::X_CIRCLE, 14.0, theme::DANGER);
-            p.galley(pos2(r.left() + 36.0, r.top() + 12.0), galley, theme::FG_2);
+            p.galley(pos2(r.left() + 36.0, r.top() + 12.0), galley, theme::fg_2());
             let br = Rect::from_min_size(pos2(r.right() - 12.0 - 132.0, r.center().y - 16.0), vec2(132.0, 32.0));
             if let Some(folder) = &b.embedded {
                 let resp = Button::new(tr("Show its file")).icon(icons::FOLDER_OPEN).variant(Variant::Secondary).size(Size::Sm).width(132.0).id_salt(("conflict-show", &b.name)).show_at(ui, br);
@@ -144,10 +144,10 @@ pub(super) fn body(ui: &mut Ui, state: &mut State) {
                     removing = Some(b.name.clone());
                 }
             } else {
-                widgets::text(ui.painter(), pos2(br.right(), br.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Needed by others"), 11.5).color(theme::FG_3));
+                widgets::text(ui.painter(), pos2(br.right(), br.center().y), Align2::RIGHT_CENTER, &Txt::new(tr("Needed by others"), 11.5).color(theme::fg_3()));
             }
         }
-        para(ui, Txt::new(tr("Or keep the versions you have: Cancel changes nothing."), 12.0).color(theme::FG_3).line_height(18.0));
+        para(ui, Txt::new(tr("Or keep the versions you have: Cancel changes nothing."), 12.0).color(theme::fg_3()).line_height(18.0));
         if let Some(name) = removing {
             let v = state.conflict.as_mut().unwrap();
             let (path, requested, prerelease) = (v.path.clone(), v.plan.requested.clone(), v.plan.prerelease);
@@ -171,10 +171,10 @@ fn step(ui: &mut Ui, state: &mut State, s: &orbiters_projects::updates::Step) {
     state.icons_wanted.push(s.name.clone());
     art::package_icon(p, state.icons.get(&s.name), t, &s.name);
     let (label, color) = match (&s.from, &s.to) {
-        (Some(f), Some(t)) => (format!("{f} → {t}"), theme::ACCENT),
-        (None, Some(t)) => (tr!("added · {version}", version = t), theme::ACCENT),
+        (Some(f), Some(t)) => (format!("{f} → {t}"), theme::accent()),
+        (None, Some(t)) => (tr!("added · {version}", version = t), theme::accent()),
         (Some(f), None) => (tr!("{version} · removed", version = f), theme::DANGER),
-        (None, None) => (String::new(), theme::FG_3),
+        (None, None) => (String::new(), theme::fg_3()),
     };
     let version = Txt::new(&label, 12.0).weight(weight::MEDIUM).color(color);
     let vw = widgets::text_size(ui, &version).x;
@@ -182,7 +182,7 @@ fn step(ui: &mut Ui, state: &mut State, s: &orbiters_projects::updates::Step) {
     let tw = r.right() - vw - 16.0 - x;
     let p = ui.painter();
     widgets::text_truncated(p, pos2(x, r.center().y - 8.0), Align2::LEFT_CENTER, &Txt::new(&s.display_name, 13.0).weight(weight::MEDIUM), tw);
-    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(s.why.as_deref().unwrap_or(&s.name), 11.0).color(theme::FG_3), tw);
+    widgets::text_truncated(p, pos2(x, r.center().y + 10.0), Align2::LEFT_CENTER, &Txt::new(s.why.as_deref().unwrap_or(&s.name), 11.0).color(theme::fg_3()), tw);
     widgets::text(p, pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, &version);
     if let Some(why) = &s.why {
         let _ = ui.interact(r, egui::Id::unique(("conflict-step", &s.name)), Sense::hover()).on_hover_text(why);

@@ -145,25 +145,25 @@ pub fn paint(p: &egui::Painter, hover: Option<Kind>, noted: Option<Kind>) {
         let r = Rect::from_min_size(pos2(PAD, PAD + i as f32 * h), vec2(all.width() - 2.0 * PAD, h)).shrink2(vec2(0.0, 5.0));
         let is_noted = noted == Some(kind);
         let fill = if is_noted {
-            theme::mix(theme::INK_950, theme::ACCENT, 0.35)
+            theme::mix(theme::ink_950(), theme::accent(), 0.35)
         } else if hover == Some(kind) {
-            theme::mix(theme::INK_950, theme::FG, 0.18)
+            theme::mix(theme::ink_950(), theme::fg(), 0.18)
         } else {
-            theme::alpha(theme::INK_950, 0.92)
+            theme::alpha(theme::ink_950(), 0.92)
         };
         p.rect_filled(r, r.height() / 2.0, fill);
-        p.rect_stroke(r, r.height() / 2.0, egui::Stroke::new(3.0, if is_noted { theme::ACCENT } else { theme::white(0.16) }), egui::StrokeKind::Inside);
-        let (words, colour) = if is_noted { (orbiters_i18n::tr(crate::mismatch::NOTED_WORDS), theme::ACCENT) } else { (orbiters_i18n::tr(kind.words()), theme::FG) };
+        p.rect_stroke(r, r.height() / 2.0, egui::Stroke::new(3.0, if is_noted { theme::accent() } else { theme::white(0.16) }), egui::StrokeKind::Inside);
+        let (words, colour) = if is_noted { (orbiters_i18n::tr(crate::mismatch::NOTED_WORDS), theme::accent()) } else { (orbiters_i18n::tr(kind.words()), theme::fg()) };
         // A mark of what it says: a struck circle for "off", a filled one for "on".
         let dot = pos2(r.left() + r.height() / 2.0 + 4.0, r.center().y);
         if is_noted {
             p.line_segment([dot + vec2(-11.0, 0.0), dot + vec2(-3.0, 9.0)], egui::Stroke::new(5.0, colour));
             p.line_segment([dot + vec2(-3.0, 9.0), dot + vec2(13.0, -10.0)], egui::Stroke::new(5.0, colour));
         } else if kind == Kind::MenuShouldBeOff {
-            p.circle_stroke(dot, 13.0, egui::Stroke::new(4.0, theme::FG_3));
-            p.line_segment([dot + vec2(-9.0, 9.0), dot + vec2(9.0, -9.0)], egui::Stroke::new(4.0, theme::FG_3));
+            p.circle_stroke(dot, 13.0, egui::Stroke::new(4.0, theme::fg_3()));
+            p.line_segment([dot + vec2(-9.0, 9.0), dot + vec2(9.0, -9.0)], egui::Stroke::new(4.0, theme::fg_3()));
         } else {
-            p.circle_filled(dot, 13.0, theme::ACCENT);
+            p.circle_filled(dot, 13.0, theme::accent());
         }
         // Every language's words whole: the size comes down until they fit (pt-BR and French are the longest).
         let room = r.right() - dot.x - 44.0;

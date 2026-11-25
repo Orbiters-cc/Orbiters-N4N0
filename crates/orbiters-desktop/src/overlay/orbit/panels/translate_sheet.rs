@@ -155,25 +155,25 @@ pub(super) fn draw_translate(p: &Painter, facts: &Facts) {
     ];
     for (i, name, about) in rows {
         let y = row(i);
-        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, look::font(20.0, weight::BOLD), look::LABEL);
-        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::LABEL, X - 40.0);
+        p.text(pos2(26.0, y + 15.0), Align2::LEFT_CENTER, name, look::font(20.0, weight::BOLD), look::label());
+        let mut job = egui::text::LayoutJob::simple(about.to_string(), look::font(15.0, weight::MEDIUM), look::label(), X - 40.0);
         job.wrap.max_rows = 2;
-        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::LABEL);
+        p.galley(pos2(26.0, y + 28.0), p.layout_job(job), look::label());
     }
     let f = &facts.translate;
     let y = row(ROW_STATUS);
-    let mut job = egui::text::LayoutJob::simple(status_words(f), look::font(19.0, weight::SEMIBOLD), look::LABEL, 1000.0 - X);
+    let mut job = egui::text::LayoutJob::simple(status_words(f), look::font(19.0, weight::SEMIBOLD), look::label(), 1000.0 - X);
     job.wrap.max_rows = 2;
-    p.galley(pos2(X, y + 6.0), p.layout_job(job), look::LABEL);
+    p.galley(pos2(X, y + 6.0), p.layout_job(job), look::label());
     if let Some(advice) = small_model_advice(f) {
-        let mut job = egui::text::LayoutJob::simple(advice, look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X);
+        let mut job = egui::text::LayoutJob::simple(advice, look::font(16.0, weight::MEDIUM), look::muted(), 1000.0 - X);
         job.wrap.max_rows = 2;
-        p.galley(pos2(X, y + 66.0), p.layout_job(job), look::MUTED);
+        p.galley(pos2(X, y + 66.0), p.layout_job(job), look::muted());
     }
     if f.provider == TranslateProvider::Orbiters && !f.agreed {
-        let mut job = egui::text::LayoutJob::simple(orbiters_notice_on(facts.desktop).to_string(), look::font(16.0, weight::MEDIUM), look::MUTED, 1000.0 - X - 240.0);
+        let mut job = egui::text::LayoutJob::simple(orbiters_notice_on(facts.desktop).to_string(), look::font(16.0, weight::MEDIUM), look::muted(), 1000.0 - X - 240.0);
         job.wrap.max_rows = 3;
-        p.galley(pos2(X, y + 72.0), p.layout_job(job), look::MUTED);
+        p.galley(pos2(X, y + 72.0), p.layout_job(job), look::muted());
     }
 }
 

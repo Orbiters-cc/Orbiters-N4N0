@@ -55,12 +55,12 @@ fn row_of(status: &ClientStatus, listening: bool) -> Row {
     let row = |text: String, color, add: Option<String>, remove| Row { text, color, add, remove };
     let update = || Some(tr("Update").to_string());
     match &status.registration {
-        Registration::Unknown => row(tr("Looking…").into(), theme::FG_3, None, false),
-        Registration::NotInstalled => row(tr("Not installed on this computer.").into(), theme::FG_3, None, false),
-        Registration::NotAdded if listening => row(tr("Not added yet. New sessions get it the moment you add it.").into(), theme::FG_2, Some(tr!("Add to {name}", name = name)), false),
-        Registration::NotAdded => row(tr("Not added.").into(), theme::FG_3, None, false),
+        Registration::Unknown => row(tr("Looking…").into(), theme::fg_3(), None, false),
+        Registration::NotInstalled => row(tr("Not installed on this computer.").into(), theme::fg_3(), None, false),
+        Registration::NotAdded if listening => row(tr("Not added yet. New sessions get it the moment you add it.").into(), theme::fg_2(), Some(tr!("Add to {name}", name = name)), false),
+        Registration::NotAdded => row(tr("Not added.").into(), theme::fg_3(), None, false),
         Registration::Added if listening => row(tr("Added. New sessions have it.").into(), theme::OK, None, true),
-        Registration::Added => row(tr("Added. It answers while the bridge is on.").into(), theme::FG_2, None, true),
+        Registration::Added => row(tr("Added. It answers while the bridge is on.").into(), theme::fg_2(), None, true),
         Registration::Outdated(Old::Token) => row(tr("Added with an old token, so it cannot connect.").into(), theme::WARN, update(), true),
         Registration::Outdated(Old::Address) => row(tr("Added with an old address, so it cannot connect.").into(), theme::WARN, update(), true),
         Registration::Outdated(Old::Everything) => row(tr("Added with an old address and token, so it cannot connect.").into(), theme::WARN, update(), true),
@@ -75,7 +75,7 @@ fn client_row(ui: &mut Ui, cx: &Cx, status: &ClientStatus, listening: bool) {
     let width = ui.available_width();
     let text_width = width - 240.0;
     let said = ui.painter().layout_job(Txt::new(row.text, 12.5).color(row.color).line_height(18.0).job(text_width));
-    let note_color = if status.failed { theme::WARN } else { theme::FG_3 };
+    let note_color = if status.failed { theme::WARN } else { theme::fg_3() };
     let noted = status.note.as_deref().map(|n| ui.painter().layout_job(Txt::new(n, 12.0).color(note_color).line_height(17.0).job(text_width)));
     let body = 20.0 + said.size().y + noted.as_ref().map_or(0.0, |n| n.size().y + 2.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, body.max(40.0) + 20.0), Sense::hover());
@@ -121,8 +121,8 @@ fn status_line(cx: &Cx) -> (String, egui::Color32) {
         (Some(Paused::Held), _) => (tr!("Paused until you resume (here, or {hotkey}).", hotkey = HOTKEY), theme::WARN),
         (None, Some(client)) if status.acting => (tr!("{name} is acting now.", name = client.name), theme::OK),
         (None, Some(client)) if client.connected => (tr!("{name} is connected.", name = client.name), theme::OK),
-        (None, Some(client)) => (tr!("{name} was here, and is not connected now.", name = client.name), theme::FG_2),
-        (None, None) => (tr("Waiting for an MCP client. No client has connected.").into(), theme::FG_2),
+        (None, Some(client)) => (tr!("{name} was here, and is not connected now.", name = client.name), theme::fg_2()),
+        (None, None) => (tr("Waiting for an MCP client. No client has connected.").into(), theme::fg_2()),
     }
 }
 
@@ -142,11 +142,11 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
 
         // The risk, in a filled note: on or off, this is what the switch above means.
         let width = ui.available_width();
-        let text = ui.painter().layout_job(Txt::new(tr(TERMS), 12.0).color(theme::FG_2).line_height(18.0).job(width - 70.0));
+        let text = ui.painter().layout_job(Txt::new(tr(TERMS), 12.0).color(theme::fg_2()).line_height(18.0).job(width - 70.0));
         let (rect, _) = ui.allocate_exact_size(vec2(width, text.size().y + 24.0), Sense::hover());
         widgets::frame(ui.painter(), rect, 12.0, theme::WARN.gamma_multiply(0.09));
         widgets::icon(ui.painter(), egui::pos2(rect.left() + 26.0, rect.top() + 21.0), icons::WARNING, 17.0, theme::WARN);
-        ui.painter().galley(egui::pos2(rect.left() + 50.0, rect.top() + 12.0), text, theme::FG_2);
+        ui.painter().galley(egui::pos2(rect.left() + 50.0, rect.top() + 12.0), text, theme::fg_2());
         ui.add_space(12.0);
 
         // What the agents have is asked once a visit: it may have changed in a terminal.
@@ -257,10 +257,10 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
         let mut galleys = Vec::new();
         if status.log.is_empty() {
-            galleys.push((ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::FG_3).line_height(17.0).job(width - 24.0)), theme::FG_3));
+            galleys.push((ui.painter().layout_job(Txt::new(tr("Nothing yet."), 11.5).mono().color(theme::fg_3()).line_height(17.0).job(width - 24.0)), theme::fg_3()));
         }
         for line in status.log.iter().skip(status.log.len().saturating_sub(state.shown)) {
-            let color = if line.ok { theme::FG_2 } else { theme::WARN };
+            let color = if line.ok { theme::fg_2() } else { theme::WARN };
             // Today's actions: the time says enough.
             let when = super::local_time_unix(line.at);
             let time = when.rsplit(", ").next().unwrap_or(&when);
@@ -269,7 +269,7 @@ pub fn show(ui: &mut Ui, cx: &Cx, index: usize, state: &mut State, draft: &mut E
         }
         let height = galleys.iter().map(|(g, _)| g.size().y).sum::<f32>() + 24.0;
         let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-        ui.painter().rect_filled(rect, theme::radius(12.0), theme::INK_900);
+        ui.painter().rect_filled(rect, theme::radius(12.0), theme::ink_900());
         let mut y = rect.top() + 12.0;
         for (g, color) in galleys {
             let h = g.size().y;

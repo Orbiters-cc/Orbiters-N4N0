@@ -988,12 +988,12 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
         // Every instance he was in, to start VRChat in one of them (REQUEST21 7).
         let previous_w = super::previous::button(ui, state, pos2(head.right() - arrows_w - if pages > 1 { 10.0 } else { 0.0 }, head.center().y));
         let selected = orbiters_i18n::tr!("Selected: {name}", name = chosen_name);
-        widgets::text_truncated(&p, pos2(title.right() + 14.0, head.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(selected, 13.5).weight(weight::MEDIUM).color(theme::ACCENT), head.right() - title.right() - 38.0 - arrows_w - previous_w);
+        widgets::text_truncated(&p, pos2(title.right() + 14.0, head.center().y + 1.0), Align2::LEFT_CENTER, &Txt::new(selected, 13.5).weight(weight::MEDIUM).color(theme::accent()), head.right() - title.right() - 38.0 - arrows_w - previous_w);
         if pages > 1 {
             let next = Rect::from_center_size(pos2(head.right() - 15.0, head.center().y), vec2(30.0, 30.0));
             let prev = next.translate(vec2(-34.0, 0.0));
             let at = state.places.page;
-            widgets::text(&p, pos2(prev.left() - 8.0, head.center().y), Align2::RIGHT_CENTER, &Txt::new(format!("{} / {pages}", at + 1), 12.5).color(theme::FG_3));
+            widgets::text(&p, pos2(prev.left() - 8.0, head.center().y), Align2::RIGHT_CENTER, &Txt::new(format!("{} / {pages}", at + 1), 12.5).color(theme::fg_3()));
             // Both arrows always, the one that leads nowhere faded and inert (the row does not shift between pages).
             for (r, glyph, label, back) in [(prev, icons::CARET_LEFT, orbiters_i18n::mark("Previous places"), true), (next, icons::CARET_RIGHT, orbiters_i18n::mark("More places"), false)] {
                 let can = if back { at > 0 } else { at + 1 < pages };
@@ -1002,7 +1002,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                         state.places.page = if back { at - 1 } else { at + 1 };
                     }
                 } else {
-                    widgets::icon(&p, r.center(), glyph, 14.0, theme::FG_4);
+                    widgets::icon(&p, r.center(), glyph, 14.0, theme::fg_4());
                 }
             }
         }
@@ -1030,7 +1030,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
             };
             let color = match tone {
                 Tone::Warn => theme::WARN,
-                _ => theme::FG_3,
+                _ => theme::fg_3(),
             };
             widgets::icon(&p, pos2(rect.left() + 8.0, y), glyph, 14.0, color);
             let mut room = rect.width() - 26.0;
@@ -1050,7 +1050,7 @@ pub fn row(ui: &mut Ui, cx: &mut Cx, state: &mut State, index: usize) {
                 }
                 room -= bw + 8.0;
             }
-            widgets::text_truncated(&p, pos2(rect.left() + 22.0, y), Align2::LEFT_CENTER, &Txt::new(text.as_str(), 12.5).color(theme::FG_2), room);
+            widgets::text_truncated(&p, pos2(rect.left() + 22.0, y), Align2::LEFT_CENTER, &Txt::new(text.as_str(), 12.5).color(theme::fg_2()), room);
             if *tone == Tone::Warn {
                 // The whole of it on hover (a path may be long).
                 ui.interact(Rect::from_min_size(pos2(rect.left() + 22.0, y - HINT_H * 0.5), vec2(room, HINT_H)), Id::unique("where-hint"), Sense::hover()).on_hover_text(text.as_str());
@@ -1136,20 +1136,20 @@ pub(super) fn kind_for(state: &State, world: &str, can_create: bool) -> CreateAc
 /// new instance's kind ("New · Friends+", to change), or the kind and region of the one that is there.
 fn reason_line(card: &Suggestion, now: i64) -> (String, &'static str, Color32) {
     match &card.reason {
-        Reason::Home => (tr("VRChat's usual start").into(), icons::HOUSE, theme::FG_3),
-        Reason::Invite { from, .. } => (orbiters_i18n::tr!("Invite from {name}", name = from), icons::ENVELOPE_SIMPLE, theme::ACCENT),
+        Reason::Home => (tr("VRChat's usual start").into(), icons::HOUSE, theme::fg_3()),
+        Reason::Invite { from, .. } => (orbiters_i18n::tr!("Invite from {name}", name = from), icons::ENVELOPE_SIMPLE, theme::accent()),
         Reason::Event { starts_at, .. } if *starts_at <= now => (tr("Event · on now").into(), icons::CALENDAR_DOTS, theme::WARN),
         Reason::Event { starts_at, .. } => {
             let minutes = ((starts_at - now + 59) / 60).max(1);
             (orbiters_i18n::tr!("Event · starts in {minutes} min", minutes = minutes), icons::CALENDAR_DOTS, theme::WARN)
         }
-        Reason::Recent { .. } => (tr("Last visited").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::FG_3),
-        Reason::Frequent { .. } => (tr("Often visited").into(), icons::STAR, theme::FG_3),
-        Reason::Friend { name } => (orbiters_i18n::tr!("With {name}", name = name), icons::USERS, theme::ACCENT),
+        Reason::Recent { .. } => (tr("Last visited").into(), icons::CLOCK_COUNTER_CLOCKWISE, theme::fg_3()),
+        Reason::Frequent { .. } => (tr("Often visited").into(), icons::STAR, theme::fg_3()),
+        Reason::Friend { name } => (orbiters_i18n::tr!("With {name}", name = name), icons::USERS, theme::accent()),
         Reason::Previous { at } => (
             orbiters_i18n::tr!("Previous instance · {when}", when = orbiters_ui::format::relative_time(*at, now.max(0) as u64)),
             icons::CLOCK_COUNTER_CLOCKWISE,
-            theme::FG_3,
+            theme::fg_3(),
         ),
     }
 }
@@ -1184,22 +1184,22 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
             let clip = p.clip_rect().intersect(pic);
             orbiters_ui::feedback::shimmer(&p.with_clip_rect(clip), Rect::from_min_max(pic.min, pic.max + vec2(0.0, RADIUS * 2.0)), RADIUS);
             // The sweep is faint on a card: the spinner says it is on its way.
-            orbiters_ui::feedback::spinner(&p, pic.center(), 11.0, 2.2, theme::FG_3);
+            orbiters_ui::feedback::spinner(&p, pic.center(), 11.0, 2.2, theme::fg_3());
         }
         Shown::None => {
             // No picture: the name's colour as a soft wash, and what the card is.
-            let c = if card.go == Go::Home { theme::ACCENT } else { widgets::name_color(&card.name) };
+            let c = if card.go == Go::Home { theme::accent() } else { widgets::name_color(&card.name) };
             let points = paint::squircle_points(pic, theme::squircle(RADIUS));
             paint::fill_convex(&p, &points, |at| {
                 let t = ((at.x - pic.left()) / pic.width() + (at.y - pic.top()) / pic.height()) * 0.5;
-                theme::mix(theme::alpha(c, 0.32), theme::INK_800, t)
+                theme::mix(theme::alpha(c, 0.32), theme::ink_800(), t)
             });
-            p.rect_filled(Rect::from_min_max(pos2(pic.left(), pic.bottom() - RADIUS), pic.max), 0.0, theme::mix(theme::alpha(c, 0.32), theme::INK_800, 0.9));
+            p.rect_filled(Rect::from_min_max(pos2(pic.left(), pic.bottom() - RADIUS), pic.max), 0.0, theme::mix(theme::alpha(c, 0.32), theme::ink_800(), 0.9));
             let glyph = match card.go {
                 Go::Home => icons::HOUSE,
                 _ => icons::GLOBE_HEMISPHERE_WEST,
             };
-            widgets::icon(&p, pic.center(), glyph, 30.0, theme::alpha(theme::FG, 0.55));
+            widgets::icon(&p, pic.center(), glyph, 30.0, theme::alpha(theme::fg(), 0.55));
         }
     }
     // The instance on the picture: the kind of a new one, to change; the kind and region of one that is there.
@@ -1212,11 +1212,11 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
             if !place.region.is_empty() {
                 chips = format!("{chips} · {}", region_tag(&place.region));
             }
-            let txt = Txt::new(chips, 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+            let txt = Txt::new(chips, 11.5).weight(weight::SEMIBOLD).color(theme::fg());
             let w = widgets::text_size(ui, &txt).x + 30.0;
             let chip = Rect::from_min_size(pic.left_bottom() + vec2(8.0, -30.0), vec2(w.min(pic.width() - 16.0), 22.0));
             p.rect_filled(chip, theme::radius(11.0), theme::black(0.6));
-            widgets::icon(&p, pos2(chip.left() + 12.0, chip.center().y), access_icon(place.access), 12.0, theme::FG);
+            widgets::icon(&p, pos2(chip.left() + 12.0, chip.center().y), access_icon(place.access), 12.0, theme::fg());
             widgets::text_truncated(&p, pos2(chip.left() + 22.0, chip.center().y), Align2::LEFT_CENTER, &txt, chip.width() - 28.0);
         }
         Go::Home | Go::EventWaiting => {}
@@ -1224,8 +1224,8 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
     // The chosen card's tick, top right.
     if ring > 0.01 {
         let c = pos2(pic.right() - 18.0, pic.top() + 18.0);
-        p.circle_filled(c, 11.0 * ring, theme::ACCENT);
-        widgets::icon(&p, c, icons::CHECK, 13.0 * ring, theme::ON_ACCENT);
+        p.circle_filled(c, 11.0 * ring, theme::accent());
+        widgets::icon(&p, c, icons::CHECK, 13.0 * ring, theme::on_accent());
     }
     // An invite can be put away here, as on its card.
     if let Go::Invite { id: invite, .. } = &card.go {
@@ -1243,14 +1243,14 @@ fn card_ui(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect, pic_h: f32, card
     let (line, glyph, tone) = reason_line(card, now);
     let y = pic.bottom() + 41.0;
     if matches!(card.reason, Reason::Invite { .. }) {
-        p.circle_filled(pos2(x + 4.0, y), 4.0, theme::ACCENT);
+        p.circle_filled(pos2(x + 4.0, y), 4.0, theme::accent());
     } else {
         widgets::icon(&p, pos2(x + 5.0, y), glyph, 12.5, tone);
     }
-    let line_color = if matches!(card.reason, Reason::Invite { .. }) { theme::ACCENT } else { theme::FG_3 };
+    let line_color = if matches!(card.reason, Reason::Invite { .. }) { theme::accent() } else { theme::fg_3() };
     widgets::text_truncated(&p, pos2(x + 16.0, y), Align2::LEFT_CENTER, &Txt::new(line, 12.5).weight(weight::MEDIUM).color(line_color), room - 16.0);
     if ring > 0.01 {
-        paint::stroke_squircle(&p, rect.expand(3.0), theme::squircle(RADIUS + 3.0), egui::Stroke::new(2.0, theme::alpha(theme::ACCENT, ring)));
+        paint::stroke_squircle(&p, rect.expand(3.0), theme::squircle(RADIUS + 3.0), egui::Stroke::new(2.0, theme::alpha(theme::accent(), ring)));
     } else if hover > 0.01 {
         paint::stroke_squircle(&p, rect, theme::squircle(RADIUS), egui::Stroke::new(1.0, theme::white(0.08 * hover)));
     }
@@ -1273,7 +1273,7 @@ fn kind_pill(ui: &mut Ui, state: &mut State, pic: Rect, card: &Suggestion, kind:
     let ctx = ui.ctx().clone();
     let access = kind_access(kind);
     let label = access_name(access);
-    let txt = Txt::new(orbiters_i18n::tr!("New · {kind}", kind = label), 11.5).weight(weight::SEMIBOLD).color(theme::FG);
+    let txt = Txt::new(orbiters_i18n::tr!("New · {kind}", kind = label), 11.5).weight(weight::SEMIBOLD).color(theme::fg());
     let w = widgets::text_size(ui, &txt).x + if can_create { 44.0 } else { 30.0 };
     let r = Rect::from_min_size(pic.left_bottom() + vec2(8.0, -30.0), vec2(w.min(pic.width() - 16.0), 22.0));
     let id = Id::unique(("where-kind", &card.key));
@@ -1285,13 +1285,13 @@ fn kind_pill(ui: &mut Ui, state: &mut State, pic: Rect, card: &Suggestion, kind:
     if can_create {
         p.rect_stroke(r, theme::radius(11.0), egui::Stroke::new(1.0, theme::white(0.14 + 0.1 * hover)), egui::StrokeKind::Inside);
     }
-    widgets::icon(p, pos2(r.left() + 12.0, r.center().y), access_icon(access), 12.0, theme::FG);
+    widgets::icon(p, pos2(r.left() + 12.0, r.center().y), access_icon(access), 12.0, theme::fg());
     widgets::text_truncated(p, pos2(r.left() + 22.0, r.center().y), Align2::LEFT_CENTER, &txt, r.width() - if can_create { 40.0 } else { 28.0 });
     if !can_create {
         resp.on_hover_text(tr("Sign in to VRChat in Settings to open Friends+, Friends or Invite instances: without it a new instance is public."));
         return;
     }
-    widgets::icon(p, pos2(r.right() - 11.0, r.center().y), icons::CARET_DOWN, 10.0, theme::FG_2);
+    widgets::icon(p, pos2(r.right() - 11.0, r.center().y), icons::CARET_DOWN, 10.0, theme::fg_2());
     widgets::note_control(&ctx, label, r, true);
     let items: Vec<popup::Item> = kinds().iter().map(|(_, a, says)| popup::Item::new(access_name(*a)).detail(says).icon(access_icon(*a))).collect();
     let selected = kinds().iter().position(|k| k.0 == kind);
@@ -1509,8 +1509,8 @@ fn stand_in_card(ui: &Ui, rect: Rect, pic_h: f32) {
 fn empty_card(ui: &Ui, rect: Rect) {
     let p = ui.painter();
     paint::stroke_squircle(p, rect.shrink(0.5), theme::squircle(RADIUS), egui::Stroke::new(1.0, theme::white(0.1)));
-    widgets::icon(p, pos2(rect.center().x, rect.center().y - 22.0), icons::STAR, 22.0, theme::FG_4);
-    let txt = Txt::new(tr("The places you visit most will show up here."), 12.5).color(theme::FG_3);
+    widgets::icon(p, pos2(rect.center().x, rect.center().y - 22.0), icons::STAR, 22.0, theme::fg_4());
+    let txt = Txt::new(tr("The places you visit most will show up here."), 12.5).color(theme::fg_3());
     let mut job = egui::text::LayoutJob::single_section(txt.text.clone(), txt.format());
     job.wrap.max_width = rect.width() - 36.0;
     job.halign = egui::Align::Center;

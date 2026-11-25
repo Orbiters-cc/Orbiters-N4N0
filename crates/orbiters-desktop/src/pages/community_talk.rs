@@ -272,7 +272,7 @@ fn reaction_pills(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&P
                 pa.image(tex.id(), er, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
             None if reaction.emoji.id.is_some() => {
-                widgets::icon(&pa, ec, icons::SMILEY, 15.0, theme::FG_2);
+                widgets::icon(&pa, ec, icons::SMILEY, 15.0, theme::fg_2());
             }
             None => {
                 widgets::text(&pa, ec, Align2::CENTER_CENTER, &Txt::new(reaction.emoji.label(), 15.0));
@@ -294,7 +294,7 @@ fn tooltip(ctx: &egui::Context, id: Id, pill: Rect, k: f32, reaction: Option<&Re
     let lead = if reaction.is_some() { 44.0 } else { 0.0 };
     let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, id.with("tip")));
     let who_g = painter.layout_job(Txt::new(who, 13.0).weight(weight::SEMIBOLD).line_height(18.0).job(max_w - 28.0 - lead));
-    let with_g = painter.layout_job(Txt::new(with, 12.0).color(theme::FG_3).job(max_w - 28.0 - lead));
+    let with_g = painter.layout_job(Txt::new(with, 12.0).color(theme::fg_3()).job(max_w - 28.0 - lead));
     let text_w = who_g.size().x.max(with_g.size().x);
     let size = vec2(text_w + 28.0 + lead, (who_g.size().y + 4.0 + with_g.size().y).max(if reaction.is_some() { 32.0 } else { 0.0 }) + 22.0);
     let screen = ctx.content_rect().shrink(8.0);
@@ -316,7 +316,7 @@ fn tooltip(ctx: &egui::Context, id: Id, pill: Rect, k: f32, reaction: Option<&Re
             Some(tex) => {
                 p.image(tex.id(), Rect::from_center_size(c, vec2(32.0, 32.0)), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
-            None if r.emoji.id.is_some() => widgets::icon(&p, c, icons::SMILEY, 26.0, theme::FG_2),
+            None if r.emoji.id.is_some() => widgets::icon(&p, c, icons::SMILEY, 26.0, theme::fg_2()),
             None => {
                 widgets::text(&p, c, Align2::CENTER_CENTER, &Txt::new(r.emoji.label(), 26.0));
             }
@@ -325,8 +325,8 @@ fn tooltip(ctx: &egui::Context, id: Id, pill: Rect, k: f32, reaction: Option<&Re
     }
     let top = rect.top() + 11.0;
     let wh = who_g.size().y;
-    p.galley(pos2(x, top), who_g, theme::FG);
-    p.galley(pos2(x, top + wh + 4.0), with_g, theme::FG_3);
+    p.galley(pos2(x, top), who_g, theme::fg());
+    p.galley(pos2(x, top + wh + 4.0), with_g, theme::fg_3());
     if a < 1.0 {
         ctx.request_repaint();
     }
@@ -344,7 +344,7 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
     // The heading: how many, and the message on Discord.
     let (head, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
     let pa = ui.painter().clone();
-    widgets::text(&pa, pos2(head.left(), head.center().y), Align2::LEFT_CENTER, &Txt::new(heading(total), 12.0).weight(weight::SEMIBOLD).color(theme::FG_3));
+    widgets::text(&pa, pos2(head.left(), head.center().y), Align2::LEFT_CENTER, &Txt::new(heading(total), 12.0).weight(weight::SEMIBOLD).color(theme::fg_3()));
     if let Some(link) = ready.and_then(|r| r.discord_link()) {
         let br = Rect::from_min_size(pos2(head.right() - 32.0, head.top()), vec2(32.0, 32.0));
         let id = wid.with("replies-discord");
@@ -360,7 +360,7 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
     match phase {
         Some(Phase::Failed(why)) => {
             let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
-            let said = Txt::new(tr!("The replies could not be read: {why}", why = tr(why)), 12.5).color(theme::FG_2);
+            let said = Txt::new(tr!("The replies could not be read: {why}", why = tr(why)), 12.5).color(theme::fg_2());
             let b = Button::new(tr("Try again")).icon(icons::ARROW_CLOCKWISE).size(Size::Sm).variant(Variant::Secondary).id_salt(wid.with("replies-retry"));
             let bw = b.desired_width(ui);
             widgets::text_truncated(ui.painter(), pos2(r.left(), r.center().y), Align2::LEFT_CENTER, &said, w - bw - 12.0);
@@ -376,14 +376,14 @@ fn replies_list(ui: &mut Ui, wid: Id, p: &community::Picture, phase: Option<&Pha
             if replies.more() > 0 {
                 if let Some(link) = replies.discord_link() {
                     ui.add_space(10.0);
-                    let t = Txt::new(tr!("{count} more on Discord", count = replies.more()), 12.5).weight(weight::SEMIBOLD).color(theme::ACCENT);
+                    let t = Txt::new(tr!("{count} more on Discord", count = replies.more()), 12.5).weight(weight::SEMIBOLD).color(theme::accent());
                     let tw = widgets::text_size(ui, &t).x;
                     let (r, _) = ui.allocate_exact_size(vec2(w, 20.0), Sense::hover());
                     let lr = Rect::from_min_size(pos2(r.left() + AVATAR + 10.0, r.top()), vec2(tw, 20.0));
                     let resp = ui.interact(lr, wid.with("replies-more"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                     widgets::text(ui.painter(), pos2(lr.left(), lr.center().y), Align2::LEFT_CENTER, &t);
                     if resp.hovered() {
-                        ui.painter().hline(lr.x_range(), lr.bottom() - 1.0, egui::Stroke::new(1.0, theme::ACCENT));
+                        ui.painter().hline(lr.x_range(), lr.bottom() - 1.0, egui::Stroke::new(1.0, theme::accent()));
                     }
                     if widgets::activated(&resp) {
                         *open_url = Some(link.to_string());
@@ -431,7 +431,7 @@ fn reply(ui: &mut Ui, id: Id, row: &Row, pictures: &mut Pictures, open_url: &mut
         for (part, rect) in [("avatar", ar), ("name", nr)] {
             let resp = ui.interact(rect, id.with(part), Sense::click()).on_hover_text(tr!("{name} on Orbiters", name = row.name)).on_hover_cursor(CursorIcon::PointingHand);
             if part == "name" && resp.hovered() {
-                pa.hline(nr.x_range(), nr.bottom(), egui::Stroke::new(1.0, theme::FG));
+                pa.hline(nr.x_range(), nr.bottom(), egui::Stroke::new(1.0, theme::fg()));
             }
             if widgets::activated(&resp) {
                 *open_url = Some(profile.clone());
@@ -440,7 +440,7 @@ fn reply(ui: &mut Ui, id: Id, row: &Row, pictures: &mut Pictures, open_url: &mut
     }
     let when = if row.edited { tr!("{when} · edited", when = row.when) } else { row.when.clone() };
     if !when.trim().is_empty() {
-        let tr = widgets::text(&pa, pos2(nr.right() + 8.0, r.top() + 8.0), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::FG_3));
+        let tr = widgets::text(&pa, pos2(nr.right() + 8.0, r.top() + 8.0), Align2::LEFT_CENTER, &Txt::new(when, 11.5).color(theme::fg_3()));
         if !row.when_full.is_empty() {
             ui.interact(tr, id.with("when"), Sense::hover()).on_hover_text(&row.when_full);
         }
@@ -450,22 +450,22 @@ fn reply(ui: &mut Ui, id: Id, row: &Row, pictures: &mut Pictures, open_url: &mut
         let br = Rect::from_min_size(pos2(r.left() + x, y), vec2((g.size().x + 24.0).min(bubble_w), bubble_h));
         // The website's chat bubble: filled, its corner by their picture tighter.
         pa.rect_filled(br, CornerRadius { nw: 6, ne: 16, sw: 16, se: 16 }, theme::white(0.06));
-        pa.galley(pos2(br.left() + 12.0, br.top() + 7.0), g, theme::FG);
+        pa.galley(pos2(br.left() + 12.0, br.top() + 7.0), g, theme::fg());
         y = br.bottom();
     }
     if !row.extras.is_empty() {
         let mut cx = r.left() + x;
         let cy = y + 6.0;
         for (glyph, label) in &row.extras {
-            let t = Txt::new(label, 11.5).color(theme::FG_2);
+            let t = Txt::new(label, 11.5).color(theme::fg_2());
             let tw = widgets::text_size(ui, &t).x.min(180.0);
             let cw = tw + 34.0;
             if cx + cw > r.right() {
                 break;
             }
             let cr = Rect::from_min_size(pos2(cx, cy), vec2(cw, 24.0));
-            pa.rect_filled(cr, theme::radius(12.0), theme::alpha(theme::FG_3, 0.14));
-            widgets::icon(&pa, pos2(cr.left() + 13.0, cr.center().y), glyph, 12.0, theme::FG_2);
+            pa.rect_filled(cr, theme::radius(12.0), theme::alpha(theme::fg_3(), 0.14));
+            widgets::icon(&pa, pos2(cr.left() + 13.0, cr.center().y), glyph, 12.0, theme::fg_2());
             widgets::text_truncated(&pa, pos2(cr.left() + 24.0, cr.center().y), Align2::LEFT_CENTER, &t, tw);
             cx += cw + 6.0;
         }

@@ -145,14 +145,14 @@ pub fn dropdown(
     if !enabled {
         p.multiply_opacity(0.45);
     }
-    p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(theme::control(), theme::INK_600, hover));
+    p.rect_filled(r, theme::radius(r.height() * 0.5), theme::mix(theme::control(), theme::ink_600(), hover));
     text_truncated(&p, pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(value, 12.5).weight(weight::MEDIUM), r.width() - 14.0 - 30.0);
     // The caret turns over while the list is open.
     let c = pos2(r.right() - 16.0, r.center().y);
     let k = flip.clamp(-0.2, 1.2);
     let s = 3.6;
     let dy = s * 0.5 * (1.0 - 2.0 * k);
-    p.line(vec![pos2(c.x - s, c.y - dy), pos2(c.x, c.y + dy), pos2(c.x + s, c.y - dy)], egui::Stroke::new(1.6, theme::FG_2));
+    p.line(vec![pos2(c.x - s, c.y - dy), pos2(c.x, c.y + dy), pos2(c.x + s, c.y - dy)], egui::Stroke::new(1.6, theme::fg_2()));
     if enabled {
         resp.on_hover_cursor(CursorIcon::PointingHand);
     }
@@ -174,8 +174,8 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
     let press = anim::toggle(&ctx, id.with("press"), resp.is_pointer_button_down_on(), Spring::SNAPPY);
     let r = Rect::from_center_size(rect.center(), rect.size() * (1.0 - 0.1 * press) * morph::bounce(&ctx, rect));
     let p = ui.painter();
-    p.circle_filled(r.center(), r.width() * 0.5, theme::mix(theme::control(), theme::INK_600, hover));
-    icon(p, r.center(), glyph, 17.0, theme::mix(theme::FG_2, theme::FG, hover));
+    p.circle_filled(r.center(), r.width() * 0.5, theme::mix(theme::control(), theme::ink_600(), hover));
+    icon(p, r.center(), glyph, 17.0, theme::mix(theme::fg_2(), theme::fg(), hover));
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(label);
     list(&ctx, id, rect, items, None, menu_width(ui, items), false)
 }
@@ -305,13 +305,13 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
                 }
                 let chosen = selected == Some(i);
                 let fg = if item.disabled {
-                    theme::FG_4
+                    theme::fg_4()
                 } else if item.danger {
                     theme::DANGER
                 } else if chosen {
-                    theme::FG
+                    theme::fg()
                 } else {
-                    theme::mix(theme::FG_2, theme::FG, hover)
+                    theme::mix(theme::fg_2(), theme::fg(), hover)
                 };
                 let mut x = r.left() + 10.0;
                 if let Some(color) = item.dot {
@@ -327,10 +327,10 @@ fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected:
                 let weight = if chosen { weight::SEMIBOLD } else { weight::REGULAR };
                 text_truncated(p, pos2(x, r.center().y), Align2::LEFT_CENTER, &Txt::new(item.label, 13.0).weight(weight).color(fg), right - x - detail_w);
                 if let Some(d) = item.detail {
-                    text(p, pos2(right, r.center().y), Align2::RIGHT_CENTER, &Txt::new(d, 11.5).color(theme::FG_3));
+                    text(p, pos2(right, r.center().y), Align2::RIGHT_CENTER, &Txt::new(d, 11.5).color(theme::fg_3()));
                 }
                 if chosen {
-                    icon(p, pos2(r.right() - 18.0, r.center().y), icons::CHECK, 14.0, theme::ACCENT);
+                    icon(p, pos2(r.right() - 18.0, r.center().y), icons::CHECK, 14.0, theme::accent());
                 }
                 if live {
                     resp.on_hover_cursor(CursorIcon::PointingHand);
@@ -380,7 +380,7 @@ mod tests {
             ("Demande-moi", "Tes amis demandent avant de venir"),
             ("Occupé", "Ni invitations ni demandes"),
         ];
-        let items: Vec<Item> = rows.into_iter().map(|(l, d)| Item::new(l).detail(d).dot(theme::ACCENT)).collect();
+        let items: Vec<Item> = rows.into_iter().map(|(l, d)| Item::new(l).detail(d).dot(theme::accent())).collect();
         let anchor = Rect::from_min_size(pos2(40.0, 40.0), vec2(110.0, 28.0));
         let mut cut = Vec::new();
         let mut texts = 0;
@@ -416,7 +416,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::install(&ctx);
         let id = Id::unique("a-status-list");
-        let colours = [theme::BLUE, theme::ACCENT, theme::WARN, theme::DANGER];
+        let colours = [theme::BLUE, theme::accent(), theme::WARN, theme::DANGER];
         let items: Vec<Item> = ["Join me", "Online", "Ask me", "Busy"].into_iter().zip(colours).map(|(l, c)| Item::new(l).detail("what it means").dot(c)).collect();
         let anchor = Rect::from_min_size(pos2(40.0, 40.0), vec2(110.0, 28.0));
         let mut dots = Vec::new();

@@ -205,7 +205,7 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
             Some(f) => tr!("{held} · {size} free on the drive", held = held, size = format::bytes(f as f64)),
             None => held,
         };
-        widgets::text_truncated(&painter, pos2(x, rect.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::FG_3), w);
+        widgets::text_truncated(&painter, pos2(x, rect.top() + 50.0), Align2::LEFT_CENTER, &Txt::new(sub, 12.0).color(theme::fg_3()), w);
         let bar = Rect::from_min_size(pos2(x, rect.top() + 72.0), vec2(w, 10.0));
         stacked_bar(ui, id.with("bar"), bar, ov, whole);
         let top = bar.bottom() + 24.0;
@@ -248,9 +248,9 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
         // What each part is, counted; a part with nothing in it says so.
         let rows = [
             match ov.trim.len() {
-                0 => (theme::ACCENT, tr("Capture files that can go").to_string(), tr("None now"), 0),
+                0 => (theme::accent(), tr("Capture files that can go").to_string(), tr("None now"), 0),
                 n => (
-                    theme::ACCENT,
+                    theme::accent(),
                     tr_n("Capture files of {count} reconstructed capture", "Capture files of {count} reconstructed captures", n as u64),
                     tr("Frames, depth and sound: only reconstructing again needs them"),
                     ov.trim_bytes,
@@ -267,10 +267,10 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
             },
             // Sessions in use (recorded, reconstructed) stay with the views for now.
             match (ov.views, ov.busy_bytes) {
-                (0, 0) => (theme::FG_4, tr("3D views").to_string(), tr("None yet"), 0),
-                (0, busy) => (theme::FG_4, tr("In use").to_string(), tr("Being recorded or reconstructed: they stay"), busy),
+                (0, 0) => (theme::fg_4(), tr("3D views").to_string(), tr("None yet"), 0),
+                (0, busy) => (theme::fg_4(), tr("In use").to_string(), tr("Being recorded or reconstructed: they stay"), busy),
                 (n, _) => (
-                    theme::FG_4,
+                    theme::fg_4(),
                     tr_n("3D view of {count} capture", "3D views of {count} captures", n as u64),
                     tr("Splats, previews and camera paths: they stay"),
                     ov.view_bytes + ov.busy_bytes,
@@ -291,7 +291,7 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
                 &painter,
                 pos2(r.left() + 18.0, r.top() + 30.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(*detail, 11.5).color(theme::FG_3),
+                &Txt::new(*detail, 11.5).color(theme::fg_3()),
                 r.width() - 18.0,
             );
             widgets::text(
@@ -311,7 +311,7 @@ pub fn popover(ctx: &egui::Context, snap: &Snapshot, p: &mut Popover, ov: &Overv
                 &painter,
                 pos2(row.left(), row.top() + 33.0),
                 Align2::LEFT_CENTER,
-                &Txt::new(tr!("{size}: nothing of them stays", size = format::bytes(ov.unviewed_bytes as f64)), 11.5).color(theme::FG_3),
+                &Txt::new(tr!("{size}: nothing of them stays", size = format::bytes(ov.unviewed_bytes as f64)), 11.5).color(theme::fg_3()),
                 w - 64.0,
             );
             let mut sw = ui.new_child(
@@ -361,7 +361,7 @@ fn stacked_bar(ui: &Ui, id: Id, rect: Rect, ov: &Overview, whole: bool) {
     let unviewed = theme::alpha(theme::WARN, if whole { 1.0 } else { 0.45 });
     let mut x = rect.left();
     let clip = p.with_clip_rect(rect.intersect(p.clip_rect()));
-    for (bytes, color) in [(ov.trim_bytes, theme::ACCENT), (ov.unviewed_bytes, unviewed), (ov.view_bytes + ov.busy_bytes, theme::INK_600)] {
+    for (bytes, color) in [(ov.trim_bytes, theme::accent()), (ov.unviewed_bytes, unviewed), (ov.view_bytes + ov.busy_bytes, theme::ink_600())] {
         let w = rect.width() * bytes as f32 / total * k;
         if w < 0.5 {
             continue;
@@ -387,23 +387,23 @@ fn running(ui: &Ui, id: Id, rect: Rect, job: &CleanupJob) {
         p,
         pos2(rect.right(), rect.top() + 10.0),
         Align2::RIGHT_CENTER,
-        &Txt::new(freed, 13.0).color(theme::FG_2),
+        &Txt::new(freed, 13.0).color(theme::fg_2()),
     );
     let bar = Rect::from_min_size(pos2(rect.left(), rect.top() + 32.0), vec2(rect.width(), 6.0));
     let f = anim::spring_from(ui.ctx(), id.with("job"), [0.0], [job.fraction()], Spring::SOFT)[0].clamp(0.0, 1.0);
     p.rect_filled(bar, theme::radius(3.0), theme::white(0.08));
-    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::ACCENT);
+    p.rect_filled(Rect::from_min_size(bar.min, vec2((bar.width() * f).max(6.0), 6.0)), theme::radius(3.0), theme::accent());
     let doing = match &job.current {
         Some((dir, true)) => tr!("Deleting {name}", name = format::folder_name(dir)),
         Some((dir, false)) => tr!("Keeping only the 3D view of {name}", name = format::folder_name(dir)),
         None => tr("Starting").to_string(),
     };
-    widgets::text_truncated(p, pos2(rect.left(), rect.top() + 58.0), Align2::LEFT_CENTER, &Txt::new(doing, 12.0).color(theme::FG_3), rect.width());
+    widgets::text_truncated(p, pos2(rect.left(), rect.top() + 58.0), Align2::LEFT_CENTER, &Txt::new(doing, 12.0).color(theme::fg_3()), rect.width());
     widgets::text_truncated(
         p,
         pos2(rect.left(), rect.top() + 80.0),
         Align2::LEFT_CENTER,
-        &Txt::new(tr_n("{count} session left · it goes on with the window closed", "{count} sessions left · it goes on with the window closed", left as u64), 12.0).color(theme::FG_4),
+        &Txt::new(tr_n("{count} session left · it goes on with the window closed", "{count} sessions left · it goes on with the window closed", left as u64), 12.0).color(theme::fg_4()),
         rect.width(),
     );
 }
@@ -415,7 +415,7 @@ fn goes(p: &Painter, rect: Rect, glyph: &str, label: &str, detail: &str, bytes: 
     p.rect_filled(tile, theme::radius(11.0), theme::alpha(theme::DANGER, 0.12));
     widgets::icon(p, tile.center(), glyph, 16.0, theme::DANGER);
     let x = tile.right() + 12.0;
-    let mut job = Txt::new(detail, 11.5).color(theme::FG_3).line_height(16.0).job(rect.right() - 14.0 - x);
+    let mut job = Txt::new(detail, 11.5).color(theme::fg_3()).line_height(16.0).job(rect.right() - 14.0 - x);
     job.wrap.max_rows = 2;
     let g = p.layout_job(job);
     // The label over its detail, the two centred in the row; the size on the label's line.
@@ -423,7 +423,7 @@ fn goes(p: &Painter, rect: Rect, glyph: &str, label: &str, detail: &str, bytes: 
     let size = Txt::new(format::bytes(bytes as f64), 13.0).weight(weight::SEMIBOLD);
     let size_r = widgets::text(p, pos2(rect.right() - 14.0, top + 9.0), Align2::RIGHT_CENTER, &size);
     widgets::text_truncated(p, pos2(x, top + 9.0), Align2::LEFT_CENTER, &Txt::new(label, 13.0).weight(weight::MEDIUM), size_r.left() - x - 12.0);
-    p.galley(pos2(x, top + 18.0), g, theme::FG_3);
+    p.galley(pos2(x, top + 18.0), g, theme::fg_3());
 }
 
 /// The note every confirmation ends with, in the language now (read where it is drawn).
@@ -436,14 +436,14 @@ fn note_text() -> &'static str {
 }
 
 fn note_height(ctx: &egui::Context) -> f32 {
-    ctx.fonts_mut(|f| f.layout_job(Txt::new(note_text(), 12.0).color(theme::FG_3).line_height(18.0).job(POPOVER_W - 40.0)).size().y)
+    ctx.fonts_mut(|f| f.layout_job(Txt::new(note_text(), 12.0).color(theme::fg_3()).line_height(18.0).job(POPOVER_W - 40.0)).size().y)
 }
 
 /// The note every confirmation ends with; returns its height.
 fn note(p: &Painter, at: egui::Pos2, width: f32) -> f32 {
-    let g = p.layout_job(Txt::new(note_text(), 12.0).color(theme::FG_3).line_height(18.0).job(width));
+    let g = p.layout_job(Txt::new(note_text(), 12.0).color(theme::fg_3()).line_height(18.0).job(width));
     let h = g.size().y;
-    p.galley(at, g, theme::FG_3);
+    p.galley(at, g, theme::fg_3());
     h
 }
 
@@ -520,21 +520,21 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
     let lead_h = ui.painter().layout_job(Txt::new(lead, 12.5).line_height(19.0).job(w - 48.0)).size().y;
     let h = 24.0 + 36.0 + 14.0 + lead_h + 16.0 + rows as f32 * 52.0 + 4.0 + note_h + 20.0 + 40.0 + 24.0;
     let p = ui.painter().clone();
-    p.with_clip_rect(over).rect_filled(over, theme::radius(28.0), theme::alpha(theme::INK_950, 0.55 * k.clamp(0.0, 1.0)));
+    p.with_clip_rect(over).rect_filled(over, theme::radius(28.0), theme::alpha(theme::ink_950(), 0.55 * k.clamp(0.0, 1.0)));
     let base = Rect::from_center_size(over.center(), vec2(w, h));
     let dialog = Rect::from_center_size(base.center() + vec2(0.0, 16.0 * (1.0 - k)), base.size() * (0.94 + 0.06 * k));
     let mut dp = p.clone();
     dp.multiply_opacity(k.clamp(0.0, 1.0));
     widgets::panel(&dp, dialog, 24.0);
     let tile = Rect::from_min_size(dialog.min + vec2(24.0, 24.0), vec2(36.0, 36.0));
-    dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::ACCENT, 0.12));
-    widgets::icon(&dp, tile.center(), icons::BROOM, 18.0, theme::ACCENT);
+    dp.rect_filled(tile, theme::radius(12.0), theme::alpha(theme::accent(), 0.12));
+    widgets::icon(&dp, tile.center(), icons::BROOM, 18.0, theme::accent());
     widgets::text(&dp, pos2(tile.right() + 12.0, tile.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Keep only the 3D view?"), 16.0).weight(weight::SEMIBOLD));
     let x = dialog.left() + 24.0;
     let iw = dialog.width() - 48.0;
     let mut y = tile.bottom() + 14.0;
-    let g = dp.layout_job(Txt::new(lead, 12.5).color(theme::FG_2).line_height(19.0).job(iw));
-    dp.galley(pos2(x, y), g, theme::FG_2);
+    let g = dp.layout_job(Txt::new(lead, 12.5).color(theme::fg_2()).line_height(19.0).job(iw));
+    dp.galley(pos2(x, y), g, theme::fg_2());
     y += lead_h + 16.0;
     match &parts {
         Some(parts) if !parts.is_empty() => {
@@ -545,7 +545,7 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
             }
         }
         Some(_) => {
-            widgets::text(&dp, pos2(x, y + 20.0), Align2::LEFT_CENTER, &Txt::new(tr("No capture files are left in this session."), 12.5).color(theme::FG_3));
+            widgets::text(&dp, pos2(x, y + 20.0), Align2::LEFT_CENTER, &Txt::new(tr("No capture files are left in this session."), 12.5).color(theme::fg_3()));
             y += 52.0;
         }
         None => {
@@ -593,10 +593,10 @@ pub fn trim_dialog(ui: &mut Ui, d: &mut TrimDialog, over: Rect, capture_bytes: u
 pub fn view_only(p: &Painter, rect: Rect, cleaning: bool) {
     p.rect_filled(rect, theme::radius(rect.height() * 0.5), theme::surface_soft());
     let (glyph, text) = if cleaning { (icons::BROOM, tr("Deleting its capture files…")) } else { (icons::CUBE_FOCUS, tr("3D view only: capture files deleted")) };
-    let t = Txt::new(text, 13.0).weight(weight::MEDIUM).color(theme::FG_3);
+    let t = Txt::new(text, 13.0).weight(weight::MEDIUM).color(theme::fg_3());
     let tw = p.layout_job(t.job(f32::INFINITY)).size().x;
     let x = rect.center().x - (tw + 15.0 + 8.0) * 0.5;
-    widgets::icon(p, pos2(x + 7.5, rect.center().y), glyph, 15.0, theme::FG_3);
+    widgets::icon(p, pos2(x + 7.5, rect.center().y), glyph, 15.0, theme::fg_3());
     widgets::text(p, pos2(x + 23.0, rect.center().y), Align2::LEFT_CENTER, &t);
 }
 

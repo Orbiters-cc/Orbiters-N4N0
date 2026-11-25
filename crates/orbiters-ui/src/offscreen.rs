@@ -5,6 +5,11 @@ use anyhow::Context as _;
 use egui::{ColorImage, RawInput};
 use egui_wgpu::wgpu;
 
+/// A GPU request's answer, waited for (the bench, which makes its own device).
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    pollster::block_on(f)
+}
+
 pub struct Offscreen {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -41,6 +46,7 @@ impl Offscreen {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions { msaa_samples: 1, dithering: true, ..Default::default() });
         crate::install_wgpu(&device, format, 1, &mut renderer.callback_resources);
+        crate::background::at_once(&mut renderer.callback_resources);
         Ok(Self { adapter, device, queue, renderer: std::sync::Arc::new(egui::mutex::RwLock::new(renderer)), format })
     }
 

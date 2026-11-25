@@ -149,7 +149,7 @@ pub fn paint_beam(p: &egui::Painter) {
     let (w, h) = (BEAM_PX[0] as f32, BEAM_PX[1] as f32);
     let strip = |x0: f32, x1: f32, far: f32, near: f32| {
         let mut mesh = egui::Mesh::default();
-        let (top, bottom) = (theme::alpha(theme::ACCENT, far), theme::alpha(theme::ACCENT, near));
+        let (top, bottom) = (theme::alpha(theme::accent(), far), theme::alpha(theme::accent(), near));
         mesh.colored_vertex(pos2(x0, 0.0), top);
         mesh.colored_vertex(pos2(x1, 0.0), top);
         mesh.colored_vertex(pos2(x1, h), bottom);
@@ -166,7 +166,7 @@ pub fn paint_beam(p: &egui::Painter) {
 pub fn paint_dot(p: &egui::Painter) {
     let c = DOT_PX as f32 / 2.0;
     let rect = Rect::from_center_size(pos2(c, c), vec2(DOT_PX as f32, DOT_PX as f32));
-    p.circle_filled(rect.center(), c - 6.0, theme::ACCENT);
+    p.circle_filled(rect.center(), c - 6.0, theme::accent());
     p.circle_stroke(rect.center(), c - 4.0, Stroke::new(4.0, Color32::from_black_alpha(150)));
     p.circle_filled(rect.center(), c * 0.32, theme::white(0.85));
 }

@@ -948,7 +948,7 @@ pub struct Panels {
     audio_outputs: Vec<orbiters_core::settings::AudioEndpoint>,
     audio_outputs_coming: Option<mpsc::Receiver<Vec<orbiters_core::settings::AudioEndpoint>>>,
     /// What was last taken as how the parts look.
-    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>, Option<orbiters_i18n::Language>, orbiters_i18n::Language)>,
+    style_seen: Option<(orbiters_core::settings::OrbitSettings, Option<String>, Option<orbiters_i18n::Language>, orbiters_i18n::Language, (u32, u32))>,
     /// A capture turning on the sheet, on the desktop: its view, its newest picture not painted yet, what it has been painted with, and the hand on it.
     sheet_view: Option<sheet_view::SheetView>,
     view_frame: Option<sheet_view::Frame>,
@@ -2286,7 +2286,8 @@ impl Panels {
         }
         // What is chosen in Settings: from now on, all of it painted again. A colour held on the bar is what shows until it is let go.
         crate::language::follow(&snap.settings);
-        let style = (snap.settings.orbit, snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()), crate::language::chosen(&snap.settings), orbiters_i18n::language());
+        crate::appearance::follow(&snap.settings, || {});
+        let style = (crate::appearance::orbit(&snap.settings), snap.settings.vr_audio.output.as_ref().map(|e| e.name.clone()), crate::language::chosen(&snap.settings), orbiters_i18n::language(), crate::appearance::drawn_in());
         if self.style_seen.as_ref() != Some(&style) && self.hue_held.is_none() {
             panels::set_style(&style.0);
             self.style_seen = Some(style);
@@ -2576,7 +2577,7 @@ impl Panels {
             strip_caption: self.list.iter().any(|p| p.zone == Zone::QmStrip),
             // While a colour is held on the bar, that one.
             orbit: {
-                let mut orbit = snap.settings.orbit;
+                let mut orbit = crate::appearance::orbit(&snap.settings);
                 if self.hue_held.is_some() {
                     (orbit.accent, orbit.retro_color) = (self.facts.orbit.accent, self.facts.orbit.retro_color);
                 }
@@ -3214,7 +3215,7 @@ impl Panels {
     fn set(&mut self, pick: panels::Pick, snap: &Snapshot) {
         use orbiters_core::settings::MenuLook;
         let retro = snap.settings.orbit.theme == MenuLook::Retro;
-        let colour = |c: [u8; 3]| if retro { serde_json::json!({ "orbit": { "retro_color": c } }) } else { serde_json::json!({ "orbit": { "accent": c } }) };
+        let colour = |c: [u8; 3]| if retro { serde_json::json!({ "orbit": { "retro_color": c } }) } else { serde_json::json!({ "orbit": { "accent": c, "accent_own": true } }) };
         let patch = match pick {
             panels::Pick::Layout(layout) => serde_json::json!({ "orbit": { "layout": layout } }),
             panels::Pick::Motion(motion) => serde_json::json!({ "orbit": { "vr_motion": motion } }),
@@ -3828,7 +3829,7 @@ impl Panels {
         self.booster_held = None;
         self.smoothing_held = None;
         if self.hue_held.take().is_some() {
-            let saved = self.backend.view().settings.orbit;
+            let saved = crate::appearance::orbit(&self.backend.view().settings);
             self.facts.orbit = saved;
             panels::set_style(&saved);
             self.paint_all_again();
@@ -3897,8 +3898,8 @@ impl Panels {
                 self.show_hue(colour);
                 self.hue_held = None;
             }
-            let key = if self.facts.orbit.theme == MenuLook::Retro { "retro_color" } else { "accent" };
-            self.backend.patch_settings(serde_json::json!({ "orbit": { key: colour } }));
+            let patch = if self.facts.orbit.theme == MenuLook::Retro { serde_json::json!({ "retro_color": colour }) } else { serde_json::json!({ "accent": colour, "accent_own": true }) };
+            self.backend.patch_settings(serde_json::json!({ "orbit": patch }));
         }
         if self.turning.take().is_some() {
             if let Some(view) = &self.sheet_view {
@@ -4735,16 +4736,16 @@ pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
     use orbiters_ui::{icons, theme, widgets};
     let area = egui::Rect::from_min_max(pos2(0.0, KEYS_TOP), pos2(layout::WIDTH as f32, layout::HEIGHT as f32));
     p.rect_filled(area, 0.0, panels::look::OPAQUE);
-    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, tr("Type on your keyboard"), theme::font(22.0, theme::weight::BOLD), panels::look::LABEL);
-    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, tr("Enter searches"), theme::font(15.0, theme::weight::MEDIUM), panels::look::MUTED);
+    widgets::icon(p, area.center() - vec2(0.0, 26.0), icons::KEYBOARD, 56.0, panels::look::label());
+    p.text(area.center() + vec2(0.0, 24.0), egui::Align2::CENTER_CENTER, tr("Type on your keyboard"), theme::font(22.0, theme::weight::BOLD), panels::look::label());
+    p.text(area.center() + vec2(0.0, 54.0), egui::Align2::CENTER_CENTER, tr("Enter searches"), theme::font(15.0, theme::weight::MEDIUM), panels::look::muted());
     // What the world's player has now, which is what a search here would replace.
     if let Some(title) = playing {
         let row = egui::Rect::from_center_size(pos2(area.center().x, area.bottom() - 42.0), vec2(area.width() - 96.0, 56.0));
         p.rect_filled(row, theme::radius(10.0), panels::look::TILE);
-        widgets::icon(p, pos2(row.left() + 30.0, row.center().y), icons::MONITOR_PLAY, 26.0, panels::look::LABEL);
+        widgets::icon(p, pos2(row.left() + 30.0, row.center().y), icons::MONITOR_PLAY, 26.0, panels::look::label());
         let font = theme::font(13.0, theme::weight::SEMIBOLD);
-        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, tr("In this world's player"), font, panels::look::MUTED);
+        p.text(pos2(row.left() + 56.0, row.center().y - 11.0), egui::Align2::LEFT_CENTER, tr("In this world's player"), font, panels::look::muted());
         let font = theme::font(16.0, theme::weight::SEMIBOLD);
         let room = row.width() - 72.0;
         let mut shown = title.to_string();
@@ -4754,7 +4755,7 @@ pub(crate) fn type_hint(p: &egui::Painter, playing: Option<&str>) {
             shown.pop();
             shown.push('…');
         }
-        p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::LABEL);
+        p.text(pos2(row.left() + 56.0, row.center().y + 11.0), egui::Align2::LEFT_CENTER, shown, font, panels::look::label());
     }
 }
 

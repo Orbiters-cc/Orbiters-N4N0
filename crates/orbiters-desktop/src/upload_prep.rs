@@ -69,8 +69,9 @@ impl Fingerprint {
 }
 
 /// What the start view's ground and eye height come from beside the sources of [`Fingerprint`]
-/// (orbiters_reconstruct::ground::INPUTS): the content of each, or that it is missing. Freeing a capture's space removes
-/// them, and a capture put back has them again: the metadata cached is then made again, as a fresh preparation would make it.
+/// (orbiters_reconstruct::ground::INPUTS): the content of each, or that it is missing. Freeing a capture's space removes the
+/// tracking and leaves what was measured from it (orbiters_core::measured); tracking can be put back, or be another's: the
+/// metadata cached is then made again, as a fresh preparation would make it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ViewInputs(Vec<Option<String>>);
 
@@ -82,6 +83,11 @@ impl ViewInputs {
             Err(e) => Err(e),
         };
         Ok(Self(orbiters_reconstruct::ground::INPUTS.into_iter().map(hash).collect::<Result<_, _>>()?))
+    }
+
+    /// Neither tracking nor anything measured from it is there: nothing to measure again from.
+    fn nothing(&self) -> bool {
+        self.0.iter().all(Option::is_none)
     }
 }
 
@@ -98,7 +104,7 @@ struct Header {
 /// What the cache answers.
 pub struct Cached {
     pub files: PreviewFiles,
-    /// The metadata, while its view's inputs are those it was made from.
+    /// The metadata, while its view's inputs are those it was made from (or none of them is left).
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -146,7 +152,10 @@ fn decode(bytes: &[u8], fingerprint: &Fingerprint, view: Option<&ViewInputs>, ke
         return None;
     }
     rekey(&mut files, key)?;
-    let same_view = view.is_some() && header.view.as_ref() == view;
+    // With nothing there to measure from, what was measured while there was something stands (tracking freed by a version that
+    // kept nothing of it): what the cache says is a fact about the recording, and a capture that never had tracking says the
+    // same of itself as it would now.
+    let same_view = view.is_some_and(|v| header.view.as_ref() == Some(v) || v.nothing());
     Some(Cached { files, metadata: same_view.then_some(header.metadata) })
 }
 
@@ -780,14 +789,17 @@ mod tests {
         let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
         let fingerprint = Fingerprint(vec![Some("fixture".into())]);
         let metadata = serde_json::json!({"quality":33.0,"view":{"position":[1,2,3]}});
-        let view = ViewInputs(vec![Some("a".into()), None, None]);
+        let view = ViewInputs(vec![Some("a".into()), None, None, None]);
         save(&dir, &fingerprint, Some(&view), &files, &metadata).unwrap();
         let Cached { files: loaded, metadata: found } = load(&dir, &fingerprint, Some(&view), 9).unwrap();
         assert_eq!(found, Some(metadata.clone()));
         // Another view's inputs, or ones that cannot be read: the trees answer, the metadata does not.
-        for other in [Some(ViewInputs(vec![None, None, None])), None] {
+        for other in [Some(ViewInputs(vec![Some("b".into()), None, None, None])), None] {
             assert!(load(&dir, &fingerprint, other.as_ref(), 9).is_some_and(|c| c.metadata.is_none()));
         }
+        // None of them left: what was measured stands.
+        let gone = ViewInputs(vec![None; 4]);
+        assert_eq!(load(&dir, &fingerprint, Some(&gone), 9).unwrap().metadata, Some(metadata.clone()));
         for (a, b) in [(&loaded.vrchat_pc, &files.vrchat_pc), (&loaded.vrchat_quest, &files.vrchat_quest), (&loaded.vrchat_coarse, &files.vrchat_coarse)] {
             assert_eq!(&a[..20], &b[..20]);
             assert_eq!(&a[20..24], &9u32.to_le_bytes());

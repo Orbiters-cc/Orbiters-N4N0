@@ -10,7 +10,7 @@
 //! `/avatar/eyeheight`, with the avatar's scale), at that moment.
 
 use crate::gaussians::{rotation_matrix, sigmoid, Gaussians};
-use orbiters_contracts::performance::{self, parameters, skeleton_frames};
+use orbiters_contracts::performance;
 use std::path::Path;
 
 /// The eye height a view uses when the session does not say: about VRChat's default avatar.
@@ -56,9 +56,9 @@ impl Ground {
     }
 }
 
-/// The files of a session [`find`] reads (each may be missing: freeing space takes them away), beside the splats and the
-/// camera it is given.
-pub const INPUTS: [&str; 3] = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE];
+/// The files of a session [`find`] reads, beside the splats and the camera it is given: the tracking (freeing space takes it
+/// away), and what was measured from it then (orbiters_core::measured). Each may be missing.
+pub const INPUTS: [&str; 4] = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE, orbiters_core::measured::FILE];
 
 /// The ground under the person at `time_ns` (the session clock; None: the start) of `session`, whose splats are `g`
 /// and whose camera stood at `camera` then.
@@ -78,26 +78,7 @@ pub fn find(session: &Path, g: &Gaussians, camera: [f32; 3], time_ns: Option<u64
     }
 }
 
-/// The avatar's eye height at `time_ns`: the last value VRChat sent before it (else the first one after), in metres.
-pub fn eye_height(session: &Path, time_ns: Option<u64>) -> Option<f32> {
-    let table: parameters::Table = serde_json::from_str(&std::fs::read_to_string(session.join(performance::PARAMETERS_TABLE)).ok()?).ok()?;
-    let changes = parameters::read(&std::fs::read(session.join(performance::PARAMETERS_FILE)).ok()?).ok()?;
-    // VRChat's built-in parameter first, then the OSC address it also sends.
-    ["EyeHeightAsMeters", "/avatar/eyeheight"].iter().find_map(|name| {
-        let id = table.parameters.iter().find(|p| p.name == *name)?.id;
-        let values: Vec<(u64, f32)> =
-            changes.iter().filter(|c| c.id == id).map(|c| (c.time_ns, c.value.as_f32())).filter(|(_, v)| v.is_finite() && (0.1..=50.0).contains(v)).collect();
-        let t = time_ns.unwrap_or(0);
-        values.iter().rev().find(|(at, _)| *at <= t).or(values.first()).map(|(_, v)| *v)
-    })
-}
-
-/// The avatar's hips (Unity world) in the capture kit's frame nearest `time_ns`.
-pub fn hips(session: &Path, time_ns: Option<u64>) -> Option<[f32; 3]> {
-    let frames = skeleton_frames::read(&std::fs::read(session.join(performance::SKELETON_FILE)).ok()?).ok()?;
-    let t = time_ns.unwrap_or(0);
-    frames.iter().filter(|f| f.hips.iter().all(|v| v.is_finite())).min_by_key(|f| f.time_ns.abs_diff(t)).map(|f| f.hips)
-}
+pub use orbiters_core::measured::{eye_height, hips};
 
 /// The height of the flat, level ground under `at`: from `below.0` to `below.1` metres below it, in the smallest of
 /// [`DISCS`] around it holding [`ENOUGH`] flat splats, the most common height (the median of the splats within a bin
@@ -201,7 +182,8 @@ mod tests {
 
     #[test]
     fn reads_the_eye_height_and_hips_of_a_session() {
-        use parameters::{Change, Kind, ParameterInfo, Table, Value};
+        use performance::parameters::{self, Change, Kind, ParameterInfo, Table, Value};
+        use performance::skeleton_frames;
         let dir = std::env::temp_dir().join(format!("orbiters-ground-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

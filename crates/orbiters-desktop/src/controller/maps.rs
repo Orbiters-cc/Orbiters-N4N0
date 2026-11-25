@@ -464,15 +464,16 @@ mod tests {
         assert!(!ctl.store_maps(second, None, &list(3)), "a fetch from before the sign-out");
     }
 
-    /// DAP-2: a preparation answered by the cache starts where a fresh one would: at the floor and eye height its tracking
-    /// gives now, removed (Free space), put back or changed, and without the trees being made again.
+    /// DAP-2: a preparation answered by the cache starts where a fresh one would, without the trees being made again: at the floor
+    /// and eye height its tracking gives, changed or put back. Freeing its space (the real one) keeps what was measured, for
+    /// the cache and for a reconstruction made after it; 1.6 m is for a capture that never had tracking.
     #[test]
     fn a_cached_preparation_starts_where_a_fresh_one_would() {
         use crate::upload_prep::{Fingerprint, ViewInputs, load, save};
         use orbiters_core::contracts::manifest;
         use orbiters_core::contracts::frame_record::{FrameRecord, record_flags};
         use orbiters_core::contracts::performance::{self, parameters, skeleton_frames};
-        use orbiters_reconstruct::gpu::DeviceOptions;
+        use orbiters_reconstruct::{gpu::DeviceOptions, ground};
         let session = std::env::temp_dir().join(format!("orbiters-prep-{}", uuid::Uuid::new_v4()));
         let result = reconstruction::dir(&session);
         std::fs::create_dir_all(&result).unwrap();
@@ -507,6 +508,9 @@ mod tests {
             std::fs::write(session.join(performance::SKELETON_FILE), [skeleton_frames::header().to_vec(), frame.to_bytes().to_vec()].concat()).unwrap();
         };
         tracking(1.1, -3.5);
+        let description = manifest::SessionManifest::new("test".into(), "2026-11-25T00:00:00Z".into(), "0");
+        std::fs::write(session.join(manifest::MANIFEST_FILE), serde_json::to_vec(&description).unwrap()).unwrap();
+        std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&reconstruction::Report::default()).unwrap()).unwrap();
         let tree_fixture = || {
             let mut bytes = orbiters_reconstruct::tree::MAGIC.to_vec();
             bytes.extend_from_slice(&orbiters_reconstruct::tree::VERSION.to_le_bytes());
@@ -526,18 +530,44 @@ mod tests {
         assert_eq!(prepared().metadata, fresh());
         let eye = |m: &serde_json::Value| (m["view"]["eyeHeight"].as_f64().unwrap() * 100.0).round();
         assert_eq!(eye(&fresh()), 110.0);
-        // Another avatar's tracking put back over it; all of it removed; the first put back: each time the fresh answer, kept
-        // with the trees, which are the same.
-        let taken = || orbiters_reconstruct::ground::INPUTS.iter().for_each(|f| std::fs::remove_file(session.join(f)).unwrap());
-        let cases: [(&str, &dyn Fn(), f64); 4] = [("changed", &|| tracking(2.0, -3.2), 200.0), ("removed", &taken, 160.0), ("put back", &|| tracking(1.1, -3.5), 110.0), ("no skeleton", &|| std::fs::remove_file(session.join(performance::SKELETON_FILE)).unwrap(), 110.0)];
-        for (what, change, height) in cases {
-            change();
+        // Another avatar's tracking put back over it, then the first's: each time the fresh answer, kept with the trees, which
+        // are the same.
+        let check = |what: &str, height: f64| {
             let p = prepared();
             assert_eq!(p.metadata, fresh(), "{what}");
             assert_eq!(eye(&p.metadata), height, "{what}");
             assert_eq!(p.files.vrchat_pc.len(), trees.vrchat_pc.len(), "{what}: the trees cached");
             assert_eq!(cached(), p.metadata, "{what}: kept for the next share");
-        }
+            p.metadata
+        };
+        tracking(2.0, -3.2);
+        check("changed", 200.0);
+        tracking(1.1, -3.5);
+        let measured = check("put back", 110.0);
+        // Free space: the tracking goes, where the view starts does not.
+        let streams = [performance::PARAMETERS_TABLE, performance::PARAMETERS_FILE, performance::SKELETON_FILE];
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        assert!(streams.iter().all(|f| !session.join(f).exists()) && session.join(orbiters_core::measured::FILE).is_file());
+        assert_eq!(check("freed", 110.0), measured);
+        assert_eq!(ground::find(&session, &g, [0.0, -3.0, 0.0], Some(1_000_000_000)).source, ground::Source::Hips, "its hips too");
+        // And again (nothing left to measure), and with no cache at all.
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        assert_eq!(check("freed again", 110.0), measured);
+        assert_eq!(fresh(), measured);
+
+        // Freed by a version that kept nothing: what its cache measured stands.
+        std::fs::remove_file(session.join(orbiters_core::measured::FILE)).unwrap();
+        assert_eq!(eye(&prepared().metadata), 110.0, "measured while its tracking was there");
+        // The same from a cache of before its inputs were recorded.
+        save(&result, &Fingerprint::read(&session, &result).unwrap(), None, &trees, &measured).unwrap();
+        assert_eq!(prepared().metadata, measured);
+        // A capture that never had tracking, freed or not: the fallback (and a new result, so no cache of another).
+        std::fs::write(result.join(reconstruction::REPORT_FILE), serde_json::to_vec(&reconstruction::Report { gaussians: 1, ..Default::default() }).unwrap()).unwrap();
+        save(&result, &Fingerprint::read(&session, &result).unwrap(), Some(&ViewInputs::read(&session).unwrap()), &trees, &fresh()).unwrap();
+        check("never tracked", 160.0);
+        orbiters_core::cleanup::keep_only_view(&session, &mut |_| {}).unwrap();
+        check("never tracked, freed", 160.0);
+        assert!(!session.join(orbiters_core::measured::FILE).exists());
         std::fs::remove_dir_all(&session).unwrap();
     }
 

@@ -4,6 +4,7 @@
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -443,12 +444,18 @@ pub fn extract(text: &str, scene: &str) -> Vec<Avatar> {
 }
 
 pub fn in_project(project: &Path, cache: &mut SceneCache) -> Vec<Avatar> {
-    in_project_checked(project, cache).0
+    in_project_until(project, cache, &AtomicBool::new(false)).0
+}
+
+#[cfg(test)]
+pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec<Avatar>, bool) {
+    in_project_until(project, cache, &AtomicBool::new(false))
 }
 
 /// Also reports incomplete reads, so discovery can retain the previous list during transient I/O failures. A scene or
 /// a prefab of any size is read ([`read_file`]): a project's uploaded avatars and worlds show whatever its scenes weigh.
-pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec<Avatar>, bool) {
+/// Stopped by `cancel` (incomplete then): two scans must not read the same disk for as long as a project takes (PRJ-14).
+pub(crate) fn in_project_until(project: &Path, cache: &mut SceneCache, cancel: &AtomicBool) -> (Vec<Avatar>, bool) {
     // What could not be read: of the walk, of the prefabs' and pictures' `.meta` files (any scene may need them), and of a scene.
     let (mut complete, mut metas) = (true, true);
     let assets = project.join("Assets");
@@ -462,6 +469,9 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
         !crate::discovery::skip_dir(&e.file_name().to_string_lossy())
             && (!e.file_type().is_dir() || !e.metadata().ok().is_some_and(|m| crate::discovery::is_link(&m)))
     }) {
+        if cancel.load(Ordering::Relaxed) {
+            return (vec![], false);
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -495,6 +505,9 @@ pub(crate) fn in_project_checked(project: &Path, cache: &mut SceneCache) -> (Vec
     let mut prefab_models: HashMap<PathBuf, Option<Option<Model>>> = HashMap::new();
     let mut picture_guids: Option<HashMap<String, PathBuf>> = None;
     for p in scenes {
+        if cancel.load(Ordering::Relaxed) {
+            return (vec![], false);
+        }
         let Ok(meta) = std::fs::metadata(&p) else {
             complete = false;
             continue;
@@ -923,6 +936,19 @@ mod read_completeness_tests {
         std::fs::rename(&p, dir.path().join("Away")).unwrap();
         in_project_checked(&p, &mut cache);
         assert_eq!(cache.len(), 2);
+    }
+
+    /// PRJ-14: a look at a project's scenes stops when its scan is stopped, and nothing is taken for gone.
+    #[test]
+    fn a_stopped_look_at_a_project_says_nothing_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Assets")).unwrap();
+        std::fs::write(dir.path().join("Assets/A.unity"), scene_with("Fox", AVATAR)).unwrap();
+        let mut cache = SceneCache::default();
+        assert_eq!(in_project_until(dir.path(), &mut cache, &AtomicBool::new(true)), (vec![], false));
+        assert_eq!(in_project_checked(dir.path(), &mut cache).0.len(), 1);
+        in_project_until(dir.path(), &mut cache, &AtomicBool::new(true));
+        assert_eq!(cache.len(), 1);
     }
 
     /// PRJ-13: a scene that cannot be read costs its own answer, not those of the scenes after it.

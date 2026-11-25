@@ -38,6 +38,7 @@ pub mod unity_install;
 pub mod updates;
 pub mod vpm;
 mod vpm_http;
+mod walk;
 
 use orbiters_i18n::tr;
 use std::path::{Path, PathBuf};

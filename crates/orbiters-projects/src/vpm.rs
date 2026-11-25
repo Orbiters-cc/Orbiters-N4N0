@@ -82,6 +82,9 @@ pub(crate) fn loads_unchanged(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// What the repositories' listings hold, read ([`crate::listings`]).
+pub(crate) type Listed = PackageCollection;
+
 pub(crate) struct EnabledCollection {
     pub(crate) inner: std::sync::Arc<crate::listings::Listings>,
     pub(crate) hidden: HashSet<String>,
@@ -119,6 +122,14 @@ fn remote_caches(root: &Path, settings: &Settings) -> Vec<PathBuf> {
     let mut caches = predefined_caches(root, settings);
     caches.extend(settings.get_user_repos().iter().filter(|r| r.url().is_some()).map(|r| root.join(r.local_path())));
     caches
+}
+/// Every file the listings of the environment in `root` are read from.
+fn listed_in(root: &Path, settings: &Settings) -> Vec<PathBuf> {
+    let mut files = vec![root.join("settings.json"), root.join("vrc-get/settings.json")];
+    files.extend(predefined_caches(root, settings));
+    files.extend(settings.get_user_repos().iter().map(|r| root.join(r.local_path())));
+    files.extend(settings.user_package_folders().iter().map(|p| p.join("package.json")));
+    files
 }
 /// A cache file that is there but cannot be used: empty (written while its disk was full: vrc-get writes it in place),
 /// cut short, or not a listing at all. vrc-get takes such a file for a repository never downloaded, and only a refresh
@@ -204,7 +215,6 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
     // Repositories turned off remain in the settings; only the collection supplied to the resolver omits them.
     let hidden = crate::repos::hidden(root);
     let root = &crate::repos::dir(root);
-    let caches = predefined_caches(root, &settings);
     // Without a cache the repository's packages are unknown: download it, as ALCOM does on its first start. `load`
     // downloads every remote repository and writes its cache (its `update_cache`).
     let inner = if refresh || missing_cache(root, &settings) {
@@ -214,7 +224,7 @@ pub(crate) async fn collection(root: &Path, refresh: bool) -> anyhow::Result<(Se
         restore_usable(&before);
         crate::listings::Listings::new(packages)
     } else {
-        crate::listings::load(root, &settings, &caches, &io).await?
+        crate::listings::load(root, &listed_in(root, &settings), PackageCollection::load_cache(&settings, &io)).await?
     };
     Ok((settings, EnabledCollection { inner, hidden }))
 }

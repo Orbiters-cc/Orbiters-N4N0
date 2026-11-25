@@ -783,7 +783,7 @@ fn flushes_every_file(file_system: Option<&str>) -> bool {
 /// The file system of the disk the folder `path` is on, or will be (asked of the nearest folder that is there), as
 /// Windows names it: `NTFS`, `ReFS`, `exFAT`, `FAT32`. `None` when it cannot be asked, and off Windows.
 #[cfg(any(windows, unix))]
-fn file_system_of(path: &Path) -> Option<String> {
+pub(crate) fn file_system_of(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;

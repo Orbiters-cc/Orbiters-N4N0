@@ -1,14 +1,12 @@
 //! The repositories' listings as they were last downloaded, read once for each version of them (PRJ-20): each look at a project's
 //! packages read every listing three or four times, twice only to learn that it is one. What is read is kept while a project is shown
 //! ([`hold`]) and let go of after.
-use crate::vpm::Package;
+use crate::vpm::{Listed, Package};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
-use vrc_get_vpm::environment::{PackageCollection, Settings};
-use vrc_get_vpm::io::DefaultEnvironmentIo;
 
 /// What tells one version of a file from another: its length and when it was written. `None`: it is not there.
 type Stamp = Option<(u64, SystemTime)>;
@@ -48,12 +46,12 @@ type Sites = HashMap<(String, String), Package>;
 
 /// Every listing of an environment, read.
 pub(crate) struct Listings {
-    pub packages: PackageCollection,
+    pub packages: Listed,
     sites: Mutex<HashMap<String, Arc<Sites>>>,
 }
 
 impl Listings {
-    pub fn new(packages: PackageCollection) -> Arc<Self> {
+    pub fn new(packages: Listed) -> Arc<Self> {
         Arc::new(Self { packages, sites: Mutex::default() })
     }
 
@@ -100,35 +98,25 @@ pub fn hold(on: bool) {
     }
 }
 
-/// The files the listings of the environment in `here` are read from.
-fn files(here: &Path, settings: &Settings, caches: &[PathBuf]) -> Vec<(PathBuf, Stamp)> {
-    let mut files = vec![here.join("settings.json"), here.join("vrc-get/settings.json")];
-    files.extend(caches.iter().cloned());
-    files.extend(settings.get_user_repos().iter().map(|r| here.join(r.local_path())));
-    files.extend(settings.user_package_folders().iter().map(|p| p.join("package.json")));
-    files.into_iter().map(|p| (p.clone(), stamp(&p))).collect()
+fn stamps(files: &[PathBuf]) -> Vec<(PathBuf, Stamp)> {
+    files.iter().map(|p| (p.clone(), stamp(p))).collect()
 }
 
-/// The listings of the environment in `here` (its `caches`), read unless those kept are of the same files.
-pub(crate) async fn load(here: &Path, settings: &Settings, caches: &[PathBuf], io: &DefaultEnvironmentIo) -> std::io::Result<Arc<Listings>> {
-    let now = files(here, settings, caches);
+/// The listings of the environment in `here`, made of `files`: those kept when they are of the same files, else read.
+pub(crate) async fn load(here: &Path, files: &[PathBuf], read: impl std::future::Future<Output = std::io::Result<Listed>>) -> std::io::Result<Arc<Listings>> {
+    let now = stamps(files);
     if let Some((_, kept)) = lock(&KEPT).iter().find(|(p, k)| p == here && k.files == now) {
         return Ok(kept.listings.clone());
     }
-    let listings = Listings::new(PackageCollection::load_cache(settings, io).await?);
-    keep(here, settings, caches, now, &listings);
-    Ok(listings)
-}
-
-/// Keeps `listings`, just read or downloaded, when they are those of files that did not change meanwhile.
-fn keep(here: &Path, settings: &Settings, caches: &[PathBuf], of: Vec<(PathBuf, Stamp)>, listings: &Arc<Listings>) {
-    if !HELD.load(Ordering::Relaxed) || files(here, settings, caches) != of {
-        return;
+    let listings = Listings::new(read.await?);
+    // (Not kept when a file changed while they were read.)
+    if HELD.load(Ordering::Relaxed) && stamps(files) == now {
+        let mut kept = lock(&KEPT);
+        kept.retain(|(p, _)| p != here);
+        kept.truncate(ENVIRONMENTS - 1);
+        kept.insert(0, (here.into(), Kept { files: now, listings: listings.clone() }));
     }
-    let mut kept = lock(&KEPT);
-    kept.retain(|(p, _)| p != here);
-    kept.truncate(ENVIRONMENTS - 1);
-    kept.insert(0, (here.into(), Kept { files: of, listings: listings.clone() }));
+    Ok(listings)
 }
 
 #[cfg(test)]
@@ -136,6 +124,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// As Creator Companion writes its own files.
+    fn put(file: &Path, value: &serde_json::Value) {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, serde_json::to_vec(value).unwrap()).unwrap();
+    }
     fn listing(version: &str) -> serde_json::Value {
         let package = json!({ "name": "test.a", "version": version, "displayName": "A", "url": "http://127.0.0.1:9/a.zip", "author": { "name": "A", "url": "https://author.example" } });
         json!({ "repo": { "id": "r", "name": "R", "url": "http://127.0.0.1:9/index.json", "packages": { "test.a": { "versions": { version: package } } } }, "headers": {} })
@@ -148,9 +141,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("vcc");
         let file = root.join("Repos/r.json");
-        crate::write_json(&root.join("vrc-get/settings.json"), &json!({ "ignoreOfficialRepository": true, "ignoreCuratedRepository": true })).unwrap();
-        crate::write_json(&file, &listing("1.0.0")).unwrap();
-        crate::write_json(&root.join("settings.json"), &json!({ "userRepos": [{ "localPath": file, "url": "http://127.0.0.1:9/index.json", "id": "r", "headers": {} }] })).unwrap();
+        put(&root.join("vrc-get/settings.json"), &json!({ "ignoreOfficialRepository": true, "ignoreCuratedRepository": true }));
+        put(&file, &listing("1.0.0"));
+        put(&root.join("settings.json"), &json!({ "userRepos": [{ "localPath": file, "url": "http://127.0.0.1:9/index.json", "id": "r", "headers": {} }] }));
         let rt = crate::runtime().unwrap();
         let look = || rt.block_on(crate::vpm::collection(&root, false)).unwrap().1.inner;
         let versions = |l: &Arc<Listings>| {
@@ -165,7 +158,7 @@ mod tests {
         let view = || rt.block_on(crate::vpm::view(&root, None, false)).unwrap().packages[0].author_url.clone();
         assert_eq!((view(), view()), (Some("https://author.example".into()), Some("https://author.example".into())));
         // Creator Companion downloads a newer one.
-        crate::write_json(&file, &listing("1.10.0")).unwrap();
+        put(&file, &listing("1.10.0"));
         let second = look();
         assert_eq!(versions(&second), ["1.10.0"]);
         assert!(Arc::ptr_eq(&second, &look()));

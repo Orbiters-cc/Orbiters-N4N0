@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc, Arc,
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -134,14 +134,12 @@ pub fn decode_registry_path(bytes: &[u8]) -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 pub fn skip_dir(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    matches!(
-        n.as_str(),
-        "windows" | "programdata" | "$recycle.bin" | "system volume information" | "appdata" | "library" | "temp" | "logs" | "obj" | "node_modules" | ".git" // i18n: not shown (folder names and a macOS query the scan skips or asks for)
-    ) || n.starts_with("program files")
+    const SKIPPED: [&str; 10] = ["windows", "programdata", "$recycle.bin", "system volume information", "appdata", "library", "temp", "logs", "obj", "node_modules"]; // i18n: not shown (folder names and a macOS query the scan skips or asks for)
+    SKIPPED.iter().any(|s| name.eq_ignore_ascii_case(s))
+        || name.get(..13).is_some_and(|n| n.eq_ignore_ascii_case("program files"))
         // Dot-folders, on every system (PROJECTS-9, Enzo 2026-11-19: "Yes"): caches, tools' state, test stand-ins.
-        || n.starts_with('.')
-        || mac_only_skip(&n)
+        || name.starts_with('.')
+        || (cfg!(target_os = "macos") && mac_only_skip(&name.to_ascii_lowercase()))
 }
 /// Hidden folders (the Trash, Spotlight's and Time Machine's, a shell's caches) and what the Finder shows as one file: an
 /// application or a photo library, never a place for a Unity project. A Unity project's own `Library` is never reached,
@@ -151,7 +149,7 @@ fn mac_only_skip(name: &str) -> bool {
 }
 /// Whether reading this folder makes macOS ask the person for permission in the app's name: the folders of the home
 /// folder it guards (its Library is left out anyway, and Spotlight answers for all of them without asking anybody).
-fn asks_permission(path: &Path) -> bool {
+pub(crate) fn asks_permission(path: &Path) -> bool {
     cfg!(target_os = "macos")
         && path.parent().is_some_and(|parent| dirs::home_dir().as_deref() == Some(parent))
         && path.file_name().is_some_and(|n| ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures"].iter().any(|g| n == *g)) // i18n: not shown (folder names and a macOS query the scan skips or asks for)
@@ -401,9 +399,12 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             roots.insert(parent.to_path_buf());
         }
     }
-    for r in roots {
-        walk(&r, Some(2), !force, cancel, &mut found, &AtomicU64::new(0), None);
-    }
+    // Copies that were cut short, found without a record of them.
+    let mut cut = vec![];
+    crate::walk::near(roots.into_iter(), Some(2), !force, cancel, |p| match unfinished_copy(&p) {
+        true => cut.push(p),
+        false => drop(keep(&mut found, p)),
+    });
     rebuild(&mut scan, &found, &known);
     publish(&scan);
     let mut enriched = HashSet::new();
@@ -412,7 +413,6 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
         scan.status = tr("Scanning fixed local disks").into();
         publish(&scan);
         let start = Instant::now();
-        let mut count = 0;
         #[cfg(target_os = "macos")]
         {
             for p in if orbiters_core::paths::roots().is_none() { spotlight_projects() } else { Vec::new() } {
@@ -421,22 +421,26 @@ pub fn discover(mut scan: Scan, force: bool, cancel: &AtomicBool, publish: impl 
             rebuild(&mut scan, &found, &known);
             publish(&scan);
         }
-        for disk in scan_roots(force) {
-            scan.status = tr!("Scanning {disk}", disk = disk.display());
-            publish(&scan);
-            count += scan_disk(&disk, !force, cancel, &mut found, &mut scan.warnings);
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-        }
+        // What the last walk found of the folders that did not change since; Refresh looks at every one again.
+        let folders = crate::data_dir().join("unity-folders.bin");
+        let index = Arc::new(if force { Default::default() } else { crate::walk::Index::load(&folders) });
+        let walked = crate::walk::disks(crate::walk::devices(scan_roots(force)), !force, &index, cancel, |p| match unfinished_copy(&p) {
+            true => cut.push(p),
+            false => drop(keep(&mut found, p)),
+        });
+        let _ = index.save(&folders, &walked.recorded, walked.cut);
+        scan.warnings.extend(walked.warnings);
         scan.full_scan_ms = start.elapsed().as_millis() as u64;
-        scan.directories = count;
+        scan.directories = walked.folders;
         if !cancel.load(Ordering::Relaxed) {
             scan.last_full = now();
         }
         rebuild(&mut scan, &found, &known);
         publish(&scan);
         enrich(&mut scan, cancel, &mut enriched, &mut publish);
+    }
+    for p in cut {
+        crate::copies::adopt(&crate::data_dir(), &p);
     }
     scan.status.clear();
     if !cancel.load(Ordering::Relaxed) {
@@ -539,7 +543,7 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>,
         let path = p.path.clone();
         scan.status = if p.kind == Kind::Worlds { tr!("Reading worlds in {project}", project = p.name) } else { tr!("Reading avatars in {project}", project = p.name) };
         publish(scan);
-        let (items, complete) = avatars::in_project_checked(&path, &mut scan.scenes);
+        let (items, complete) = avatars::in_project_until(&path, &mut scan.scenes, cancel);
         // A readable Assets root does not guarantee its subfolders, scenes or prefabs were readable.
         if !complete {
             continue;
@@ -550,102 +554,13 @@ fn enrich(scan: &mut Scan, cancel: &AtomicBool, enriched: &mut HashSet<PathBuf>,
         publish(scan);
     }
 }
-enum DiskEvent {
-    Found(PathBuf),
-    Done,
-}
-/// A damaged/offline volume must not hold every other disk hostage. Cancel an enumeration after 60 s without a
-/// single directory completed, retain discoveries already received, and report that volume in the scan warnings.
-fn scan_disk(root: &Path, quiet: bool, cancel: &AtomicBool, found: &mut HashMap<String, PathBuf>, warnings: &mut Vec<String>) -> u64 {
-    let (tx, rx) = mpsc::channel();
-    let stop = Arc::new(AtomicBool::new(false));
-    let progress = Arc::new(AtomicU64::new(0));
-    let worker = {
-        let root = root.to_path_buf();
-        let stop = stop.clone();
-        let progress = progress.clone();
-        std::thread::spawn(move || {
-            low_priority();
-            walk(&root, None, quiet, &stop, &mut HashMap::new(), &progress, Some(&tx));
-            let _ = tx.send(DiskEvent::Done);
-        })
-    };
-    let mut last = 0;
-    let mut advanced = Instant::now();
-    let mut finished = false;
-    loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(DiskEvent::Found(p)) => {
-                keep(found, p);
-            }
-            Ok(DiskEvent::Done) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                finished = true;
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let n = progress.load(Ordering::Relaxed);
-        if n != last {
-            last = n;
-            advanced = Instant::now();
-        }
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        if advanced.elapsed() > Duration::from_secs(60) {
-            warnings.push(tr!("{folder} stopped responding for 60 seconds. Its scan was interrupted; Refresh retries it.", folder = root.display()));
-            break;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    if finished {
-        let _ = worker.join();
-    } else {
-        #[cfg(windows)]
-        unsafe {
-            use std::os::windows::io::AsRawHandle;
-            let _ = windows::Win32::System::IO::CancelSynchronousIo(windows::Win32::Foundation::HANDLE(worker.as_raw_handle()));
-        }
-    }
-    progress.load(Ordering::Relaxed)
-}
-/// `quiet`: leaving out the folders reading which makes the system ask the person something ([`asks_permission`]).
-fn walk(
-    root: &Path,
-    depth: Option<usize>,
-    quiet: bool,
-    cancel: &AtomicBool,
-    found: &mut HashMap<String, PathBuf>,
-    count: &AtomicU64,
-    events: Option<&mpsc::Sender<DiskEvent>>,
-) {
-    let mut stack = vec![(root.to_path_buf(), 0)];
-    while let Some((p, d)) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
-        if is_link(&m) || !m.is_dir() {
-            continue;
-        }
-        count.fetch_add(1, Ordering::Relaxed);
-        if is_project(&p) {
-            if let Some(tx) = events {
-                let _ = tx.send(DiskEvent::Found(p.clone()));
-            }
-            keep(found, p);
-            continue;
-        }
-        if depth.is_some_and(|max| d >= max) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&p) else { continue };
-        for e in entries.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_dir()) && !skip_dir(&e.file_name().to_string_lossy()) && !(quiet && asks_permission(&e.path())) {
-                stack.push((e.path(), d + 1));
-            }
-        }
-    }
+/// What a walk of `dir` finds.
+#[cfg(test)]
+pub(crate) fn found_in(dir: &Path) -> Vec<PathBuf> {
+    let mut found = vec![];
+    crate::walk::near(std::iter::once(dir.to_path_buf()), None, false, &AtomicBool::new(false), |p| found.push(p));
+    found.sort();
+    found
 }
 
 pub fn find_editor(version: &str) -> Option<PathBuf> {
@@ -883,11 +798,9 @@ mod mac_tests {
         project("Library/Application Support/Orbiters/templates/base");
         project("Applications/Some.app/Contents/Project");
         project("Unity Projects/Avatar/Assets/Nested");
-        let mut found = HashMap::new();
-        walk(temp.path(), None, true, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
-        let mut keys: Vec<&String> = found.keys().collect();
+        let mut keys: Vec<String> = found_in(temp.path()).iter().map(|p| key(p)).collect();
         keys.sort();
-        let mut expected: Vec<&String> = wanted.iter().collect();
+        let mut expected = wanted.to_vec();
         expected.sort();
         assert_eq!(keys, expected);
     }
@@ -905,9 +818,7 @@ mod mac_tests {
         let wanted = project("Projects/Mine");
         project(".orbiters-build/runs/Stand-in");
         project("Projects/.cache/Other");
-        let mut found = HashMap::new();
-        walk(temp.path(), None, false, &AtomicBool::new(false), &mut found, &AtomicU64::new(0), None);
-        assert_eq!(found.keys().collect::<Vec<_>>(), [&wanted]);
+        assert_eq!(found_in(temp.path()).iter().map(|p| key(p)).collect::<Vec<_>>(), [wanted]);
     }
 
     #[test]
@@ -931,13 +842,13 @@ mod mac_tests {
     #[ignore]
     fn real_walk() {
         let start = Instant::now();
-        let (mut found, count) = (HashMap::new(), AtomicU64::new(0));
-        walk(Path::new("/Users"), None, true, &AtomicBool::new(false), &mut found, &count, None);
-        println!("{} folders in {:?}: {} projects", count.load(Ordering::Relaxed), start.elapsed(), found.len());
+        let mut found = vec![];
+        let walked = crate::walk::disks(crate::walk::devices(vec![PathBuf::from("/Users")]), true, &Arc::default(), &AtomicBool::new(false), |p| found.push(p));
+        println!("{} folders in {:?}: {} projects", walked.folders, start.elapsed(), found.len());
         let start = Instant::now();
         let spotlight = spotlight_projects();
         println!("Spotlight in {:?}: {} projects", start.elapsed(), spotlight.len());
-        for p in found.values().chain(&spotlight) {
+        for p in found.iter().chain(&spotlight) {
             println!("  {}", p.display());
         }
     }

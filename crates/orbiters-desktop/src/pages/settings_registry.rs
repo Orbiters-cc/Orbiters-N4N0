@@ -382,6 +382,7 @@ pub static ENTRIES: &[Entry] = &[
     e("capture.tracking-rate", Capture, mark("Performance"), mark("Tracking rate"), mark("Device poses recorded per second."), mark("Hz frequency poses")).gate(Gate::Camera).controls(&["perf-rate"]),
     e("storage.free", Capture, mark("Storage"), mark("Free up space"), mark("What the captures and 3D pictures take, and deleting what they no longer need."), mark("disk space delete clean")).controls(&[mark("Free up space")]),
     e("storage.limit", Capture, mark("Storage"), mark("Storage limit"), mark("Recording stops when the library reaches it (0 = no limit)."), mark("disk space GB quota library")).controls(&["limit"]),
+    e("storage.vrchat-pictures", Capture, mark("Storage"), mark("Friends' and groups' pictures"), mark("VRChat's pictures, kept on this computer so that they show at once. Past this, the ones seen longest ago go; signing out of VRChat removes them all."), mark("VRChat cache disk space MB")).controls(&["vrchat-pictures"]),
     e("storage.folder", Capture, mark("Storage"), mark("Captures folder"), "", mark("folder path directory location drive")).controls(&[mark("Change")]),
     e("storage.raw-folder", Capture, mark("Storage"), mark("Raw captures folder"), mark("Where Mixer's capture simulator writes."), mark("folder path directory Mixer")).controls(&[mark("Change")]),
     // VRChat & performance.

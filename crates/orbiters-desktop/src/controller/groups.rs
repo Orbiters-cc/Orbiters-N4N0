@@ -762,6 +762,7 @@ impl Controller {
             rt.running += 1;
         }
         let _slot = Slot(self);
+        let (turn, asked) = (self.kept_turn(), matches!(request, Request::Discover | Request::Hydrate { .. } | Request::Open { .. } | Request::Members { .. } | Request::Posts { .. }).then(|| request.clone()));
         let reply = match request {
             Request::Discover => self.groups_discover(&scope).map(Reply::Discovered),
             Request::Hydrate { ids } => self.groups_hydrate(&scope, ids).map(Reply::Hydrated),
@@ -797,6 +798,10 @@ impl Controller {
         // (verify4 F13).
         if !self.groups_live(&scope) {
             return Reply::Failed(Failure::AccountChanged);
+        }
+        // What the page shows at the next start (REQUEST28).
+        if let (Some(request), Ok(reply)) = (&asked, &reply) {
+            self.kept_groups(turn, &scope, request, reply);
         }
         reply.unwrap_or_else(Reply::Failed)
     }

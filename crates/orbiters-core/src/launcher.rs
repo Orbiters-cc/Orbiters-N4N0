@@ -521,6 +521,10 @@ pub struct LauncherState {
     pub notice: Option<Notice>,
     /// Reading the friends for the first time.
     pub loading: bool,
+    /// The list is the one last on show, kept on this computer ([`crate::vrchat_store`]), and VRChat has not said anything
+    /// since: when it was last live. `None` once read.
+    #[serde(default)]
+    pub kept: Option<i64>,
     /// VRChat's profiles on this computer: the ones running, starting or used before, by number.
     #[serde(default)]
     pub profiles: Vec<GameProfile>,
@@ -768,6 +772,7 @@ pub fn sample() -> LauncherState {
         game: Game::NotRunning,
         notice: None,
         loading: false,
+        kept: None,
         unresolved: 0,
         profiles: vec![
             GameProfile { profile: 0, account: Some("Sample Me".into()), ..GameProfile::default() },

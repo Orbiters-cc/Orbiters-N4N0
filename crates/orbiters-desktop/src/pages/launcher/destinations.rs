@@ -169,7 +169,7 @@ impl EventSoon {
 }
 
 /// A world visited, with how much it counts.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Frequent {
     pub world_id: String,
     pub name: String,
@@ -182,7 +182,7 @@ pub struct Frequent {
 }
 
 /// The last instance joined.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LastVisit {
     pub world_id: String,
     pub instance: String,
@@ -192,7 +192,7 @@ pub struct LastVisit {
 }
 
 /// What the history gives Where.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryView {
     pub frequent: Vec<Frequent>,
     pub last: Option<LastVisit>,
@@ -210,6 +210,19 @@ impl HistoryView {
             picture: None,
         });
         Self { frequent, last }
+    }
+
+    /// As it was last read in a run before, for the first frame (the history itself is read again behind it).
+    fn before(file: &std::path::Path) -> Option<Self> {
+        serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+    }
+
+    fn keep(&self, file: &std::path::Path) {
+        if let Ok(bytes) = serde_json::to_vec(self) {
+            if std::fs::read(file).ok().as_deref() != Some(&bytes) {
+                let _ = orbiters_core::write_atomic(file, &bytes);
+            }
+        }
     }
 
     /// The region new instances are made in: the last instance's (where the person plays), else VRChat's own default.
@@ -817,9 +830,18 @@ fn cards(ui: &Ui, cx: &Cx, state: &mut State, me: Option<&str>, feed: bool) -> (
     // Tests read nothing of this computer's or the network's (pictures of the page hand everything in).
     let reads = state.places.staged.is_none() && !cfg!(test);
     if reads {
-        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", || {
+        let file = orbiters_core::paths::cache_dir().join("where.json");
+        {
+            let mut s = state.places.history.lock().unwrap_or_else(|e| e.into_inner());
+            if s.value.is_none() && s.at.is_none() && !s.busy {
+                s.value = HistoryView::before(&file);
+            }
+        }
+        refresh(&state.places.history, HISTORY_EVERY, &ctx, "history", move || {
             let history = orbiters_core::visited::History::load(&orbiters_core::visited::history_file());
-            Some(HistoryView::of(&history, orbiters_core::visited::now()))
+            let view = HistoryView::of(&history, orbiters_core::visited::now());
+            view.keep(&file);
+            Some(view)
         });
         // Only once who it is is known: an empty list read before would stand for theirs.
         let server = orbiters_core::account::Server::current();
@@ -1082,7 +1104,8 @@ fn hint(state: &mut State, cards: &[Suggestion], signed_in: bool, can_create: bo
     if chosen.is_some_and(|s| s.go == Go::EventWaiting) {
         return Some((tr("VRChat starts at home: the event's invite arrives there.").into(), Tone::Quiet));
     }
-    if state.stale() {
+    // (The account on its way back, its list shown as it was: nothing to say.)
+    if state.stale() || state.held() {
         return None;
     }
     match (&state.data.source, signed_in) {

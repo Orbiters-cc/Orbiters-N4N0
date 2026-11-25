@@ -49,6 +49,16 @@ impl Scope {
     pub(super) fn verified_by(&self, now: &super::vrchat_scope::Stamp) -> bool {
         self.verified_for.as_ref().is_some_and(|v| v.epoch == now.epoch && v.member == now.owner.member && v.user == self.user)
     }
+    /// Whose folder on this computer is this account's (`orbiters_core::vrchat_store`): the Orbiters member and the VRChat
+    /// account it was verified for, signed in or on its way back.
+    pub fn account(&self) -> Option<orbiters_core::vrchat_store::Account> {
+        let v = self.verified_for.as_ref()?;
+        // Signed in as another than the one verified (never, but for a moment between two states): nobody's.
+        if self.user.is_some() && self.user != v.user {
+            return None;
+        }
+        orbiters_core::vrchat_store::Account::verified(v)
+    }
     /// The signed-in VRChat account this scope was taken under.
     pub fn vrchat_user(&self) -> Option<&str> {
         self.user.as_deref()
@@ -59,6 +69,20 @@ impl Scope {
         self.allowed && self.user.is_some()
     }
 }
+
+/// The friends of the account signed in, by name, as Home's list has them now: shown at once where friends are chosen, until
+/// [`Request::Friends`] answers. None of a list kept from before and not read since, or of any account but that one.
+pub fn friends_here(s: &Snapshot) -> Vec<&orbiters_core::launcher::Friend> {
+    let login = &s.vrchat_login;
+    let theirs = matches!((&s.launcher.source, &login.user), (orbiters_core::launcher::Source::SignedIn { user_id, .. }, Some(u)) if *user_id == u.id);
+    if !theirs || !login.allowed || s.launcher.kept.is_some() || s.launcher.verified_for.is_none() || s.launcher.verified_for != login.verified_for {
+        return Vec::new();
+    }
+    let mut friends: Vec<_> = s.launcher.friends.iter().collect();
+    friends.sort_by_cached_key(|f| f.name.to_lowercase());
+    friends
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     WorldDetails { world: String },

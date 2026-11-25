@@ -220,7 +220,7 @@ pub fn read() -> LauncherState {
     read_now().unwrap_or_else(|Busy| nothing())
 }
 
-fn nothing() -> LauncherState {
+pub fn nothing() -> LauncherState {
     LauncherState { possible: Possible { play: true, ..Possible::default() }, ..LauncherState::default() }
 }
 

@@ -114,7 +114,7 @@ impl Engine {
         timings.detect = t.elapsed().as_secs_f32() * 1000.0;
         let t = Instant::now();
         let mut lines = self.main.read(left, &boxes)?;
-        let unsure: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].confidence < SURE).collect();
+        let unsure: Vec<usize> = (0..lines.len()).filter(|&i| asks_others(&lines[i])).collect();
         if !unsure.is_empty() {
             let unsure_boxes: Vec<_> = unsure.iter().map(|&i| lines[i].boxed.clone()).collect();
             for other in [self.korean.as_mut(), self.cyrillic.as_mut()].into_iter().flatten() {
@@ -123,10 +123,7 @@ impl Engine {
                     let i = unsure[k];
                     // A reader for one script reads any other as look-alike letters of its own ("o6po noxanoBaTb" for
                     // "Добро пожаловать", and sure of it): its read counts only in its own script.
-                    // Nor over a main read in Chinese characters or kana, unless that read was a guess: 西 read a little
-                    // unsure became the Korean reader's "뼈" at 0.94 in the sandbox.
-                    let chinese_or_japanese = lines[i].confidence >= 0.5 && crate::language::guess(&lines[i].text).is_some_and(|g| g == "ja" || g == "zh");
-                    if own_script(reader, &l.text) && !chinese_or_japanese && l.confidence > lines[i].confidence + 0.02 {
+                    if own_script(reader, &l.text) && !chinese_or_japanese(&lines[i]) && l.confidence > lines[i].confidence + 0.02 {
                         lines[i] = l;
                     }
                 }
@@ -145,6 +142,18 @@ impl Engine {
         }
         Ok((lines, timings))
     }
+}
+
+/// Whether the main reader's `line` is given to the other readers: not when it is sure, nor (N4N-14) when no read of theirs would
+/// replace it.
+fn asks_others(line: &Line) -> bool {
+    line.confidence < SURE && !chinese_or_japanese(line)
+}
+
+/// Read in Chinese characters or kana, and no guess: the other readers' reads do not count over it (西 read a little unsure became the
+/// Korean reader's "뼈" at 0.94 in the sandbox).
+fn chinese_or_japanese(line: &Line) -> bool {
+    line.confidence >= 0.5 && crate::language::guess(&line.text).is_some_and(|g| g == "ja" || g == "zh")
 }
 
 /// Whether a read of the Korean or the Cyrillic reader has letters of its script.
@@ -282,4 +291,27 @@ pub fn ahead(view: &EyeView, px: [f32; 2], distance: f32) -> V3 {
 /// A picture as the pipeline reads it.
 pub fn rgba(width: u32, height: u32, pixels: &[u8]) -> Rgba<'_> {
     Rgba { width, height, pixels }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N4N-14: the other readers read only what they may replace.
+    #[test]
+    fn only_lines_the_other_readers_may_replace_are_read_again() {
+        let line = |text: &str, confidence| Line { boxed: crate::ocr::TextBox { corners: [[0.0; 2]; 4], score: 1.0, vertical: false }, text: text.into(), confidence, reader: Reader::Main, glyphs: Vec::new() };
+        for (text, confidence, asks) in [
+            ("o6po noxanoBaTb", 0.7, true),
+            ("Exit", 0.9, false),
+            ("西", 0.49, true),
+            ("西", 0.5, false),
+            ("出口", 0.84, false),
+            ("ひらがな", 0.7, false),
+            ("ひらがな", 0.95, false),
+            ("뼈", 0.7, true),
+        ] {
+            assert_eq!(asks_others(&line(text, confidence)), asks, "{text} {confidence}");
+        }
+    }
 }

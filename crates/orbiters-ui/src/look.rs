@@ -149,6 +149,16 @@ impl Tokens {
     }
 }
 
+impl Tokens {
+    /// The same over a background as bright as `ground`: the quieter words and the accent a step lighter where AA needs it, never
+    /// past the second text step. What is drawn on the accent stays as readable (it only gets lighter).
+    pub fn over(self, ground: Color32) -> Tokens {
+        let lifted = lightened(self.fg_3, ground, AA);
+        let fg_3 = if luminance(lifted) > luminance(self.fg_2) { self.fg_2 } else { lifted };
+        Tokens { fg_3, accent: lightened(self.accent, ground, AA), ..self }
+    }
+}
+
 /// The accent itself when it can be read on the tint's surfaces, else the nearest of its hue that can.
 pub fn passing(accent: Color32, tint: Tint) -> Color32 {
     if accent == base::ACCENT {

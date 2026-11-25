@@ -432,7 +432,7 @@ fn shadow_mesh(r: Rect, radius: f32, blur: f32, color: Color32) -> Mesh {
     for k in 0..SHADOW_RINGS {
         let d = inner + (blur - inner) * k as f32 / (SHADOW_RINGS - 1) as f32;
         let ring = r.expand(d);
-        let cr = (radius + d).clamp(0.0, 0.5 * ring.width().min(ring.height()));
+        let cr = (radius + d).clamp(0.0, (0.5 * ring.width().min(ring.height())).max(0.0));
         let c = color.gamma_multiply(value(d));
         // Corners clockwise from the bottom right, each a quarter circle (one point when sharp).
         let centres = [

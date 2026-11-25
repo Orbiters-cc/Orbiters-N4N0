@@ -320,7 +320,7 @@ impl App {
         crate::language::follow(&snap.settings);
         {
             let woken = ctx.clone();
-            crate::appearance::follow(&snap.settings, move || woken.request_repaint());
+            crate::appearance::follow_in_window(&snap.settings, &mut self.wallpaper, move || woken.request_repaint());
         }
         self.follow_size(&ctx, snap.settings.appearance.size.zoom());
         orbiters_ui::follow(&ctx);

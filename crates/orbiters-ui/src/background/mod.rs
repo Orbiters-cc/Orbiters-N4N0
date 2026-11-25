@@ -103,18 +103,20 @@ impl Backdrop {
         }
     }
 
-    /// How dark a veil the words on the page need over it: as little black as brings the theme's third text step to AA
-    /// over the brightest the scene can be behind it, after the website's own wash. The same rule for every scene,
-    /// whatever its colours.
-    pub fn veil(&self) -> f32 {
+    /// What the words of the pages in `tokens` need over it: how dark a veil, and the brightest they then lie on. The scene is
+    /// left as bright as can be: the quieter words get lighter first ([`look::Tokens::over`], up to the second text step), and only
+    /// what that step cannot be read on is darkened, with as little black as brings it to AA, after the website's own
+    /// wash. The same rule for every scene, whatever its colours.
+    pub fn under(&self, tokens: &look::Tokens) -> (f32, Color32) {
         if self.scene == Scene::None {
-            return 0.0;
+            return (0.0, tokens.ink_950);
         }
-        let page = crate::theme::ink_950();
+        let page = tokens.ink_950;
         // The wash is a quarter at the top of the window: least where the page's headings are.
         let washed = crate::theme::mix(self.peak(), page, 0.25);
         let seen = crate::theme::mix(page, washed, self.scene.opacity());
-        look::veil_for(crate::theme::fg_3(), seen, look::AA)
+        let veil = look::veil_for(tokens.fg_2, seen, look::AA);
+        (veil, look::over(crate::theme::black(veil), seen))
     }
 }
 
@@ -404,17 +406,29 @@ mod tests {
         for s in Scene::ALL {
             assert_eq!(Scene::of_id(s.id()), Some(s));
             let b = Backdrop::of(s);
-            let veil = b.veil();
-            if s == Scene::None {
-                assert_eq!(veil, 0.0);
-                continue;
+            for tint in look::Tint::ALL {
+                for accent in ["#00da6d", "#b78aff", "#338ef7"] {
+                    let tokens = look::Tokens::of(&look::Look { tint, accent: look::parse_hex(accent).unwrap() });
+                    let (veil, ground) = b.under(&tokens);
+                    if s == Scene::None {
+                        assert_eq!(veil, 0.0);
+                        continue;
+                    }
+                    // Bright colours get a darker veil, never an unreadable page.
+                    let white = Backdrop { colors: [Color32::WHITE; 3], ..b };
+                    let (darker, bright) = white.under(&tokens);
+                    assert!(darker >= veil && darker < 0.9, "{s:?} {darker}");
+                    for ground in [ground, bright] {
+                        let t = tokens.over(ground);
+                        for text in [t.fg, t.fg_2, t.fg_3, t.accent] {
+                            assert!(look::contrast(text, ground) >= look::AA - 0.02, "{s:?} {tint:?} {accent}: {text:?} on {ground:?} is {:.2}", look::contrast(text, ground));
+                        }
+                        // A card lets a little of it through.
+                        let card = look::over(crate::theme::alpha(t.ink_850, crate::theme::OVER_BACKGROUND_ALPHA), ground);
+                        assert!(look::contrast(t.fg_3, card) >= look::AA, "{s:?} {tint:?}: {:.2} on a card", look::contrast(t.fg_3, card));
+                    }
+                }
             }
-            let page = crate::theme::base::INK_950;
-            let seen = look::over(crate::theme::black(veil), crate::theme::mix(page, crate::theme::mix(b.peak(), page, 0.25), s.opacity()));
-            assert!(look::contrast(crate::theme::base::FG_3, seen) >= look::AA, "{s:?} {veil}");
-            // Bright colours get a darker veil, never an unreadable page.
-            let white = Backdrop { colors: [Color32::WHITE; 3], ..b };
-            assert!(white.veil() >= veil && white.veil() < 0.95, "{s:?} {}", white.veil());
         }
         assert_eq!(Scene::of_id("starfield"), None);
     }

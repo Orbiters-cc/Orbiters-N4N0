@@ -6,7 +6,7 @@ use crate::appearance::{self, Palette, ACCENTS, BACKGROUNDS, PALETTES, TINTS};
 use egui::{pos2, vec2, Align2, Color32, ColorImage, Id, Painter, Rect, Response, Sense, Stroke, StrokeKind, Ui};
 use orbiters_core::appearance::{AppearanceSettings, Background, BackgroundColors, InterfaceSize, Tint};
 use orbiters_core::settings::Settings;
-use orbiters_i18n::{mark, tr, tr_ctx, tr_n};
+use orbiters_i18n::{mark, tr, tr_ctx};
 use orbiters_ui::anim::{self, Spring};
 use orbiters_ui::background::{self, Backdrop, Laid, Scene, Time};
 use orbiters_ui::faces::{self, BUNDLED, INSTALLED};
@@ -97,7 +97,7 @@ pub fn cards(ui: &mut Ui, cx: &mut Cx, state: &mut State, draft: &mut Settings, 
 fn choice(ui: &mut Ui, key: &'static str, n: usize, rect: Rect, radius: f32, chosen: bool, name: &str) -> (Response, bool) {
     let id = ui.scope_id().with((key, n));
     let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    widgets::mark_control(key, "choice", rect);
+    widgets::mark_control(key, "tile", rect);
     let label = name.to_string();
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, chosen, &label));
     let ctx = ui.ctx().clone();
@@ -117,8 +117,8 @@ fn choice(ui: &mut Ui, key: &'static str, n: usize, rect: Rect, radius: f32, cho
     (resp, pressed && !chosen)
 }
 
-/// A grid of `count` tiles at least `min` wide and `h` high, over the rest of the width.
-fn grid(ui: &mut Ui, count: usize, min: f32, h: f32, gap: f32, mut tile: impl FnMut(&mut Ui, usize, Rect)) {
+/// A grid of `count` tiles (the choices of `key`) at least `min` wide and `h` high, over the rest of the width.
+fn grid(ui: &mut Ui, key: &str, count: usize, min: f32, h: f32, gap: f32, mut tile: impl FnMut(&mut Ui, usize, Rect)) {
     let w = ui.available_width();
     let n = (((w + gap) / (min + gap)).floor() as usize).clamp(1, count.max(1));
     let each = (w - gap * (n - 1) as f32) / n as f32;
@@ -128,6 +128,8 @@ fn grid(ui: &mut Ui, count: usize, min: f32, h: f32, gap: f32, mut tile: impl Fn
         let r = Rect::from_min_size(area.min + vec2((i % n) as f32 * (each + gap), (i / n) as f32 * (h + gap)), vec2(each, h));
         if ui.is_rect_visible(r) {
             tile(ui, i, r);
+        } else {
+            widgets::mark_control(key, "tile", r);
         }
     }
 }
@@ -135,7 +137,6 @@ fn grid(ui: &mut Ui, count: usize, min: f32, h: f32, gap: f32, mut tile: impl Fn
 /// A row's name and what it says, above what fills the card's width under them.
 fn heading(ui: &mut Ui, label: &str, about: Option<&str>) {
     widgets::field(ui, label, about, 0.0, |_| {});
-    ui.add_space(-6.0);
 }
 
 // --- The preview ---
@@ -144,14 +145,14 @@ fn heading(ui: &mut Ui, label: &str, about: Option<&str>) {
 fn preview(ui: &mut Ui, draft: &Settings) -> bool {
     let a = &draft.appearance;
     ui.add_space(6.0);
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 244.0), Sense::hover());
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 228.0), Sense::hover());
     let p = ui.painter().with_clip_rect(r.intersect(ui.clip_rect()));
     p.rect_filled(r, theme::radius(16.0), theme::ink_950());
     let b = appearance::backdrop(a);
     if b.scene == Scene::None {
         glow(&p, r);
     } else {
-        background::paint(&p, Id::unique("appearance-preview"), r, &b, Time::STILL, Laid { veil: b.veil(), radius: 16.0, ..Laid::PAGE });
+        background::paint(&p, Id::unique("appearance-preview"), r, &b, Time::STILL, Laid { veil: b.under(&theme::tokens()).0, radius: 16.0, ..Laid::PAGE });
     }
     let over = b.scene != Scene::None;
     theme::with_background(over, || miniature(&p, r));
@@ -159,7 +160,7 @@ fn preview(ui: &mut Ui, draft: &Settings) -> bool {
     let mut reset = false;
     widgets::field(ui, tr(RESET), Some(tr("The colors, the font, the size and the background, as they were.")), 120.0, |ui| {
         let can = !a.is_orbiters() || draft.orbit.has_own_accent();
-        reset = Button::new(tr("Reset")).id_salt("appearance-reset").icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).enabled(can).show(ui).clicked();
+        reset = Button::new(tr("Reset")).icon(icons::ARROW_COUNTER_CLOCKWISE).size(Size::Sm).enabled(can).show(ui).clicked();
     });
     reset
 }
@@ -167,8 +168,9 @@ fn preview(ui: &mut Ui, draft: &Settings) -> bool {
 /// Orbiters' own glow, still.
 fn glow(p: &Painter, r: Rect) {
     let blob = |at: egui::Pos2, size: f32, c: Color32| paint::shadow(&p.with_clip_rect(r.intersect(p.clip_rect())), Rect::from_center_size(at, vec2(size, size * 0.6)), size * 0.3, vec2(0.0, 0.0), size * 0.55, 0.0, c);
-    blob(pos2(r.left() + r.width() * 0.16, r.top() + r.height() * 0.15), r.width() * 0.3, theme::alpha(theme::PURPLE, 0.22));
-    blob(pos2(r.right() - r.width() * 0.14, r.top() + r.height() * 0.4), r.width() * 0.26, theme::alpha(theme::BLUE, 0.16));
+    // Clear of the corners, which are round.
+    blob(pos2(r.left() + r.width() * 0.3, r.center().y - r.height() * 0.1), r.height() * 0.9, theme::alpha(theme::PURPLE, 0.2));
+    blob(pos2(r.right() - r.width() * 0.26, r.center().y + r.height() * 0.06), r.height() * 0.8, theme::alpha(theme::BLUE, 0.15));
 }
 
 fn miniature(p: &Painter, r: Rect) {
@@ -205,7 +207,7 @@ fn miniature(p: &Painter, r: Rect) {
     widgets::text_truncated(p, pos2(c.left(), c.top() + 29.0), Align2::LEFT_CENTER, &Txt::new(tr("The text you read, and quieter text beside it."), 12.5).color(theme::fg_2()), c.width() - 60.0);
     let track = Rect::from_min_size(pos2(c.right() - 38.0, c.top() + 2.0), vec2(38.0, 22.0));
     p.rect_filled(track, theme::radius(11.0), theme::accent());
-    p.circle_filled(pos2(track.right() - 11.0, track.center().y), 8.0, theme::on_accent());
+    p.circle_filled(pos2(track.right() - 11.0, track.center().y), 8.0, Color32::WHITE);
     p.hline(c.x_range(), c.top() + 50.0, Stroke::new(1.0, theme::white(0.06)));
     let y = c.top() + 80.0;
     let face = Rect::from_center_size(pos2(c.left() + 18.0, y), vec2(36.0, 36.0));
@@ -225,7 +227,7 @@ fn colours(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings, orbit: &m
     let mut changed = false;
     heading(ui, tr("Palette"), Some(tr("The surfaces, the accent and the background's colors together.")));
     let mut picked: Option<&Palette> = None;
-    grid(ui, PALETTES.len(), 150.0, 104.0, 14.0, |ui, i, r| {
+    grid(ui, "appearance-palette", PALETTES.len(), 150.0, 104.0, 14.0, |ui, i, r| {
         let palette = &PALETTES[i];
         let chosen = palette.is(a);
         let art = Rect::from_min_size(r.min, vec2(r.width(), 74.0));
@@ -356,7 +358,7 @@ fn palette_art(p: &Painter, r: Rect) {
     p.rect_filled(card, theme::radius(9.0), theme::ink_800());
     let inner = card.shrink(10.0);
     p.rect_filled(Rect::from_min_size(inner.min, vec2(inner.width() * 0.62, 6.0)), theme::radius(3.0), theme::fg());
-    p.rect_filled(Rect::from_min_size(inner.min + vec2(0.0, 12.0), vec2(inner.width() * 0.8, 5.0)), theme::radius(2.5), theme::fg_3());
+    p.rect_filled(Rect::from_min_size(inner.min + vec2(0.0, 12.0), vec2(inner.width() * 0.44, 5.0)), theme::radius(2.5), theme::fg_3());
     let pill = Rect::from_min_size(pos2(inner.right() - 40.0, inner.bottom() - 13.0), vec2(40.0, 13.0));
     p.rect_filled(pill, theme::radius(6.5), theme::accent());
     p.rect_filled(Rect::from_center_size(pill.center(), vec2(18.0, 3.0)), theme::radius(1.5), theme::on_accent());
@@ -472,7 +474,7 @@ fn font(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings) -> bool {
     let mut changed = false;
     ui.add_space(8.0);
     let mut picked: Option<String> = None;
-    grid(ui, BUNDLED.len() + 1, 220.0, 78.0, 12.0, |ui, i, r| {
+    grid(ui, "appearance-font", BUNDLED.len() + 1, 220.0, 78.0, 12.0, |ui, i, r| {
         let (key, name) = match i.checked_sub(1).map(|k| &BUNDLED[k]) {
             None => (String::new(), tr("Orbiters' own").to_string()),
             Some(b) => (b.id.to_string(), b.name.to_string()),
@@ -492,7 +494,7 @@ fn font(ui: &mut Ui, state: &mut State, a: &mut AppearanceSettings) -> bool {
     };
     widgets::field(ui, tr(OWN_FONT), Some(&about), 160.0, |ui| {
         let label = if state.fonts_open { tr("Hide") } else { tr("Choose a font") };
-        if Button::new(label).id_salt("appearance-own-font").icon(if state.fonts_open { icons::CARET_UP } else { icons::CARET_DOWN }).size(Size::Sm).show(ui).clicked() {
+        if Button::new(label).icon(if state.fonts_open { icons::CARET_UP } else { icons::CARET_DOWN }).size(Size::Sm).show(ui).clicked() {
             state.fonts_open = !state.fonts_open;
         }
     });
@@ -549,7 +551,7 @@ fn own_fonts(ui: &mut Ui, state: &mut State, chosen: Option<&str>) -> Option<Str
         widgets::text(ui.painter(), ui.cursor().min + vec2(0.0, 12.0), Align2::LEFT_CENTER, &Txt::new(tr("No font of that name here."), 12.5).color(theme::fg_3()));
         ui.add_space(28.0);
     }
-    grid(ui, shown, 220.0, 78.0, 12.0, |ui, i, r| {
+    grid(ui, "appearance-installed", shown, 220.0, 78.0, 12.0, |ui, i, r| {
         let (family, path) = found[i];
         if !path.is_empty() && !state.specimens.contains_key(family) {
             let path = path.clone();
@@ -566,8 +568,8 @@ fn own_fonts(ui: &mut Ui, state: &mut State, chosen: Option<&str>) -> Option<Str
     let more = found.len() - shown;
     if more > 0 {
         ui.add_space(8.0);
-        let label = tr_n("Show {count} more font", "Show {count} more fonts", more as u64);
-        if Button::new(&label).id_salt("appearance-more-fonts").variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
+        let label = tr!("Show more ({count})", count = more);
+        if Button::new(&label).variant(Variant::Ghost).size(Size::Sm).show(ui).clicked() {
             state.shown = shown + FONTS_FIRST * 4;
         }
     }
@@ -642,9 +644,9 @@ fn backgrounds(ui: &mut Ui, a: &mut AppearanceSettings, reduced: bool) -> bool {
     let mut changed = false;
     ui.add_space(8.0);
     let mut picked = None;
-    grid(ui, BACKGROUNDS.len(), 190.0, 158.0, 14.0, |ui, i, r| {
+    grid(ui, "appearance-background", BACKGROUNDS.len(), 150.0, 146.0, 14.0, |ui, i, r| {
         let b = BACKGROUNDS[i];
-        let art = Rect::from_min_size(r.min, vec2(r.width(), 112.0));
+        let art = Rect::from_min_size(r.min, vec2(r.width(), 100.0));
         let (name, caption) = scene_words(b);
         let chosen = a.background == b;
         let (_, pressed) = choice(ui, "appearance-background", i, art, 14.0, chosen, name);
@@ -694,18 +696,37 @@ fn backgrounds(ui: &mut Ui, a: &mut AppearanceSettings, reduced: bool) -> bool {
             }
         });
         widgets::separator(ui);
-        let note = if reduced { tr("Reduce motion is on in App & updates: it stands still.") } else { tr("While this window is in front and in use, at most 30 times a second. It rests after half a minute without you.") };
-        widgets::field(ui, tr("Move"), Some(note), 48.0, |ui| {
-            changed |= widgets::toggle(ui, "appearance-animate", &mut a.animate);
+        let note = if reduced { tr("Reduce motion is on in App & updates: it stands still.") } else { tr(MOTION_WHY) };
+        let mut now = Moves::of(a);
+        let options = [SegOption::new(Moves::Never, tr("Still")), SegOption::new(Moves::AtRest, tr("Not while playing")), SegOption::new(Moves::Always, tr_ctx("motion", "Always"))];
+        widgets::field(ui, tr("Motion"), Some(note), 320.0, |ui| {
+            if widgets::segmented(ui, "appearance-motion", &mut now, &options, true) {
+                (a.animate, a.animate_while_playing) = (now != Moves::Never, now == Moves::Always);
+                changed = true;
+            }
         });
-        if a.animate {
-            widgets::separator(ui);
-            widgets::field(ui, tr("Move while playing"), Some(tr("Also while VRChat or SteamVR runs. Off, the background costs a game nothing.")), 48.0, |ui| {
-                changed |= widgets::toggle(ui, "appearance-animate-playing", &mut a.animate_while_playing);
-            });
-        }
     }
     changed
+}
+
+pub const MOTION_WHY: &str = mark("It moves while this window is in front and in use, and rests after half a minute. Not while playing: while VRChat or SteamVR runs it costs a game nothing.");
+
+/// The settings' two switches about motion, as the one choice they are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Moves {
+    Never,
+    AtRest,
+    Always,
+}
+
+impl Moves {
+    fn of(a: &AppearanceSettings) -> Moves {
+        match (a.animate, a.animate_while_playing) {
+            (false, _) => Moves::Never,
+            (true, false) => Moves::AtRest,
+            (true, true) => Moves::Always,
+        }
+    }
 }
 
 fn colors_name(c: BackgroundColors) -> &'static str {
@@ -730,8 +751,4 @@ fn swatches(p: &Painter, r: Rect, b: &Backdrop) {
 /// What the settings' search says of those that need something else.
 pub fn needs_background(s: &crate::state::Snapshot) -> Option<&'static str> {
     (s.settings.appearance.background == Background::None).then_some(mark("Shown with a background"))
-}
-
-pub fn needs_motion(s: &crate::state::Snapshot) -> Option<&'static str> {
-    needs_background(s).or_else(|| (!s.settings.appearance.animate).then_some(mark("Shown when Move is on")))
 }

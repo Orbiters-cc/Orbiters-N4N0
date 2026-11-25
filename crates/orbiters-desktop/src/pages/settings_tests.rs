@@ -104,6 +104,8 @@ impl Harness {
         s.translate.provider = orbiters_core::settings::TranslateProvider::Address;
         // A gun changed the avatar once: Who can change my avatar shows.
         s.avatar_gun.changed_once = true;
+        // A background: its colors and its motion show.
+        s.appearance.background = orbiters_core::appearance::Background::AeroShards;
         let mut snap = Snapshot::new(s);
         // An AI server that offers models (the translator's Model row).
         snap.translate.set(crate::state::TranslateStatus { models: vec!["made-up-model".into()], ..Default::default() });
@@ -180,6 +182,7 @@ impl Harness {
         s.performance.record_mic = false;
         s.launch.performance = false;
         s.translate.provider = orbiters_core::settings::TranslateProvider::ThisComputer;
+        s.appearance.background = orbiters_core::appearance::Background::None;
         self.snap.account.state = AccountState::SignedOut;
         self.snap.translate.set(crate::state::TranslateStatus::default());
     }
@@ -508,6 +511,7 @@ fn each_view_has_one_scrolling_region() {
         ("perf_card", include_str!("perf_card.rs")),
         ("mic", include_str!("mic.rs")),
         ("form", include_str!("form.rs")),
+        ("appearance", include_str!("appearance.rs")),
     ] {
         assert_eq!(count(source), 0, "{name} has a scroll area inside Settings' own");
     }
@@ -732,7 +736,9 @@ fn hint_of(e: &registry::Entry, snap: &Snapshot) -> Option<&'static str> {
 
 /// The settings that need another to show, every one of them, by id: the count is exact, so a dependency added or lost
 /// without its states below fails here.
-const DEPENDENT: [&str; 17] = [
+const DEPENDENT: [&str; 19] = [
+    "appearance.background-colors",
+    "appearance.motion",
     "account.explorer-points",
     "n4n0.afk-message",
     "n4n0.direct-calls",
@@ -773,7 +779,10 @@ fn signed_in(h: &mut Harness) {
 /// account with Calls on or off, each translator with and without models, an agreement given or not, a hint or none.
 fn dependency_states() -> Vec<(&'static str, Vec<DepState>)> {
     use orbiters_core::settings::TranslateProvider as P;
+    use orbiters_core::appearance::Background;
     vec![
+        ("appearance.background-colors", vec![("a background", |h| h.snap.settings.appearance.background = Background::Grainient, None), ("none", |h| h.snap.settings.appearance.background = Background::None, Some("Shown with a background"))]),
+        ("appearance.motion", vec![("a background", |h| h.snap.settings.appearance.background = Background::LeafShadow, None), ("none", |h| h.snap.settings.appearance.background = Background::None, Some("Shown with a background"))]),
         (
             "account.explorer-points",
             vec![
@@ -982,4 +991,116 @@ fn every_key_the_registry_names_is_in_the_cards_source() {
 fn add_control(h: &mut Harness, card: &'static str, key: &str, kind: &'static str, rect: Rect) {
     h.state.seen_controls.push((card, key.to_owned(), rect));
     h.state.seen_kinds.push(kind);
+}
+
+/// Appearance: each choice is one press and saved at once, the keyboard presses as the pointer does, and one button puts
+/// Orbiters' look back, whatever was chosen.
+#[test]
+fn appearance_is_chosen_in_one_press_and_put_back_in_one() {
+    use orbiters_core::appearance::{AppearanceSettings, Background, Tint};
+    orbiters_ui::widgets::watch_controls();
+    let applied = |h: &mut Harness| {
+        let patch = h.patches().last().cloned().expect("a change written");
+        let (patched, left_out) = (*h.snap.settings).clone().patched(&patch);
+        assert!(left_out.is_empty(), "{left_out:?}");
+        *h.snap.settings = patched;
+        h.settle_a_little();
+    };
+    let tile = |h: &Harness, key: &str, n: usize| h.state.seen_controls.iter().filter(|(_, k, _)| k == key).nth(n).map(|(_, _, r)| *r).unwrap_or_else(|| panic!("{key} {n}"));
+    let mut h = Harness::new();
+    h.size = vec2(1280.0, 3400.0);
+    h.snap.settings.appearance = AppearanceSettings::default();
+    h.open("appearance");
+    let (_, on) = orbiters_ui::widgets::control(&h.ctx, "Reset").expect("Reset is drawn");
+    assert!(!on, "Orbiters' look: nothing to reset");
+    // A palette is a whole look.
+    let at = tile(&h, "appearance-palette", 1);
+    h.press(at.center());
+    applied(&mut h);
+    let a = h.snap.settings.appearance.clone();
+    assert!(crate::appearance::PALETTES[1].is(&a), "{a:?}");
+    // A tint of its own, an accent of its own.
+    let at = tile(&h, "appearance-tint", 2);
+    h.press(at.center());
+    applied(&mut h);
+    assert_eq!(h.snap.settings.appearance.tint, Tint::Slate);
+    let at = tile(&h, "appearance-accent", 3);
+    h.press(at.center());
+    applied(&mut h);
+    assert_eq!(h.snap.settings.appearance.accent, crate::appearance::ACCENTS[3]);
+    // Any accent, along the strip.
+    let strip = tile(&h, "appearance-hue", 0);
+    h.press(strip.center());
+    applied(&mut h);
+    assert!(!crate::appearance::ACCENTS.contains(&h.snap.settings.appearance.accent));
+    // A font, a background, then its colors and its motion.
+    let at = tile(&h, "appearance-font", 3);
+    h.press(at.center());
+    applied(&mut h);
+    assert_eq!(h.snap.settings.appearance.font, "nunito");
+    let at = tile(&h, "appearance-background", 1);
+    h.press(at.center());
+    applied(&mut h);
+    assert_eq!(h.snap.settings.appearance.background, Background::AeroShards);
+    let at = tile(&h, "appearance-background-colors", 5);
+    h.press(at.center());
+    applied(&mut h);
+    assert_eq!(h.snap.settings.appearance.background_colors, orbiters_core::appearance::BackgroundColors::Daydream);
+    let motion = tile(&h, "appearance-motion", 0);
+    h.press(egui::pos2(motion.right() - 20.0, motion.center().y));
+    applied(&mut h);
+    let a = &h.snap.settings.appearance;
+    assert!(a.animate && a.animate_while_playing);
+    // Back, in one.
+    let (r, on) = orbiters_ui::widgets::control(&h.ctx, "Reset").expect("Reset is drawn");
+    assert!(on);
+    h.press(r.center());
+    applied(&mut h);
+    assert!(h.snap.settings.appearance.is_orbiters(), "{:?}", h.snap.settings.appearance);
+    // The keyboard: Tab reaches every choice, Enter chooses.
+    let mut reached = false;
+    for _ in 0..120 {
+        h.key(egui::Key::Tab);
+        let before = h.patches().len();
+        let focused = h.ctx.memory(|m| m.focused());
+        let on_palette = focused.and_then(|id| h.ctx.read_response(id)).is_some_and(|r| r.rect == tile(&h, "appearance-palette", 2));
+        if on_palette {
+            h.key(egui::Key::Enter);
+            assert!(h.patches().len() > before, "Enter chose the palette the keyboard is on");
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "Tab reaches the palettes");
+}
+
+/// Appearance at every width the window takes, in every language and in two of its fonts: no control past the page, none over its
+/// row's words.
+#[test]
+fn appearance_fits_in_every_language_and_font() {
+    let mut wrong = Vec::new();
+    for font in ["", "roboto-slab"] {
+        for language in Language::ALL {
+            orbiters_ui::faces::in_face(font, || {
+                in_language(language, || {
+                    for width in [808.0, 1280.0] {
+                        let mut h = Harness::new();
+                        h.size = vec2(width, 820.0);
+                        h.open("appearance");
+                        for (label, control, text_w) in &h.state.seen_fields {
+                            if *text_w < 120.0 && control.width() > 1.0 {
+                                wrong.push(format!("{language:?} {font} {width}: {label:?} leaves its text {text_w:.0} pt"));
+                            }
+                        }
+                        for (card, key, r) in &h.state.seen_controls {
+                            if r.left() < 0.0 || r.right() > width - 24.0 {
+                                wrong.push(format!("{language:?} {font} {width} › {card}: {key:?} goes past the page: {r:?}"));
+                            }
+                        }
+                    }
+                });
+            });
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

@@ -114,14 +114,20 @@ pub fn generation() -> u32 {
 
 /// The process draws in `look` from now on. Contexts follow at their next frame ([`crate::follow`]).
 pub fn set_look(look: &Look) {
+    set_look_over(look, None);
+}
+
+/// The same, its pages over a background whose brightest is the colour given ([`Tokens::over`]).
+pub fn set_look_over(look: &Look, ground: Option<Color32>) {
     // Asked each frame: the colours are worked out when they change.
-    static LAST: Mutex<Option<Look>> = Mutex::new(None);
+    static LAST: Mutex<Option<(Look, Option<Color32>)>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    if last.replace(*look) == Some(*look) {
+    if last.replace((*look, ground)) == Some((*look, ground)) {
         return;
     }
     let mut changed = false;
-    for (now, new) in NOW.iter().zip(of(&Tokens::of(look))) {
+    let tokens = Tokens::of(look);
+    for (now, new) in NOW.iter().zip(of(&ground.map_or(tokens, |g| tokens.over(g)))) {
         changed |= now.swap(new, Ordering::Relaxed) != new;
     }
     if changed {
@@ -187,7 +193,7 @@ pub const REC: Color32 = Color32::from_rgb(0xff, 0x4d, 0x6d);
 pub const CARD_RADIUS: f32 = 18.0;
 pub const TILE_RADIUS: f32 = 14.0;
 /// How opaque cards are over a background.
-const OVER_BACKGROUND_ALPHA: f32 = 0.82;
+pub const OVER_BACKGROUND_ALPHA: f32 = 0.82;
 
 /// `c` at opacity `a` (0..1), blended like CSS (in gamma space).
 pub fn alpha(c: Color32, a: f32) -> Color32 {

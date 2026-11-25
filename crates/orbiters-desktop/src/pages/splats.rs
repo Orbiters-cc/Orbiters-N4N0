@@ -393,7 +393,7 @@ impl Viewer {
             return open;
         }
         let p = ui.painter().with_clip_rect(rect);
-        p.rect_filled(rect, 0.0, Color32::from_rgb(9, 9, 11));
+        p.rect_filled(rect, 0.0, theme::ink_950());
         let id = Id::unique(("splat-viewer", &self.session));
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let ppp = ctx.pixels_per_point();

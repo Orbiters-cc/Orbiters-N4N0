@@ -85,7 +85,8 @@ fn save(folder: &std::path::Path, size: [f32; 2], at: f64) -> anyhow::Result<()>
     for scene in Scene::ALL.into_iter().skip(1) {
         let b = Backdrop::of(scene);
         let moving = Time { moved: at, still: false };
-        let veiled = Laid { veil: b.veil(), ..Laid::PAGE };
+        let veil = b.under(&orbiters_ui::look::Tokens::ORBITERS).0;
+        let veiled = Laid { veil, ..Laid::PAGE };
         for (name, time, laid) in [("scene", moving, Laid { picture: true, ..Laid::PAGE }), ("still", Time::STILL, Laid { picture: true, ..Laid::PAGE }), ("behind-a-page", moving, Laid::PAGE), ("behind-a-page-with-the-veil", moving, veiled)] {
             let ctx = egui::Context::default();
             orbiters_ui::install(&ctx);
@@ -100,7 +101,7 @@ fn save(folder: &std::path::Path, size: [f32; 2], at: f64) -> anyhow::Result<()>
             }
             save_png(&folder.join(format!("{}-{name}.png", scene.id())), &image.context("no picture")?)?;
         }
-        println!("{} (veil {:.2})", scene.id(), b.veil());
+        println!("{} (veil {veil:.2})", scene.id());
     }
     Ok(())
 }

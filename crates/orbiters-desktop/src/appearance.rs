@@ -133,6 +133,13 @@ pub fn follow(settings: &Settings, woken: impl FnOnce() + Send + 'static) {
     faces::choose(&settings.appearance.font, woken);
 }
 
+/// [`follow`] for the window, whose words may lie on a background. Cheap to ask each frame: what it works out is kept in `wallpaper`.
+pub fn follow_in_window(settings: &Settings, wallpaper: &mut Wallpaper, woken: impl FnOnce() + Send + 'static) {
+    let (b, _, ground) = wallpaper.wanted(&settings.appearance);
+    theme::set_look_over(&look(&settings.appearance), (b.scene != Scene::None).then_some(ground));
+    faces::choose(&settings.appearance.font, woken);
+}
+
 /// What anything drawn now is drawn in: something kept is out of date once this differs.
 pub fn drawn_in() -> (u32, u32) {
     (theme::generation(), faces::generation())
@@ -224,8 +231,8 @@ pub struct Wallpaper {
     /// When it was last painted, and how fast it moves (0 at rest, 1).
     last: Option<f64>,
     speed: f64,
-    /// What the settings say it is, worked out when they or the colours change: the settings, the colours, the background, its veil.
-    worked_out: Option<(AppearanceSettings, u32, Backdrop, f32)>,
+    /// What the settings say it is, worked out when they change: the background, its veil, the brightest words lie on.
+    worked_out: Option<(AppearanceSettings, (Backdrop, f32, Color32))>,
 }
 
 struct Layer {
@@ -238,15 +245,14 @@ struct Layer {
 
 impl Wallpaper {
     /// The background the settings ask for and its veil.
-    fn wanted(&mut self, a: &AppearanceSettings) -> (Backdrop, f32) {
-        let drawn_in = theme::generation();
+    fn wanted(&mut self, a: &AppearanceSettings) -> (Backdrop, f32, Color32) {
         match &self.worked_out {
-            Some((of, at, b, veil)) if of == a && *at == drawn_in => (*b, *veil),
+            Some((of, out)) if of == a => *out,
             _ => {
                 let b = backdrop(a);
-                let veil = b.veil();
-                self.worked_out = Some((a.clone(), drawn_in, b, veil));
-                (b, veil)
+                let (veil, ground) = b.under(&look::Tokens::of(&look(a)));
+                self.worked_out = Some((a.clone(), (b, veil, ground)));
+                (b, veil, ground)
             }
         }
     }
@@ -258,7 +264,7 @@ impl Wallpaper {
 
     /// [`Wallpaper::paint_as`] for the settings.
     pub fn paint(&mut self, painter: &Painter, rect: Rect, a: &AppearanceSettings, motion: Motion) -> bool {
-        let (wanted, veil) = self.wanted(a);
+        let (wanted, veil, _) = self.wanted(a);
         self.paint_as(painter, rect, wanted, veil, motion)
     }
 

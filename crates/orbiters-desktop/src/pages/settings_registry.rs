@@ -296,25 +296,22 @@ pub static ENTRIES: &[Entry] = &[
         .gate(Gate::VrchatLogin)
         .whole().controls(&["vrchat-username", "vrchat-factor-code", mark("Show the password"), mark("Hide the password")]),
     // Appearance.
-    e("appearance.reset", Appearance, appearance::PREVIEW, appearance::RESET, mark("The colors, the font, the size and the background, as they were."), mark("default theme restore original undo")).controls(&["appearance-reset"]),
+    e("appearance.reset", Appearance, appearance::PREVIEW, appearance::RESET, mark("The colors, the font, the size and the background, as they were."), mark("default theme restore original undo")).controls(&[mark("Reset")]),
     e("appearance.palette", Appearance, appearance::COLOURS, mark("Palette"), mark("The surfaces, the accent and the background's colors together."), mark("theme color scheme dark Aurora Ember Lagoon Daydream")).controls(&["appearance-palette"]),
     e("appearance.accent", Appearance, appearance::COLOURS, mark("Accent"), mark("The main action, what is selected, and switches that are on."), mark("green highlight color button theme")).controls(&["appearance-accent"]),
     e("appearance.own-accent", Appearance, appearance::COLOURS, mark("Your own accent"), mark("Any color, kept readable on every surface."), mark("hue hex code picker custom color contrast")).controls(&["appearance-accent-code", "appearance-hue"]),
     e("appearance.surfaces", Appearance, appearance::COLOURS, mark("Surfaces"), mark("What the greys of pages and cards lean to."), mark("tint grey black OLED neutral dark")).controls(&["appearance-tint"]),
     e("appearance.menus", Appearance, appearance::COLOURS, mark("Menus in VRChat"), mark("Whether Orbiters' panels beside VRChat's menus have the app's accent or their own."), mark("overlay quick menu panels color accent VR")).gate(Gate::Around).controls(&["appearance-menus"]),
     e("appearance.font", Appearance, appearance::FONT, appearance::FONT, mark("The letters of the whole app: Orbiters' own, or one of those it brings."), mark("typeface text letters Inter Nunito Montserrat readable dyslexia")).controls(&["appearance-font"]).whole(),
-    e("appearance.own-font", Appearance, appearance::FONT, appearance::OWN_FONT, mark("Any font installed here, drawn at Orbiters' size so pages keep their layout."), mark("system font installed Windows typeface")).controls(&["appearance-own-font", "appearance-font-search", "appearance-installed", "appearance-more-fonts"]),
+    e("appearance.own-font", Appearance, appearance::FONT, appearance::OWN_FONT, mark("Any font installed here, drawn at Orbiters' size so pages keep their layout."), mark("system font installed Windows typeface")).controls(&[mark("Choose a font"), mark("Hide"), "appearance-font-search", "appearance-installed"]),
     e("appearance.size", Appearance, appearance::FONT, mark("Size"), mark("Of the text and everything in the window."), mark("zoom scale bigger smaller large text")).controls(&["appearance-size"]),
     e("appearance.background", Appearance, appearance::BACKGROUND, appearance::BACKGROUND, mark("Behind the window's pages: the backgrounds of profiles on orbiters.cc"), mark("wallpaper animated shards waves ASCII window light profile")).controls(&["appearance-background"]).whole(),
     e("appearance.background-colors", Appearance, appearance::BACKGROUND, mark("Background's colors"), mark("The colors the background is drawn in."), mark("wallpaper palette color"))
         .needs("appearance.background", appearance::needs_background)
         .controls(&["appearance-background-colors"]),
-    e("appearance.animate", Appearance, appearance::BACKGROUND, mark("Move"), mark("The background moves while the window is in front and in use."), mark("animate animation motion still wallpaper"))
+    e("appearance.motion", Appearance, appearance::BACKGROUND, mark("Motion"), appearance::MOTION_WHY, mark("animate animation motion still wallpaper performance game frame rate"))
         .needs("appearance.background", appearance::needs_background)
-        .controls(&["appearance-animate"]),
-    e("appearance.animate-playing", Appearance, appearance::BACKGROUND, mark("Move while playing"), mark("The background also moves while VRChat or SteamVR runs."), mark("performance frame rate game animation"))
-        .needs("appearance.animate", appearance::needs_motion)
-        .controls(&["appearance-animate-playing"]),
+        .controls(&["appearance-motion"]),
     // N4N0 companion.
     e("n4n0.enabled", N4n0, "N4N0", "N4N0", mark("The panel, the AFK message, carried and held parameters, saved videos."), mark("on off enable disable companion bot")).controls(&["n4n0-enabled"]),
     e("n4n0.show-bot", N4n0, "N4N0", mark("Show N4N0"), mark("The bot beside your head, its beams and its panel, for everyone around. Off, N4N0's menu still opens, before your eyes as ever. Show N4N0 in your Action Menu does the same."), mark("bot hide visible beams")).controls(&["n4n0-bot"]),

@@ -310,9 +310,9 @@ impl History {
             log.read = read;
             self.logs.insert(name.clone(), log);
         }
-        // Forget the logs VRChat deleted.
+        // Forget the logs VRChat deleted: not those this look at the folder missed.
         let before = self.logs.len();
-        self.logs.retain(|name, _| logs.iter().any(|(n, _)| n == name));
+        self.logs.retain(|name, _| logs.binary_search_by(|(listed, _)| listed.cmp(name)).is_ok() || !matches!(dir.join(name).try_exists(), Ok(false)));
         if changed {
             self.sort();
         }

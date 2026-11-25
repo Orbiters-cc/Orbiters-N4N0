@@ -22,6 +22,7 @@ mod no_write_tests;
 pub mod own;
 pub mod owned;
 pub mod preview;
+mod programs;
 mod repos;
 pub mod scene;
 pub mod setup;
@@ -118,14 +119,25 @@ pub fn vcc_app_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("ORBITERS_VCC_APP_DIR") {
         return (!dir.is_empty()).then(|| PathBuf::from(dir)).filter(|p| p.is_dir());
     }
-    uninstall_entry(|key, name| key == "{A20FE4C3-FE52-495B-B0DA-92992240BFC0}_is1" || name.starts_with("VRChat Creator Companion"))
+    uninstall_entry(is_vcc_entry)
         .and_then(|(location, _)| location)
         .filter(|p| p.is_dir())
 }
 
-/// The Windows uninstall entry `matches` picks (by its key and display name): its install folder and display icon.
-#[allow(unused_variables)]
+fn is_vcc_entry(key: &str, name: &str) -> bool {
+    key == "{A20FE4C3-FE52-495B-B0DA-92992240BFC0}_is1" || name.starts_with("VRChat Creator Companion")
+}
+
+/// The first of [`uninstall_entries`].
 fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
+    uninstall_entries(matches).into_iter().next()
+}
+
+/// The Windows uninstall entries `matches` picks (by their keys and display names): their install folders and display icons.
+#[allow(unused_variables)]
+fn uninstall_entries(matches: impl Fn(&str, &str) -> bool) -> Vec<(Option<PathBuf>, Option<PathBuf>)> {
+    #[allow(unused_mut)]
+    let mut found = vec![];
     #[cfg(windows)]
     {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -142,13 +154,13 @@ fn uninstall_entry(matches: impl Fn(&str, &str) -> bool) -> Option<(Option<PathB
                         // DisplayIcon is "path,index".
                         let icon = value("DisplayIcon")
                             .map(|s| PathBuf::from(s.rsplit_once(',').filter(|(_, i)| i.parse::<i32>().is_ok()).map_or(s.as_str(), |(p, _)| p)));
-                        return Some((value("InstallLocation").map(PathBuf::from), icon));
+                        found.push((value("InstallLocation").map(PathBuf::from), icon));
                     }
                 }
             }
         }
     }
-    None
+    found
 }
 
 /// Unity Hub's program: where VCC was told it is, else where its installer says, else its usual folder.

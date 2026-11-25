@@ -35,10 +35,14 @@ impl Source {
     }
     /// Selection changes the playing account, so a matching log identity is mandatory.
     pub fn select_avatar(&self, id: &str) -> anyhow::Result<()> {
+        self.select_avatar_while(id, || true)
+    }
+    /// [`Self::select_avatar`], sent only if `current` says so once there is nothing left to wait for.
+    pub fn select_avatar_while(&self, id: &str, current: impl FnOnce() -> bool) -> anyhow::Result<()> {
         let playing = self.log_account.as_deref().ok_or(Error::Unauthorized)?;
         self.direct(|c| {
             if c.current_user()?.id != playing { return Err(Error::Unauthorized); }
-            c.select_avatar(id)
+            c.select_avatar_while(id, current)
         }).ok_or(Error::Unauthorized)?
     }
     pub fn new(direct: Option<Arc<Mutex<Client>>>, orbiters: Option<(Api, String)>, log_account: Option<String>) -> Self {

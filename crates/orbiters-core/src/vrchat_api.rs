@@ -1362,7 +1362,8 @@ impl Client {
     pub fn select_avatar(&mut self, id: &str) -> Result<()> {
         self.authenticated()?;
         if !id.starts_with("avtr_") || id.len() != 41 { return Err(Error::InvalidResponse); }
-        self.request("avatars", "PUT", format!("{BASE}/avatars/{}/select", encode(id)), None, None)?;
+        let leave: Leave = Box::new(|| current().then(|| Box::new(()) as Box<dyn Held>));
+        self.request_with("avatars", "PUT", format!("{BASE}/avatars/{}/select", encode(id)), None, None, None, &[], Some(leave))?;
         Ok(())
     }
     fn keep_avatar(&mut self, id: &str, body: &[u8]) -> Result<Avatar> {
@@ -1431,6 +1432,10 @@ impl Client {
                 for u in page {
                     all.insert(u.id.clone(), u);
                 }
+        self.select_avatar_while(id, || true)
+    }
+    /// [`Self::select_avatar`], sent only if `current` says so once there is nothing left to wait for.
+    pub fn select_avatar_while(&mut self, id: &str, current: impl FnOnce() -> bool) -> Result<()> {
                 if n < 100 {
                     break;
                 }
@@ -2405,6 +2410,21 @@ pub(crate) mod tests {
                     200,
                     &format!(
                         r#"{{"requiresTwoFactorAuth":["{}"]}}"#,
+    /// DCT-1: an avatar is put on only if what allowed it still does when the request is about to leave, after who is signed in was
+    /// asked and its turn came.
+    #[test]
+    fn an_avatar_is_selected_only_while_it_is_still_allowed() {
+        for allowed in [true, false] {
+            let (c, seen) = mock(vec![response(200, r#"{"id":"usr_test","displayName":"Tester"}"#, &[]), response(200, "{}", &[])]);
+            let source = crate::vrchat_source::Source::new(Some(Arc::new(Mutex::new(c))), None, Some("usr_test".into()));
+            let asked = seen.clone();
+            let selected = source.select_avatar_while("avtr_4432ea9b-729c-46e3-8eaf-846aa0a37fdd", || {
+                assert_eq!(asked.lock().unwrap().len(), 1, "asked last");
+                allowed
+            });
+            assert_eq!((selected.is_ok(), seen.lock().unwrap().iter().any(|r| r.method == "PUT")), (allowed, allowed));
+        }
+    }
                         match method {
                             TwoFactor::Totp => "totp",
                             TwoFactor::Email => "emailOtp",

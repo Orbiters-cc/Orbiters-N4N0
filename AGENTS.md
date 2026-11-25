@@ -16,6 +16,8 @@
   from the fork github.com/Orbiters-cc/Obelisk (branch `cli`, GPL-3.0, its `docs/CLI.md` is the contract), a separate
   program N4N0 downloads from that fork's releases and runs (`orbiters_core::obelisk`, `controller/obelisk_cli.rs`).
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
+- **Every change keeps `cargo check` passing for the Mac** (main did not compile there from 0ee59341 to 2026-11-25; the tag 0.3.10 does
+  not). From Windows: `scripts/linux/check.sh mac` (`setup` first; it type-checks without a Mac); what is Windows' alone stays behind `cfg(windows)`.
 - **The VRChat bridge on a Mac observes and travels only** (`docs/vrchat-bridge.md`, "On a Mac"). What a computer's bridge can
   do is `bridge/caps.rs`, never `cfg` in shared logic: Windows has every capability (keep it so: its tools, guide and tests are
   unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side

@@ -10,5 +10,9 @@
   "The incomplete copy at {path} was deleted.": "{path}の未完成のコピーを削除しました。",
   "Delete the incomplete copy…": "未完成のコピーを削除…",
   "Delete its files": "ファイルを削除",
-  "Deleting the incomplete copy…": "未完成のコピーを削除中…"
+  "Deleting the incomplete copy…": "未完成のコピーを削除中…",
+  "Could not record the package change before making it: nothing was changed": "パッケージの変更を始める前に記録できませんでした。何も変更していません",
+  "A package change of this project ended halfway (Orbiters closed during it). {problems}": "このプロジェクトのパッケージの変更が途中で終わりました（その間にOrbitersが終了しました）。{problems}",
+  "{name} could not be put back from {from} to {to}: {why}": "{name}を{from}から{to}に戻せませんでした：{why}",
+  "{name} may be the new one: what the project had is kept in {path}. Restore installs the version the project's list has.": "{name}は新しいものかもしれません。プロジェクトにあったものは{path}に残しています。「復元」でプロジェクトの一覧にあるバージョンをインストールできます。"
 }

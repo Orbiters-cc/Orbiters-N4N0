@@ -404,10 +404,11 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let (io, _) = environment(root).await?;
     let mut lock = named_lock(&io, &crate::repos::dir(root), PACKAGES_LOCK).await?;
-    // A plan an earlier run stopped halfway is put back first, from its journal (kept outside the project), before any
-    // repository is reached: a network failure must not hold that up.
-    recover_plans(path, &plan_journals(root))?;
-    recover_plans(path, &old_plan_journals(root))?;
+    // A plan an earlier run stopped halfway is said first, from its journal (kept outside the project), before any repository is
+    // reached. Those of 0.3.8 and before are in a folder beside Creator Companion's files, and are only read.
+    unfinished(path, &plan_journals(root), true)?;
+    unfinished(path, &old_plan_journals(root), false)?;
+    crate::installs::recover(root, path)?;
     // Downloaded without the lock: a host that does not answer must not hold every other window's change.
     let (settings, packages) = if wants_download(root, path, &action).await? {
         drop(lock);
@@ -461,9 +462,18 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
         );
     }
     ready(root, path, &changes)?;
-    project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await?;
-    project.save().await?;
-    Ok(())
+    let making = crate::installs::Installing::begin(root, path, changes.package_changes().keys().map(|name| name.as_ref()))?;
+    let Err(e) = project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await else {
+        making.over();
+        project.save().await?;
+        return Ok(());
+    };
+    // What vrc-get could not move back (its folder in use a moment ago) is tried once more, and said where it stays.
+    drop(making);
+    Err(match crate::installs::recover(root, path) {
+        Ok(()) => anyhow::Error::from(e).context(tr("Nothing was changed: the project's packages are as they were")),
+        Err(left) => anyhow::Error::from(e).context(left.to_string()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

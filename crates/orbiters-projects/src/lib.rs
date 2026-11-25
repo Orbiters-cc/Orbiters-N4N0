@@ -13,6 +13,7 @@ pub mod gallery;
 pub mod git;
 pub mod hidden;
 pub mod icons;
+mod installs;
 pub mod listings;
 #[cfg(target_os = "macos")]
 mod mac;
@@ -355,6 +356,8 @@ fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority:
     let ask = || unity6::authority::allow(&data_dir(), &project.path, unity6::authority::Action::Open(caller)).map_err(|why| anyhow::anyhow!("{why}"));
     let way = ask()?;
     let folder = owned::id_of(&project.path)?;
+    // A package change that ended halfway is put back first: Unity empties the folder what it moved away is in.
+    installs::recover(&vcc_dir(), &project.path)?;
     let locked = unity_open(&project.path);
     let editors = editor::running();
     if let Some(open) = editor::of(&editors, &project.path, locked) {

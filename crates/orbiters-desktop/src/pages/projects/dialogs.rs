@@ -60,6 +60,10 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             let (t, s) = super::conflict::head(state);
             (glyph::PACKAGE, t, s, 620.0)
         }
+        Modal::Unity6(path) => {
+            let (t, s) = super::unity6_sheet::head(state, path);
+            (icons::CUBE, t, s, 720.0)
+        }
     };
     let step = match &modal {
         Modal::Repos => 0,
@@ -69,6 +73,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
         Modal::Setup => 4,
         Modal::Duplicate(_) => 5,
         Modal::Conflict => 6,
+        Modal::Unity6(_) => 7 + state.u6.sheet.step as usize,
     };
     let creating = matches!(modal, Modal::New | Modal::Duplicate(_)) && state.running() || (modal == Modal::Conflict && state.conflict.as_ref().is_some_and(|c| c.solving.running()));
     let resp = Dialog::new(id, state.modal_origin, &title)
@@ -87,6 +92,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Setup => setup_steps(ui, state),
                 Modal::Duplicate(path) => super::duplicate::body(ui, state, path),
                 Modal::Conflict => super::conflict::body(ui, state),
+                Modal::Unity6(path) => super::unity6_sheet::body(ui, cx, state, path),
             }),
             Part::Footer => match &modal {
                 Modal::Repos => {}
@@ -96,6 +102,7 @@ pub fn modals(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
                 Modal::Setup => setup_footer(ui, cx, state),
                 Modal::Duplicate(path) => super::duplicate::footer(ui, state, path),
                 Modal::Conflict => super::conflict::footer(ui, state),
+                Modal::Unity6(path) => super::unity6_sheet::footer(ui, cx, state, path),
             },
         });
     if resp.closed {
@@ -505,6 +512,8 @@ fn new_footer(ui: &mut Ui, state: &mut State) {
             }
             None => None,
         },
+        // From a template: the place alone.
+        (Some(_), false) if !state.duplicate && valid && !state.new_location.is_empty() && !state.running() => super::duplicate::place_problem(&ctx, state),
         _ => None,
     };
     // Said once known (not while the size is being measured).
@@ -855,6 +864,9 @@ fn setup_steps(ui: &mut Ui, state: &mut State) {
     widgets::text(p, pos2(r.left() + 92.0, r.top() + 20.0), Align2::LEFT_CENTER, &Txt::new(headline, 17.0).weight(weight::SEMIBOLD));
     p.galley(pos2(r.left() + 92.0, r.top() + 34.0), g, theme::FG_2);
 
+    if let Some(warning) = state.flow.as_ref().and_then(|f| f.warning.clone()) {
+        inline_warning(ui, &warning);
+    }
     // The steps, on a thread.
     let mut steps: Vec<(&str, Step)> =
         vec![(if nano { tr("Install My Avatar and Toolkit") } else { tr("Install My Avatar") }, if s == Stage::Installing { Step::Now } else { Step::Done })];

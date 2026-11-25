@@ -9,10 +9,11 @@ use crate::controller::vrchat_login::Status;
 use crate::pages::groups::{art::{Crop, Target}, stage};
 use crate::state::{AccountState, Snapshot};
 use egui::{pos2, vec2, Color32, ColorImage, Rect};
+use orbiters_core::group_events::CalendarEvent;
 use orbiters_core::groups::*;
 use orbiters_core::vrchat_api::User;
 
-pub(super) const NAMES: [&str; 42] = [
+pub(super) const NAMES: [&str; 51] = [
     "groups-home-several",
     "groups-home-one",
     "groups-home-none",
@@ -55,9 +56,18 @@ pub(super) const NAMES: [&str; 42] = [
     "groups-home-several-fr",
     "groups-studio-anchored-ja",
     "groups-confirm-post-ja",
+    "groups-edit-banner",
+    "groups-edit-icon",
+    "groups-edit-icons",
+    "groups-events",
+    "groups-events-orbiters",
+    "groups-events-past",
+    "groups-events-empty",
+    "groups-events-failed",
+    "groups-confirm-two-factor",
 ];
 /// Also in French or Japanese (the name and a language).
-const TRANSLATED: [(&str, &str, &str); 9] = [
+const TRANSLATED: [(&str, &str, &str); 16] = [
     ("groups-look-fr", "groups-look", "fr"),
     ("groups-outcome-unknown-fr", "groups-outcome-unknown", "fr"),
     ("groups-outcome-not-shown-ja", "groups-outcome-not-shown", "ja"),
@@ -67,6 +77,13 @@ const TRANSLATED: [(&str, &str, &str); 9] = [
     ("groups-members-roles-ja", "groups-members-roles", "ja"),
     ("groups-posts-compose-ja", "groups-posts-compose", "ja"),
     ("groups-studio-centered-fr", "groups-studio-centered", "fr"),
+    ("groups-events-fr", "groups-events", "fr"),
+    ("groups-events-ja", "groups-events", "ja"),
+    ("groups-events-orbiters-fr", "groups-events-orbiters", "fr"),
+    ("groups-events-orbiters-ja", "groups-events-orbiters", "ja"),
+    ("groups-edit-banner-fr", "groups-edit-banner", "fr"),
+    ("groups-members-roles-fr", "groups-members-roles", "fr"),
+    ("groups-confirm-two-factor-ja", "groups-confirm-two-factor", "ja"),
 ];
 
 const ME: &str = "usr_00000000-0000-4000-8000-00000000e001";
@@ -96,7 +113,7 @@ pub(super) fn append(scenarios: &mut Vec<Scenario>) {
             open_detail: false,
             toasts: if base_name(name) == "groups-outcome-done" { vec![(orbiters_ui::toast::Kind::Success, "The member's roles are updated.")] } else { vec![] },
             pointer: None,
-            scroll: if home { 6000.0 } else if base_name(name) == "groups-roles-edit" { 430.0 } else { 0.0 },
+            scroll: if home { 6000.0 } else if base_name(name) == "groups-roles-edit" { 430.0 } else if base_name(name) == "groups-events-past" { 6000.0 } else if base_name(name) == "groups-events-orbiters" { 440.0 } else { 0.0 },
             world: None,
             home: None,
             library: None,
@@ -116,7 +133,7 @@ fn s(v: &[&str]) -> Vec<String> {
 }
 
 /// Made-up art: a soft landscape, a sun, a few shapes; `seed` changes its colours.
-fn landscape(w: u32, h: u32, seed: u32) -> image::RgbaImage {
+pub(super) fn landscape(w: u32, h: u32, seed: u32) -> image::RgbaImage {
     let palettes = [([38, 24, 92], [255, 140, 110], [255, 214, 120]), ([10, 40, 70], [60, 190, 200], [210, 250, 220]), ([60, 20, 40], [230, 90, 140], [255, 200, 220]), ([20, 30, 30], [120, 200, 90], [240, 240, 160])];
     let (top, mid, sun) = palettes[(seed % 4) as usize];
     image::RgbaImage::from_fn(w, h, |x, y| {
@@ -149,7 +166,7 @@ fn color_image(img: &image::RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw())
 }
 
-fn icon(seed: u32) -> image::RgbaImage {
+pub(super) fn icon(seed: u32) -> image::RgbaImage {
     let colours = [[0, 218, 109], [116, 102, 255], [255, 107, 122], [72, 230, 255], [245, 183, 79]];
     let c = colours[(seed % 5) as usize];
     image::RgbaImage::from_fn(128, 128, |x, y| {
@@ -177,7 +194,7 @@ fn card(i: u32, name: &str, code: &str, owner: bool, rights: &[&str], members: u
     }
 }
 
-fn cards() -> Vec<GroupCard> {
+pub(super) fn cards() -> Vec<GroupCard> {
     vec![
         card(1, "Made-up Makers", "MAKE", true, &["*"], 1240),
         card(2, "Night Painters Club", "PAINT", false, &["group-roles-manage", "group-roles-assign", "group-members-manage", "group-announcement-manage"], 312),
@@ -196,6 +213,9 @@ fn roles() -> Vec<Role> {
         Role { description: "Members who made the art of the month.".into(), ..r("grol_artist", "Artists", 3, &[]) },
         Role { self_assignable: true, ..r("grol_events", "Event goers", 4, &[]) },
         Role { requires_two_factor: true, ..r("grol_staff", "Event staff", 5, &["group-instance-join"]) },
+        // As an old group's role comes: without the rights it gives.
+        Role { known: false, whole: false, ..r("grol_hosts", "Event hosts", 6, &[]) },
+        Role { requires_purchase: true, ..r("grol_supporter", "Supporters", 7, &[]) },
         Role { default_role: true, ..r("grol_everyone", "Everyone", 9, &["group-instance-join"]) },
     ]
 }
@@ -212,7 +232,7 @@ fn catalogue() -> Vec<PermissionInfo> {
     ]
 }
 
-fn page(owner: bool) -> GroupPage {
+pub(super) fn page(owner: bool) -> GroupPage {
     let c = &cards()[0];
     let (rights, mine) = if owner { (s(&["*"]), s(&["grol_owner"])) } else { (s(&["group-instance-moderate", "group-bans-manage"]), s(&["grol_mod"])) };
     GroupPage {
@@ -240,7 +260,7 @@ fn page(owner: bool) -> GroupPage {
     }
 }
 
-fn members() -> Vec<Member> {
+pub(super) fn members() -> Vec<Member> {
     let names = [("Nova Lumen", &["grol_admin"][..]), ("Kite", &["grol_mod", "grol_artist"]), ("Sam Juniper", &[]), ("Sam Juniper", &["grol_events"]), ("Orla Finch", &["grol_artist"]), ("Pip", &[]), ("Teodor Vance", &["grol_events", "grol_staff"])];
     names
         .iter()
@@ -258,12 +278,67 @@ fn members() -> Vec<Member> {
         .collect()
 }
 
-fn posts() -> Vec<Post> {
+pub(super) fn posts() -> Vec<Post> {
     vec![
         Post { id: "gpos_1".into(), title: "Saturday showcase".into(), text: "Bring what you made this week: worlds, avatars, props. We start at 20:00 in the gallery world.".into(), visibility: Visibility::Group, created_at: Some("2026-11-21T19:00:00Z".into()), complete: true, ..Default::default() },
         Post { id: "gpos_2".into(), title: "New role for artists".into(), text: "Artists of the month now get their own role and colour.".into(), visibility: Visibility::Public, created_at: Some("2026-11-18T10:30:00Z".into()), complete: true, ..Default::default() },
         Post { id: "gpos_3".into(), title: "Staff briefing".into(), text: "Event staff: meet ten minutes early.".into(), visibility: Visibility::Group, role_ids: s(&["grol_staff"]), created_at: Some("2026-11-15T09:00:00Z".into()), complete: true, ..Default::default() },
     ]
+}
+
+/// The calendar: what is under way and coming (one of them on Orbiters too), and what is over.
+fn events() -> Vec<CalendarEvent> {
+    let now = crate::pages::events::now();
+    let iso = |t: i64| time::OffsetDateTime::from_unix_timestamp(t).unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
+    let e = |i: u32, title: &str, about: &str, start: i64, hours: i64| CalendarEvent {
+        id: format!("cal_00000000-0000-4000-8000-00000000c{i:03}"),
+        title: title.into(),
+        description: about.into(),
+        starts_at: Some(iso(now + start)),
+        ends_at: Some(iso(now + start + hours * 3600)),
+        access: "group".into(),
+        category: "arts".into(),
+        platforms: s(&["standalonewindows", "android"]),
+        image_url: format!("https://api.vrchat.cloud/api/1/image/file_event{i}/1/1024"),
+        ..Default::default()
+    };
+    let mut out = vec![
+        CalendarEvent { access: "public".into(), category: "music".into(), interested: Some(48), featured: true, ..e(1, "Open decks in the greenhouse", "Anyone can play. Ask the hosts for a slot when you arrive.", -2400, 3) },
+        CalendarEvent { interested: Some(31), following: Some(true), repeats: Some("weekly".into()), ..e(2, "Saturday showcase", "Bring what you made this week: worlds, avatars, props. Everyone gets five minutes on stage.", 3 * 86400 + 7200, 2) },
+        CalendarEvent { role_ids: s(&["grol_artist", "grol_staff"]), interested: Some(6), image_url: String::new(), platforms: s(&["standalonewindows"]), ..e(3, "Sketch night", "Quiet company, pens ready.", 6 * 86400, 2) },
+    ];
+    let names = ["Halloween gallery", "Prop swap", "Saturday showcase", "World jam: results", "Sketch night", "Film evening", "Avatar clinic", "Saturday showcase", "Founders' picnic"];
+    out.extend(names.iter().enumerate().map(|(i, n)| CalendarEvent { category: if i == 5 { "film_media" } else { "hangout" }.into(), interested: Some(9 + 7 * i as u32), ..e(10 + i as u32, n, "", -86400 * (4 + 6 * i as i64), 2) }));
+    out
+}
+
+/// What Orbiters says of the second of them.
+fn on_orbiters(e: &CalendarEvent) -> (orbiters_core::community::Card, orbiters_core::community::Overview, orbiters_core::community::Invites) {
+    use orbiters_core::community::*;
+    let id = "11111111-1111-4111-8111-111111111111".to_string();
+    let host = |id: Option<&str>, name: &str| Host { id: id.map(str::to_string), name: name.into(), ..Default::default() };
+    let at = |minutes: i64| time::OffsetDateTime::from_unix_timestamp(e.start().unwrap() + minutes * 60).unwrap().format(&time::format_description::well_known::Rfc3339).ok();
+    let step = |id: &str, title: &str, minutes: i64, world: &str| Step { id: id.into(), title: title.into(), starts_at: at(minutes), world: Some(World { name: Some(world.into()), ..Default::default() }), ..Default::default() };
+    let card = Card { id: id.clone(), title: e.title.clone(), starts_at: e.starts_at.clone(), ends_at: e.ends_at.clone(), ..Default::default() };
+    let page = Overview {
+        id,
+        title: "Saturday showcase: the winter edition".into(),
+        description: e.description.clone(),
+        long_description: "Winter edition: anything with **snow** in it gets its own wall. Uploads close an hour before; late ones go to next week's.".into(),
+        status: "published".into(),
+        starts_at: e.starts_at.clone(),
+        ends_at: e.ends_at.clone(),
+        access: Some("members".into()),
+        community: Some(host(Some(G1), "Made-up Makers")),
+        discord: Some(host(None, "Made-up Makers Workshop")),
+        discord_event_url: Some("https://discord.com/events/1/2".into()),
+        discord_announcement_url: Some("https://discord.com/channels/1/2/3".into()),
+        signups: Some(23),
+        steps: vec![Step { invite_open: true, ..step("main", "Gallery walk", 0, "Snowfall Gallery") }, step("stage", "Five minutes each", 45, "The Small Stage")],
+        details: Details { staff: vec![Staff { name: "Hosts".into(), people: vec![Person { username: "Nova Lumen".into() }, Person { username: "Kite".into() }] }], prizes: vec![Prize { place: Some("1st".into()), title: "Your work on the group's banner for a week".into() }] },
+        ..Default::default()
+    };
+    (card, page, Invites { items: [("main".to_string(), "pending".to_string())].into(), ..Default::default() })
 }
 
 fn prepared(write: Write, role: Option<Role>) -> Sealed {
@@ -324,6 +399,9 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
         stage::picture(ctx, state, &c.banner_url, color_image(&landscape(480, 270, i as u32)));
         stage::picture(ctx, state, &c.icon_url, color_image(&icon(i as u32)));
     }
+    for (i, e) in events().iter().enumerate().filter(|(_, e)| !e.image_url.is_empty()) {
+        stage::picture(ctx, state, &e.image_url, color_image(&landscape(480, 270, i as u32 + 1)));
+    }
     for (i, m) in members().iter().enumerate() {
         stage::picture(ctx, state, &m.icon_url, color_image(&icon(i as u32 + 2)));
     }
@@ -360,6 +438,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             open.tab = match n {
                 n if n.starts_with("groups-members") => tab::Members,
                 n if n.starts_with("groups-roles") => tab::Roles,
+                n if n.starts_with("groups-events") => tab::Events,
                 n if n.starts_with("groups-posts") => tab::Posts,
                 n if n.starts_with("groups-confirm") && (n.contains("role") && !n.contains("give") && !n.contains("take")) => tab::Roles,
                 n if n.starts_with("groups-confirm") && n.contains("post") => tab::Posts,
@@ -379,6 +458,21 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
                 "groups-posts-compose" => {
                     open.composer = Some(crate::pages::groups::Composer::new(PostDraft { title: "Saturday showcase".into(), text: "Bring what you made this week.\nWe start at 20:00.".into(), role_ids: s(&["grol_artist"]), ..Default::default() }));
                 }
+                "groups-events" | "groups-events-orbiters" | "groups-events-past" => {
+                    let all = events();
+                    let (card, page, invites) = on_orbiters(&all[1]);
+                    open.events.told.pages.insert(card.id.clone(), crate::pages::groups::Says::Is(Box::new(page), Some(invites)));
+                    open.events.told.cards = vec![card];
+                    open.events.stage(all);
+                }
+                "groups-events-empty" => open.events.stage(vec![]),
+                "groups-events-failed" => open.events.stage_failed(crate::controller::groups::Failure::Api(orbiters_core::vrchat_api::GroupFailure::Unavailable)),
+                "groups-edit-icons" => {
+                    let files = (0..6).map(|i| InventoryFile { id: format!("file_pick{i}"), url: format!("https://api.vrchat.cloud/api/1/file/file_member{i}/1/file") }).collect();
+                    open.picker = Some(crate::pages::groups::Picker::staged(ArtSlot::Icon, files));
+                }
+                "groups-edit-banner" => stage::edit_open(ctx, "banner"),
+                "groups-edit-icon" => stage::edit_open(ctx, "icon"),
                 "groups-look-uploaded" => {}
                 "groups-outcome-refused" => {}
                 "groups-outcome-unknown" => {}
@@ -389,6 +483,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, snapshot: &S
             let r = roles();
             let confirm = match n {
                 "groups-confirm-give-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[0].user_id.clone(), membership: members()[0].membership().unwrap(), role: "grol_mod".into(), add: true }, Some(r[2].clone()))),
+                "groups-confirm-two-factor" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[0].user_id.clone(), membership: members()[0].membership().unwrap(), role: "grol_staff".into(), add: true }, Some(r[5].clone()))),
                 "groups-confirm-take-role" => Some(prepared(Write::MemberRole { group: G1.into(), user: members()[1].user_id.clone(), membership: members()[1].membership().unwrap(), role: "grol_artist".into(), add: false }, Some(r[3].clone()))),
                 "groups-confirm-new-role" => Some(prepared(Write::CreateRole { group: G1.into(), draft: RoleDraft { name: "Greeters".into(), description: "Welcome new members.".into(), permissions: s(&["group-instance-join"]), self_assignable: true, ..Default::default() } }, None)),
                 "groups-confirm-edit-role" => {

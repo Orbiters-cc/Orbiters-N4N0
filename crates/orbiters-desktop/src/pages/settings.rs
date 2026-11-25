@@ -1268,6 +1268,14 @@ fn storage_card(ui: &mut Ui, cx: &Cx, index: usize, ctx: &egui::Context, draft: 
             }
         });
         widgets::separator(ui);
+        widgets::field(ui, tr("Friends' and groups' pictures"), Some(tr("VRChat's pictures, kept on this computer so that they show at once. Past this, the ones seen longest ago go; signing out of VRChat removes them all.")), 284.0, |ui| {
+            let mut v = draft.vrchat_pictures_mb as f32;
+            if widgets::slider(ui, "vrchat-pictures", &mut v, 64.0..=2048.0, 64.0, |v| format!("{v:.0} MB")) {
+                draft.vrchat_pictures_mb = v as u32;
+                apply = true;
+            }
+        });
+        widgets::separator(ui);
         if folder_field(ui, tr("Captures folder"), None, &draft.sessions_dir) {
             state.picker = Some((Folder::Sessions, pick(ctx, &draft.sessions_dir)));
         }

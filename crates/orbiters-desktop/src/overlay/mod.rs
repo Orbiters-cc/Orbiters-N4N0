@@ -263,6 +263,8 @@ fn record_phase(phase: usize, took: Duration) {
 pub(crate) struct PaintTextures(std::sync::Arc<egui::epaint::mutex::RwLock<egui::epaint::textures::TextureManager>>);
 impl PaintTextures {
     pub(crate) fn of(ctx: &egui::Context) -> Self { Self(ctx.tex_manager()) }
+    /// Which interface's textures these are, for as long as any of them is held.
+    pub(crate) fn id(&self) -> usize { std::sync::Arc::as_ptr(&self.0).cast::<()>() as usize }
     pub(crate) fn load_texture(&self, name: impl Into<String>, image: impl Into<egui::ImageData>, options: egui::TextureOptions) -> egui::TextureHandle {
         let id = self.0.write().alloc(name.into(), image.into(), options);
         egui::TextureHandle::new(self.0.clone(), id)

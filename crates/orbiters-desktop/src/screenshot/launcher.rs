@@ -469,7 +469,7 @@ fn more_people(state: &mut LauncherState) {
 }
 
 /// The page's data for a scenario.
-fn data(name: &str) -> LauncherState {
+pub(super) fn data(name: &str) -> LauncherState {
     let mut s = sample();
     more_people(&mut s);
     // REQUEST20 2: the invite's world is the sketch's "Chill House"; signed out of VRChat, Play alone and no list's places.
@@ -614,7 +614,7 @@ fn data(name: &str) -> LauncherState {
 }
 
 /// A made-up picture for a `sample://` URL: a round-headed creature on its colour, a banner of soft lights, a world.
-fn picture(url: &str) -> ColorImage {
+pub(super) fn picture(url: &str) -> ColorImage {
     let seed: u32 = url.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let hue = (seed as f32 * 0.137).fract();
     let rgb = |h: f32, s: f32, v: f32| -> [f32; 3] {
@@ -718,7 +718,7 @@ fn keep_pictures(data: &mut LauncherState) {
         let c = picture(sample);
         let rgba: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
         let image = image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, rgba).expect("a made-up picture");
-        crate::worlds::profile_pictures::Profiles::shared().keep(&url, Some(user), &image);
+        crate::worlds::profile_pictures::Profiles::of(None).keep(&url, Some(user), &image);
         url
     };
     for f in data.friends.iter_mut().chain(data.me.iter_mut()) {

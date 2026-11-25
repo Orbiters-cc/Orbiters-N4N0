@@ -309,7 +309,7 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let wide = |l: &str| widgets::text_size(ui, &Txt::new(l, 12.5).weight(weight::SEMIBOLD)).x + 46.0;
     let pill_w = match reach {
         // As wide as what it says: Select leaves the world's name its room beside Join.
-        Reach::Ready => wide(label),
+        Reach::Ready | Reach::Waiting => wide(label),
         Reach::Sent => wide(tr("Request invite")),
         Reach::Cooling(_) => 80.0,
         _ => 0.0,
@@ -325,7 +325,9 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
     let starts = !orbiters_core::vrchat_launch::SEVERAL_HERE && idle;
     let join = match &friend.whereabouts {
         Whereabouts::World(place)
+            // (Nor from a list last on show before its account is back.)
             if state.data.possible.play
+                && !state.held()
                 && !(starts && state.places.previous.signed_in_elsewhere)
                 // (nor into a private one where whose the VRChat started is could not be told)
                 && !(idle && state.places.previous.log.is_some() && !orbiters_core::vrchat_launch::is_public_instance(&place.instance_id))
@@ -371,7 +373,8 @@ fn place_card(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Fri
                 Action::PlayAt { mode: orbiters_core::launcher::LaunchMode::Desktop, profile, destination: place }
             };
             // (A list that went stale in this very frame sends nothing of it, whatever its action is.)
-            if !state.stale() {
+            // Nor does one last on show before its account is back: where its people are is not known now.
+            if !state.stale() && !state.held() {
                 state.act(cx, clock, action);
             }
         }
@@ -384,7 +387,7 @@ fn boop_row(ui: &mut Ui, cx: &mut Cx, state: &mut State, r: Rect, friend: &Frien
     let booped = state.booped.get(&friend.id).cloned();
     let reach = states::boop(&state.data, friend, booped.as_ref().map(|b| b.0), clock, now);
     let p = ui.painter().clone();
-    if reach == Reach::SignIn && cx.snap.vrchat_login.presence() != crate::controller::vrchat_login::Presence::SignedOut {
+    if matches!(reach, Reach::SignIn | Reach::Waiting) && cx.snap.vrchat_login.presence() != crate::controller::vrchat_login::Presence::SignedOut {
         // r21: the saved session is being restored: no sign-in offered meanwhile.
         widgets::icon(&p, pos2(r.left() + 10.0, r.center().y), icons::HOURGLASS_MEDIUM, 15.0, theme::FG_3);
         widgets::text_truncated(&p, pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &Txt::new(cx.snap.account.connecting(), 13.0).color(theme::FG_2), r.width() - 30.0);

@@ -292,10 +292,10 @@ fn associated() -> Option<PathBuf> {
     {
         let folder = std::env::temp_dir().join(format!("orbiters-blend-{}", std::process::id()));
         let file = folder.join("association.blend");
-        std::fs::create_dir_all(&folder).ok()?;
-        std::fs::write(&file, b"").ok()?;
+        crate::disk::create_dir_all(&folder).ok()?;
+        crate::disk::write(&file, b"").ok()?;
         let app = crate::mac::default_app(&file);
-        let _ = std::fs::remove_dir_all(&folder);
+        let _ = crate::disk::remove_dir_all(&folder);
         app.map(|app| crate::mac::bundle_program(&app))
     }
     #[cfg(not(any(windows, target_os = "macos")))]

@@ -1,0 +1,157 @@
+{
+  "schema": 1,
+  "serial": 1,
+  "verified": "2026-11-22",
+  "rows": [
+    {
+      "sdk": "3.11.0-beta.1",
+      "channel": "beta",
+      "unity": "6000.0.67f1",
+      "changeset": "78a1c2bbeb6a",
+      "vcc": "2.5.0-beta.3",
+      "checked": "2026-11-22",
+      "sources": [
+        "VRChat Creator Companion 2.5.0-beta.3 portable (web_vcc_2.5.0-beta.3_Release_Portable.zip, sha256 a7111cce300e7e435a7ed3fdfe3c3bdcd90d411ac4aa905ea3cb924661f4d1ac): Templates/Avatar, World and Base pin com.vrchat.* 3.11.0-beta.1 with ProjectVersion 6000.0.67f1 (78a1c2bbeb6a)",
+        "Unity release API, 6000.0.67f1: shortRevision 78a1c2bbeb6a, unityhub://6000.0.67f1/78a1c2bbeb6a",
+        "packages.vrchat.com/official: com.vrchat.base, avatars and worlds 3.11.0-beta.1 declare unity 6000.0",
+        "https://vrc-beta-docs.netlify.app/sdk/upgrade/unity-6000/ (last updated 2026-11-04): upgrade from 2022.3.22f1 to 6000.0.67f1"
+      ],
+      "notes": "Open beta announced by VRChat on 2026-11-19. VRChat has announced no stable date for it and no end date for Unity 2022.",
+      "editor": {
+        "windows-x86_64": {
+          "download": 4078656432,
+          "installed": 7771104225,
+          "android": [
+            1975193716,
+            5637323067
+          ],
+          "ios": [
+            264805936,
+            1225293674
+          ]
+        },
+        "windows-arm64": {
+          "download": 4036077288,
+          "installed": 6869335837,
+          "android": [
+            1975193716,
+            5637323067
+          ],
+          "ios": [
+            264805936,
+            1225293674
+          ]
+        },
+        "macos-arm64": {
+          "download": 4967499142,
+          "installed": 9016277000,
+          "android": [
+            2280699188,
+            5898840524
+          ],
+          "ios": [
+            370898999,
+            1183837000
+          ]
+        },
+        "macos-x86_64": {
+          "download": 4981246882,
+          "installed": 8882322000,
+          "android": [
+            2280699188,
+            5898840524
+          ],
+          "ios": [
+            370898999,
+            1183837000
+          ]
+        }
+      }
+    },
+    {
+      "sdk": ">=3.5.0 <3.11.0-0",
+      "channel": "stable",
+      "unity": "2022.3.22f1",
+      "changeset": "887be4894c44",
+      "checked": "2026-11-22",
+      "sources": [
+        "VRChat Creator Companion 2.5.0-beta.3 portable: Templates/Avatar 2022 and World 2022 pin com.vrchat.* ~3.10.x with ProjectVersion 2022.3.22f1 (887be4894c44)",
+        "Unity release API, 2022.3.22f1: shortRevision 887be4894c44",
+        "packages.vrchat.com/official: com.vrchat.base 3.10.6 (newest release) declares unity 2022.3"
+      ],
+      "notes": "VRChat's supported editor for SDK 3.5 to 3.10.",
+      "editor": {
+        "windows-x86_64": {
+          "download": 2812392448,
+          "installed": 5602628608,
+          "android": [
+            1839723734,
+            5710492273
+          ],
+          "ios": [
+            368998400,
+            1710011392
+          ]
+        },
+        "macos-arm64": {
+          "download": 3632871537,
+          "installed": 7234018000,
+          "android": [
+            2736044170,
+            7330161776
+          ],
+          "ios": [
+            554596358,
+            1664016000
+          ]
+        },
+        "macos-x86_64": {
+          "download": 3634062333,
+          "installed": 7071323000,
+          "android": [
+            2736044170,
+            7330161776
+          ],
+          "ios": [
+            554596358,
+            1664016000
+          ]
+        }
+      }
+    }
+  ],
+  "events": {
+    "unity6_stable": null,
+    "unity2022_retirement": null
+  },
+  "issues": [
+    {
+      "package": "com.poiyomi.toon",
+      "versions": ">=10.0.20",
+      "kind": "publisher",
+      "text": {
+        "en": "Poiyomi's release notes for 10.0.20 say it adds official support for Unity 6.",
+        "fr": "Les notes de version 10.0.20 de Poiyomi indiquent qu’elle ajoute la prise en charge officielle d’Unity 6.",
+        "es": "Las notas de la versión 10.0.20 de Poiyomi dicen que añade compatibilidad oficial con Unity 6.",
+        "ja": "Poiyomi の 10.0.20 のリリースノートには、Unity 6 に正式対応したと書かれています。",
+        "pt-BR": "As notas da versão 10.0.20 do Poiyomi dizem que ela adiciona suporte oficial ao Unity 6."
+      },
+      "link": "https://www.poiyomi.com/changelog/2026/09/14/10-0-20",
+      "date": "2026-09-14"
+    },
+    {
+      "package": "jp.lilxyzw.liltoon",
+      "versions": "*",
+      "kind": "report",
+      "text": {
+        "en": "An open report on lilToon's GitHub says its fur shader does not work in some configurations on VRChat's Unity 6 beta.",
+        "fr": "Un signalement ouvert sur le GitHub de lilToon indique que son shader de fourrure ne fonctionne pas dans certaines configurations sur la bêta Unity 6 de VRChat.",
+        "es": "Un informe abierto en el GitHub de lilToon dice que su shader de pelaje no funciona en algunas configuraciones en la beta de Unity 6 de VRChat.",
+        "ja": "lilToon の GitHub に、VRChat の Unity 6 ベータで一部の設定ではファーシェーダーが動かないという未解決の報告があります。",
+        "pt-BR": "Um relato aberto no GitHub do lilToon diz que o shader de pelo não funciona em algumas configurações na beta do Unity 6 do VRChat."
+      },
+      "link": "https://github.com/lilxyzw/lilToon/issues/428",
+      "date": "2026-07-25"
+    }
+  ]
+}

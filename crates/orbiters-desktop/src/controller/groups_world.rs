@@ -67,6 +67,8 @@ pub(crate) struct World {
     pub files: Vec<(String, Value)>,
     pub tags: Vec<String>,
     pub fault: Option<Fault>,
+    /// The roles' own list, when it is not the group's.
+    pub list: Option<Vec<Value>>,
     /// Answers to reads whose address holds the text, instead of the state's.
     pub instead: Vec<(String, Value)>,
     /// Run once, when a read whose address holds the text was answered (what others do meanwhile).
@@ -132,6 +134,7 @@ impl Default for World {
             files: vec![("gallery".into(), file("file_gal1", "gallery", "usr_test", &g1)), ("icon".into(), file("file_ico1", "icon", "usr_test", &i1))],
             tags: vec!["system_supporter".into()],
             fault: None,
+            list: None,
             instead: Vec::new(),
             then: Vec::new(),
             done: Vec::new(),
@@ -169,6 +172,7 @@ impl World {
             let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
             return match rest.split('/').collect::<Vec<_>>().as_slice() {
                 [""] => answer(self.group()),
+                ["", "roles"] => self.list.as_ref().map_or(Routed::Answer(404, json!({})), |l| answer(json!(l))),
                 ["", "permissions"] => answer(json!(["group-instance-moderate", "group-instance-join", "group-data-manage"].map(|p| json!({"name": p, "displayName": p, "allowedToAdd": true})))),
                 ["", "members", u] => answer(self.members.get(*u).cloned().unwrap_or(Value::Null)),
                 ["", "members"] => answer(Value::Array(self.members.values().cloned().collect())),

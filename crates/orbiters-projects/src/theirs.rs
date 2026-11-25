@@ -79,7 +79,8 @@ fn database(root: &Path) -> anyhow::Result<Option<Database>> {
 const NEW: usize = 2 * 8192;
 
 pub(crate) fn projects(root: &Path) -> Lists {
-    let settings = match json(&root.join("settings.json")) {
+    // (Where they are not there or blank, ALCOM's copy of them: it and Orbiters up to 0.3.9 read that then.)
+    let settings = match self::settings(root) {
         Ok(None) => Part::Silent,
         // Without the key the database is the list.
         Ok(Some(v)) => match &v["userProjects"] {

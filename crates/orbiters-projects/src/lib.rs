@@ -2,7 +2,11 @@
 pub mod avatars;
 pub mod blender;
 mod builtin_templates;
+mod bundled_templates;
 pub mod coherent;
+mod copying;
+pub mod copies;
+mod disk;
 pub mod discovery;
 pub mod editor;
 pub mod gallery;
@@ -26,6 +30,7 @@ pub mod storage;
 pub mod suggestions;
 pub mod templates;
 mod theirs;
+pub mod unity6;
 pub mod updates;
 pub mod vpm;
 mod vpm_http;
@@ -182,45 +187,31 @@ pub fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 /// Atomic publication in the destination directory; no partially written JSON is visible.
 pub fn write_json(path: &Path, value: &impl serde::Serialize) -> anyhow::Result<()> {
     use std::io::Write;
-    std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent folder"))?)?;
+    crate::disk::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("Missing parent folder"))?)?;
     // A file of this write's own (PROJECTS-36): the window and the service write the same files, and a shared temporary
     // name let one publish, truncate or take the other's half-written bytes.
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     let written = (|| -> anyhow::Result<()> {
-        let mut f = std::fs::File::options().write(true).create_new(true).open(&tmp)?;
+        let mut f = disk::open(std::fs::File::options().write(true).create_new(true), &tmp)?;
         f.write_all(&serde_json::to_vec_pretty(value)?)?;
         f.sync_all()?;
         Ok(())
     })();
     if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = crate::disk::remove_file(&tmp);
         return Err(e);
     }
-    // Windows rename does not replace existing files. MoveFileEx provides replacement without a gap.
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-        let src: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-        let dst: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        // Another writer replacing the same file at this instant (or a reader holding it) refuses the move for a moment.
-        let mut tries = 0;
-        while let Err(e) = unsafe { MoveFileExW(PCWSTR(src.as_ptr()), PCWSTR(dst.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } {
-            tries += 1;
-            if tries >= 20 {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e.into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5 * tries));
+    // Another writer replacing the same file at this instant (or a reader holding it) refuses the move for a moment.
+    let mut tries = 0;
+    while let Err(e) = disk::replace(&tmp, path) {
+        tries += 1;
+        if tries >= 20 || cfg!(not(windows)) {
+            let _ = disk::remove_file(&tmp);
+            return Err(e.into());
         }
-    }
-    #[cfg(not(windows))]
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
+        std::thread::sleep(std::time::Duration::from_millis(5 * tries));
     }
     Ok(())
 }
@@ -239,7 +230,7 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
 pub fn unity_open(path: &Path) -> bool {
     let lock = path.join("Temp/UnityLockfile");
     #[cfg(not(unix))]
-    return lock.exists() && std::fs::OpenOptions::new().write(true).open(lock).is_err();
+    return lock.exists() && disk::open(std::fs::OpenOptions::new().write(true), lock).is_err();
     // Unity's lock file is no exclusive open here: anyone can open it, and it stays behind after a crash. What tells is
     // a lock held on it, or an editor whose command line names the project.
     #[cfg(unix)]
@@ -298,19 +289,39 @@ pub(crate) fn within<T: Send + 'static>(limit: std::time::Duration, f: impl FnOn
 /// Opens `project` in its Unity version and returns once the editor has started (or was already there). Always prompt:
 /// never a long operation, which [`storage::repair`] is, asked for separately. Call on a worker.
 pub fn open_project(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, true, unity6::authority::Caller::Window)
+}
+
+/// [`open_project`] for a tool of the bridge: never a project on Unity 6.
+pub fn open_project_from_bridge(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, true, unity6::authority::Caller::Bridge)
+}
+
+/// [`open_project`] without its storage step: Unity is started and Orbiters changes nothing of the project itself. For an
+/// original about to be tried on Unity 6, which Orbiters never writes to.
+pub fn open_project_as_is(project: &discovery::Project) -> anyhow::Result<Opened> {
+    open_limited(project, false, unity6::authority::Caller::Window)
+}
+
+fn open_limited(project: &discovery::Project, tidy: bool, caller: unity6::authority::Caller) -> anyhow::Result<Opened> {
     let name = project.name.clone();
     let p = project.clone();
-    within(OPEN_LIMIT, move || open_now(&p)).unwrap_or_else(|| {
+    within(OPEN_LIMIT, move || open_now(&p, tidy, caller)).unwrap_or_else(|| {
         anyhow::bail!("{}", tr!("Opening {name} is taking too long: its disk or Unity's list of editors is not answering. Unity may still open by itself.", name = name))
     })
 }
 
-fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
+fn open_now(project: &discovery::Project, tidy: bool, caller: unity6::authority::Caller) -> anyhow::Result<Opened> {
     anyhow::ensure!(
         discovery::is_project(&project.path),
         "{}",
         tr!("{name} is not at {path} any more. If it is on a disk that is not connected, connect it and try again.", name = project.name, path = project.path.display())
     );
+    // What may happen to it, before anything at all does (even bringing an editor forward): a Unity 6 trial keeps its
+    // protections whoever opens it.
+    let ask = || unity6::authority::allow(&data_dir(), &project.path, unity6::authority::Action::Open(caller)).map_err(|why| anyhow::anyhow!("{why}"));
+    let way = ask()?;
+    let folder = owned::id_of(&project.path)?;
     let locked = unity_open(&project.path);
     let editors = editor::running();
     if let Some(open) = editor::of(&editors, &project.path, locked) {
@@ -324,18 +335,31 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
         "{}",
         tr!("Something else holds {name}'s lock (its Temp/UnityLockfile): Unity still quitting, or Orbiters repairing its storage. Try again in a moment.", name = project.name)
     );
-    anyhow::ensure!(
-        !project.unity.is_empty(),
-        "{}",
-        tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name)
-    );
-    let editor = discovery::find_editor(&project.unity)
-        .ok_or_else(|| anyhow::anyhow!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = project.unity)))?;
+    // Read again now, not as the scan saw it: Creator Companion or another tool may have changed it since (M6).
+    let stamp = unity6::standing::EditorStamp::read(&project.path);
+    anyhow::ensure!(stamp.parsed, "{}", tr!("{name} does not say which Unity version it uses (ProjectSettings/ProjectVersion.txt).", name = project.name));
+    if let unity6::authority::Way::Trial(job) = &way {
+        let start = |program: &Path, at: &Path, log: &Path| start_logged(program, at, log, &job.target.unity);
+        unity6::trial::launch(&data_dir(), &job.id, &|v, build| unity6::editors::find_build(v, Some(build)), &unity6::trial::is_open, &unity6::trial::PROCESSES, &start)?;
+        return Ok(Opened { already_open: false, moved: None });
+    }
+    let unity = stamp.text.clone();
+    // Only that exact editor and build: another one would upgrade or downgrade the project (a Unity 6 project never goes to 2022).
+    let chosen = choose_editor(&unity, unity6::editors::find_build(&unity, stamp.revision.as_deref()))?;
+    let editor = chosen.program.clone();
+    let project = &discovery::Project { unity, ..project.clone() };
     // Only ever instant. A problem with it must not stop Unity opening: the panel's warning says what to do about the disk.
-    let moved = storage::preflight(&project.path).unwrap_or_else(|e| {
-        eprintln!("the storage check of {} did not finish: {e:#}", project.path.display());
-        None
-    });
+    let moved = if tidy { preflight(&project.path) } else { None };
+    // The program itself again, held until it has started: nothing was put in its place since.
+    let _held = unity6::gate::hold_program(&editor)?;
+    anyhow::ensure!(
+        unity6::editors::probe(&editor) == chosen.identity,
+        "{}",
+        tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = editor.display(), version = project.unity)
+    );
+    // And the project: still that folder, on that version and build, and still to be opened so.
+    let same = as_it_was(&project.path, folder, &stamp);
+    anyhow::ensure!(same && ask()? == way, "{}", tr!("{name} changed while its editor was being found (another program may be working on it). Try again.", name = project.name));
     #[cfg(not(target_os = "macos"))]
     let started = {
         let mut command = hidden_command(&editor);
@@ -347,6 +371,50 @@ fn open_now(project: &discovery::Project) -> anyhow::Result<Opened> {
     started?;
     Ok(Opened { already_open: false, moved })
 }
+
+/// Whether the project at `path` is still the folder `id`, stamped as `stamp`.
+fn as_it_was(path: &Path, id: owned::FileId, stamp: &unity6::standing::EditorStamp) -> bool {
+    owned::is_same(path, id) && unity6::standing::EditorStamp::read(path) == *stamp
+}
+
+fn preflight(project: &Path) -> Option<PathBuf> {
+    storage::preflight(project).unwrap_or_else(|e| {
+        eprintln!("the storage check of {} did not finish: {e:#}", project.display());
+        None
+    })
+}
+
+/// The program Open uses for a project on `unity`: one that says it is exactly that version, of the build the project names,
+/// for this computer; never another one, which is named instead.
+fn choose_editor(unity: &str, found: unity6::editors::Found) -> anyhow::Result<unity6::editors::Candidate> {
+    match found {
+        unity6::editors::Found::Exact(c) => Ok(c),
+        unity6::editors::Found::Unverified(c) => anyhow::bail!(
+            "{}",
+            tr!("{path} could not be verified as Unity {version}: open the project from Unity Hub, or locate a program that says it is that version.", path = c.program.display(), version = unity)
+        ),
+        unity6::editors::Found::Missing { wrong } => match wrong.first() {
+            Some(other) => anyhow::bail!(
+                "{}",
+                tr!("Unity {version} is not installed: {path} is another version. Open Unity Hub to install {version}.", version = unity, path = other.program.display())
+            ),
+            None => anyhow::bail!("{}", tr!("Unity {version} is not installed. Open Unity Hub to install this version.", version = unity)),
+        },
+    }
+}
+
+/// An editor that started and ended at once (its exit status when the system gave one, and the sentence saying so): a
+/// different fact from a program that could not be started at all.
+#[derive(Debug)]
+pub struct QuitAtOnce(pub Option<String>, pub String);
+
+impl std::fmt::Display for QuitAtOnce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for QuitAtOnce {}
 
 /// The editor being started, so that each way it can fail is told as one whole sentence (a sentence cut in pieces cannot be translated).
 #[derive(Clone, Copy)]
@@ -366,19 +434,14 @@ impl Starting<'_> {
         anyhow::anyhow!("{}", tr!("Unity {unity} ({editor}) could not be watched: {why}", unity = unity, editor = editor, why = why))
     }
 
-    /// It ended at once, with `status` when the system says one.
+    /// It ended at once, with `status` when the system says one ([`QuitAtOnce`], told apart from a program that never started).
     fn quit(&self, status: Option<std::process::ExitStatus>) -> anyhow::Error {
         let (unity, editor) = (self.unity, self.editor.display());
-        match status {
-            Some(status) => anyhow::anyhow!(
-                "{}",
-                tr!("Unity {unity} ({editor}) quit right after starting ({status}). Its log is at {log}.", unity = unity, editor = editor, status = status, log = EDITOR_LOG)
-            ),
-            None => anyhow::anyhow!(
-                "{}",
-                tr!("Unity {unity} ({editor}) quit right after starting. Its log is at {log}.", unity = unity, editor = editor, log = EDITOR_LOG)
-            ),
-        }
+        let message = match status {
+            Some(status) => tr!("Unity {unity} ({editor}) quit right after starting ({status}). Its log is at {log}.", unity = unity, editor = editor, status = status, log = EDITOR_LOG),
+            None => tr!("Unity {unity} ({editor}) quit right after starting. Its log is at {log}.", unity = unity, editor = editor, log = EDITOR_LOG),
+        };
+        anyhow::Error::new(QuitAtOnce(status.map(|s| s.to_string()), message))
     }
 }
 
@@ -388,14 +451,20 @@ impl Starting<'_> {
 /// [`FIRST_SIGHT`] was gone before it could be looked at.
 #[cfg(target_os = "macos")]
 fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration, unity: &str) -> anyhow::Result<()> {
+    start_on_mac_with(editor, project, watch, unity, &[])
+}
+
+/// [`start_on_mac`] with more arguments for the editor after the project's (a trial's `-logFile`).
+#[cfg(target_os = "macos")]
+fn start_on_mac_with(editor: &Path, project: &Path, watch: std::time::Duration, unity: &str, extra: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
     use std::process::Stdio;
     let who = Starting { unity, editor };
     let Some(app) = mac::enclosing_app(editor) else {
         let mut command = hidden_command(editor);
-        command.arg("-projectPath").arg(project).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        command.arg("-projectPath").arg(project).args(extra).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         return start_watched(command, watch, who);
     };
-    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).output().map_err(|e| who.not_started(e))?;
+    let answer = mac::start_app(&app).arg("--args").arg("-projectPath").arg(project).args(extra).output().map_err(|e| who.not_started(e))?;
     if !answer.status.success() {
         return Err(who.not_started(String::from_utf8_lossy(&answer.stderr).trim()));
     }
@@ -417,18 +486,39 @@ fn start_on_mac(editor: &Path, project: &Path, watch: std::time::Duration, unity
 #[cfg(target_os = "macos")]
 const FIRST_SIGHT: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// Starts `editor` (Unity `unity`) on `project` with a log of its own (`-logFile log`, a Unity 6 trial's attempt), watched
+/// as Open in Unity is: an error when it cannot start or quits at once. The process id, when the system gives it.
+pub fn start_logged(editor: &Path, project: &Path, log: &Path, unity: &str) -> anyhow::Result<Option<u32>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = hidden_command(editor);
+        command.arg("-projectPath").arg(project).arg("-logFile").arg(log);
+        start_watched_id(command, START_WATCH, Starting { unity, editor })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        start_on_mac_with(editor, project, START_WATCH, unity, &[std::ffi::OsStr::new("-logFile"), log.as_os_str()]).map(|()| None)
+    }
+}
+
 /// Starts `command` and watches it for `watch`: a program that could not start, or that quit at once with a failure, is an
 /// error rather than a success said too soon. One still running, or ended well (it handed over to another process), is
 /// started.
-fn start_watched(mut command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<()> {
+fn start_watched(command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<()> {
+    start_watched_id(command, watch, who).map(|_| ())
+}
+
+/// [`start_watched`], with the process id.
+fn start_watched_id(mut command: std::process::Command, watch: std::time::Duration, who: Starting) -> anyhow::Result<Option<u32>> {
     let mut child = command.spawn().map_err(|e| who.not_started(e))?;
+    let pid = Some(child.id());
     let start = std::time::Instant::now();
     while start.elapsed() < watch {
         if let Some(status) = child.try_wait().map_err(|e| who.not_watched(e))? {
             if !status.success() {
                 return Err(who.quit(Some(status)));
             }
-            return Ok(());
+            return Ok(pid);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -437,7 +527,7 @@ fn start_watched(mut command: std::process::Command, watch: std::time::Duration,
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
+    Ok(pid)
 }
 
 pub fn open_hub() -> anyhow::Result<()> {
@@ -612,12 +702,40 @@ mod open_tests {
         assert_eq!(within(Duration::from_secs(5), || 7), Some(7));
     }
 
+    /// M6/M8: Open goes by the version the project's file says at the click, and never uses another editor.
+    #[test]
+    fn open_refuses_another_editor_and_reads_the_version_at_the_click() {
+        use unity6::editors::{Candidate, Check, Found, Hint};
+        let candidate = |program: &str, check: Check| Candidate { program: PathBuf::from(program), hint: Hint::HubFolder, check, identity: None, modules: Default::default() };
+        let wrong = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Wrong("it is Unity 2022.3.22f1, not 6000.0.67f1".into()));
+        let error = format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![wrong] }).unwrap_err());
+        assert!(error.contains("another version") && error.contains("6000.0.67f1"), "{error}");
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Missing { wrong: vec![] }).unwrap_err()).contains("not installed"));
+        // Verification blocker 4: a program found by another tool's hint that says nothing of itself is not used.
+        let mut vcc_hint = candidate("D:/Elsewhere/Unity.exe", Check::Unverified);
+        vcc_hint.hint = Hint::VccSettings;
+        assert!(format!("{:#}", choose_editor("6000.0.67f1", Found::Unverified(vcc_hint)).unwrap_err()).contains("could not be verified"));
+        assert!(choose_editor("6000.0.67f1", Found::Unverified(candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Unverified))).is_err(), "not even in Hub's own folder of that version");
+        let exact = candidate("C:/Hub/6000.0.67f1/Editor/Unity.exe", Check::Verified);
+        assert_eq!(choose_editor("6000.0.67f1", Found::Exact(exact)).unwrap().program, PathBuf::from("C:/Hub/6000.0.67f1/Editor/Unity.exe"));
+        // The scan saw 2022; Creator Companion changed the file since: the file is what counts, and a file naming no
+        // version stops Open before any editor is looked for.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("ProjectSettings")).unwrap();
+        std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "m_EditorVersion: 6000.0.67f1\n").unwrap();
+        assert_eq!(unity6::standing::EditorStamp::read(temp.path()).text, "6000.0.67f1");
+        std::fs::write(temp.path().join("ProjectSettings/ProjectVersion.txt"), "nothing\n").unwrap();
+        let project = discovery::Project { name: "Changed".into(), path: temp.path().to_path_buf(), unity: "2022.3.22f1".into(), ..Default::default() };
+        let error = format!("{:#}", open_now(&project, true, unity6::authority::Caller::Window).unwrap_err());
+        assert!(error.contains("does not say which Unity version"), "{error}");
+    }
+
     #[test]
     fn a_project_gone_from_its_folder_is_not_handed_to_unity() {
         // Unity would make a new, empty project there.
         let temp = tempfile::tempdir().unwrap();
         let project = discovery::Project { name: "Gone".into(), path: temp.path().join("gone"), unity: "2022.3.22f1".into(), ..Default::default() };
-        let error = open_now(&project).unwrap_err();
+        let error = open_now(&project, true, unity6::authority::Caller::Window).unwrap_err();
         assert!(format!("{error:#}").contains("is not at"), "{error:#}");
         assert!(!temp.path().join("gone").exists());
     }
@@ -648,5 +766,28 @@ mod write_tests {
         assert_eq!(v["i"], 39);
         let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
         assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// Third verification B4: right before the start, the project is still the folder looked at, on the version and build its
+    /// editor was found for.
+    #[test]
+    fn a_project_changed_while_its_editor_is_found_is_not_opened() {
+        use crate::unity6::standing::EditorStamp;
+        let temp = tempfile::tempdir().unwrap();
+        let at = temp.path().join("P");
+        let write = |text: &str| {
+            std::fs::create_dir_all(at.join("ProjectSettings")).unwrap();
+            std::fs::write(at.join("ProjectSettings/ProjectVersion.txt"), text).unwrap();
+        };
+        write("m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (887be4894c44)\n");
+        let (id, stamp) = (crate::owned::id_of(&at).unwrap(), EditorStamp::read(&at));
+        assert!(super::as_it_was(&at, id, &stamp));
+        for other in ["m_EditorVersion: 6000.0.67f1\n", "m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (000000000000)\n", ""] {
+            write(other);
+            assert!(!super::as_it_was(&at, id, &stamp), "{other:?}");
+        }
+        std::fs::rename(&at, temp.path().join("Away")).unwrap();
+        write("m_EditorVersion: 2022.3.22f1\nm_EditorVersionWithRevision: 2022.3.22f1 (887be4894c44)\n");
+        assert!(!super::as_it_was(&at, id, &stamp), "another folder");
     }
 }

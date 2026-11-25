@@ -225,7 +225,8 @@ fn read_due(state: &State, account: &str, clock: f64) -> bool {
         Some((asked, at)) => asked == account && clock - at <= READ_AGAIN,
         None => false,
     };
-    !loaded && !asked
+    // (Nothing is asked of an account still on its way back.)
+    !loaded && !asked && !state.held()
 }
 
 /// Another account on show (or none): what was typed, chosen or sent for the previous one is dropped, never saved to
@@ -241,7 +242,7 @@ pub(super) fn sync_account(state: &mut State) {
 
 /// The change as it goes out: bound to the account it was made on, and only while that account's list is on show.
 fn bound(state: &State, edit: ProfileEdit) -> Option<Action> {
-    let account = state.mine.account.clone()?;
+    let account = state.mine.account.clone().filter(|_| !state.held())?;
     (signed_in(state).as_ref() == Some(&account)).then(|| Action::As { account, action: Box::new(Action::EditProfile(edit)) })
 }
 
@@ -534,6 +535,16 @@ fn draw(ui: &mut Ui, cx: &Cx, state: &mut State, rect: Rect) {
                 (Some(false), ..) | (_, _, true) => state.mine.editing = None,
                 _ => state.mine.editing = Some(Editing::Bio(draft)),
             }
+        }
+        // As it was last read, shown while it is read again: not changed from here meanwhile.
+        _ if !mine.loaded && !shown_bio.trim().is_empty() => {
+            let mut job = Txt::new(shown_bio.trim(), 13.0).color(theme::FG_2).line_height(BIO_LINE).job(bio_rect.width() - 16.0 - 24.0);
+            job.wrap.max_rows = BIO_ROWS_IDLE;
+            let galley = ui.painter().layout_job(job);
+            p.galley(bio_rect.min + vec2(8.0, 6.0), galley, theme::FG_2);
+            let mut hp = p.clone();
+            hp.multiply_opacity(0.35);
+            widgets::icon(&hp, pos2(bio_rect.right() - 14.0, bio_rect.top() + 16.0), icons::PENCIL_SIMPLE, 14.0, theme::FG_3);
         }
         _ if !mine.loaded => {
             // Not read yet (or the read failed): its bio is not known, so it is not offered for editing.

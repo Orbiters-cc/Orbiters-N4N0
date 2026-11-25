@@ -534,6 +534,10 @@ pub struct Moved {
 /// it at any time before the switch: Library stays as it was and the partial copy is deleted. A failure does the same
 /// and says so. Unity must have quit: this holds the project's lock, so Unity cannot open it meanwhile (and is told so).
 pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) -> anyhow::Result<RepairEnd> {
+    {
+        use crate::unity6::authority::{allow, Action};
+        allow(&crate::data_dir(), project, Action::Storage).map_err(|why| anyhow::anyhow!("{why}"))?;
+    }
     #[cfg(not(any(windows, unix)))]
     {
         let _ = (project, progress, cancel);
@@ -588,7 +592,7 @@ fn repair_with(project: &Path, progress: &SharedProgress, cancel: &AtomicBool, p
 /// Makes `link` lead to the folder `target`: an NTFS junction.
 #[cfg(windows)]
 fn redirect(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
-    junction::create(target, link)
+    crate::disk::link(target, link)
 }
 
 #[cfg(windows)]
@@ -598,14 +602,14 @@ fn is_redirect(link: impl AsRef<Path>) -> std::io::Result<bool> {
 
 #[cfg(windows)]
 fn remove_redirect(link: impl AsRef<Path>) -> std::io::Result<()> {
-    junction::delete(link)
+    crate::disk::unlink(link)
 }
 
 /// Makes `link` lead to the folder `target`: a symbolic link, naming the whole path so that it holds wherever it is read
 /// from (a project moved by hand takes it along, as on Windows).
 #[cfg(unix)]
 fn redirect(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(std::path::absolute(target)?, link)
+    crate::disk::link(std::path::absolute(target)?, link)
 }
 
 #[cfg(unix)]
@@ -615,7 +619,7 @@ fn is_redirect(link: impl AsRef<Path>) -> std::io::Result<bool> {
 
 #[cfg(unix)]
 fn remove_redirect(link: impl AsRef<Path>) -> std::io::Result<()> {
-    std::fs::remove_file(link)
+    crate::disk::remove_file(link)
 }
 
 /// What a move reports to and is stopped by.
@@ -628,13 +632,8 @@ struct Work<'a> {
 #[cfg(windows)]
 fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
-    std::fs::create_dir_all(project.join("Temp"))?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(project.join("Temp/UnityLockfile"))
+    crate::disk::create_dir_all(project.join("Temp"))?;
+    crate::disk::open(std::fs::OpenOptions::new().write(true).create(true).truncate(false).share_mode(0), project.join("Temp/UnityLockfile"))
         .with_context(|| tr("Close this project's Unity window before repairing storage"))
 }
 
@@ -646,8 +645,8 @@ fn project_lock(project: &Path) -> anyhow::Result<std::fs::File> {
     fn held() -> &'static str {
         tr("Close this project's Unity window before repairing storage")
     }
-    std::fs::create_dir_all(project.join("Temp"))?;
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(project.join("Temp/UnityLockfile")).with_context(held)?;
+    crate::disk::create_dir_all(project.join("Temp"))?;
+    let file = crate::disk::open(std::fs::OpenOptions::new().write(true).create(true).truncate(false), project.join("Temp/UnityLockfile")).with_context(held)?;
     match file.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => bail!("{}", held()),
@@ -739,13 +738,13 @@ impl Written for OnDisk {
 
     fn flushed(&self, path: &Path) -> std::io::Result<Box<dyn Read>> {
         // Write access only to have it written out: a read-only handle cannot on Windows.
-        written_out(&std::fs::OpenOptions::new().write(true).open(path)?)?;
+        written_out(&crate::disk::open(std::fs::OpenOptions::new().write(true), path)?)?;
         Ok(Box::new(std::fs::File::open(path)?))
     }
 
     /// `FlushFileBuffers` on Windows, `F_FULLFSYNC` on a Mac, `fsync` elsewhere: what `sync_all` is on each.
     fn persist(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
+        crate::disk::open(std::fs::OpenOptions::new().write(true), path)?.sync_all()
     }
 
     fn persists_every_file(&self) -> bool {
@@ -849,7 +848,7 @@ fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec
     let [left, right] = buffers;
     let mut source = std::fs::File::open(from)?;
     let meta = source.metadata()?;
-    let mut copy = std::fs::File::create(to)?;
+    let mut copy = crate::disk::create_file(to)?;
     loop {
         if is_cancelled(work.cancel) {
             return Ok(false);
@@ -880,7 +879,7 @@ fn copy_and_check(disk: &dyn Written, from: &Path, to: &Path, buffers: &mut [Vec
     }
     // Here a new file is not executable either, and Library holds programs (Burst's compiler, in a package).
     if cfg!(unix) || meta.permissions().readonly() {
-        let _ = std::fs::set_permissions(to, meta.permissions());
+        let _ = crate::disk::set_permissions(to, meta.permissions());
     }
     Ok(true)
 }
@@ -902,7 +901,7 @@ fn discard_copy(target: &Path, work: &Work) -> Option<PathBuf> {
     };
     match removed {
         Ok(()) => {
-            let _ = std::fs::remove_file(target.with_extension("json"));
+            let _ = crate::disk::remove_file(target.with_extension("json"));
             None
         }
         Err(e) => {
@@ -951,9 +950,9 @@ fn relocate_on(
     // remove it without asking which projects the gallery knows.
     let record = |phase: &str, backup_id: Option<crate::owned::FileId>| serde_json::json!({"project":project,"library":target,"backup":backup,"phase":phase,"backup_id":backup_id});
     crate::write_json(&target.with_extension("json"), &record("copying", None))?;
-    std::fs::create_dir_all(target.parent().with_context(|| tr("A file without a folder"))?)?;
-    std::fs::create_dir(target)?;
-    std::fs::File::options().write(true).create_new(true).open(target.join(COPYING))?;
+    crate::disk::create_dir_all(target.parent().with_context(|| tr("A file without a folder"))?)?;
+    crate::disk::create_dir(target)?;
+    crate::disk::open(std::fs::File::options().write(true).create_new(true), target.join(COPYING))?;
     update(work.progress, |p| {
         p.phase = Phase::Copying;
         p.bytes_total = bytes;
@@ -972,7 +971,7 @@ fn relocate_on(
                 continue;
             }
             let to = target.join(relative);
-            std::fs::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
+            crate::disk::create_dir_all(to.parent().with_context(|| tr("A file without a folder"))?)?;
             update(work.progress, |p| p.file = relative.display().to_string());
             // Flushed all the way once it has passed, before the switch and before the original goes: every file, or the
             // last one ([`Written::persists_every_file`]).
@@ -1002,8 +1001,8 @@ fn relocate_on(
     // Library about to be set aside (a folder put later at the backup's name is not it).
     let had_library = library.is_dir();
     let switching = (|| -> anyhow::Result<()> {
-        std::fs::File::options().write(true).create_new(true).open(target.join(SWITCHED))?;
-        std::fs::remove_file(target.join(COPYING))?;
+        crate::disk::open(std::fs::File::options().write(true).create_new(true), target.join(SWITCHED))?;
+        crate::disk::remove_file(target.join(COPYING))?;
         let backup_id = if had_library { Some(crate::owned::id_of(&library)?) } else { None };
         crate::write_json(&target.with_extension("json"), &record("switching", backup_id))
     })();
@@ -1012,7 +1011,7 @@ fn relocate_on(
         return Err(error).with_context(|| tr!("Library was not moved and stays where it is. {note}", note = partial_note(&left)));
     }
     if had_library {
-        if let Err(error) = std::fs::rename(&library, &backup) {
+        if let Err(error) = crate::disk::rename(&library, &backup) {
             let left = discard_copy(target, work);
             return Err(error).with_context(|| tr!("Something is using this project's Library, so it was not moved and stays where it is. {note}", note = partial_note(&left)));
         }
@@ -1023,11 +1022,11 @@ fn relocate_on(
             remove_redirect(&library)?;
         }
         if library.exists() {
-            std::fs::remove_dir(&library).with_context(|| tr("Could not remove an empty failed Library redirect"))?;
+            crate::disk::remove_dir(&library).with_context(|| tr("Could not remove an empty failed Library redirect"))?;
         }
         if had_library {
             // The copy stays when Library cannot come back: it is then the only complete one under that name.
-            std::fs::rename(&backup, &library).with_context(|| {
+            crate::disk::rename(&backup, &library).with_context(|| {
                 tr!(
                     "Could not restore Library after a failed redirect. It is at {backup}, and a checked copy is at {copy}.",
                     backup = backup.display(),
@@ -1124,7 +1123,7 @@ fn read_up_to(file: &mut dyn Read, buffer: &mut [u8], sectors: bool) -> std::io:
 #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
 fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
     fn remove_link(path: &Path) -> std::io::Result<()> {
-        std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path))
+        crate::disk::remove_dir(path).or_else(|_| crate::disk::remove_file(path))
     }
     /// What stops a removal here is not the file's own read-only mode but its folder's: packages unpack read-only.
     #[cfg(unix)]
@@ -1134,33 +1133,33 @@ fn remove_tree(root: &Path, on_file: &mut dyn FnMut()) -> std::io::Result<()> {
             if let Ok(meta) = std::fs::symlink_metadata(parent) {
                 let mut open = meta.permissions();
                 open.set_mode(open.mode() | 0o700);
-                let _ = std::fs::set_permissions(parent, open);
+                let _ = crate::disk::set_permissions(parent, open);
             }
         }
     }
     fn remove_file(path: &Path, meta: Option<std::fs::Metadata>) -> std::io::Result<()> {
-        match std::fs::remove_file(path) {
+        match crate::disk::remove_file(path) {
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 // A read-only file (the copy keeps the flag).
                 if let Some(meta) = meta {
                     let mut writable = meta.permissions();
                     #[allow(clippy::permissions_set_readonly_false)]
                     writable.set_readonly(false);
-                    let _ = std::fs::set_permissions(path, writable);
+                    let _ = crate::disk::set_permissions(path, writable);
                 }
                 #[cfg(unix)]
                 open_parent(path);
-                std::fs::remove_file(path)
+                crate::disk::remove_file(path)
             }
             other => other,
         }
     }
     fn remove_folder(path: &Path) -> std::io::Result<()> {
-        match std::fs::remove_dir(path) {
+        match crate::disk::remove_dir(path) {
             #[cfg(unix)]
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 open_parent(path);
-                std::fs::remove_dir(path)
+                crate::disk::remove_dir(path)
             }
             other => other,
         }
@@ -1471,7 +1470,7 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
                     continue;
                 };
                 if let Some(old) = restore {
-                    if let Err(e) = std::fs::rename(&old, project.join("Library")) {
+                    if let Err(e) = crate::disk::rename(&old, project.join("Library")) {
                         drop(lock);
                         // The cache may be the only good copy until the old Library is back: it stays.
                         swept.failed.push((old, e.to_string()));
@@ -1484,7 +1483,7 @@ fn sweep(roots: &[PathBuf], known: &[PathBuf], cancel: &AtomicBool) -> Swept {
                 let removed = if cache.exists() { remove_tree(&cache, &mut || {}) } else { Ok(()) };
                 match removed {
                     Ok(()) => {
-                        let _ = std::fs::remove_file(cache.with_extension("json"));
+                        let _ = crate::disk::remove_file(cache.with_extension("json"));
                         swept.removed.push(cache);
                     }
                     Err(e) => swept.failed.push((cache, e.to_string())),

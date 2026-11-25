@@ -94,6 +94,14 @@ fn listing(theirs: &Path) -> String {
     format!("theirs-{}-{name}", own::short(&crate::discovery::key(theirs)))
 }
 
+/// The files of theirs that repositories without an address are in, by where they are kept here.
+pub(crate) fn files(root: &Path) -> BTreeMap<PathBuf, PathBuf> {
+    let here = dir(root).join("Repos");
+    let settings = their_settings(root);
+    let all = settings["userRepos"].as_array().into_iter().flatten().filter(|r| !r["url"].is_string());
+    all.filter_map(|r| r["localPath"].as_str().map(|p| root.join(p))).map(|at| (here.join(listing(&at)), at)).collect()
+}
+
 /// Makes the environment's settings from theirs and what was chosen here, with the listings downloaded already.
 pub(crate) fn prepare(root: &Path) -> anyhow::Result<PathBuf> {
     let here = dir(root);
@@ -108,14 +116,10 @@ pub(crate) fn prepare(root: &Path) -> anyhow::Result<PathBuf> {
             continue;
         }
         let Some(at) = r["localPath"].as_str().map(|p| root.join(p)) else { continue };
-        if r["url"].is_string() {
-            let own = here.join("Repos").join(listing(&at));
-            r["localPath"] = json!(own);
-            listings.push((at, own));
-        } else {
-            // A repository in a file: the file itself.
-            r["localPath"] = json!(at);
-        }
+        // A repository in a file is read from a copy too: one that says where it comes from is refreshed there.
+        let own = here.join("Repos").join(listing(&at));
+        r["localPath"] = json!(own);
+        listings.push((at, own));
         repos.push(r);
     }
     for a in &chosen.added {
@@ -129,7 +133,7 @@ pub(crate) fn prepare(root: &Path) -> anyhow::Result<PathBuf> {
     if let Ok(v) = theirs::json(&root.join("vrc-get/settings.json")) {
         write(&here.join("vrc-get/settings.json"), &v.unwrap_or_else(|| json!({})))?;
     }
-    std::fs::create_dir_all(here.join("Repos"))?;
+    crate::disk::create_dir_all(here.join("Repos"))?;
     for (from, to) in listings {
         newer(&from, &to);
     }
@@ -166,9 +170,9 @@ pub(crate) fn archive(root: &Path, name: &str, version: &str) {
     }
     let Some(parent) = to.parent() else { return };
     let sum = |p: &Path| p.with_extension("zip.sha256");
-    let copied = std::fs::create_dir_all(parent).and_then(|()| std::fs::copy(sum(&from), sum(&to))).and_then(|_| std::fs::copy(&from, &to));
+    let copied = crate::disk::create_dir_all(parent).and_then(|()| crate::disk::copy(sum(&from), sum(&to))).and_then(|_| crate::disk::copy(&from, &to));
     if copied.is_err() {
-        let _ = std::fs::remove_file(&to);
-        let _ = std::fs::remove_file(sum(&to));
+        let _ = crate::disk::remove_file(&to);
+        let _ = crate::disk::remove_file(sum(&to));
     }
 }

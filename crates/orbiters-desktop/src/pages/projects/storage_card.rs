@@ -105,6 +105,19 @@ impl State {
 
     /// Open in Unity, from wherever it is offered. `quiet`: no word when it worked (the setup dialog goes on by itself).
     pub(super) fn open_unity(&mut self, ctx: &egui::Context, project: &Project, quiet: bool) {
+        self.open_unity_with(ctx, project, quiet, orbiters_projects::open_project);
+    }
+
+    /// Opens an original about to be tried on Unity 6: Orbiters moves nothing of it first.
+    pub(super) fn open_unity_as_is(&mut self, ctx: &egui::Context, project: &Project) {
+        self.open_unity_with(ctx, project, false, orbiters_projects::open_project_as_is);
+    }
+
+    fn open_unity_with(&mut self, ctx: &egui::Context, project: &Project, quiet: bool, open: fn(&Project) -> anyhow::Result<orbiters_projects::Opened>) {
+        if self.u6.waiting(&project.path) {
+            self.error = Some(tr("This trial waits for Creator Companion's migration: Orbiters does not open it or change its packages before.").into());
+            return;
+        }
         if self.repairing(&project.path) {
             self.error = Some(tr!("Orbiters is moving the Library of {name}. Unity can open it once that ends, or after Cancel.", name = project.name));
             return;
@@ -116,7 +129,7 @@ impl State {
         }
         let p = project.clone();
         self.task(ctx, tr("Opening Unity…"), move || {
-            let opened = orbiters_projects::open_project(&p)?;
+            let opened = open(&p)?;
             if quiet {
                 return Ok(super::state::Outcome::Picked(None));
             }

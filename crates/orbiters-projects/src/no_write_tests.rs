@@ -151,10 +151,13 @@ mod source {
     /// `t` without the items and statements marked `#[cfg(test)]`.
     pub fn production(t: &[Token]) -> Vec<Token> {
         let mark = [Sign('#'), Sign('['), Word("cfg".into()), Sign('('), Word("test".into()), Sign(')'), Sign(']')];
+        // `#[cfg(test)]`, and `#[cfg(all(test, …))]`: both only of a test.
+        let part = [Sign('#'), Sign('['), Word("cfg".into()), Sign('('), Word("all".into()), Sign('('), Word("test".into())];
         let (mut out, mut i) = (vec![], 0);
         while i < t.len() {
-            if t[i..].starts_with(&mark) {
-                i += mark.len();
+            let whole = t[i..].starts_with(&mark);
+            if whole || t[i..].starts_with(&part) {
+                i = if whole { i + mark.len() } else { closing(t, i + 1) + 1 };
                 // Other attributes, then the item: to its `;`, or its block.
                 while i < t.len() {
                     match &t[i] {
@@ -338,8 +341,9 @@ fn writes(krate: &str, name: &str, text: &str) -> Vec<String> {
             ["vrc_get_vpm", "environment", "PackageCollection" | "PackageInstaller" | "add_remote_repo", ..] => krate == "orbiters-projects" && name == "vpm.rs",
             ["vrc_get_vpm", "environment", ..] => false,
             ["vrc_get_vpm", "io"] => false,
-            ["vrc_get_vpm", "io", "DefaultProjectIo", ..] => krate == "orbiters-projects",
-            ["vrc_get_vpm", "io", "DefaultEnvironmentIo"] | ["vrc_get_vpm", "io", "DefaultEnvironmentIo", "new"] => krate == "orbiters-projects" && name == "vpm.rs",
+            ["vrc_get_vpm", "io", "DefaultProjectIo", ..] => krate == "orbiters-projects" && name == "disk.rs",
+            ["vrc_get_vpm", "io", "DefaultEnvironmentIo"] => krate == "orbiters-projects" && matches!(name, "vpm.rs" | "disk.rs"),
+            ["vrc_get_vpm", "io", "DefaultEnvironmentIo", "new"] => krate == "orbiters-projects" && name == "disk.rs",
             ["vrc_get_vpm", "io", ..] | ["vrc_get_vpm", "*"] => false,
             ["vrc_get_vpm", ..] => krate == "orbiters-projects",
             ["vrc_get_litedb", "file_io", "LiteDBFile"] | ["vrc_get_litedb", "file_io", "LiteDBFile", "parse"] | ["vrc_get_litedb", "bson", "Document"] => krate == "orbiters-projects" && name == "theirs.rs",
@@ -364,8 +368,7 @@ fn writes(krate: &str, name: &str, text: &str) -> Vec<String> {
             out.push("save of what is not a project".into());
         }
         // The environment it works in is Orbiters' own, made at one place.
-        let path = ["(", "crate", "repos", "prepare"];
-        if word(i, "DefaultEnvironmentIo") && sign(i + 1, ':') && word(i + 3, "new") && !(sign(i + 4, '(') && word(i + 5, path[1]) && word(i + 8, path[2]) && word(i + 11, path[3])) {
+        if word(i, "environment_io") && !word(i.wrapping_sub(1), "fn") && !(sign(i + 1, '(') && word(i + 2, "crate") && word(i + 5, "repos") && word(i + 8, "prepare")) {
             out.push("an environment that is not Orbiters'".into());
         }
         // By its own name, so that the one place is seen.
@@ -378,6 +381,106 @@ fn writes(krate: &str, name: &str, text: &str) -> Vec<String> {
         out.extend(read.paths.iter().filter(|p| ["std::fs", "std::os", "std::process", "tokio", "windows", "std::io"].iter().any(|w| p.starts_with(w))).cloned());
     }
     out
+}
+
+/// What writes on a disk, by any name: everything of the crate goes through `disk`.
+const WRITERS: &[&str] = &[
+    "std::fs::write", "std::fs::create_dir", "std::fs::create_dir_all", "std::fs::rename", "std::fs::remove_file", "std::fs::remove_dir", "std::fs::remove_dir_all", "std::fs::copy", "std::fs::hard_link", "std::fs::soft_link",
+    "std::fs::set_permissions", "std::fs::DirBuilder", "std::fs::File::create", "std::fs::File::create_new", "std::fs::File::set_len", "std::fs::*", "tokio::fs", "junction::create", "junction::delete", "junction::*", "std::os::unix::fs::symlink", "std::os::windows::fs::symlink_dir",
+    "std::os::windows::fs::symlink_file", "orbiters_core::write_atomic", "image::save_buffer", "image::save_buffer_with_format", "tempfile", "fs_extra", "libc::rename", "libc::unlink", "libc::mkdir", "libc::open",
+];
+/// Windows' own, whatever module they are named from.
+const WINDOWS: &[&str] = &[
+    "MoveFileExW", "MoveFileW", "MoveFileWithProgressW", "CopyFileW", "CopyFileExW", "DeleteFileW", "RemoveDirectoryW", "CreateDirectoryW", "CreateFileW", "CreateFile2", "ReplaceFileW", "SetFileInformationByHandle", "SetFileAttributesW", "CreateHardLinkW",
+    "CreateSymbolicLinkW", "WriteFile", "DeviceIoControl", "SHFileOperationW",
+];
+
+/// What of the crate's file `name` writes on a disk by itself.
+fn writers(name: &str, text: &str) -> Vec<String> {
+    // (And the gate's own two files: each writes below a folder held open, which the gate asked `disk` about first.)
+    if matches!(name, "disk.rs" | "sys_windows.rs" | "sys_unix.rs") {
+        return vec![];
+    }
+    let tokens = source::production(&source::tokens(text));
+    let read = source::read(&tokens);
+    let mut out = vec![];
+    for p in &read.paths {
+        let last = p.rsplit("::").next().unwrap_or_default();
+        let hit = WRITERS.iter().any(|w| p == w || p.strip_prefix(w).is_some_and(|rest| rest.starts_with("::")) || p == &format!("std::fs::{{{w}}}"));
+        // (`owned` deletes by the handle it holds, of a path it asked about.)
+        if hit || WINDOWS.contains(&last) && !(name == "owned.rs" && last == "SetFileInformationByHandle") {
+            out.push(p.clone());
+        }
+    }
+    // A file opened to be written is opened by `disk`; `owned` opens to ask what a file is, and to hold it.
+    let word = |i: usize, w: &str| tokens.get(i) == Some(&Token::Word(w.into()));
+    let sign = |i: usize, c: char| tokens.get(i) == Some(&Token::Sign(c));
+    for i in 0..tokens.len() {
+        let options = word(i, "OpenOptions") && sign(i + 1, ':') || word(i, "options") && i >= 3 && word(i - 3, "File");
+        if !options || name == "owned.rs" {
+            continue;
+        }
+        // From where it is given to `disk::open(`, or only to read.
+        let given = (i.saturating_sub(14)..i).any(|n| word(n, "disk") && word(n + 3, "open") && sign(n + 4, '('));
+        let reads = (i..i + 40).take_while(|n| !sign(*n, ';')).any(|n| word(n, "read") && sign(n + 1, '(')) && !(i..i + 60).take_while(|n| !sign(*n, ';')).any(|n| ["write", "append", "create", "create_new", "truncate"].iter().any(|w| word(n, w)));
+        if !given && !reads {
+            out.push(format!("opens to write (token {i})"));
+        }
+    }
+    out
+}
+
+/// Every write of the crate goes through `disk`, which refuses Creator Companion's and ALCOM's folders.
+#[test]
+fn every_write_goes_through_one_door() {
+    let mut out = vec![];
+    let mut looked = 0;
+    for path in production_files("orbiters-projects") {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with("_tests.rs") {
+            continue;
+        }
+        looked += 1;
+        out.extend(writers(&name, &std::fs::read_to_string(&path).unwrap()).into_iter().map(|w| format!("{}: {w}", path.display())));
+    }
+    assert!(looked > 30, "{looked} files");
+    assert!(out.is_empty(), "these write past `disk`:\n{}", out.join("\n"));
+}
+
+/// The test of that test.
+#[test]
+fn no_writer_past_the_door_is_missed() {
+    for bad in [
+        "fn f() { std::fs::write(p, b); }",
+        "use std::fs; fn f() { fs::create_dir_all(p); }",
+        "use std::fs::{self as d}; fn f() { d::rename(a, b); }",
+        "use std::fs::remove_file as rm; fn f() { rm(p); }",
+        "use std::fs::*;",
+        "use std::fs::File; fn f() { File::create(p); }",
+        "fn f() { std::fs::File::options().write(true).open(p); }",
+        "use std::fs::OpenOptions; fn f() { OpenOptions::new().append(true).open(p); }",
+        "fn f() { tokio::fs::write(p, b).await; }",
+        "fn f() { junction::create(a, b); }",
+        "fn f() { std::os::unix::fs::symlink(a, b); }",
+        "use windows::Win32::Storage::FileSystem::MoveFileExW; fn f() { MoveFileExW(a, b, c); }",
+        "fn f() { orbiters_core::write_atomic(p, b); }",
+        "fn f() { image::save_buffer_with_format(p, b, 1, 1, c, d); }",
+        "fn f() { tempfile::tempdir(); }",
+        "fn f() { std::fs::copy(a, b); } #[cfg(test)] mod tests {}",
+        "#[cfg(all(test, windows))] mod tests {} fn f() { std::fs::copy(a, b); }",
+        "#[cfg(all(not(test), windows))] fn f() { std::fs::copy(a, b); }",
+    ] {
+        assert!(!writers("gallery.rs", bad).is_empty(), "{bad}");
+    }
+    for fine in [
+        "fn f() { std::fs::read(p); std::fs::File::open(p); std::fs::metadata(p); }",
+        "fn f() { crate::disk::write(p, b); crate::disk::open(std::fs::File::options().write(true), p); }",
+        "fn f() { std::fs::OpenOptions::new().read(true).custom_flags(1).open(p); }",
+        "#[cfg(test)] mod tests { fn f() { std::fs::write(p, b); } }",
+        "#[cfg(all(test, target_os = \"macos\"))] mod tests { fn f() { std::fs::write(p, b); } } fn g() { junction::exists(p); }",
+    ] {
+        assert_eq!(writers("gallery.rs", fine), Vec::<String>::new(), "{fine}");
+    }
 }
 
 fn production_files(krate: &str) -> Vec<PathBuf> {
@@ -436,6 +539,8 @@ fn no_way_of_writing_them_is_missed() {
         "use vrc_get_vpm::io::DefaultEnvironmentIo as Io; fn f() { Io::new(root.into()); }",
         "fn f() { vrc_get_vpm::io::DefaultEnvironmentIo::new(root.into()); }",
         "use vrc_get_vpm::io::IoTrait;",
+        "use vrc_get_vpm::io::DefaultProjectIo; fn f() { DefaultProjectIo::new(p.into()); }",
+        "fn f() { crate::disk::environment_io(root.into()); }",
         "use vrc_get_litedb::file_io::LiteDBFile; fn f() { LiteDBFile::new(); }",
         "fn f() { vrc_get_litedb::file_io::LiteDBFile::parse(b)?.serialize(); }",
         "fn f() { settings.remove_repo(|r| true); }",
@@ -450,8 +555,8 @@ fn no_way_of_writing_them_is_missed() {
         assert!(!writes("orbiters-projects", "theirs.rs", bad).is_empty(), "{bad}");
     }
     for fine in [
-        "use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings}; async fn f() { let io = DefaultEnvironmentIo::new(crate::repos::prepare(root)?.into()); Settings::load(&io).await; project.save().await; }",
-        "use vrc_get_vpm::io::{DefaultEnvironmentIo, DefaultProjectIo}; fn f() { UnityProject::load(DefaultProjectIo::new(p)); } // db.save(&io)",
+        "use vrc_get_vpm::environment::{self, PackageCollection, PackageInstaller, Settings}; async fn f() { let io = crate::disk::environment_io(crate::repos::prepare(root)?)?; Settings::load(&io).await; project.save().await; }",
+        "use vrc_get_vpm::io::DefaultEnvironmentIo; fn f() { UnityProject::load(crate::disk::project_io(p)?); } // db.save(&io)",
     ] {
         assert_eq!(writes("orbiters-projects", "vpm.rs", fine), Vec::<String>::new());
     }

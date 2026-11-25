@@ -319,6 +319,7 @@ impl App {
         // This process reads Orbiters too (the Map explorer's public pages): from the environment the service uses,
         // production included (else Unity's switch would decide).
         crate::controller::follow_environment(snap.settings.development);
+        crate::worlds::profile_pictures::set_cap(u64::from(snap.settings.vrchat_pictures_mb.max(16)) << 20);
         let now = anim::time(&ctx);
         let started = *self.started.get_or_insert(now);
         if self.visit == 0 {

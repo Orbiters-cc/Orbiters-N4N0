@@ -14,6 +14,7 @@ pub mod explorer;
 pub mod picture;
 pub mod features;
 pub mod gallery_talk;
+pub mod group_events;
 pub mod groups;
 pub mod here;
 pub mod keyframes;
@@ -52,6 +53,7 @@ pub mod vrchat_api;
 pub mod vrchat_launch;
 pub mod vrchat_log;
 pub mod vrchat_source;
+pub mod vrchat_store;
 pub mod world_feedback;
 
 pub use orbiters_contracts as contracts;

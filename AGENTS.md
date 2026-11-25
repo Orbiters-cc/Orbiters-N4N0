@@ -18,6 +18,15 @@
   Nothing of N4N0 goes into the fork, and none of the fork's code into N4N0.
 - **Every change keeps `cargo check` passing for the Mac** (main did not compile there from 0ee59341 to 2026-11-25; the tag 0.3.10 does
   not). From Windows: `scripts/linux/check.sh mac` (`setup` first; it type-checks without a Mac); what is Windows' alone stays behind `cfg(windows)`.
+- **The Orbiters menu around VRChat's is on a Mac too** (`overlay/orbit/desktop_mac`, `docs/orbit-overlays.md`, "On a Mac"): the same
+  parts and detectors as Windows' `desktop.rs`, which is not to be edited for a Mac (its tests cannot run here: share through
+  `desk_shared.rs`, and check with `cargo check --target x86_64-pc-windows-gnu -p orbiters-desktop --tests`). Ordinary panels of ours over
+  the engine's window, and nothing else: no event tap, no Accessibility, nothing sent to the game or `wsd`, no pointer warp while
+  the game holds it, and **never windows that together cover all of the game's** (macOS stops showing it: `panel::uncovering`).
+  **Left Option** points, around the wheel and the Quick Menu alike (VRChat keeps the mouse on a Mac); Screen Recording is the one
+  permission (Input Monitoring only if macOS hides the keys without it). Hidden there: 3D pictures, the camera's column,
+  translation, the corner's cards and mismatch buttons. `tools/mac-overlay/check.py` runs it over the engine's real window server
+  with no game, only while nobody uses the Mac.
 - **The VRChat bridge on a Mac observes and travels only** (`docs/vrchat-bridge.md`, "On a Mac"). What a computer's bridge can
   do is `bridge/caps.rs`, never `cfg` in shared logic: Windows has every capability (keep it so: its tools, guide and tests are
   unchanged), and a Mac's tool list, guide, prompt and Settings come from its set. A tool it lacks is refused there before any side

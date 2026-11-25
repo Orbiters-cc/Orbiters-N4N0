@@ -18,7 +18,7 @@
 //!
 //! What it does not measure: SteamVR taking the texture, a window taking its picture on the desktop (the count of pixels handed over is given instead), and anything of a headset.
 
-use super::desktop::Hints;
+use super::desk_shared::Hints;
 use super::panels::Action;
 use super::vr;
 use super::zones::{self, Around, Placed, Zone};

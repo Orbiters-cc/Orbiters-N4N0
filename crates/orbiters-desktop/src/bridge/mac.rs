@@ -104,6 +104,7 @@ mod imp {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
         fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> CFTypeRef;
+        fn CGWindowListCreateDescriptionFromArray(windows: CFTypeRef) -> CFTypeRef;
         fn CGRectMakeWithDictionaryRepresentation(dict: CFTypeRef, rect: *mut CGRect) -> bool;
         fn CGEventSourceSecondsSinceLastEventType(state: i32, kind: u32) -> f64;
         fn CGSessionCopyCurrentDictionary() -> CFTypeRef;
@@ -124,6 +125,7 @@ mod imp {
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
+        fn CFArrayCreate(allocator: CFTypeRef, values: *const CFTypeRef, count: CFIndex, callbacks: CFTypeRef) -> CFTypeRef;
         fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
         fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
         fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
@@ -173,11 +175,31 @@ mod imp {
 
     /// The windows, and whether that is all of them: the list was given, and every entry of it could be read.
     fn listed(option: u32) -> (Vec<MacWindow>, bool) {
+        // SAFETY: a plain query; the list is ours (copied).
+        read(unsafe { CGWindowListCopyWindowInfo(option, 0) })
+    }
+
+    /// The window `id` alone, on screen or not; `None` when there is none.
+    pub fn window(id: u32) -> Option<MacWindow> {
+        let ids = [id as usize as CFTypeRef];
+        // SAFETY: the array of window numbers (no objects: no callbacks) is ours and released once; the list is ours (copied).
+        unsafe {
+            let array = CFArrayCreate(std::ptr::null(), ids.as_ptr(), 1, std::ptr::null());
+            if array.is_null() {
+                return None;
+            }
+            let list = CGWindowListCreateDescriptionFromArray(array);
+            CFRelease(array);
+            read(list).0.into_iter().find(|w| w.id == id)
+        }
+    }
+
+    /// What a list of macOS's says of its windows, and whether every entry could be read. The list is released.
+    fn read(array: CFTypeRef) -> (Vec<MacWindow>, bool) {
         let mut out = Vec::new();
         let mut whole = true;
-        // SAFETY: the list is ours (copied) and released once; its entries are read while it lives.
+        // SAFETY: the list is the caller's, given over, and released once; its entries are read while it lives.
         unsafe {
-            let array = CGWindowListCopyWindowInfo(option, 0);
             if array.is_null() {
                 return (out, false);
             }
@@ -288,6 +310,12 @@ mod imp {
         // SAFETY: a plain query.
         let b = unsafe { CGDisplayBounds(display) };
         Some((b.x, b.y, b.w, b.h))
+    }
+
+    /// The main display's height, in points: macOS's global coordinates start at its top left, AppKit's at its foot.
+    pub fn main_display_height() -> f64 {
+        // SAFETY: plain queries.
+        unsafe { CGDisplayBounds(CGMainDisplayID()) }.h
     }
 
     /// Seconds since the last keyboard, mouse or trackpad event of the HID system, whoever's (the bridge sends none on a Mac).

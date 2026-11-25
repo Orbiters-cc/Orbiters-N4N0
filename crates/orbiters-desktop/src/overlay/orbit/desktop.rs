@@ -14,6 +14,7 @@
 //!   wheel lights the ring's cells one by one and a click opens the one lit ([`scroll`]). The hook that sees it lets VRChat have every movement and click
 //!   but those: its click is ours only after a scroll, and a movement of the mouse gives it back.
 
+use super::desk_shared::{self, hit, Clicks, Hints, Presence, SCROLL_TO_PICK};
 use super::detect::{self, Part, Seen, MenuKey, Watcher};
 use super::zones::{self, Around, Placed, Zone};
 use super::{Panel, Panels};
@@ -153,7 +154,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         // The shell says someone is in exclusive full screen, for the whole system: VRChat only when it is the one in front (a game on another screen is not).
         let exclusive = exclusive_said.0 && found.is_some_and(front_is);
-        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
+        let status = OrbitStatus { note: exclusive.then(|| mark("VRChat is in exclusive full screen, which no other window can be above. Use a window or borderless full screen.").to_string()), needs: None, steamvr_overrides: None, camera_note: None, camera_provisional: false, camera_panel_seen_ns: panel_seen_ns, camera_scale_measured: false };
         if said.as_ref() != Some(&status) {
             backend.orbit_status(status.clone());
             said = Some(status);
@@ -431,51 +432,6 @@ fn camera_tools_here(snap: &Snapshot) -> bool {
     snap.settings.orbit.camera_tiles && !driven
 }
 
-/// Whether the scroll wheel picks a cell of the ring, with no key held ([`scroll`]). Off since dev.25: in dev.24 a scroll's click that opened a sheet froze the
-/// panels once on the real game, and the cause is not proven yet. Left Alt and the number keys work as ever.
-const SCROLL_TO_PICK: bool = false;
-
-/// What the caption says with nothing pointed at, which someone who has seen it often enough no longer needs in full.
-#[derive(Default)]
-pub(super) struct Hints {
-    /// How often Left Alt was used on the ring, and how often the Quick Menu opened, since this started.
-    pointed: u32,
-    openings: u32,
-    was_open: Option<Around>,
-    was_pointing: bool,
-}
-
-impl Hints {
-    /// How many times the full words show.
-    const FULL: u32 = 3;
-
-    pub(super) fn follow(&mut self, open: Option<Around>, pointing: bool) {
-        if open != self.was_open && open == Some(Around::QuickMenu) {
-            self.openings += 1;
-        }
-        if pointing && !self.was_pointing {
-            self.pointed += 1;
-        }
-        (self.was_open, self.was_pointing) = (open, pointing);
-    }
-
-    pub(super) fn now(&self, open: Option<Around>, pointing: bool) -> Option<(&'static str, &'static str)> {
-        match open {
-            // Now the ring takes the mouse: it said so, it says so.
-            Some(Around::Wheel) if pointing && self.pointed <= Self::FULL => Some((mark("Click a tool"), "")),
-            Some(Around::Wheel) if pointing => None,
-            // The scroll wheel first, where it is on: it needs no key (round 12's judges: Left Alt was the friction of the desktop's wheel).
-            Some(Around::Wheel) if SCROLL_TO_PICK && self.pointed < Self::FULL => Some((mark("Scroll to pick a tool, then click"), mark("Or hold Left Alt to point; keys 1 to 6"))),
-            Some(Around::Wheel) if SCROLL_TO_PICK => Some((mark("Scroll to pick, or hold Left Alt"), "")),
-            Some(Around::Wheel) if self.pointed < Self::FULL => Some((mark("Hold Left Alt, then click a tool"), mark("Or press its number, 1 to 6, from the top clockwise"))),
-            Some(Around::Wheel) => Some((mark("Left Alt to click, or a number"), "")),
-            // Says what this is, and that it is not VRChat's.
-            Some(Around::QuickMenu) if self.openings <= Self::FULL => Some((mark("Your tools"), mark("Worlds in 3D, videos, instances and 3D pictures."))),
-            _ => None,
-        }
-    }
-}
-
 /// `--orbit-bench <seconds>`: counts VRChat's frames through a capture of its window that only counts (what the panels' cost is measured with: run the same in each
 /// state and compare). Prints frames a second, one line per 5 s. A tool for the report, not used by anything.
 pub fn bench(args: &[String]) -> anyhow::Result<()> {
@@ -516,18 +472,6 @@ fn press(panels: &mut Panels, down: bool, snap: &Snapshot, windows: &mut Windows
     } else {
         panels.release();
     }
-}
-
-/// Which panel the point (window pixels) is on: its index in [`Panels::all`] and where in it in its units. The takeover in front first.
-fn hit(panels: &Panels, p: Pos2) -> Option<(usize, Pos2)> {
-    let all: Vec<&Panel> = panels.all().collect();
-    (0..all.len()).rev().find_map(|i| {
-        let panel = all[i];
-        (panel.shown && panel.placed.contains(p)).then(|| {
-            let uv = (p - panel.placed.rect.min) / panel.placed.rect.size();
-            (i, panel.to_logical([uv.x, uv.y]))
-        })
-    })
 }
 
 /// Whether the screen's point `at` shows ours or VRChat's window, nothing that covers them: Windows' own hit testing.
@@ -594,30 +538,6 @@ fn pump() {
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        }
-    }
-}
-
-/// The app's click, computed on a thread at the start, so that the first press already has it.
-struct Clicks {
-    output: orbiters_sound::Output,
-    click: Arc<std::sync::OnceLock<Arc<orbiters_sound::Sound>>>,
-}
-
-impl Clicks {
-    fn start() -> Self {
-        let click = Arc::new(std::sync::OnceLock::new());
-        let slot = click.clone();
-        let _ = std::thread::Builder::new().name("orbit-click".into()).spawn(move || {
-            use orbiters_sound::{render, sounds, RATE};
-            let _ = slot.set(Arc::new(render(&sounds::ROCKER, RATE)));
-        });
-        Self { output: orbiters_sound::Output::new(), click }
-    }
-
-    fn play(&self) {
-        if let Some(s) = self.click.get() {
-            self.output.play(s);
         }
     }
 }
@@ -1509,12 +1429,10 @@ fn place_in_order(list: &mut HashMap<Zone, PanelWindow>, showing: &[(Zone, POINT
     raise
 }
 
-/// Where the panel's window goes and its alpha as its spring has them: it comes from the menu's side.
+/// Where the panel's window goes and its alpha ([`desk_shared::spot`]).
 fn placed_at(panel: &Panel, origin: Pos2) -> (Zone, POINT, u8) {
-    let Placed { rect, center, unit, .. } = panel.placed;
-    let way = panel.zone.ring().map_or((rect.center() - center).normalized(), |ring| zones::polar(1.0, ring.middle()));
-    let at = origin + rect.min.to_vec2() + way * panel.outward() * unit;
-    (panel.zone, POINT { x: at.x.round() as i32, y: at.y.round() as i32 }, (panel.appear.alpha() * 255.0) as u8)
+    let (zone, [x, y], alpha) = desk_shared::spot(panel, origin);
+    (zone, POINT { x, y }, alpha)
 }
 
 // --------------------------------------------------------------------------------------------- the pointer over ours
@@ -1540,27 +1458,7 @@ pub(crate) mod cursor {
         (side.max(0) as u32).clamp(32, 256)
     }
 
-    /// The arrow in a box of 24 units: its tip at the top left (the hotspot), its two wings, the notch between them at its back. Two triangles, as it is not
-    /// convex.
-    pub(crate) const TIP: Pos2 = pos2(2.0, 2.0);
-    const WING_RIGHT: Pos2 = pos2(19.5, 9.0);
-    const NOTCH: Pos2 = pos2(10.6, 10.6);
-    const WING_DOWN: Pos2 = pos2(9.0, 19.5);
-
-    /// The arrow in a square of `px` pixels at `scale` (1.0: the 24 units' box), RGBA premultiplied.
-    pub(crate) fn picture(px: u32, scale: f32, colour: Color32) -> Vec<u8> {
-        let mut canvas = crate::overlay::Canvas::new(px, px);
-        canvas.paint(0.0, |p| {
-            let at = |q: Pos2| pos2(q.x * scale, q.y * scale);
-            let outline = vec![at(TIP), at(WING_RIGHT), at(NOTCH), at(WING_DOWN)];
-            // The dark edge first, half of it outside the arrow, then the arrow over it.
-            p.add(egui::Shape::closed_line(outline, egui::Stroke::new(2.4 * scale, Color32::from_black_alpha(200))));
-            for tri in [[TIP, WING_RIGHT, NOTCH], [TIP, NOTCH, WING_DOWN]] {
-                p.add(egui::Shape::convex_polygon(tri.iter().map(|q| at(*q)).collect(), colour, egui::Stroke::NONE));
-            }
-        });
-        canvas.pixels().to_vec()
-    }
+    pub(crate) use super::desk_shared::arrow::{picture, TIP};
 
     /// The cursor for the accent now, when one was made.
     pub(crate) fn current() -> Option<HCURSOR> {
@@ -1761,24 +1659,6 @@ fn on_screen(game: HWND) -> bool {
         let visible = windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(game).as_bool() && !IsIconic(game).as_bool();
         let _ = DwmGetWindowAttribute(game, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, std::mem::size_of::<u32>() as u32);
         visible && cloaked == 0
-    }
-}
-
-/// What the loop decides from VRChat's window and the keyboard's owner, each turn (REQUEST15 item 1): whether ours show at all, and whether VRChat has the keyboard.
-/// Before, ours went the moment another program had the keyboard (`in_front` = VRChat in front): now they stay as long as VRChat's window is on the screen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Presence {
-    /// Ours show: VRChat's window is there, not minimised, not hidden, not in exclusive full screen.
-    pub(crate) show: bool,
-    /// The keyboard is VRChat's (or a window of ours has it): the keys of ours (Esc and R for its menus, 1 to 6 on the ring, Left Alt, Alt+F7 to F9) are read, the
-    /// pointer's hook may take the mouse, and ours are topmost. Otherwise none of that: what is typed is for the program in front.
-    pub(crate) keyboard: bool,
-}
-
-impl Presence {
-    pub(crate) fn of(found: bool, on_screen: bool, exclusive: bool, front_is_game_or_ours: bool) -> Self {
-        let show = found && on_screen && !exclusive;
-        Self { show, keyboard: show && front_is_game_or_ours }
     }
 }
 

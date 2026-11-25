@@ -151,6 +151,10 @@ fn main() -> anyhow::Result<()> {
         Some("--overlay") => overlay::run(&args[1..]),
         #[cfg(windows)]
         Some("--orbit-desktop") => overlay::orbit::desktop::run(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--orbit-desktop") => overlay::orbit::desktop_mac::run(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--orbit-lab") => overlay::orbit::desktop_mac::lab::run(&args[1..]),
         #[cfg(windows)]
         Some("--orbit-bench") => overlay::orbit::desktop::bench(&args[1..]),
         #[cfg(windows)]

@@ -2120,6 +2120,35 @@ fn eventually(done: impl Fn() -> bool) {
     panic!("it never came");
 }
 
+/// The panels around VRChat's menus lie over Home's own VRChat, for as long as it runs, and over one started by hand or before this N4N0; never over the bridge's, which
+/// its agent clicks in.
+#[test]
+#[cfg(target_os = "macos")]
+fn the_panels_game_is_the_persons_own_and_never_the_bridges() {
+    let root = std::env::temp_dir().join(format!("orbiters-panels-game-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let machine = pretend_program(&root);
+    let game = || machine.desktop_game(&machine.running().iter().map(|(pid, _)| *pid).collect::<Vec<_>>());
+    let stop = |n: u32| {
+        std::fs::write(root.join(format!("stop-5e551011-0000-4000-8000-00000000000{n}")), "").unwrap();
+        eventually(|| machine.running().is_empty() && !machine.play.starting() && machine.play.attached().is_none());
+    };
+    assert_eq!(game(), None, "nothing runs");
+    // One this N4N0 did not start (by hand, or before it was restarted).
+    assert_eq!(machine.desktop_game(&[4242]), Some(4242));
+    machine.start_for(&["-screen-fullscreen".to_string()], &errand_of("usr_a")).unwrap();
+    eventually(|| game().is_some());
+    assert_eq!(game(), machine.running().first().map(|(pid, _)| *pid));
+    stop(1);
+    assert_eq!(game(), None, "it ended");
+    machine.start_launch_reserved(&["-screen-width".to_string()], None).unwrap();
+    eventually(|| !machine.running().is_empty());
+    assert_eq!(game(), None, "the bridge's");
+    stop(2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Fifth verification, finding 8: a restart is of the session it was shown for, with what that very launch was started with
 /// and for its own accounts, asked again after the quit; nothing is asked to quit for a launch that could not be started
 /// again, and nothing is started over another start.

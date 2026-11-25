@@ -828,6 +828,8 @@ pub struct Facts {
     pub can_light: bool,
     /// In VR, a close on the sheet and the wing.
     pub vr_close: bool,
+    /// On a Mac's screen: no 3D picture is taken there, and nothing of a headset is offered ([`super::Panels::on_a_mac`]).
+    pub mac: bool,
 }
 
 /// A capture turning on a sheet.
@@ -1818,7 +1820,9 @@ fn sheet_page_items(sheet: Sheet, facts: &Facts) -> Vec<Item> {
             }
             // A recording starts beside VRChat's camera alone (Enzo, F15): here it says so, and while one runs it is its Stop.
             let record = if stop_shown(facts) { stop_action(facts) } else { Action::Idle };
-            if facts.no_kit {
+            if facts.mac {
+                // Nothing is taken or recorded on a Mac: what it shows alone.
+            } else if facts.no_kit {
                 // Recording first, as it works; then, quietly, where the kit is (round 11's judges: the banner and its green button were the loudest thing on the sheet).
                 out.push(Item { action: record, rect: r(x0, y0, width, h), look: Look::Record });
                 out.push(Item { action: Action::AddKit, rect: r(x0 + width + gap, y0, width * 2.0 + gap, h), look: Look::AddKit });
@@ -2741,6 +2745,7 @@ pub fn caption(action: Action, facts: &Facts) -> Option<(String, String)> {
         Action::VolumeBar => (tr("Volume").into(), tr("Your computer's volume.").into()),
         Action::Volume(up) => (if up { tr("Louder") } else { tr("Quieter") }.into(), tr("Your computer's volume.").into()),
         Action::Mute => (tr("Mute").into(), tr("Your computer's sound, on or off.").into()),
+        Action::Pictures if facts.mac => (tr("Pictures").into(), tr("Your pictures and 3D captures.").into()),
         Action::Pictures => (tr("Pictures").into(), tr("Take a 3D picture, record a scene, see your captures.").into()),
         Action::All => (tr("All tools").into(), tr("Everything Orbiters can do from here.").into()),
         Action::PictureLength => (
@@ -5641,6 +5646,7 @@ mod tests {
         let base = Facts { desktop: true, digits: true, ..Default::default() };
         let states = [
             Facts { hint: Some(("Hold Left Alt, then click a tool", "Or press its number, 1 to 6, from the top clockwise")), ..base.clone() },
+            Facts { hint: Some(("Hold Left Option, then click a tool", "Or press its number, 1 to 5, from the top clockwise")), mac: true, ..base.clone() },
             Facts { pointed: Some(Action::Pictures), ..base.clone() },
             base.clone(),
         ];
@@ -5656,6 +5662,40 @@ mod tests {
         }
     }
 
+    /// On a Mac nothing takes a 3D picture: the Pictures sheet shows the pictures and no button that takes one, and says so when pointed at; the sheet of settings has no row of
+    /// a headset's, its rows one under the other with nothing left between. Elsewhere both are as ever.
+    #[test]
+    fn a_mac_s_sheets_offer_nothing_it_cannot_do() {
+        use crate::overlay::orbit::zones::Zone;
+        let takes = |f: &Facts| sheet_items(Sheet::Pictures, f).iter().filter(|i| matches!(i.look, Look::Picture(_) | Look::Record | Look::AddKit)).count();
+        for no_kit in [false, true] {
+            assert!(takes(&Facts { no_kit, ..facts() }) >= 2);
+            let mac = Facts { mac: true, no_kit, ..facts() };
+            assert_eq!(takes(&mac), 0);
+            assert!(sheet_items(Sheet::Pictures, &mac).iter().any(|i| matches!(i.look, Look::Filter(_))), "what it shows is still chosen");
+        }
+        let says = |f: &Facts| caption(Action::Pictures, f).expect("words").1;
+        assert_ne!(says(&facts()), says(&Facts { mac: true, ..facts() }));
+        let picks = |f: &Facts| sheet_items(Sheet::Settings, f);
+        let (ours, theirs) = (picks(&facts()), picks(&Facts { mac: true, ..facts() }));
+        let has = |list: &[Item], f: &dyn Fn(&Item) -> bool| list.iter().any(f);
+        for gone in [&(|i: &Item| matches!(i.action, Action::Set(Pick::Motion(_)))) as &dyn Fn(&Item) -> bool, &|i: &Item| matches!(i.action, Action::Set(Pick::Sound(_))), &|i: &Item| i.look == Look::MicsOpen] {
+            assert!(has(&ours, gone) && !has(&theirs, gone));
+        }
+        for kept in [&(|i: &Item| matches!(i.action, Action::Set(Pick::Layout(_)))) as &dyn Fn(&Item) -> bool, &|i: &Item| matches!(i.action, Action::Set(Pick::Language(_))), &|i: &Item| matches!(i.action, Action::Set(Pick::Hue))] {
+            assert!(has(&ours, kept) && has(&theirs, kept));
+        }
+        let mut tops: Vec<i32> = theirs.iter().map(|i| (i.rect.center().y / 70.0) as i32).collect();
+        tops.sort_unstable();
+        tops.dedup();
+        assert_eq!(tops, (0..tops.len() as i32).collect::<Vec<_>>(), "no row is left empty between two");
+        assert_eq!(theirs.iter().find(|i| i.action == Action::Set(Pick::Hue)).unwrap().rect.x_range(), hue_bar().x_range(), "the colour under the pointer is the bar's");
+        // Around VRChat's menus: what takes pictures, and only that.
+        let gone: Vec<Zone> = Zone::WHEEL.into_iter().chain(Zone::QUICK_MENU).chain(Zone::CAMERA).filter(|z| z.needs_the_camera_s_frames()).collect();
+        assert_eq!(&gone[..3], [Zone::WheelPictures, Zone::BloomPeople, Zone::BloomWorld]);
+        assert_eq!(&gone[3..], Zone::CAMERA);
+    }
+
     /// Request16 2 (Enzo's picture: "The upper part of this frame is cutout"): the wing's caption on a screen, with the name's row over "Your tools" and its
     /// three-line hint, lost its top: the card is laid from the panel's foot as high as its words take, and the panel was lower than that. Painted as the overlay
     /// paints it, in every language, on a screen (the name's row) and in a headset (the beta's row under it), with what it says at the Quick Menu's first openings
@@ -5667,8 +5707,11 @@ mod tests {
         let screen = Zone::QmCaption.units().size();
         // In a headset the zone carries the beta's row at its foot too (`vr::quick_menu_places`).
         let headset = screen + vec2(0.0, BETA_ROW);
-        let hints: [(&'static str, &'static str); 3] = [
+        let hints: [(&'static str, &'static str); 5] = [
             ("Your tools", "Worlds in 3D, videos, instances and 3D pictures."),
+            // A Mac's, whose Quick Menu says the key that frees the mouse.
+            ("Hold Left Option, then click a tool", "Worlds in 3D, videos, instances and pictures."),
+            ("Left Option to click", ""),
             // The longest a caption can be: two lines of what it is, three of what it says, cut with an ellipsis.
             (
                 "Worlds in 3D, videos, instances and 3D pictures, all in one place",

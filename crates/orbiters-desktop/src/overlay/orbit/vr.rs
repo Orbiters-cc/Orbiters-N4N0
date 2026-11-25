@@ -1744,6 +1744,7 @@ impl OrbitVr {
         }
         let status = OrbitStatus {
             note: (on != Some(true)).then(|| mark("SteamVR's \"Experimental overlay input overrides\" (Settings, Developer) is off: pointing at a panel still presses in VRChat too.").to_string()),
+            needs: None,
             steamvr_overrides: on,
             camera_note: self.camera_note(cx.snap),
             camera_provisional: self.camera_watch.is_some() && (self.camera_looks < CAMERA_LOOKS_TO_SHOW || self.camera_follow.awaiting_confirmation() || !self.camera_follow.settled() || !self.camera_scale_measured()),

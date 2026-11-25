@@ -561,6 +561,10 @@ pub struct LauncherState {
     /// VRChat ran and its log could not be read: whose a VRChat is cannot be told here.
     #[serde(default)]
     pub log_trouble: Option<LogTrouble>,
+    /// On a Mac: the process of the engine's launcher of the person's own VRChat, while it runs: whose window the panels around VRChat's menus lie over. Never one the
+    /// VRChat bridge started (that one is the agent's, and it clicks there).
+    #[serde(default)]
+    pub desktop_game: Option<u32>,
 }
 
 /// A private place on its way to a VRChat that was started without it ([`LauncherState::joining`]): its world's name alone.
@@ -784,6 +788,7 @@ pub fn sample() -> LauncherState {
         start_trouble: None,
         several_profiles: true,
         joining: None,
+        desktop_game: None,
         log_trouble: None,
         mine: Some(MyProfile {
             loaded: true,

@@ -121,6 +121,13 @@ pub fn start(sink: mpsc::Sender<KeyInput>) {
     }
 }
 
+/// A key typed where the menu's keyboard page shows over VRChat and holds the keyboard itself (a Mac, `overlay::orbit::desktop_mac`): to where the hook's keys go.
+pub fn typed(key: KeyInput) {
+    if let Some(sink) = SINK.get() {
+        let _ = sink.lock().unwrap_or_else(|e| e.into_inner()).send(key);
+    }
+}
+
 /// Takes the keyboard while `on` (N4N0's keyboard page shows) and VRChat (`vrchat`, its process) is in front.
 pub fn capture(on: bool, vrchat: Option<u32>) {
     VRCHAT.store(vrchat.unwrap_or(0), Ordering::Relaxed);

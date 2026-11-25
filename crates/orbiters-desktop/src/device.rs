@@ -22,7 +22,7 @@ pub fn platform() -> Platform {
         locale: Box::new(WindowsLocale),
         ears: Box::new(VoiceProcess),
         media: crate::media::watcher().clone(),
-        mouse: orbiters_core::here::HERE.desktop_panels.then(|| Box::new(WindowsMouse) as Box<dyn Mouse>),
+        mouse: orbiters_core::here::HERE.mouse.then(|| Box::new(WindowsMouse) as Box<dyn Mouse>),
     }
 }
 

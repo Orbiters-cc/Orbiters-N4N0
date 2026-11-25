@@ -46,9 +46,14 @@ const DOWNLOAD_SHARE: f32 = 0.9;
 /// Microphone packets the capture thread may have waiting for the loop (one every 10 ms or so): more are dropped.
 const AUDIO_QUEUE: usize = 8;
 /// Packets one pass of the loop takes at most before it looks at the commands and its deadlines again: far more than
-/// come between two passes (a pass waits at most 10 ms for a command, ~16 ms on Windows' default timer), so the queue
-/// is emptied each time and a burst after a slow pass catches up at once.
+/// come between two passes, so the queue is emptied each time and a burst after a slow pass catches up at once.
 const AUDIO_PER_PASS: usize = 64;
+/// The loop waits at least this long for something to do.
+const LEAST_WAIT: Duration = Duration::from_millis(10);
+/// Lost sound is heard as silence, this much at most (a pause that long ends a sentence).
+const GAP_MOST: usize = RATE;
+/// How much was lost when the device cannot say.
+const GAP_UNKNOWN: usize = RATE / 10;
 /// Dropped packets are said in the log at most this often.
 const DROPS_SAID_EVERY: Duration = Duration::from_secs(60);
 
@@ -59,18 +64,73 @@ struct Drops {
     frames: AtomicU64,
 }
 
-/// Hands one microphone packet of capture `generation` to the loop: dropped (and counted) when its queue is full; an
-/// error when the worker is gone.
-fn offer(audio: &mpsc::SyncSender<(u64, Vec<f32>)>, drops: &Drops, generation: u64, chunk: Vec<f32>) -> anyhow::Result<()> {
-    let frames = chunk.len() as u64;
-    match audio.try_send((generation, chunk)) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(_)) => {
-            drops.packets.fetch_add(1, Ordering::Relaxed);
-            drops.frames.fetch_add(frames, Ordering::Relaxed);
-            Ok(())
+/// Where the capture threads put their sound: a bounded queue, and a word to the loop that some waits in it.
+#[derive(Clone)]
+struct Sound {
+    queue: mpsc::SyncSender<(u64, Vec<f32>)>,
+    tx: mpsc::Sender<Input>,
+    /// The loop was told, and has not looked since.
+    told: Arc<AtomicBool>,
+    /// What the capture threads dropped.
+    drops: Arc<Drops>,
+}
+
+impl Sound {
+    /// Hands one microphone packet (of `frames`) of capture `generation` to the loop: dropped (and counted: false) when its queue is
+    /// full; an error when the worker is gone.
+    fn offer(&self, generation: u64, chunk: Vec<f32>, frames: u32) -> anyhow::Result<bool> {
+        let taken = match self.queue.try_send((generation, chunk)) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.drops.packets.fetch_add(1, Ordering::Relaxed);
+                self.drops.frames.fetch_add(frames.into(), Ordering::Relaxed);
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return Err(anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped"))),
+        };
+        self.tell();
+        Ok(taken)
+    }
+
+    fn tell(&self) {
+        if !self.told.swap(true, Ordering::SeqCst) {
+            let _ = self.tx.send(Input::Sound);
         }
-        Err(mpsc::TrySendError::Disconnected(_)) => Err(anyhow::anyhow!("{}", orbiters_i18n::tr("the worker stopped"))),
+    }
+}
+
+/// What a capture lost, heard as silence of the same length before what comes next (N4N-11): what was said before and after a gap is
+/// never one word. (A gap of the device's, or packets the loop's queue had no room for.)
+#[derive(Default)]
+struct Gaps {
+    /// When the sound so far ends (ns), and the samples lost since.
+    end: Option<u64>,
+    lost: usize,
+}
+
+impl Gaps {
+    /// A packet's sound, after what was lost before it.
+    fn chunk(&mut self, p: &orbiters_audio::Packet) -> Vec<f32> {
+        if p.discontinuity {
+            self.lost += match self.end {
+                Some(end) if !p.timestamp_error => (p.at_ns.saturating_sub(end) as f64 * RATE as f64 / 1e9) as usize,
+                Some(_) => GAP_UNKNOWN,
+                // The first packet of a capture: nothing was before it.
+                None => 0,
+            };
+        }
+        self.end = Some(p.at_ns + p.frames as u64 * 1_000_000_000 / RATE as u64);
+        let mut chunk = vec![0.0; self.lost.min(GAP_MOST)];
+        match p.samples {
+            Some(samples) => chunk.extend_from_slice(samples),
+            None => chunk.resize(chunk.len() + p.frames as usize, 0.0),
+        }
+        chunk
+    }
+
+    /// The last chunk reached the loop, or is lost too.
+    fn taken(&mut self, taken: bool, chunk: usize) {
+        self.lost = if taken { 0 } else { chunk };
     }
 }
 
@@ -78,6 +138,8 @@ fn offer(audio: &mpsc::SyncSender<(u64, Vec<f32>)>, drops: &Drops, generation: u
 /// a thread being replaced may still speak once or twice after its successor started.
 enum Input {
     Command(VoiceCommand),
+    /// The microphone's sound waits in its queue.
+    Sound,
     MicOpened(u64, String),
     MicClosed(u64, Option<String>),
     /// The system's default microphone changed while capture `n` (of the default one) ran: it ended.
@@ -238,10 +300,9 @@ impl LiveText {
 
 struct Worker {
     tx: mpsc::Sender<Input>,
-    audio_tx: mpsc::SyncSender<(u64, Vec<f32>)>,
+    sound: Sound,
     audio_rx: mpsc::Receiver<(u64, Vec<f32>)>,
-    /// What the capture threads dropped, and what of it the log has said (and when).
-    drops: Arc<Drops>,
+    /// What of the sound dropped the log has said, and when.
     drops_said: (u64, Instant),
     /// Packets of the current microphone the loop took (for the tests).
     taken: u64,
@@ -283,10 +344,10 @@ struct Worker {
 
 impl Worker {
     fn new(tx: mpsc::Sender<Input>) -> Self {
-        let (audio_tx, audio_rx) = mpsc::sync_channel(AUDIO_QUEUE);
+        let (queue, audio_rx) = mpsc::sync_channel(AUDIO_QUEUE);
+        let sound = Sound { queue, tx: tx.clone(), told: Default::default(), drops: Default::default() };
         Self {
-            tx, audio_tx, audio_rx, decoder: Decoder::new(),
-            drops: Arc::new(Drops::default()),
+            tx, sound, audio_rx, decoder: Decoder::new(),
             drops_said: (0, Instant::now()),
             taken: 0,
             decode_generation: Arc::new(AtomicU64::new(0)),
@@ -331,9 +392,9 @@ impl Worker {
             let generation = self.mic_generation;
             let stop = Arc::new(AtomicBool::new(false));
             let (tx, id, s) = (self.tx.clone(), self.mic_id.clone(), stop.clone());
-            let (audio_tx, drops) = (self.audio_tx.clone(), self.drops.clone());
+            let sound = self.sound.clone();
             let _ = std::thread::Builder::new().name("mic".into()).spawn(move || {
-                let (ready, audio) = (tx.clone(), audio_tx);
+                let (ready, mut gaps) = (tx.clone(), Gaps::default());
                 // The default microphone is followed: a headset put on (Virtual Desktop, SteamVR, the app's own "When
                 // SteamVR starts") is heard from then on. A microphone chosen by name stays that one.
                 let options = orbiters_audio::Options { rate: Some(voice::SAMPLE_RATE), follow_default: true, ..Default::default() };
@@ -346,8 +407,10 @@ impl Worker {
                         Ok(())
                     },
                     |p| {
-                        let chunk = p.samples.map(<[f32]>::to_vec).unwrap_or_else(|| vec![0.0; p.frames as usize]);
-                        offer(&audio, &drops, generation, chunk)
+                        let chunk = gaps.chunk(p);
+                        let samples = chunk.len();
+                        gaps.taken(sound.offer(generation, chunk, p.frames)?, samples);
+                        Ok(())
                     },
                 );
                 let _ = tx.send(match result {
@@ -734,6 +797,7 @@ impl Worker {
     /// Takes the microphone's packets waiting for the loop, at most `most`: those of the current capture are heard,
     /// those of one being replaced dropped. How many were taken.
     fn take_audio(&mut self, most: usize) -> usize {
+        self.sound.told.store(false, Ordering::SeqCst);
         let mut taken = 0;
         while taken < most {
             let Ok((generation, samples)) = self.audio_rx.try_recv() else { break };
@@ -743,13 +807,38 @@ impl Worker {
                 self.audio(samples);
             }
         }
+        if taken == most {
+            // More may wait: at the next pass.
+            self.sound.tell();
+        }
         taken
     }
 
-    /// One pass of the worker's loop: a command or a message (waiting up to 10 ms for one), the microphone's packets
+    /// When something is to be done whatever comes (see [`Worker::tick`]).
+    fn due(&self) -> Option<Instant> {
+        if let Some(progress) = &self.installing {
+            return Some(Instant::now() + STALL.saturating_sub(progress.idle_for()));
+        }
+        let reopen = (self.wants_mic() && self.mic.is_none()).then(|| self.reopen_at.unwrap_or_else(Instant::now));
+        let unload = self.idle().then(|| self.used_at + IDLE_UNLOAD);
+        let listen = self.listen.as_ref().map(|l| l.since + if l.hold || self.speaking { LONGEST } else { NO_SPEECH });
+        [reopen, unload, listen].into_iter().flatten().min()
+    }
+
+    /// The recogniser is there for nothing.
+    fn idle(&self) -> bool {
+        matches!(self.recognizer, Recognizer::Ready(_)) && self.listen.is_none() && self.waiting.is_empty() && !self.speaking
+    }
+
+    /// One pass of the worker's loop: a command or a message (waited for until something is due), the microphone's packets
     /// (up to `most`), the deadlines. False when the worker should quit.
     fn pass(&mut self, rx: &mpsc::Receiver<Input>, most: usize) -> bool {
-        match rx.recv_timeout(Duration::from_millis(10)) {
+        let input = match self.due() {
+            Some(due) => rx.recv_timeout(due.saturating_duration_since(Instant::now()).max(LEAST_WAIT)),
+            None => rx.recv().map_err(Into::into),
+        };
+        match input {
+            Ok(Input::Sound) => {}
             Ok(Input::Command(c)) => {
                 if !self.command(c) {
                     return false;
@@ -779,9 +868,9 @@ impl Worker {
 
     /// Says in the log, at most once a minute, how much sound the loop's queue dropped since it last said.
     fn say_drops(&mut self) {
-        let packets = self.drops.packets.load(Ordering::Relaxed);
+        let packets = self.sound.drops.packets.load(Ordering::Relaxed);
         if packets > self.drops_said.0 && self.drops_said.1.elapsed() >= DROPS_SAID_EVERY {
-            let frames = self.drops.frames.load(Ordering::Relaxed);
+            let frames = self.sound.drops.frames.load(Ordering::Relaxed);
             eprintln!("voice: the microphone's queue was full: {} packets dropped ({frames} frames in all)", packets - self.drops_said.0);
             self.drops_said = (packets, Instant::now());
         }
@@ -803,12 +892,7 @@ impl Worker {
         if self.wants_mic() && self.mic.is_none() {
             self.follow_mic();
         }
-        if matches!(self.recognizer, Recognizer::Ready(_))
-            && self.listen.is_none()
-            && self.waiting.is_empty()
-            && !self.speaking
-            && self.used_at.elapsed() > IDLE_UNLOAD
-        {
+        if self.idle() && self.used_at.elapsed() > IDLE_UNLOAD {
             // About 1 GB back to VRChat until the next sentence.
             self.recognizer = Recognizer::Unloaded;
             eprintln!("voice: speech recogniser let go after {} idle minutes", IDLE_UNLOAD.as_secs() / 60);
@@ -1148,20 +1232,20 @@ mod tests {
     fn one_pass_takes_every_packet_waiting_and_none_of_an_old_microphone() {
         // N4N0-5: the loop took one packet a pass; a full queue is emptied by one pass now.
         let (mut worker, rx) = listening_worker();
-        let drops = worker.drops.clone();
+        let drops = worker.sound.drops.clone();
         for _ in 0..AUDIO_QUEUE {
-            offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+            assert!(worker.sound.offer(1, vec![0.0; 160], 160).unwrap());
         }
         assert!(worker.pass(&rx, AUDIO_PER_PASS));
         assert_eq!(worker.taken, AUDIO_QUEUE as u64, "the whole queue in one pass");
         // A packet of the capture being replaced is taken off the queue, not heard.
-        offer(&worker.audio_tx, &drops, 0, vec![0.0; 160]).unwrap();
-        offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+        worker.sound.offer(0, vec![0.0; 160], 160).unwrap();
+        worker.sound.offer(1, vec![0.0; 160], 160).unwrap();
         assert!(worker.pass(&rx, AUDIO_PER_PASS));
         assert_eq!(worker.taken, AUDIO_QUEUE as u64 + 1);
         // A full queue drops, and counts what it dropped.
-        for _ in 0..AUDIO_QUEUE + 3 {
-            offer(&worker.audio_tx, &drops, 1, vec![0.0; 160]).unwrap();
+        for i in 0..AUDIO_QUEUE + 3 {
+            assert_eq!(worker.sound.offer(1, vec![0.0; 160], 160).unwrap(), i < AUDIO_QUEUE);
         }
         assert_eq!((drops.packets.load(Ordering::Relaxed), drops.frames.load(Ordering::Relaxed)), (3, 480));
     }
@@ -1170,7 +1254,7 @@ mod tests {
     /// the loop takes at most `most` packets a pass. What was dropped.
     fn loop_drops(most: usize, chunks: u64) -> (u64, u64) {
         let (mut worker, rx) = listening_worker();
-        let (audio, drops) = (worker.audio_tx.clone(), worker.drops.clone());
+        let sound = worker.sound.clone();
         let producer = std::thread::spawn(move || {
             let start = Instant::now();
             for i in 0..chunks {
@@ -1178,15 +1262,103 @@ mod tests {
                 if let Some(wait) = due.checked_duration_since(Instant::now()) {
                     std::thread::sleep(wait);
                 }
-                offer(&audio, &drops, 1, vec![0.0; 160]).unwrap();
+                sound.offer(1, vec![0.0; 160], 160).unwrap();
             }
+            let _ = sound.tx.send(Input::StdinClosed);
         });
-        while !producer.is_finished() {
-            assert!(worker.pass(&rx, most));
-        }
+        while worker.pass(&rx, most) {}
         producer.join().unwrap();
         while worker.take_audio(most) > 0 {}
-        (worker.taken, worker.drops.packets.load(Ordering::Relaxed))
+        (worker.taken, worker.sound.drops.packets.load(Ordering::Relaxed))
+    }
+
+    /// N4N-13: the loop's passes without anything to do, in half a second with a microphone open that gives nothing, then with one
+    /// that gives sound.
+    #[test]
+    fn the_loop_wakes_for_sound_commands_and_deadlines_only() {
+        let (mut worker, rx) = listening_worker();
+        let tx = worker.tx.clone();
+        let quit = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = tx.send(Input::StdinClosed);
+        });
+        let mut passes = 0;
+        while worker.pass(&rx, AUDIO_PER_PASS) {
+            passes += 1;
+        }
+        quit.join().unwrap();
+        assert!(passes <= 2, "{passes} passes of nothing");
+        // Sound is heard as it comes: not at the next look.
+        let (mut worker, rx) = listening_worker();
+        let sound = worker.sound.clone();
+        let speak = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            sound.offer(1, vec![0.0; 160], 160).unwrap();
+        });
+        assert!(worker.pass(&rx, AUDIO_PER_PASS));
+        assert_eq!(worker.taken, 1);
+        speak.join().unwrap();
+        // Two a pass: what is left is taken without more sound.
+        for _ in 0..5 {
+            worker.sound.offer(1, vec![0.0; 160], 160).unwrap();
+        }
+        for taken in [3, 5, 6] {
+            assert!(worker.pass(&rx, 2));
+            assert_eq!(worker.taken, taken);
+        }
+        // A listen nobody speaks to ends by itself.
+        worker.listen = Some(Listen { hold: false, since: Instant::now().checked_sub(NO_SPEECH - Duration::from_millis(50)).unwrap(), id: 3, live: false });
+        let start = Instant::now();
+        while worker.listen.is_some() {
+            assert!(worker.pass(&rx, AUDIO_PER_PASS) && start.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    /// N4N-11: what a device or a full queue lost is silence in what is heard, as long as it was, up to a second.
+    #[test]
+    fn what_was_lost_is_heard_as_silence() {
+        const MS: u64 = 1_000_000;
+        let word = vec![0.5f32; 160];
+        let packet = |at_ms: u64, discontinuity, timestamp_error| orbiters_audio::Packet { at_ns: at_ms * MS, frames: 160, samples: Some(&word), discontinuity, timestamp_error };
+        let (worker, _rx) = listening_worker();
+        let mut gaps = Gaps::default();
+        let mut offer = |p| {
+            let chunk = gaps.chunk(&p);
+            let samples = chunk.len();
+            let taken = worker.sound.offer(1, chunk, p.frames).unwrap();
+            gaps.taken(taken, samples);
+            taken
+        };
+        // Heard, as how many samples of silence before how many of speech.
+        let heard = || {
+            let chunk = worker.audio_rx.recv_timeout(Duration::from_secs(1)).unwrap().1;
+            let silence = chunk.iter().take_while(|s| **s == 0.0).count();
+            assert!(chunk[silence..].iter().all(|s| *s == 0.5));
+            (silence, chunk.len() - silence)
+        };
+        // Devices say so of the first packet: nothing was before it.
+        assert!(offer(packet(1000, true, false)));
+        assert_eq!(heard(), (0, 160));
+        offer(packet(1010, false, false));
+        assert_eq!(heard(), (0, 160));
+        // 250 ms lost by the device, then a while it cannot tell, then a minute.
+        offer(packet(1270, true, false));
+        assert_eq!(heard(), (RATE / 4, 160));
+        offer(packet(1270, true, true));
+        assert_eq!(heard(), (GAP_UNKNOWN, 160));
+        offer(packet(61_280, true, false));
+        assert_eq!(heard(), (GAP_MOST, 160));
+        // The queue is full for three packets.
+        for i in 0..AUDIO_QUEUE as u64 + 3 {
+            assert_eq!(offer(packet(61_290 + 10 * i, false, false)), i < AUDIO_QUEUE as u64);
+        }
+        for _ in 0..AUDIO_QUEUE {
+            assert_eq!(heard(), (0, 160));
+        }
+        offer(packet(61_400, false, false));
+        assert_eq!(heard(), (480, 160));
+        offer(packet(61_410, false, false));
+        assert_eq!(heard(), (0, 160));
     }
 
     #[test]

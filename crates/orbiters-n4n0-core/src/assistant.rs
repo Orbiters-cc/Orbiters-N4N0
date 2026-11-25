@@ -6,7 +6,7 @@ use orbiters_core::account::Api;
 use orbiters_i18n::tr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Limits of a turn request, as the server counts them (UTF-16 units, like JavaScript's `length`).
@@ -190,11 +190,43 @@ pub fn unreachable(e: &anyhow::Error) -> bool {
     })
 }
 
+/// A request's body (JSON, then a line's end), and who is told once it went. Its last byte, which says nothing, is asked for only
+/// once all before it was written to the connection.
+struct Body<'a> {
+    bytes: &'a [u8],
+    sent: &'a mut dyn FnMut(),
+}
+
+impl Read for Body<'_> {
+    fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        let ready = match self.bytes.len() {
+            1 => {
+                (self.sent)();
+                1
+            }
+            left => left.saturating_sub(1),
+        };
+        let n = ready.min(into.len());
+        let (now, later) = self.bytes.split_at(n);
+        into[..n].copy_from_slice(now);
+        self.bytes = later;
+        Ok(n)
+    }
+}
+
 /// Sends one request of a turn and reads its answer: `on_event` gets the text and progress as they come; the result
-/// is the `done` payload. `cancel` stops reading at the next event. `submitted` is told once the request is with Orbiters
-/// (it answered: its event stream opens before the model does anything) or was not: until then what admitted the request
-/// is kept (verify4-r21 P10), and never while the answer is read.
+/// is the `done` payload. `cancel` stops reading at the next event. `submitted` is told once the request has left (all it says
+/// was written to the connection) or never will: until then what admitted the request is kept (verify4-r21 P10), and never
+/// while Orbiters takes its time to answer (N4N-4) or the answer is read.
 pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, submitted: impl FnOnce(), mut on_event: impl FnMut(Event)) -> anyhow::Result<Done> {
+    let mut bytes = serde_json::to_vec(request)?;
+    bytes.push(b'\n');
+    let mut submitted = Some(submitted);
+    let mut sent = || {
+        if let Some(submitted) = submitted.take() {
+            submitted();
+        }
+    };
     let response = api
         .agent()
         .post(&api.url("n4n0/assistant/turns"))
@@ -205,8 +237,10 @@ pub fn send(api: &Api, token: &str, request: &Request, cancel: &AtomicBool, subm
         .build()
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "text/event-stream")
-        .send_json(request);
-    submitted();
+        .header("Content-Type", "application/json; charset=utf-8")
+        .header("Content-Length", bytes.len())
+        .send(ureq::SendBody::from_reader(&mut Body { bytes: &bytes, sent: &mut sent }));
+    sent();
     let response = response.with_context(|| tr("Orbiters could not be reached"))?;
     let status = response.status().as_u16();
     let header_retry = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u32>().ok());

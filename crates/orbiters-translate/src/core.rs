@@ -192,7 +192,7 @@ pub struct Core {
     /// A line newly followed is translated again even when its text was translated before (development builds, to
     /// measure the translator on texts seen before).
     pub no_cache: bool,
-    /// Where translations are kept between sessions, whether some arrived since they were written, and when.
+    /// Where translations are kept between sessions, whether some arrived since they were written, and when that was last tried.
     cache_file: Option<std::path::PathBuf>,
     cache_changed: bool,
     cache_saved: std::time::Instant,
@@ -244,13 +244,15 @@ impl Core {
         if !self.cache_changed || !(now || self.cache_saved.elapsed() >= std::time::Duration::from_secs(30)) {
             return;
         }
-        if let Some(path) = &self.cache_file {
-            if let Err(e) = self.cache.save(path) {
-                self.log.push(format!("translations not kept: {e}")); // i18n: not shown (a log's line)
-            }
-        }
-        self.cache_changed = false;
         self.cache_saved = std::time::Instant::now();
+        // Those that could not be written are still to be (N4N-17).
+        self.cache_changed = match self.cache_file.as_ref().map(|path| self.cache.save(path)) {
+            Some(Err(e)) => {
+                self.log.push(format!("translations not kept: {e}")); // i18n: not shown (a log's line)
+                true
+            }
+            _ => false,
+        };
     }
 
     /// Another translator (the person chose another provider): what was translated stays.
@@ -576,6 +578,34 @@ mod tests {
     fn gaze(degrees: f32) -> (V3, V3) {
         let a = degrees.to_radians();
         ([0.0, 1.6, 0.0], [a.sin(), 0.0, -a.cos()])
+    }
+
+    /// N4N-17: translations that could not be written are written once they can be, with no new one come meanwhile.
+    #[test]
+    fn translations_that_could_not_be_kept_are_kept_later() {
+        let dir = std::env::temp_dir().join(format!("orbiters-translate-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("folder").join("kept.jsonl");
+        let mut core = Core::new(None, Box::new(Echo), Reader { target: "fr".into(), reads: vec![] });
+        core.keep_cache(path.clone());
+        core.cache.put("fr", "Exit", "Sortie".into());
+        core.cache_changed = true;
+        // A file where its folder goes.
+        std::fs::write(dir.join("folder"), b"").unwrap();
+        core.save_cache(true);
+        assert_eq!(core.log.len(), 1, "{:?}", core.log);
+        // Not at every look.
+        core.save_cache(false);
+        assert_eq!(core.log.len(), 1);
+        std::fs::remove_file(dir.join("folder")).unwrap();
+        core.save_cache(true);
+        assert_eq!(Cache::load(&path).get("fr", "Exit").map(String::as_str), Some("Sortie"));
+        // And then no more.
+        std::fs::remove_file(&path).unwrap();
+        core.save_cache(true);
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Until every line followed is translated (the translator answers on its own thread).

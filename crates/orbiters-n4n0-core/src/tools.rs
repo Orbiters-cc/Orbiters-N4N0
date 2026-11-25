@@ -152,13 +152,18 @@ pub fn more_spec(open: &std::collections::BTreeSet<crate::intents::route::ToolGr
 /// `actions`: what is sent from an account is offered too (`orbiters_core::features::N4N0_ASSISTANT_ACTIONS`).
 pub fn specs_for(bare_parameters: bool, groups: &std::collections::BTreeSet<crate::intents::route::ToolGroup>, actions: bool) -> Vec<Value> {
     let mut out = vec![more_spec(groups)];
-    out.extend(specs(bare_parameters, actions).into_iter().filter(|t| t["name"].as_str().and_then(crate::intents::route::group_of).is_some_and(|g| groups.contains(&g))));
+    out.extend(specs(bare_parameters, actions).iter().filter(|t| t["name"].as_str().and_then(crate::intents::route::group_of).is_some_and(|g| groups.contains(&g))).cloned());
     out
 }
 
-/// The client tools, for `tools` of a turn. `bare_parameters`: the avatar has no manifest, so its parameters are
+/// The client tools, for `tools` of a turn, made once (N4N-6). `bare_parameters`: the avatar has no manifest, so its parameters are
 /// offered by name too. `actions`: as in [`specs_for`].
-pub fn specs(bare_parameters: bool, actions: bool) -> Vec<Value> {
+pub fn specs(bare_parameters: bool, actions: bool) -> &'static [Value] {
+    static SPECS: [std::sync::OnceLock<Vec<Value>>; 4] = [const { std::sync::OnceLock::new() }; 4];
+    SPECS[bare_parameters as usize * 2 + actions as usize].get_or_init(|| make_specs(bare_parameters, actions))
+}
+
+fn make_specs(bare_parameters: bool, actions: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "set_avatar_control",

@@ -1510,6 +1510,18 @@ mod platform_tests {
         OscService::start_with("Test", &[], network, Discovery::Platform, ports, |_, _| {}).unwrap()
     }
 
+    /// XCT-23: the browsing thread sleeps until something is seen; the service's end wakes it, it does not wait for its next look
+    /// ([`RECHECK`]).
+    #[test]
+    fn the_browsing_thread_ends_with_the_service() {
+        let service = lan_service(Ports::default());
+        assert!(service.threads.iter().any(|t| t.thread().name() == Some("oscquery-browse")));
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        drop(service);
+        assert!(started.elapsed() < RECHECK / 2, "{:?}", started.elapsed());
+    }
+
     /// `next` as the mdns-sd and system-Bonjour paths both drive it. (127.0.0.1 is no address of the local network, so
     /// the name's check is what is exercised here; the choice itself is `lan_vrchat_address`'s tests.)
     #[test]

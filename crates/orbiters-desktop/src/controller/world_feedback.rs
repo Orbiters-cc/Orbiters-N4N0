@@ -1088,6 +1088,58 @@ mod tests {
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 
+    /// DCT-14: the sender sleeps until the next call there is, and for ever with none: never past one, so nothing is sent later
+    /// than it was. DCT-27: the answers kept are bounded, and none in use goes.
+    #[test]
+    fn the_sender_sleeps_until_its_next_call_and_what_is_kept_is_bounded() {
+        let stamp = Stamp { server: "s".into(), account: Some("1".into()), credential: None };
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-due-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            stamp: stamp.clone(),
+            ..Default::default()
+        };
+        let now = now_ms();
+        assert!(rt.next_call().is_none() && rt.next_due(now).is_none(), "nothing to do: nothing is due");
+        // Another account's waiting action is nothing to this one.
+        rt.queue.push_to(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }), now, Stamp { account: Some("2".into()), ..stamp.clone() });
+        assert!(rt.next_call().is_none() && rt.next_due(now).is_none());
+        // Its own is, once its wait is over; parked, once the pause ends.
+        rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
+        rt.wanted.clear();
+        assert_eq!(rt.next_due(now_ms()), Some(Duration::from_millis(300)), "now");
+        let mine = rt.queue.items.len() - 1;
+        rt.queue.items[mine].due = now + 8_000;
+        let due = rt.next_due(now).unwrap();
+        assert_eq!(due, Duration::from_secs(8));
+        assert!(rt.next_call().is_none());
+        rt.queue.items[mine].due = now;
+        assert!(matches!(rt.next_call(), Some(Call::Send { .. })));
+        rt.parked.push((stamp.clone(), now + 60_000));
+        assert!(rt.next_call().is_none());
+        assert!(rt.next_due(now).unwrap() >= Duration::from_secs(60));
+        rt.parked.clear();
+        rt.queue.items.clear();
+        // A world shown is read, then again once its answer is old.
+        rt.wanted.insert(WORLD.into(), Instant::now());
+        assert_eq!(rt.next_due(now_ms()), Some(Duration::from_millis(300)));
+        assert!(matches!(rt.next_call(), Some(Call::Read { .. })));
+        let due = rt.next_due(now_ms()).unwrap();
+        assert!(due > READ_AGAIN - Duration::from_secs(5) && due <= READ_AGAIN + Duration::from_secs(1), "{due:?}");
+        // What is kept.
+        for i in 0..KNOWN_MAX as u64 + 40 {
+            rt.known.insert(format!("wrld_{i}"), Known { view: None, read_at: i });
+        }
+        rt.asked.push(("wrld_0".into(), Instant::now()));
+        rt.world.selected = Some(("wrld_1".into(), String::new()));
+        rt.forget_old();
+        assert_eq!(rt.known.len(), KNOWN_MAX);
+        assert!(["wrld_0", "wrld_1", WORLD].iter().all(|w| rt.known.contains_key(*w)), "in use");
+        assert!(!rt.known.contains_key("wrld_2") && rt.known.contains_key(&format!("wrld_{}", KNOWN_MAX as u64 + 39)), "the oldest went");
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
     /// CORE-C2: a read the server of before an environment switch answers late shows nothing of that server in the
     /// new one; an action it took is not sent again.
     #[test]

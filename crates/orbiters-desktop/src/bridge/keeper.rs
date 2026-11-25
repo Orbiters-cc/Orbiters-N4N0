@@ -562,6 +562,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(allowed());
+        // XCT-23: off in Settings, the next look is when Orbiters is to be asked again (what it follows wakes it); with nobody
+        // signed in there is none.
+        assert!(matches!(keeper.next_look(), Look::At { due: Some(due), allowed: true } if due > ASK_EVERY - Duration::from_secs(60) && due <= ASK_EVERY));
+        *flag.identity.lock().unwrap() = None;
+        keeper.tick();
+        assert!(matches!(keeper.next_look(), Look::At { due: None, allowed: false }));
         let _ = std::fs::remove_dir_all(dir);
     }
 

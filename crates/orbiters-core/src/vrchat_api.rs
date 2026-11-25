@@ -678,7 +678,12 @@ impl Http {
         let cookies = response.headers().get_all("set-cookie").iter().filter_map(|h| h.to_str().ok().map(str::to_owned)).collect();
         let retry_after = response.headers().get("retry-after").and_then(|h| h.to_str().ok()).map(str::to_owned);
         let location = response.headers().get("location").and_then(|h| h.to_str().ok()).map(str::to_owned);
-        let body = response.into_body().with_config().limit(16 * 1024 * 1024).read_to_vec().map_err(|_| Error::InvalidResponse)?;
+        let body = match response.into_body().with_config().limit(16 * 1024 * 1024).read_to_vec() {
+            Ok(body) => body,
+            // What VRChat said is in the status and the headers already: its pause is kept whatever came of the body.
+            Err(_) if status == 429 => Vec::new(),
+            Err(_) => return Err(Error::InvalidResponse),
+        };
         Ok(Response { status, cookies, retry_after, location, body })
     }
 }
@@ -2642,6 +2647,81 @@ pub(crate) mod tests {
         assert_eq!(refused.to_string(), "VRChat refused the request (HTTP 400: malformed url).");
         assert_eq!(c.instance_alive("wrld_a", "5"), Err(Error::InvalidResponse));
         assert_eq!(c.instance_alive("wrld_a", "6"), Err(Error::Refused(302, String::new())));
+    /// COR-3: a read of several pages holds the client for each request alone: what another thread asks goes between two pages,
+    /// while the next one's turn is waited for; and it stops once another account is signed in.
+    #[test]
+    fn another_request_goes_between_two_pages() {
+        struct Pages {
+            order: Mutex<Vec<String>>,
+            first: std::sync::mpsc::Sender<()>,
+        }
+        impl Transport for Pages {
+            fn send(&self, r: Request) -> Result<Response> {
+                let path = r.url.trim_start_matches(BASE).to_string();
+                let page = path.starts_with("/favorites").then(|| path.rsplit_once('=').unwrap().1.parse::<usize>().unwrap() / 100);
+                let body = match page {
+                    Some(page) if page < 2 => serde_json::Value::Array(vec![serde_json::json!({}); 100]).to_string(),
+                    Some(_) => "[]".into(),
+                    None => r#"{"id":"wrld_a"}"#.into(),
+                };
+                self.order.lock().unwrap().push(page.map_or("other".into(), |page| format!("page {page}")));
+                if page == Some(0) {
+                    let _ = self.first.send(());
+                }
+                Ok(response(200, &body, &[]))
+            }
+        }
+        let shared = |first| {
+            let (mut c, _) = mock(vec![]);
+            let sent = Arc::new(Pages { order: Mutex::default(), first });
+            c.transport = sent.clone();
+            (Mutex::new(c), sent)
+        };
+        let (first, asked) = std::sync::mpsc::channel();
+        let (client, sent) = shared(first);
+        std::thread::scope(|scope| {
+            let pages = scope.spawn(|| Client::favourite_friends_value(&mut Turns::new(&client)).map(|v| v.as_array().unwrap().len()));
+            asked.recv().unwrap();
+            client.lock().unwrap().request("worlds", "GET", format!("{BASE}/worlds/wrld_a"), None, None).unwrap();
+            assert_eq!(pages.join().unwrap(), Ok(200));
+        });
+        assert_eq!(*sent.order.lock().unwrap(), ["page 0", "other", "page 1", "page 2"]);
+        let (first, asked) = std::sync::mpsc::channel();
+        let (client, sent) = shared(first);
+        std::thread::scope(|scope| {
+            let pages = scope.spawn(|| Client::favourite_friends_value(&mut Turns::new(&client)));
+            asked.recv().unwrap();
+            client.lock().unwrap().user = Some(User { id: "usr_other".into(), ..Default::default() });
+            assert_eq!(pages.join().unwrap(), Err(Error::Unauthorized));
+        });
+        assert_eq!(*sent.order.lock().unwrap(), ["page 0"], "the other account is asked nothing");
+    }
+    /// COR-4: a 429 whose body cannot be read (cut short, too large) is the 429 it says: its pause holds every request after it.
+    #[test]
+    fn a_rate_limit_whose_body_is_cut_short_is_kept() {
+        use std::io::{Read, Write};
+        struct Here(Http, String);
+        impl Transport for Here {
+            fn send(&self, mut r: Request) -> Result<Response> {
+                r.url = r.url.replace(BASE, &self.1);
+                self.0.send(r)
+            }
+        }
+        for length in ["400", "99999999999"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.read(&mut [0u8; 4096]);
+                write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 73\r\nContent-Length: {length}\r\n\r\ncut").unwrap();
+            });
+            let (mut c, _) = mock(vec![]);
+            c.transport = Arc::new(Here(Http(ureq::Agent::new_with_config(ureq::Agent::config_builder().http_status_as_error(false).build())), base));
+            assert_eq!(c.user("usr_a"), Err(Error::RateLimited(Duration::from_secs(73))), "{length}");
+            server.join().unwrap();
+            assert!(matches!(c.avatar("avtr_a"), Err(Error::RateLimited(wait)) if wait > Duration::from_secs(60)), "nothing goes meanwhile");
+        }
+    }
         assert!(!c.instances.contains_key(&("wrld_a".into(), "4".into())), "errors are not cached"); // i18n: not shown (inside a test the scan cannot skip)
     }
     #[cfg(windows)]

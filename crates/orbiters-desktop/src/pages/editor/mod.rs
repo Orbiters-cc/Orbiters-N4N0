@@ -43,23 +43,23 @@ pub fn saved() -> u64 {
 }
 
 /// The picture of a Photos & captures entry, with VRChat's layers when it is a multi-layer picture, or a picture on
-/// Orbiters only (shared with the member, or theirs from another computer), downloaded to edit; None for a capture.
-pub fn source_of(entry: &crate::controller::shares::Entry) -> Option<Source> {
+/// Orbiters only (shared with the member, or theirs from another computer; `development`: listed by the development
+/// environment's server), downloaded to edit; None for a capture.
+pub fn source_of(entry: &crate::controller::shares::Entry, development: bool) -> Option<Source> {
     use crate::controller::shares::Local;
     match &entry.local {
         Some(Local::Picture(path)) => Some(Source::with_layers(path.clone(), entry.layers().iter().map(|l| (l.name.clone(), l.path.clone())))),
         Some(Local::Session(_)) => None,
         None => {
-            // A 3D capture's picture is its preview, not a picture to edit.
-            if entry.remote.as_ref().is_some_and(|i| i.kind != orbiters_core::shares::Kind::Picture) {
+            if is_capture(entry) {
                 return None;
             }
             // Fetched as Photos & captures fetches what is dragged out of it: a shared picture's file, a gallery
             // picture's renewed link, an asset's public link.
-            let (kind, asset, id, development, url) = match super::gallery_select::remote(entry, development())? {
+            let (kind, asset, id, development, url) = match super::gallery_select::remote(entry, development)? {
                 super::gallery_select::Remote::Shared { server, id } => (files::RemoteKind::Shared, 0, id, server == orbiters_core::account::Server::Development, String::new()),
                 super::gallery_select::Remote::Gallery { server, asset, id, url } => (files::RemoteKind::Gallery, asset, id, server == orbiters_core::account::Server::Development, url),
-                super::gallery_select::Remote::Link(url) => (files::RemoteKind::Link, 0, 0, development(), url),
+                super::gallery_select::Remote::Link(url) => (files::RemoteKind::Link, 0, 0, development, url),
             };
             let by = entry.remote.as_ref().map(|i| (i.from.as_ref().unwrap_or(&i.owner).name.clone(), i.mine)).filter(|(n, mine)| !n.is_empty() && !mine).map(|(n, _)| n);
             let world = (!entry.world_name.is_empty()).then(|| entry.world_name.clone());
@@ -80,6 +80,21 @@ pub fn source_of(entry: &crate::controller::shares::Entry) -> Option<Source> {
     }
 }
 
+/// Whether [`source_of`] has something to edit of it.
+pub fn can_edit(entry: &crate::controller::shares::Entry, development: bool) -> bool {
+    use crate::controller::shares::Local;
+    match &entry.local {
+        Some(Local::Picture(_)) => true,
+        Some(Local::Session(_)) => false,
+        None => !is_capture(entry) && super::gallery_select::remote(entry, development).is_some(),
+    }
+}
+
+/// A 3D capture on Orbiters: its picture is its preview, not a picture to edit.
+fn is_capture(entry: &crate::controller::shares::Entry) -> bool {
+    entry.remote.as_ref().is_some_and(|i| i.kind != orbiters_core::shares::Kind::Picture)
+}
+
 /// A picture of a community's or an event's gallery (`event`: the event it was taken at, with its world), downloaded
 /// to edit; `development`: listed by the development environment's server.
 pub fn gallery_source(p: &orbiters_core::community::Picture, event: Option<&orbiters_core::community::Card>, development: bool) -> Source {
@@ -95,12 +110,6 @@ pub fn gallery_source(p: &orbiters_core::community::Picture, event: Option<&orbi
     let kind = if p.id == 0 { files::RemoteKind::Link } else { files::RemoteKind::Gallery };
     let revision = files::Remote::revision_of(None, &url);
     Source::remote(files::Remote { kind, asset: p.asset_id, id: p.id, development, world_id: world.id, world_name: world.name, taken, name, url, revision })
-}
-
-/// Whether the app is on the development environment (what a shared picture's id is of).
-fn development() -> bool {
-    // Tests never read the person's settings.
-    !cfg!(test) && orbiters_core::settings::Settings::load().development
 }
 
 const TOP_H: f32 = 64.0;
@@ -1233,11 +1242,11 @@ mod tests {
             e
         };
         // A community gallery's picture: renewed by its id, its listed link kept.
-        let g = source_of(&only(crate::worlds::Picture::Gallery { development: false, asset: 0, id: 31, url: "https://cdn.example/x.png".into(), large: false })).unwrap();
+        let g = source_of(&only(crate::worlds::Picture::Gallery { development: false, asset: 0, id: 31, url: "https://cdn.example/x.png".into(), large: false }), false).unwrap();
         let r = g.remote.unwrap();
         assert_eq!((r.kind, r.id, r.url.as_str()), (files::RemoteKind::Gallery, 31, "https://cdn.example/x.png"));
         // An asset's picture: its link alone.
-        let a = source_of(&only(crate::worlds::Picture::Gallery { development: false, asset: 0, id: 0, url: "https://orbiters.cc/asset.webp".into(), large: false })).unwrap();
+        let a = source_of(&only(crate::worlds::Picture::Gallery { development: false, asset: 0, id: 0, url: "https://orbiters.cc/asset.webp".into(), large: false }), false).unwrap();
         assert_eq!(a.remote.map(|r| (r.kind, r.url)), Some((files::RemoteKind::Link, "https://orbiters.cc/asset.webp".to_string())));
         // A 3D capture's picture is no picture to edit.
         let mut capture = base.clone();
@@ -1245,6 +1254,6 @@ mod tests {
         if let Some(item) = capture.remote.as_mut() {
             item.kind = orbiters_core::shares::Kind::Capture;
         }
-        assert!(source_of(&capture).is_none());
+        assert!(source_of(&capture, false).is_none());
     }
 }

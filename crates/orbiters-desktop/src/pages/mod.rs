@@ -778,6 +778,31 @@ mod tests {
         assert!(!f.see(&of(A::Expired { username: Some("Sam".into()) }, "development/2"), true).changed);
     }
 
+    /// DPG-1: a page draws from the settings the service sent (`cx.snap.settings`): it never reads the file, which the
+    /// gallery did at every frame for every card that is only on Orbiters, to know the environment (and could find
+    /// another than the one on show).
+    #[test]
+    fn no_window_page_reads_the_settings_file() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in source.lines().enumerate().filter(|(_, l)| !l.contains("contains(") && !l.trim_start().starts_with("//")) {
+                        if line.contains("Settings::load") {
+                            out.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pages"), &mut found);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// Verify4-r21 P3: no page of a window (nor its pictures) reads the saved account: what it asks is the service's to send, as the
     /// member on show.
     #[test]

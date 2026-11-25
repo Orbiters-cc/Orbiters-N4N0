@@ -414,12 +414,13 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, shown: f32, int
                     clicked = Some((world.id.clone(), cover_r));
                 }
                 // A right press: what the world offers.
-                let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
-                let acts = if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() };
-                let items: Vec<orbiters_ui::popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-                if let Some(k) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", &items) {
+                let acts = || {
+                    let sharable = (world.reconstructed() > 0 || !world.shots.is_empty()) && !state.share_prepare.running();
+                    if interactive && !open_here { card_acts(world, sharable) } else { Vec::new() }
+                };
+                if let Some((_, act)) = orbiters_ui::popup::context_menu(ui, &resp, "world-card", acts, |(i, _)| *i) {
                     let thumb = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
-                    match acts[k].1 {
+                    match act {
                         CardAct::Open => clicked = Some((world.id.clone(), thumb)),
                         CardAct::Share(public) => share_clicked = Some((share_paths(world), public, thumb)),
                         act => menu_picked = Some((act, world.clone())),

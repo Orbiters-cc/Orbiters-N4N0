@@ -1461,8 +1461,30 @@ fn again_row(o: Offer, ready: bool) -> Option<(Menu, String, &'static str, Optio
 /// reconstructed, the shares, Copy public link once public, Export… once reconstructed, Reconstruct or Reconstruct again
 /// (or its run to stop, or why not), Copy its picture, Open its folder; what is on Orbiters only: Ask to share
 /// or the owner's shares, Copy, Download, Open on Orbiters; then the group's Instance… and World on VRChat, and Select
-/// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once.
+/// (or Deselect). With the card in a selection of several, Copy copies the selection. The picked action, once. Made only
+/// as it opens and while it shows.
 fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Option<Menu> {
+    orbiters_ui::popup::context_menu(
+        ui,
+        resp,
+        "card-menu",
+        || menu_rows(ui, resp, e, select, cx),
+        |(_, label, glyph, why)| {
+            let item = orbiters_ui::popup::Item::new(label).icon(glyph);
+            match *why {
+                Some(why) => item.detail(tr(why)).disabled(),
+                None => item,
+            }
+        },
+    )
+    .map(|row| row.0)
+}
+
+/// A row of a card's menu: what it does, says, its glyph, and why it takes no press (none where it takes one).
+type MenuRow = (Menu, String, &'static str, Option<&'static str>);
+
+/// The rows of a card's menu ([`card_menu`]).
+fn menu_rows(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_select::Selection, cx: &Cx) -> Vec<MenuRow> {
     let mut acts: Vec<(Menu, String, &'static str)> = vec![(Menu::Open, tr("Open").into(), icons::ARROWS_OUT)];
     // Why the row at this place takes no press.
     let mut off: Option<(usize, &'static str)> = None;
@@ -1485,9 +1507,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
     };
     match &e.local {
         Some(controller::Local::Picture(_)) => {
-            if super::editor::source_of(e).is_some() {
-                acts.push((Menu::Edit, tr("Edit").into(), icons::SLIDERS_HORIZONTAL));
-            }
+            acts.push((Menu::Edit, tr("Edit").into(), icons::SLIDERS_HORIZONTAL));
             mine_shares(&mut acts);
             acts.push((Menu::Copy, copy(mark("Copy")), icons::COPY));
             if !e.layers().is_empty() && !several {
@@ -1519,7 +1539,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
             if e.ready {
                 acts.push((Menu::Export, tr("Export…").into(), icons::UPLOAD_SIMPLE));
                 reconstruct(&mut acts);
-                // Read at the right press and kept with the card: a menu is built every frame, for every card.
+                // Read at the right press and kept with the card: an open menu is made every frame.
                 if let Some(controller::Local::Session(dir)) = &e.local {
                     let row_id = resp.id.with("wearer-row");
                     let ctx = ui.ctx();
@@ -1548,7 +1568,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
                 acts.push((Menu::CopyLink, tr("Copy public link").into(), icons::LINK_SIMPLE));
             }
             // A copy of a picture from Orbiters edited (its full picture fetched), saved among this computer's.
-            if !capture && super::editor::source_of(e).is_some() {
+            if !capture && super::editor::can_edit(e, cx.snap.settings.development) {
                 acts.push((Menu::Edit, tr("Edit").into(), icons::SLIDERS_HORIZONTAL));
             }
             if select.can_hand_out(e) {
@@ -1570,18 +1590,7 @@ fn card_menu(ui: &Ui, resp: &egui::Response, e: &Entry, select: &super::gallery_
     }
     let selected = select.has(&e.key);
     acts.push((Menu::Select, if selected { tr("Deselect") } else { tr("Select") }.into(), if selected { icons::X_CIRCLE } else { icons::CHECK_CIRCLE }));
-    let items: Vec<orbiters_ui::popup::Item<'_>> = acts
-        .iter()
-        .enumerate()
-        .map(|(i, (_, label, glyph))| {
-            let item = orbiters_ui::popup::Item::new(label).icon(glyph);
-            match off {
-                Some((at, why)) if at == i => item.detail(tr(why)).disabled(),
-                _ => item,
-            }
-        })
-        .collect();
-    orbiters_ui::popup::context_menu(ui, resp, "card-menu", &items).map(|i| acts[i].0)
+    acts.into_iter().enumerate().map(|(i, (menu, label, glyph))| (menu, label, glyph, off.filter(|(at, _)| *at == i).map(|(_, why)| why))).collect()
 }
 
 /// Where a card's menu opens what it opens (as a press on the card would, the instance popover from the card).
@@ -1602,7 +1611,7 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
         Menu::Open => *opened.clicked = Some((e, thumb)),
         // A picture from Orbiters: the editor at once (what was already fetched for a drag or a copy is not fetched again).
         Menu::Edit if e.local.is_none() => {
-            if let Some(source) = super::editor::source_of(&e) {
+            if let Some(source) = super::editor::source_of(&e, cx.snap.settings.development) {
                 if let Some(fetched) = state.select.fetched(&e.key) {
                     super::editor::files::seed(&source, &fetched);
                 }
@@ -1615,7 +1624,7 @@ fn act_menu(ctx: &egui::Context, cx: &mut Cx, state: &mut State, entries: &[Entr
             let radius = picture_radius(state.layout);
             let d = state.dialog.insert(Dialog::new(ctx, e, m == Menu::ShareTo).from(thumb, radius));
             match m {
-                Menu::Edit => d.edit(ctx),
+                Menu::Edit => d.edit(ctx, cx.snap.settings.development),
                 Menu::SharePublicly => d.public(ctx, server),
                 Menu::Update => d.update(ctx, server),
                 _ => {}

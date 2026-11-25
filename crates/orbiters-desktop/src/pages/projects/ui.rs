@@ -345,10 +345,8 @@ fn grid(ui: &mut Ui, cx: &mut Cx, state: &mut State, projects: &[Project]) {
             opened = Some(p.path.clone());
         }
         // A right press: what the project offers (`menus`).
-        let acts = menus::project_items(state, p, true);
-        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-        if let Some(k) = popup::context_menu(ui, &resp, "project-card", &items) {
-            picked = Some((p.clone(), acts[k].1, r));
+        if let Some((_, act)) = popup::context_menu(ui, &resp, "project-card", || menus::project_items(state, p, true), |(i, _)| *i) {
+            picked = Some((p.clone(), act, r));
         }
     }
     if let Some(path) = opened {
@@ -568,10 +566,8 @@ fn found(ui: &mut Ui, cx: &mut Cx, state: &mut State, list: &[Project]) {
             Some(false) => open = Some(p.path.clone()),
             None => {}
         }
-        let acts = menus::project_items(state, p, true);
-        let items: Vec<popup::Item> = acts.iter().map(|(i, _)| *i).collect();
-        if let Some(k) = popup::context_menu(ui, &resp, "found-row", &items) {
-            picked = Some((p.clone(), acts[k].1, r));
+        if let Some((_, act)) = popup::context_menu(ui, &resp, "found-row", || menus::project_items(state, p, true), |(i, _)| *i) {
+            picked = Some((p.clone(), act, r));
         }
     }
     if let Some((p, act, r)) = picked {

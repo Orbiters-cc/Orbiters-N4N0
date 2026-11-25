@@ -299,13 +299,13 @@ impl Dialog {
 
     /// Edit: a 3D capture's 3D view directly in Edit in 3D; for a picture the photo editor on a copy of it (a multi-layer
     /// picture with a stack of effects for each of its layers, whichever layer the window shows).
-    pub fn edit(&mut self, ctx: &egui::Context) {
+    pub fn edit(&mut self, ctx: &egui::Context, development: bool) {
         if matches!(self.entry.local, Some(controller::Local::Session(_))) {
             self.edit_3d = true;
             return;
         }
         let entry = self.layers.layered(&self.entry);
-        if let Some(source) = super::editor::source_of(entry) {
+        if let Some(source) = super::editor::source_of(entry, development) {
             self.editor = Some(super::editor::Editor::open(ctx, source, entry.world_name.clone()));
         }
     }
@@ -1017,7 +1017,7 @@ impl Dialog {
             let can = cx.gpu.is_some();
             return self.entry.ready.then(|| b.enabled(can).hint(if can { tr("Edit in 3D: this capture's 3D view with the photo editor's layers") } else { tr("Edit in 3D takes a graphics card this window does not have") }));
         }
-        super::editor::source_of(self.layers.layered(&self.entry)).is_some().then_some(b.hint(tr("Edits a copy in the photo editor: this picture stays as it is")))
+        super::editor::can_edit(self.layers.layered(&self.entry), cx.snap.settings.development).then_some(b.hint(tr("Edits a copy in the photo editor: this picture stays as it is")))
     }
 
     /// Over the picture: what it is (top left), its 3D view or folder (bottom right), a share's or a reconstruction's
@@ -1829,7 +1829,7 @@ impl Dialog {
                 }
             }
             Act::Full => self.full = !self.full,
-            Act::Edit => self.edit(ctx),
+            Act::Edit => self.edit(ctx, cx.snap.settings.development),
             Act::Export => {
                 if let Some(controller::Local::Session(dir)) = &self.entry.local {
                     self.export = Some(super::splat_export::Export::open(ctx, dir, &self.entry.world_name, self.export_button));

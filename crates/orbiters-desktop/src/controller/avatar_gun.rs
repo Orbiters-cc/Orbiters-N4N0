@@ -20,6 +20,7 @@ use orbiters_core::osc::{OscValue, AVATAR_CHANGE, PARAMETERS_PREFIX};
 use orbiters_core::settings::AvatarGunAllow;
 use orbiters_i18n::{fill, mark, tr};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// How often the thread looks; while desktop mode's trigger is read, faster.
@@ -285,6 +286,12 @@ struct Hit {
     avatar: gun::Avatar,
     from: String,
     card: u64,
+    /// The instance it was for, and the Orbiters identity signed in when it came (controller/identity.rs).
+    instance: String,
+    epoch: u64,
+    /// Whether the shooter was a friend when asked, and whether the person pressed Allow.
+    friend: bool,
+    allowed: bool,
 }
 
 /// What the module keeps.
@@ -319,6 +326,9 @@ pub(super) struct Runtime {
     put_on: Option<String>,
     choose: u64,
     stop: bool,
+    /// What tests' hits were answered with (no server is told).
+    #[cfg(test)]
+    answered: Vec<(String, Outcome)>,
 }
 
 fn now_ms() -> u64 {
@@ -401,7 +411,7 @@ impl Controller {
             (CardKind::Ask, true) => {
                 if let Some(hit) = hit {
                     eprintln!("avatar gun: {} allowed by the person", hit.shot); // i18n: not shown (a log's line)
-                    self.avatar_gun_change(hit);
+                    self.avatar_gun_change(Hit { allowed: true, ..hit });
                 }
             }
             (CardKind::Ask, false) => {
@@ -442,14 +452,29 @@ impl Controller {
         });
     }
 
+    /// The hit of card `card` is over: another's stays.
+    fn avatar_gun_release(&self, card: u64) {
+        let mut rt = self.avatar_gun.lock().unwrap();
+        if rt.hit.as_ref().is_some_and(|h| h.card == card) {
+            rt.hit = None;
+        }
+    }
+
+    /// Whether the avatar is (still) `hit`'s to change: the hit under way, in the instance and for the account it came for, and
+    /// allowed by the person or by the settings as they are now. Asked as each request is about to leave.
+    fn avatar_gun_permitted(&self, hit: &Hit) -> bool {
+        let (here, allow) = {
+            let s = self.snapshot.lock().unwrap();
+            (s.vrchat.world.instance_hash().as_deref() == Some(hit.instance.as_str()), s.settings.avatar_gun.allow)
+        };
+        here && self.identity_epoch.load(Ordering::SeqCst) == hit.epoch
+            && (hit.allowed || decide(allow, hit.friend, None, true, false) == Decision::Change)
+            && self.avatar_gun.lock().unwrap().hit.as_ref().is_some_and(|h| h.card == hit.card)
+    }
+
     /// The card `card` and its hit go.
     fn avatar_gun_end(&self, card: u64) {
-        {
-            let mut rt = self.avatar_gun.lock().unwrap();
-            if rt.hit.as_ref().is_some_and(|h| h.card == card) {
-                rt.hit = None;
-            }
-        }
+        self.avatar_gun_release(card);
         self.update_if(|s| {
             let gone = s.avatar_gun.card.as_ref().is_some_and(|c| c.id == card);
             if gone {
@@ -673,26 +698,25 @@ impl Controller {
                 }
                 true
             });
-            let mut rt = ctl.avatar_gun.lock().unwrap();
-            if rt.streaming.as_ref().is_some_and(|(n, _, _)| *n == number) {
-                rt.streaming = None;
-                rt.connected = false;
+            if let Err(e) = &result {
+                eprintln!("avatar gun events: {e:#}"); // i18n: not shown (a log's line)
             }
-            match result {
-                Ok(true) => {
-                    rt.failures = 0;
-                    rt.retry_at = Some(Instant::now() + STREAM_RETRY);
-                }
-                Ok(false) | Err(_) => {
-                    if let Err(e) = &result {
-                        eprintln!("avatar gun events: {e:#}"); // i18n: not shown (a log's line)
-                    }
-                    rt.failures += 1;
-                    let pause = STREAM_RETRY.saturating_mul(1 << (rt.failures - 1).min(5)).min(STREAM_RETRY_MOST);
-                    rt.retry_at = Some(Instant::now() + pause);
-                }
-            }
+            ctl.avatar_gun_stream_ended(number, matches!(result, Ok(true)));
         });
+    }
+
+    /// The stream `number` ended, `well` or not: when the next one is tried, unless another took its place meanwhile (its
+    /// waits are its own).
+    fn avatar_gun_stream_ended(&self, number: u64, well: bool) {
+        let mut rt = self.avatar_gun.lock().unwrap();
+        if !rt.streaming.as_ref().is_some_and(|(n, _, _)| *n == number) {
+            return;
+        }
+        rt.streaming = None;
+        rt.connected = false;
+        rt.failures = if well { 0 } else { rt.failures + 1 };
+        let pause = if well { STREAM_RETRY } else { STREAM_RETRY.saturating_mul(1 << (rt.failures - 1).min(5)).min(STREAM_RETRY_MOST) };
+        rt.retry_at = Some(Instant::now() + pause);
     }
 
     /// `AvatarGun/Fire` rose with the gun loaded: the shot goes to Orbiters.
@@ -723,6 +747,14 @@ impl Controller {
 
     /// What the hit player's app did with `shot`, to Orbiters (the shooter is told).
     fn avatar_gun_answer(&self, shot: &str, result: Outcome) {
+        #[cfg(test)]
+        return self.avatar_gun.lock().unwrap().answered.push((shot.to_string(), result));
+        #[cfg(not(test))]
+        self.avatar_gun_tell(shot, result);
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    fn avatar_gun_tell(&self, shot: &str, result: Outcome) {
         let Some((api, token)) = self.account_api() else { return };
         let report = gun::AnswerReport { shot: shot.to_string(), result };
         std::thread::spawn(move || {
@@ -758,9 +790,7 @@ impl Controller {
 
     /// A hit of another player's shot: what the settings say of it ([`decide`]).
     fn avatar_gun_hit(self: &Shared, hit: gun::Hit, instance: &str) {
-        let snap = self.view();
-        let allow = snap.settings.avatar_gun.allow;
-        let here = snap.vrchat.world.instance_hash().as_deref() == Some(instance);
+        let epoch = self.identity_epoch.load(Ordering::SeqCst);
         if !gun::is_avatar_id(&hit.avatar.id) {
             eprintln!("avatar gun: hit {} names no avatar: refused", hit.shot); // i18n: not shown (a log's line)
             self.avatar_gun_answer(&hit.shot, Outcome::Refused);
@@ -770,35 +800,35 @@ impl Controller {
         let instance = instance.to_string();
         // A friend's (a verified VRChat account) is looked up off the stream's thread.
         std::thread::spawn(move || {
-            let friend = match (&hit.from.vrchat_id, allow) {
+            let friend = match (&hit.from.vrchat_id, ctl.view().settings.avatar_gun.allow) {
                 (Some(id), AvatarGunAllow::Friends) => ctl.vrchat_source().friends().map(|f| f.iter().any(|u| u.id == *id)).unwrap_or(false),
                 _ => false,
             };
-            let (busy, since) = {
-                let rt = ctl.avatar_gun.lock().unwrap();
-                (rt.hit.is_some(), rt.changed_at.map(|t| t.elapsed()))
-            };
-            let decision = decide(allow, friend, since, here, busy);
-            eprintln!("avatar gun: hit {} by {} ({}), {:?} in {instance}: {decision:?}", hit.shot, hit.from.name, if friend { "a friend" } else { "not a friend" }, allow); // i18n: not shown (a log's line)
-            let card = {
-                let mut rt = ctl.avatar_gun.lock().unwrap();
-                rt.cards += 1;
-                rt.cards
-            };
+            // As it is once the shooter was looked up: the room left, or the setting tightened, meanwhile counts.
+            let snap = ctl.view();
+            let allow = snap.settings.avatar_gun.allow;
+            let here = snap.vrchat.world.instance_hash().as_deref() == Some(instance.as_str()) && ctl.identity_epoch.load(Ordering::SeqCst) == epoch;
             let name = hit.from.name.chars().take(64).collect::<String>();
             let avatar = gun::Avatar { name: hit.avatar.name.chars().take(gun::NAME_MOST).collect(), ..hit.avatar.clone() };
-            let pending = Hit { shot: hit.shot.clone(), avatar, from: name, card };
+            // Decided and taken in one step: of two hits at once, one is.
+            let (decision, pending) = {
+                let mut rt = ctl.avatar_gun.lock().unwrap();
+                let decision = decide(allow, friend, rt.changed_at.map(|t| t.elapsed()), here, rt.hit.is_some());
+                rt.cards += 1;
+                let pending = Hit { shot: hit.shot.clone(), avatar, from: name, card: rt.cards, instance: instance.clone(), epoch, friend, allowed: false };
+                if !matches!(decision, Decision::Refuse(_)) {
+                    rt.hit = Some(pending.clone());
+                }
+                (decision, pending)
+            };
+            eprintln!("avatar gun: hit {} by {} ({}), {:?} in {instance}: {decision:?}", hit.shot, hit.from.name, if friend { "a friend" } else { "not a friend" }, allow); // i18n: not shown (a log's line)
             match decision {
                 Decision::Refuse(_) => ctl.avatar_gun_answer(&hit.shot, Outcome::Refused),
                 Decision::Ask => {
-                    ctl.avatar_gun.lock().unwrap().hit = Some(pending.clone());
                     ctl.avatar_gun_card(&pending, CardKind::Ask, gun::ASK_S * 1000);
                     ctl.avatar_gun_answer(&hit.shot, Outcome::Asked);
                 }
-                Decision::Change => {
-                    ctl.avatar_gun.lock().unwrap().hit = Some(pending.clone());
-                    ctl.avatar_gun_change(pending);
-                }
+                Decision::Change => ctl.avatar_gun_change(pending),
             }
         });
     }
@@ -825,11 +855,11 @@ impl Controller {
             if !public {
                 ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::NotPublic), FAILED_FOR_MS);
                 ctl.avatar_gun_answer(&hit.shot, Outcome::Refused);
-                ctl.avatar_gun.lock().unwrap().hit = None;
+                ctl.avatar_gun_release(hit.card);
                 return;
             }
             let worn = ctl.avatar_gun_worn();
-            if ctl.avatar_gun_wear(&hit.avatar.id) {
+            if ctl.avatar_gun_wear(&hit.avatar.id, || ctl.avatar_gun_permitted(&hit)) {
                 {
                     let mut rt = ctl.avatar_gun.lock().unwrap();
                     // The avatar worn before, by hand: kept until the next change by hand, through several shots.
@@ -850,9 +880,14 @@ impl Controller {
                 }
                 ctl.avatar_gun_answer(&hit.shot, Outcome::Changed);
             } else {
-                ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::DidNotFollow { signed_in }), FAILED_FOR_MS);
+                if ctl.avatar_gun_permitted(&hit) {
+                    ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::DidNotFollow { signed_in }), FAILED_FOR_MS);
+                    ctl.avatar_gun_release(hit.card);
+                } else {
+                    eprintln!("avatar gun: {} is not allowed any more (the instance left, the setting changed): stopped", hit.shot); // i18n: not shown (a log's line)
+                    ctl.avatar_gun_end(hit.card);
+                }
                 ctl.avatar_gun_answer(&hit.shot, Outcome::Refused);
-                ctl.avatar_gun.lock().unwrap().hit = None;
             }
         });
     }
@@ -868,10 +903,11 @@ impl Controller {
         let ctl = self.clone();
         std::thread::spawn(move || {
             eprintln!("avatar gun: Undo of {}: back to {before}", hit.shot); // i18n: not shown (a log's line)
-            if ctl.avatar_gun_wear(&before) {
+            // The person's own, whatever the settings say.
+            if ctl.avatar_gun_wear(&before, || true) {
                 {
                     let mut rt = ctl.avatar_gun.lock().unwrap();
-                    (rt.before, rt.put_on, rt.hit) = (None, None, None);
+                    (rt.before, rt.put_on) = (None, None);
                 }
                 ctl.avatar_gun_end(hit.card);
                 if let Some((api, token)) = ctl.account_api() {
@@ -881,7 +917,7 @@ impl Controller {
                 }
             } else {
                 ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::UndoFailed), FAILED_FOR_MS);
-                ctl.avatar_gun.lock().unwrap().hit = None;
+                ctl.avatar_gun_release(hit.card);
             }
         });
     }
@@ -912,12 +948,13 @@ impl Controller {
     }
 
     /// Puts `id` on: VRChat's API with the sign-in, held as done once VRChat names it; else, or when VRChat did not follow,
-    /// OSC's `/avatar/change`, waited for the same way. Each step a line of the log.
-    fn avatar_gun_wear(&self, id: &str) -> bool {
+    /// OSC's `/avatar/change`, waited for the same way; each only if `permitted` says so as it is about to leave. Each step a line
+    /// of the log.
+    fn avatar_gun_wear(&self, id: &str, permitted: impl Fn() -> bool) -> bool {
         let source = self.vrchat_source();
         if source.direct_available() {
             let asked = orbiters_core::clock::now_ns();
-            match source.select_avatar(id) {
+            match source.select_avatar_while(id, &permitted) {
                 Ok(()) => {
                     eprintln!("avatar gun: {id} selected through VRChat's API; waiting for VRChat"); // i18n: not shown (a log's line)
                     if self.avatar_gun_wait(id, asked) {
@@ -930,6 +967,9 @@ impl Controller {
             }
         } else {
             eprintln!("avatar gun: not signed in to VRChat here: OSC only"); // i18n: not shown (a log's line)
+        }
+        if !permitted() {
+            return false;
         }
         let asked = orbiters_core::clock::now_ns();
         match self.with_osc(|o| o.send(AVATAR_CHANGE, vec![rosc::OscType::String(id.to_string())])) {
@@ -948,6 +988,10 @@ impl Controller {
         worn
     }
 }
+
+#[cfg(test)]
+#[path = "avatar_gun_permits.rs"]
+mod permits;
 
 #[cfg(test)]
 mod tests {

@@ -537,7 +537,7 @@ fn bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, level: Level, reason: Option
         None => match world.world_name.clone().filter(|_| world.in_world) {
             Some(name) => (orbiters_i18n::tr!("Ready · {world}", world = name), theme::fg_2()),
             // (a Mac's own game's world is given to its captures, and shown nowhere else)
-            None if snap.launcher.desktop_game.is_some() => (tr("Ready: a capture is tagged with the world you are in").into(), theme::fg_2()),
+            None if snap.launcher.desktop_game.is_some() && snap.launcher.camera => (tr("Ready: a capture is tagged with the world you are in").into(), theme::fg_2()),
             None => (tr("VRChat is running; join a world to tag captures with it.").into(), theme::fg_3()),
         },
     };

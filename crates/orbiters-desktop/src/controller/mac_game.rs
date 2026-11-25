@@ -38,7 +38,7 @@ pub(super) struct OwnGame {
 impl OwnGame {
     /// A turn of the watchers (each second): what happened in its world since the last, and whether it happened now.
     pub(super) fn turn(&mut self, ctl: &Shared, library: &Path, tick: u64) -> (Vec<LogEvent>, bool) {
-        let game = ctl.view().launcher.desktop_game;
+        let game = ctl.own_pid();
         if game != self.game {
             self.game = game;
             self.query = None;
@@ -100,9 +100,14 @@ fn follow(library: &Path, born: Option<SystemTime>) -> LogWatcher {
 }
 
 impl super::Controller {
-    /// The person's own VRChat runs on this Mac.
+    /// The person's own VRChat runs on this Mac, on an engine that gives its camera: with one from before nothing here is done, and everything is as it was.
     pub(crate) fn own_game(&self) -> bool {
-        self.snapshot.lock().unwrap().launcher.desktop_game.is_some()
+        self.own_pid().is_some()
+    }
+
+    fn own_pid(&self) -> Option<u32> {
+        let snapshot = self.snapshot.lock().unwrap();
+        snapshot.launcher.desktop_game.filter(|_| snapshot.launcher.camera)
     }
 
     /// The world the game of this Mac is in.
@@ -112,7 +117,7 @@ impl super::Controller {
 
     /// Whose frames are read from now on, here and in the capture worker: the running game's, told at each change.
     pub(super) fn follow_camera_host(self: &Shared) {
-        let game = self.snapshot.lock().unwrap().launcher.desktop_game;
+        let game = self.own_pid();
         let host = game.map(|pid| orbiters_core::obelisk::host_folder(&orbiters_core::obelisk::user_tmp(), pid)).filter(|h| h.is_dir());
         {
             let mut held = self.mac_game.host.lock().unwrap();
@@ -194,6 +199,19 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// With an engine from before, nothing of this is done: the network's VRChat is the one talked with, as it was.
+    #[test]
+    fn an_engine_from_before_changes_nothing() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        assert!(!ctl.own_game());
+        ctl.update(|s| s.launcher.desktop_game = Some(std::process::id()));
+        assert!(!ctl.own_game(), "0.1.14");
+        ctl.update(|s| s.launcher.camera = true);
+        assert!(ctl.own_game());
+        ctl.update(|s| s.launcher.desktop_game = None);
+        assert!(!ctl.own_game(), "it ended");
     }
 
     /// The log followed is the running game's: never one left by an earlier run, whatever its date of writing.

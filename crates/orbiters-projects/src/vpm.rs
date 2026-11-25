@@ -71,6 +71,17 @@ pub struct View {
 fn http() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder().user_agent(format!("Orbiters-N4N0/{}", orbiters_core::app_version())).timeout(std::time::Duration::from_secs(90)).build()?)
 }
+/// Whether VPM's project loader leaves the project as it is: vrc-get's `UnityProject::load` rewrites a manifest holding the
+/// "3.2-3.8" range spelling an old vrc-get wrote.
+pub(crate) fn loads_unchanged(path: &Path) -> std::io::Result<bool> {
+    const REWRITTEN: &[u8] = br#""3.2-3.8""#;
+    match std::fs::read(path.join("Packages/vpm-manifest.json")) {
+        Ok(manifest) => Ok(!manifest.windows(REWRITTEN.len()).any(|w| w == REWRITTEN)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) struct EnabledCollection {
     pub(crate) inner: PackageCollection,
     pub(crate) hidden: HashSet<String>,
@@ -353,7 +364,15 @@ pub enum Change {
     /// Any failure puts the project's manifest back and restores its packages.
     Plan { install: Vec<(String, String)>, remove: Vec<String>, prerelease: bool },
 }
+pub(crate) fn may_change(path: &Path) -> anyhow::Result<()> {
+    use crate::unity6::authority::{allow, Action};
+    allow(&crate::data_dir(), path, Action::Packages).map(|_| ()).map_err(|why| anyhow::anyhow!("{why}"))
+}
+
 pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<()> {
+    // A Unity 6 trial keeps its packages until Creator Companion migrated it, whoever asks (the page, the bridge, the
+    // Toolkit's update).
+    may_change(path)?;
     // Serialize mutations across this app's windows. VCC's database has its own upstream shared LiteDB mutex.
     let (io, _) = environment(root).await?;
     let _lock = named_lock(&io, &crate::repos::dir(root), "Global\\Orbiters.Vpm.Packages").await?;
@@ -814,6 +833,8 @@ fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<()> {
 }
 /// Installs the latest releases of `names` from the Orbiters repository, adding it (or turning it back on) first.
 pub async fn install_orbiters(root: &Path, path: &Path, names: &[&str]) -> anyhow::Result<()> {
+    // Before the repository is added or turned on for it.
+    may_change(path)?;
     add_repo(root, ORBITERS_REPOSITORY, BTreeMap::new()).await?;
     // Ensure an existing disabled Orbiters repo is enabled before resolving its packages.
     let (_, settings) = environment(root).await?;

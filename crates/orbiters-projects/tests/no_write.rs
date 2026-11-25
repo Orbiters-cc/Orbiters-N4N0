@@ -464,7 +464,10 @@ const ACTIONS: &[Action] = &[
             all &= refused(block(orbiters_projects::coherent::solve(&s.root, &p, &[("test.avatar".into(), "1.0.0".into())], &[], false)).map_err(anyhow::Error::from));
             let avatar = orbiters_projects::avatars::Avatar { id: "avtr_00000000-0000-4000-8000-000000000001".into(), ..Default::default() };
             let request = orbiters_projects::setup::request(avatar, 1, "https://example.invalid", "1");
-            all &= request.is_err() || refused(orbiters_projects::setup::write(&p, &request.unwrap()));
+            // (Where an upload is allowed at all.)
+            if let (Ok(request), Ok(handoff)) = (request, orbiters_projects::unity6::authority::upload(&orbiters_projects::data_dir(), &p)) {
+                all &= refused(orbiters_projects::setup::write(&p, &request, &handoff));
+            }
             let _ = orbiters_projects::setup::take_result(&p, "done");
             all &= refused(orbiters_projects::storage::repair(&p, &Default::default(), &AtomicBool::new(false)));
             let _ = orbiters_projects::size::measure(&p, &AtomicBool::new(false));

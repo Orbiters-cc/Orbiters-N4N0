@@ -534,6 +534,10 @@ pub struct Moved {
 /// it at any time before the switch: Library stays as it was and the partial copy is deleted. A failure does the same
 /// and says so. Unity must have quit: this holds the project's lock, so Unity cannot open it meanwhile (and is told so).
 pub fn repair(project: &Path, progress: &SharedProgress, cancel: &AtomicBool) -> anyhow::Result<RepairEnd> {
+    {
+        use crate::unity6::authority::{allow, Action};
+        allow(&crate::data_dir(), project, Action::Storage).map_err(|why| anyhow::anyhow!("{why}"))?;
+    }
     #[cfg(not(any(windows, unix)))]
     {
         let _ = (project, progress, cancel);

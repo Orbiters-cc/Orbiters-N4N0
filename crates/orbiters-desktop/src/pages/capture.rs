@@ -896,6 +896,7 @@ fn why_last(ui: &mut Ui, cx: &mut Cx, toolkit_asked: &mut bool, projects: &mut s
     let (button, note) = match &offer {
         Some(super::projects::ToolkitOffer::Project(name)) => (Some(tr!("Update the Toolkit in {name}", name = name)), None),
         Some(super::projects::ToolkitOffer::NotHere) => (None, Some(super::projects::toolkit_refusal(name.as_deref()))),
+        Some(super::projects::ToolkitOffer::Refused(why)) => (None, Some(why.clone())),
         _ => (None, None),
     };
     let text = note.map_or(why.clone(), |n| format!("{why} {n}"));

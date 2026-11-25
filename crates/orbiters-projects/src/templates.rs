@@ -1,7 +1,12 @@
-use orbiters_i18n::{mark, tr};
+pub use crate::bundled_templates::builtins;
+use crate::copying::{self, between, Made, Step};
+use crate::unity6::gate::{self, AppRoot, Destination, Parents};
+use crate::unity6::budget::{self, Demand, Need, Room};
+use crate::unity6::payload::{self, Making, Own, Payload};
 use anyhow::{bail, Context};
+use orbiters_i18n::{mark, tr};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -81,55 +86,6 @@ pub fn banner(app: &Path, id: &str) -> Option<PathBuf> {
     Some(app.join("WebApp/Dist/template-covers").join(file)).filter(|p| p.is_file())
 }
 
-/// A fresh install has no VCC template directory. Bundle ALCOM's MIT-licensed modern template assets so these are
-/// available offline; VPM still downloads and resolves the SDK through its normal official repository.
-pub fn builtins(cache: &Path) -> anyhow::Result<Vec<Template>> {
-    static MATERIALIZE: Mutex<()> = Mutex::new(());
-    let _one = MATERIALIZE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut out = vec![];
-    for (id, files) in crate::builtin_templates::TEMPLATES {
-        let path = cache.join(id);
-        crate::disk::create_dir_all(&path)?;
-        for (relative, content) in *files {
-            let p = path.join(relative);
-            if !p.is_file() {
-                crate::disk::create_dir_all(p.parent().unwrap())?;
-                crate::disk::write(&p, content)?;
-            }
-        }
-        let avatars = id.starts_with("avatars");
-        out.push(Template {
-            name: if avatars { tr("VRChat Avatar Project") } else { tr("VRChat World Project") }.into(),
-            path,
-            unity: "2022.3.22f1".into(),
-            builtin: true,
-            id: if avatars { "com.vrchat.template.avatar" } else { "com.vrchat.template.world" }.into(),
-            banner: None,
-        });
-    }
-    // Found by its id: its name is translated, so it is the one thing that cannot be compared.
-    let avatar = out.iter().find(|t| t.id == "com.vrchat.template.avatar").with_context(|| tr("Bundled avatar template is missing"))?;
-    let path = cache.join("base-2022.3.22f1");
-    if !path.join("ProjectSettings/ProjectVersion.txt").is_file() {
-        copy(&avatar.path, &path, &AtomicBool::new(false), &Arc::new(Mutex::default()))?;
-    }
-    // Written when it is not this already (PROJECTS-24 a): every look at a project's packages lists the templates, and each
-    // wrote, flushed to disk and replaced the same file. The avatar template's manifest copied in first is replaced.
-    let manifest = path.join("Packages/vpm-manifest.json");
-    let base = serde_json::json!({"dependencies":{"com.vrchat.base":{"version":"3.x"}}});
-    if std::fs::read(&manifest).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()).as_ref() != Some(&base) {
-        crate::write_json(&manifest, &base)?;
-    }
-    out.push(Template {
-        name: String::from(tr("VRChat Base Project")),
-        path,
-        unity: "2022.3.22f1".into(),
-        builtin: true,
-        id: "com.vrchat.template.base".into(),
-        banner: None,
-    });
-    Ok(out)
-}
 pub fn validate_name(name: &str) -> anyhow::Result<()> {
     let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
     if name.trim() != name
@@ -162,7 +118,7 @@ pub struct Keep {
 /// called Library or Temp) is copied.
 /// What a copy leaves out: [`excluded`] for a project (`project`), only Git's and Node's folders for a package folder
 /// (PROJECTS-37: a package's own Library, Logs or Temp folder is part of it), and never a copy's marker at the top.
-fn left_out(name: &str, depth: usize, dir: bool, keep: Keep, project: bool) -> bool {
+pub(crate) fn left_out(name: &str, depth: usize, dir: bool, keep: Keep, project: bool) -> bool {
     if depth == 1 && !dir && name == INCOMPLETE {
         return true;
     }
@@ -209,196 +165,124 @@ impl Marker {
     }
 }
 
-/// Copy into a newly reserved folder only. Links and junctions in the source are followed: what they lead to is copied
-/// as real files, so that the copy does not depend on them.
+/// Copy into a new folder only, through its proof ([`crate::unity6::gate`]). Links and junctions in the source are followed:
+/// what they lead to is copied as real files, so that the copy does not depend on them.
 pub fn copy(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
     copy_keeping(source, destination, Keep::default(), cancel, progress)
 }
-/// [`copy`], taking along what `keep` asks for.
+
+/// [`copy`], taking along what `keep` asks for: the files as they are, without the settings a project of its own gets.
 pub fn copy_keeping(source: &Path, destination: &Path, keep: Keep, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
-    copy_keeping_then(source, destination, keep, true, cancel, progress, |_| {})
+    let (parent, name) = (destination.parent(), destination.file_name());
+    let (parent, name) = parent.zip(name).with_context(|| tr("Choose a destination folder"))?;
+    let stopped = |e| before_anything(e, destination, cancel);
+    let payload = payload::scan(source_folder(source)?, Making { keep, ..Default::default() }, cancel).map_err(stopped)?;
+    let place = Destination::check(parent, &name.to_string_lossy(), &payload.protected, Parents::Make)?;
+    let filled = fill(&payload, place, destination, cancel, progress, &mut |_| Ok(())).map_err(unmarked)?;
+    copying::unmark(&filled.root, filled.marker)
 }
 
-/// What a running copy made, so that a Stop removes exactly that (PROJECTS-4, Enzo 2026-11-19: "Yes").
-struct Made {
-    marker: Marker,
-    /// The folder it created, held from the moment it was made: on Windows it cannot be renamed, moved or replaced
-    /// while the copy runs, nor any folder above it, so every name below it stays this very folder's.
-    root: crate::owned::Pinned,
-    /// The marker file, by identity.
-    marker_id: crate::owned::FileId,
-    /// Each folder it created, held the same way, in the order made (parents first), relative to the root.
-    folders: Vec<(PathBuf, crate::owned::Pinned)>,
-    /// Each file it created and its identity.
-    files: Vec<(PathBuf, crate::owned::FileId)>,
+fn source_folder(source: &Path) -> anyhow::Result<&Path> {
+    anyhow::ensure!(source.is_dir(), "{}", tr("The source folder no longer exists."));
+    Ok(source)
 }
 
-/// Removes what `made` created at `destination`, each entry through a handle whose identity is the one it made (a
-/// folder through the handle held since it was made, a file through one opened once and checked); anything else
-/// found there stays. The paths that stayed (none: the folder is gone).
-fn discard_partial(destination: &Path, made: Made) -> std::io::Result<Vec<PathBuf>> {
-    use crate::owned::{delete_file_if, is_same};
-    let Made { marker, root, marker_id, mut folders, files } = made;
-    if !is_same(destination, root.id) || Marker::read(destination).as_ref() != Some(&marker) {
-        return Err(std::io::Error::other(tr("it is not the folder this copy made")));
+/// A Stop before anything was made says so.
+fn before_anything(e: anyhow::Error, destination: &Path, cancel: &AtomicBool) -> anyhow::Error {
+    if cancel.load(Ordering::Relaxed) {
+        return anyhow::anyhow!("{}", tr!("Copy stopped before anything was copied to {path}.", path = destination.display()));
     }
-    let mut left = vec![];
-    for (rel, id) in files.iter().rev() {
-        let path = destination.join(rel);
-        if !delete_file_if(&path, *id).unwrap_or(false) && std::fs::symlink_metadata(&path).is_ok() {
-            left.push(path);
-        }
-    }
-    // Deepest first; a folder that holds what is not the copy's is not empty and stays.
-    while let Some((rel, folder)) = folders.pop() {
-        if folder.delete().is_err() {
-            left.push(destination.join(rel));
-        }
-    }
-    delete_file_if(&destination.join(INCOMPLETE), marker_id)?;
-    if root.delete().is_err() || destination.exists() {
-        // What is still there is not the copy's: named, never removed.
-        let mut extra: Vec<PathBuf> = walkdir::WalkDir::new(destination).min_depth(1).follow_links(false).into_iter().flatten().map(|e| e.into_path()).collect();
-        extra.retain(|p| !left.contains(p));
-        left.extend(extra);
-        left.sort();
-        left.dedup();
-        if left.is_empty() {
-            left.push(destination.to_path_buf());
-        }
-    }
-    Ok(left)
+    e
 }
 
-/// A Stop during the copy into `destination`: what it made goes, or says what stayed and why.
-fn stopped(destination: &Path, made: Made) -> anyhow::Error {
-    match discard_partial(destination, made) {
-        Ok(left) if left.is_empty() => anyhow::anyhow!("{}", tr("Copy stopped. The incomplete copy was removed.")),
-        Ok(left) => anyhow::anyhow!(
-            "{}",
-            tr!(
-                "Copy stopped. What it copied was removed; {path} keeps what was not the copy's: {files}",
-                path = destination.display(),
-                files = left.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-            )
-        ),
-        Err(e) => anyhow::anyhow!("{}", tr!("Copy stopped. The incomplete copy at {path} could not be removed ({why}); it is not listed as a project.", path = destination.display(), why = e)),
-    }
+/// A folder made and filled.
+struct Filled {
+    /// Held for the whole of the operation.
+    new: gate::NewFolder,
+    root: gate::WriteRoot,
+    made: Made,
+    /// Until it is taken away, it is not a project.
+    marker: crate::owned::FileId,
 }
 
-/// [`copy_keeping`], running `made` once its folder exists (a test stops the copy, or swaps the folder, there).
-/// `project`: the project rules of what is left out (a package's folder is copied whole but for Git's and Node's).
-fn copy_keeping_then(
-    source: &Path,
-    destination: &Path,
-    keep: Keep,
-    project: bool,
-    cancel: &AtomicBool,
-    progress: &SharedProgress,
-    on_made: impl FnOnce(&Path),
-) -> anyhow::Result<()> {
-    if !source.is_dir() {
-        bail!("{}", tr("The source folder no longer exists."));
+/// Makes the folder and puts `payload` in it. `on_made`: told of the folder before anything is put in it. An error says whether
+/// anything of it is left ([`Nothing`]: not).
+fn fill(payload: &Payload, place: Destination, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress, on_made: &mut dyn FnMut(&gate::NewFolder) -> anyhow::Result<()>) -> anyhow::Result<Filled> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(before_anything(anyhow::anyhow!("{}", tr("Stopped.")), destination, cancel).context(Nothing));
     }
-    let source = std::fs::canonicalize(source)?;
-    let parent = destination.parent().with_context(|| tr("Choose a destination folder"))?;
-    crate::disk::create_dir_all(parent)?;
-    let parent = std::fs::canonicalize(parent)?;
-    if parent.starts_with(&source) {
-        bail!("{}", tr("Create the copy outside the source project."));
-    }
-    anyhow::ensure!(!destination.exists(), "{}", tr("The destination already exists; choose a new project name."));
-    let mut files = vec![];
-    // Folders too, empty ones included (PROJECTS-41): an empty asset folder has its .meta beside it.
-    let mut folders = vec![];
-    for entry in walkdir::WalkDir::new(&source)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(|e| !left_out(&e.file_name().to_string_lossy(), e.depth(), e.file_type().is_dir(), keep, project))
-    {
-        if cancel.load(Ordering::Relaxed) {
-            bail!("{}", tr!("Copy stopped before anything was copied to {path}.", path = destination.display()));
-        }
-        let e = entry?;
-        if e.file_type().is_file() {
-            files.push(e.path().to_path_buf());
-        } else if e.file_type().is_dir() && e.depth() > 0 {
-            folders.push(e.path().to_path_buf());
-        }
-    }
-    crate::disk::create_dir(destination).with_context(|| tr("The destination already exists or cannot be created; choose a new project name."))?;
-    // Held at once: its identity is the held folder's, and nothing can take its place until the copy is done.
-    let root = crate::owned::Pinned::open(destination)?;
-    let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now(), folder: Some(root.id) };
-    let marker_id = {
-        let mut file = crate::disk::open(std::fs::File::options().write(true).create_new(true), destination.join(INCOMPLETE))?;
-        file.write_all(&serde_json::to_vec(&marker)?)?;
-        crate::owned::id_of_file(&file)?
+    let new = place.make().map_err(|e| anyhow::Error::new(e).context(tr("The destination already exists or cannot be created; choose a new project name.")).context(Nothing))?;
+    let begun = new.root().map_err(anyhow::Error::new).and_then(|root| {
+        anyhow::ensure!(!payload.protected.iter().any(|p| p.id == Some(new.id)), "{}", tr("Create the copy outside the source project."));
+        on_made(&new).map(|()| root)
+    });
+    let root = match begun {
+        Ok(root) => root,
+        // Empty still: it goes.
+        Err(e) if new.remove().unwrap_or(false) => return Err(e.context(Nothing)),
+        Err(e) => return Err(e),
     };
-    let mut made = Made { marker, root, marker_id, folders: vec![], files: vec![] };
-    for folder in &folders {
-        let rel = folder.strip_prefix(&source)?.to_path_buf();
-        let at = destination.join(&rel);
-        // Made here, and held: one already there is not the copy's (and is never removed by it).
-        match crate::disk::create_dir(&at) {
-            Ok(()) => made.folders.push((rel, crate::owned::Pinned::open(&at)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
+    let marker = Marker { copy: uuid::Uuid::new_v4().simple().to_string(), destination: destination.to_path_buf(), started: crate::discovery::now(), folder: Some(new.id) };
+    let mut made = Made::default();
+    let filled = between(Step::Made).and_then(|()| copying::fill(payload, &root, &marker, &mut made, cancel, progress));
+    match (filled, made.marker()) {
+        (Ok(()), Some(marker)) => Ok(Filled { new, root, made, marker }),
+        (Err(_), _) if cancel.load(Ordering::Relaxed) => {
+            let said = anyhow::anyhow!("{}", copying::undo(root, new, made));
+            Err(if std::fs::symlink_metadata(destination).is_err() { said.context(Nothing) } else { said })
         }
+        (Err(e), _) => Err(e.context(tr!("The copy could not be finished: what was copied is kept at {path}, and is not listed as a project", path = destination.display()))),
+        (Ok(()), None) => bail!("{}", tr("Stopped.")),
     }
-    on_made(destination);
-    progress.lock().unwrap().total = files.len();
-    // One buffer for every file (PROJECTS-6): most are a few KB.
-    let mut buffer = vec![0u8; 1024 * 1024];
-    for (i, p) in files.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(stopped(destination, made));
-        }
-        // Elsewhere than Windows nothing holds the folder: it must still be the one made.
-        #[cfg(not(windows))]
-        anyhow::ensure!(crate::owned::is_same(destination, made.root.id), "{}", tr("it is not the folder this copy made"));
-        let rel = p.strip_prefix(&source)?;
-        let dst = destination.join(rel);
-        let mut input = std::fs::File::open(p)?;
-        // Never over a file that is there already: it is not this copy's.
-        let mut output = crate::disk::open(std::fs::File::options().write(true).create_new(true), &dst)
-            .with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
-        made.files.push((rel.to_path_buf(), crate::owned::id_of_file(&output)?));
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                // The file being written is let go first: Windows removes no file still open.
-                drop(output);
-                return Err(stopped(destination, made));
-            }
-            let n = input.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            output.write_all(&buffer[..n]).with_context(|| tr!("Could not copy {path}", path = rel.display()))?;
-        }
-        // The source's modification time: Unity compares it with what it recorded, and a copy with Library then has
-        // nothing to look at again. Where a disk cannot keep it, the copy is still whole.
-        if let Ok(modified) = input.metadata().and_then(|m| m.modified()) {
-            let _ = output.set_modified(modified);
-        }
-        // A new file is not executable here, and a copy must be usable: a package's tools, a plugin's programs.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let executable = input.metadata()?.permissions().mode() & 0o111;
-            if executable != 0 {
-                let mut permissions = output.metadata()?.permissions();
-                permissions.set_mode(permissions.mode() | executable);
-                output.set_permissions(permissions)?;
-            }
-        }
-        *progress.lock().unwrap() = Progress { copied: i + 1, total: files.len(), file: rel.display().to_string(), phase: String::from(mark("Copying project")) };
-    }
-    // Its own marker only, through the held folder.
-    crate::owned::delete_file_if(&destination.join(INCOMPLETE), made.marker_id)?;
-    drop(made);
-    Ok(())
 }
+
+/// Nothing of the copy was made, or nothing of it is left.
+#[derive(Debug)]
+struct Nothing;
+
+impl std::fmt::Display for Nothing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(tr("Nothing of the copy is left."))
+    }
+}
+
+/// An error in its own words, without [`Nothing`].
+fn unmarked(e: anyhow::Error) -> anyhow::Error {
+    if e.downcast_ref::<Nothing>().is_none() {
+        return e;
+    }
+    anyhow::anyhow!("{}", e.chain().skip(1).map(|c| c.to_string()).collect::<Vec<_>>().join(": "))
+}
+
+/// The staging folders of no run at all (other tests' runs have theirs).
+#[cfg(test)]
+pub(crate) fn stages_left(app: &Path) -> Vec<OsString> {
+    let left = || {
+        let Ok(held) = AppRoot::existing(app) else { return vec![] };
+        let free = |name: &OsString| {
+            let lock = Stage::lock_of(&name.to_string_lossy());
+            !app.join(&lock).exists() || held.try_lock(&lock).is_ok_and(|l| l.is_some())
+        };
+        held.folders(Path::new(STAGES)).into_iter().filter(|n| free(n)).collect()
+    };
+    let mut now: Vec<OsString> = left();
+    // One between its folder and its lock going.
+    for _ in 0..20 {
+        if now.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        now = left();
+    }
+    now
+}
+
+/// Why a copy or a new project cannot be made in `parent`/`name`, as far as the place alone says (the source's own rules are asked
+/// when it is made): for a window, before it offers to. Reads only.
+pub fn refused_place(parent: &Path, name: &str) -> Option<String> {
+    Destination::check(parent, name, &[], Parents::Make).err().map(|e| e.text())
+}
+
 /// A new project in `parent`/`name` from the template (or, with `duplicate`, the project) in `source`, its packages
 /// restored and registered.
 #[allow(clippy::too_many_arguments)]
@@ -448,64 +332,233 @@ async fn make(
     if !parent.is_absolute() {
         bail!("{}", tr("Choose an absolute destination folder."));
     }
-    let destination = parent.join(name);
     // Never in Creator Companion's or ALCOM's folder, however it is said, nor making a folder on the way there.
     crate::disk::companion(root);
-    crate::disk::tree(&destination)?;
-    let required = duplication_bytes(source, copy.unwrap_or_default())?;
-    let free = crate::size::free_space(parent).with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
-    anyhow::ensure!(
-        free >= required,
-        "{}",
-        tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = required.saturating_sub(free))
-    );
-    copy_keeping(source, &destination, copy.unwrap_or_default(), cancel, progress)?;
-    #[cfg(test)]
-    if STOP_AFTER_COPY.with(|s| s.get()) {
-        cancel.store(true, Ordering::Relaxed);
+    let app = crate::data_dir();
+    if copy.is_some() {
+        use crate::unity6::authority::{allow, Action};
+        allow(&app, source, Action::Duplicate).map_err(|why| anyhow::anyhow!("{why}"))?;
     }
-    let version = destination.join("ProjectSettings/ProjectVersion.txt");
-    if !version.is_file() {
-        if vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
-            bail!("{}", tr!("Choose a Unity editor version. The copied folder is at {path}.", path = destination.display()));
+    Stage::sweep(&app);
+    // Everything is read first, and the source (with what it links to and takes packages from) is only ever read.
+    let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let guid = uuid::Uuid::new_v4().simple().to_string();
+    let keep = copy.unwrap_or_default();
+    // A copy without its Library has the packages only the Library holds as its own (AGENTS.md: installed dependencies, without
+    // their repositories).
+    let installed = copy.is_some() && !keep.library;
+    let how = Making { keep, own: Some(Own { name, from: from.as_deref(), guid: &guid }), unity: Some(unity), installed, ..Default::default() };
+    let destination = parent.join(name);
+    let mut payload = payload::scan(source_folder(source)?, how, cancel).map_err(|e| before_anything(e, &destination, cancel))?;
+    if let Some((name, path)) = payload.missing.first() {
+        bail!("{}", tr!("Required local package {name} is unavailable at {path}", name = name, path = path.display()));
+    }
+    // Where a project says no version, its copy is given one.
+    if matches!(payload.items.get(Path::new(payload::VERSION_FILE)), Some(payload::Item::Made(_))) && vrc_get_vpm::version::UnityVersion::parse(unity).is_none() {
+        bail!("{}", tr("Choose a Unity editor version."));
+    }
+    // Nothing is written anywhere the source can see: not the copy, not what Orbiters and VCC keep.
+    gate::apart(&[&app, root], &payload.protected)?;
+    let place = Destination::check(parent, name, &payload.protected, Parents::Make)?;
+    let free = place.free().with_context(|| tr("Cannot check available disk space. Choose an accessible destination."))?;
+    anyhow::ensure!(free >= payload.bytes, "{}", tr!("Not enough disk space: free at least {bytes} more bytes before duplicating.", bytes = payload.bytes.saturating_sub(free)));
+    // Recorded before anything of it is made, until it is on the list: a copy that stays is never lost from sight.
+    let mut record = crate::copies::Held::begin(&app, source, &destination)?;
+    let filled = fill(&payload, place, &destination, cancel, progress, &mut |new| record.made(new.id));
+    let Filled { new, root: held, mut made, marker } = match filled {
+        Ok(f) => f,
+        Err(e) if e.downcast_ref::<Nothing>().is_some() => {
+            record.done();
+            return Err(unmarked(e));
         }
-        crate::disk::create_dir_all(version.parent().unwrap())
-            .and_then(|()| crate::disk::write(&version, format!("m_EditorVersion: {unity}\n")))
-            .with_context(|| tr!("Choose a Unity editor version. The copied folder is at {path}.", path = destination.display()))?;
-    }
+        Err(e) => {
+            record.failed(&e);
+            return Err(e);
+        }
+    };
     // Every file is in: a Stop pressed now no longer leaves a whole copy unlisted (AGENTS.md: a retained project is
-    // visible); it is registered like any other.
-    // Register the completed copy before any fallible restoration (AGENTS.md): from here on every failure leaves a
-    // project the gallery lists, and says where it is.
-    progress.lock().unwrap().phase = mark("Registering project").into();
-    crate::gallery::add(root, &destination)
-        .with_context(|| tr!("The copy is at {path}, but registration failed", path = destination.display()))?;
-    let listed = || tr!("The copy is listed at {path}, but its local packages could not be copied", path = destination.display());
-    if copy.is_some() { copy_local_packages(source, &destination, cancel, progress).with_context(listed)?; }
-    // A product GUID of its own; a template's product name always becomes the project's, a copy's when it was the
-    // copied project's name.
-    let path = destination.join("ProjectSettings/ProjectSettings.asset");
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        let from = copy.map(|_| source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        crate::disk::write(&path, retarget(&s, name, from.as_deref()))
-            .with_context(|| tr!("The copy is listed at {path}, but its project settings could not be updated", path = destination.display()))?;
+    // visible); it is registered like any other, before anything that can fail.
+    let path = if crate::owned::is_same(&destination, new.id) { destination } else { new.path.clone() };
+    let listed: anyhow::Result<()> = async {
+        record.whole()?;
+        between(Step::Copied)?;
+        copying::unmark(&held, marker)?;
+        between(Step::MarkerGone)?;
+        progress.lock().unwrap().phase = mark("Registering project").into();
+        crate::gallery::add(root, &path)
     }
-    // Duplication preserves installed package contents and exact locked versions, including packages whose
-    // repositories are no longer available. Resolution is needed only for genuinely missing packages/templates.
-    let complete = installed_dependencies_complete(&destination)
-        .with_context(|| tr!("The copy is listed at {path}, but missing packages could not be restored", path = destination.display()))?;
-    if copy.is_none() || !complete {
+    .await;
+    if let Err(e) = listed {
+        let e = e.context(tr!("The copy is at {path}, but registration failed", path = path.display()));
+        record.failed(&e);
+        return Err(e);
+    }
+    record.done();
+    between(Step::Listed)?;
+    // From here on every failure leaves a project the gallery lists, and says where it is.
+    if let Some(why) = payload.late.take() {
+        return Err(anyhow::anyhow!("{why}").context(tr!("The copy is listed at {path}, but its local packages could not be copied", path = path.display())));
+    }
+    // Duplication preserves installed package contents and exact locked versions, including packages whose repositories are no
+    // longer available. Only genuinely missing packages (a template's) are restored: in a folder of Orbiters' own, and put in
+    // the copy from there through its proof.
+    if copy.is_none() || !payload.packages_complete().unwrap_or(false) {
+        let missing = || tr!("The copy is listed at {path}, but missing packages could not be restored", path = path.display());
         progress.lock().unwrap().phase = mark("Restoring missing packages").into();
-        crate::vpm::change(root, &destination, crate::vpm::Change::Resolve).await
-            .with_context(|| tr!("The copy is listed at {path}, but missing packages could not be restored", path = destination.display()))?;
+        let restored: anyhow::Result<()> = async {
+            let stage = Stage::restore(root, &app, &path, &payload, &budget::Disks).await?;
+            // The source is let go; the new folder is held to the end.
+            copying::take_restored(&stage.path, &stage.names, &held, &mut made, progress)?;
+            between(Step::Restored)
+        }
+        .await;
+        restored.with_context(missing)?;
+        // Never called ready unless what it needs is in it.
+        anyhow::ensure!(installed_dependencies_complete(&path).unwrap_or(false), "{}", missing());
     }
-    Ok(destination)
+    drop(new);
+    Ok(path)
 }
 
 #[cfg(test)]
 thread_local! {
-    /// A test's Stop pressed the moment the last file is in.
-    static STOP_AFTER_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's network that is not there.
+    pub(crate) static OFFLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's package that a restore brings, without VPM.
+    pub(crate) static RESTORES: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What one missing package may take at most, in the folder it is restored in (downloaded and unpacked), in the downloads', and in the
+/// copy: the largest of VRChat's and the community's are well below. (No list says how large a package is.)
+const RESTORED: u64 = 384 * 1024 * 1024;
+const CACHED: u64 = 128 * 1024 * 1024;
+/// A template names a package or two, and those name others.
+const FEWEST: u64 = 4;
+
+/// Room on every disk a restore writes on, before anything is downloaded: app data (with the downloads) and the copy's own.
+fn restore_room(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &dyn Room) -> anyhow::Result<()> {
+    let manifest: serde_json::Value = payload.read(Path::new("Packages/vpm-manifest.json"))?.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut names: Vec<&String> = ["dependencies", "locked"].iter().flat_map(|s| manifest[*s].as_object().into_iter().flatten()).map(|(n, _)| n).collect();
+    names.sort();
+    names.dedup();
+    let missing = names.iter().filter(|n| !payload.items.contains_key(&Path::new("Packages").join(n).join("package.json"))).count() as u64; // i18n: not shown (a folder's name)
+    let count = missing.max(FEWEST);
+    let demand = |need, at: &Path, bytes| Demand { need, at: at.to_path_buf(), bytes, low: None };
+    let demands = vec![demand(Need::Download, app, count * RESTORED), demand(Need::Download, &crate::own::dir(root), count * CACHED), demand(Need::Copy, copy, count * RESTORED)];
+    for v in budget::plan(demands, room, false).volumes {
+        anyhow::ensure!(
+            v.fits(),
+            "{}",
+            tr!(
+                "Restoring missing packages may need {need} MB on the disk of {path}, which has {free} MB free.",
+                need = v.total() / 1_000_000,
+                path = v.at.display(),
+                free = v.free.map_or_else(|| tr("unknown").to_string(), |f| (f / 1_000_000).to_string())
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Where missing packages are restored: a folder of Orbiters' own, laid out as a project that has the copy's package lists and
+/// nothing else. It goes when this is dropped; one a crash left goes at the next.
+struct Stage {
+    app: PathBuf,
+    name: String,
+    path: PathBuf,
+    lock: Option<gate::Lock>,
+    /// The packages restored in it.
+    names: Vec<OsString>,
+}
+
+const STAGES: &str = "project-stage";
+
+impl Stage {
+    fn lock_of(name: &str) -> PathBuf {
+        Path::new(STAGES).join(format!("{name}.lock"))
+    }
+
+    /// Takes away what runs that are gone left.
+    fn sweep(app: &Path) {
+        let Ok(held) = AppRoot::existing(app) else { return };
+        for left in held.files(Path::new(STAGES)) {
+            let Some(name) = left.to_str().and_then(|n| n.strip_suffix(".lock")) else { continue };
+            // Nobody holds it: the process that made it is gone.
+            if let Ok(Some(lock)) = held.try_lock(&Self::lock_of(name)) {
+                drop(Stage { app: app.into(), name: name.into(), path: PathBuf::new(), lock: Some(lock), names: vec![] });
+            }
+        }
+    }
+
+    fn make(app: &Path) -> anyhow::Result<Self> {
+        let held = AppRoot::open(app)?;
+        let name = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let lock = held.lock(&Self::lock_of(&name))?;
+        held.make_dir(&Path::new(STAGES).join(&name))?;
+        Ok(Stage { app: app.into(), path: app.join(STAGES).join(&name), name, lock: Some(lock), names: vec![] })
+    }
+
+    /// The packages `payload` is missing, restored.
+    async fn restore(root: &Path, app: &Path, copy: &Path, payload: &Payload, room: &dyn Room) -> anyhow::Result<Self> {
+        restore_room(root, app, copy, payload, room)?;
+        #[cfg(test)]
+        if OFFLINE.with(|o| o.get()) {
+            let _made = Self::make(app)?;
+            bail!("offline");
+        }
+        #[cfg(test)]
+        if let Some((name, version)) = RESTORES.with(|r| r.borrow().clone()) {
+            // What VPM would leave there, without it.
+            let mut stage = Self::make(app)?;
+            let held = AppRoot::existing(app)?;
+            let at = Path::new(STAGES).join(&stage.name).join("Packages");
+            held.write_new(&at.join(&name).join("package.json"), serde_json::json!({ "name": name, "version": version }).to_string().as_bytes())?;
+            held.write_new(&at.join(&name).join("Runtime/new.txt"), b"new")?;
+            held.write_new(&at.join("vpm-manifest.json"), &payload.read(Path::new("Packages/vpm-manifest.json"))?.unwrap_or_default())?;
+            stage.names.push(name.into());
+            return Ok(stage);
+        }
+        let mut stage = Self::make(app)?;
+        let held = AppRoot::existing(app)?;
+        let mut packages = vec![];
+        for at in payload.items.keys() {
+            let names: Vec<_> = at.iter().collect();
+            let wanted = match names[..] {
+                [a, b] => a == "Packages" && (b == "manifest.json" || b == "vpm-manifest.json") || at.as_path() == Path::new(payload::VERSION_FILE), // i18n: not shown (a folder's name)
+                [a, _, c] => a == "Packages" && c == "package.json", // i18n: not shown (a folder's name)
+                _ => false,
+            };
+            let Some(bytes) = wanted.then(|| payload.read(at)).transpose()?.flatten() else { continue };
+            held.write_new(&Path::new(STAGES).join(&stage.name).join(at), &bytes)?;
+            if names.len() == 3 {
+                packages.push((names[1].to_os_string(), bytes));
+            }
+        }
+        crate::vpm::change(root, &stage.path, crate::vpm::Change::Resolve).await?;
+        // What holds only the list put there was there already.
+        for e in std::fs::read_dir(stage.path.join("Packages"))? {
+            let e = e?;
+            let Ok(list) = std::fs::read(e.path().join("package.json")) else { continue };
+            let alone = std::fs::read_dir(e.path())?.count() == 1;
+            let name = e.file_name();
+            if !(alone && packages.iter().any(|(n, was)| *n == name && *was == list)) {
+                stage.names.push(name);
+            }
+        }
+        Ok(stage)
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let Ok(held) = AppRoot::existing(&self.app) else { return };
+        let gone = held.remove_tree(&Path::new(STAGES).join(&self.name));
+        drop(self.lock.take());
+        // What could not go is tried again at the next copy: its lock names it.
+        if gone.is_ok() || !self.app.join(STAGES).join(&self.name).exists() {
+            let _ = held.remove_file(&Self::lock_of(&self.name));
+        }
+    }
 }
 
 /// Fresh copy estimate using the same exclusions and link traversal as the copier, including local packages.
@@ -539,45 +592,6 @@ pub fn duplication_bytes(source: &Path, keep: Keep) -> anyhow::Result<u64> {
     Ok(total)
 }
 
-/// Materialize external UPM folder dependencies so a moved duplicate does not depend on its source location.
-fn copy_local_packages(source: &Path, destination: &Path, cancel: &AtomicBool, progress: &SharedProgress) -> anyhow::Result<()> {
-    let path = destination.join("Packages/manifest.json");
-    if !path.is_file() { return Ok(()); }
-    let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    let mut changed = false;
-    if let Some(dependencies) = manifest["dependencies"].as_object_mut() {
-        for (name, value) in dependencies {
-            let Some(local) = value.as_str().and_then(|s| s.strip_prefix("file:")) else { continue };
-            anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
-            let at = source.join("Packages").join(local);
-            let origin = at.canonicalize().with_context(|| tr!("Required local package {name} is unavailable at {path}", name = name, path = at.display()))?;
-            let target = destination.join("Packages").join(name);
-            if origin.is_dir() {
-                if !target.exists() { copy_keeping_then(&origin, &target, Keep::default(), false, cancel, progress, |_| {})?; }
-                *value = serde_json::Value::String(format!("file:{name}"));
-            } else {
-                let filename = format!("{name}.tgz");
-                let to = destination.join("Packages").join(&filename);
-                // Never over an archive the project already had under that name (PROJECTS-37): the same bytes are
-                // kept, other bytes stop the copy here, named.
-                if to.exists() {
-                    anyhow::ensure!(
-                        std::fs::read(&to)? == std::fs::read(&origin)?,
-                        "{}",
-                        tr!("{file} in the copy's Packages folder is another archive than the one {name} needs ({path})", file = filename, name = name, path = origin.display())
-                    );
-                } else {
-                    crate::disk::copy(&origin, &to)?;
-                }
-                *value = serde_json::Value::String(format!("file:{filename}"));
-            }
-            changed = true;
-        }
-    }
-    if changed { crate::write_json(&path, &manifest)?; }
-    Ok(())
-}
-
 /// The Unity packages of `project` that only its Library holds (PROJECTS-22): those `Packages/packages-lock.json` takes
 /// from Git or from a registry other than Unity's, and that are not in `Packages/` itself. A copy made without Library
 /// has them only after Unity downloads them again from their source, so it is not "ready" while that is unsure.
@@ -603,18 +617,25 @@ pub fn packages_only_in_library(project: &Path) -> Vec<String> {
 }
 
 /// Check every locked dependency, including transitive dependencies, against the copied package metadata.
-fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
-    let path = project.join("Packages/vpm-manifest.json");
-    if !path.exists() { return Ok(true); }
-    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+pub(crate) fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
+    dependencies_complete(|rel| match std::fs::read(project.join(rel)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => Ok(None),
+        Err(e) => Err(e.into()),
+    })
+}
+
+/// [`installed_dependencies_complete`] of the project whose files `read` gives.
+pub(crate) fn dependencies_complete(read: impl Fn(&str) -> anyhow::Result<Option<Vec<u8>>>) -> anyhow::Result<bool> {
+    let Some(manifest) = read("Packages/vpm-manifest.json")? else { return Ok(true) };
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest)?;
     let locked = manifest["locked"].as_object();
     if let Some(dependencies) = manifest["dependencies"].as_object() {
         if dependencies.keys().any(|name| !locked.is_some_and(|l| l.contains_key(name))) { return Ok(false); }
     }
     for (name, package) in locked.into_iter().flatten() {
         anyhow::ensure!(!name.contains(['/', '\\']) && name != "..", "{}", tr!("Invalid package name: {name}", name = name));
-        let installed = project.join("Packages").join(name).join("package.json");
-        let Ok(bytes) = std::fs::read(installed) else { return Ok(false) };
+        let Ok(Some(bytes)) = read(&format!("Packages/{name}/package.json")) else { return Ok(false) };
         let installed: serde_json::Value = serde_json::from_slice(&bytes)?;
         if installed["name"].as_str() != Some(name) || installed["version"] != package["version"] { return Ok(false); }
     }
@@ -625,6 +646,11 @@ fn installed_dependencies_complete(project: &Path) -> anyhow::Result<bool> {
 /// product name (under which the editor keeps the project's PlayerPrefs) changed to `name` when it was `from` (the
 /// copied project's name), or always without `from` (a template's). The other lines and every line's ending stay.
 pub fn retarget(settings: &str, name: &str, from: Option<&str>) -> String {
+    retarget_with(settings, name, from, &uuid::Uuid::new_v4().simple().to_string())
+}
+
+/// [`retarget`] with the product GUID to give it.
+pub(crate) fn retarget_with(settings: &str, name: &str, from: Option<&str>, guid: &str) -> String {
     let mut out = String::with_capacity(settings.len() + 64);
     for line in settings.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
@@ -632,7 +658,7 @@ pub fn retarget(settings: &str, name: &str, from: Option<&str>) -> String {
         let trimmed = body.trim_start();
         let indent = &body[..body.len() - trimmed.len()];
         if trimmed.starts_with("productGUID:") {
-            out.push_str(&format!("{indent}productGUID: {}{end}", uuid::Uuid::new_v4().simple()));
+            out.push_str(&format!("{indent}productGUID: {guid}{end}"));
         } else if trimmed.strip_prefix("productName:").is_some_and(|v| from.is_none_or(|f| unquote(v.trim()) == f)) {
             out.push_str(&format!("{indent}productName: {}{end}", serde_json::to_string(name).unwrap()));
         } else {
@@ -744,9 +770,10 @@ mod tests {
         let manifest_bytes = std::fs::metadata(source.join("Packages/manifest.json")).unwrap().len();
         assert_eq!(duplication_bytes(&source, Keep::default()).unwrap(), manifest_bytes + 4096);
         let destination = temp.path().join("Copy");
-        let progress = Arc::new(Mutex::default());
-        copy(&source, &destination, &AtomicBool::new(false), &progress).unwrap();
-        copy_local_packages(&source, &destination, &AtomicBool::new(false), &progress).unwrap();
+        // It never said which Unity it uses: a new project is given one.
+        let made = made_from(temp.path(), &source, "Copy");
+        assert!(made.is_ok(), "{made:?}");
+        assert!(std::fs::read_to_string(destination.join("ProjectSettings/ProjectVersion.txt")).unwrap().contains("2022.3.22f1"));
         assert_eq!(std::fs::read(destination.join("Packages/external.package/payload.bin")).unwrap(), vec![42u8; 4096]);
         let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("Packages/manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["dependencies"]["external.package"], "file:external.package");
@@ -800,6 +827,12 @@ mod tests {
         assert!(crate::gallery::lists(&root, &copy));
         std::fs::remove_file(copy.join("Packages/private.package/package.json")).unwrap();
         assert!(!installed_dependencies_complete(&copy).unwrap());
+    }
+
+    /// A new project from `source`, its packages not restored (no repository answers in a test).
+    fn made_from(root: &Path, source: &Path, name: &str) -> Result<PathBuf, String> {
+        let rt = crate::runtime().unwrap();
+        rt.block_on(make(&root.join("vcc"), source, root, name, "2022.3.22f1", Some(Keep::default()), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map_err(|e| format!("{e:#}"))
     }
 
     /// A project on disk in `dir`: its version file and a `Packages/manifest.json` with `dependencies`.
@@ -859,12 +892,40 @@ mod tests {
     /// A copy of `source` into `copy`, stopped once its folder exists after `meanwhile` ran: what Stop says.
     fn stopped_after(source: &Path, copy: &Path, meanwhile: impl FnOnce(&Path)) -> String {
         let cancel = AtomicBool::new(false);
-        copy_keeping_then(source, copy, Keep::default(), true, &cancel, &Arc::new(Mutex::default()), |dest| {
-            meanwhile(dest);
-            cancel.store(true, Ordering::Relaxed);
-        })
+        // The hook runs inside the copy: what it borrows outlives it.
+        let mut meanwhile = Some(meanwhile);
+        let at = copy.to_path_buf();
+        {
+            let hook = |step: Step| {
+                if step == Step::Folders {
+                    if let Some(f) = meanwhile.take() {
+                        f(&at);
+                    }
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(())
+            };
+            stepping(hook, || copy_keeping(source, copy, Keep::default(), &cancel, &Arc::new(Mutex::default())))
+        }
         .unwrap_err()
         .to_string()
+    }
+
+    /// Runs `f` with `hook` between the steps of a copy.
+    fn stepping<R>(hook: impl FnMut(Step) -> anyhow::Result<()>, f: impl FnOnce() -> R) -> R {
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                crate::copying::BETWEEN.with(|b| *b.borrow_mut() = None);
+            }
+        }
+        let cell = std::cell::RefCell::new(hook);
+        let hook: Box<dyn Fn(Step) -> anyhow::Result<()> + '_> = Box::new(|s| (cell.borrow_mut())(s));
+        // SAFETY: taken out again (by `Off`, whatever happens) before what it borrows goes.
+        let hook: crate::copying::Between = unsafe { std::mem::transmute(hook) };
+        crate::copying::BETWEEN.with(|b| *b.borrow_mut() = Some(hook));
+        let _off = Off;
+        f()
     }
 
     /// PROJECTS-4: Stop removes what that copy made, and only that.
@@ -983,10 +1044,14 @@ mod tests {
         project(&source, serde_json::json!({}));
         let root = temp.path().join("vcc");
         let rt = crate::runtime().unwrap();
-        STOP_AFTER_COPY.with(|s| s.set(true));
-        let made = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())));
-        STOP_AFTER_COPY.with(|s| s.set(false));
-        let _ = made;
+        let cancel = AtomicBool::new(false);
+        let stop = |step: Step| {
+            if step == Step::Copied {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        };
+        stepping(stop, || rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &cancel, &Arc::new(Mutex::default())))).unwrap();
         assert!(is_registered(&root, &temp.path().join("Copy")));
     }
 
@@ -1002,8 +1067,7 @@ mod tests {
         let source = temp.path().join("Source");
         project(&source, serde_json::json!({ "my.tool": "file:../../External" }));
         let dst = temp.path().join("Copy");
-        copy(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
-        copy_local_packages(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
+        made_from(temp.path(), &source, "Copy").unwrap();
         assert!(dst.join("Packages/my.tool/Logs/part-of-the-package.txt").is_file());
         // An archive: the source holds another file under the name the copy would give it.
         std::fs::write(temp.path().join("tool.tgz"), "the archive").unwrap();
@@ -1013,15 +1077,214 @@ mod tests {
         let estimate = duplication_bytes(&source, Keep::default()).unwrap();
         assert!(estimate >= ("the archive".len() + "something else".len()) as u64, "both counted: {estimate}");
         let dst = temp.path().join("Copy2");
-        copy(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap();
-        let said = copy_local_packages(&source, &dst, &AtomicBool::new(false), &Arc::new(Mutex::default())).unwrap_err().to_string();
-        assert!(said.contains("my.archive.tgz"), "{said}");
+        let said = made_from(temp.path(), &source, "Copy2").unwrap_err();
+        assert!(said.contains("my.archive.tgz") && said.contains("listed"), "{said}");
+        assert!(is_registered(&temp.path().join("vcc"), &dst), "the copy is in the gallery's list");
         assert_eq!(std::fs::read_to_string(dst.join("Packages/my.archive.tgz")).unwrap(), "something else");
         // Gone: named with where it was looked for.
         let source = temp.path().join("Source3");
         project(&source, serde_json::json!({ "my.gone": "file:../../Gone" }));
         let said = format!("{:#}", duplication_bytes(&source, Keep::default()).unwrap_err());
         assert!(said.contains("my.gone") && said.contains("Gone"), "{said}");
+        let said = made_from(temp.path(), &source, "Copy3").unwrap_err();
+        assert!(said.contains("my.gone") && said.contains("Gone") && !temp.path().join("Copy3").exists(), "{said}");
+    }
+
+    /// Third verification R1: one proof of the new folder is held from the moment it is made to the end of its listing: nothing
+    /// takes its place or its folders' meanwhile, and nothing of the original is ever written (its settings, the packages it
+    /// takes from outside, what those link to).
+    #[cfg(windows)]
+    #[test]
+    fn a_duplicates_folder_is_held_to_the_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let (external, shared) = (temp.path().join("External"), temp.path().join("Shared"));
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(external.join("package.json"), r#"{"name":"my.tool","version":"1.0.0"}"#).unwrap();
+        std::fs::write(shared.join("a.mat"), "a").unwrap();
+        junction::create(&shared, external.join("Shared")).unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({ "my.tool": "file:../../External" }));
+        std::fs::write(source.join("ProjectSettings/ProjectSettings.asset"), "  productName: Source\n  productGUID: aa\n").unwrap();
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        let copy = temp.path().join("New/Deeper/Copy");
+        let seen = std::cell::RefCell::new(vec![]);
+        let hook = |step: Step| {
+            seen.borrow_mut().push(step);
+            assert!(std::fs::rename(&copy, temp.path().join("Away")).is_err(), "{step:?}");
+            assert!(std::fs::rename(temp.path().join("New"), temp.path().join("Away")).is_err(), "{step:?}");
+            Ok(())
+        };
+        let made = stepping(hook, || rt.block_on(duplicate(&root, &source, copy.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())))).unwrap();
+        assert_eq!(*seen.borrow(), [Step::Made, Step::Folders, Step::Copied, Step::MarkerGone, Step::Listed]);
+        assert!(crate::copies::shown(&crate::data_dir()).iter().all(|(c, _)| c.destination != copy), "on the list: no record of it left");
+        assert!(made == copy && is_registered(&root, &copy));
+        // Everything of its own was written once, with the rest.
+        let settings = std::fs::read_to_string(copy.join("ProjectSettings/ProjectSettings.asset")).unwrap();
+        assert!(settings.contains("productName: \"Copy\"") && !settings.contains("productGUID: aa"), "{settings}");
+        assert_eq!(std::fs::read_to_string(copy.join("Packages/my.tool/Shared/a.mat")).unwrap(), "a");
+        assert!(!crate::owned::is_link(&std::fs::symlink_metadata(copy.join("Packages/my.tool/Shared")).unwrap()));
+        // What the package links to is the original's: no copy goes there.
+        let said = rt.block_on(duplicate(&root, &source, &shared, "In", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map(|_| ()).unwrap_err().to_string();
+        assert!(said.contains("original uses") && !shared.join("In").exists(), "{said}");
+        // App data or VCC's folder that the project links to: nothing is written there either.
+        let kept = temp.path().join("vcc2");
+        std::fs::create_dir_all(&kept).unwrap();
+        junction::create(&kept, source.join("Assets/Kept")).unwrap();
+        assert!(rt.block_on(duplicate(&kept, &source, temp.path(), "Other", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).is_err());
+        assert!(std::fs::read_dir(&kept).unwrap().count() == 0 && !temp.path().join("Other").exists());
+        junction::delete(source.join("Assets/Kept")).unwrap();
+        junction::delete(external.join("Shared")).unwrap();
+    }
+
+    /// A copy whose missing packages cannot be restored is listed all the same, and named; what they were restored in goes.
+    #[test]
+    fn a_copy_whose_packages_cannot_be_restored_is_listed_and_named() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        crate::write_json(&source.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"gone.package":{"version":"1.0.0"}},"locked":{"gone.package":{"version":"1.0.0","dependencies":{}}}})).unwrap();
+        let root = temp.path().join("vcc");
+        let manifest = std::fs::read(source.join("Packages/vpm-manifest.json")).unwrap();
+        let rt = crate::runtime().unwrap();
+        let said = OFFLINE.with(|o| {
+            o.set(true);
+            let r = rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default())));
+            o.set(false);
+            format!("{:#}", r.map(|_| ()).unwrap_err())
+        });
+        let copy = temp.path().join("Copy");
+        assert!(said.contains("could not be restored") && said.contains(&copy.display().to_string()), "{said}");
+        assert!(is_registered(&root, &copy) && crate::discovery::is_project(&copy));
+        assert_eq!(std::fs::read(copy.join("Packages/vpm-manifest.json")).unwrap(), manifest, "its package list is the project's");
+        assert!(stages_left(&crate::data_dir()).is_empty());
+    }
+
+    /// AGENTS.md: a copy is listed before anything of it is restored; then packages restored in Orbiters' own folder take the place of
+    /// what it had of them, with the list that goes with them. Everything else is the project's own.
+    #[test]
+    fn a_copy_is_listed_and_then_its_packages_are_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        for (at, text) in [("Packages/kept/package.json", "{}"), ("Packages/kept/mine.txt", "mine"), ("Packages/half/package.json", r#"{"name":"half","version":"0.9.0"}"#), ("Packages/half/old.txt", "old")] {
+            std::fs::create_dir_all(source.join(at).parent().unwrap()).unwrap();
+            std::fs::write(source.join(at), text).unwrap();
+        }
+        crate::write_json(&source.join("Packages/vpm-manifest.json"), &serde_json::json!({"dependencies":{"half":{"version":"1.0.0"}},"locked":{"half":{"version":"1.0.0","dependencies":{}}}})).unwrap();
+        let root = temp.path().join("vcc");
+        let rt = crate::runtime().unwrap();
+        let copy = temp.path().join("Copy");
+        RESTORES.with(|r| *r.borrow_mut() = Some(("half".into(), "1.0.0".into())));
+        let steps = std::cell::RefCell::new(vec![]);
+        let made = stepping(
+            |step| {
+                steps.borrow_mut().push((step, copy.join("Packages/half/old.txt").is_file()));
+                Ok(())
+            },
+            || rt.block_on(duplicate(&root, &source, temp.path(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))),
+        );
+        RESTORES.with(|r| *r.borrow_mut() = None);
+        assert_eq!(made.unwrap(), copy);
+        let at = |s: Step| steps.borrow().iter().position(|(x, _)| *x == s).unwrap();
+        assert!(at(Step::Listed) < at(Step::Restored));
+        assert_eq!((steps.borrow()[at(Step::Listed)].1, steps.borrow()[at(Step::Restored)].1), (true, false), "what it had, then what was restored");
+        let read = |at: &str| std::fs::read_to_string(copy.join(at)).ok();
+        assert_eq!(read("Packages/kept/mine.txt").as_deref(), Some("mine"));
+        assert_eq!(read("Packages/half/Runtime/new.txt").as_deref(), Some("new"));
+        assert!(installed_dependencies_complete(&copy).unwrap() && is_registered(&root, &copy));
+        assert_eq!(std::fs::read(source.join("Packages/half/old.txt")).unwrap(), b"old", "the source is the source's");
+    }
+
+    /// AGENTS.md: a whole copy that could not be listed is in the gallery, wherever it is, with why, and can be listed again.
+    #[test]
+    fn a_whole_copy_that_could_not_be_listed_is_in_the_gallery() {
+        let temp = tempfile::Builder::new().prefix("unlisted").tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let (root, app) = (temp.path().join("vcc"), crate::data_dir());
+        let full = crate::own::full_for(&root);
+        let at = temp.path().join(".hidden").join("Copy");
+        let rt = crate::runtime().unwrap();
+        let said = rt.block_on(duplicate(&root, &source, at.parent().unwrap(), "Copy", Keep::default(), &AtomicBool::new(false), &Arc::new(Mutex::default()))).map(|_| ()).map_err(|e| format!("{e:#}")).unwrap_err();
+        assert!(said.contains(&at.display().to_string()), "{said}");
+        let mine = || crate::copies::shown(&app).into_iter().find(|(c, _)| c.destination == at);
+        let (copy, status) = mine().expect("recorded");
+        assert_eq!((status, copy.error.as_deref()), (crate::copies::Status::Unlisted, Some(said.as_str())));
+        assert!(crate::copies::folders(&app).contains(&at), "in the gallery though its folder begins with a dot");
+        // The list is there again.
+        drop(full);
+        crate::copies::list(&app, &root, &copy.id).unwrap();
+        assert!(mine().is_none() && is_registered(&root, &at));
+    }
+
+    /// Room for a restore is asked of every disk it writes on, before anything is downloaded.
+    #[test]
+    fn a_restore_needs_room_on_every_disk_it_writes_on() {
+        struct Disks(u64, u64, u64);
+        impl Room for Disks {
+            fn of(&self, path: &Path) -> Option<(String, u64)> {
+                match path.to_str()? {
+                    "app" => Some(("a".into(), self.0)),
+                    downloads if downloads.contains("orbiters-projects-tests") => Some(("v".into(), self.1)),
+                    _ => Some(("c".into(), self.2)),
+                }
+            }
+        }
+        struct One(u64);
+        impl Room for One {
+            fn of(&self, _: &Path) -> Option<(String, u64)> {
+                Some(("one".into(), self.0))
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Source");
+        project(&source, serde_json::json!({}));
+        let locked: serde_json::Map<_, _> = (0..6).map(|i| (format!("gone{i}"), serde_json::json!({"version":"1.0.0"}))).collect();
+        crate::write_json(&source.join("Packages/vpm-manifest.json"), &serde_json::json!({ "locked": locked })).unwrap();
+        let payload = payload::scan(&source, Making::default(), &AtomicBool::new(false)).unwrap();
+        let ask = |room: &dyn Room| restore_room(Path::new("vcc"), Path::new("app"), Path::new("copy"), &payload, room);
+        let (r, c) = (6 * RESTORED, 6 * CACHED);
+        assert!(ask(&Disks(r, c, r)).is_ok());
+        for short in [Disks(r - 1, c, r), Disks(r, c - 1, r), Disks(r, c, r - 1)] {
+            assert!(ask(&short).unwrap_err().to_string().contains("MB"));
+        }
+        // One disk for all three: their sum.
+        assert!(ask(&One(2 * r + c)).is_ok() && ask(&One(2 * r + c - 1)).is_err());
+    }
+
+    /// A restore's folder that could not be taken away stays named by its lock, and goes at the next copy.
+    #[cfg(windows)]
+    #[test]
+    fn a_restore_s_folder_that_could_not_go_goes_at_the_next_copy() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let stage = Stage::make(&app).unwrap();
+        let (path, name) = (stage.path.clone(), stage.name.clone());
+        std::fs::write(path.join("in use.txt"), "x").unwrap();
+        let held = std::fs::File::options().read(true).share_mode(1).open(path.join("in use.txt")).unwrap();
+        drop(stage);
+        assert!(path.exists() && app.join(Stage::lock_of(&name)).is_file());
+        drop(held);
+        // One that is in use is left to its run.
+        let mine = Stage::make(&app).unwrap();
+        Stage::sweep(&app);
+        assert!(!path.exists() && !app.join(Stage::lock_of(&name)).exists() && mine.path.is_dir());
+    }
+
+    /// Where no copy can be made, said for a window before it offers to: a share, inside a project, a name or a folder taken.
+    #[test]
+    fn a_place_that_is_refused_is_said_before() {
+        let temp = tempfile::tempdir().unwrap();
+        let inside = temp.path().join("Project");
+        project(&inside, serde_json::json!({}));
+        assert_eq!(refused_place(temp.path(), "New"), None);
+        assert_eq!(refused_place(&temp.path().join("not/there/yet"), "New"), None);
+        assert!(refused_place(&inside.join("Assets"), "New").unwrap().contains("Unity project"));
+        assert!(refused_place(temp.path(), "Project").is_some() && refused_place(temp.path(), "a:b").is_some() && refused_place(Path::new("relative"), "New").is_some());
+        assert!(!cfg!(windows) || refused_place(Path::new(r"\\server\share"), "New").unwrap().contains("network share"));
     }
 
     #[test]

@@ -66,7 +66,10 @@ pub fn request(avatar: Avatar, asset_id: u64, server: &str, app_version: &str) -
         then: vec!["save-scene".into(), "open-build-panel".into()],
     })
 }
-pub fn write(project: &Path, request: &Request) -> anyhow::Result<()> {
+pub fn write(project: &Path, request: &Request, handoff: &crate::unity6::authority::Handoff) -> anyhow::Result<()> {
+    // It ends in the SDK's build panel, ready to upload: leave for that is asked of the one place that knows.
+    // Asked again now: package work, another program or a swapped folder may have changed what it was given for.
+    handoff.still(project).map_err(|why| anyhow::anyhow!("{why}"))?;
     if request.schema != 1 || uuid::Uuid::parse_str(&request.id)?.to_string() != request.id {
         bail!("{}", tr("Invalid setup request id or schema"));
     }

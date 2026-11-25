@@ -74,10 +74,13 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
     let packages_y = Id::unique("project-panel-packages-y");
     let mixer_y = Id::unique("project-panel-mixer-y");
     let commits_y = Id::unique("project-panel-commits-y");
+    let unity6_y = Id::unique("project-panel-unity6-y");
     let bar = Rect::from_min_max(pos2(rect.right() - 13.0, rect.top() + 18.0), pos2(rect.right() - 3.0, rect.bottom() - 18.0));
     let mut scroll = egui::ScrollArea::vertical().id_salt(("project-panel-scroll", &project.path)).auto_shrink([false, false]).scroll_bar_rect(bar);
-    if state.scroll_to_packages || state.scroll_to_mixer || state.scroll_to_commits {
-        let at = if state.scroll_to_commits {
+    if state.scroll_to_packages || state.scroll_to_mixer || state.scroll_to_commits || state.u6.scroll_to {
+        let at = if state.u6.scroll_to {
+            unity6_y
+        } else if state.scroll_to_commits {
             commits_y
         } else if state.scroll_to_mixer {
             mixer_y
@@ -89,6 +92,7 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             state.scroll_to_packages = false;
             state.scroll_to_mixer = false;
             state.scroll_to_commits = false;
+            state.u6.scroll_to = false;
         }
     }
     let from = orbiters_ui::blur::next_shape(ui);
@@ -101,6 +105,8 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
             hero(ui, cx, state, &project, !split.docked);
             only_here(ui, cx, state, &project);
             super::storage_card::card(ui, state, &project);
+            ctx.data_mut(|d| d.insert_temp(unity6_y, ui.cursor().top() - top));
+            super::unity6_card::card(ui, cx, state, &project);
             if state.modal.is_none() {
                 super::ui::errors(ui, state, "panel");
             }
@@ -113,10 +119,16 @@ pub(super) fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect, cont
                 avatars(ui, cx, state, &project);
             }
             ctx.data_mut(|d| d.insert_temp(mixer_y, ui.cursor().top() - top));
-            mixer(ui, cx, state, &project);
+            // A trial waiting for Creator Companion's migration: no package change from here (its Unity 6 card says why).
+            let waiting = state.u6.waiting(&project.path);
+            if !waiting {
+                mixer(ui, cx, state, &project);
+            }
             ctx.data_mut(|d| d.insert_temp(packages_y, ui.cursor().top() - top));
-            super::packages_card::packages(ui, state, &project);
-            available(ui, state, &project);
+            if !waiting {
+                super::packages_card::packages(ui, state, &project);
+                available(ui, state, &project);
+            }
             ctx.data_mut(|d| d.insert_temp(commits_y, ui.cursor().top() - top));
             commits(ui, cx, state, &project);
             ui.add_space(8.0);
@@ -160,7 +172,7 @@ fn sticky_bar(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, re
         .icon(icons::PLAY)
         .variant(Variant::Primary)
         .size(Size::Sm)
-        .enabled(project.registered && !project.missing && !state.running() && !state.repairing(&project.path) && k > 0.5)
+        .enabled(project.registered && !project.missing && !state.running() && !state.repairing(&project.path) && !state.u6.waiting(&project.path) && k > 0.5)
         .id_salt("panel-bar-open");
     let open = project.registered && state.session(&project.path).open();
     let bw = if open { 280.0_f32.min(band.width() * 0.6) } else { b.desired_width(&bu) };
@@ -306,11 +318,18 @@ fn hero(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, sheet: b
         super::unity_session::controls(ui, state, project, wide, "hero");
     } else if project.registered {
         let moving = state.repairing(&project.path);
-        let b = Button::new(if moving { tr("Moving its Library…") } else { tr("Open in Unity") })
+        let waiting = state.u6.waiting(&project.path);
+        let b = Button::new(if moving {
+            tr("Moving its Library…")
+        } else if waiting {
+            tr("Waiting for migration")
+        } else {
+            tr("Open in Unity")
+        })
             .icon(icons::PLAY)
             .variant(Variant::Primary)
             .width(main_w)
-            .enabled(!project.missing && !busy && !moving)
+            .enabled(!project.missing && !busy && !moving && !waiting)
             .id_salt("panel-open");
         if widgets::activated(&b.show_at(ui, main)) {
             state.open_unity(&ctx, project, false);
@@ -484,7 +503,7 @@ fn avatars(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project) {
                     widgets::text(p, pr.center(), Align2::CENTER_CENTER, &t);
                 }
                 widgets::text_truncated(p, pos2(x, thumb.top() + 30.0), Align2::LEFT_CENTER, &Txt::new(&a.scene, 11.5).color(theme::FG_3), link.left() - 8.0 - x);
-                let enabled = project.registered && !state.running();
+                let enabled = project.registered && !state.running() && !state.u6.waiting(&project.path);
                 let nano = Button::new(tr("Add N4N0")).icon(icons::N4N0_MARK).size(Size::Sm).enabled(enabled).id_salt(("add-n4n0", &a.id, &a.scene));
                 let nw = nano.desired_width(ui);
                 let nr = Rect::from_min_size(pos2(x, thumb.top() + 46.0), vec2(nw, 32.0));

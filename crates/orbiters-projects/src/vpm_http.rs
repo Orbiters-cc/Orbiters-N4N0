@@ -61,6 +61,8 @@ fn allowed<'a>(scoped: &[Scoped], url: &Url, headers: impl IntoIterator<Item = (
     let origin = url.origin();
     headers
         .into_iter()
+        // Every request names Orbiters: a repository's configured headers never name another program in its place.
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("User-Agent"))
         .filter(|(name, value)| scoped.iter().any(|s| s.name.eq_ignore_ascii_case(name) && s.value == *value && s.origin.as_ref().is_some_and(|o| *o == origin && o.is_tuple())))
         .collect()
 }
@@ -138,6 +140,12 @@ mod tests {
         // A pair the settings no longer have (an older cached listing's) goes nowhere, not even to its own host.
         let stale = [("Authorization", "Bearer old")];
         assert!(allowed(&scoped, &Url::parse("https://vpm.example.com/a.zip").unwrap(), stale).is_empty());
+        // What names the program asking is Orbiters' own, whatever a repository's settings say.
+        let other = vec![super::tests::scoped("User-Agent", "VCC/1.0", "https://vpm.example.com/index.json")]
+            .into_iter()
+            .chain([Scoped { name: "user-agent".into(), value: "VCC/1.0".into(), origin: Some(Url::parse("https://vpm.example.com/").unwrap().origin()) }])
+            .collect::<Vec<_>>();
+        assert!(allowed(&other, &Url::parse("https://vpm.example.com/a.zip").unwrap(), [("User-Agent", "VCC/1.0"), ("user-agent", "VCC/1.0")]).is_empty());
         // A header name matched whatever its case.
         let lower = [("authorization", "Bearer secret")];
         assert_eq!(allowed(&scoped, &Url::parse("https://vpm.example.com/a.zip").unwrap(), lower).len(), 1);

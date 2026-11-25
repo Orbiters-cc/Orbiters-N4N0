@@ -397,7 +397,8 @@ const WINDOWS: &[&str] = &[
 
 /// What of the crate's file `name` writes on a disk by itself.
 fn writers(name: &str, text: &str) -> Vec<String> {
-    if name == "disk.rs" {
+    // (And the gate's own two files: each writes below a folder held open, which the gate asked `disk` about first.)
+    if matches!(name, "disk.rs" | "sys_windows.rs" | "sys_unix.rs") {
         return vec![];
     }
     let tokens = source::production(&source::tokens(text));

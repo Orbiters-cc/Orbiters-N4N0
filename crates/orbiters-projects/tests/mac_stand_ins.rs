@@ -13,6 +13,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 const VERSION: &str = "2022.3.22f1";
+/// That version's own build: a project names it, and an editor of another build is not used for it.
+const BUILD: &str = "887be4894c44";
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -29,14 +31,14 @@ fn bundle(source: &str, app: &Path, program: &str, id: &str) {
     write(
         &app.join("Contents/Info.plist"),
         &format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>{program}</string><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>{VERSION}</string></dict></plist>"#
+            r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>{program}</string><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>{VERSION}</string><key>UnityBuildNumber</key><string>{BUILD}</string></dict></plist>"#
         ),
     );
     assert!(Command::new("codesign").args(["-s", "-", "--force"]).arg(app).stderr(std::process::Stdio::null()).status().unwrap().success());
 }
 
 fn make_project(path: &Path, version: &str, sdk: &str) -> Project {
-    write(&path.join("ProjectSettings/ProjectVersion.txt"), &format!("m_EditorVersion: {version}\n"));
+    write(&path.join("ProjectSettings/ProjectVersion.txt"), &if version == VERSION { format!("m_EditorVersion: {version}\nm_EditorVersionWithRevision: {version} ({BUILD})\n") } else { format!("m_EditorVersion: {version}\n") });
     write(&path.join("Packages/vpm-manifest.json"), &format!(r#"{{"dependencies":{{"{sdk}":{{"version":"3.7.0"}}}},"locked":{{"{sdk}":{{"version":"3.7.0"}}}}}}"#));
     write(&path.join("Packages/manifest.json"), r#"{"dependencies":{}}"#);
     write(&path.join("Assets/Scenes/Main.unity"), "%YAML 1.1\n");
@@ -108,7 +110,7 @@ fn a_project_goes_through_everything_the_panel_does() {
     assert_eq!(found(&avatar.path).expect("named by Unity Hub").unity, VERSION);
     assert_eq!(found(&world.path).expect("in Unity Hub's folder of projects").kind, discovery::Kind::Worlds);
     assert!(found(&newer.path).is_some());
-    assert!(home.join("Library/Application Support/Orbiters/unity-projects.json").is_file(), "the scan is kept in the app's data");
+    assert!(orbiters_projects::data_dir().join("unity-projects.json").is_file(), "the scan is kept in the app's data");
 
     // ---- The editors: the version recorded, and only that.
     assert_eq!(discovery::find_editor(VERSION), Some(unity.join("Contents/MacOS/Unity")));

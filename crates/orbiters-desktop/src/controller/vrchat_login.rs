@@ -1,4 +1,5 @@
-//! Owner-gated, local VRChat session. Only the feature check goes to Orbiters.
+//! The local VRChat session, held for the Orbiters member who owns it, offered as the server's `n4n0-vrchat-login` says
+//! (open to every member). Only the feature check goes to Orbiters.
 use super::vrchat_scope::{enforce, Stamp};
 pub(super) use super::vrchat_scope::Owner;
 use super::{Controller, Shared};

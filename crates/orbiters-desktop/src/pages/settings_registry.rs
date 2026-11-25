@@ -138,6 +138,9 @@ pub enum Gate {
     GpuChoice,
     /// The window can choose its GPU and is on the graphics card.
     GpuSplit,
+    /// VRChat runs here and a gun changed this player's avatar once (`avatar_gun.changed_once`): who may do it shows from
+    /// then on (Enzo, 2026-11-24).
+    AvatarGunChanged,
 }
 
 /// What the page knows when it searches: which gates are open.
@@ -147,6 +150,8 @@ pub struct Open {
     pub vrchat_login: bool,
     pub gpu_choice: bool,
     pub gpu_split: bool,
+    /// A gun changed this player's avatar once.
+    pub avatar_gun: bool,
 }
 
 impl Open {
@@ -169,11 +174,12 @@ impl Open {
             Gate::VrchatLogin => self.vrchat_login,
             Gate::GpuChoice => self.gpu_choice,
             Gate::GpuSplit => self.gpu_split,
+            Gate::AvatarGunChanged => HERE.vrchat_runs && self.avatar_gun,
         }
     }
 
     /// Everything open (the tests, which draw every card).
-    pub const ALL: Open = Open { bridge: true, vrchat_login: true, gpu_choice: true, gpu_split: true };
+    pub const ALL: Open = Open { bridge: true, vrchat_login: true, gpu_choice: true, gpu_split: true, avatar_gun: true };
 }
 
 /// One setting.
@@ -338,7 +344,7 @@ pub static ENTRIES: &[Entry] = &[
             }
         }).controls(&["n4n0-direct-calls"]),
     e("n4n0.avatar-gun", N4n0, super::avatar_gun::TITLE, super::avatar_gun::WHO, super::avatar_gun::WHO_WHY, super::avatar_gun::KEYWORDS)
-        .gate(Gate::VrchatHere)
+        .gate(Gate::AvatarGunChanged)
         .controls(&["avatar-gun-allow"]),
     // Voice & assistant.
     e("voice.assistant", Voice, mark("Assistant"), mark("AI assistant"), mark("Off, N4N0 is a tool without AI: nothing is transcribed, and nothing goes to Orbiters."), mark("AI brain chat answers")).controls(&["n4n0-ai"]),

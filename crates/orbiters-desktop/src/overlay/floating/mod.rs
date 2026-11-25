@@ -309,7 +309,7 @@ impl Floating {
         if let (Some(p), Some(n)) = (self.prompt.as_mut(), notice.as_ref()) {
             p.fit(cx.overlay, prompt::Face::World { earns_one: n.earns == Some(1.0), on: None });
         } else if let (Some(p), Some(c)) = (self.prompt.as_mut(), gun.as_ref()) {
-            p.fit(cx.overlay, prompt::Face::Gun { ask: c.kind == crate::controller::avatar_gun::CardKind::Ask });
+            p.fit(cx.overlay, prompt::Face::Gun { ask: c.kind == crate::controller::avatar_gun::CardKind::Ask, tall: c.hinted() });
         } else if let Some(p) = self.prompt.as_mut().filter(|_| band.is_some()) {
             p.fit(cx.overlay, prompt::Face::Talk);
         }
@@ -468,7 +468,7 @@ impl Floating {
         }
         // The avatar gun's card: Allow, Not now, Undo or its cross, on the release, on its part.
         if let (Some(c), Some(uv)) = (gun.as_ref(), outcome.prompt_release) {
-            if let Some(part) = crate::avatar_gun_ui::part_at_uv(&c.kind, uv) {
+            if let Some(part) = crate::avatar_gun_ui::part_at_uv(c, uv) {
                 clicked = true;
                 cx.backend.avatar_gun(crate::avatar_gun_ui::command(c, part));
                 if let Some(p) = self.prompt.as_mut() {
@@ -544,9 +544,9 @@ impl Floating {
             let look = prompt::look_of((pk.id, &names, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
             p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::shared_view_ui::paint_pick(painter, &names, hover, left));
         } else if let (Some(p), Some(c)) = (self.prompt.as_mut(), gun.as_ref()) {
-            let hover = outcome.prompt_at.and_then(|uv| crate::avatar_gun_ui::part_at_uv(&c.kind, uv));
+            let hover = outcome.prompt_at.and_then(|uv| crate::avatar_gun_ui::part_at_uv(c, uv));
             let left = c.left(crate::controller::unix_ms());
-            let look = prompt::look_of((c.id, format!("{:?}", c.kind), &c.from, &c.avatar, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
+            let look = prompt::look_of((c.id, format!("{:?}{:?}", c.kind, c.hint), &c.from, &c.avatar, hover, orbiters_i18n::language(), (left * STEPS).ceil() as u32));
             p.paint_with(cx.overlay, cx.presenter, look, |painter| crate::avatar_gun_ui::paint_vr(painter, c, hover, left));
         } else if let (Some(p), Some(o)) = (self.prompt.as_mut(), rest) {
             p.paint(cx.overlay, cx.presenter, prompt::Face::KeepOpen { seconds: o.seconds(now_ms) }, outcome.prompt_hover, o.left(now_ms));

@@ -741,6 +741,7 @@ mod tests {
         let mut q = Queue::default();
         q.push_to(WORLD, Action::Comment { text: "A's draft".into(), client_id: "n4n0-a".into() }, 0, prod.clone());
         assert_eq!(q.for_stamp(&prod).count(), 1);
+        assert!(std::ptr::eq(q.for_stamp(&prod).next().unwrap(), &q.items[0]), "show the queued action without copying it");
         assert!(q.for_stamp(&other).next().is_none(), "B never sees A's waiting comment");
     }
 

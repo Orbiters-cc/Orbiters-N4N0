@@ -340,13 +340,13 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
-    /// How long until [`Self::next_call`] may have one by the clock alone: never with nothing queued and no world shown (what is
-    /// queued and shown meanwhile wakes the sender).
+    /// When the sender next needs to send, read or expire an action. New queue entries and requests wake it directly.
     fn next_due(&self, now: u64) -> Option<Duration> {
         let parked = self.parked.iter().filter(|(stamp, until)| stamp.sends_as(&self.stamp) && now < *until).map(|(_, until)| *until).max();
         let queued = self.queue.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&self.stamp))).map(|p| p.due.max(parked.unwrap_or(0)));
+        let expiry = self.queue.items.iter().filter(|p| p.to.is_some()).map(|p| p.since.saturating_add(orbiters_core::world_feedback::DROP_AFTER.as_millis() as u64));
         let read = self.wanted.keys().map(|w| self.known.get(w).map_or(now, |k| k.read_at + READ_AGAIN.as_millis() as u64 + 1));
-        queued.chain(read).min().map(|at| Duration::from_millis(at.saturating_sub(now).max(300)))
+        queued.chain(expiry).chain(read).min().map(|at| Duration::from_millis(at.saturating_sub(now).max(300)))
     }
 
     /// The other server's answers are forgotten, and those still coming are not taken.
@@ -1073,8 +1073,7 @@ mod tests {
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 
-    /// DCT-14: the sender sleeps until the next call there is, and for ever with none: never past one, so nothing is sent later
-    /// than it was. DCT-27: the answers kept are bounded, and none in use goes.
+    /// DCT-14: the sender sleeps until a call or expiry is due and waits for a signal when its queue is empty.
     #[test]
     fn the_sender_sleeps_until_its_next_call() {
         let stamp = Stamp { server: "s".into(), account: Some("1".into()), credential: None };
@@ -1087,8 +1086,11 @@ mod tests {
         };
         let now = now_ms();
         assert!(rt.next_call().is_none() && rt.next_due(now).is_none(), "nothing to do: nothing is due");
-        // Another account's waiting action is nothing to this one.
+        // The sender never sends another account's waiting action. It still removes it when its retention period ends.
         rt.queue.push_to(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }), now, Stamp { account: Some("2".into()), ..stamp.clone() });
+        assert!(rt.next_call().is_none());
+        assert_eq!(rt.next_due(now), Some(orbiters_core::world_feedback::DROP_AFTER));
+        rt.queue.items[0].since = now - orbiters_core::world_feedback::DROP_AFTER.as_millis() as u64;
         assert!(rt.next_call().is_none() && rt.next_due(now).is_none());
         // Its own is, once its wait is over; parked, once the pause ends.
         rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));

@@ -1168,11 +1168,15 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
     let mut withheld = false;
     for row in rows {
         let Some(o) = state.open.as_mut() else { return };
-        let id = match row {
-            None => me.as_ref().map(|me| me.membership_id.clone()),
-            Some(i) => o.members.items.get(i).map(row_of),
+        // Which row it is, borrowed (DPG-22: a row out of view made a copy of its member's id on every frame, 2,000 a
+        // frame on a full roster); made owned only for a press of its Roles button.
+        let open_now = {
+            let key = match row {
+                None => me.as_ref().map(|me| me.membership_id.as_str()),
+                Some(i) => o.members.items.get(i).map(row_key),
+            };
+            key.is_some() && open_for.as_deref() == key
         };
-        let open_now = id.is_some() && open_for == id;
         if !open_now {
             let next = Rect::from_min_size(ui.cursor().min, vec2(w, 60.0));
             if !ui.is_rect_visible(next.expand(120.0)) {
@@ -1228,6 +1232,10 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
             let b = Rect::from_min_size(pos2(rect.right() - 108.0, rect.center().y - 16.0), vec2(96.0, 32.0));
             if widgets::Button::new(tr("Roles")).icon(if open_now { icons::CARET_UP } else { icons::CARET_DOWN }).size(widgets::Size::Sm).id_salt(("member-roles", m.user_id.as_str())).show_at(ui, b).clicked() {
                 if let Some(o) = state.open.as_mut() {
+                    let id = match row {
+                        None => me.as_ref().map(|me| me.membership_id.clone()),
+                        Some(i) => o.members.items.get(i).map(row_of),
+                    };
                     o.member_roles = if open_now { None } else { id };
                 }
             }
@@ -1254,7 +1262,11 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
 /// The row a member's record is: their membership (one who left and came back is another), or the record alone when it does
 /// not say which.
 fn row_of(m: &Member) -> String {
-    if m.membership_id.is_empty() { m.user_id.clone() } else { m.membership_id.clone() }
+    row_key(m).to_owned()
+}
+
+fn row_key(m: &Member) -> &str {
+    if m.membership_id.is_empty() { &m.user_id } else { &m.membership_id }
 }
 
 #[cfg(test)]
@@ -2273,6 +2285,40 @@ mod tests {
         }
         let built = state.open.unwrap().rows_built / frames;
         assert!(built > 3 && built < 40, "{built} rows a frame of 2000");
+    }
+
+    /// DPG-22: a frame of a roster costs the rows in view: 2,000 members loaded allocate about what 40 do (each row out
+    /// of view copied its member's id to know whether its roles were open).
+    #[test]
+    fn a_frame_of_a_large_roster_allocates_for_the_rows_in_view() {
+        let ctl: crate::backend::Ctl = std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = ctl.view();
+        let scope = crate::controller::vrchat_data::Scope::of(&snap);
+        let ctx = egui::Context::default();
+        let mut made = Vec::new();
+        for n in [40usize, 2000] {
+            let mut state = State { staged: true, ..Default::default() };
+            let mut o = open_as(&["*"], &["grol_owner"]);
+            o.members.started = true;
+            o.members.items = (0..n).map(|i| Member { user_id: format!("usr_00000000-0000-4000-8000-{i:012}"), display_name: Some(format!("Member {i}")), roles_known: true, ..Default::default() }).collect();
+            state.open = Some(o);
+            let mut frame = |t: usize, state: &mut State| {
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 600.0))), time: Some(t as f64), ..Default::default() };
+                let mut toasts = orbiters_ui::toast::Toasts::default();
+                let mut out = ctx.run_ui(input, |ui| {
+                    let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| members(ui, &cx, state, &scope, &mut Vec::new()));
+                });
+                out.textures_delta.clear();
+            };
+            for t in 0..5 {
+                frame(t, &mut state);
+            }
+            let n_made = crate::test_alloc::count(|| (5..25).for_each(|t| frame(t, &mut state))) / 20;
+            println!("DPG-22, a roster of {n} members: {n_made} allocations a frame");
+            made.push(n_made);
+        }
+        assert!(made[1] < made[0] + 200, "2,000 members cost {} allocations a frame, 40 cost {}", made[1], made[0]);
     }
 
     /// Major 9: so does a long list of posts, and it is bounded.

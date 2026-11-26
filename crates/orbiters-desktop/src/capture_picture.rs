@@ -51,6 +51,8 @@ pub fn png_file(session: &Path, dir: &Path, name: &str) -> Option<PathBuf> {
     }
     let (w, h, rgba) = rgba(session)?;
     std::fs::create_dir_all(dir).ok()?;
+    #[cfg(test)]
+    ENCODED.with(|n| n.set(n.get() + 1));
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out).write_image(&rgb(&rgba), w, h, image::ExtendedColorType::Rgb8).ok()?;
     orbiters_core::write_atomic(&file, &out).ok()?;
@@ -58,6 +60,12 @@ pub fn png_file(session: &Path, dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 use image::ImageEncoder;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the PNGs [`png_file`] encoded on this thread.
+    pub static ENCODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 mod tests {

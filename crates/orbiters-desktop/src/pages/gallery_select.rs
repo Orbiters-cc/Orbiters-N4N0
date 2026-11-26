@@ -69,8 +69,10 @@ pub struct Selection {
     from_window: bool,
     /// The lifted drag waits for this many pictures still coming from Orbiters (of so many).
     waiting: Option<(usize, usize)>,
-    /// A copy asked for, waiting for its pictures from Orbiters.
-    copying: Option<Vec<String>>,
+    /// What is carried that is on this computer, made on a worker since the lift ([`OnDisk`]).
+    preparing: Option<Preparing>,
+    /// A copy asked for, waiting for what is on this computer to be made and its pictures from Orbiters.
+    copying: Option<Preparing>,
     /// What the last drag copied, and when.
     said: Option<(String, f64)>,
     /// Pictures from Orbiters fetched to hand out, and those already asked for as they were selected.
@@ -130,6 +132,7 @@ impl Selection {
         }
         self.loose = None;
         self.waiting = None;
+        self.preparing = None;
         self.copying = None;
         self.fetches = Fetches::default();
         self.prefetched.clear();
@@ -223,7 +226,7 @@ impl Selection {
         self.started = true;
         if let Some(path) = image {
             let refs: Vec<&Entry> = entries.iter().collect();
-            if let Some(i) = drag_image(&refs, &self.fetches) {
+            if let Some(i) = drag_image(&refs, &self.fetches, &on_disk(&refs)) {
                 let _ = image::save_buffer(path, &i.rgba, i.width, i.height, image::ExtendedColorType::Rgba8);
             }
         }
@@ -283,6 +286,7 @@ impl Selection {
         for e in entries.iter().filter(|e| e.local.is_none()) {
             self.want(ctx, e, true);
         }
+        self.preparing = Some(Preparing::start(ctx, &keys, &entries));
         self.carried = keys;
         self.lifted_at = anim::time(ctx);
         self.started = false;
@@ -306,6 +310,7 @@ impl Selection {
             self.want(ctx, e, true);
         }
         self.carried = vec![e.key.clone()];
+        self.preparing = Some(Preparing::start(ctx, &self.carried, &[e]));
         self.loose = Some(e.clone());
         self.lifted_at = anim::time(ctx);
         self.started = false;
@@ -322,7 +327,7 @@ impl Selection {
         for e in order.iter().filter(|e| e.local.is_none() && keys.contains(&e.key)) {
             self.want(ctx, e, true);
         }
-        self.copying = Some(keys);
+        self.copying = Some(Preparing::start(ctx, &keys, &by_keys(order, &keys)));
     }
 
     /// Copies these files to the clipboard now (a multi-layer picture with its layers), saying so on the bar.
@@ -434,20 +439,30 @@ impl Selection {
                     self.said = Some((tr("Still getting them from Orbiters: drag them again in a moment").into(), now));
                 }
                 self.carried.clear();
+                self.preparing = None;
                 self.waiting = None;
             } else if now - self.lifted_at >= LIFT {
                 let entries = by_keys(order, &self.carried);
-                let gathered = self.gather(&entries);
-                if gathered.waiting > 0 {
-                    // (Each picture that comes, or fails, wakes the page.)
-                    self.waiting = Some((gathered.waiting, entries.len()));
+                let mut preparing = self.preparing.take().filter(|p| p.keys == self.carried);
+                let on_disk = preparing.as_mut().and_then(Preparing::made);
+                let gathered = self.gather(&entries, on_disk);
+                if gathered.preparing || gathered.waiting > 0 {
+                    // (Each picture that comes, or fails, wakes the page; so does the worker once it made the rest.)
+                    self.waiting = (gathered.waiting > 0).then_some((gathered.waiting, entries.len()));
+                    self.preparing = preparing;
                 } else if gathered.files.is_empty() {
                     self.said = Some((nothing_came(&gathered), now));
                     self.carried.clear();
                     self.waiting = None;
                 } else {
                     let with_files: Vec<&Entry> = entries.into_iter().filter(|e| gathered.keys.contains(&e.key)).collect();
-                    drag_out::start(drag_out::Drag { image: drag_image(&with_files, &self.fetches), files: gathered.files });
+                    // Made by the worker when nothing came from Orbiters (and the cards are still those it was made of).
+                    let made = preparing.as_mut().and_then(|p| p.made.as_mut()).and_then(|d| d.image.take()).filter(|(keys, _)| *keys == gathered.keys);
+                    let image = match made {
+                        Some((_, image)) => Some(image),
+                        None => drag_image(&with_files, &self.fetches, preparing.as_mut().and_then(Preparing::made).unwrap_or(&OnDisk::default())),
+                    };
+                    drag_out::start(drag_out::Drag { image, files: gathered.files });
                     self.handed = gathered.keys;
                     self.started = true;
                     self.waiting = None;
@@ -467,14 +482,17 @@ impl Selection {
         }
         if self.carried.is_empty() {
             self.loose = None;
+            self.preparing = None;
         }
 
         // A copy, once what it waits for came.
-        if let Some(keys) = self.copying.clone() {
-            let entries = by_keys(order, &keys);
-            let gathered = self.gather(&entries);
-            if gathered.waiting == 0 {
-                self.copying = None;
+        if let Some(mut copying) = self.copying.take() {
+            let entries = by_keys(order, &copying.keys);
+            let gathered = self.gather(&entries, copying.made());
+            copying.waiting = gathered.waiting;
+            if gathered.preparing || gathered.waiting > 0 {
+                self.copying = Some(copying);
+            } else {
                 let said = if gathered.files.is_empty() {
                     nothing_came(&gathered)
                 } else {
@@ -488,14 +506,19 @@ impl Selection {
         }
     }
 
-    /// The files of these cards that can be handed out now, and how many are still coming or failed.
-    fn gather(&self, entries: &[&Entry]) -> Gathered {
+    /// The files of these cards that can be handed out now (those on this computer from `on_disk`, once made), and how
+    /// many are still coming or failed.
+    fn gather(&self, entries: &[&Entry], on_disk: Option<&OnDisk>) -> Gathered {
         let mut g = Gathered::default();
         for e in entries {
             if e.local.is_some() {
-                if let Some(f) = files(&[e]).pop() {
-                    g.files.push(f);
-                    g.keys.push(e.key.clone());
+                match on_disk.map(|d| d.files.get(&e.key)) {
+                    Some(Some(Some(f))) => {
+                        g.files.push(f.clone());
+                        g.keys.push(e.key.clone());
+                    }
+                    Some(_) => {}
+                    None => g.preparing = true,
                 }
                 continue;
             }
@@ -528,7 +551,7 @@ impl Selection {
         let coming = match (self.waiting, &self.copying) {
             (Some((1, 1)), _) => Some(tr("Getting it from Orbiters…").to_string()),
             (Some((n, total)), _) if n > 0 => Some(tr!("Getting {n} of {total} from Orbiters…", n = n, total = total)),
-            (_, Some(_)) => Some(tr("Getting them from Orbiters to copy…").to_string()),
+            (_, Some(c)) if c.waiting > 0 => Some(tr("Getting them from Orbiters to copy…").to_string()),
             _ => None,
         };
         let said = coming.clone().or(said);
@@ -717,6 +740,8 @@ struct Gathered {
     keys: Vec<String>,
     /// Still coming from Orbiters.
     waiting: usize,
+    /// What is on this computer is still being made ([`OnDisk`]).
+    preparing: bool,
     /// Why the last one that could not be fetched was not.
     failed: Option<String>,
 }
@@ -774,21 +799,79 @@ fn files(entries: &[&Entry]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The drag image: the first three as a fanned stack of rounded pictures with a soft shadow, the count on a green
-/// badge when there are several. A picture from Orbiters is the small copy made as it was fetched.
-fn drag_image(entries: &[&Entry], fetches: &Fetches) -> Option<drag_out::Image> {
-    let pictures: Vec<image::RgbaImage> = entries
-        .iter()
-        .take(3)
-        .filter_map(|e| {
-            let local = e
+/// What a drag or a copy hands out of what is on this computer (DPG-17): each card's file (a capture's PNG made the
+/// first time, [`files`]) and the pictures the drag image shows of the first three cards that have one. Made on a
+/// worker from the lift ([`Preparing`]): the frame that drew the cards lifted made all of it itself, and froze for as
+/// long (a PNG encoded per capture, a picture decoded whole per card shown).
+#[derive(Default)]
+struct OnDisk {
+    /// Each card on this computer, by key: its file to hand out, if it has one.
+    files: HashMap<String, Option<PathBuf>>,
+    /// The pictures of the first three cards on this computer that have a file.
+    pictures: HashMap<String, image::RgbaImage>,
+    /// When every card is on this computer: the drag image already, and the cards it shows (those with a file).
+    image: Option<(Vec<String>, drag_out::Image)>,
+}
+
+fn on_disk(entries: &[&Entry]) -> OnDisk {
+    let mut made = OnDisk::default();
+    for e in entries.iter().filter(|e| e.local.is_some()) {
+        let file = files(&[e]).pop();
+        if file.is_some() && made.pictures.len() < 3 {
+            let picture = e
                 .picture
                 .as_ref()
                 .and_then(crate::worlds::decode_local)
                 .and_then(|c| image::RgbaImage::from_raw(c.size[0] as u32, c.size[1] as u32, c.as_raw().to_vec()));
-            local.or_else(|| fetches.small(&e.key))
-        })
-        .collect();
+            if let Some(picture) = picture {
+                made.pictures.insert(e.key.clone(), picture);
+            }
+        }
+        made.files.insert(e.key.clone(), file);
+    }
+    made
+}
+
+/// [`OnDisk`] being made on a worker for these keys (a drag's, a copy's), and how many of them are still coming from
+/// Orbiters (a copy says so on the bar).
+struct Preparing {
+    keys: Vec<String>,
+    job: super::Job<OnDisk>,
+    made: Option<OnDisk>,
+    waiting: usize,
+}
+
+impl Preparing {
+    fn start(ctx: &egui::Context, keys: &[String], entries: &[&Entry]) -> Self {
+        let mine: Vec<Entry> = entries.iter().filter(|e| e.local.is_some()).map(|e| (*e).clone()).collect();
+        let all_here = mine.len() == entries.len();
+        let job = super::Job::spawn(ctx, move || {
+            let mine: Vec<&Entry> = mine.iter().collect();
+            let mut made = on_disk(&mine);
+            if all_here {
+                let with_files: Vec<&Entry> = mine.into_iter().filter(|e| made.files.get(&e.key).is_some_and(Option::is_some)).collect();
+                let keys = with_files.iter().map(|e| e.key.clone()).collect();
+                made.image = drag_image(&with_files, &Fetches::default(), &made).map(|i| (keys, i));
+            }
+            made
+        });
+        Self { keys: keys.to_vec(), job, made: None, waiting: 0 }
+    }
+
+    /// What was made, once it was (nothing to hand out of it if the worker failed).
+    fn made(&mut self) -> Option<&OnDisk> {
+        if self.made.is_none() {
+            self.made = self.job.take().or_else(|| (!self.job.running()).then(OnDisk::default));
+        }
+        self.made.as_ref()
+    }
+}
+
+/// The drag image: the first three as a fanned stack of rounded pictures with a soft shadow, the count on a green
+/// badge when there are several. A picture from Orbiters is the small copy made as it was fetched; one on this
+/// computer was decoded with the rest of [`OnDisk`].
+fn drag_image(entries: &[&Entry], fetches: &Fetches, on_disk: &OnDisk) -> Option<drag_out::Image> {
+    let pictures: Vec<image::RgbaImage> = entries.iter().take(3).filter_map(|e| on_disk.pictures.get(&e.key).cloned().or_else(|| fetches.small(&e.key))).collect();
     let front = pictures.first()?;
     let n = entries.len();
     let (cw, ch) = card_size(front.width(), front.height());
@@ -1341,15 +1424,20 @@ mod tests {
         sel.lift(&ctx, &gallery, &order);
         assert_eq!(sel.carried, ["here", "community:345", "asset:7:0"], "the whole selection, in the page's order");
         let entries: Vec<&Entry> = order.iter().collect();
-        let g = sel.gather(&entries);
+        // What is on this computer is made on a worker: until it is, the drag waits for it too.
+        let g = sel.gather(&entries, None);
+        assert!(g.preparing && g.files == [fetched.clone()]);
+        let made = on_disk(&entries);
+        let g = sel.gather(&entries, Some(&made));
+        assert!(!g.preparing);
         assert_eq!((g.files.clone(), g.waiting), (vec![local.clone(), fetched.clone()], 1), "the drag waits for the asset's picture");
         // It came: everything goes.
         sel.fetches.stage(&asset.key, fetched.clone());
-        let g = sel.gather(&entries);
+        let g = sel.gather(&entries, Some(&made));
         assert_eq!((g.files.len(), g.waiting, g.keys.len()), (3, 0, 3));
         // One that failed is left out, and the bar says why when nothing else is there.
         sel.fetches.lock().states.insert(asset.key.clone(), Fetch::Failed("Orbiters answered 404.".into()));
-        let g = sel.gather(&[&asset]);
+        let g = sel.gather(&[&asset], Some(&made));
         assert!(g.files.is_empty());
         assert_eq!(nothing_came(&g), "These could not be fetched from Orbiters: Orbiters answered 404.");
         // A card alone, outside the selection, goes alone.
@@ -1358,6 +1446,82 @@ mod tests {
         assert!(sel.carried.is_empty(), "nothing to hand out of a card without a picture");
         assert_eq!(sel.fetched(&gallery.key), Some(fetched));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// DPG-17: eight 3D captures selected and dragged out. The frame where the lifted cards go to Windows made each
+    /// capture's PNG (a 1920 by 1080 picture encoded) and decoded the drag image's pictures itself: the window froze for
+    /// as long. Now a worker makes them from the lift, and the frames only look whether it is done; the drag hands
+    /// out the same files.
+    #[test]
+    fn a_drag_of_captures_encodes_and_decodes_nothing_on_the_window_s_thread() {
+        use orbiters_core::reconstruction as rec;
+        let root = std::env::temp_dir().join(format!("orbiters-drag-captures-{}", uuid::Uuid::new_v4()));
+        let (w, h) = (1920u32, 1080u32);
+        let preview: Vec<u8> = (0..w * h).flat_map(|i| [(i * 7 % 251) as u8, (i / w * 3 % 241) as u8, (i * 13 % 239) as u8]).collect();
+        let preview = orbiters_core::contracts::qoi::encode(&preview, w, h, 3);
+        let thumb = orbiters_core::contracts::qoi::encode(&[120u8; 640 * 360 * 4], 640, 360, 4);
+        let order: Vec<Entry> = (0..8)
+            .map(|i| {
+                let dir = root.join(format!("capture-{i}"));
+                std::fs::create_dir_all(rec::result_dir(&dir)).unwrap();
+                std::fs::write(rec::result_dir(&dir).join(rec::PREVIEW_FILE), &preview).unwrap();
+                std::fs::write(dir.join(orbiters_core::bundle::PICTURE_THUMBNAIL_FILE), &thumb).unwrap();
+                let mut e = entry(&dir.to_string_lossy(), false);
+                e.picture = Some(crate::worlds::Picture::Session(dir));
+                e
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        let mut sel = Selection::default();
+        sel.stage(order.iter().map(|e| e.key.clone()).collect());
+        let at = pos2(200.0, 200.0);
+        let frame = |t: f64, first: bool, sel: &mut Selection| {
+            let mut events = vec![egui::Event::PointerMoved(at)];
+            if first {
+                events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+            }
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))), events, time: Some(t), ..Default::default() };
+            let mut took = 0.0;
+            let mut output = ctx.run_ui(input, |ui| {
+                if first {
+                    sel.lift(ui.ctx(), &order[0], &order);
+                }
+                let background = ui.interact(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0)), Id::unique("dpg17-background"), Sense::click_and_drag());
+                let started = std::time::Instant::now();
+                sel.update(ui, &order, &background, false);
+                took = started.elapsed().as_secs_f64() * 1e3;
+            });
+            output.textures_delta.clear();
+            took
+        };
+        let encoded = || crate::capture_picture::ENCODED.with(|n| n.get());
+        let decoded = || crate::worlds::DECODED_HERE.with(|n| n.get());
+        let (encoded_before, decoded_before) = (encoded(), decoded());
+        frame(0.0, true, &mut sel);
+        assert_eq!(sel.carried.len(), 8, "the whole selection is lifted");
+        let (mut t, mut longest, mut frames) = (LIFT + 0.01, 0.0f64, 0);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !sel.started {
+            assert!(std::time::Instant::now() < until, "the drag never started");
+            longest = longest.max(frame(t, false, &mut sel));
+            frames += 1;
+            t += 0.016;
+            if !sel.started {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let drag = drag_out::take_pending().expect("the drag was asked for");
+        let (encodes, decodes) = (encoded() - encoded_before, decoded() - decoded_before);
+        println!("DPG-17, 8 captures dragged: longest frame of the selection {longest:.1} ms over {frames} frames; PNGs encoded on the window's thread {encodes}, pictures decoded there {decodes}");
+        assert_eq!(drag.files.len(), 8, "every capture's picture goes");
+        assert!(drag.files.iter().all(|f| f.extension().is_some_and(|x| x == "png") && f.is_file()));
+        assert!(drag.image.is_some(), "with its drag image");
+        assert_eq!(sel.handed.len(), 8);
+        assert_eq!((encodes, decodes), (0, 0), "nothing encoded or decoded on the window's thread");
+        for f in &drag.files {
+            let _ = std::fs::remove_file(f);
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

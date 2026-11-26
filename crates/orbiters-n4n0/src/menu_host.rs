@@ -484,9 +484,12 @@ impl<P: Pictures> MenuHost<P> {
         }
         self.menu.media = read;
         self.menu.volume = reading.volume;
+        // The art of what played before is not shown any more: one picture per song was kept, for the whole evening (DOV-7).
+        // At every reading, so that a song with no art (or nothing playing) lets the last one go too (W56-verify m1).
+        let shown = self.menu.media.as_ref().and_then(|m| m.art.as_deref());
+        let read_art = reading.art.as_ref().map(|a| a.key.as_str());
+        self.thumbs.retain(|key, _| !key.starts_with(ART_PREFIX) || Some(key.as_str()) == read_art || Some(key.as_str()) == shown);
         if let Some(art) = reading.art {
-            // The art of what played before is not shown any more: one picture per song was kept, for the whole evening (DOV-7).
-            self.thumbs.retain(|key, _| !key.starts_with(ART_PREFIX) || *key == art.key);
             if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(..))) {
                 let ready = self.pictures.make(&art.key, &art.rgb);
                 self.thumbs.insert(art.key.clone(), Thumb::Ready(ready));
@@ -852,6 +855,22 @@ mod tests {
         media.stand_in(art(3));
         host.follow_media();
         assert!(host.picture(&format!("{ART_PREFIX}{:016x}", 3)).is_some() && host.picture(&format!("{ART_PREFIX}{:016x}", 99)).is_none());
+    }
+
+    /// W56-verify m1: a song with no art after one with art let nothing go; the first song's picture stayed.
+    #[test]
+    fn a_song_without_art_lets_the_last_art_go() {
+        let media = Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia)));
+        let mut host = MenuHost::new(Sizes, Arc::new(English), media.clone());
+        let song = |title: &str| Some(orbiters_n4n0_core::menu::Media { title: title.into(), ..Default::default() });
+        let first = format!("{ART_PREFIX}first");
+        media.stand_in(crate::media::Reading { media: song("First"), art: Some(Arc::new(crate::media::Art { key: first.clone(), rgb: Rgb { width: 1, height: 1, pixels: vec![1; 3] } })), ..Default::default() });
+        host.follow_media();
+        assert!(host.picture(&first).is_some());
+        media.stand_in(crate::media::Reading { media: song("Second"), ..Default::default() });
+        host.follow_media();
+        assert!(host.picture(&first).is_none(), "the art of a song no longer playing is kept");
+        assert!(host.picture_keys().is_empty());
     }
 
     /// verify2 (OVERLAY-16): the loaded pictures are listed from the host itself, so a page is given every drawable one.

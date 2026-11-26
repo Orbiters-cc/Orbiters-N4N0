@@ -57,6 +57,15 @@ pub(crate) fn hidden(root: &Path) -> HashSet<String> {
     theirs::hidden_repositories(root).into_iter().chain(chosen.off).filter(|id| !chosen.on.contains(id)).collect()
 }
 
+/// Their settings without what the person gave Creator Companion to sign in to private repositories: it is used while it can be read,
+/// and kept in no copy of Orbiters' (PRJ-29).
+fn without_credentials(mut settings: Value) -> Value {
+    for r in settings["userRepos"].as_array_mut().into_iter().flatten().filter_map(Value::as_object_mut) {
+        r.remove("headers");
+    }
+    settings
+}
+
 /// Their settings as last read: what they are while they cannot be (in use, damaged, their folder gone).
 fn their_settings(root: &Path) -> Value {
     let kept = dir(root).join("their-settings.json");
@@ -68,7 +77,12 @@ fn their_settings(root: &Path) -> Value {
                     o.remove(other);
                 }
             }
-            let _ = own::change(&kept, || Value::Null, |now: &mut Value| *now = v.clone());
+            let _ = own::change(&kept, || Value::Null, |now: &mut Value| *now = without_credentials(v.clone()));
+            // One kept by 0.3.10 and before had them, and so has the copy of it before this change.
+            let before = own::previous(&kept);
+            if let Some(old) = own::parse::<Value>(&before).filter(|old| without_credentials(old.clone()) != *old) {
+                let _ = crate::write_json(&before, &without_credentials(old));
+            }
             v
         }
         _ => own::read(&kept).filter(Value::is_object).unwrap_or_else(|| json!({})),
@@ -138,6 +152,36 @@ pub(crate) fn prepare(root: &Path) -> anyhow::Result<PathBuf> {
         newer(&from, &to);
     }
     Ok(here)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PRJ-29: what a person gave Creator Companion to sign in to a private repository with is used, and kept in no list of Orbiters':
+    /// nor in one kept before it was left out.
+    #[test]
+    fn their_credentials_are_kept_in_no_copy_of_their_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("vcc");
+        let settings = |name: &str| json!({ "userRepos": [{ "localPath": root.join("Repos/r.json"), "name": name, "url": "https://vpm.example.com/index.json", "id": "r", "headers": { "Authorization": "Bearer sesame" } }] });
+        let kept = dir(&root).join("their-settings.json");
+        crate::write_json(&kept, &settings("before")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), settings("now").to_string()).unwrap();
+        prepare(&root).unwrap();
+        for file in [kept.clone(), own::previous(&kept)] {
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains("vpm.example.com") && !text.contains("sesame"), "{text}");
+        }
+        assert!(std::fs::read_to_string(dir(&root).join("settings.json")).unwrap().contains("sesame"), "used");
+        prepare(&root).unwrap();
+        // Theirs cannot be read: the repository is still there, without it.
+        std::fs::write(root.join("settings.json"), "{").unwrap();
+        prepare(&root).unwrap();
+        let used = std::fs::read_to_string(dir(&root).join("settings.json")).unwrap();
+        assert!(used.contains("vpm.example.com") && !used.contains("sesame"), "{used}");
+    }
 }
 
 fn write(file: &Path, value: &Value) -> anyhow::Result<()> {

@@ -50,11 +50,11 @@ pub(crate) fn short(text: &str) -> String {
 }
 
 /// Where the copy of `file` before its last change is.
-fn previous(file: &Path) -> PathBuf {
+pub(crate) fn previous(file: &Path) -> PathBuf {
     file.with_extension("previous.json")
 }
 
-fn parse<T: DeserializeOwned>(file: &Path) -> Option<T> {
+pub(crate) fn parse<T: DeserializeOwned>(file: &Path) -> Option<T> {
     serde_json::from_slice(&std::fs::read(file).ok()?).ok()
 }
 

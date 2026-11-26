@@ -925,13 +925,29 @@ pub(crate) fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
     retrying(|| std::fs::rename(from, to))
 }
 
+/// `path` as Windows takes it past its 260 characters, NUL-terminated: whole (`std::path::absolute`, which also turns `/`
+/// into `\` and resolves `..`) and with the `\\?\` prefix that std's own file calls add to a long path (V2-1). A raw call
+/// with the plain form fails in a deep install folder where every std call around it succeeds.
+fn long_form(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+    let full: Vec<u16> = std::path::absolute(path)?.as_os_str().encode_wide().collect();
+    let mut wide = if full.starts_with(&units(r"\\?\")) || full.starts_with(&units(r"\\.\")) {
+        full
+    } else if full.starts_with(&units(r"\\")) {
+        [units(r"\\?\UNC\"), full[2..].to_vec()].concat()
+    } else {
+        [units(r"\\?\"), full].concat()
+    };
+    wide.push(0);
+    Ok(wide)
+}
+
 /// Publish a transaction marker, waiting for the move to reach disk.
 pub(crate) fn rename_marker(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-    let (from, to) = (wide(from), wide(to));
+    let (from, to) = (long_form(from)?, long_form(to)?);
     let mut flags = MOVEFILE_WRITE_THROUGH;
     if replace {
         flags |= MOVEFILE_REPLACE_EXISTING;
@@ -1019,6 +1035,51 @@ pub(crate) mod tests {
             start_with_steamvr: false,
             installed: String::new(),
         }
+    }
+
+    /// Windows' side of an install, left out: nothing outside the folder.
+    pub(crate) struct Quiet;
+    impl Surroundings for Quiet {
+        fn integrate(&self, _: &Path, _: &InstallRecord, _: Option<&InstallRecord>, _: u64, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn swapping(&self, _: &Path, _: bool) {}
+    }
+
+    /// The payload of one program, `APP_EXE`, holding `text`, at `version`.
+    pub(crate) fn one_program(version: &str, text: &str) -> Vec<u8> {
+        static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let source = scratch(&format!("one-program-{}", MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::write(source.join(APP_EXE), text).unwrap();
+        let packed = source.join("payload.bin");
+        payload::pack(version, &[(APP_EXE.to_string(), source.join(APP_EXE))], &packed).unwrap();
+        let bytes = std::fs::read(&packed).unwrap();
+        remove_tree(&source);
+        bytes
+    }
+
+    pub(crate) fn options(dir: &Path) -> Options {
+        Options { dir: dir.to_path_buf(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() }
+    }
+
+    /// V2-1: an install folder deep enough that its markers' paths pass Windows' 260 characters installs and updates, as every
+    /// other file move of the setup (std's) does there: both names of each marker's move, the journal's (which replaces
+    /// nothing) and the record's (which replaces the one there).
+    #[test]
+    fn a_deep_install_folder_installs_and_updates() {
+        let base = scratch("deep-folder");
+        let mut dir = base.clone();
+        while dir.as_os_str().len() < 250 {
+            dir.push("Project Archive");
+        }
+        assert!(dir.join(crate::swap::JOURNAL).as_os_str().len() > 260 && dir.join(STAGING).join(crate::swap::JOURNAL).as_os_str().len() > 260);
+        for (version, text, fresh) in [("1.0.0", "first", true), ("2.0.0", "second", false)] {
+            install_with(&one_program(version, text), &options(&dir), &Progress::default(), true, fresh, &Quiet).unwrap_or_else(|e| panic!("{version}: {e:#}"));
+            assert_eq!(InstallRecord::load(&dir).unwrap().unwrap().version, version);
+            assert_eq!(std::fs::read_to_string(dir.join(APP_EXE)).unwrap(), text);
+            assert!(!dir.join(crate::swap::JOURNAL).exists() && crate::swap::whole(&dir));
+        }
+        remove_tree(&base);
     }
 
     #[test]
@@ -1176,13 +1237,6 @@ pub(crate) mod tests {
     /// a journal's name held by a file of the person's still stops a first install.
     #[test]
     fn a_cut_first_install_installs_on_the_next_run() {
-        struct Quiet;
-        impl Surroundings for Quiet {
-            fn integrate(&self, _: &Path, _: &InstallRecord, _: Option<&InstallRecord>, _: u64, _: bool) -> Vec<String> {
-                vec![]
-            }
-            fn swapping(&self, _: &Path, _: bool) {}
-        }
         let source = scratch("first-cut-source");
         std::fs::write(source.join(APP_EXE), b"app").unwrap();
         let packed = source.join("payload.bin");
@@ -1208,8 +1262,7 @@ pub(crate) mod tests {
         }
         let dir = scratch("first-persons-journal");
         std::fs::write(dir.join(crate::swap::JOURNAL), b"").unwrap();
-        let options = Options { dir: dir.clone(), desktop_shortcut: false, start_with_windows: false, start_with_steamvr: false, channel: STABLE.into() };
-        let said = format!("{:#}", install_with(&bytes, &options, &Progress::default(), true, true, &Quiet).unwrap_err());
+        let said = format!("{:#}", install_with(&bytes, &options(&dir), &Progress::default(), true, true, &Quiet).unwrap_err());
         assert!(said.contains(crate::swap::JOURNAL) && !dir.join(APP_EXE).exists(), "{said}");
         remove_tree(&dir);
         remove_tree(&source);

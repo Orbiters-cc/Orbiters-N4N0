@@ -995,6 +995,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_frame_of_gallery_clocks_formats_only_the_clock() {
+        let secs = 1_792_000_000;
+        drop(local_clock(secs));
+        let allocations = crate::test_alloc::count(|| {
+            for slot in 0..60 {
+                std::hint::black_box(local_clock(secs + slot));
+            }
+        });
+        println!("Gallery clock allocations over 60 cards: {allocations}");
+        assert_eq!(allocations, 60);
+    }
+
     /// Each language writes the date its own way, but keeps the date and the time apart by ", " (the gallery and community pages split them there),
     /// and leaves no `{name}` of its template unfilled.
     #[test]

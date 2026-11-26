@@ -512,7 +512,7 @@ impl Controller {
             rest.wait(match look {
                 crate::bridge::keeper::Look::At { due, allowed } if !(allowed && shown) => due,
                 _ => Some(crate::bridge::keeper::Look::TURN),
-            })
+            });
         });
         *self.bridge.lock().unwrap() = Some(keeper);
     }

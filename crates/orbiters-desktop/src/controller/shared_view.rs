@@ -498,7 +498,6 @@ impl Controller {
         });
     }
 
-    /// Whether the calls' event stream is wanted for shares (open even with Calls off).
     fn shared_rest(&self) -> std::sync::Arc<super::rest::Rest> {
         self.rest("shared-view", |s| {
             let view = &s.shared_view;
@@ -507,6 +506,7 @@ impl Controller {
         })
     }
 
+    /// Whether the calls' event stream is wanted for shares (open even with Calls off).
     pub(super) fn shared_view_wants_stream(&self) -> bool {
         self.shared_view.lock().unwrap().present
     }

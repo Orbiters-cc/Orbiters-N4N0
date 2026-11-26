@@ -2017,6 +2017,7 @@ mod tests {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 820.0))), time: Some(0.0), ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| app.draw(ui));
         output.textures_delta.clear();
+        println!("Home menu host after first frame: {}", app.home_mut().menu_host().is_some());
         assert!(app.home_mut().menu_host().is_some(), "the menu's host is made at the window's first frame");
         assert!(widgets::control(&ctx, "All tools").is_none(), "and nothing of Home is drawn yet");
     }

@@ -2808,8 +2808,8 @@ mod tests {
     /// 1.9 s after the window opened).
     #[test]
     fn the_list_is_read_before_the_page_shows() {
-        let root = std::env::temp_dir().join(format!("orbiters-gallery-prepare-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let temp = crate::link_smoke::Scratch::new("orbiters-gallery-prepare", false).unwrap();
+        let root = &temp.path;
         std::fs::create_dir_all(root.join("Sessions")).unwrap();
         let history = root.join("visited-worlds.json");
         orbiters_core::visited::History::default().save(&history).unwrap();
@@ -2840,7 +2840,6 @@ mod tests {
         }
         // The page's own first frame asks for nothing more.
         assert!(!state.local_job.running() && !state.local_dirty);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The page over `n` pictures of this computer, ten to an instance, at rest: what a frame allocates and takes (in

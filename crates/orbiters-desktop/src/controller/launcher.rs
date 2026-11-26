@@ -1157,7 +1157,7 @@ impl Machine for RealMachine {
     fn roster_now(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
         let vrchats = super::bridge_side::vrchats_now();
         let runs = self.roster.lock().unwrap().scan_whole(&vrchats, self.log_dir().as_deref());
-        Some(runs.iter().map(|run| super::vrchats::shown(run, None, None)).collect())
+        Some(super::vrchats::shown_all(&runs, None, None))
     }
 
     fn vrchats_seen(&self) -> Option<Arc<super::vrchats::Seen>> {

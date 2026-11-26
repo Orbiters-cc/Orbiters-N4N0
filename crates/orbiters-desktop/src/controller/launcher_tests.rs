@@ -71,6 +71,11 @@ impl Machine for Pretend {
     }
 }
 
+/// No look at this computer's own Steam, VRChat or Obelisk.
+pub(in crate::controller) fn pretend_this_computer(c: &Controller) {
+    c.launcher.lock().unwrap().machine = Arc::new(Pretend::default());
+}
+
 /// A press on the list of the test client's account (`usr_test`).
 fn mine(action: Action) -> Action {
     Action::As { account: "usr_test".into(), action: Box::new(action) }

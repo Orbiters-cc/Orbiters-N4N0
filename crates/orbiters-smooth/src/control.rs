@@ -5,6 +5,39 @@ use std::io;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
+/// Why the control block cannot be used. The words for it are the app's ([`words`]): the driver, loaded by SteamVR, tells nobody anything, and one call of a translated text in what it
+/// shares with the app put every translation of the app inside it (nine tenths of its 2.9 MB).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    NeedsWindows,
+    /// Smaller than this version's.
+    Smaller,
+    /// Set up by another version, with this layout.
+    OtherVersion(u32),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// What went wrong with the control block, to show.
+#[cfg(feature = "install")]
+pub fn words(e: &io::Error) -> String {
+    use orbiters_i18n::tr;
+    match e.get_ref().and_then(|e| e.downcast_ref::<Refused>()) {
+        Some(Refused::NeedsWindows) => tr("tracking smoothing needs Windows").to_owned(),
+        Some(Refused::Smaller) => tr("the smoothing control block is smaller than this version's").to_owned(),
+        Some(Refused::OtherVersion(layout)) => {
+            tr!("the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})", layout = layout, version = VERSION)
+        }
+        None => e.to_string(),
+    }
+}
+
 /// A view of a [`ControlBlock`] in named shared memory; unmapped and closed on drop.
 pub struct Mapping {
     #[cfg(windows)]
@@ -37,7 +70,7 @@ impl Mapping {
         #[cfg(not(windows))]
         {
             let _ = name;
-            Err(io::Error::new(io::ErrorKind::Unsupported, orbiters_i18n::tr("tracking smoothing needs Windows")))
+            Err(io::Error::new(io::ErrorKind::Unsupported, Refused::NeedsWindows))
         }
     }
 
@@ -59,7 +92,7 @@ impl Mapping {
         }
         #[cfg(not(windows))]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, orbiters_i18n::tr("tracking smoothing needs Windows")))
+            Err(io::Error::new(io::ErrorKind::Unsupported, Refused::NeedsWindows))
         }
     }
 
@@ -82,7 +115,7 @@ impl Mapping {
         if !ok || info.RegionSize < std::mem::size_of::<ControlBlock>() {
             // SAFETY: the view mapped above.
             unsafe { UnmapViewOfFile(view) };
-            return Err(close(io::Error::new(io::ErrorKind::InvalidData, orbiters_i18n::tr("the smoothing control block is smaller than this version's"))));
+            return Err(close(io::Error::new(io::ErrorKind::InvalidData, Refused::Smaller)));
         }
         // Views start on an allocation granularity boundary (64 KB): aligned for the block.
         Ok(Mapping { handle, block: view as *const ControlBlock, created })
@@ -133,11 +166,7 @@ impl Control {
         let block = mapping.block();
         if block.magic.load(Ordering::Acquire) == MAGIC {
             if !block.is_valid() {
-                return Err(io::Error::other(orbiters_i18n::tr!(
-                    "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout {layout}, this one {version})",
-                    layout = block.version.load(Ordering::Relaxed),
-                    version = VERSION
-                )));
+                return Err(io::Error::other(Refused::OtherVersion(block.version.load(Ordering::Relaxed))));
             }
         } else {
             // New (zeroed), or made by a process that exited before setting it up.
@@ -309,6 +338,17 @@ mod tests {
     use crate::{win, DriverReport};
     use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::sync::Arc;
+
+    /// VRR-47: one translated text in what the driver is made of put the app's whole catalogue, and a JSON reader, inside SteamVR. Only [`words`], which the driver never calls, has any.
+    #[test]
+    fn the_driver_s_side_has_no_translations() {
+        let (control, lib, win) = (include_str!("control.rs"), include_str!("lib.rs"), include_str!("win.rs"));
+        let code = control.split("#[cfg(all(test, windows))]").next().unwrap();
+        assert_eq!(code.matches("orbiters_i18n").count(), 1, "in `words` alone");
+        assert!(!lib.contains("orbiters_i18n") && !win.contains("orbiters_i18n"));
+        assert_eq!(words(&io::Error::other(Refused::OtherVersion(7))), "the tracking smoothing control is in use by another version of Orbiters - N4N0 (layout 7, this one 1)");
+        assert_eq!(words(&io::Error::other("what Windows said")), "what Windows said");
+    }
 
     fn unique_name(what: &str) -> String {
         static N: AtomicU32 = AtomicU32::new(0);

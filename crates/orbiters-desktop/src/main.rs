@@ -23,6 +23,7 @@ mod drag_out;
 mod gpu;
 mod harness;
 mod idle_frames;
+mod idle_service;
 mod ipc;
 mod keys;
 mod language;
@@ -146,6 +147,7 @@ fn main() -> anyhow::Result<()> {
         Some(orbiters_booster::system::RESTORE_ARGUMENT) => controller::booster_restore_at_sign_in(),
         Some("--gpu-bench") => bench::run(&args[1..]),
         Some("--idle-frames") => idle_frames::run(&args[1..]),
+        Some("--idle-service") => idle_service::run(&args[1..]),
         Some("--publish-cost") => controller::publish_cost::run(&args[1..]),
         Some("--repair-capture-pictures") => controller::picture_repair::run(&args[1..]),
         Some("--link-smoke") => link_smoke::run(&args[1..]),

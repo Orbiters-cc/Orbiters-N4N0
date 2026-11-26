@@ -269,22 +269,68 @@ pub struct InstallRecord {
     pub installed: String,
 }
 
+/// The bytes of the file at `path`, or `None` only when it is confirmed not there. Any other failure to read it (another
+/// program holding it a moment, as an antivirus or Explorer does; no access) is an error, never taken for its absence: a
+/// decision made on "not there" would undo or forget what the file says.
+fn read_if_there(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Sync a new draft before publishing it. The returned handle can keep a published journal exclusive to its writer.
+pub fn publish_file(draft: &Path, path: &Path, bytes: &[u8], rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_DELETE: u32 = 4;
+        options.share_mode(FILE_SHARE_DELETE);
+    }
+    let mut file = options.open(draft)?;
+    let published = file.write_all(bytes).and_then(|()| file.sync_all()).and_then(|()| rename(draft, path));
+    if let Err(error) = published {
+        drop(file);
+        let _ = std::fs::remove_file(draft);
+        return Err(error);
+    }
+    Ok(file)
+}
+
 impl InstallRecord {
-    /// The record in `dir`, if it holds an install.
+    /// The record in `dir`, if it holds an install: what to show, never what to decide on ([`Self::load`]).
     pub fn read(dir: &Path) -> Option<Self> {
-        let bytes = std::fs::read(dir.join(RECORD_FILE)).ok()?;
-        serde_json::from_slice::<Self>(&bytes).ok().filter(|r| r.product == PRODUCT)
+        Self::load(dir).ok().flatten()
+    }
+
+    /// The record in `dir`: `None` when there is none, or one that is not of an install of this app; an error when it is there
+    /// and could not be read now.
+    pub fn load(dir: &Path) -> std::io::Result<Option<Self>> {
+        let bytes = read_if_there(&dir.join(RECORD_FILE))?;
+        let Some(bytes) = bytes else { return Ok(None) };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value["product"] != PRODUCT {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(value)?))
     }
 
     /// Writes the record in `dir` through a temporary file renamed over it: a cut write leaves the old record.
     pub fn write(&self, dir: &Path) -> std::io::Result<()> {
-        let path = dir.join(RECORD_FILE);
-        let tmp = dir.join(format!("{RECORD_FILE}.tmp"));
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(serde_json::to_string_pretty(self).map_err(std::io::Error::other)?.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, &path)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static WRITES: AtomicU64 = AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, Ordering::Relaxed);
+        let draft = dir.join(format!(".{RECORD_FILE}.{}-{n}.tmp", std::process::id()));
+        self.publish(dir, &draft, |from, to| std::fs::rename(from, to))
+    }
+
+    /// Publish through the caller's staging directory, with the caller's move semantics.
+    pub fn publish(&self, dir: &Path, draft: &Path, rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(self)?;
+        publish_file(draft, &dir.join(RECORD_FILE), &bytes, rename).map(drop)
     }
 
     /// The install this program runs from: its folder and record. `None` for a program that was not installed by the

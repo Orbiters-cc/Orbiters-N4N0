@@ -59,6 +59,9 @@ const STEAMVR_GONE_AFTER: Duration = Duration::from_secs(5);
 /// N4N0's menu (a double press) is true for a moment only and SteamVR keeps no press between two reads, and the taps
 /// that open it by default are timed from these reads.
 const TURN: Duration = Duration::from_millis(11);
+/// A turn while nothing of ours can be pointed at or pressed on: VRChat shows no world (it loads), the headset is off the face or SteamVR's dashboard has the controllers, and
+/// nothing of ours shows ([`turn_length`]). One displayed frame later to the first press (the owner's answer, review 1124), for a third of the calls to SteamVR.
+const CALM_TURN: Duration = Duration::from_millis(33);
 /// A turn waiting on the compositor is at least this long, should the wait come back at once.
 const SHORTEST_TURN: Duration = Duration::from_millis(3);
 /// After the D3D11 device was lost (a driver reset), raw pixels this long, then a new device. After a refusal (a
@@ -86,6 +89,23 @@ impl Stalls {
         let line = format!("{at} a turn took {} ms: {}\n", took.as_millis(), doing()); // i18n: not shown (a log's line)
         vr_log::append("overlay-stalls.log", None, line);
     }
+}
+
+/// What a turn's length hangs on.
+#[derive(Clone, Copy, Debug)]
+struct Calm {
+    /// VRChat shows its world.
+    in_world: bool,
+    /// The headset is on the face (unknown: taken as worn).
+    worn: Option<bool>,
+    dashboard: bool,
+    /// Something of ours shows, moves or is being timed: a menu, the tab, a panel, the 3D view, a calibration, a walk, a recording's hints, two taps.
+    ours: bool,
+}
+
+fn turn_length(calm: Calm) -> Duration {
+    let away = !calm.in_world || calm.worn == Some(false) || calm.dashboard;
+    if away && !calm.ours { CALM_TURN } else { TURN }
 }
 
 /// How long raw pixels last after the `refusals`-th refusal in a row: 5 s, 10 s, 20 s… up to about ten minutes.
@@ -311,6 +331,39 @@ fn mismatch_report(kind: crate::mismatch::Kind, steamvr: &vr::Client, snap: &cra
     };
     let context = crate::mismatch::Context { surface: "vr".into(), controllers, bindings, state };
     crate::mismatch::press(kind, context, &snap.settings, snap.vrchat.world.log_file.clone(), picture);
+}
+
+#[cfg(test)]
+mod calm_turns {
+    use super::*;
+
+    /// DOV-24: while VRChat loads, the headset is off or SteamVR's dashboard is up, the loop turns thirty times a second, and 88 otherwise and whenever anything of ours shows.
+    #[test]
+    fn the_loop_takes_its_time_only_where_nothing_can_be_pressed() {
+        let playing = Calm { in_world: true, worn: Some(true), dashboard: false, ours: false };
+        assert_eq!(turn_length(playing), TURN);
+        assert_eq!(turn_length(Calm { worn: None, ..playing }), TURN, "not known: worn");
+        for calm in [Calm { in_world: false, ..playing }, Calm { worn: Some(false), ..playing }, Calm { dashboard: true, ..playing }] {
+            assert_eq!(turn_length(calm), CALM_TURN, "{calm:?}");
+            assert_eq!(turn_length(Calm { ours: true, ..calm }), TURN, "{calm:?}, with something of ours up");
+        }
+    }
+
+    /// Two taps are timed at every short turn from the first touch on.
+    #[test]
+    fn taps_are_timed_at_the_short_turns() {
+        let mut taps = actions::Taps::default();
+        let start = Instant::now();
+        assert!(!taps.timing(start));
+        assert!(!taps.step(true, start));
+        assert!(taps.timing(start), "touched");
+        let off = start + Duration::from_millis(100);
+        taps.step(false, off);
+        assert!(taps.timing(off + Duration::from_millis(20)), "let go, perhaps a flicker");
+        taps.step(false, off + Duration::from_millis(60));
+        assert!(taps.timing(off + Duration::from_millis(60)), "the gap before a second tap");
+        assert!(!taps.timing(off + Duration::from_millis(60) + actions::TAP_GAP), "no second one came");
+    }
 }
 
 #[cfg(test)]
@@ -1377,7 +1430,18 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
         } else {
             // Keep input at its existing cadence. Only displayed 3D content gets short, high-resolution service
             // slices: a completed texture need not wait through the rest of this turn. No tick-based channel waits.
-            let end = turn + TURN;
+            let ours = visible
+                || menus_up
+                || t.menu.host.menu.open
+                || t.menu.worlds.view.active()
+                || t.menu.worlds.view.preparing()
+                || t.menu.worlds.small_showing()
+                || t.floating.as_ref().is_some_and(|f| !f.quiet())
+                || t.state.busy()
+                || t.translate.running() && vrchat_scene
+                || snap.capture.state != crate::state::CaptureState::Idle
+                || actions.timing_taps(Instant::now());
+            let end = turn + turn_length(Calm { in_world: vrchat_scene, worn, dashboard, ours });
             while Instant::now() < end {
                 let now = Instant::now();
                 let left = end.saturating_duration_since(now);
@@ -1391,10 +1455,30 @@ fn session(args: &[String]) -> anyhow::Result<Ended> {
             }
         }
         meter.turn(busy);
-        if let Some(turns) = meter.take(Instant::now()) {
+        if let Some(mut turns) = meter.take(Instant::now()) {
+            turns.holds = held_bytes(&t).into_iter().map(|(what, bytes)| (what.to_string(), crate::perf::megabytes(bytes))).collect();
             backend.perf_turns(turns);
         }
     }
+}
+
+/// Bytes of textures each set of fetched pictures keeps here, but for what shows: about fifty thumbnails, three sheets of them. The window keeps twice that: it shows more of them at once,
+/// and is not beside a game in a headset.
+const PICTURES_HOLD: usize = 24 << 20;
+
+/// The bytes of every texture of an interface.
+fn texture_bytes(ctx: &egui::Context) -> u64 {
+    ctx.tex_manager().read().allocated().map(|(_, meta)| meta.bytes_used() as u64).sum()
+}
+
+/// What this process's caches hold, in bytes: the pictures of the menus and the captures in 3D, each by its own name in the memory log
+/// ([`crate::perf::MEMORY_LOG`]), so that a process of gigabytes says what they are (DOV-1).
+fn held_bytes(t: &Teardown) -> Vec<(&'static str, u64)> {
+    let mut out = t.menu.worlds.held_bytes();
+    if let Some(orbit) = t.orbit.as_ref() {
+        out.extend(orbit.held_bytes());
+    }
+    out
 }
 
 /// A CPU painter for the tab with its backdrop painted once (it never changes).

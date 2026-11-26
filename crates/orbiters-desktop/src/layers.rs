@@ -22,7 +22,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     // The programs: the service's process, the window's.
     ("programs", &["app", "mac", "service", "tray", "window"]),
     // What developers run.
-    ("developer", &["background_bench", "bench", "harness", "idle_frames", "link_between", "link_smoke", "screenshot"]),
+    ("developer", &["background_bench", "bench", "harness", "idle_frames", "idle_service", "link_between", "link_smoke", "screenshot"]),
 ];
 
 const BESIDE: (&str, &str) = ("overlay", "pages");

@@ -156,7 +156,7 @@ pub fn dropdown(
     if enabled {
         resp.on_hover_cursor(CursorIcon::PointingHand);
     }
-    list(&ctx, id, rect, items, selected, rect.width().max(160.0))
+    list(&ctx, id, rect, items, selected, || rect.width().max(160.0), false)
 }
 
 /// A round "…" (or other `glyph`) button in `rect` with a menu of `items`; returns the index picked this frame.
@@ -177,7 +177,7 @@ pub fn menu_button(ui: &mut Ui, id_salt: impl egui::AsIdSalt, rect: Rect, glyph:
     p.circle_filled(r.center(), r.width() * 0.5, theme::mix(theme::control(), theme::ink_600(), hover));
     icon(p, r.center(), glyph, 17.0, theme::mix(theme::fg_2(), theme::fg(), hover));
     resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(label);
-    list(&ctx, id, rect, items, None, menu_width(ui, items))
+    list(&ctx, id, rect, items, None, || menu_width(ui, items), false)
 }
 
 /// The list of `items` for a control its caller draws (a chip): `pressed` this frame opens or closes it, and it closes
@@ -187,7 +187,7 @@ pub fn list_from(ctx: &egui::Context, id: Id, anchor: Rect, pressed: bool, items
     if pressed {
         set_open(ctx, id, !is_open(ctx, id));
     }
-    list(ctx, id, anchor, items, selected, width)
+    list(ctx, id, anchor, items, selected, || width, false)
 }
 
 /// How wide a list of `items` must be for every row to show whole: its icon or dot, its label (as bold as a chosen one), its detail and the tick of a chosen
@@ -243,7 +243,7 @@ pub fn context_menu<R>(
         }
         None => at?,
     };
-    let (picked, gone) = list_at(&ctx, id, Rect::from_center_size(at, vec2(2.0, 2.0)), &items, None, menu_width(ui, &items), true);
+    let (picked, gone) = list_at(&ctx, id, Rect::from_center_size(at, vec2(2.0, 2.0)), &items, None, || menu_width(ui, &items), true);
     // Its point is kept until the list shrank back into it.
     if gone {
         ctx.data_mut(|d| d.remove_temp::<egui::Pos2>(at_id));
@@ -251,14 +251,14 @@ pub fn context_menu<R>(
     rows.into_iter().nth(picked?)
 }
 
-/// The list of the control `id` under (or over, near the window's bottom) `anchor`, while it is open or closing.
-fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: f32) -> Option<usize> {
-    list_at(ctx, id, anchor, items, selected, width, false).0
+/// The list of the control `id` under (or over, near the window's bottom) `anchor`, while it is open or closing. `at_point`:
+/// a context menu, from the pointer's corner rather than the control's edge. `width` is asked only then: a menu's is measured, and most menus of a page are closed.
+fn list(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: impl FnOnce() -> f32, at_point: bool) -> Option<usize> {
+    list_at(ctx, id, anchor, items, selected, width, at_point).0
 }
 
-/// [`list`]; `at_point`: a context menu, from the pointer's corner rather than the control's edge. And whether it is
-/// closed and back in its anchor.
-fn list_at(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: f32, at_point: bool) -> (Option<usize>, bool) {
+/// [`list`], and whether it is closed and back in its anchor.
+fn list_at(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], selected: Option<usize>, width: impl FnOnce() -> f32, at_point: bool) -> (Option<usize>, bool) {
     let open = is_open(ctx, id);
     let travel = morph::travel(ctx, id.with("list"), open, Spring::BOUNCY);
     if travel.landed {
@@ -273,6 +273,7 @@ fn list_at(ctx: &egui::Context, id: Id, anchor: Rect, items: &[Item<'_>], select
         let pass = ctx.cumulative_pass_nr();
         ctx.data_mut(|d| d.insert_temp(Id::unique("orbiters-popup-open-pass"), pass));
     }
+    let width = width();
     let screen = ctx.content_rect();
     // A control's list keeps to its height and scrolls; a context menu's rows are actions to see at a glance, as tall as the
     // window allows.
@@ -390,6 +391,31 @@ mod tests {
         let mut out = Vec::new();
         shapes.iter().for_each(|s| walk(&s.shape, &mut out));
         out
+    }
+
+    /// VRR-16: a page's "…" buttons measured their whole closed menus, every frame.
+    #[test]
+    fn a_closed_menu_is_not_measured() {
+        let ctx = egui::Context::default();
+        crate::install(&ctx);
+        let items: Vec<Item> = ["Open in VRChat", "Copy the link", "Remove it"].into_iter().map(Item::new).collect();
+        let frame = |n: u32, open: bool| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))), time: Some(n as f64 / 60.0), ..Default::default() };
+            let measured = std::cell::Cell::new(0);
+            let mut full = ctx.run_ui(input, |ui| {
+                set_open(ui.ctx(), Id::unique("a-menu"), open);
+                list(ui.ctx(), Id::unique("a-menu"), Rect::from_min_size(pos2(20.0, 20.0), vec2(32.0, 32.0)), &items, None, || {
+                    measured.set(measured.get() + 1);
+                    menu_width(ui, &items)
+                }, false);
+            });
+            full.textures_delta.clear();
+            measured.get()
+        };
+        let closed: u32 = (0..20).map(|n| frame(n, false)).sum();
+        assert_eq!(closed, 0);
+        let open: u32 = (20..60).map(|n| frame(n, true)).sum();
+        assert!(open >= 30, "{open}");
     }
 
     /// Request16 1: the status list in French cut "Rejoins-moi" and "Demande-moi" to an ellipsis at its fixed width. A list [`list_width`] wide shows every

@@ -106,7 +106,7 @@ its mechanism and makes it drift:
 His controllers are Quest Pro Touch on SteamVR's `oculus` driver, whose input profile
 (`drivers/oculus/resources/input/touch_profile.json`) gives `/input/thumbrest` `"click": false, "touch": true`: there is
 no click for SteamVR to send, whatever is bound (the Steam Frame's thumbrest is the same). The overlay reads `open` once
-every turn (11 ms) on its rising edge, so a click or a double press from any input that has one does open it. People
+every turn (11 ms; 33 ms while VRChat shows no world, the headset is off or SteamVR's dashboard is up, and nothing of ours shows) on its rising edge, so a click or a double press from any input that has one does open it. People
 who changed Orbiters' bindings before keep theirs: SteamVR's controller settings, Orbiters, choose the default
 binding again to get these.
 

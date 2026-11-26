@@ -142,9 +142,12 @@ pub fn land(ctx: &Context, rect: Rect, scale: f32) {
 /// what flies over them).
 pub fn bounce(ctx: &Context, rect: Rect) -> f32 {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data(|d| d.get_temp::<Vec<(Rect, f32, u64)>>(landings_id()))
-        .and_then(|list| list.iter().rev().find(|(r, _, p)| p + 1 >= pass && same_place(*r, rect)).map(|(_, s, _)| *s))
-        .unwrap_or(1.0)
+    // Asked by every button of every frame: looked at where it is (a copy of it was made here), and a landing that is over goes.
+    ctx.data_mut(|d| {
+        let list = d.get_temp_mut_or_default::<Vec<(Rect, f32, u64)>>(landings_id());
+        list.retain(|(_, _, p)| p + 1 >= pass);
+        list.iter().rev().find(|(r, _, _)| same_place(*r, rect)).map_or(1.0, |(_, s, _)| *s)
+    })
 }
 
 fn same_place(a: Rect, b: Rect) -> bool {

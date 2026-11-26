@@ -4,6 +4,7 @@
 //! walk boost) and its OSC (the service's own, on this computer's loopback, and the values VRChat sent), through
 //! [`Link`], which holds the controller weakly: N4N0 lives inside it.
 
+use super::rest::Part;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::{CallsStatus, N4n0Status, ProcessUsage};
 use orbiters_core::account::Api;
@@ -49,6 +50,11 @@ impl Host for Link {
 
     fn update_settings(&self, change: &mut dyn FnMut(&mut Settings)) {
         self.with(|c| c.update_settings(|s| change(s)));
+    }
+
+    /// `n4n0-watch`, below, and the tracking note.
+    fn wakes(&self) -> bool {
+        true
     }
 
     fn scene(&self) -> Scene {
@@ -353,33 +359,62 @@ fn motion_news(before: Option<crate::state::AvatarMotion>, now: crate::state::Av
     true
 }
 
+/// How often the world performance summaries still waiting are looked at.
+const PERFORMANCE_EVERY: Duration = Duration::from_secs(60);
+
 impl Controller {
     /// N4N0 starts, with the service's own watch beside it: the footprint of Orbiters' processes and VRChat's (the N4N0
     /// page's), the world performance summaries still waiting (VRChat closed before they were sent), and the 3D captures
     /// its menu shows.
     pub(super) fn start_n4n0(self: &Shared) {
+        let ctl = self.clone();
+        let rest = self.rest("n4n0-watch", |s| {
+            (Part::of(&s.settings), s.vrchat.running, s.vrchat.pid, s.steamvr.running, Part::of(&s.vrchat.world), Part::of(&s.n4n0.calls), Part::of(&s.account))
+        });
         self.n4n0.start();
+        let _ = std::thread::Builder::new().name("n4n0-watch".into()).spawn(move || {
+            while !ctl.n4n0.stopped() {
+                rest.wait(None);
+                ctl.n4n0.look();
+            }
+        });
         let ctl = self.clone();
         let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
             let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
-            let mut beat = 0u64;
+            let (mut read, mut sent): (Option<Instant>, Option<Instant>) = (None, None);
+            let rest = ctl.rest("n4n0-resources", |s| {
+                let games = (s.vrchat.running, s.steamvr.running);
+                (games, Part::of(&s.capture), s.reconstruction.is_some(), Part::of(&s.reconstruct_queue), Part::of(&s.capture_shares), s.settings.world_performance)
+            });
             while !ctl.n4n0.stopped() {
-                // (elsewhere than on Windows every process is asked: less often beside a game)
-                if beat.is_multiple_of(if ctl.game_on_this_mac() { 15 } else { 3 }) {
+                let shown = ctl.shown();
+                // Read while something shows it. (Elsewhere than on Windows every process is asked: less often beside a game.)
+                let every = Duration::from_secs(if ctl.game_on_this_mac() { 15 } else { 3 });
+                if shown && read.is_none_or(|at| at.elapsed() + Duration::from_millis(500) >= every) {
+                    // What a processor did needs two looks: the second follows the first at the next turn.
+                    let first = cfg!(windows) && before.as_ref().is_none_or(|(at, _)| at.elapsed() > 2 * every);
                     if cfg!(windows) {
+                        if first {
+                            before = None;
+                        }
                         ctl.n4n0_resources_scanned(&mut before);
                     } else {
                         ctl.n4n0_resources(&mut system);
                     }
+                    read = if first { None } else { Some(Instant::now()) };
                 }
                 // Where the 3D captures N4N0's menu shows stand (their recording, 3D view and shares).
-                ctl.menu_captures_tick();
-                if beat.is_multiple_of(60) && ctl.settings().world_performance {
+                let captures = ctl.menu_captures_tick();
+                let snap = ctl.view();
+                let busy = shown || captures || snap.vrchat.running || snap.steamvr.running;
+                let performance = snap.settings.world_performance;
+                drop(snap);
+                if performance && (!busy || sent.is_none_or(|at| at.elapsed() >= PERFORMANCE_EVERY)) {
+                    sent = Some(Instant::now());
                     ctl.performance_send_if_due(false);
                 }
-                beat += 1;
-                std::thread::sleep(Duration::from_secs(1));
+                rest.wait(if busy { Some(Duration::from_secs(1)) } else { (performance && ctl.performance_waits()).then_some(PERFORMANCE_EVERY) });
             }
         });
     }

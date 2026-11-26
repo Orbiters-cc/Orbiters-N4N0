@@ -437,7 +437,7 @@ impl Rig {
             let mode = self.mode;
             let worker_sheet = mode == Mode::Vr && self.panels.stage.async_pages && page_top.is_some();
             let sheet = &mut self.sheet;
-            if page_top.is_none() { sheet.page = false; }
+            if page_top.is_none() { sheet.leave(); }
             self.panels.paint(&self.snap, |panel, changed| {
                 if let (Some(top), Zone::SheetBack | Zone::Takeover) = (page_top, panel.zone) {
                     if worker_sheet { return; }

@@ -355,9 +355,8 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
     if index.hash(&paths) {
         let _ = index.save(&index_file);
     }
-    let wanted: HashSet<&PathBuf> = paths.iter().collect();
     // Layers without a world of their own are shared too.
-    index.every_shot().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
+    paths.into_iter().filter_map(|p| index.hashes_of(&p).0.map(str::to_owned).map(|hash| (p, hash))).collect()
 }
 
 /// Every hash Orbiters may know each screenshot by: the file's own (what was sent before PRIV-8, and a gallery share's
@@ -369,13 +368,14 @@ pub fn map_hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, Vec<String>> {
     if index.hash(&paths) {
         let _ = index.save(&index_file);
     }
-    let wanted: HashSet<&PathBuf> = paths.iter().collect();
-    index
-        .every_shot()
+    paths
         .into_iter()
-        .filter(|s| wanted.contains(&s.path))
-        .map(|s| (s.path, s.sha256.into_iter().chain(s.clean_sha256).collect::<Vec<_>>()))
-        .filter(|(_, h)| !h.is_empty())
+        .map(|p| {
+            let (own, clean) = index.hashes_of(&p);
+            let hashes: Vec<String> = own.into_iter().chain(clean).map(str::to_owned).collect();
+            (p, hashes)
+        })
+        .filter(|(_, hashes)| !hashes.is_empty())
         .collect()
 }
 
@@ -638,6 +638,17 @@ struct Kept {
     interim: Option<TextureHandle>,
 }
 
+impl Kept {
+    /// The bytes of its textures.
+    fn bytes(&self) -> usize {
+        let shown = match &self.slot {
+            Slot::Ready(t) => t.byte_size(),
+            _ => 0,
+        };
+        shown + self.interim.as_ref().map_or(0, |t| t.byte_size())
+    }
+}
+
 /// A picture read by a loader: its image, or none; `Err` when its reading panicked. `true`: only a stand-in shown until
 /// the picture itself arrives.
 type Loaded = (Picture, Result<Option<ColorImage>, ()>, bool);
@@ -654,6 +665,8 @@ const STALE_REQUEST: f64 = 2.0;
 /// first frame replaces) costs none.
 pub struct Pictures {
     slots: HashMap<Picture, Kept>,
+    /// Bytes of textures kept at most, but for what shows.
+    keep: usize,
     queue: Arc<(Mutex<Vec<Picture>>, std::sync::Condvar)>,
     done: Arc<Mutex<Vec<Loaded>>>,
     /// When the pictures were last trimmed to [`KEEP_BYTES`] (egui's clock).
@@ -679,6 +692,7 @@ impl Pictures {
     pub fn with_backend(ctx: &egui::Context, backend: Option<crate::backend::Ctl>) -> Self {
         Self {
             slots: HashMap::new(),
+            keep: KEEP_BYTES,
             queue: Arc::default(),
             done: Arc::default(),
             trimmed: f64::NEG_INFINITY,
@@ -689,6 +703,17 @@ impl Pictures {
             backend,
             wake: ctx.clone(),
         }
+    }
+
+    /// The same within `bytes` of textures ([`KEEP_BYTES`] otherwise).
+    pub(crate) fn within(mut self, bytes: usize) -> Self {
+        self.keep = bytes;
+        self
+    }
+
+    /// The bytes of the textures it keeps.
+    pub(crate) fn bytes(&self) -> usize {
+        self.slots.values().map(Kept::bytes).sum()
     }
 
     /// Starts the loaders, once.
@@ -934,23 +959,16 @@ impl Pictures {
             lock.lock().unwrap().retain(|p| slots.get(p).is_some_and(|k| !stale(k)));
         }
         self.slots.retain(|_, k| !stale(k));
-        let bytes = |k: &Kept| {
-            let shown = match &k.slot {
-                Slot::Ready(t) => t.byte_size(),
-                _ => 0,
-            };
-            shown + k.interim.as_ref().map_or(0, |t| t.byte_size())
-        };
-        let mut total: usize = self.slots.values().map(bytes).sum();
-        if total <= KEEP_BYTES {
+        let mut total = self.bytes();
+        if total <= self.keep {
             return;
         }
         // What was on screen in the last second, or in the frame before, stays, whatever it weighs.
         let mut old: Vec<(f64, Picture, usize)> =
-            self.slots.iter().filter(|(_, k)| matches!(k.slot, Slot::Ready(_)) && k.used < now - 1.0 && k.used < shown).map(|(p, k)| (k.used, p.clone(), bytes(k))).collect();
+            self.slots.iter().filter(|(_, k)| matches!(k.slot, Slot::Ready(_)) && k.used < now - 1.0 && k.used < shown).map(|(p, k)| (k.used, p.clone(), k.bytes())).collect();
         old.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (_, p, size) in old {
-            if total <= KEEP_BYTES {
+            if total <= self.keep {
                 break;
             }
             self.slots.remove(&p);

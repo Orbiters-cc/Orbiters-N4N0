@@ -870,6 +870,7 @@ fn the_parts_kept_are_one_a_zone_and_are_let_go() {
     assert_eq!(person.panels.resting().0, kept, "not yet");
     person.panels.let_go(Instant::now() + super::RESTS_FOR + Duration::from_secs(1));
     assert_eq!(person.panels.resting(), (0, 0));
+    assert_eq!(person.panels.held_bytes().iter().filter(|h| h.0 != "page textures").map(|h| h.1).sum::<u64>(), 0, "nothing else of the menus either");
     // An opening after that is a first one.
     person.around = Some(Around::QuickMenu);
     person.turn();
@@ -2358,7 +2359,13 @@ fn every_page_has_its_sheet_s_corners() {
             let back = person.panels.all().find(|p| p.zone == Zone::SheetBack).expect("a back");
             let page = person.panels.takeover.as_ref().expect("a page");
             let top = super::vr::page_row(back, page).expect("one picture");
-            let whole = super::vr::compose_sheet(back.pixels(), back.px, page.pixels(), page.px, top);
+            // The worker's page and head apart, as they went into the sheet's one picture.
+            let apart = person.panels.stage.cache.last().and_then(|f| f.apart.clone()).filter(|_| worker);
+            let (page_pixels, back_pixels) = apart.unwrap_or_else(|| (page.pixels().to_vec(), back.pixels().to_vec()));
+            let whole = super::vr::compose_sheet(&back_pixels, back.px, &page_pixels, page.px, top);
+            if worker {
+                assert!(person.panels.stage.cache.last().unwrap().composed.as_ref().unwrap().pixels.as_slice() == whole, "{look:?} {opens:?}: the sheet's picture is its head's and its page's");
+            }
             let [w, h] = back.px;
             let alpha = |pixels: &[u8], x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
             // At the foot's corners, where the page reaches: nothing of it where its back is not. (Off a pixel and a half of the straight sides, whose outer pixel the
@@ -2367,7 +2374,7 @@ fn every_page_has_its_sheet_s_corners() {
             let mut worst = (0i32, 0, 0);
             for y in top..top + page.px[1] {
                 for x in (2..corner).chain(w - corner..w - 2) {
-                    let past = alpha(&whole, x, y) as i32 - alpha(back.pixels(), x, y) as i32;
+                    let past = alpha(&whole, x, y) as i32 - alpha(&back_pixels, x, y) as i32;
                     if past > worst.0 {
                         worst = (past, x, y);
                     }
@@ -2576,7 +2583,7 @@ fn review_camera_web_frames_and_header_stop_repaint_on_the_worker() {
     Arc::make_mut(&mut person.snap).camera_open_said = Some(true);
     person.panels.web = Some(super::camera_web::CameraWeb::open("https://orbiters.cc"));
     for color in [egui::Color32::RED, egui::Color32::BLUE] {
-        let web = person.panels.web.as_mut().unwrap(); web.frame = Some(egui::ColorImage::filled([32,32], color)); web.state = WebState::Shown; web.fresh = true;
+        let web = person.panels.web.as_mut().unwrap(); web.frame = Some(egui::ColorImage::filled([32,32], color).into()); web.state = WebState::Shown; web.fresh = true;
         for panel in &mut person.panels.list { panel.dirty = true; }
         person.turn();
         person.turns_until("camera web frame", |p| p.panels.list.iter().find(|p| p.zone == Zone::CameraWeb).is_some_and(|p| p.painted && !p.dirty) && !p.panels.stage.painter.busy());
@@ -2677,16 +2684,105 @@ fn review_the_worker_publishes_the_complete_sheet_and_matching_geometry() {
     let picture = person.panels.take_sheet_picture().unwrap();
     let back = person.panels.list.iter().find(|p| p.zone == Zone::SheetBack).unwrap();
     let page = person.panels.takeover.as_ref().unwrap();
-    assert_eq!(picture.0.as_slice(), super::vr::compose_sheet(back.pixels(), back.px, page.pixels(), page.px, picture.2));
-    let mut sheet = super::vr::SheetPicture::default(); let original = picture.0.clone(); let size = picture.1;
+    let rendered = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap();
+    let (page_pixels, head_pixels) = rendered.apart.as_ref().unwrap();
+    assert_eq!(picture.pixels.as_slice(), super::vr::compose_sheet(head_pixels, back.px, page_pixels, page.px, picture.top));
+    let mut sheet = super::vr::SheetPicture::default(); let original = picture.pixels.clone(); let size = picture.px;
+    let row = size[0] as usize * 4 * picture.top as usize;
     sheet.adopt(picture);
     assert_eq!(sheet.pixels().as_ptr(), original.as_ptr(), "input adopts the worker allocation without pixel work");
-    assert_eq!(sheet.changed, Some([0,0,size[0],size[1]]), "damage covers the entire composed picture");
-    let rendered = person.panels.stage.cache.iter().find(|f| f.sheet == Sheet::Settings).unwrap();
-    assert_eq!(page.pixels().as_ptr(), rendered.pixels.as_ptr(), "input adopts the raw page allocation without a pixel copy");
-    assert_eq!(back.pixels().as_ptr(), rendered.header.as_ref().unwrap().pixels.as_ptr(), "input adopts the matching raw header allocation");
+    assert_eq!(sheet.changed, Some([0,0,size[0],size[1]]), "a first picture is handed on whole");
+    assert_eq!(page.pixels().as_ptr(), original[row..].as_ptr(), "the page shows its rows of the one picture, without a copy");
+    assert_eq!(page.pixels().len(), page.px[0] as usize * page.px[1] as usize * 4);
+    assert_eq!(back.pixels().as_ptr(), original.as_ptr(), "and so does the head");
+    // DOV-2: the sheet once, not three times.
+    assert_eq!(rendered.bytes(), size[0] as usize * size[1] as usize * 4);
     assert_eq!(page.items, super::panels::sheet_items(Sheet::Settings, &page.displayed.as_ref().unwrap()));
 }
+/// DOV-3, VRR-21: a pointer moving over a page in the headset made four whole copies of the sheet and handed all 5 MB of it to SteamVR. Now what one repaint changes is what is
+/// handed on; put together, the parts handed on are the sheet, to the last bit, in both looks, with a page left and come back to, and with a picture the hand-over missed.
+#[test]
+fn a_page_repainted_hands_on_only_what_changed() {
+    use orbiters_core::settings::MenuLook;
+    for look in [MenuLook::Modern, MenuLook::Retro] {
+        let mut person = Person::new();
+        person.panels.stage.async_pages = true;
+        let mut snap = (*person.snap).clone();
+        snap.settings.orbit.theme = look;
+        person.snap = Arc::new(snap);
+        person.around = Some(Around::QuickMenu);
+        person.turns(3);
+        // What SteamVR holds, from the parts handed on alone.
+        let mut sheet = super::vr::SheetPicture::default();
+        let mut held: Vec<u8> = Vec::new();
+        let mut handed: Vec<(String, u64)> = Vec::new();
+        let mut take = |person: &mut Person, what: &str, miss: bool| {
+            let began = Instant::now();
+            loop {
+                person.turn();
+                if let Some(picture) = person.panels.take_sheet_picture() {
+                    sheet.adopt(picture);
+                    if let Some(part) = (!miss).then(|| sheet.changed.take()).flatten() {
+                        held.resize(sheet.pixels().len(), 0);
+                        for y in part[1]..part[3] {
+                            let (a, b) = (((y * sheet.px[0] + part[0]) * 4) as usize, ((y * sheet.px[0] + part[2]) * 4) as usize);
+                            held[a..b].copy_from_slice(&sheet.pixels()[a..b]);
+                        }
+                        handed.push((what.to_string(), (part[2] - part[0]) as u64 * (part[3] - part[1]) as u64 * 4));
+                    }
+                }
+                let still = !person.panels.stage.painter.busy() && !person.panels.takeover.as_ref().is_some_and(|p| p.dirty || !p.painted) && !person.panels.list.iter().any(|p| p.zone == Zone::SheetBack && p.dirty);
+                if still { break; }
+                assert!(began.elapsed() < Duration::from_secs(20), "{what}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if !miss { assert!(held == sheet.pixels(), "{look:?}, {what}: what was handed on is the sheet"); }
+        };
+        person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+        take(&mut person, "open", false);
+        let targets: Vec<egui::Pos2> = person.panels.takeover.as_ref().unwrap().items.iter().map(|i| i.rect.center()).take(6).collect();
+        let page = person.panels.list.len();
+        for (n, at) in targets.iter().enumerate() {
+            person.panels.hover(Some((page, *at)));
+            take(&mut person, "point", n == 2);
+        }
+        person.panels.hover(None);
+        take(&mut person, "point away", false);
+        person.panels.open_sheet(Sheet::Tracking, "", &person.snap);
+        take(&mut person, "another page", false);
+        person.panels.open_sheet(Sheet::Settings, "", &person.snap);
+        take(&mut person, "back", false);
+        person.panels.hover(Some((page, targets[0])));
+        take(&mut person, "point after back", false);
+        let whole = handed.iter().find(|h| h.0 == "open").unwrap().1;
+        let points: Vec<u64> = handed.iter().filter(|h| h.0 == "point").map(|h| h.1).collect();
+        println!("{look:?}: {whole} bytes handed on for a first picture; for a repaint of what is pointed at: {points:?}; all: {handed:?}");
+        assert!(points.len() >= 4, "{points:?}");
+        // What is pointed at and what was: the rectangle around both, which in the retro look's tiles can span a column.
+        let mut sorted = points.clone();
+        sorted.sort();
+        assert!(sorted[sorted.len() / 2] < whole / 10 && points.iter().all(|p| *p < whole / 2), "{look:?}: {points:?} of {whole}");
+    }
+}
+
+/// DOV-2: the pictures of pages lately seen stay within their budget, the oldest going first, whatever number of pages is opened.
+#[test]
+fn pages_lately_seen_are_kept_within_their_bytes() {
+    let mut person = Person::new();
+    person.panels.stage.async_pages = true;
+    person.around = Some(Around::QuickMenu);
+    person.turns(3);
+    for (n, sheet) in [Sheet::Settings, Sheet::Tracking, Sheet::Mics, Sheet::Booster, Sheet::All, Sheet::Talk, Sheet::Translate, Sheet::Pictures, Sheet::Results, Sheet::Instances, Sheet::Settings, Sheet::Tracking].into_iter().enumerate() {
+        person.panels.open_sheet(sheet, "", &person.snap);
+        person.turns_until(&format!("{sheet:?}'s picture"), |p| p.panels.takeover.as_ref().is_some_and(|p| p.painted && !p.dirty) && !p.panels.stage.painter.busy());
+        let held: usize = person.panels.stage.cache.iter().map(|f| f.bytes()).sum();
+        assert!(held <= super::PAGES_HOLD, "page {n}: {held}");
+    }
+    let each: Vec<usize> = person.panels.stage.cache.iter().map(|f| f.bytes()).collect();
+    println!("{} pages kept, {} bytes", each.len(), each.iter().sum::<usize>());
+    assert!(each.len() >= 8, "Back through the last eight pages shows them at once: {each:?}");
+}
+
 #[test]
 fn review_a_camera_bar_for_a_previous_url_cannot_act_on_the_new_page() {
     let mut person = Person::new(); person.panels.stage.async_pages = true; person.around = Some(Around::Camera);

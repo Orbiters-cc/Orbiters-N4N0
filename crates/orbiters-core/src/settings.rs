@@ -1023,22 +1023,18 @@ impl Settings {
         Self::load_from(&crate::paths::settings_file())
     }
 
-    /// The settings in `text`, parsed once, as [`crate::json_lenient`] reads them, a statistics switch that did not read
-    /// off, never on by default (the person may have turned it off; PRIV-12); with the fields left out, and whether
-    /// something was saved under an earlier name ([`migrate`]).
-    fn parse(text: &str) -> (Self, Vec<String>, bool) {
-        let (mut settings, dropped, moved) = match crate::parse_json(text) {
-            Some(mut value) => {
-                let moved = migrate(&mut value);
-                let (settings, dropped) = crate::json_lenient_value::<Self>(value);
-                (settings, dropped, moved)
-            }
-            None => (Self::default(), vec!["(not JSON)".into()], false),
+    /// The settings in `text` as [`crate::json_lenient`] reads them, a statistics switch that did not read off, never on
+    /// by default (the person may have turned it off; PRIV-12); with the fields left out.
+    pub(crate) fn parse(text: &str) -> (Self, Vec<String>, bool) {
+        let Ok(mut input) = crate::json_document(text) else {
+            return (Self::unread(), vec!["(not JSON)".into()], false);
         };
+        let migrated = migrate_fields(&mut input);
+        let (mut settings, dropped) = crate::json_lenient_value::<Self>(input);
         if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
             settings.usage.enabled = false;
         }
-        (settings, dropped, moved)
+        (settings, dropped, migrated)
     }
 
     /// The language a program of its own (the call, capture and speech workers) speaks: the one these settings hold (what the account gave
@@ -1255,9 +1251,7 @@ fn was_loaded_unreadable(path: &Path) -> Option<bool> {
     LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).copied()
 }
 
-/// Moves what an earlier version saved under another name to today's (today's wins when both are there); whether
-/// anything moved (nothing in what is not a JSON object).
-fn migrate(value: &mut serde_json::Value) -> bool {
+fn migrate_fields(value: &mut serde_json::Value) -> bool {
     let Some(fields) = value.as_object_mut() else { return false };
     let legacy = fields.remove(LEGACY_N4N0_KEY);
     let moved = legacy.is_some();
@@ -1300,9 +1294,9 @@ mod tests {
         let earlier = format!("{{\"storage_limit_gb\": 7, \"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}}}");
         for text in [today, earlier, r#"{"storage_limit_gb": 7, "capture_mode": 12}"#.into()] {
             std::fs::write(&path, &text).unwrap();
-            let before = crate::PARSES.with(std::cell::Cell::get);
+            let before = crate::DOCUMENT_PARSES.get();
             assert_eq!(Settings::load_from(&path).storage_limit_gb, 7.0);
-            assert_eq!(crate::PARSES.with(std::cell::Cell::get) - before, 1, "{text}");
+            assert_eq!(crate::DOCUMENT_PARSES.get() - before, 1, "{text}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1378,6 +1372,13 @@ mod tests {
         let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
         std::fs::write(&path, both).unwrap();
         assert!(!Settings::load_from(&path).n4n0.wake_word);
+
+        // The JSON spelling of the key is independent of its decoded name.
+        let escaped = format!(r#"\u{:04x}{}"#, LEGACY_N4N0_KEY.as_bytes()[0], &LEGACY_N4N0_KEY[1..]);
+        std::fs::write(&path, earlier.replace(LEGACY_N4N0_KEY, &escaped)).unwrap();
+        crate::DOCUMENT_PARSES.set(0);
+        assert!(Settings::load_from(&path).n4n0.wake_word);
+        assert_eq!(crate::DOCUMENT_PARSES.replace(0), 1, "migration and settings use the same parsed document");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -246,7 +246,7 @@ impl Smoothing {
         if self.control.is_none() {
             match orbiters_smooth::Control::open_or_create() {
                 Ok(control) => self.control = Some(control),
-                Err(e) => return tr!("The driver cannot be reached: {error}", error = e),
+                Err(e) => return tr!("The driver cannot be reached: {error}", error = orbiters_smooth::words(&e)),
             }
         }
         self.keep_kinds(w, now);

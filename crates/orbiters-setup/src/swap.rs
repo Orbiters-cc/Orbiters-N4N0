@@ -7,16 +7,17 @@
 //! either of a swap that ended, and only tidied up, or of one that did not, and all of it goes back. The journal goes
 //! first in both cases, then the files it named.
 
-use crate::install::{contained, make_parent, remove_empty_dirs, remove_file, remove_tree, rename, BACKUP, STAGING};
+use crate::install::{contained, make_parent, remove_empty_dirs, remove_file, remove_tree, rename, rename_marker, BACKUP, STAGING};
 use anyhow::Context as _;
 use orbiters_i18n::tr;
 use orbiters_update::{payload, InstallRecord, APP_EXE, PRODUCT, RECORD_FILE};
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// The journal's file, in the install folder.
 pub(crate) const JOURNAL: &str = ".setup-journal";
+pub(crate) const RECORD_DRAFT: &str = "install.json.tmp";
 
 /// What a swap does.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,30 +54,38 @@ struct Journal {
 }
 
 impl Journal {
+    /// Written whole in the staging folder (this setup's own), then published under its name in `dir` (W1-3): a cut before
+    /// that leaves no journal at all, never an empty or half one that a first install would take for a file of the person's.
+    /// Held from the start, shared only to be renamed: another setup finds it in use.
     fn begin(dir: &Path, plan: &Plan) -> anyhow::Result<Self> {
         let path = dir.join(JOURNAL);
-        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(&path).with_context(|| tr!("{path} cannot be written", path = path.display()))?;
-        // Whole on the disk before the first move.
-        file.write_all(&serde_json::to_vec(&plan.json())?)?;
-        file.sync_all()?;
+        let draft = dir.join(STAGING).join(JOURNAL);
+        make_parent(&draft)?;
+        let bytes = serde_json::to_vec(&plan.json())?;
+        let file = orbiters_update::publish_file(&draft, &path, &bytes, |from, to| rename_marker(from, to, false))
+            .with_context(|| tr!("{path} cannot be written", path = path.display()))?;
         Ok(Self { file: Some(file), path })
     }
 
-    /// The journal a swap left in `dir`. One that cannot be read was cut before anything moved.
-    fn left(dir: &Path) -> anyhow::Result<Option<(Self, Plan)>> {
+    /// The journal a swap left in `dir`: none when it is confirmed not there (or is a folder, or a link: not ours). One that is
+    /// there but cannot be looked at now is an error, never "none" (W1-1). Its plan is `None` when it holds no whole one: an
+    /// older setup wrote it in place and was cut while writing it (V2-2).
+    fn left(dir: &Path) -> anyhow::Result<Option<(Self, Option<Plan>)>> {
         const SHARING_VIOLATION: i32 = 32;
         let path = dir.join(JOURNAL);
         match std::fs::symlink_metadata(&path) {
             Ok(m) if m.is_file() && m.file_attributes() & 0x400 == 0 => {}
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(unreadable(&path, e)),
             _ => return Ok(None),
         }
         let mut file = match std::fs::OpenOptions::new().read(true).share_mode(0).open(&path) {
             Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => anyhow::bail!("{}", tr!("Another setup is at work in {folder}: nothing was changed.", folder = dir.display())),
-            opened => opened?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            opened => opened.map_err(|e| unreadable(&path, e))?,
         };
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(Plan::read(&bytes).map(|plan| (Self { file: Some(file), path }, plan)))
+        file.read_to_end(&mut bytes).map_err(|e| unreadable(&path, e))?;
+        Ok(Some((Self { file: Some(file), path }, Plan::read(&bytes))))
     }
 
     /// What it was for is over. An error when it could not be removed: it then still says what it said.
@@ -118,7 +127,7 @@ pub(crate) fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::I
                 rename(&from, &dest).with_context(|| tr!("{path} cannot be written", path = dest.display()))?;
             }
         }
-        record.write(dir).with_context(|| tr!("{path} cannot be written", path = dir.join(RECORD_FILE).display()))
+        record.publish(dir, &staging.join(RECORD_DRAFT), |from, to| rename_marker(from, to, true)).with_context(|| tr!("{path} cannot be written", path = dir.join(RECORD_FILE).display()))
     })();
     if let Err(e) = result {
         // As it was: the new files out, the old ones back. Each move checked (F16): what could not be put back is named, and
@@ -137,6 +146,11 @@ pub(crate) fn swap(dir: &Path, staging: &Path, backup: &Path, index: &payload::I
     Ok(())
 }
 
+/// A file of the install that is there and could not be read now: the setup is to be run again (at the next sign-in, it is).
+pub(crate) fn unreadable(path: &Path, e: std::io::Error) -> anyhow::Error {
+    anyhow::anyhow!("{}", tr!("{path} cannot be read right now ({why}). Try again in a moment.", path = path.display(), why = e))
+}
+
 fn not_put_back(stuck: &[String], backup: &Path) -> String {
     tr!("The previous version could not be fully put back: {files}. Its files are kept in {folder}.", files = stuck.join(", "), folder = backup.display())
 }
@@ -151,14 +165,16 @@ fn put_back(dir: &Path, staging: &Path, backup: &Path, plan: &Plan) -> Vec<Strin
             continue;
         };
         let moved = |from: &Path, to: &Path| make_parent(to).is_ok() && rename(from, to).is_ok();
-        let was_there = plan.aside.iter().any(|p| p == path);
-        let back = if was_there {
-            // (Not in the backup folder: not moved yet, or back already.)
-            !old.is_file() || ((!dest.exists() || (!new.exists() && moved(&dest, &new))) && moved(&old, &dest))
-        } else {
-            // (In the staging folder: not moved yet, or back already.)
-            new.exists() || !dest.exists() || moved(&dest, &new)
-        };
+        let back = (|| -> std::io::Result<bool> {
+            if plan.aside.iter().any(|p| p == path) {
+                // An absent backup means that the old file never moved or has already been restored.
+                if !old.try_exists()? {
+                    return Ok(true);
+                }
+                return Ok(old.is_file() && (!dest.try_exists()? || (!new.try_exists()? && moved(&dest, &new))) && moved(&old, &dest));
+            }
+            Ok(new.try_exists()? || !dest.try_exists()? || moved(&dest, &new))
+        })().unwrap_or(false);
         if !back {
             stuck.push(path.to_string());
         }
@@ -170,10 +186,26 @@ fn put_back(dir: &Path, staging: &Path, backup: &Path, plan: &Plan) -> Vec<Strin
 /// Whether there was one. An error when the previous version could not be put back whole: its files and the journal stay.
 pub fn recover(dir: &Path) -> anyhow::Result<bool> {
     let Some((journal, plan)) = Journal::left(dir)? else { return Ok(false) };
+    let Some(plan) = plan else {
+        // V2-2: this app's journal, at its own name in the install folder, that says no whole plan: an older setup wrote it in
+        // place and was cut while it did, before its first move. It is kept beside under a name of its own (whatever it holds
+        // stays), never left at its name, where every later setup would refuse to write its own and stop there for good.
+        let journal_path = journal.path.clone();
+        drop(journal);
+        crate::install::keep_aside(dir, &journal_path).with_context(|| tr!("{path} cannot be written", path = journal_path.display()))?;
+        return Ok(true);
+    };
     let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
-    if InstallRecord::read(dir).as_ref() != Some(&plan.to) {
+    // Whether the swap ended is what its record says: one that cannot be read now decides nothing, before any file moves (W1-1).
+    let record = dir.join(RECORD_FILE);
+    let ended = InstallRecord::load(dir).map_err(|e| unreadable(&record, e))?.as_ref() == Some(&plan.to);
+    if !ended {
         let stuck = put_back(dir, &staging, &backup, &plan);
         anyhow::ensure!(stuck.is_empty(), "{}", not_put_back(&stuck, &backup));
+    }
+    // A cut can leave an unpublished record in staging. Root-level files of the same name are left alone.
+    if let Some(draft) = contained(&staging, RECORD_DRAFT) {
+        let _ = remove_file(&draft);
     }
     // The journal first: without its files, what it says would be taken for a swap to undo.
     if journal.over().is_ok() {
@@ -190,10 +222,21 @@ pub fn recover(dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// Whether `dir` holds one version whole, the only kind that may be started (W1-4): no swap left to put back (a put-back that
+/// could not end leaves the old program beside new files), or one whose record was written; and the record read.
+pub(crate) fn whole(dir: &Path) -> bool {
+    let Ok(journal) = Journal::left(dir) else { return false };
+    let Ok(Some(record)) = InstallRecord::load(dir) else { return false };
+    if journal.as_ref().and_then(|(_, plan)| plan.as_ref()).is_some_and(|plan| record != plan.to) {
+        return false;
+    }
+    let available = |path: &str| contained(dir, path).is_some_and(|file| file.is_file());
+    available(APP_EXE) && record.files.iter().all(|path| available(path))
+}
+
 /// The programs a cut swap in `dir` was about, which must not run while it is put back.
-pub(crate) fn left_programs(dir: &Path) -> Vec<String> {
-    let left = Journal::left(dir).ok().flatten();
-    left.map(|(_, plan)| plan.paths().map(str::to_string).collect()).unwrap_or_default()
+pub(crate) fn left_programs(dir: &Path) -> anyhow::Result<Vec<String>> {
+    Ok(Journal::left(dir)?.and_then(|(_, plan)| plan).map(|plan| plan.paths().map(str::to_string).collect()).unwrap_or_default())
 }
 
 /// The command that puts back what a cut swap in `dir` leaves: `setup`, with its folder named where Windows' 260 characters
@@ -278,7 +321,9 @@ mod tests {
                 let _ = cut_after(Some(again), || recover(&dir));
             }
             cut_after(None, || recover(&dir)).unwrap().unwrap();
-            let left = tree(&dir);
+            // Cut at the journal's publication (its first move), the swap had not begun: what was unpacked waits in the staging
+            // folder, which the next setup sets aside.
+            let left: Vec<_> = tree(&dir).into_iter().filter(|(p, _)| cut > 0 || !p.starts_with(&format!("{STAGING}/"))).collect();
             if InstallRecord::read(&dir).unwrap() == to {
                 for name in NEW {
                     assert!(left.contains(&(name.to_string(), format!("new {name}"))), "cut after {cut} moves: {left:?}");
@@ -318,7 +363,9 @@ mod tests {
         remove_tree(&dir);
     }
 
-    /// A journal another setup holds is a swap under way; one that cannot be read, or is a person's file, is none.
+    /// A journal another setup holds is a swap under way. One at its name that holds no whole plan (V2-2: what an older setup,
+    /// which wrote it in place, left when cut while writing it) moves nothing: it is kept beside as it is, and its name is free.
+    /// A folder at its name is none.
     #[test]
     fn only_a_swap_that_was_cut_is_recovered() {
         let dir = scratch("held");
@@ -327,12 +374,109 @@ mod tests {
         let said = format!("{:#}", recover(&dir).unwrap_err());
         assert!(said.contains("Another setup is at work"), "{said}");
         drop(held);
+        let unplanned = tree(&dir).into_iter().filter(|(p, _)| p != JOURNAL).collect::<Vec<_>>();
         for text in [&b"{\"product\":\"orbiters-desktop\",\"aside\":[\"mine.txt\"]"[..], b"{}", b"a person's", b""] {
             std::fs::write(dir.join(JOURNAL), text).unwrap();
-            assert!(!recover(&dir).unwrap());
-            assert!(dir.join("mine.txt").is_file());
+            assert!(recover(&dir).unwrap());
+            assert!(!dir.join(JOURNAL).exists() && !recover(&dir).unwrap());
+            let (kept, rest): (Vec<_>, Vec<_>) = tree(&dir).into_iter().partition(|(p, _)| p.starts_with(&format!("{JOURNAL}-")));
+            assert_eq!(rest, unplanned, "nothing of the install moved");
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].1.as_bytes(), text);
+            std::fs::remove_file(dir.join(&kept[0].0)).unwrap();
         }
+        std::fs::create_dir(dir.join(JOURNAL)).unwrap();
+        assert!(!recover(&dir).unwrap() && dir.join(JOURNAL).is_dir());
+        std::fs::remove_dir(dir.join(JOURNAL)).unwrap();
+        std::fs::write(dir.join(JOURNAL), b"a person's").unwrap();
+        let (_, old, to) = before(&dir);
+        assert!(Journal::begin(&dir, &Plan { aside: old.files, fresh: vec![], to }).is_err());
+        assert_eq!(std::fs::read(dir.join(JOURNAL)).unwrap(), b"a person's");
         remove_tree(&dir);
+    }
+
+    /// W1-1: a swap whose record is written, with that record held a moment by another program (an antivirus), is not undone:
+    /// nothing moves, the journal stays, and the next recovery keeps the new version.
+    #[test]
+    fn a_committed_swap_waits_while_its_record_cannot_be_read() {
+        let dir = scratch("committed-record-held");
+        let (index, old, to) = before(&dir);
+        let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
+        swap(&dir, &staging, &backup, &index, Some(&old), &to).unwrap();
+        let plan = Plan { aside: old.files.clone(), fresh: vec!["fresh/c.dll".into()], to: to.clone() };
+        drop(Journal::begin(&dir, &plan).unwrap());
+        let before_recovery = tree(&dir);
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join(RECORD_FILE)).unwrap();
+        let said = format!("{:#}", recover(&dir).unwrap_err());
+        assert!(!whole(&dir), "not to be started while it cannot be told which version it is");
+        drop(held);
+        assert!(said.contains(RECORD_FILE), "{said}");
+        assert_eq!(tree(&dir), before_recovery, "nothing moved");
+        assert!(recover(&dir).unwrap());
+        assert_eq!(InstallRecord::read(&dir).unwrap(), to);
+        assert_eq!(std::fs::read_to_string(dir.join(APP_EXE)).unwrap(), format!("new {APP_EXE}"));
+        assert!(whole(&dir) && !dir.join(JOURNAL).exists());
+        remove_tree(&dir);
+    }
+
+    /// W1-4: a put-back that could not end (a new helper held open) leaves a mixed folder: never one to start, until a later
+    /// recovery puts the whole old version back.
+    #[test]
+    fn a_partial_put_back_is_not_a_version_to_start() {
+        let dir = scratch("partial-put-back");
+        let (index, old, to) = before(&dir);
+        let (staging, backup) = (dir.join(STAGING), dir.join(BACKUP));
+        let helper = "orbiters-capture.exe";
+        assert!(index.files.iter().any(|f| f.path == helper));
+        assert!(whole(&dir));
+        drop(Journal::begin(&dir, &Plan { aside: old.files.clone(), fresh: vec!["fresh/c.dll".into()], to }).unwrap());
+        make_parent(&backup.join(helper)).unwrap();
+        std::fs::rename(dir.join(helper), backup.join(helper)).unwrap();
+        std::fs::rename(staging.join(helper), dir.join(helper)).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join(helper)).unwrap();
+        assert!(recover(&dir).is_err());
+        assert!(dir.join(JOURNAL).exists());
+        assert_eq!(std::fs::read_to_string(dir.join(APP_EXE)).unwrap(), "old app");
+        assert!(!whole(&dir), "the old program beside a new helper");
+        // The app's start after an update (and the failure page's Open) goes through the same door, which starts nothing here.
+        let started = std::cell::RefCell::new(vec![]);
+        let launch = |program: &Path, _: &[&str]| {
+            started.borrow_mut().push(program.to_path_buf());
+            Ok(())
+        };
+        crate::relaunch_with(&dir, true, launch);
+        assert!(started.borrow().is_empty(), "the old program beside a new helper is never started");
+        drop(held);
+        recover(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(helper)).unwrap(), "old capture");
+        assert!(whole(&dir));
+        crate::relaunch_with(&dir, true, launch);
+        assert_eq!(*started.borrow(), vec![dir.join(APP_EXE)], "a whole version is");
+        remove_tree(&dir);
+    }
+
+    /// W1-1: a journal that cannot be looked at now is not "no journal".
+    #[test]
+    fn a_journal_that_cannot_be_read_now_is_an_error() {
+        let dir = scratch("journal-held");
+        let (_, old, to) = before(&dir);
+        drop(Journal::begin(&dir, &Plan { aside: old.files.clone(), fresh: vec![], to }).unwrap());
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join(JOURNAL)).unwrap();
+        assert!(recover(&dir).is_err() && !whole(&dir));
+        drop(held);
+        assert!(recover(&dir).unwrap());
+        remove_tree(&dir);
+    }
+
+    /// W1-1, its first step on its own: where the journal's name cannot even be looked at (here a name Windows refuses, the one
+    /// failure of that step a test can bring about), that is an error, never "no journal".
+    #[test]
+    fn a_journal_name_that_cannot_be_looked_at_is_an_error() {
+        let dir = scratch("journal-name").join("a?b");
+        let looked = std::fs::symlink_metadata(dir.join(JOURNAL)).unwrap_err();
+        assert_ne!(looked.kind(), std::io::ErrorKind::NotFound, "{looked}");
+        assert!(Journal::left(&dir).is_err() && recover(&dir).is_err() && left_programs(&dir).is_err() && !whole(&dir));
+        remove_tree(dir.parent().unwrap());
     }
 
     /// What Windows runs at the next sign-in is at most 260 characters, or it would not run it.

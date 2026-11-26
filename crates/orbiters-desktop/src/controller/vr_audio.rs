@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 pub const APPLY_FOR: Duration = Duration::from_secs(40);
 /// After SteamVR closes, the devices put back are looked at and put back again this long.
 pub const RESTORE_FOR: Duration = Duration::from_secs(12);
+/// How often the defaults are looked at outside VR.
+const OUTSIDE_EVERY: Duration = Duration::from_secs(15);
 /// A default outside VR that held this long is the one to put back.
 pub const SETTLED: Duration = Duration::from_secs(45);
 /// Times a flow's default is set in one of those windows at most: another program wanting its own is not fought on.
@@ -408,7 +410,8 @@ impl Controller {
     }
 }
 
-/// The service's thread: a turn every second while it watches the defaults closely, every two otherwise.
+/// The service's thread: a turn every second while it watches the defaults closely, every [`OUTSIDE_EVERY`] outside VR while a
+/// device is chosen (the default before VR is the one that held [`SETTLED`]), else when SteamVR or the choice changes.
 pub fn run(ctl: Shared) {
     if !orbiters_core::here::HERE.steam_vr || !orbiters_core::here::HERE.sound {
         return;
@@ -416,6 +419,7 @@ pub fn run(ctl: Shared) {
     let path = saved_file();
     let mut keeper = Keeper::new(Windows, load(&path));
     ctl.set_vr_audio(Status { last: keeper.saved.last.clone() });
+    let rest = ctl.rest("vr-audio", |s| (s.steamvr.running, s.steamvr.pid, s.settings.vr_audio.clone()));
     loop {
         let snap = ctl.view();
         let steamvr = snap.steamvr.running.then(|| snap.steamvr.pid.unwrap_or(0));
@@ -423,8 +427,9 @@ pub fn run(ctl: Shared) {
             save(&path, &keeper.saved);
             ctl.set_vr_audio(Status { last: keeper.saved.last.clone() });
         }
+        let chosen = snap.settings.vr_audio.output.is_some() || snap.settings.vr_audio.input.is_some();
         drop(snap);
-        std::thread::sleep(if keeper.busy() { Duration::from_secs(1) } else { Duration::from_secs(2) });
+        rest.wait(if keeper.busy() { Some(Duration::from_secs(1)) } else { (chosen && steamvr.is_none()).then_some(OUTSIDE_EVERY) });
     }
 }
 

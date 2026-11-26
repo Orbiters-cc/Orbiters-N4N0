@@ -2,10 +2,11 @@
 //! back whatever an earlier run left. It looks at SteamVR's frames through the overlay and never opens a connection of its
 //! own: its connections disturbed the overlay's input ("asks SteamVR nothing itself", `overlay/mod.rs`).
 //!
-//! Every second it compares what the overlay wants with what is so. The overlay gone means nothing is wanted: priorities come
+//! Every second it compares what the overlay wants with what is so (at rest, when one of the two changes). The overlay gone means nothing is wanted: priorities come
 //! back then. A service that itself is killed leaves programs in efficiency mode until its next start or until they exit, and that gap
 //! is real and is said in `docs/fps-booster.md`.
 
+use super::rest::{Part, Rest};
 use super::Shared;
 use crate::booster::{Command, OverlayReport};
 use orbiters_booster::engine::{Request, Wants};
@@ -14,13 +15,15 @@ use orbiters_booster::journal::{Store, Target};
 use orbiters_booster::programs::{self, RealOs, Seen};
 use orbiters_booster::{system, vrchat_read, Level};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How old the overlay's last report may be for it to count as there.
 const REPORT_GONE_AFTER: Duration = Duration::from_secs(5);
 /// How often other programs are looked at while VRChat runs here with SteamVR.
 const SCAN_EVERY: Duration = Duration::from_secs(5);
+/// How often the limits on avatars are read for the list.
+const LIMITS_EVERY: Duration = Duration::from_secs(10);
 /// How often a SteamVR value still owed is tried again through its file while SteamVR stays closed.
 const OFFLINE_EVERY: Duration = Duration::from_secs(60);
 /// How often step 1 looks again: for programs that started since, for one that started playing sound (put back), and for a
@@ -37,7 +40,7 @@ pub(crate) struct Hub {
     holds_preparing: AtomicBool,
     inner: Mutex<Inner>,
     generation: AtomicU64,
-    worker: Mutex<Option<std::thread::Thread>>,
+    worker: Mutex<Option<Arc<Rest>>>,
 }
 
 #[derive(Default)]
@@ -54,7 +57,7 @@ struct Inner {
 impl Hub {
     pub(crate) fn cancel_work(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(worker) = self.worker.lock().unwrap().as_ref() { worker.unpark(); }
+        if let Some(worker) = self.worker.lock().unwrap().as_ref() { worker.wake(); }
     }
 
     pub(crate) fn holds_reconstructions(&self) -> bool {
@@ -214,7 +217,9 @@ impl super::Controller {
     }
 
     fn booster_thread(self: Shared, store: Store) {
-        *self.booster.worker.lock().unwrap() = Some(std::thread::current());
+        let rest = self.rest("fps-booster", |s| (s.vrchat.running, s.vrchat.remote, s.steamvr.running, s.settings.booster.clone(), Part::of(&s.booster)));
+        *self.booster.worker.lock().unwrap() = Some(rest.clone());
+        let mut turn = Some(Duration::from_secs(1));
         let mut os = RealOs;
         let mut last_seen: Option<(Instant, Vec<Seen>)> = None;
         let mut last_lower: Option<Instant> = None;
@@ -227,7 +232,7 @@ impl super::Controller {
         let mut slower = programs::Slower::default();
         let mut level = Level::Off;
         loop {
-            std::thread::park_timeout(Duration::from_secs(1));
+            rest.wait(turn);
             if self.quitting.load(Ordering::Relaxed) {
                 let _ = programs::restore_all(&store, &mut os);
                 return;
@@ -331,7 +336,7 @@ impl super::Controller {
 
             // What the limits on avatars are set to, read only, for the list: only while someone could be looking at it.
             let wanted_limits = snap.settings.booster.level == Level::Avatars || !snap.booster.to_put_back.is_empty();
-            if wanted_limits && last_limits.is_none_or(|at| at.elapsed() >= Duration::from_secs(10)) {
+            if wanted_limits && last_limits.is_none_or(|at| at.elapsed() >= LIMITS_EVERY) {
                 last_limits = Some(Instant::now());
                 let account = vrchat_read::account_of(snap.vrchat.world.local_player.as_deref(), &snap.vrchat.world.players);
                 let limits = vrchat_read::read(account.as_deref());
@@ -351,6 +356,17 @@ impl super::Controller {
                     changed
                 });
             }
+
+            // With no game, no SteamVR, nothing in force and nobody's report: until one of them comes, but for what is looked at now
+            // and then (the limits' list, a value owed to SteamVR).
+            let busy = here || snap.steamvr.running || snap.booster.watching || lowered_any || stopping_prep || holding;
+            turn = if busy {
+                Some(Duration::from_secs(1))
+            } else if wanted_limits {
+                Some(LIMITS_EVERY)
+            } else {
+                store.entries().map_or(true, |e| system::owed_to_steamvr(&e)).then_some(OFFLINE_EVERY)
+            };
         }
     }
 

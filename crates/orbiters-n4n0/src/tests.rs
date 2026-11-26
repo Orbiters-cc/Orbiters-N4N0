@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,8 @@ static CLIPBOARD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 #[derive(Default)]
 pub(crate) struct TestHost {
     settings: Mutex<Settings>,
+    /// The app wakes N4N0 when what it looks at changes ([`Host::wakes`]).
+    wakes: AtomicBool,
     scene: Mutex<Scene>,
     world: Mutex<WorldState>,
     published: Mutex<N4n0Status>,
@@ -255,6 +257,10 @@ impl Host for TestHost {
 
     fn update_settings(&self, change: &mut dyn FnMut(&mut Settings)) {
         change(&mut self.settings.lock().unwrap());
+    }
+
+    fn wakes(&self) -> bool {
+        self.wakes.load(Ordering::Relaxed)
     }
 
     fn scene(&self) -> Scene {

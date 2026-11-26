@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn the_worlds_lines_become_actions_once_each() {
         let mut rt =
-            WorldFeedbackRuntime { queue: Queue::default(), queue_path: std::env::temp_dir().join("orbiters-feedback-unit.json"), ..Default::default() };
+            WorldFeedbackRuntime { queue: Queue::default(), queue_path: orbiters_core::paths::stand_ins().join("feedback-unit.json"), ..Default::default() };
         assert!(rt.line(line(1, r#""t":"hello""#), false, true));
         rt.line(line(2, &format!(r#""t":"select","world":"{WORLD}","name":"Home","preview":1,"slot":2,"key":3"#)), false, true);
         assert_eq!(rt.world.selected, Some((WORLD.into(), "Home".into())));

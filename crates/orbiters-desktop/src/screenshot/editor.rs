@@ -103,7 +103,7 @@ fn drawn() -> PathBuf {
             px[i..i + 4].copy_from_slice(&[(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, 255]);
         }
     }
-    let path = std::env::temp_dir().join("orbiters-editor-stand-in.png");
+    let path = orbiters_core::paths::stand_ins().join("editor-stand-in.png");
     let _ = files::write_png(&path, &photo::Rgba8::new(w, h, px), None);
     path
 }
@@ -192,7 +192,7 @@ pub(super) fn stage(ctx: &egui::Context, app: &mut App, name: &str, f: u32) {
 
 /// The skyline drawn here, turned 4 degrees (its edges lean): what AUTO levels.
 fn tilted() -> PathBuf {
-    let path = std::env::temp_dir().join("orbiters-editor-tilted.png");
+    let path = orbiters_core::paths::stand_ins().join("editor-tilted.png");
     if let Ok(p) = files::load(&drawn()) {
         let g = photo::Geometry { straighten: 4.0, ..Default::default() };
         let crop = g.effective_crop(p.width, p.height);

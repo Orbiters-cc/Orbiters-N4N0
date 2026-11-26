@@ -1492,7 +1492,7 @@ fn compact(n: u64) -> String {
 /// (`ORBITERS_PREVIEW_PROJECTS`, separated by `|`) without avatar pictures, their stills drawn on the frame.
 impl State {
     pub fn stage_preview(&mut self, name: &str) {
-        let dir = std::env::temp_dir().join("orbiters-preview-stand-in");
+        let dir = stand_in_dir();
         let folder = dir.join(file::FOLDER);
         let _ = std::fs::remove_dir_all(dir.join("Assets"));
         for old in ["stand-in.preview", "second.preview"] {
@@ -1616,6 +1616,12 @@ impl Previews {
         cam.now = o;
         cam.spin = [0.0; 2];
     }
+}
+
+/// Where the stand-in preview is. Scenes are laid out by several processes at once (`every_layer_over_the_page_says_it_is_shown`),
+/// and each one writes and removes its own: in one folder for all, a scene found its preview gone and showed none.
+fn stand_in_dir() -> PathBuf {
+    orbiters_core::paths::stand_ins().join("preview")
 }
 
 /// A stand-in scene for screenshots: N4N0's black sphere with white strokes floating over a plinth, a ring round it and
@@ -1869,6 +1875,31 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         assert!(Prefs::read(&path).scene_light, "an unreadable file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The layers' walk lays the scenes out in four processes at once, and failed now and then on this scene alone: the stand-in
+    /// of one was in the folder of all, and another's scene took it away between its being made and its being shown.
+    #[test]
+    fn another_process_s_scene_takes_nothing_from_this_one_s() {
+        let mut state = State::default();
+        state.stage_preview("projects-preview-open");
+        let own = state.preview.fixture.clone().expect("the stand-in's folder").join(file::FOLDER).join("stand-in.preview");
+        assert!(own.is_file());
+        let other = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pages::projects::preview::tests::another_process_s_scene", "--ignored"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(other.success());
+        assert!(own.is_file(), "still there, for the frame that shows it");
+    }
+
+    /// What [`another_process_s_scene_takes_nothing_from_this_one_s`] runs in another process: a scene without a preview.
+    #[test]
+    #[ignore]
+    fn another_process_s_scene() {
+        State::default().stage_preview("projects-preview-no-scene");
     }
 
     #[test]

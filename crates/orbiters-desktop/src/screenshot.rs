@@ -4312,6 +4312,24 @@ mod dashboard_tests {
         run(&args[1..]).unwrap();
     }
 
+    /// What a scene stands in for is in its own process's folders (`orbiters_core::paths::stand_ins`): several make the same
+    /// scenes at once, and a fixed name in the system's temporary folder is one file for all of them.
+    #[test]
+    fn no_scene_has_a_fixed_name_in_the_temporary_folder() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut wrong = Vec::new();
+        for (file, text) in orbiters_core::source::named(&src) {
+            // (The load of Settings' own try of the FPS booster: one program of that name at a time, on purpose.)
+            if file == "controller/booster.rs" {
+                continue;
+            }
+            let flat: String = text.split_whitespace().collect();
+            wrong.extend(flat.match_indices("temp_dir().join(\"").map(|(at, _)| format!("{file}: {}", flat[at..].chars().take(60).collect::<String>())));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("
+"));
+    }
+
     /// Verify2-r21 M5: an `Area` is made through `orbiters_ui::front` and nowhere else, and what draws on a layer of its own
     /// says so there.
     #[test]

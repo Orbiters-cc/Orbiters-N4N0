@@ -2609,7 +2609,7 @@ mod tests {
         }
         // An editor of a picture of this computer is the person's own work: it stays.
         frame(&mut state, signed_in("x"));
-        let path = std::env::temp_dir().join("orbiters-test-local-edit.png");
+        let path = orbiters_core::paths::stand_ins().join("local-edit.png");
         state.editor = Some(Editor::open(&ctx, Source::picture(&path), "World"));
         frame(&mut state, signed_in("z"));
         assert!(state.editor.is_some());

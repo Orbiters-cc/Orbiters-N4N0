@@ -145,7 +145,7 @@ impl Service {
         let rest = self.ctl.rest("overlay-keeper", |s| {
             (s.vrchat.running, s.vrchat.remote, s.steamvr.running, s.steamvr.pid, s.launcher.desktop_game, controller::rest::Part::of(&s.settings), s.n4n0.desktop_mode)
         });
-        std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
+        std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || while !svc.quitting.load(Ordering::Relaxed) {
             svc.keep_overlay();
             svc.keep_orbit();
             svc.keep_steamvr_start();

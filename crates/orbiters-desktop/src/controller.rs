@@ -3486,8 +3486,6 @@ fn spawn_watchers(ctl: Shared) {
             let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
-            #[cfg(not(target_os = "linux"))]
-            let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut storage_sweep = StorageSweep::default();
             let mut rate = PublishRate::default();
@@ -3500,34 +3498,22 @@ fn spawn_watchers(ctl: Shared) {
             let rest = ctl.rest("watchers", |s| s.capture.state);
             let mut storage_looked: Option<Instant> = None;
             let mut step = 1;
-            loop {
+            while !ctl.quitting.load(Ordering::Relaxed) {
                 // VRChat process, every 3 s (first, so the world below knows whether VRChat runs).
                 if tick.is_multiple_of(3) {
-                    // Names only: the default refresh also reads every process's command line and environment. On a Mac
-                    // nothing of VRChat or SteamVR runs under those names (its VRChat is the engine's, known by its
-                    // records): a look now and then.
-                    // On Linux from /proc: Wine's threads have VRChat's name too, and sysinfo counts threads.
+                    // One Windows inventory gives both process names and the full birth time.
+                    // Linux's /proc inventory counts Wine processes without their similarly named threads.
+                    #[cfg(windows)]
+                    let system = if cfg!(test) { Vec::new() } else { orbiters_booster::programs::scan() };
                     #[cfg(target_os = "linux")]
                     let system = if cfg!(test) { Vec::new() } else { orbiters_core::processes::all() };
-                    #[cfg(target_os = "linux")]
-                    let named = |names: &[&str]| system.iter().find(|p| names.iter().any(|n| p.is(n))).map(|p| p.pid);
-                    #[cfg(not(target_os = "linux"))]
-                    if (orbiters_core::osc::VRCHAT_RUNS_HERE || tick.is_multiple_of(30)) && !cfg!(test) {
-                        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    let named = |names: &[&str]| {
-                        system
-                            .processes()
-                            .values()
-                            .find(|p| {
-                                let n = p.name().to_string_lossy().to_lowercase();
-                                names.contains(&n.as_str())
-                            })
-                            .map(|p| p.pid().as_u32())
-                    };
-                    // The person's VRChat (or the main session's), never one the bridge runs beside it, unless lent to it.
+                    #[cfg(any(windows, target_os = "linux"))]
+                    let steamvr_pid = system.iter().find(|p| p.name.eq_ignore_ascii_case("vrserver.exe") || p.name.eq_ignore_ascii_case("vrserver")).map(|p| p.pid);
+                    #[cfg(any(windows, target_os = "linux"))]
                     let started = bridge_side::vrchat_births(&system);
+                    // Home follows its own engine's records on a Mac.
+                    #[cfg(not(any(windows, target_os = "linux")))]
+                    let (steamvr_pid, started) = (None::<u32>, Vec::<(u32, u64)>::new());
                     let vrchats: Vec<u32> = started.iter().map(|(p, _)| *p).collect();
                     if orbiters_core::osc::VRCHAT_RUNS_HERE {
                         let dir = orbiters_core::paths::vrchat_log_dir();
@@ -3544,7 +3530,7 @@ fn spawn_watchers(ctl: Shared) {
                     let pid = ctl.sides.app_pid(&vrchats);
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
-                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
+                    let steamvr_pid = steamvr_pid.filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
                     let steamvr = steamvr_pid.is_some();
                     let was = running;
                     // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs

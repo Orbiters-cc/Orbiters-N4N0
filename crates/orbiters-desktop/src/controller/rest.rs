@@ -173,9 +173,22 @@ mod tests {
     /// once a second in all, and publishes nothing. Most of what is left is the one look at the processes every three seconds: no
     /// event says that a program starts. Beyond the loops started here: the OSC socket (four a minute), the bridge's keeper (none
     /// while nobody is signed in: `bridge::keeper`), the statistics' upload (one); `--idle-service` counts every thread.
+    #[cfg(windows)]
     #[test]
     fn an_idle_minute_wakes_the_service_less_than_once_a_second() {
-        const SECONDS: u64 = 20;
+        // Other tests manipulate the account and settings roots. Give the idle
+        // service its own process so those changes are not fixture activity.
+        const CHILD: &str = "ORBITERS_IDLE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "controller::rest::tests::an_idle_minute_wakes_the_service_less_than_once_a_second", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{} {}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        const SECONDS: u64 = 60;
         let mut settings = Settings::default();
         settings.osc.enabled = false;
         let ctl = Controller::new(settings);
@@ -193,6 +206,7 @@ mod tests {
         service.keep().unwrap();
         std::thread::sleep(Duration::from_secs(5));
         let (before, published) = (ctl.wake_ups(), ctl.publishes());
+        let snapshot = ctl.view();
         std::thread::sleep(Duration::from_secs(SECONDS));
         let (after, published) = (ctl.wake_ups(), ctl.publishes() - published);
         ctl.quitting.store(true, Ordering::Relaxed);
@@ -203,7 +217,9 @@ mod tests {
         println!("{} loops; awake in {SECONDS} s: {woke:?}; {a_minute} a minute", after.len());
         assert!(after.len() >= 20, "every loop is counted: {after:?}");
         assert!(a_minute < 60, "{a_minute} a minute: {woke:?}");
-        assert_eq!(published, 0, "nothing happened");
+        let (changed, _) = orbiters_core::slice::changes_between(&*ctl.view(), &*snapshot).unwrap();
+        let changed: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&changed).unwrap();
+        assert_eq!(published, 0, "parts changed at rest: {:?}", changed.keys().collect::<Vec<_>>());
         assert!(woke.keys().all(|name| ["watchers", "n4n0", "perf", "account", "overlay-keeper", "launcher"].contains(name)), "{woke:?}");
     }
 

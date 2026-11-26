@@ -199,6 +199,8 @@ impl Controller {
         }
         // The file changes when a tool signs in or out: the system says so, else it is looked at now and then. The folder is both
         // environments'.
+        // An environment change also wakes this wait.
+        let rest = self.rest("account", |_| ());
         let weak = std::sync::Arc::downgrade(self);
         let folder: Vec<_> = account::account_path(server).and_then(|p| Some(p.parent()?.to_path_buf())).into_iter().collect();
         let told = orbiters_core::folder_watch::watch("account-folder", folder, move || {
@@ -207,9 +209,7 @@ impl Controller {
             }
         });
         let ctl = self.clone();
-        // (Another environment is another account installed, which wakes every loop.)
-        let rest = self.rest("account", |_| ());
-        let _ = std::thread::Builder::new().name("account".into()).spawn(move || loop {
+        let _ = std::thread::Builder::new().name("account".into()).spawn(move || while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             ctl.account_tick();
             rest.wait(ctl.account_rests(told));
         });

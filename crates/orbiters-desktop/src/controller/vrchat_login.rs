@@ -355,7 +355,7 @@ impl Controller {
         let rest = self.rest("vrchat-feature", |s| (super::rest::Part::of(&s.account), s.settings.development));
         let _ = std::thread::Builder::new().name("vrchat-feature".into()).spawn(move || {
             loop {
-                let Some(ctl) = weak.upgrade() else { break };
+                let Some(ctl) = weak.upgrade().filter(|ctl| !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed)) else { break };
                 ctl.vrchat_feature_tick();
                 let most = ctl.vrchat_feature_rests();
                 drop(ctl);

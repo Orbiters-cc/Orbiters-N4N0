@@ -234,6 +234,7 @@ fn nothing_is_handed_over_while_nothing_happens() {
 #[test]
 fn it_sleeps_while_nothing_happens_and_wakes_for_what_does() {
     let (t, n, _device) = ready();
+    t.scene(|s| s.vrchat = false);
     t.wakes.store(true, Ordering::SeqCst);
     t.settings.lock().unwrap().n4n0.assistant = false;
     started(&n);

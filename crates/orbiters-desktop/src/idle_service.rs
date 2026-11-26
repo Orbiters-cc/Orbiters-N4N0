@@ -1,9 +1,9 @@
 //! `orbiters-desktop --idle-service [--seconds <s>] [--settle <s>]` counts what wakes the tray service while nothing
 //! happens: no VRChat, no SteamVR, nobody signed in, no window (review 1124, XCT-23). It runs the service's own threads
 //! (`Controller::start`, the bridge's keeper, `Service`'s keepers) over private folders, and after `--settle` seconds reads
-//! how often each thread of this process was switched to over `--seconds` (Windows' and Linux' own count of context
-//! switches): a thread that sleeps is switched to exactly when it wakes. It prints every thread that woke, its wake-ups a
-//! minute and its processor time, and how many times the state was published.
+//! how often each thread of this process was switched to over `--seconds` (Windows' and Linux' context switch counts).
+//! Rescheduling within work also increments that count. The service's loop counters measure returns from waits separately.
+//! The report includes CPU time and the number of snapshots published.
 //!
 //! Nothing of the person's is read or written, no network is listened on or asked, and it refuses to run beside VRChat or
 //! SteamVR, which are not an idle computer. What it does not have: an account signed in (the event streams and the account's
@@ -56,9 +56,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     std::thread::Builder::new().name("tray-watch".into()).spawn(move || while mailbox.take().is_some() {})?;
 
     std::thread::sleep(Duration::from_secs(settle));
-    let (before, published) = (threads(), ctl.publishes());
+    let (before, published, turns_before) = (threads(), ctl.publishes(), ctl.wake_ups());
     std::thread::sleep(Duration::from_secs(seconds));
-    let (after, published) = (threads(), ctl.publishes() - published);
+    let (after, published, turns_after) = (threads(), ctl.publishes() - published, ctl.wake_ups());
     let this = this_thread();
     let a_minute = |n: u64| n as f64 * 60.0 / seconds as f64;
     let mut rows: Vec<(String, u64, u64)> = after
@@ -71,12 +71,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let (total, cpu) = rows.iter().fold((0, 0), |(n, c), r| (n + r.1, c + r.2));
-    println!("{:<28} {:>14} {:>12}", "thread", "wake-ups/min", "cpu ms/min");
+    println!("{:<28} {:>14} {:>12}", "thread", "switches/min", "cpu ms/min");
     for (name, n, cpu) in rows.iter().filter(|r| r.1 > 0) {
         println!("{:<28} {:>14.1} {:>12.2}", if name.is_empty() { "(no name)" } else { name }, a_minute(*n), a_minute(*cpu) / 1e4);
     }
     println!("{} threads, {} asleep all along", rows.len(), rows.iter().filter(|r| r.1 == 0).count());
-    println!("{:.1} wake-ups a minute, {:.2} ms of processor, {:.1} publishes", a_minute(total), a_minute(cpu) / 1e4, a_minute(published));
+    println!("{:.1} context switches a minute, {:.2} ms of processor, {:.1} publishes", a_minute(total), a_minute(cpu) / 1e4, a_minute(published));
+    let turns: Vec<_> = turns_after.into_iter().filter_map(|(name, n)| {
+        let n = n.saturating_sub(turns_before.get(name).copied().unwrap_or(0));
+        (n > 0).then_some((name, n))
+    }).collect();
+    println!("{:.1} controller loop turns a minute: {turns:?}", a_minute(turns.iter().map(|(_, n)| n).sum()));
     ctl.shutdown();
     Ok(())
 }

@@ -42,19 +42,14 @@ fn processes() -> Vec<(u32, String, u64)> {
         .collect()
 }
 
-/// The VRChats in `system`'s list with when each started (Unix nanoseconds, as precisely as Windows keeps it; 0 when it would not
-/// say). No process is opened for it.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn vrchat_births(system: &sysinfo::System) -> Vec<(u32, u64)> {
-    // FILETIME (100 ns since 1601) to Unix nanoseconds.
+/// The VRChats in the Windows process inventory, with their full-precision birth times.
+#[cfg(windows)]
+pub(super) fn vrchat_births(processes: &[orbiters_booster::programs::Seen]) -> Vec<(u32, u64)> {
     const UNIX_FROM_1601: u64 = 116_444_736_000_000_000;
-    let exact: HashMap<u32, u64> = orbiters_booster::programs::scan().into_iter().map(|p| (p.pid, p.created.saturating_sub(UNIX_FROM_1601).saturating_mul(100))).collect();
-    system
-        .processes()
-        .values()
-        .filter(|p| is_vrchat(p.name().to_string_lossy().to_lowercase().as_str()))
-        .map(|p| (p.pid().as_u32(), p.start_time()))
-        .map(|(pid, seconds)| (pid, if cfg!(windows) { exact.get(&pid).copied().unwrap_or(0) } else { seconds.saturating_mul(1_000_000_000) }))
+    processes
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case("vrchat.exe") || p.name.eq_ignore_ascii_case("vrchat"))
+        .map(|p| (p.pid, p.created.saturating_sub(UNIX_FROM_1601).saturating_mul(100)))
         .collect()
 }
 
@@ -70,12 +65,20 @@ pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
     vrchat_births(&orbiters_core::processes::all())
 }
 
-/// The VRChats that run now, with when each started ([`vrchat_births`]).
-#[cfg(not(target_os = "linux"))]
+/// The VRChats that run now, with when each started.
+#[cfg(windows)]
+pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
+    vrchat_births(&orbiters_booster::programs::scan())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(super) fn vrchats_now() -> Vec<(u32, u64)> {
     let mut system = sysinfo::System::new();
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    vrchat_births(&system)
+    system.processes().values()
+        .filter(|p| is_vrchat(p.name().to_string_lossy().to_lowercase().as_str()))
+        .map(|p| (p.pid().as_u32(), p.start_time().saturating_mul(1_000_000_000)))
+        .collect()
 }
 
 fn is_vrchat(name: &str) -> bool {
@@ -775,7 +778,7 @@ impl Game for SideGame {
             // A profile's account does not change between its starts: kept, so that a start that failed is not taken for a
             // profile waiting at its sign-in page (2026-11-15 07:09: go_to_world answered a stale needs_sign_in). The new
             // VRChat's log says it again, or that it waits for a sign-in.
-            let account = std::mem::take(&mut st.account).started_again();
+            let account = Account { signed_out: false, ..std::mem::take(&mut st.account) };
             let mut followed = std::mem::take(&mut st.followed);
             followed.extend(st.log.take());
             // A handful is enough: older logs are minutes old, past any launch's moment.

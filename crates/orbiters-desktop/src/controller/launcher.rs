@@ -1554,7 +1554,7 @@ impl Controller {
         });
         let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || {
             loop {
-                let Some(ctl) = weak.upgrade() else { break };
+                let Some(ctl) = weak.upgrade().filter(|ctl| !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed)) else { break };
                 ctl.launcher_tick();
                 let most = ctl.launcher_rests();
                 drop(ctl);

@@ -462,7 +462,6 @@ impl Viewer {
                 None => (tr("Loading the splats…").to_string(), theme::fg_3()),
             };
             widgets::text(&p, rect.center(), Align2::CENTER_CENTER, &Txt::new(text, 13.0).color(color));
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         self.select_pointer(ui, &resp, rect, &p);
 

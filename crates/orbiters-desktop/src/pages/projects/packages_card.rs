@@ -17,7 +17,8 @@ use orbiters_ui::{feedback, icons};
 
 pub(super) fn packages(ui: &mut Ui, state: &mut State, project: &Project) {
     let ctx = ui.ctx().clone();
-    let installed: Vec<vpm::Package> = state.view.packages.iter().filter(|p| p.installed.is_some()).cloned().collect();
+    let view = state.view.arc();
+    let installed: Vec<&vpm::Package> = view.packages.iter().filter(|p| p.installed.is_some()).collect();
     let count = (!installed.is_empty()).then(|| installed.len().to_string());
     let loading = state.view_loading() && installed.is_empty();
     let busy = state.running();
@@ -116,7 +117,7 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
     let ctx = ui.ctx().clone();
     let busy = state.running();
     let current = pkg.installed.clone().unwrap_or_default();
-    let list: Vec<String> = versions(pkg, state.prerelease).into_iter().cloned().collect();
+    let list = versions(pkg, state.prerelease);
     let working = state.busy_package.as_deref() == Some(pkg.name.as_str());
     state.icons_wanted.push(pkg.name.clone());
     let icon = state.icons.get(&pkg.name).cloned();
@@ -157,9 +158,9 @@ fn row(ui: &mut Ui, state: &mut State, project: &Project, pkg: &vpm::Package, up
             feedback::spinner(ui.painter(), dd.center(), 8.0, 2.0, theme::accent());
         } else {
             let items: Vec<Item> = list.iter().map(|v| if v.contains('-') { Item::new(v).detail(tr("Pre-release")) } else { Item::new(v) }).collect();
-            let selected = list.iter().position(|v| *v == current);
+            let selected = list.iter().position(|v| **v == current);
             if let Some(k) = popup::dropdown(ui, ("version", &pkg.name), dd, &current, &items, selected, !busy) {
-                if list[k] != current {
+                if *list[k] != current {
                     state.anchors.insert("conflict-origin".into(), dd);
                     let change = vpm::Change::Install { names: vec![(pkg.name.clone(), Some(list[k].clone()))], prerelease: state.prerelease };
                     package_action(state, &ctx, project, change, &tr!("Changing {package} to {version}…", package = pkg.display_name, version = list[k]), &pkg.name);

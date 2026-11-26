@@ -2723,7 +2723,7 @@ fn stage_events(ctx: &egui::Context, app: &mut App, sc: &Scenario, f: u32) {
             gallery.community_mut().open_nth(ctx, 0, &shown);
         }
         if sc.name.starts_with("gallery-community-event") {
-            gallery.community_mut().open_event(ctx);
+            gallery.open_community_event(ctx);
         }
     }
 }

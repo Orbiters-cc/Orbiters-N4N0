@@ -823,7 +823,6 @@ pub(super) fn cover(ui: &mut Ui, cx: &Cx, state: &mut State, project: &Project, 
             let warn = note.glyph == icons::WARNING;
             if note.spinner {
                 feedback::spinner(p, pos2(r.left() + 15.0, r.center().y), 5.0, 1.6, theme::alpha(if lit > 0.0 { theme::accent() } else { theme::fg_2() }, k));
-                ctx.request_repaint();
             } else {
                 let tone = if warn { theme::WARN } else { theme::mix(theme::fg_3(), theme::accent(), lit) };
                 widgets::icon(p, pos2(r.left() + 15.0, r.center().y - 1.5 * hover * lit), note.glyph, 12.0, theme::alpha(tone, k));
@@ -981,7 +980,6 @@ pub(super) fn window(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
             paint::fill_squircle(ui.painter(), r, theme::squircle(20.0), theme::black(0.65 * pk));
             if spin {
                 feedback::spinner(ui.painter(), pos2(r.left() + 22.0, r.center().y), 6.0, 1.8, theme::alpha(theme::accent(), pk));
-                ctx.request_repaint();
             } else {
                 widgets::icon(ui.painter(), pos2(r.left() + 22.0, r.center().y), glyph, 14.0, theme::alpha(theme::WARN, pk));
             }
@@ -1301,7 +1299,6 @@ fn chrome(
                 match &ch.state {
                     ChipState::Building => {
                         feedback::spinner(&p, pos2(tx + 5.0, r.center().y), 5.0, 1.6, theme::fg_3());
-                        ui.ctx().request_repaint();
                         tx += 18.0;
                     }
                     ChipState::Failed(_) => {

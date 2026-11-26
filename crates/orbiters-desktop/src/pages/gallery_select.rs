@@ -439,8 +439,8 @@ impl Selection {
                 let entries = by_keys(order, &self.carried);
                 let gathered = self.gather(&entries);
                 if gathered.waiting > 0 {
+                    // (Each picture that comes, or fails, wakes the page.)
                     self.waiting = Some((gathered.waiting, entries.len()));
-                    ctx.request_repaint_after(std::time::Duration::from_millis(120));
                 } else if gathered.files.is_empty() {
                     self.said = Some((nothing_came(&gathered), now));
                     self.carried.clear();
@@ -473,9 +473,7 @@ impl Selection {
         if let Some(keys) = self.copying.clone() {
             let entries = by_keys(order, &keys);
             let gathered = self.gather(&entries);
-            if gathered.waiting > 0 {
-                ctx.request_repaint_after(std::time::Duration::from_millis(120));
-            } else {
+            if gathered.waiting == 0 {
                 self.copying = None;
                 let said = if gathered.files.is_empty() {
                     nothing_came(&gathered)

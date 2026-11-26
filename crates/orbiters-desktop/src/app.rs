@@ -361,8 +361,13 @@ impl App {
 
         let title = Rect::from_min_size(full.min, vec2(full.width(), TITLE_H));
         let body = Rect::from_min_max(pos2(full.left(), full.top() + TITLE_H), full.max);
+        if !content_ready {
+            self.prepare(ui, &snap);
+        }
         // The shortcut to N4N0's bar, Esc, and the keys of the page while the bar or the chat has the keyboard.
         if content_ready {
+            // What Unity projects' first visit shows at once, read now that the first page is drawn (not beside it).
+            self.projects.warm();
             let modal = self.modal_up(&ctx);
             self.chat.before_page(&ctx, &snap, modal);
         }
@@ -776,7 +781,6 @@ impl App {
             Some(f) => {
                 orbiters_ui::paint::ring(p, at, 5.0, 2.0, theme::alpha(theme::accent(), 0.3));
                 orbiters_ui::paint::arc(p, at, 5.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * f.clamp(0.0, 1.0), 2.0, theme::accent());
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
             None if with_icon => widgets::icon(p, at, icons::DOWNLOAD_SIMPLE, 12.5, if live { theme::on_accent() } else { theme::accent() }),
             None => {}
@@ -801,6 +805,31 @@ impl App {
             let page = format!("{:?}", here.0);
             let feature = here.1.map(|p| crate::usage::stable_name(&format!("{p:?}"))).unwrap_or_default();
             crate::usage::enter(&crate::usage::screen_name([page.into(), feature.into()]));
+        }
+    }
+
+    /// Under the splash: what the page about to show asks for at its first frame is asked now, so that it is there (or
+    /// nearly) when the page is. Nothing is drawn: a page's entrances are to be seen.
+    fn prepare(&mut self, ui: &Ui, snap: &Arc<Snapshot>) {
+        let mut cx = pages::Cx {
+            ctl: &self.ctl,
+            snap,
+            toasts: &mut self.toasts,
+            entered: self.page_since,
+            visit: self.visit,
+            windowed: self.windowed,
+            gpu: self.gpu.as_ref(),
+            top: TITLE_H,
+            go: None,
+        };
+        match self.page {
+            Page::Home => pages::home::prepare(ui, &mut cx, &mut self.home),
+            Page::Projects => pages::projects::prepare(ui, &cx, &mut self.projects),
+            Page::Sessions => pages::sessions::prepare(ui, &cx, &mut self.sessions),
+            Page::Worlds => pages::worlds::prepare(ui, &cx, &mut self.worlds),
+            Page::Events => pages::events::prepare(ui, &cx, &mut self.events),
+            Page::Videos => pages::videos::prepare(ui, &cx, &mut self.videos),
+            Page::N4n0 | Page::Settings => {}
         }
     }
 

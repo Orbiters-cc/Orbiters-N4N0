@@ -153,7 +153,7 @@ pub enum Gate {
 }
 
 /// What the page knows when it searches: which gates are open.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Open {
     pub bridge: bool,
     pub vrchat_login: bool,

@@ -80,6 +80,8 @@ mod worker;
 mod layers;
 #[cfg(test)]
 mod unseen;
+#[cfg(test)]
+mod test_alloc;
 #[cfg(all(test, windows))]
 mod test_crash;
 

@@ -84,6 +84,8 @@ pub struct State {
     found: Option<&'static str>,
     /// How many of the notices the log shows.
     log_shown: usize,
+    /// What the search finds, for the text, the language and what can show here it was looked for with.
+    results: Option<((String, orbiters_i18n::Language, registry::Open), Vec<registry::Found>)>,
     /// Tests: the rows drawn last frame (their card's English title, their label, where), and the cards.
     /// The arrows moved the lit result this frame: it is brought into view.
     keyed: bool,
@@ -206,8 +208,8 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     let now = anim::time(&ctx);
     // The controls edit a copy of the settings as published; what they change is saved over the settings as they
     // are by then (`form::save`).
-    let base = cx.snap.settings.clone();
-    let mut draft = base.clone();
+    let base = cx.snap.settings.arc();
+    let mut draft = (*base).clone();
     let mut asked = Asked::default();
 
     // A folder chosen in the picker.
@@ -278,7 +280,13 @@ pub fn show(ui: &mut Ui, cx: &mut Cx, state: &mut State) {
     // The search: Ctrl (⌘) K takes the keys there; while it has them, the arrows move along the results, Enter opens
     // one and Escape clears it (the website's keys).
     let words = registry::words(&state.query);
-    let found = registry::search(&state.query, &open);
+    // Looked for again when the text, the language or what can show here changed: it reads some 150 entries' words.
+    let key = (state.query.clone(), orbiters_i18n::language(), open);
+    if state.results.as_ref().is_none_or(|(of, _)| *of != key) {
+        let found = registry::search(&state.query, &open);
+        state.results = Some((key, found));
+    }
+    let found = state.results.as_ref().map(|(_, found)| found.clone()).unwrap_or_default();
     let searching = !words.is_empty();
     state.limit = state.limit.max(RESULTS);
     let search_focused = state.search_id.is_some_and(|id| ctx.memory(|m| m.has_focus(id)));
@@ -1983,7 +1991,7 @@ fn vrchat_account(ui: &mut Ui, cx: &Cx, state: &mut VrchatForm) {
         state.saw_busy = false;
         state.code.clear();
         cx.ctl.vrchat_login(command);
-        orbiters_ui::anim::request_frame(ui.ctx());
+        orbiters_ui::anim::wake(ui.ctx());
     }
 }
 /// Folder row: label, path, Change button. True when Change was clicked.

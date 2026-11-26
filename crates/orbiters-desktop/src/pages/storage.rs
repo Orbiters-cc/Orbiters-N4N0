@@ -105,6 +105,12 @@ impl Pending {
         self.asked.iter().any(|(dir, a)| !in_job(job, dir) && now - a.at > ANSWER_GRACE)
     }
 
+    /// How long until the next one asked may be given up as turned down ([`Pending::settled`]), while one is still to
+    /// come: what the service says of them meanwhile brings its own frame.
+    pub fn due_in(&self, now: f64) -> Option<f64> {
+        self.asked.values().map(|a| ANSWER_GRACE - (now - a.at)).filter(|left| *left >= 0.0).min_by(f64::total_cmp)
+    }
+
     /// A list was read: what the service is done with is as the list says, what it still has to do shows as done.
     pub fn on_list(&mut self, list: &mut Vec<SessionSummary>, job: Option<&CleanupJob>, now: f64) {
         self.asked.retain(|dir, a| in_job(job, dir) || now - a.at <= ANSWER_GRACE);

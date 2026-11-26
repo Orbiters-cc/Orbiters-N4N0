@@ -92,6 +92,8 @@ pub struct Previous {
     query: String,
     /// The text searched for at the last frame ([`crate::pages::new_search`]).
     searched: Option<String>,
+    /// Which of the rows the search finds: the rows and the text they were looked for in.
+    found: Option<(Arc<[Visit]>, String, Arc<[usize]>)>,
     /// The history's instances, read when the sheet opens (pictures of the page hand them in), and whether a read is
     /// under way: one lock, so a read finishing while the sheet is closed is never lost (verify-r21 Major 5).
     history: Arc<Mutex<HistoryRead>>,
@@ -125,7 +127,7 @@ type Reader = Arc<dyn Fn() -> Vec<Visit> + Send + Sync>;
 
 #[derive(Default)]
 struct HistoryRead {
-    rows: Option<Vec<Visit>>,
+    rows: Option<Arc<[Visit]>>,
     reading: bool,
 }
 
@@ -142,7 +144,7 @@ impl Previous {
 
     /// Pictures of the page and tests: the history's instances handed in (nothing read), the sheet up with `query`.
     pub fn stand_in(&mut self, rows: Vec<Visit>, query: &str) {
-        self.history.locked().rows = Some(rows);
+        self.history.locked().rows = Some(rows.into());
         self.staged = true;
         self.quiet = true;
         self.query = query.into();
@@ -152,7 +154,7 @@ impl Previous {
     /// Tests: the history's instances handed in (nothing read); a row picked is asked of the backend as on the app.
     #[cfg(test)]
     pub fn stand_in_rows(&mut self, rows: Vec<Visit>) {
-        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows);
+        self.history.lock().unwrap_or_else(|e| e.into_inner()).rows = Some(rows.into());
         self.staged = true;
     }
 
@@ -235,10 +237,7 @@ pub(super) fn follow(state: &mut State, cx: &Cx, clock: f64) {
 /// friends of now.
 fn joins(state: &State, visit: &Visit, origin: &Origin, me: &str) -> bool {
     match origin {
-        Origin::Friend { .. } => {
-            let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-            joinable_without_asking(&visit.instance, me, &|id| friends.contains(id))
-        }
+        Origin::Friend { .. } => joinable_without_asking(&visit.instance, me, &|id| state.has_friend(id)),
         _ => rejoinable(&visit.instance, me),
     }
 }
@@ -402,7 +401,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         pause_before_publishing(&paused);
         ticket.answer(open, at);
         if let Some(ctx) = ctx {
-            ctx.request_repaint();
+            anim::wake(&ctx);
         }
     }).or_log("a thread could not be started");
 }
@@ -437,13 +436,12 @@ pub(super) fn friend_selectable(state: &State, friend: &orbiters_core::launcher:
         return None;
     }
     // Signed out, or a profile of another account: nothing can be asked of VRChat for it; Request as before.
-    let me = match &state.places.desk.asker().account {
-        Some(me) => me.clone(),
-        None if state.places.previous.connecting => String::new(),
+    let me = match state.places.desk.asker().account.as_deref() {
+        Some(me) => me,
+        None if state.places.previous.connecting => "",
         None => return None,
     };
-    let friends: std::collections::HashSet<&str> = state.data.friends.iter().map(|f| f.id.as_str()).collect();
-    joinable_without_asking(&place.instance_id, &me, &|id| friends.contains(id)).then(|| place.clone())
+    joinable_without_asking(&place.instance_id, me, &|id| state.has_friend(id)).then(|| place.clone())
 }
 
 /// Select on a friend's row or profile (REQUEST23): their instance becomes Where's destination, nothing sent to VRChat.
@@ -499,14 +497,14 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             let started = std::thread::Builder::new().name("where-previous-history".into()).spawn(move || {
                 let rows = reader();
                 let mut h = history.locked();
-                h.rows = Some(rows);
+                h.rows = Some(rows.into());
                 h.reading = false;
                 drop(h);
-                ctx2.request_repaint();
+                anim::wake(&ctx2);
             });
             if started.is_err() {
                 let mut h = state.places.previous.history.locked();
-                h.rows = Some(Vec::new());
+                h.rows = Some(Vec::new().into());
                 h.reading = false;
             }
         }
@@ -571,8 +569,14 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
 
     // The rows: one list that scrolls, only those in view laid out.
     let list = Rect::from_min_max(pos2(inner.left() - 8.0, y), pos2(inner.right() + 8.0, inner.bottom()));
-    let find = orbiters_core::search::Query::new(state.places.previous.query.trim());
-    let shown: Vec<Visit> = rows.as_deref().unwrap_or_default().iter().filter(|v| find.matches(&v.name)).cloned().collect();
+    let previous = &mut state.places.previous;
+    let query = previous.query.trim();
+    // Which of them the search finds, looked for again when it or they changed.
+    if !previous.found.as_ref().is_some_and(|(of, asked, _)| asked == query && rows.as_ref().is_some_and(|r| Arc::ptr_eq(of, r))) {
+        let find = orbiters_core::search::Query::new(query);
+        previous.found = rows.as_ref().map(|r| (r.clone(), query.to_owned(), r.iter().enumerate().filter(|(_, v)| find.matches(&v.name)).map(|(i, _)| i).collect()));
+    }
+    let shown = previous.found.as_ref().map(|(.., found)| found.clone()).unwrap_or_default();
     let mut pressed: Option<(Visit, bool)> = None;
     let mut lu = panel.new_child(UiBuilder::new().max_rect(list).id_salt("where-previous-list"));
     lu.set_clip_rect(list.intersect(panel.clip_rect()));
@@ -593,7 +597,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             widgets::text(&p, c + vec2(0.0, 34.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
             widgets::text(&p, c + vec2(0.0, 56.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::fg_3()));
         }
-        Some(_) => {
+        Some(rows) => {
             let mut scroll = egui::ScrollArea::vertical().id_salt("where-previous-rows").auto_shrink([false, false]);
             let searched = &mut state.places.previous.searched;
             if crate::pages::new_search(searched, state.places.previous.query.as_str()) {
@@ -603,7 +607,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             scroll.show_rows(&mut lu, ROW_H, shown.len(), |ui, range| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 for i in range {
-                    let v = &shown[i];
+                    let v = &rows[shown[i]];
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
                     let r = r.shrink2(vec2(8.0, 0.0));
                     if let Some(p) = row(ui, state, r, v, now) {
@@ -700,7 +704,6 @@ fn row(ui: &mut Ui, state: &mut State, r: Rect, v: &Visit, now: u64) -> Option<b
         widgets::text(&p, pos2(right, y), Align2::RIGHT_CENTER, &txt);
         if *glyph == icons::HOURGLASS_MEDIUM {
             orbiters_ui::feedback::spinner(&p, pos2(right - tw - 12.0, y), 6.0, 1.6, *color);
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         } else {
             widgets::icon(&p, pos2(right - tw - 12.0, y), glyph, 13.0, *color);
         }
@@ -772,13 +775,12 @@ fn kind_choice(ui: &mut Ui, state: &mut State, right_center: Pos2, v: &Visit) ->
 /// A row while the history is read.
 fn stand_in_row(ui: &Ui, r: Rect) {
     let p = ui.painter();
-    let t = anim::clock(ui.ctx(), 30.0) as f32;
+    let t = anim::working(ui.ctx()) as f32;
     let shimmer = 0.5 + 0.5 * (t * 2.4).sin();
     p.rect_filled(r, theme::radius(RADIUS + 2.0), theme::white(0.02 + 0.02 * shimmer));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 27.0), vec2(PIC_W, 54.0)), theme::radius(RADIUS), theme::white(0.04));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + PIC_W + 22.0, r.center().y - 14.0), vec2(r.width() * 0.35, 11.0)), theme::radius(5.0), theme::white(0.06));
     p.rect_filled(Rect::from_min_size(pos2(r.left() + PIC_W + 22.0, r.center().y + 6.0), vec2(r.width() * 0.22, 9.0)), theme::radius(4.5), theme::white(0.04));
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 /// A world's picture for this sheet: only one already kept on this computer, never fetched (verify-r21 Major 6: opening

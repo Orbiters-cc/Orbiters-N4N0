@@ -46,6 +46,7 @@ pub mod vr_audio;
 pub mod watch;
 pub mod worlds;
 
+use orbiters_core::locks::*;
 pub use watch::Watch;
 
 use crate::backend::Ctl;
@@ -542,7 +543,10 @@ pub const PAD_X: f32 = 32.0;
 pub fn local_time(iso: &str) -> String {
     use time::format_description::well_known::Rfc3339;
     let Ok(t) = time::OffsetDateTime::parse(iso, &Rfc3339) else { return iso.to_string() };
-    let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
+    date_time(localized(t))
+}
+
+fn date_time(t: time::OffsetDateTime) -> String {
     // The whole date is one text, so each language puts day, month and year in its own order (Japanese: 2026年10月20日, 01:55).
     let month = match t.month() as u8 {
         1 => tr_ctx("month", "Jan"),
@@ -558,7 +562,59 @@ pub fn local_time(iso: &str) -> String {
         11 => tr_ctx("month", "Nov"),
         _ => tr_ctx("month", "Dec"),
     };
-    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
+    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = clock_text(t))
+}
+
+fn clock_text(t: time::OffsetDateTime) -> String {
+    format!("{:02}:{:02}", t.hour(), t.minute())
+}
+
+/// This computer's offset from UTC (asked again once a minute: summer time).
+pub(crate) fn offset() -> time::UtcOffset {
+    local_offset().unwrap_or(time::UtcOffset::UTC)
+}
+
+fn localized(t: time::OffsetDateTime) -> time::OffsetDateTime {
+    local_offset().map_or(t, |offset| t.to_offset(offset))
+}
+
+fn local_offset() -> Option<time::UtcOffset> {
+    static KEPT: std::sync::Mutex<Option<(std::time::Instant, Option<time::UtcOffset>)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT.locked();
+    match *kept {
+        Some((at, offset)) if at.elapsed().as_secs() < 60 => offset,
+        _ => {
+            let offset = time::UtcOffset::current_local_offset().ok();
+            *kept = Some((std::time::Instant::now(), offset));
+            offset
+        }
+    }
+}
+
+fn unix_date(secs: u64) -> Option<time::OffsetDateTime> {
+    let t = time::OffsetDateTime::from_unix_timestamp(secs as i64).ok()?;
+    // Keep the range previously accepted by the RFC 3339 formatter.
+    (0..=9999).contains(&t.year()).then_some(t)
+}
+
+/// The time of day alone of Unix seconds, in local time: "21:30", as [`local_time`] ends.
+pub fn local_clock(secs: u64) -> String {
+    unix_date(secs).map(localized).map(clock_text).unwrap_or_default()
+}
+
+/// From one moment to a later one (Unix seconds), in local time: "28 Oct 2026, 21:30 – 22:30" on one day, both dates
+/// otherwise, one moment alone as [`local_time`].
+pub fn local_span(from: u64, to: u64) -> String {
+    if from == to {
+        return local_time_unix(from);
+    }
+    let start = unix_date(from).map(localized);
+    let end = unix_date(to).map(localized);
+    let end_text = match (start, end) {
+        (Some(start), Some(end)) if start.date() == end.date() => clock_text(end),
+        _ => end.map(date_time).unwrap_or_default(),
+    };
+    format!("{} – {end_text}", start.map(date_time).unwrap_or_default())
 }
 
 /// "5 min ago" for the moment `epoch` at `now` (Unix seconds; `orbiters_ui::format::relative_time`), and a frame asked
@@ -630,8 +686,7 @@ fn local_day_in(now: u64, offset_at: &dyn Fn(i64) -> i64) -> (i64, u64) {
 
 /// Unix seconds in local time, as [`local_time`].
 pub fn local_time_unix(secs: u64) -> String {
-    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
-    local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
+    unix_date(secs).map(localized).map(date_time).unwrap_or_default()
 }
 
 /// What a page costs while nothing happens, for the pages' tests.
@@ -778,6 +833,66 @@ mod tests {
         assert!(!f.see(&of(A::Expired { username: Some("Sam".into()) }, "development/2"), true).changed);
     }
 
+    /// DPG-2: what is in progress moves on the shared clock (`anim::working`, which a spinner and a shimmer read too):
+    /// nothing beside it asks for frames of its own, which is how Home drew itself at the monitor's rate for as long as
+    /// it said "Connecting to VRChat…".
+    #[test]
+    fn what_is_in_progress_asks_for_no_frames_of_its_own() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    let lines: Vec<&str> = source.lines().collect();
+                    for (n, line) in lines.iter().enumerate().filter(|(_, l)| !l.contains("contains(")) {
+                        if !["::spinner(", "::shimmer(", "anim::working("].iter().any(|w| line.contains(w)) {
+                            continue;
+                        }
+                        // (To the end of its block, at most.)
+                        let indent = |l: &str| l.len() - l.trim_start().len();
+                        let after = lines[n + 1..].iter().take(6).take_while(|l| l.trim().is_empty() || indent(l) >= indent(line));
+                        for (k, l) in after.enumerate() {
+                            if l.contains("request_repaint") || l.contains("anim::wake(") {
+                                out.push(format!("{}:{}: {}", path.display(), n + 2 + k, l.trim()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        walk(&src.join("pages"), &mut found);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    /// DPG-1: a page draws from the settings the service sent (`cx.snap.settings`): it never reads the file, which the
+    /// gallery did at every frame for every card that is only on Orbiters, to know the environment (and could find
+    /// another than the one on show).
+    #[test]
+    fn no_window_page_reads_the_settings_file() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in source.lines().enumerate().filter(|(_, l)| !l.contains("contains(") && !l.trim_start().starts_with("//")) {
+                        if line.contains("Settings::load") {
+                            out.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pages"), &mut found);
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// Verify4-r21 P3: no page of a window (nor its pictures) reads the saved account: what it asks is the service's to send, as the
     /// member on show.
     #[test]
@@ -856,6 +971,42 @@ mod tests {
         assert_eq!(to_change as i64, change - just_past_midnight);
         let (_, to_midnight) = local_day_in(change as u64, &forward);
         assert_eq!(to_change + to_midnight, 23 * 3600 - 60, "23 hours from midnight to midnight");
+    }
+
+    /// DPG-12: a card's time and a group's span say what they were cut out of the translated date for.
+    #[test]
+    fn the_time_alone_and_a_span_are_the_date_s_own_words() {
+        for language in Language::ALL {
+            in_language(language, || {
+                for from in [1_792_000_000u64, 1_792_000_000 + 11 * 3600 + 59 * 60, 1_767_225_599] {
+                    let text = local_time_unix(from);
+                    assert_eq!(text.rsplit_once(", ").unwrap().1, local_clock(from), "{language:?}");
+                    assert_eq!(local_span(from, from), text, "{language:?}");
+                    for later in [60u64, 3 * 3600, 30 * 3600] {
+                        // As the headings said it: the day once when it is the same.
+                        let end = local_time_unix(from + later);
+                        let said = match (text.rsplit_once(", "), end.rsplit_once(", ")) {
+                            (Some((d1, t1)), Some((d2, t2))) if d1 == d2 => format!("{d1}, {t1} – {t2}"),
+                            _ => format!("{text} – {end}"),
+                        };
+                        assert_eq!(local_span(from, from + later), said, "{language:?}");
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_frame_of_gallery_clocks_formats_only_the_clock() {
+        let secs = 1_792_000_000;
+        drop(local_clock(secs));
+        let allocations = crate::test_alloc::count(|| {
+            for slot in 0..60 {
+                std::hint::black_box(local_clock(secs + slot));
+            }
+        });
+        println!("Gallery clock allocations over 60 cards: {allocations}");
+        assert_eq!(allocations, 60);
     }
 
     /// Each language writes the date its own way, but keeps the date and the time apart by ", " (the gallery and community pages split them there),

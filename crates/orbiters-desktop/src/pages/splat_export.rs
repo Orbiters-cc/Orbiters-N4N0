@@ -201,7 +201,7 @@ impl Export {
         self.poll(ctx);
         let busy = self.running.is_some() || self.picking.running() || self.discarding.running();
         if busy {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            orbiters_ui::anim::working_read(ctx);
         }
         let title = tr!("Export {title}", title = self.title);
         let dialog = Dialog::new(self.id, self.origin, &title)

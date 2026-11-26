@@ -333,7 +333,7 @@ fn run<T: PartialEq>(shared: Arc<Shared<T>>, ctx: egui::Context, period: Duratio
         if inner.seen.as_ref() != Some(&saw) {
             inner.seen = Some(saw);
             inner.changes += 1;
-            orbiters_ui::anim::request_frame(&ctx);
+            orbiters_ui::anim::wake(&ctx);
         }
         let (mut inner, _) = shared.wake.wait_timeout_while_locked(inner, period, |inner| !shared.over(inner) && !inner.now);
         inner.now = false;

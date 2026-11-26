@@ -14,7 +14,8 @@
 //! sessions and Unity projects also stay within the run's private roots.
 //!
 //! `states` is not a page of the sidebar: it is Home on the avatars' states, their cards showing, with something
-//! asked that the service never answers (what was asked there once kept the window drawing).
+//! asked that the service never answers (what was asked there once kept the window drawing). `connecting` is Home with
+//! a VRChat session that waits for Orbiters, which can last a whole evening offline (DPG-2).
 //!
 //! `orbiters-desktop --idle-frames --local-revision` times instead what Photos & captures' watch does every fifteen
 //! seconds on its thread (`controller::shares::LocalRevision`), on its private fixture library, which it only reads.
@@ -30,9 +31,10 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-const PAGES: [(&str, Page); 9] = [
+const PAGES: [(&str, Page); 10] = [
     ("home", Page::Home),
     (STATES, Page::Home),
+    (CONNECTING, Page::Home),
     ("n4n0", Page::N4n0),
     ("projects", Page::Projects),
     ("sessions", Page::Sessions),
@@ -44,6 +46,7 @@ const PAGES: [(&str, Page); 9] = [
 
 /// Home on the avatars' states (see the module's words).
 const STATES: &str = "states";
+const CONNECTING: &str = "connecting";
 
 /// Times the look of Photos & captures' watch on this computer's library (read only): how many captures it counts,
 /// and how long a look takes the first time, again, and with the visit history read and parsed anew, which a look
@@ -134,7 +137,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let threads: Vec<_> = pages
         .into_iter()
         .map(|(name, page)| {
-            let (settings, snapshot) = (settings.clone(), snapshot.clone());
+            let (settings, mut snapshot) = (settings.clone(), snapshot.clone());
+            if name == CONNECTING {
+                snapshot.launcher.possible.play = true;
+                snapshot.vrchat_login.waiting = true;
+            }
             // A page's frame is deep in a debug build (the screenshots run on such a stack too).
             std::thread::Builder::new().name(format!("idle-{name}")).stack_size(16 << 20).spawn(move || {
                 let ctl = Controller::new(settings);

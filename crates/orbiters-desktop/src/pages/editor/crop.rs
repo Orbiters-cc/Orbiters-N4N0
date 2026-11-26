@@ -628,7 +628,6 @@ fn paint_picture(ed: &mut Editor, ui: &mut Ui, frame: Rect, clip: Rect, c: Crop)
     }
     if ed.preview.as_ref().is_some_and(|pv| pv.busy()) {
         feedback::spinner(&p, pos2(clip.right() - 22.0, clip.top() + 18.0), 7.0, 2.0, theme::fg_3());
-        ui.ctx().request_repaint();
     }
 }
 

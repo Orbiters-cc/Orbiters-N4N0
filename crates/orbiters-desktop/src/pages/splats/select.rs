@@ -839,9 +839,6 @@ impl Viewer {
             if !on {
                 e.redraw(ctx);
             }
-            if e.busy() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            }
         }
     }
 
@@ -1243,7 +1240,6 @@ impl Viewer {
         widgets::text_truncated(p, hint_r.center(), Align2::CENTER_CENTER, &hint, hint_w - 28.0);
         if self.select.loading.is_some() {
             orbiters_ui::feedback::spinner(p, pos2(hint_r.right() + 18.0, hint_r.center().y), 8.0, 2.0, theme::accent());
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
 
         // The moment's own line, in the middle above all of them: what it is for, or the selection and its actions.

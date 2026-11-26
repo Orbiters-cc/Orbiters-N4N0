@@ -904,7 +904,7 @@ impl Client {
             if news && self.background.load(Ordering::Relaxed) {
                 ctx.request_repaint_after(BACKGROUND_PACE);
             } else {
-                orbiters_ui::anim::request_frame(ctx);
+                orbiters_ui::anim::wake(ctx);
             }
         }
     }

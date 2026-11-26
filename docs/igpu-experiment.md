@@ -163,7 +163,7 @@ most 5.3 %). The SteamVR overlay's process never drew (its tab was not shown).
   so there is nothing to check beforehand; Windows' hybrid presentation did it on this machine for every test.
 - **The 3D view** on an integrated GPU draws at most 0.4 Mpx while the camera moves (above).
 - **Fewer frames**: egui's `request_repaint` draws two frames, to let layouts settle; the service's news now asks for
-  one (`anim::request_frame`: 30 frames a second for 30 news instead of 59). While VRChat runs and the window does not
+  one (`anim::wake`: 30 frames a second for 30 news instead of 59). While VRChat runs and the window does not
   have the focus, the service's news is drawn at most five times a second (`ipc::BACKGROUND_PACE`).
 - **The setup** asks wgpu for the least power-hungry GPU (the integrated one where there is one).
 - Tools: `orbiters-desktop --gpu-bench`, `scripts/gpu-lab` (`gpu-lab.exe`, `presence.py`, `matrix.py`, `run.py`,

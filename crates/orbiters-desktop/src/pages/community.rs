@@ -39,6 +39,16 @@ fn gallery_of(e: &Entry) -> Option<u64> {
     e.world_id.strip_prefix(GROUP)?.parse().ok()
 }
 
+/// The gallery an entry of a community's gallery is of.
+pub(super) fn gallery_id(e: &Entry) -> Option<u64> {
+    gallery_of(e)
+}
+
+/// Where an event's window opens from and closes into: its card, at the top of the gallery's `heading`.
+fn header_origin(heading: Rect) -> Rect {
+    Rect::from_min_size(heading.min + vec2(10.0, 10.0), vec2(128.0, 80.0))
+}
+
 fn visibility(g: Option<&Gallery>) -> (&'static str, &'static str, Color32) {
     match g.map(|g| g.visibility.as_str()) {
         Some("public") => (icons::GLOBE, tr("Public"), theme::OK),
@@ -94,6 +104,10 @@ pub struct State {
     /// Each card's picture as last drawn (by entry key).
     cards: HashMap<String, Rect>,
     changed: bool,
+    /// The event each gallery belongs to, of those that belong to one ([`State::index`]).
+    events: HashMap<u64, Card>,
+    /// Where each picture is in `feed` ([`State::index`]).
+    places: HashMap<u64, usize>,
     stand_ins: Vec<Picture>,
     fixture: bool,
     /// Screenshots: what the pictures' windows say (their replies and reactions) and the reaction hovered.
@@ -112,7 +126,32 @@ impl State {
         self.error = None;
         self.window = None;
         self.event = None;
+        self.changed();
+    }
+
+    /// The galleries or the feed are others: what is looked up in them is indexed again, and the page makes its list
+    /// again. (The grouping walked the whole feed for each of its pictures, twice a frame.)
+    fn changed(&mut self) {
         self.changed = true;
+        self.places = self.feed.items.iter().enumerate().rev().map(|(i, p)| (p.id, i)).collect();
+        self.events.clear();
+        let mut seen = std::collections::HashSet::new();
+        // Its own word for it, else its first picture's.
+        for g in self.galleries.iter().flat_map(Galleries::all) {
+            if seen.insert(g.id) {
+                if let Some(e) = &g.event {
+                    self.events.insert(g.id, e.clone());
+                }
+            }
+        }
+        seen.clear();
+        for p in &self.feed.items {
+            if seen.insert(p.gallery_id) {
+                if let Some(e) = &p.event {
+                    self.events.entry(p.gallery_id).or_insert_with(|| e.clone());
+                }
+            }
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -175,7 +214,7 @@ impl State {
         }
         self.galleries = Some(galleries);
         self.feed = feed;
-        self.changed = true;
+        self.changed();
     }
 
     /// Reads the galleries and their newest pictures when Photos & captures shows them (`wanted`), again when the
@@ -199,11 +238,11 @@ impl State {
                 self.answered = false;
                 self.error = None;
                 self.feed = community::Pictures::default();
-                self.changed = true;
                 if account_changed {
                     self.galleries = None;
                     self.galleries_job = ask_galleries(ctx, server, &owner);
                 }
+                self.changed();
                 self.fetch(ctx, server, false);
             } else if std::mem::take(&mut self.answered) {
                 // Orbiters answers again: what could not be read is asked again; what shows stays.
@@ -221,14 +260,14 @@ impl State {
                 Ok(g) => self.galleries = Some(g),
                 Err(e) => self.error = Some(e.to_string()),
             }
-            self.changed = true;
+            self.changed();
         }
         if let Some(r) = self.feed_job.take().and_then(|r| r.take_for(self.account.owner())) {
             match r {
                 Ok(page) => self.feed.append(page),
                 Err(e) => self.error = Some(e.to_string()),
             }
-            self.changed = true;
+            self.changed();
         }
         std::mem::take(&mut self.changed)
     }
@@ -283,13 +322,14 @@ impl State {
     }
 
     fn picture(&self, key: &str) -> Option<&community::Picture> {
-        let id = picture_id(key)?;
-        self.feed.items.iter().find(|p| p.id == id)
+        self.feed.items.get(*self.places.get(&picture_id(key)?)?)
     }
 
     /// The event a gallery belongs to: its own word for it, or its pictures'.
     fn event_of(&self, gallery: u64) -> Option<&Card> {
-        self.gallery(gallery).and_then(|g| g.event.as_ref()).or_else(|| self.feed.items.iter().find(|p| p.gallery_id == gallery).and_then(|p| p.event.as_ref()))
+        #[cfg(test)]
+        EVENT_LOOKUPS.with(|count| count.set(count.get() + 1));
+        self.events.get(&gallery)
     }
 
     /// An event's gallery shows as one group, whatever the days its pictures span.
@@ -355,7 +395,7 @@ impl State {
                 }
                 self.event = Some(w);
             }
-            self.headers.insert(gid, Rect::from_min_size(card.min + vec2(10.0, 10.0), vec2(128.0, 80.0)));
+            self.headers.insert(gid, header_origin(card));
             return;
         }
         let p = ui.painter().clone();
@@ -498,8 +538,7 @@ impl State {
         }
         // Who posted it and when, then its words (or its gallery).
         let bx = r.left() + 16.0;
-        let time = super::local_time(&controller::iso(e.taken));
-        let time = time.rsplit_once(", ").map_or(time.clone(), |(_, t)| t.to_string());
+        let time = super::local_clock(e.taken);
         let tt = Txt::new(&time, 12.0).color(theme::fg_3());
         let tw = widgets::text_size(ui, &tt).x;
         widgets::text(&pa, pos2(r.right() - 16.0, thumb.bottom() + 22.0), Align2::RIGHT_CENTER, &tt);
@@ -648,11 +687,20 @@ impl State {
         self.open(ctx, &key, origin, &keys);
     }
 
-    /// Opens the first event gallery's event as if its card was pressed (screenshots).
-    pub fn open_event(&mut self, ctx: &egui::Context) {
+    /// The first event gallery (screenshots).
+    pub fn event_gallery(&self) -> Option<u64> {
+        self.galleries.as_ref()?.all().find(|g| g.event.is_some()).map(|g| g.id)
+    }
+
+    /// Opens the first event gallery's event as if its card was pressed (screenshots), its `heading` where the list has
+    /// it (else where it was last drawn).
+    pub fn open_event(&mut self, ctx: &egui::Context, heading: Option<Rect>) {
         let Some(g) = self.galleries.as_ref().and_then(|g| g.all().find(|g| g.event.is_some()).cloned()) else { return };
         let Some(e) = g.event.clone() else { return };
-        let origin = self.headers.get(&g.id).copied().unwrap_or(Rect::from_min_size(pos2(300.0, 200.0), vec2(128.0, 80.0)));
+        let origin = heading
+            .map(header_origin)
+            .or_else(|| self.headers.get(&g.id).copied())
+            .unwrap_or(Rect::from_min_size(pos2(300.0, 200.0), vec2(128.0, 80.0)));
         let mut w = events::Window::open(ctx, e.clone(), origin, 16.0, Server::Production);
         w.gallery = Some(g.id);
         w.show_pictures = false;
@@ -725,15 +773,7 @@ pub(super) fn picture_entry(key: String, name: String, p: &community::Picture, d
 
 /// "28 Oct 2026, 21:30 – 22:30" for a group's pictures (the newest first).
 fn span(newest: u64, oldest: u64) -> String {
-    let date = super::local_time(&controller::iso(newest));
-    if newest == oldest {
-        return date;
-    }
-    let start = super::local_time(&controller::iso(oldest));
-    match (start.rsplit_once(", "), date.rsplit_once(", ")) {
-        (Some((d1, t1)), Some((d2, t2))) if d1 == d2 => format!("{d1}, {t1} – {t2}"),
-        _ => format!("{start} – {date}"),
-    }
+    super::local_span(oldest, newest)
 }
 
 /// The event an event gallery belongs to, as the website shows it above the gallery: its cover, Event and its status,
@@ -1328,8 +1368,26 @@ fn details(
 }
 
 #[cfg(test)]
+thread_local!(static EVENT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_event_lookup_work_scales_with_the_pictures() {
+        let n = 1000;
+        let mut state = State::default();
+        state.feed.items = (1..=n).map(|id| community::Picture { id, gallery_id: id, ..Default::default() }).collect();
+        state.changed();
+        let entries = state.entries(&orbiters_core::search::Query::new(""));
+        assert_eq!(entries.len(), n as usize);
+        EVENT_LOOKUPS.with(|count| count.set(0));
+        assert!(entries.iter().all(|entry| !state.whole(entry)));
+        let lookups = EVENT_LOOKUPS.with(std::cell::Cell::get);
+        println!("Community event probes over {n} entries: {lookups}");
+        assert_eq!(lookups, n as usize);
+    }
 
     #[test]
     fn an_event_gallery_heads_its_pictures_once() {
@@ -1337,6 +1395,7 @@ mod tests {
         let event = Card { id: "e1".into(), ..Default::default() };
         let picture = |id, gallery_id, event: Option<Card>| community::Picture { id, gallery_id, event, ..Default::default() };
         state.feed.items = vec![picture(1, 31, Some(event.clone())), picture(2, 12, None), picture(3, 31, Some(event.clone())), picture(4, 12, None)];
+        state.changed();
         let mut entries = state.entries(&orbiters_core::search::Query::new(""));
         let order = |e: &[Entry]| e.iter().map(|e| e.key.clone()).collect::<Vec<_>>();
         state.gather(&mut entries);

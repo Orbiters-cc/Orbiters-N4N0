@@ -1132,7 +1132,8 @@ fn members(ui: &mut Ui, cx: &Cx, state: &mut State, scope: &crate::controller::v
         if !staged && !o.kept && !reading && (!o.members.started || (wanted != o.members.asked && now - o.members.typed_at > 0.45)) {
             ask_members(&ctx, cx, jobs, scope, o);
         } else if wanted != o.members.asked {
-            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            // (A read under way brings its own frame as it ends.)
+            crate::pages::frame_in(&ctx, 0.45 - (now - o.members.typed_at));
         }
     }
     let Some(o) = state.open.as_ref() else { return };

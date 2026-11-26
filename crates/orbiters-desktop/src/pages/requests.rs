@@ -5,6 +5,7 @@ use super::{sharing, Cx, Job};
 use orbiters_i18n::{mark, tr, tr_ctx};
 use crate::controller::shares::{self as controller, Operation, Outcome, Request};
 use egui::{pos2, vec2, Align2, Id, Rect, Sense, Ui, UiBuilder};
+use std::collections::{HashMap, HashSet};
 use orbiters_core::{
     account::Server,
     shares::{self, Item, RequestStatus, ShareRequest},
@@ -48,6 +49,8 @@ pub struct State {
     /// The window's serial (a new one each opening) and whether it shows.
     window: Option<u64>,
     serial: u64,
+    /// Each card's height, by request, with what it was measured from ([`State::height_key`]).
+    heights: HashMap<u64, (u64, f32)>,
 }
 impl State {
     pub fn pending(&self) -> usize {
@@ -294,7 +297,8 @@ impl State {
             if let Some(error) = self.error.clone() {
                 feedback::banner(ui, Id::unique(("requests-error", &error)), Tone::Danger, &tr!("Requests could not be loaded: {error}", error = error), false);
             }
-            let entries = if self.outgoing_box { self.outgoing.clone() } else { self.incoming.clone() };
+            // (Lent to the cards, not copied whole every frame: DPG-22.)
+            let entries = std::mem::take(if self.outgoing_box { &mut self.outgoing } else { &mut self.incoming });
             if entries.is_empty() {
                 if self.list.running() {
                     for _ in 0..2 {
@@ -305,23 +309,29 @@ impl State {
                     empty(ui, self.outgoing_box);
                 }
             }
-            for request in entries {
-                if let Some(action) = self.card(ui, &request) {
-                    match action {
-                        RowAction::Approve => self.answer(cx, request.clone(), true, false),
-                        RowAction::ApproveAnyway => self.answer(cx, request.clone(), true, true),
-                        RowAction::Deny => self.answer(cx, request.clone(), false, false),
-                        RowAction::CancelWarning => self.warning = None,
-                        RowAction::Retry => {
-                            if let Some((r, approve, ack)) = self.last.clone() {
-                                self.answer(cx, r, approve, ack);
-                            }
+            let acted: Vec<(usize, RowAction)> = entries.iter().enumerate().filter_map(|(i, request)| Some((i, self.card(ui, request)?))).collect();
+            let acted: Vec<(ShareRequest, RowAction)> = acted.into_iter().map(|(i, action)| (entries[i].clone(), action)).collect();
+            *(if self.outgoing_box { &mut self.outgoing } else { &mut self.incoming }) = entries;
+            // Heights of requests no longer listed go (looked at only once there are many more than listed).
+            if self.heights.len() > 2 * (self.incoming.len() + self.outgoing.len()) + 16 {
+                let listed: HashSet<u64> = self.incoming.iter().chain(&self.outgoing).map(|r| r.id).collect();
+                self.heights.retain(|id, _| listed.contains(id));
+            }
+            for (request, action) in acted {
+                match action {
+                    RowAction::Approve => self.answer(cx, request, true, false),
+                    RowAction::ApproveAnyway => self.answer(cx, request, true, true),
+                    RowAction::Deny => self.answer(cx, request, false, false),
+                    RowAction::CancelWarning => self.warning = None,
+                    RowAction::Retry => {
+                        if let Some((r, approve, ack)) = self.last.clone() {
+                            self.answer(cx, r, approve, ack);
                         }
-                        RowAction::Open(origin) => {
-                            if let Some(item) = &request.item {
-                                picked = Some((item.clone(), Some(origin)));
-                                dialog::close(&ctx, id);
-                            }
+                    }
+                    RowAction::Open(origin) => {
+                        if let Some(item) = &request.item {
+                            picked = Some((item.clone(), Some(origin)));
+                            dialog::close(&ctx, id);
                         }
                     }
                 }
@@ -336,10 +346,40 @@ impl State {
         picked
     }
 
+    /// What a card's height is made from (DPG-22): who it is for, its message, the warning or error shown on it, the
+    /// width, the language and the screen's scale. A card out of view is only placed, by its height kept for these:
+    /// every card's pills were measured and its message wrapped on every frame to know whether it showed.
+    fn height_key(&self, ui: &Ui, request: &ShareRequest, w: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (w.to_bits(), ui.ctx().pixels_per_point().to_bits(), orbiters_i18n::language()).hash(&mut h);
+        (request.public, request.message.trim()).hash(&mut h);
+        request.recipients.iter().for_each(|r| r.display_name.hash(&mut h));
+        self.warning.as_ref().filter(|(r, _)| r.id == request.id).map(|(_, m)| m).hash(&mut h);
+        self.row_error.as_ref().is_some_and(|(id, _)| *id == request.id).hash(&mut h);
+        h.finish()
+    }
+
     /// One request: who, about what, for whom, their message, then the answer (or how it was answered).
     fn card(&mut self, ui: &mut Ui, request: &ShareRequest) -> Option<RowAction> {
-        let ctx = ui.ctx().clone();
         let w = ui.available_width();
+        let key = self.height_key(ui, request, w);
+        let placed = match self.heights.get(&request.id) {
+            Some(&(k, h)) if k == key => {
+                let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                if !ui.is_rect_visible(rect) {
+                    return None;
+                }
+                Some(rect)
+            }
+            _ => None,
+        };
+        self.card_at(ui, request, w, key, placed)
+    }
+
+    /// [`State::card`] laid out, at `placed` when its kept height placed it already (`key` is what that height is of).
+    fn card_at(&mut self, ui: &mut Ui, request: &ShareRequest, w: f32, key: u64, placed: Option<Rect>) -> Option<RowAction> {
+        let ctx = ui.ctx().clone();
         let outgoing = self.outgoing_box;
         let person = if outgoing { &request.approver } else { &request.requester };
         let world = request.item.as_ref().map(|i| i.world.name.clone());
@@ -371,7 +411,11 @@ impl State {
             h += 12.0 + 20.0;
         }
         h += 16.0 + 32.0 + 16.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        self.heights.insert(request.id, (key, h));
+        let rect = match placed {
+            Some(rect) => rect,
+            None => ui.allocate_exact_size(vec2(w, h), Sense::hover()).0,
+        };
         if !ui.is_rect_visible(rect) {
             return None;
         }
@@ -576,6 +620,98 @@ fn empty(ui: &mut Ui, outgoing: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DPG-22: the Sharing requests window copied its whole list and laid out every card (its pills measured, its
+    /// message wrapped) on every frame, in view or not. A frame at rest now costs about what is in view, whether 2 or
+    /// 200 requests are listed.
+    #[test]
+    fn a_frame_of_the_requests_costs_the_cards_in_view() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let ctl: crate::backend::Ctl =
+            std::sync::Arc::new(crate::backend::Local::new(crate::controller::Controller::new(orbiters_core::settings::Settings::default())));
+        let snap = (*ctl.view()).clone();
+        let fixture: shares::Requests = serde_json::from_str(include_str!("../../../orbiters-core/tests/fixtures/capture-requests.json")).unwrap();
+        let mut state = State { fixture: true, open: true, ..Default::default() };
+        let mut made = Vec::new();
+        for n in [2usize, 200] {
+            state.incoming = (0..n)
+                .map(|i| {
+                    let mut r = fixture.requests[i % fixture.requests.len()].clone();
+                    r.id = 1000 + i as u64;
+                    r
+                })
+                .collect();
+            let mut t = 0.0;
+            let mut frame = |state: &mut State| {
+                t += 1.0 / 60.0;
+                let mut toasts = orbiters_ui::toast::Toasts::default();
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1600.0, 1000.0))), time: Some(t), ..Default::default() };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let cx = Cx { ctl: &ctl, snap: &snap, toasts: &mut toasts, entered: 0.0, visit: 1, windowed: true, gpu: None, top: 0.0, go: None };
+                    state.show(ui, &cx, Rect::from_min_size(pos2(100.0, 100.0), vec2(40.0, 40.0)));
+                });
+                output.textures_delta.clear();
+            };
+            for _ in 0..90 {
+                frame(&mut state);
+            }
+            let started = std::time::Instant::now();
+            let n_made = crate::test_alloc::count(|| (0..60).for_each(|_| frame(&mut state))) / 60;
+            println!("DPG-22, Sharing requests with {n} incoming: {n_made} allocations a frame, {:.2} ms", started.elapsed().as_secs_f64() * 1e3 / 60.0);
+            made.push(n_made);
+        }
+        assert!(made[1] < made[0] * 3 / 2 + 100, "200 requests cost {} allocations a frame, 2 cost {}", made[1], made[0]);
+        assert_eq!(state.incoming.len(), 200, "the list is lent to the cards and given back");
+    }
+
+    /// DPG-22: a card placed by its kept height is as tall as one laid out anew, for whatever changes its height: its
+    /// message, a warning shown on it, an error under it, the language.
+    #[test]
+    fn a_card_s_kept_height_follows_what_it_is_made_of() {
+        let ctx = egui::Context::default();
+        orbiters_ui::install(&ctx);
+        let fixture: shares::Requests = serde_json::from_str(include_str!("../../../orbiters-core/tests/fixtures/capture-requests.json")).unwrap();
+        // The height a card takes, drawn out of view (only placed, when its height is kept) or in it.
+        let height = |state: &mut State, r: &ShareRequest, seen: bool| {
+            let mut h = 0.0;
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1600.0, 1000.0))), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                ui.allocate_ui(vec2(600.0, 5000.0), |ui| {
+                    if !seen {
+                        ui.set_clip_rect(Rect::from_min_size(pos2(-100.0, -100.0), vec2(1.0, 1.0)));
+                    }
+                    let top = ui.cursor().top();
+                    state.card(ui, r);
+                    h = ui.cursor().top() - top;
+                });
+            });
+            output.textures_delta.clear();
+            h
+        };
+        let mut r = fixture.requests[0].clone();
+        let mut state = State { fixture: true, ..Default::default() };
+        let fresh = |state: &State, r: &ShareRequest, height: &dyn Fn(&mut State, &ShareRequest, bool) -> f32| {
+            let mut other = State { fixture: true, warning: state.warning.clone(), row_error: state.row_error.clone(), ..Default::default() };
+            height(&mut other, r, true)
+        };
+        let first = height(&mut state, &r, true);
+        assert_eq!(height(&mut state, &r, false), first, "placed by its kept height");
+        r.message = "A much longer message, which wraps over several lines of the card: ".repeat(6);
+        let longer = height(&mut state, &r, false);
+        assert!(longer > first);
+        assert_eq!(longer, fresh(&state, &r, &height));
+        state.warning = Some((r.clone(), shares::EXPLICIT_WARNING.into()));
+        let warned = height(&mut state, &r, false);
+        assert!(warned > longer);
+        assert_eq!(warned, fresh(&state, &r, &height));
+        state.warning = None;
+        state.row_error = Some((r.id, "Orbiters answered 500.".into()));
+        assert_eq!(height(&mut state, &r, false), fresh(&state, &r, &height));
+        r.public = true;
+        assert_eq!(height(&mut state, &r, false), fresh(&state, &r, &height), "Everyone on Orbiters among its pills");
+        orbiters_i18n::in_language(orbiters_i18n::Language::Ja, || assert_eq!(height(&mut state, &r, false), fresh(&state, &r, &height)));
+    }
 
     /// Night4, verify2 PAGES-UI-23: x's requests, read while x's sign-in came back (which forgot what was asked) and
     /// landing after y signed in, are never shown to y.

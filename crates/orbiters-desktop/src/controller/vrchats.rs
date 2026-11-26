@@ -495,7 +495,7 @@ pub(crate) fn shown_all(runs: &[VrchatRun], target: Option<u32>, chosen: Option<
         logs.len()
     };
     for run in &mut shown {
-        if run.account_id.as_deref().is_some_and(|id| named(id) > 99) {
+        if run.account_id.as_deref().is_some_and(|id| named(id) > 1) {
             run.account_id = None;
         }
     }

@@ -5,7 +5,7 @@
 //! Rescheduling within work also increments that count. The service's loop counters measure returns from waits separately.
 //! The report includes CPU time and the number of snapshots published.
 //!
-//! Nothing of the person's is read or written, no network is listened on or asked, and it refuses to run beside VRChat or
+//! It uses private paths and ephemeral loopback sockets, skips the fixed world-feedback port, and refuses to run beside VRChat or
 //! SteamVR, which are not an idle computer. What it does not have: an account signed in (the event streams and the account's
 //! own looks), mDNS (it would raise Windows' firewall prompt), the tray's message loop, and the capture worker's two reading
 //! threads when the worker is not beside this program.

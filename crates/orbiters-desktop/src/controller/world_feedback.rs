@@ -715,7 +715,7 @@ pub(super) fn spawn(ctl: Shared) {
             c.feedback_publish();
         }
     });
-    if !cfg!(test) {
+    if !cfg!(test) && !orbiters_core::osc::no_network_listening() {
         let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
     }
 }

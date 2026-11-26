@@ -825,6 +825,9 @@ mod tests {
         assert_eq!(index.hashes_of(&dir.join("another.png")), (None, None));
         // One there already is kept, the other is read.
         let first = &paths[0];
+        let stored = index.files[first].sha256.as_deref().unwrap();
+        assert!(std::ptr::eq(index.hashes_of(first).0.unwrap(), stored), "the lookup borrows the requested hash");
+
         index.files.get_mut(first).unwrap().clean_sha256 = None;
         index.files.get_mut(first).unwrap().sha256 = Some("kept".into());
         assert!(index.hash(std::slice::from_ref(first)));

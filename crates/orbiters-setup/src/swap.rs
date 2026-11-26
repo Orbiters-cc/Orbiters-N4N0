@@ -438,10 +438,20 @@ mod tests {
         assert!(dir.join(JOURNAL).exists());
         assert_eq!(std::fs::read_to_string(dir.join(APP_EXE)).unwrap(), "old app");
         assert!(!whole(&dir), "the old program beside a new helper");
+        // The app's start after an update (and the failure page's Open) goes through the same door, which starts nothing here.
+        let started = std::cell::RefCell::new(vec![]);
+        let launch = |program: &Path, _: &[&str]| {
+            started.borrow_mut().push(program.to_path_buf());
+            Ok(())
+        };
+        crate::relaunch_with(&dir, true, launch);
+        assert!(started.borrow().is_empty(), "the old program beside a new helper is never started");
         drop(held);
         recover(&dir).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join(helper)).unwrap(), "old capture");
         assert!(whole(&dir));
+        crate::relaunch_with(&dir, true, launch);
+        assert_eq!(*started.borrow(), vec![dir.join(APP_EXE)], "a whole version is");
         remove_tree(&dir);
     }
 
@@ -456,6 +466,17 @@ mod tests {
         drop(held);
         assert!(recover(&dir).unwrap());
         remove_tree(&dir);
+    }
+
+    /// W1-1, its first step on its own: where the journal's name cannot even be looked at (here a name Windows refuses, the one
+    /// failure of that step a test can bring about), that is an error, never "no journal".
+    #[test]
+    fn a_journal_name_that_cannot_be_looked_at_is_an_error() {
+        let dir = scratch("journal-name").join("a?b");
+        let looked = std::fs::symlink_metadata(dir.join(JOURNAL)).unwrap_err();
+        assert_ne!(looked.kind(), std::io::ErrorKind::NotFound, "{looked}");
+        assert!(Journal::left(&dir).is_err() && recover(&dir).is_err() && left_programs(&dir).is_err() && !whole(&dir));
+        remove_tree(dir.parent().unwrap());
     }
 
     /// What Windows runs at the next sign-in is at most 260 characters, or it would not run it.

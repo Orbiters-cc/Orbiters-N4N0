@@ -1035,6 +1035,18 @@ mod picture_wire_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrelated_snapshot_changes_share_the_profile_pixels() {
+        let before = super::super::publish_cost::busy_evening();
+        let mut after = before.clone();
+        after.n4n0.afk = !before.n4n0.afk;
+
+        let before = before.vrchat_login.picture.as_ref().unwrap();
+        let after = after.vrchat_login.picture.as_ref().unwrap();
+        assert_eq!(before.rgba.len(), 96 * 96 * 4);
+        assert_eq!(before.rgba.as_ptr(), after.rgba.as_ptr());
+    }
     #[test]
     fn ipc_debug_redacts_passwords_and_codes() {
         for command in [

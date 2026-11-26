@@ -6,7 +6,7 @@
 //!
 //! The pictures are the interface's own ([`Pictures`]): egui textures on the desktop, a phone toolkit's images there.
 
-use crate::media::Watcher;
+use crate::media::{Watcher, ART_PREFIX};
 use crate::platform::Locale;
 use crate::screen::{keyboard, mode_setting, photo_length, photo_mode, photo_setting};
 use crate::status::{N4n0Status, StateAction};
@@ -485,6 +485,8 @@ impl<P: Pictures> MenuHost<P> {
         self.menu.media = read;
         self.menu.volume = reading.volume;
         if let Some(art) = reading.art {
+            // The art of what played before is not shown any more: one picture per song was kept, for the whole evening (DOV-7).
+            self.thumbs.retain(|key, _| !key.starts_with(ART_PREFIX) || *key == art.key);
             if !matches!(self.thumbs.get(&art.key), Some(Thumb::Ready(..))) {
                 let ready = self.pictures.make(&art.key, &art.rgb);
                 self.thumbs.insert(art.key.clone(), Thumb::Ready(ready));
@@ -828,6 +830,28 @@ mod tests {
 
     fn host() -> MenuHost<Sizes> {
         MenuHost::new(Sizes, Arc::new(English), Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia))))
+    }
+
+    /// DOV-7: the music's art is kept for what plays now only; an evening of songs kept a picture of each (230,400 bytes as a
+    /// texture, more in the retro look) until a YouTube page fetched thumbnails.
+    #[test]
+    fn only_the_art_of_what_plays_is_kept() {
+        let media = Arc::new(Watcher::new(|| Box::new(crate::media::NoMedia)));
+        let mut host = MenuHost::new(Sizes, Arc::new(English), media.clone());
+        host.done_tx.send(Done::Thumbnail { id: "v0".into(), tries: 0, image: Some(Rgb { width: 1, height: 1, pixels: vec![0; 3] }) }).unwrap();
+        host.poll();
+        let art = |n: usize| crate::media::Reading { art: Some(Arc::new(crate::media::Art { key: format!("{ART_PREFIX}{n:016x}"), rgb: Rgb { width: 2, height: 1, pixels: vec![0; 6] } })), ..Default::default() };
+        for n in 0..100 {
+            media.stand_in(art(n));
+            host.follow_media();
+        }
+        let mut keys = host.picture_keys();
+        keys.sort();
+        assert_eq!(keys, [format!("{ART_PREFIX}{:016x}", 99), "v0".to_string()], "the art of the song playing, and the page's thumbnail");
+        // Back to a song heard before: its art is made again.
+        media.stand_in(art(3));
+        host.follow_media();
+        assert!(host.picture(&format!("{ART_PREFIX}{:016x}", 3)).is_some() && host.picture(&format!("{ART_PREFIX}{:016x}", 99)).is_none());
     }
 
     /// verify2 (OVERLAY-16): the loaded pictures are listed from the host itself, so a page is given every drawable one.

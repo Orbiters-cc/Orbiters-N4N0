@@ -28,6 +28,8 @@ const EVERY: Duration = Duration::from_secs(1);
 pub const ART_WIDTH: usize = 320;
 pub const ART_HEIGHT: usize = 180;
 const ART_BACKGROUND: [u8; 3] = [0x10, 0x10, 0x12];
+/// What the art's key begins with (a song's art is `art:` and the hash of its picture).
+pub const ART_PREFIX: &str = "art:";
 
 /// The art of what plays, under the key the menus keep its picture by.
 #[derive(Debug)]
@@ -389,7 +391,7 @@ pub fn art(media: &Media, bytes: &[u8]) -> Option<Arc<Art>> {
     for b in bytes.iter().step_by((bytes.len() / 4096).max(1)).chain(media.title.as_bytes()) {
         hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3);
     }
-    Some(Arc::new(Art { key: format!("art:{hash:016x}"), rgb: picture::letterbox(&rgb, ART_WIDTH, ART_HEIGHT, ART_BACKGROUND) }))
+    Some(Arc::new(Art { key: format!("{ART_PREFIX}{hash:016x}"), rgb: picture::letterbox(&rgb, ART_WIDTH, ART_HEIGHT, ART_BACKGROUND) }))
 }
 
 #[cfg(test)]

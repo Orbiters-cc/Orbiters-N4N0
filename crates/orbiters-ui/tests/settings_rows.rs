@@ -96,3 +96,27 @@ fn a_button_asks_about_landings_without_copying_them() {
     println!("allocations of 100 buttons over 18 frames after a landing: {made}");
     assert_eq!(made, 0);
 }
+
+/// VRR-40: every layer over the page said it showed by copying the list of those shown and putting it back, and asking whether
+/// one holds the foreground (the window asks it each frame) copied it again.
+#[test]
+fn layers_over_the_page_say_they_show_without_copying_the_list() {
+    let ctx = egui::Context::default();
+    let mut made = 0;
+    for n in 0..20 {
+        let mut full = ctx.run_ui(egui::RawInput { time: Some(n as f64 / 60.0), ..Default::default() }, |ui| {
+            let before = MADE.with(Cell::get);
+            for k in 0..8 {
+                let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("layer", k)));
+                std::hint::black_box(orbiters_ui::front::layer(ui.ctx(), layer, k == 3));
+            }
+            assert!(orbiters_ui::front::held(ui.ctx()));
+            if n >= 2 {
+                made += MADE.with(Cell::get) - before;
+            }
+        });
+        full.textures_delta.clear();
+    }
+    println!("allocations of 8 layers and the foreground asked, over 18 frames: {made}");
+    assert_eq!(made, 0);
+}

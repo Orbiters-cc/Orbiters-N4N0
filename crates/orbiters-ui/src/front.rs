@@ -22,11 +22,11 @@ fn key() -> Id {
 fn note(ctx: &Context, layer: LayerId, holds: bool) {
     // The pass is read first: the context cannot be read while its memory is locked for writing.
     let pass = ctx.cumulative_pass_nr();
+    // In place: a copy of the list for every layer of every frame was made and put back (VRR-40).
     ctx.data_mut(|d| {
-        let mut all = d.get_temp::<Vec<Shown>>(key()).unwrap_or_default();
+        let all = d.get_temp_mut_or_default::<Vec<Shown>>(key());
         all.retain(|s| s.pass + 1 >= pass && !(s.layer == layer && s.pass == pass));
         all.push(Shown { layer, holds, pass });
-        d.insert_temp(key(), all);
     });
 }
 
@@ -53,7 +53,7 @@ pub fn hold(ctx: &Context, id: Id) {
 /// Whether anything holds the foreground now (said in this pass or the last one).
 pub fn held(ctx: &Context) -> bool {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data(|d| d.get_temp::<Vec<Shown>>(key())).is_some_and(|all| all.iter().any(|s| s.holds && s.pass + 1 >= pass))
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<Shown>>(key()).iter().any(|s| s.holds && s.pass + 1 >= pass))
 }
 
 /// The layers over the page that took a press or a key in the pass that just ended without saying they were shown

@@ -2217,6 +2217,7 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     ui.add_space(8.0);
     app_log(ui, &logs);
+    widgets::separator(ui);
     if entries.is_empty() {
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
         widgets::text(ui.painter(), pos2(row.left(), row.center().y), Align2::LEFT_CENTER, &Txt::new(tr("Nothing yet."), 13.0).color(theme::fg_3()));
@@ -2270,37 +2271,40 @@ fn notice_log(ui: &mut Ui, shown: &mut usize) {
 /// How many errors of the app's own log are copied.
 const APP_LOG_COPIED: usize = 60;
 
-/// The app's own log (`orbiters_core::app_log`), for who helps to find out what went wrong: its folder, and its last errors.
+/// The app's own log (`orbiters_core::app_log`), for who helps to find out what went wrong: a row of the card like any
+/// other, its folder and its last errors at its right.
 fn app_log(ui: &mut Ui, logs: &std::path::Path) {
-    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-    let mut bu = ui.new_child(UiBuilder::new().max_rect(bar).layout(Layout::right_to_left(egui::Align::Center)));
-    bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    let what = tr("What went wrong inside the app: when, where in it, and error codes. No names, nothing anyone wrote, no tokens. It stays on this computer, two weeks at most.");
-    let folder = Button::new(tr("Open the log folder")).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm).id_salt("app-log-folder").show(&mut bu);
-    if folder.on_hover_text(what).clicked() {
-        let dir = orbiters_core::app_log::folder(logs);
-        let working = super::Working::begin();
-        std::thread::Builder::new().name("open-app-log".into()).spawn(move || {
-            let _working = working;
-            (|| -> anyhow::Result<()> {
-                std::fs::create_dir_all(&dir)?;
-                crate::controller::open_path(&dir)
-            })().or_log("the log's folder could not be opened");
-        }).or_log("the thread to open the log's folder could not be started");
-    }
-    let copy = Button::new(tr("Copy the last errors")).icon(icons::COPY).variant(Variant::Ghost).size(Size::Sm).id_salt("app-log-copy").show(&mut bu);
-    if copy.on_hover_text(what).clicked() {
-        let logs = logs.to_path_buf();
-        let ctx = ui.ctx().clone();
-        let empty = tr("No error in the app's log.").to_string();
-        let working = super::Working::begin();
-        std::thread::Builder::new().name("copy-app-log".into()).spawn(move || {
-            let _working = working;
-            let lines = orbiters_core::app_log::last_errors(&logs, APP_LOG_COPIED);
-            ctx.copy_text(if lines.is_empty() { empty } else { lines.join("\n") });
-            ctx.request_repaint();
-        }).or_log("the thread to copy the log could not be started");
-    }
+    let folder = Button::new(tr("Open the log folder")).icon(icons::FOLDER_OPEN).variant(Variant::Ghost).size(Size::Sm).id_salt("app-log-folder");
+    let copy = Button::new(tr("Copy the last errors")).icon(icons::COPY).variant(Variant::Ghost).size(Size::Sm).id_salt("app-log-copy");
+    let width = folder.desired_width(ui) + 8.0 + copy.desired_width(ui);
+    let about = tr("When and where something went wrong inside the app, with its error codes. No names, no messages, no sign-in details. It stays on this computer, two weeks at most.");
+    widgets::field(ui, tr("Error log"), Some(about), width, |bu| {
+        bu.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        // Right to left: the folder at the far right, as the notices' file below.
+        if folder.show(bu).clicked() {
+            let dir = orbiters_core::app_log::folder(logs);
+            let working = super::Working::begin();
+            std::thread::Builder::new().name("open-app-log".into()).spawn(move || {
+                let _working = working;
+                (|| -> anyhow::Result<()> {
+                    std::fs::create_dir_all(&dir)?;
+                    crate::controller::open_path(&dir)
+                })().or_log("the log's folder could not be opened");
+            }).or_log("the thread to open the log's folder could not be started");
+        }
+        if copy.show(bu).clicked() {
+            let logs = logs.to_path_buf();
+            let ctx = bu.ctx().clone();
+            let empty = tr("No error in the app's log.").to_string();
+            let working = super::Working::begin();
+            std::thread::Builder::new().name("copy-app-log".into()).spawn(move || {
+                let _working = working;
+                let lines = orbiters_core::app_log::last_errors(&logs, APP_LOG_COPIED);
+                ctx.copy_text(if lines.is_empty() { empty } else { lines.join("\n") });
+                ctx.request_repaint();
+            }).or_log("the thread to copy the log could not be started");
+        }
+    });
 }
 
 #[cfg(test)]

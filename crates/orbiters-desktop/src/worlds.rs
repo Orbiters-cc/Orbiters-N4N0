@@ -305,12 +305,20 @@ pub fn rescan_pictures(folders: &[PathBuf]) {
     scan_pictures(&visited::shot_index_file(), visited::screenshot_dirs_with(folders));
 }
 
+/// A walk of the picture folders is running ([`scan_pictures`]).
+static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Walks begun (tests count them).
+static WALKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// One walk of `dirs` at a time, on a thread: a walk asked for while one runs is not started (the next one asked sees
-/// what it would have).
+/// what it would have). Where the system tells what changes in them ([`Followed`]), none while nothing was told since the
+/// last walk began.
 fn scan_pictures(file: &Path, dirs: Vec<PathBuf>) {
-    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(walk) = Followed::walk(&dirs) else { return };
     let file = file.to_path_buf();
     one_at_a_time(&SCANNING, "picture-scan", move || {
+        walk.begins();
+        WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _one = shot_index_lock();
         let mut current = visited::ShotIndex::load(&file);
         if current.refresh_progress(&dirs, publish_pictures) {
@@ -318,6 +326,63 @@ fn scan_pictures(file: &Path, dirs: Vec<PathBuf>) {
             publish_pictures(&current);
         }
     });
+}
+
+/// The picture folders, followed by the system (DPG-23: `orbiters_core::folder_watch`, with the month folders under them):
+/// Photos & captures walked every one of them again every 15 seconds while it showed, behind VRChat for hours, stat'ing
+/// every picture and reading the whole index each time, to find nothing new. A set of folders is followed from its
+/// first walk on (its notices opened before that walk), and walked again only once something in them changed since the
+/// last walk began. Where the system gives no notice (not Windows, some network drives), every walk asked is made, as
+/// before.
+struct Followed {
+    dirs: Vec<PathBuf>,
+    /// Changes told in them (None: not followed, walked whenever asked).
+    told: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// What `told` was as the last walk began.
+    walked: Arc<Mutex<Option<u64>>>,
+}
+
+/// A walk to make, and how to note that it began ([`Followed::walk`]).
+struct Walk {
+    told: Option<Arc<std::sync::atomic::AtomicU64>>,
+    walked: Arc<Mutex<Option<u64>>>,
+}
+
+impl Walk {
+    /// The walk begins: what it sees is at least as new as every change told until now.
+    fn begins(&self) {
+        if let Some(told) = &self.told {
+            *self.walked.locked() = Some(told.load(std::sync::atomic::Ordering::Acquire));
+        }
+    }
+}
+
+impl Followed {
+    /// The walk to make of `dirs` now, if one is needed: always the first (and the first after a change of the set); after
+    /// it, once a change was told.
+    fn walk(dirs: &[PathBuf]) -> Option<Walk> {
+        static FOLLOWED: Mutex<Vec<Followed>> = Mutex::new(Vec::new());
+        let mut followed = FOLLOWED.locked();
+        let at = match followed.iter().position(|f| f.dirs == dirs) {
+            Some(at) => at,
+            None => {
+                let told = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let counted = told.clone();
+                let on = orbiters_core::folder_watch::watch_tree("picture-folders", dirs.to_vec(), move || {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                });
+                // (A set that was followed stays so: the system's notices live as long as the process.)
+                followed.push(Followed { dirs: dirs.to_vec(), told: on.then_some(told), walked: Arc::default() });
+                followed.len() - 1
+            }
+        };
+        let f = &followed[at];
+        let needed = match &f.told {
+            Some(told) => *f.walked.locked() != Some(told.load(std::sync::atomic::Ordering::Acquire)),
+            None => true,
+        };
+        needed.then(|| Walk { told: f.told.clone(), walked: f.walked.clone() })
+    }
 }
 
 /// Runs `work` on a thread named `name` unless one started with the same `running` flag still runs; says whether it
@@ -1326,6 +1391,82 @@ pub fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// DPG-23: Photos & captures asks for a walk of the picture folders every 15 seconds while it shows. Each walked
+    /// every folder and stat'ed every picture (2,000 here) and read the whole index, also when nothing had changed. Now a
+    /// walk is made only when the system told a change in the folders (a month's folder included) since the last one
+    /// began, and a picture taken is still found.
+    #[cfg(windows)]
+    #[test]
+    fn the_picture_folders_are_walked_again_only_once_they_changed() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join(format!("orbiters-picture-walks-{}", uuid::Uuid::new_v4()));
+        let pictures = dir.join("VRChat");
+        let month = pictures.join("2026-11");
+        std::fs::create_dir_all(&month).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255])).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        for i in 0..2_000 {
+            std::fs::write(month.join(format!("VRChat_2026-11-01_10-{:02}-{:02}.{i:03}_4x4.png", i / 60 % 60, i % 60)), png.get_ref()).unwrap();
+        }
+        let file = dir.join("screenshots.json");
+        let idle = || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while SCANNING.load(Ordering::Acquire) {
+                assert!(std::time::Instant::now() < until, "a walk never ended");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let walks = || WALKS.load(Ordering::Relaxed);
+        let listed = |file: &Path| visited::ShotIndex::load(file).every_shot().len();
+        idle();
+        let first = std::time::Instant::now();
+        scan_pictures(&file, vec![pictures.clone()]);
+        idle();
+        let one = first.elapsed();
+        assert_eq!(listed(&file), 2_000, "the first look walks them");
+        // What the system tells late of the files just written (their metadata written back after the notices were
+        // opened) may bring a walk more; then nothing changes: the looks of a minute and more (ten periods).
+        let mut settling = 0;
+        loop {
+            let before = walks();
+            scan_pictures(&file, vec![pictures.clone()]);
+            idle();
+            if walks() == before {
+                break;
+            }
+            settling += 1;
+            assert!(settling < 20, "the folder never settled");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let before = walks();
+        let still = std::time::Instant::now();
+        for _ in 0..10 {
+            scan_pictures(&file, vec![pictures.clone()]);
+            idle();
+        }
+        let again = walks() - before;
+        println!("DPG-23, 2,000 pictures: a walk {:.0} ms; {settling} walk(s) more as the folder settled; walks over ten looks at an unchanged folder: {again} ({:.0} ms)", one.as_secs_f64() * 1e3, still.elapsed().as_secs_f64() * 1e3);
+        assert_eq!(again, 0, "nothing changed: no walk");
+        // A picture taken in the month's folder is found by the next look the system's notice allows.
+        std::fs::write(month.join("VRChat_2026-11-26_21-00-00.000_4x4.png"), png.get_ref()).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while listed(&file) != 2_001 {
+            assert!(std::time::Instant::now() < until, "the new picture was never found");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            scan_pictures(&file, vec![pictures.clone()]);
+            idle();
+        }
+        // And a picture removed.
+        std::fs::remove_file(month.join("VRChat_2026-11-26_21-00-00.000_4x4.png")).unwrap();
+        while listed(&file) != 2_000 {
+            assert!(std::time::Instant::now() < until, "the removed picture stayed");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            scan_pictures(&file, vec![pictures.clone()]);
+            idle();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Verifier (CORE2-13): a world's picture from one environment (or a new one of the same world) is kept apart from
     /// the other's: another address, another file.

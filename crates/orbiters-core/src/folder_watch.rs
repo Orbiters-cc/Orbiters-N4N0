@@ -11,13 +11,22 @@ use std::path::PathBuf;
 /// replaced by another of its name is followed at the one at its path (told then too). It can come several times for one
 /// change, and for a change that was undone. False when the system gives no such notice here: the caller looks by itself.
 pub fn watch(name: &str, folders: Vec<PathBuf>, changed: impl Fn() + Send + 'static) -> bool {
+    watch_as(name, folders, false, changed)
+}
+
+/// [`watch`], with everything under the folders too (VRChat's pictures go in a folder per month).
+pub fn watch_tree(name: &str, folders: Vec<PathBuf>, changed: impl Fn() + Send + 'static) -> bool {
+    watch_as(name, folders, true, changed)
+}
+
+fn watch_as(name: &str, folders: Vec<PathBuf>, tree: bool, changed: impl Fn() + Send + 'static) -> bool {
     #[cfg(windows)]
     {
-        windows_watch::watch(name, folders, changed)
+        windows_watch::watch(name, folders, tree, changed)
     }
     #[cfg(not(windows))]
     {
-        let _ = (name, folders, changed);
+        let _ = (name, folders, tree, changed);
         false
     }
 }
@@ -87,24 +96,25 @@ mod windows_watch {
         Some((info.dwVolumeSerialNumber, (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
     }
 
-    fn notice(folder: &Path, what: FILE_NOTIFY_CHANGE) -> Option<HANDLE> {
+    fn notice(folder: &Path, what: FILE_NOTIFY_CHANGE, tree: bool) -> Option<HANDLE> {
         let path = wide(folder);
         // SAFETY: a path ending in zero, alive for the call.
-        unsafe { FindFirstChangeNotificationW(PCWSTR(path.as_ptr()), false, what) }.ok()
+        unsafe { FindFirstChangeNotificationW(PCWSTR(path.as_ptr()), tree, what) }.ok()
     }
 
-    fn open(wanted: &Path) -> Option<Watched> {
+    /// The notices of `wanted` (with what is under it when `tree`; never under a folder above it waited in).
+    fn open(wanted: &Path, tree: bool) -> Option<Watched> {
         let folder = wanted.ancestors().find(|f| f.is_dir())?;
         let there = folder == wanted;
         // The folder above first: a folder put in its place from now on is told there, even before its own notice is open.
-        let above = there.then(|| wanted.parent().and_then(|p| notice(p, FILE_NOTIFY_CHANGE_DIR_NAME))).flatten().map(|h| (Notice(h), identity(wanted)));
+        let above = there.then(|| wanted.parent().and_then(|p| notice(p, FILE_NOTIFY_CHANGE_DIR_NAME, false))).flatten().map(|h| (Notice(h), identity(wanted)));
         let what = if there { FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE } else { FILE_NOTIFY_CHANGE_DIR_NAME };
-        let handle = notice(folder, what)?;
+        let handle = notice(folder, what, tree && there)?;
         Some(Watched { wanted: wanted.to_path_buf(), there, handle, above })
     }
 
-    pub fn watch(name: &str, folders: Vec<PathBuf>, changed: impl Fn() + Send + 'static) -> bool {
-        let opened: Option<Vec<Watched>> = folders.iter().map(|f| open(f)).collect();
+    pub fn watch(name: &str, folders: Vec<PathBuf>, tree: bool, changed: impl Fn() + Send + 'static) -> bool {
+        let opened: Option<Vec<Watched>> = folders.iter().map(|f| open(f, tree)).collect();
         // (Two notices each at most: what one wait can hold.)
         let Some(mut watched) = opened.filter(|w| !w.is_empty() && w.len() <= 32) else { return false };
         std::thread::Builder::new()
@@ -139,7 +149,7 @@ mod windows_watch {
                     let wanted: Vec<PathBuf> = watched.iter().map(|w| w.wanted.clone()).collect();
                     watched.clear();
                     loop {
-                        match wanted.iter().map(|f| open(f)).collect::<Option<Vec<Watched>>>() {
+                        match wanted.iter().map(|f| open(f, tree)).collect::<Option<Vec<Watched>>>() {
                             Some(opened) => {
                                 watched = opened;
                                 break;
@@ -193,6 +203,27 @@ mod tests {
         assert!(told(), "in the folder that came later");
         std::fs::write(root.join("beside"), "x").unwrap();
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "what is beside them is not theirs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DPG-23: VRChat's pictures go in a folder per month under the folder followed.
+    #[test]
+    fn a_tree_is_followed_below_its_folder() {
+        let root = std::env::temp_dir().join(format!("orbiters-watch-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tree = root.join("tree");
+        std::fs::create_dir_all(tree.join("2026-11")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        assert!(super::watch_tree("watch-tree-test", vec![tree.clone()], move || {
+            let _ = tx.send(());
+        }));
+        std::fs::write(tree.join("2026-11").join("picture.png"), "one").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "a picture in a month's folder");
+        while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        std::fs::create_dir_all(tree.join("2026-12")).unwrap();
+        while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        std::fs::write(tree.join("2026-12").join("picture.png"), "two").unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok(), "in a month's folder made later");
         let _ = std::fs::remove_dir_all(&root);
     }
 

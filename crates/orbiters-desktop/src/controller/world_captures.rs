@@ -505,6 +505,43 @@ impl super::Controller {
 mod tests {
     use super::*;
 
+    /// The requests' thread over this test process's own folders: a request put in a `requests` folder that replaced the
+    /// one it followed is taken without anything else happening (W23-verify M1).
+    #[test]
+    fn a_request_in_a_requests_folder_made_again_is_taken() {
+        let ctl = crate::controller::Controller::new(orbiters_core::settings::Settings::default());
+        let requests = root().join("requests");
+        let old = root().join("requests-moved-away");
+        let _ = std::fs::remove_dir_all(&old);
+        std::fs::create_dir_all(&requests).unwrap();
+        spawn(ctl.clone());
+        let taken = |file: &Path| {
+            let at = Instant::now();
+            while file.exists() && at.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !file.exists()
+        };
+        // Not a request: removed, and nothing stays under way (no look again by the clock).
+        let first = requests.join("first.json");
+        std::fs::write(&first, "{}").unwrap();
+        assert!(taken(&first), "the thread follows the folder");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::rename(&requests, &old).unwrap();
+        std::fs::create_dir(&requests).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let (part, second) = (requests.join("second.part"), requests.join("second.json"));
+        let world = "wrld_12345678-1234-4123-8123-123456789abc";
+        std::fs::write(&part, format!(r#"{{"schema":{SCHEMA},"id":"second","action":"watch","world":{{"id":"{world}","name":"Fixture"}}}}"#)).unwrap();
+        std::fs::rename(&part, &second).unwrap();
+        let seen = taken(&second);
+        ctl.quitting.store(true, std::sync::atomic::Ordering::Relaxed);
+        ctl.rests.wake_all();
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_file(root().join(format!("{world}.json")));
+        assert!(seen, "the request in the new folder was taken");
+    }
+
     #[test]
     fn requests_are_read_oldest_first_and_other_schemas_refused() {
         let dir = std::env::temp_dir().join(format!("orbiters-world-requests-{}", std::process::id()));

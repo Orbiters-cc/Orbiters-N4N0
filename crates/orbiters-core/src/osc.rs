@@ -911,7 +911,7 @@ impl OscService {
                 let (tx, rx) = mpsc::channel::<Sighting>();
                 let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
                 // (The service's end hangs up, see `Drop`.)
-                let next = move || match rx.recv_timeout(RECHECK) {
+                let next = move |most| match rx.recv_timeout(most) {
                     Ok(sighting) => Some(Some(sighting)),
                     Err(mpsc::RecvTimeoutError::Timeout) => Some(None),
                     Err(mpsc::RecvTimeoutError::Disconnected) => None,
@@ -926,7 +926,7 @@ impl OscService {
                             Ok(events) => {
                                 let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
                                 // (The daemon's end hangs up, see `Drop`.)
-                                let next = move || match events.recv_timeout(RECHECK) {
+                                let next = move |most| match events.recv_timeout(most) {
                                     Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => Some(Some(Sighting::Found {
                                         name: info.get_fullname().to_string(),
                                         addresses: info.get_addresses_v4().into_iter().collect(),
@@ -1409,8 +1409,11 @@ fn named(full: &str, name: Option<&str>) -> bool {
 /// ([`VrchatServices`]), or, on the network (`lan`: the VRChat wanted there), at the chosen VRChat's, whose address and
 /// input port the `route` takes. A VRChat that starts while the services run looks for them only as it starts, before
 /// it could hear them: when its own service shows up, they are announced again ([`announce`]) so that it finds them.
+///
+/// `next(most)` is what is seen next, `Some(None)` after `most` with nothing: it waits until the next look at the service in
+/// use at most, so that what else is seen meanwhile never puts that look off.
 fn watch_vrchat(
-    mut next: impl FnMut() -> Option<Option<Sighting>>,
+    mut next: impl FnMut(Duration) -> Option<Option<Sighting>>,
     stop: &AtomicBool,
     found: &Mutex<Option<SocketAddr>>,
     announcement: &Announcement,
@@ -1422,7 +1425,7 @@ fn watch_vrchat(
     let mut checked = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let before = services.current();
-        match next() {
+        match next(RECHECK.saturating_sub(checked.elapsed())) {
             // A short name from the system's Bonjour, a full one from mdns-sd.
             Some(Some(Sighting::Found { name, addresses, port })) if name.starts_with("VRChat-Client-") => {
                 let addr = match lan {
@@ -1521,6 +1524,34 @@ mod platform_tests {
         let started = Instant::now();
         drop(service);
         assert!(started.elapsed() < RECHECK / 2, "{:?}", started.elapsed());
+    }
+
+    /// The browsing thread waits until the next look at the VRChat service in use at most: what else is seen meanwhile (other
+    /// services, the daemon's own events) does not put that look off a whole wait, so a VRChat gone without a word is gone
+    /// after [`MISSES`] looks [`RECHECK`] apart, as when the wait was a quarter of a second (before review 1124's W3).
+    #[test]
+    fn what_is_seen_between_two_looks_does_not_put_the_next_one_off() {
+        let (stop, found) = (AtomicBool::new(false), Mutex::new(None));
+        let route = Route::of(&Network::Loopback { vrchat_port: 9000 });
+        let a = Announcement { interface: None, instance: "Test-1".into(), host: "test-1.local".into(), address: Ipv4Addr::LOCALHOST, osc_port: 1, query_port: 2, direct: None };
+        let mut asked = Vec::new();
+        watch_vrchat(
+            |most| {
+                asked.push(most);
+                if asked.len() > 1 {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                Some(Some(Sighting::Gone { name: "Another-Service".into() }))
+            },
+            &stop,
+            &found,
+            &a,
+            None,
+            &route,
+        );
+        assert!(asked[0] <= RECHECK, "{asked:?}");
+        assert!(asked[1] <= RECHECK - Duration::from_millis(300), "the next look stays where it was: {asked:?}");
     }
 
     /// `next` as the mdns-sd and system-Bonjour paths both drive it. (127.0.0.1 is no address of the local network, so

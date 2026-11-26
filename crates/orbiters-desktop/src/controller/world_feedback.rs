@@ -65,6 +65,8 @@ pub(super) struct WorldFeedbackRuntime {
     instances: (Vec<orbiters_n4n0_core::menu::InstanceRow>, Option<Instant>),
     /// Why the local address cannot be served (another program has the port).
     pub(super) port_note: Option<String>,
+    /// Where the local address waits for connections, while it does.
+    listening: Option<std::net::SocketAddr>,
     sent: Option<FeedbackView>,
     /// Bumped when the environment changes: an answer to a call made before is the other server's.
     scope: u64,
@@ -96,6 +98,7 @@ impl WorldFeedbackRuntime {
             asked: Vec::new(),
             instances: (Vec::new(), None),
             port_note: None,
+            listening: None,
             sent: None,
             scope: 0,
             stamp: Stamp::default(),
@@ -722,8 +725,20 @@ pub(super) fn spawn(ctl: Shared) {
     }
 }
 
+impl super::Controller {
+    /// Ends the local address's wait for a connection once the app quits (W23-verify m1): a connection of its own, which it
+    /// leaves unanswered.
+    pub(super) fn wake_feedback_listener(&self) {
+        let listening = self.world_feedback.locked().listening.take();
+        if let Some(at) = listening {
+            let _ = TcpStream::connect_timeout(&at, Duration::from_millis(500));
+        }
+    }
+}
+
 /// The local address: `GET /n4n0/feedback/v1` on 127.0.0.1:22541 (contracts `Docs/world-feedback.md`).
 fn serve(ctl: Shared) {
+    let rest = ctl.rest("world-feedback-probe", |_| ());
     let listener = loop {
         if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -736,10 +751,21 @@ fn serve(ctl: Shared) {
             Err(e) => {
                 ctl.world_feedback.locked().port_note =
                     Some(tr!("Port {port} is taken ({error}): the N4N0 world cannot reach Orbiters - N4N0 to give feedback", port = contract::PORT, error = e));
-                std::thread::sleep(Duration::from_secs(30));
+                rest.wait(Some(Duration::from_secs(30)));
             }
         }
     };
+    listen(&ctl, listener);
+}
+
+/// Answers each connection until the app quits, then lets the port go: quitting ends the wait for the next connection
+/// ([`super::Controller::wake_feedback_listener`]).
+fn listen(ctl: &Shared, listener: TcpListener) {
+    ctl.world_feedback.locked().listening = listener.local_addr().ok();
+    // (Quitting before the address was there to wake.)
+    if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     for stream in listener.incoming() {
         if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -825,6 +851,26 @@ fn respond(runtime: &std::sync::Mutex<WorldFeedbackRuntime>, mut stream: TcpStre
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quitting_lets_the_local_address_go() {
+        let ctl = super::super::Controller::new(orbiters_core::settings::Settings::default());
+        let listener = super::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let c = ctl.clone();
+        let listening = std::thread::spawn(move || super::listen(&c, listener));
+        let at = std::time::Instant::now();
+        while ctl.world_feedback.lock().unwrap().listening.is_none() && at.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Nobody connects: the wait for a connection ends with the app (W23-verify m1).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        ctl.shutdown();
+        let at = std::time::Instant::now();
+        while !listening.is_finished() && at.elapsed() < std::time::Duration::from_secs(3) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(listening.is_finished(), "still waiting for a connection after quitting");
+    }
+
     use super::*;
 
     const WORLD: &str = "wrld_4432ea9b-729c-46e3-8eaf-846aa0a37fdd";

@@ -2667,6 +2667,8 @@ impl Controller {
         }
         self.quitting.store(true, Ordering::Relaxed);
         self.rests.wake_all();
+        // The world feedback's local address waits for a connection: it ends, and the port is let go.
+        self.wake_feedback_listener();
         // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
         self.n4n0.shutdown();
         // The friends list as it is, for the next start.

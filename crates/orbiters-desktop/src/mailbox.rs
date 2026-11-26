@@ -168,6 +168,7 @@ fn can_be_missed(message: &ToClient) -> bool {
     match message {
         ToClient::Notice { .. } | ToClient::Library { .. } | ToClient::Maps { .. } | ToClient::Locomotion { .. } => true,
         ToClient::SmoothingAck { .. }
+        | ToClient::EditSettled { .. }
         | ToClient::Snapshot { .. }
         | ToClient::WorkerLog { .. }
         | ToClient::VrchatData { .. }

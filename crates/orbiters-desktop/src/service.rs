@@ -490,7 +490,16 @@ impl Service {
 
     /// [`Service::handle`]; `library`: the sessions folder when the command was read (file work done later on the link's
     /// work thread is judged against it, not against a folder the settings switched to meanwhile).
+    fn settle_edit(&self, link: u64, edit: Option<u64>) {
+        if let Some(id) = edit {
+            if let Some(link) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                link.mailbox.post(ToClient::EditSettled { id });
+            }
+        }
+    }
+
     fn handle_in(&self, link: u64, role: Role, msg: ToService, library: Option<&std::path::Path>) {
+        let edit = msg.edit_id();
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
             if let Err(e) = r {
@@ -516,7 +525,7 @@ impl Service {
                 ctl.save_settings(*settings);
                 self.follow_usage_switch();
             }
-            ToService::PatchSettings { patch } => {
+            ToService::PatchSettings { patch } | ToService::EditSettings { patch, .. } => {
                 ctl.patch_settings(&patch);
                 self.follow_usage_switch();
             }
@@ -543,7 +552,7 @@ impl Service {
                 report(r);
             }
             // Deleting runs on a thread of its own; the job shows in the snapshot.
-            ToService::CleanUp { trim, delete } => report(ctl.clean_up(trim, delete)),
+            ToService::CleanUp { trim, delete, .. } => report(ctl.clean_up(trim, delete)),
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
             ToService::SendToMixer { dir, title } => {
                 #[cfg(test)]
@@ -552,19 +561,24 @@ impl Service {
                 }
                 report(ctl.send_to_mixer(dir, title))
             }
-            ToService::SignIn => {
+            ToService::SignIn { edit } => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 std::thread::spawn(move || {
                     if let Err(e) = c.sign_in() {
                         c.notify(NoticeKind::Error, tr!("Could not start the sign-in: {error}", error = e));
                     }
+                    if let Some(mailbox) = mailbox {
+                        mailbox.post(ToClient::EditSettled { id: edit });
+                    }
                 });
+                return;
             }
             ToService::ReopenSignIn => report(ctl.reopen_sign_in()),
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
-            ToService::VrchatLogin { command } => ctl.vrchat_command(command),
+            ToService::VrchatLogin { command, .. } => ctl.vrchat_command(command),
             ToService::Launcher { action } => ctl.launcher_action(action),
             ToService::VrchatData { id, scope, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
@@ -700,6 +714,7 @@ impl Service {
             ToService::Bridge { command } => ctl.bridge_command(command),
             ToService::Quit => self.quit(),
         }
+        self.settle_edit(link, edit);
     }
 
     /// One client: check its token (the accept loop counted it among the unauthenticated), then stream every change
@@ -786,6 +801,8 @@ impl Service {
                     {
                         let mut running = svc.file_work.lock().unwrap();
                         if svc.quitting.load(Ordering::SeqCst) {
+                            drop(running);
+                            svc.settle_edit(id, msg.0.edit_id());
                             continue;
                         }
                         *running += 1;
@@ -802,10 +819,14 @@ impl Service {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
                 match msg {
                     // Quitting: no new file work is taken.
-                    msg if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
+                    msg if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {
+                        self.settle_edit(id, msg.edit_id());
+                    }
                     msg if is_file_work(&msg) => {
+                        let edit = msg.edit_id();
                         let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
                         if !hand_over(work.as_ref(), (msg, library)) {
+                            self.settle_edit(id, edit);
                             self.ctl.notify(NoticeKind::Error, tr("Orbiters is busy with many requests: try again in a moment."));
                         }
                     }
@@ -1549,6 +1570,27 @@ pub(crate) mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_refused_optimistic_edit_is_settled_on_its_own_link() {
+        use crate::backend::{Backend, Remote};
+        use crate::controller::vrchat_login::Command;
+
+        let service = service();
+        let other = linked(&service, Role::Orbit);
+        let editor = linked(&service, Role::Window);
+        let unchanged = other.snapshot();
+        let publishes = service.ctl.publishes();
+
+        // Nobody is signed in, so the service refuses Resume without publishing.
+        Remote(editor.clone()).vrchat_login(Command::Resume);
+        // This reply travels behind the answer to Resume on the same connection.
+        editor.send(&ToService::WorkerLog);
+        assert!(until(|| editor.worker_log().is_some()));
+        assert!(!editor.snapshot().vrchat_login.busy, "refusal must clear the optimistic value");
+        assert_eq!(service.ctl.publishes(), publishes);
+        assert!(Arc::ptr_eq(&unchanged, &other.snapshot()));
     }
 
     /// The whole way, as the app runs it: the controller publishes, each link's thread writes what changed since what

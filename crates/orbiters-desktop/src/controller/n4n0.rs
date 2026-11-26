@@ -4,6 +4,7 @@
 //! walk boost) and its OSC (the service's own, on this computer's loopback, and the values VRChat sent), through
 //! [`Link`], which holds the controller weakly: N4N0 lives inside it.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::{CallsStatus, N4n0Status, ProcessUsage};
@@ -361,7 +362,7 @@ impl Controller {
     pub(super) fn start_n4n0(self: &Shared) {
         self.n4n0.start();
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
+        std::thread::Builder::new().name("n4n0-resources".into()).spawn(move || {
             let mut system = sysinfo::System::new();
             let mut before: Option<(Instant, Vec<crate::perf::Raw>)> = None;
             let mut beat = 0u64;
@@ -382,7 +383,7 @@ impl Controller {
                 beat += 1;
                 std::thread::sleep(Duration::from_secs(1));
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// What the window and the overlay ask of N4N0.

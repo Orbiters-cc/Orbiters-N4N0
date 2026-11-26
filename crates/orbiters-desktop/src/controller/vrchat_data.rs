@@ -1,5 +1,6 @@
 //! Scoped data requests, picture updates and deliberate instance creation/self-invites for the signed-in account.
 //! Only workers call this module; session credentials never cross IPC.
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::Snapshot;
@@ -722,7 +723,7 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
     }
     let miss = || {
         if let Some(parent) = missing.parent() {
-            let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&missing, b""));
+            std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&missing, b"")).or_log("a file could not be written");
         }
     };
     match fetch() {
@@ -730,7 +731,7 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
             if let Some(picture) = avatar_picture(&bytes) {
                 if let Some(parent) = file.parent() {
                     let tmp = file.with_extension("tmp");
-                    let _ = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&tmp, &bytes)).and_then(|()| std::fs::rename(tmp, file));
+                    std::fs::create_dir_all(parent).and_then(|()| std::fs::write(&tmp, &bytes)).and_then(|()| std::fs::rename(tmp, file)).or_log("a file could not be written");
                 }
                 let _ = std::fs::remove_file(&missing);
                 Ok(Some(picture))

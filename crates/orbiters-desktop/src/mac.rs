@@ -41,7 +41,7 @@ define_class!(
                 Ok(icon) => {
                     let _ = self.ivars().tray.set(icon);
                 }
-                Err(e) => eprintln!("menu bar item: {e:#}"),
+                Err(e) => log_warn!("menu bar item: {e:#}", e = e),
             }
         }
 
@@ -151,7 +151,7 @@ static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
 /// which handles them itself.
 pub fn install_window_menu(ctl: Ctl) {
     if let Err(e) = window_menu(ctl) {
-        eprintln!("the window's menu: {e:#}");
+        log_warn!("the window's menu: {e:#}", e = e);
     }
 }
 

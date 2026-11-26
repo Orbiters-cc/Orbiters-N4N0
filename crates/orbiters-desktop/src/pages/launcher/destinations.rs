@@ -27,6 +27,7 @@
 //! [`Request::CreateInstance`]: crate::controller::vrchat_data::Request::CreateInstance
 //! [`finder::new_instance`]: crate::overlay::worlds::finder::new_instance
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::selection::{Asker, Desk, Destination, Offer, Origin, Selection, Verified};
 use super::states::PlayState;
@@ -221,7 +222,7 @@ impl HistoryView {
     fn keep(&self, file: &std::path::Path) {
         if let Ok(bytes) = serde_json::to_vec(self) {
             if std::fs::read(file).ok().as_deref() != Some(&bytes) {
-                let _ = orbiters_core::write_atomic(file, &bytes);
+                orbiters_core::write_atomic(file, &bytes).or_log("a file could not be written");
             }
         }
     }
@@ -1603,7 +1604,7 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
     let (ctl, ctx) = (cx.ctl.clone(), state.ctx.clone());
     // Work of the window until VRChat was asked to start: it does not rest to the tray in the middle of it.
     let working = super::super::Working::begin();
-    let _ = std::thread::Builder::new().name("where-new-instance".into()).spawn(move || {
+    std::thread::Builder::new().name("where-new-instance".into()).spawn(move || {
         let _working = working;
         let made = make(ctl.as_ref(), scope, &world, &name, access, region);
         ticket.finish(made, |place| {
@@ -1613,7 +1614,7 @@ pub fn play(state: &mut State, cx: &Cx, clock: f64, mode: LaunchMode, profile: O
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// VRChat starts in this instance: the selection said it is proven, for `account`. The start goes bound to that account,

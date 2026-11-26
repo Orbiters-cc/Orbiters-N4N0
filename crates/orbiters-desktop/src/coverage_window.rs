@@ -47,7 +47,7 @@ pub fn start(ctl: crate::controller::Shared) {
                 match win::Panel::open(PX[0], PX[1], MARGIN) {
                     Ok(w) => window = Some(w),
                     Err(e) => {
-                        eprintln!("coverage panel: {e}");
+                        log_warn!("coverage panel: {e}", e = e);
                         std::thread::sleep(Duration::from_secs(5));
                         continue;
                     }
@@ -73,7 +73,7 @@ pub fn start(ctl: crate::controller::Shared) {
         }
     });
     if let Err(e) = spawned {
-        eprintln!("coverage panel: {e}");
+        log_warn!("coverage panel: {e}", e = e);
     }
 }
 

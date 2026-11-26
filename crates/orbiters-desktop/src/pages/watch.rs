@@ -260,7 +260,7 @@ impl<K: PartialEq + Clone, T: Clone + PartialEq + Send + 'static> Watch<K, T> {
                     }
                     self.panics += 1;
                     if self.panics == PANICS_MOST {
-                        eprintln!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row");
+                        log_warn!("a page's watch is given up: its look panicked {PANICS_MOST} times in a row", PANICS_MOST = PANICS_MOST);
                     }
                 }
                 if self.panics >= PANICS_MOST {

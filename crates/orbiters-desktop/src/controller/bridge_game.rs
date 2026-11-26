@@ -326,7 +326,7 @@ impl Game for RealGame {
         let Some(number) = *self.picture.locked() else { return };
         if let Ok(ctl) = self.ctl() {
             if let Err(e) = ctl.stop_capture(super::StopOf::Recording(number)) {
-                eprintln!("the bridge stopped a recording: {e:#}");
+                log_warn!("the bridge stopped a recording: {e:#}", e = e);
             }
         }
     }
@@ -469,7 +469,7 @@ impl Controller {
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
-                eprintln!("the VRChat bridge stays off: {e}");
+                log_warn!("the VRChat bridge stays off: {e}", e = e);
                 return;
             }
         };

@@ -1,6 +1,7 @@
 //! The local VRChat session, held for the Orbiters member who owns it, offered as the server's `n4n0-vrchat-login` says
 //! (open to every member). Only the feature check goes to Orbiters.
 use orbiters_core::vrchat_api::ClientLock;
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::vrchat_scope::{enforce, Stamp};
 pub(super) use super::vrchat_scope::Owner;
@@ -380,7 +381,7 @@ impl Controller {
                 // Half a second, or at once when the Orbiters account changes (r21: the first look after launch waited).
                 seen = bell.wait(seen, Duration::from_millis(500));
             }
-        });
+        }).or_log("a thread could not be started");
     }
     /// Before the first look and before any window asks (r21): a session saved here is "connecting", with the last
     /// account's name and picture kept on this computer, never "signed out" while nothing has been asked yet.
@@ -999,8 +1000,8 @@ fn write_account_cache(path: &std::path::Path, user: &User, picture: Option<&Pic
     let picture = picture.cloned().or_else(|| read_account_cache(path).filter(|(u, _, o)| u.id == user.id && o.as_deref() == Some(owner)).and_then(|(_, p, _)| p));
     let cached = CachedAccount { id: user.id.clone(), name: user.display_name.clone(), picture, owner: Some(owner.to_string()) };
     if let (Some(dir), Ok(text)) = (path.parent(), serde_json::to_vec(&cached)) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = orbiters_core::write_atomic(path, &text);
+        std::fs::create_dir_all(dir).or_log("a folder could not be made");
+        orbiters_core::write_atomic(path, &text).or_log("a file could not be written");
     }
 }
 

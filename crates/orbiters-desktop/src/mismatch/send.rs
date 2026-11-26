@@ -2,6 +2,7 @@
 //! with its picture when it has one. Unauthenticated: a report carries no account (unlike the beta's usage statistics, which go with the account once told, `usage::spool`). A report Orbiters
 //! took gets a `sent` file in its folder and stays on this computer until deleted.
 
+use orbiters_core::app_log::OrLog as _;
 use super::{Kept, Report, PICTURE, REPORT, SENT};
 use base64::Engine as _;
 use std::time::Duration;
@@ -93,7 +94,7 @@ pub fn unsent(api: &orbiters_core::account::Api, kept: &[Kept]) -> Outcome {
         let picture = report.picture.as_ref().and_then(|_| std::fs::read(k.dir.join(PICTURE)).ok());
         match post(api, "n4n0/menu-reports", &body(report, picture)) {
             Posted::Taken => {
-                let _ = std::fs::write(k.dir.join(SENT), super::iso(super::now_ms()));
+                std::fs::write(k.dir.join(SENT), super::iso(super::now_ms())).or_log("a file could not be written");
                 out.sent += 1;
             }
             Posted::Refused(status) => {
@@ -112,7 +113,7 @@ pub fn unsent(api: &orbiters_core::account::Api, kept: &[Kept]) -> Outcome {
         }
     }
     if let Some(why) = &out.why {
-        eprintln!("menu mismatch reports: {} sent, {} not: {why}", out.sent, out.failed); // i18n: not shown (a log's line)
+        log_warn!("menu mismatch reports: {} sent, {} not: {why}", out.sent, out.failed, why = why); // i18n: not shown (a log's line)
     }
     out
 }

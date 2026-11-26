@@ -3,6 +3,7 @@
 //!
 //! The looks run on ScreenCaptureKit's own queue, and starting and stopping on a thread of this module's, which sleeps while nothing is asked. The loop never waits for either.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::super::detect::{self, CameraLook, Part};
 use super::super::zones::Around;
@@ -263,11 +264,11 @@ fn keep(bgra: &[u8], width: usize, height: usize, stride: usize) {
     for row in bgra.chunks(stride).take(height) {
         rgba.extend(row[..width * 4].chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]));
     }
-    let _ = std::thread::Builder::new().name("orbit-keeps".into()).spawn(move || {
+    std::thread::Builder::new().name("orbit-keeps".into()).spawn(move || {
         let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) else { return };
         let folder = orbiters_core::paths::logs_dir().join(KEPT_FOLDER);
         keep_in(&folder, &image);
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// The folder of the logs' folder the kept frames are in.

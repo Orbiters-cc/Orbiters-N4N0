@@ -79,7 +79,7 @@ pub fn run_pending(ctx: &egui::Context, raw: &mut egui::RawInput) {
     {
         if let Some(drag) = PENDING.locked().take() {
             if let Err(e) = mac::drag(&drag, ctx.clone()) {
-                eprintln!("the drag could not start: {e}");
+                log_warn!("the drag could not start: {e}", e = e);
                 *ENDED.locked() = Some((Outcome::Failed, None));
             }
         }

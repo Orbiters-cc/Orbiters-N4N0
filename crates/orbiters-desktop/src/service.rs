@@ -3,6 +3,7 @@
 //! overlay over the IPC link. It never creates a GPU device: the window process does, and exits when closed; the
 //! overlay process runs while SteamVR does.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use crate::controller::{self, Controller, NoticeKind};
 use crate::ipc::{self, Endpoint, N4n0Command, Role, ToClient, ToService};
@@ -202,7 +203,7 @@ impl Service {
                 crate::perf::keeper().locked().role(child.id(), "window");
                 *window = Some((child, Instant::now()));
             }
-            Err(e) => eprintln!("could not start the window: {e}"),
+            Err(e) => log_warn!("could not start the window: {e}", e = e),
         }
     }
 
@@ -343,7 +344,7 @@ impl Service {
                 self.overlay_after_quit.locked().started(Some(session));
                 *overlay = Some((child, Instant::now(), Some(session), failures, errors));
             }
-            Err(e) => eprintln!("could not start the SteamVR overlay: {e}"),
+            Err(e) => log_warn!("could not start the SteamVR overlay: {e}", e = e),
         }
     }
 
@@ -380,7 +381,7 @@ impl Service {
                 crate::perf::keeper().locked().role(child.id(), "orbit-desktop");
                 *orbit = Some((child, Instant::now()));
             }
-            Err(e) => eprintln!("could not start the panels around VRChat's menus: {e}"),
+            Err(e) => log_warn!("could not start the panels around VRChat's menus: {e}", e = e),
         }
     }
 
@@ -399,7 +400,7 @@ impl Service {
         while *running > 0 {
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                eprintln!("quitting: {} file operation(s) still under way after {:?}", *running, FILE_WORK_AT_QUIT);
+                log_info!("quitting: {} file operation(s) still under way after {:?}", *running, FILE_WORK_AT_QUIT);
                 break;
             }
             running = self.file_work_done.wait_timeout_locked(running, left).0;
@@ -1103,7 +1104,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     if let Some((setup, dir)) = controller::update::pending_setup() {
         match controller::update::start_setup(&setup, &dir, hidden) {
             Ok(()) => return Ok(()),
-            Err(e) => eprintln!("the update could not start: {e}"),
+            Err(e) => log_warn!("the update could not start: {e}", e = e),
         }
     }
 
@@ -1111,16 +1112,16 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
     crate::startup::mac::follow_this_program();
 
     let settings = Settings::load();
-    let _ = std::fs::create_dir_all(&settings.sessions_dir);
-    let _ = std::fs::create_dir_all(&settings.raw_captures_dir);
+    std::fs::create_dir_all(&settings.sessions_dir).or_log("a folder could not be made");
+    std::fs::create_dir_all(&settings.raw_captures_dir).or_log("a folder could not be made");
     let ctl = Controller::new(settings);
     // What an earlier run of the FPS booster left comes back before anything else starts.
     ctl.start_booster();
     // What writes killed between their temporary file and its rename left beside the settings (REL-14 c).
     if let Some(dir) = orbiters_core::paths::settings_file().parent().map(std::path::Path::to_path_buf) {
-        let _ = std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
+        std::thread::Builder::new().name("tmp-sweep".into()).spawn(move || {
             remove_stale_temporaries(&dir, Duration::from_secs(24 * 3600));
-        });
+        }).or_log("a thread could not be started");
     }
     ctl.start();
     ctl.start_bridge();
@@ -1209,7 +1210,7 @@ fn tray_loop(service: &Arc<Service>) -> anyhow::Result<()> {
     let mut tray = match crate::tray::Tray::new(service.clone()) {
         Ok(t) => Some(t),
         Err(e) => {
-            eprintln!("tray icon: {e}");
+            log_warn!("tray icon: {e}", e = e);
             None
         }
     };

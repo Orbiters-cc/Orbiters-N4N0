@@ -149,7 +149,7 @@ impl Previews {
         if self.fixture.is_none() {
             let path = orbiters_core::paths::config_dir().join(PREFS_FILE);
             if let Err(e) = (Prefs { scene_light: on }).write(&path) {
-                eprintln!("project preview: could not remember the light chosen in {}: {e}", path.display());
+                log_warn!("project preview: could not remember the light chosen in {}: {e}", path.display(), e = e);
             }
         }
     }
@@ -487,7 +487,7 @@ impl Previews {
             match result {
                 Ok((scene, guid)) => {
                     let t = scene.timings;
-                    eprintln!(
+                    log_info!(
                         "project preview {}: {:.0} ms (read {:.0}, pictures {:.0}, upload {:.0}, pipelines {:.0}), {:.1} MB",
                         scene.header.scene.name,
                         t.total_ms,
@@ -495,8 +495,7 @@ impl Previews {
                         t.decode_ms,
                         t.upload_ms,
                         t.pipelines_ms,
-                        t.bytes as f64 / 1e6
-                    );
+                        t.bytes as f64 / 1e6);
                     self.pipelines.get_or_insert_with(|| scene.pipelines());
                     let first = c.camera.is_none();
                     if first || c.shown_guid.as_ref() != Some(&guid) {
@@ -508,7 +507,7 @@ impl Previews {
                     c.error = None;
                 }
                 Err(e) => {
-                    eprintln!("project preview: {e}");
+                    log_warn!("project preview: {e}", e = e);
                     c.error = Some(e);
                 }
             }

@@ -145,7 +145,7 @@ impl Viewer {
             c.request_repaint();
         });
         if let Err(e) = made {
-            eprintln!("Edit in 3D: {e}");
+            log_warn!("Edit in 3D: {e}", e = e);
         }
         self.edit3d.editing = Some(Editing { editor: Editor::live(self.title.clone(), full, doc), full, shared, flashed: f64::NEG_INFINITY, focus: None, focused_at: 0.0 });
     }

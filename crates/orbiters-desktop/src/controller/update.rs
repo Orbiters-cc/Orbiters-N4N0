@@ -67,7 +67,7 @@ fn write_ready(ready: &Ready) -> std::io::Result<()> {
     let path = orbiters_update::updates_dir().join(READY_FILE);
     let written = serde_json::to_vec_pretty(ready).map_err(std::io::Error::other).and_then(|json| orbiters_core::write_atomic(&path, &json));
     if let Err(e) = &written {
-        eprintln!("updates: {}: {e}", path.display());
+        log_warn!("updates: {}: {e}", path.display(), e = e);
     }
     written
 }
@@ -150,7 +150,7 @@ impl Controller {
         }
         let Some((dir, record)) = InstallRecord::of_this_program() else { return };
         if orbiters_update::public_key().is_none() {
-            eprintln!("updates: this build has no release key; it does not update itself");
+            log_info!("updates: this build has no release key; it does not update itself");
             return;
         }
         // An update that installed (this app is its version or newer) leaves its setup behind.
@@ -192,7 +192,7 @@ impl Controller {
             }
         });
         if let Err(e) = spawned {
-            eprintln!("updates: {e}");
+            log_warn!("updates: {e}", e = e);
         }
     }
 
@@ -242,7 +242,7 @@ impl Controller {
                 return;
             }
             Err(e) => {
-                eprintln!("updates: {e:#}");
+                log_warn!("updates: {e:#}", e = e);
                 if !ready {
                     let error = format!("{e:#}");
                     let message = if orbiters_update::development() {
@@ -300,7 +300,7 @@ impl Controller {
                 &self.quitting,
             );
             if let Err(e) = downloaded {
-                eprintln!("updates: {e:#}");
+                log_warn!("updates: {e:#}", e = e);
                 if !self.quitting.load(Ordering::Relaxed) {
                     let message = tr!("Version {version} could not be downloaded: {error}", version = version, error = e);
                     self.update(|s| s.update.state = UpdateState::Failed { message });

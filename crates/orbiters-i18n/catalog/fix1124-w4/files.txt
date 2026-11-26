@@ -1,1 +1,4 @@
+# The texts of fix1124 W4, in files of other areas; and the files it adds.
+crates/orbiters-core/src/app_log.rs
+crates/orbiters-core/src/locks.rs
 crates/orbiters-setup/src/companions.rs

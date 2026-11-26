@@ -22,6 +22,7 @@
 //! present. The keeper asks for [`Registrations::repair`] each time the bridge opens and after a new token: an entry with old values is
 //! rewritten, and the log and Settings say so, with what cannot be fixed from here: a session already open keeps what it read.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use serde::{Deserialize, Serialize};
 use orbiters_i18n::tr;
@@ -729,7 +730,7 @@ impl Registrations {
     fn run(self: &Arc<Self>, cli: Arc<dyn ClientCli>, step: Option<Step>, wanted: Wanted) {
         let this = self.clone();
         if self.threads.load(Ordering::Relaxed) {
-            let _ = std::thread::Builder::new().name("bridge-client".into()).spawn(move || this.steps(cli, step, wanted));
+            std::thread::Builder::new().name("bridge-client".into()).spawn(move || this.steps(cli, step, wanted)).or_log("a thread could not be started");
         } else {
             this.steps(cli, step, wanted);
         }

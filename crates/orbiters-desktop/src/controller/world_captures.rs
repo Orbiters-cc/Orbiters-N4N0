@@ -4,6 +4,7 @@
 //! Photos & captures), and keeps `<world id>.json` current (the world's sessions, their state and upload, the answers)
 //! for the worlds asked about in the last 10 minutes.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::shares::{self, Entry, Local, Operation};
 use super::Shared;
@@ -159,7 +160,7 @@ struct Job {
 
 /// The requests' thread: every [`TICK`], while the app runs.
 pub(super) fn spawn(ctl: Shared) {
-    let _ = std::thread::Builder::new().name("world-captures".into()).spawn(move || {
+    std::thread::Builder::new().name("world-captures".into()).spawn(move || {
         let mut taken: HashSet<String> = HashSet::new();
         let mut imports: VecDeque<(Request, PathBuf)> = VecDeque::new();
         let mut jobs: HashMap<String, Job> = HashMap::new();
@@ -181,7 +182,7 @@ pub(super) fn spawn(ctl: Shared) {
                         take(&ctl, r, file, &mut imports, &mut jobs);
                     }
                     Err(message) => {
-                        eprintln!("world captures: {}: {message}", file.display());
+                        log_info!("world captures: {}: {message}", file.display(), message = message);
                         let _ = std::fs::remove_file(&file);
                     }
                 }
@@ -207,7 +208,7 @@ pub(super) fn spawn(ctl: Shared) {
             taken.retain(|id| on_disk.contains(id));
             std::thread::sleep(TICK);
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// The requests waiting, oldest first; `Err` for a file that is not a request of this schema.
@@ -465,12 +466,12 @@ fn write_status(world: &str, mut status: Status, written: &mut HashMap<String, S
     status.updated_utc = orbiters_core::now_utc_iso();
     let Ok(bytes) = serde_json::to_vec_pretty(&status) else { return };
     let dir = root();
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
     match orbiters_core::write_atomic(&dir.join(format!("{world}.json")), &bytes) {
         Ok(()) => {
             written.insert(world.to_string(), same);
         }
-        Err(e) => eprintln!("world captures: {world}.json: {e}"),
+        Err(e) => log_warn!("world captures: {world}.json: {e}", world = world, e = e),
     }
 }
 

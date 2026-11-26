@@ -226,7 +226,7 @@ impl orbiters_reconstruct::tree_tune::Keep for PartialFile {
         let bytes = std::fs::read(&self.path).ok()?;
         let partial = self.open(&bytes).and_then(orbiters_reconstruct::tree_tune::Partial::from_bytes);
         if partial.is_none() {
-            eprintln!("{} is of another result, or damaged: preparing from the start", self.path.display());
+            log_warn!("{} is of another result, or damaged: preparing from the start", self.path.display());
         }
         partial
     }
@@ -242,7 +242,7 @@ impl orbiters_reconstruct::tree_tune::Keep for PartialFile {
         let digest = Sha256::digest(&out[40..]);
         out[8..40].copy_from_slice(&digest);
         if let Err(e) = orbiters_core::write_atomic(&self.path, &out) {
-            eprintln!("could not keep how far the upload preparation got: {e}");
+            log_warn!("could not keep how far the upload preparation got: {e}", e = e);
         }
     }
 }
@@ -397,7 +397,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let device = orbiters_reconstruct::gpu::DeviceOptions { low_priority: true, low_power: integrated, ..Default::default() };
     let start = Instant::now();
     crate::controller::prepare_upload(&session, device)?;
-    eprintln!("prepared {} for sharing in {:.1} s", session.display(), start.elapsed().as_secs_f32());
+    log_info!("prepared {} for sharing in {:.1} s", session.display(), start.elapsed().as_secs_f32());
     Ok(())
 }
 
@@ -562,7 +562,7 @@ pub fn start_next(integrated: bool, on_log: impl Fn(String) + Send + 'static, on
             std::thread::sleep(Duration::from_millis(100));
         };
         if !stopped.load(Ordering::SeqCst) && !status.is_some_and(|s| s.success()) {
-            eprintln!("background upload preparation of {} failed ({status:?}): a share prepares it then", dir.display());
+            log_warn!("background upload preparation of {} failed ({status:?}): a share prepares it then", dir.display(), status = status);
         }
         background(|b| b.running = None);
         let (flag, wake) = &*done;

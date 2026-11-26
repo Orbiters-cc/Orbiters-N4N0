@@ -11,6 +11,7 @@
 //! looks at a few small patches of the window ten times a second ([`Signature`]); when they change the translations go at once, and come back from a new look as
 //! soon as the view is still. While one of VRChat's menus or ours is up they go too, and reading waits (VR does the same), as the menus cover the view.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::desktop::{client_in_frame, Gpu, PanelWindow};
 use crate::backend::Ctl;
@@ -542,7 +543,7 @@ impl Host {
             let px = [rect.width().max(1.0) as u32, rect.height().max(1.0) as u32];
             let at = self.shown.iter().position(|s| s.track == q.track);
             let fresh = |q: &Quad| -> Option<Shown> {
-                let mut window = PanelWindow::new(px[0], px[1], false).map_err(|e| eprintln!("translation window: {e}")).ok()?; // i18n: not shown (a log's line)
+                let mut window = PanelWindow::new(px[0], px[1], false).map_err(|e| log_warn!("translation window: {e}", e = e)).ok()?; // i18n: not shown (a log's line)
                 window.picture(&scaled_premultiplied(&q.picture.rgba, q.picture.width, q.picture.height, px), [0, 0, px[0], px[1]]);
                 Some(Shown { window, track: q.track, picture: q.picture.clone(), rect, alpha: 0.0, to: 1.0 })
             };
@@ -684,7 +685,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
     let mut translator_checked = Instant::now();
     // The built-in translator's download, while reading goes on: bytes so far, in all, and how it ended.
     let fetching: Arc<Mutex<Option<(u64, u64, Option<Result<(), String>>)>>> = Arc::default();
-    let gpu = Gpu::new().map_err(|e| eprintln!("desk translate: {e}")).ok(); // i18n: not shown (a log's line)
+    let gpu = Gpu::new().map_err(|e| log_warn!("desk translate: {e}", e = e)).ok(); // i18n: not shown (a log's line)
     let mut grab: Option<Grab> = None;
     let mut looks = 0u32;
     let mut cost = Duration::from_millis(300);
@@ -709,7 +710,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
                 if f.is_none() {
                     *f = Some((0, 0, None));
                     let (fetching, stop) = (fetching.clone(), vr_translate::stop_flag(stop));
-                    let _ = std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
+                    std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
                         vr_translate::lower_priority();
                         let result = orbiters_translate::models::install_files(&orbiters_translate::builtin::FILES, &stop, &mut |done, total| {
                             if let Some(f) = fetching.locked().as_mut() {
@@ -719,7 +720,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
                         if let Some(f) = fetching.locked().as_mut() {
                             f.2 = Some(result.map_err(|e| e.to_string()));
                         }
-                    });
+                    }).or_log("a thread could not be started");
                 }
             }
             let downloaded = matches!(*fetching.locked(), Some((_, _, Some(Ok(())))));
@@ -770,7 +771,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) {
         }
         if grab.as_ref().is_none_or(|g| g.window != hwnd) {
             // Still VRChat's: a closed window's handle may be another program's now (verify-r15).
-            grab = gpu.as_ref().filter(|_| super::desktop::is_vrchat_window(HWND(hwnd as *mut _), pid)).and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| eprintln!("desk translate: {e}")).ok()); // i18n: not shown (a log's line)
+            grab = gpu.as_ref().filter(|_| super::desktop::is_vrchat_window(HWND(hwnd as *mut _), pid)).and_then(|g| Grab::new(HWND(hwnd as *mut _), g).map_err(|e| log_warn!("desk translate: {e}", e = e)).ok()); // i18n: not shown (a log's line)
             reset_motion(&mut motion, shared);
             if grab.is_none() {
                 std::thread::sleep(Duration::from_millis(500));

@@ -140,7 +140,7 @@ impl SheetView {
         let for_thread = shared.clone();
         let spawned = std::thread::Builder::new().name("orbit-sheet-view".into()).spawn(move || {
             if let Err(e) = run(&for_thread, load, turning) {
-                eprintln!("the sheet's 3D view: {e:#}");
+                log_warn!("the sheet's 3D view: {e:#}", e = e);
                 *for_thread.state.locked() = ViewState::Failed(format!("{e:#}"));
             }
         });

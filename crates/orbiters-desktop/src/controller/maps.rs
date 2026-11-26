@@ -326,7 +326,7 @@ pub fn prepare(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions)
         if prepared.generation == before && after == before && crate::upload_prep::ResultIdentity::read(session) == prepared.identity {
             return Ok(prepared);
         }
-        eprintln!("the splat edits or the result of {} changed while it was prepared: again", session.display());
+        log_info!("the splat edits or the result of {} changed while it was prepared: again", session.display());
     }
     anyhow::bail!("{}", tr("Its splat edits kept changing while it was being prepared: share it again once they are done."))
 }
@@ -359,7 +359,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
                 drop(g);
                 if view.is_some() && crate::upload_prep::ViewInputs::read(session).ok() == view {
                     if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
-                        eprintln!("Could not cache upload preparation: {e:#}");
+                        log_warn!("Could not cache upload preparation: {e:#}", e = e);
                     }
                 }
                 drop(stage);
@@ -389,7 +389,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     })
     .ok();
     if std::env::var_os("ORBITERS_PREP_TIMING").is_some() {
-        eprintln!("upload preparation adapter: {}", gpu.as_ref().map_or("CPU (untuned)", |g| g.adapter.as_str()));
+        log_info!("upload preparation adapter: {}", gpu.as_ref().map_or("CPU (untuned)", |g| g.adapter.as_str()));
     }
     drop(stage);
     // Names this upload in its three trees, so a world can tell when a slot's files have been replaced.
@@ -400,7 +400,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
     let trees = orbiters_reconstruct::tree_tune::vrchat_files_kept(&g, &cameras, gpu.as_mut(), key, &options, kept.as_mut().map(|k| k as &mut dyn orbiters_reconstruct::tree_tune::Keep), |_| {})?;
     if let Some(gpu) = &gpu {
         if let Some(p) = &gpu.profiler {
-            eprintln!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
+            log_info!("upload preparation GPU span: {:?}; passes: {:?}", p.span.get(), p.totals.borrow());
         }
     }
     let files = PreviewFiles { vrchat_pc: trees.pc, vrchat_quest: trees.quest, vrchat_coarse: trees.coarse };
@@ -416,7 +416,7 @@ fn prepare_once(session: &Path, device: orbiters_reconstruct::gpu::DeviceOptions
             // The metadata under what its view was made from, while that is what is still there.
             let view = view.filter(|v| crate::upload_prep::ViewInputs::read(session).ok().as_ref() == Some(v));
             if let Err(e) = crate::upload_prep::save(&result, fingerprint, view.as_ref(), &files, &metadata) {
-                eprintln!("Could not cache upload preparation: {e:#}");
+                log_warn!("Could not cache upload preparation: {e:#}", e = e);
             }
         }
         drop(stage);

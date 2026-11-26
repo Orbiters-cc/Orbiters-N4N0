@@ -1076,7 +1076,7 @@ impl State {
                     self.sizes.insert(path, s);
                 }
                 // Measuring is a nicety: a project it fails on shows no size (the folder went away, say).
-                Err(e) => eprintln!("project size {}: {e}", path.display()),
+                Err(e) => log_warn!("project size {}: {e}", path.display(), e = e),
             }
         }
         // The first waiting is walked; it stays listed (as measuring) until its answer arrives.
@@ -1149,7 +1149,7 @@ impl State {
             match change.save() {
                 Ok(()) => drop(saved.fetch_add(1, Ordering::SeqCst)),
                 // (Not counted as saved: the list as it is here stays.)
-                Err(e) => eprintln!("hidden projects: {e:#}"),
+                Err(e) => log_warn!("hidden projects: {e:#}", e = e),
             }
         });
     }

@@ -12,6 +12,7 @@
 //! offer opens nothing before its Show. A state applies only to the share accepted, only from a newer revision and
 //! term ([`orbiters_core::shared_view`]). The capture is downloaded signed in, never from a public address.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::ipc::SharedViewCommand;
@@ -412,11 +413,11 @@ impl SharedRuntime {
 /// break, the credential), on a thread of its own: the identity that leaves is not the one the queue sends with.
 fn shared_withdraw_as(stamp: &str) {
     let Some((base, token)) = credential_of(stamp) else { return };
-    let _ = std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
+    std::thread::Builder::new().name("shared-view-leave".into()).spawn(move || {
         let api = Api::at(&base);
         let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
-        let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
-    });
+        agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
+    }).or_log("a thread could not be started");
 }
 
 /// The API's address and the credential a stamp (`SharedRuntime::identity`) names.
@@ -483,7 +484,7 @@ impl Controller {
     /// Starts the shares presence's thread (it does nothing while N4N0 is off, signed out or out of an instance).
     pub(super) fn start_shared_view(self: &Shared) {
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("shared-view".into()).spawn(move || {
+        std::thread::Builder::new().name("shared-view".into()).spawn(move || {
             while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
                 ctl.shared_tick();
                 std::thread::sleep(Duration::from_secs(2));
@@ -492,9 +493,9 @@ impl Controller {
             let owed = ctl.shared_view.locked().withdraw();
             if let (Some(_), Some((api, token))) = (owed, ctl.account_api()) {
                 let agent = orbiters_core::http_agent(Some(Duration::from_secs(3)), Some(Duration::from_secs(5)));
-                let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// Whether the calls' event stream is wanted for shares (open even with Calls off).
@@ -730,7 +731,7 @@ impl Controller {
                             self.shared_publish();
                         }
                         Err(e) => {
-                            eprintln!("shared view presence: {e:#}");
+                            log_warn!("shared view presence: {e:#}", e = e);
                             let Some(mut rt) = self.shared_for(&stamp) else { continue };
                             rt.backoff_until = Some(Instant::now() + PRESENCE_BACKOFF);
                             rt.here_sent = None;
@@ -742,14 +743,14 @@ impl Controller {
                 }
                 Request::Withdraw => {
                     let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-                    let _ = agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    agent.delete(&api.url("n4n0/shares/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
                 }
                 Request::Offer { number, contact, capture, state } => {
                     let body = json!({ "v": sv::VERSION, "contact": contact, "capture": { "type": "capture", "id": capture.id, "revision": capture.revision }, "state": state });
                     let answer = match post(&api, &token, "n4n0/shares", &body) {
                         Ok(v) => v["share"].as_str().filter(|s| sv::share_id(s)).map(str::to_string).ok_or(None),
                         Err(e) => {
-                            eprintln!("shared view offer: {e:#}");
+                            log_warn!("shared view offer: {e:#}", e = e);
                             Err(code_of(&e))
                         }
                     };
@@ -762,23 +763,23 @@ impl Controller {
                     let answer = post(&api, &token, &path, &json!({ "v": sv::VERSION }));
                     if !accept {
                         if let Err(e) = answer {
-                            eprintln!("shared view decline: {e:#}");
+                            log_warn!("shared view decline: {e:#}", e = e);
                         }
                         continue;
                     }
-                    let answer = answer.map(|v| serde_json::from_value::<ViewState>(v["state_now"].clone()).ok()).map_err(|e| eprintln!("shared view accept: {e:#}"));
+                    let answer = answer.map(|v| serde_json::from_value::<ViewState>(v["state_now"].clone()).ok()).map_err(|e| log_warn!("shared view accept: {e:#}", e = e));
                     let Some(mut rt) = self.shared_for(&stamp) else { continue };
                     let acts = rt.accepted(number, answer);
                     self.shared_act(rt, acts);
                 }
                 Request::State { share, state } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/shares/{share}/state"), &json!({ "v": sv::VERSION, "state": state })) {
-                        eprintln!("shared view state: {e:#}");
+                        log_warn!("shared view state: {e:#}", e = e);
                     }
                 }
                 Request::End { share } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/shares/{share}/end"), &json!({ "v": sv::VERSION })) {
-                        eprintln!("shared view end: {e:#}");
+                        log_warn!("shared view end: {e:#}", e = e);
                     }
                 }
                 Request::Fetch { number, capture } => {

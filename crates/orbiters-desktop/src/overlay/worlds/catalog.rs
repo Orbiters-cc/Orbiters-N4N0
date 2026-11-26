@@ -6,6 +6,7 @@
 //! the API's web `.splat` and sky map of the preview elsewhere (a development server publishes its slots to storage the
 //! app has no address for).
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::cache::{Disk, Validators};
@@ -451,7 +452,7 @@ impl Source {
         };
         progress.stage.store(STAGE_PREPARING, Ordering::Relaxed);
         progress.check()?;
-        let sky = sky.and_then(|bytes| sky_map(&bytes).map_err(|e| eprintln!("3D worlds: sky map of {}: {e:#}", entry.name)).ok());
+        let sky = sky.and_then(|bytes| sky_map(&bytes).map_err(|e| log_warn!("3D worlds: sky map of {}: {e:#}", entry.name, e = e)).ok());
         Ok(Capture::new(g, sky, entry.view))
     }
 
@@ -953,9 +954,9 @@ impl Catalog {
         }
         s.fetching = true;
         let (state, source) = (self.state.clone(), source.clone());
-        let _ = std::thread::Builder::new().name("3d-worlds-listing".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-listing".into()).spawn(move || {
             let answer = source.listing();
-            let feedback = source.all_feedback().map_err(|e| eprintln!("3D worlds: worlds' feedback: {e:#}")).ok();
+            let feedback = source.all_feedback().map_err(|e| log_warn!("3D worlds: worlds' feedback: {e:#}", e = e)).ok();
             let mut s = state.locked();
             if let Some(feedback) = feedback {
                 s.feedback = feedback;
@@ -970,7 +971,7 @@ impl Catalog {
                 }
                 Err(e) => s.error = Some(format!("{e:#}")),
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The listing as if Orbiters had just answered `entries`.

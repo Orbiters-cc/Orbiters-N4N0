@@ -16,6 +16,7 @@
 //! THAT answer says (its `explorer`, with the upload's for a picture uploaded by this share): reading the points before
 //! and after would count another share or a removal in between.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::Shared;
 use crate::controller::shares::{Outcome, ShareJob};
@@ -356,9 +357,9 @@ impl Told {
     fn write(&self, path: &Path) {
         if let Ok(bytes) = serde_json::to_vec(self) {
             if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
+                std::fs::create_dir_all(dir).or_log("a folder could not be made");
             }
-            let _ = orbiters_core::write_atomic(path, &bytes);
+            orbiters_core::write_atomic(path, &bytes).or_log("a file could not be written");
         }
     }
 }
@@ -441,7 +442,7 @@ pub(super) fn spawn(ctl: Shared) {
         }
     });
     if let Err(e) = started {
-        eprintln!("explorer: {e}"); // i18n: not shown (a log's line)
+        log_warn!("explorer: {e}", e = e); // i18n: not shown (a log's line)
     }
 }
 
@@ -708,7 +709,7 @@ impl super::Controller {
         let server = if snap.settings.development { Server::Development } else { Server::Production };
         let sessions_dir = snap.settings.sessions_dir.clone();
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("share-here".into()).spawn(move || {
+        std::thread::Builder::new().name("share-here".into()).spawn(move || {
             let uploads = crate::controller::shares::uploads(server);
             let found = share_here(&world, &captures_of(&sessions_dir, &world, &uploads), public_now);
             // Still in that world: else the next look is under way.
@@ -728,7 +729,7 @@ impl super::Controller {
                 st.explorer.share_here = found;
                 true
             });
-        });
+        }).or_log("a thread could not be started");
     }
 
     fn explorer_share(self: &Shared, offer: u64, public: bool, recipients: Vec<(String, String)>, confirmed: bool, epoch: u64) {

@@ -3,6 +3,7 @@
 //! summaries to Orbiters every few minutes while the setting is on. Other people are only counted: their avatars go by
 //! name, never who wears them. Unsent summaries wait on disk (a day at most).
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::Shared;
 use crate::state::FrameChunk;
@@ -103,7 +104,7 @@ fn pending_file_in(dir: &std::path::Path, server: orbiters_core::account::Server
 fn read_pending(path: &std::path::Path) -> Vec<Sample> {
     let Ok(Some(text)) = orbiters_core::read_text(path) else { return Vec::new() };
     serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)).unwrap_or_else(|e| {
-        eprintln!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path));
+        log_warn!("world performance: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path), e = e);
         Vec::new()
     })
 }
@@ -112,7 +113,7 @@ fn read_pending(path: &std::path::Path) -> Vec<Sample> {
 /// so that an older list never lands after a newer one.
 fn keep_pending(path: &std::path::Path, pending: &[Sample]) {
     if let Err(e) = orbiters_core::write_atomic(path, serde_json::to_string(pending).unwrap_or_default().as_bytes()) {
-        eprintln!("world performance: could not keep the summaries waiting: {e}");
+        log_warn!("world performance: could not keep the summaries waiting: {e}", e = e);
     }
 }
 
@@ -261,7 +262,7 @@ impl super::Controller {
         });
         for path in lists {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("world performance: the summaries waiting could not be removed: {e}");
+                log_warn!("world performance: the summaries waiting could not be removed: {e}", e = e);
             }
         }
     }
@@ -299,7 +300,7 @@ impl super::Controller {
             let extra = pending.len() - MAX_PENDING;
             pending.drain(..extra);
         }
-        let _ = std::fs::create_dir_all(orbiters_core::paths::config_dir());
+        std::fs::create_dir_all(orbiters_core::paths::config_dir()).or_log("a folder could not be made");
         keep_pending(&path, pending);
     }
 
@@ -339,9 +340,9 @@ impl super::Controller {
             let sent = send(&api, &token, &batch.0, &batch.1);
             match &sent {
                 Ok(()) => {}
-                Err(e) if refused_for_good(e) => eprintln!("world performance: {} summaries refused for good, dropped: {e:#}", batch.0.len()),
+                Err(e) if refused_for_good(e) => log_warn!("world performance: {} summaries refused for good, dropped: {e:#}", batch.0.len(), e = e),
                 Err(e) => {
-                    eprintln!("world performance: {e:#}");
+                    log_warn!("world performance: {e:#}", e = e);
                     return;
                 }
             }

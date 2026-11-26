@@ -4,6 +4,7 @@
 //! keyboard layout writes them (Shift, AltGr, Caps Lock); Backspace, Enter (Search or Done), Escape (back) and Ctrl+V
 //! (the clipboard's text) do what they do in a text field. Shift, Ctrl, Alt and the Windows keys go through untouched.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use orbiters_n4n0_core::menu::KeyInput;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -118,7 +119,7 @@ pub fn start(sink: mpsc::Sender<KeyInput>) {
     }
     #[cfg(windows)]
     {
-        let _ = std::thread::Builder::new().name("keyboard".into()).spawn(windows_thread);
+        std::thread::Builder::new().name("keyboard".into()).spawn(windows_thread).or_log("a thread could not be started");
     }
 }
 
@@ -282,7 +283,7 @@ fn windows_thread() {
                     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
                     match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
                         Ok(h) => hooked = Some(h),
-                        Err(e) => eprintln!("keyboard: {e}"),
+                        Err(e) => log_warn!("keyboard: {e}", e = e),
                     }
                     let down = (1u32..256).filter(|&vk| (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0);
                     *KEYS.locked() = Owners::taken_with(down);

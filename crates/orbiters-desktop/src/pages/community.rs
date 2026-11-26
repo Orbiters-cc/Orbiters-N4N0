@@ -5,6 +5,7 @@
 //! which opens the event's window ([`super::events::Window`]); a picture opens in the picture window ([`PictureWindow`],
 //! the capture window's look and motion: grown out of its card, ←/→ through the gallery, the event it was taken at).
 
+use orbiters_core::app_log::OrLog as _;
 use super::events::{self, CoverSize, Covers, Phase};
 use super::{sharing, Cx, Job};
 use crate::controller::shares::{self as controller, Entry};
@@ -1164,8 +1165,8 @@ impl PictureWindow {
             // Screenshots: the stand-in picture in place of the download.
             if let Some(Picture::Shot { path, .. }) = self.stand_ins.get((p.id as usize) % self.stand_ins.len().max(1)) {
                 if !source.picture.exists() {
-                    let _ = std::fs::create_dir_all(source.picture.parent().unwrap_or(std::path::Path::new(".")));
-                    let _ = std::fs::copy(path, &source.picture);
+                    std::fs::create_dir_all(source.picture.parent().unwrap_or(std::path::Path::new("."))).or_log("a folder could not be made");
+                    std::fs::copy(path, &source.picture).or_log("a file could not be moved or copied");
                 }
             }
             self.editor = Some(super::editor::Editor::open(&ctx, source, title));

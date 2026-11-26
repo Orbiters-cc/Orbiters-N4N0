@@ -8,6 +8,7 @@ pub mod at_once;
 mod picture_cache;
 pub mod profile_pictures;
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use orbiters_contracts::qoi;
@@ -392,7 +393,7 @@ fn cache_dir() -> PathBuf {
             for part in ["worlds", "thumbs", "screenshots.json"] {
                 let (from, to) = (old.join(part), dir.join(part));
                 if from.exists() && !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
-                    let _ = std::fs::rename(&from, &to);
+                    std::fs::rename(&from, &to).or_log("a file could not be moved or copied");
                 }
             }
         });
@@ -494,11 +495,11 @@ impl Infos {
                         match api.world(&id) {
                             Ok(page) => {
                                 if keep {
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    let _ = orbiters_core::write_atomic(
+                                    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
+                                    orbiters_core::write_atomic(
                                         &file,
                                         &serde_json::to_vec(&CachedInfo { fetched: visited::now(), page: page.clone() }).unwrap_or_default(),
-                                    );
+                                    ).or_log("a file could not be written");
                                 }
                                 page.map_or(Info::Unlisted, |p| Info::Listed(Box::new(p)))
                             }
@@ -535,7 +536,7 @@ impl Infos {
                 self.known.locked()[e].entry(id.to_string()).or_insert_with(|| Info::Listed(Box::new(page)));
             }
             note_outbound(id);
-            let _ = self.tx.send((server, id.to_string()));
+            self.tx.send((server, id.to_string())).or_log("what a worker was asked did not reach it");
         }
         self.known.locked()[e].get(id).cloned()
     }
@@ -1106,8 +1107,8 @@ fn decode(api: &Api, keep: bool, picture: &Picture) -> Option<ColorImage> {
                     note_outbound(world_id);
                     let b = api.image(url).ok()?;
                     if keep {
-                        let _ = std::fs::create_dir_all(file.parent()?);
-                        let _ = orbiters_core::write_atomic(&file, &b);
+                        std::fs::create_dir_all(file.parent()?).or_log("a folder could not be made");
+                        orbiters_core::write_atomic(&file, &b).or_log("a file could not be written");
                     }
                     decode_image(&b)?
                 }
@@ -1146,7 +1147,7 @@ fn world_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controlle
     let (w, h, rgba) = decode_image(&bytes)?;
     let file = cache_dir().join("worlds").join(remote_file_name(world_id, url, false));
     if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
-        let _ = orbiters_core::write_atomic(&file, &bytes);
+        orbiters_core::write_atomic(&file, &bytes).or_log("a file could not be written");
     }
     Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
 }
@@ -1180,7 +1181,7 @@ fn avatar_picture(backend: Option<&crate::backend::Ctl>, scope: &crate::controll
     let (w, h, rgba) = decode_image(&bytes)?;
     let file = avatar_file(avatar_id, url);
     if file.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) {
-        let _ = orbiters_core::write_atomic(&file, &bytes);
+        orbiters_core::write_atomic(&file, &bytes).or_log("a file could not be written");
     }
     Some(ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
 }
@@ -1213,7 +1214,7 @@ pub(crate) fn capture_view(api: &Api, token: Option<&str>, url: &str, large: boo
             let picture = image::load_from_memory(&bytes).ok()?;
             if let Some(f) = file {
                 if f.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
-                    let _ = orbiters_core::write_atomic(f, &bytes);
+                    orbiters_core::write_atomic(f, &bytes).or_log("a file could not be written");
                 }
             }
             picture

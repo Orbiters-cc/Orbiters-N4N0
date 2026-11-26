@@ -1,6 +1,7 @@
 //! What the desktop's panels are made of on every system: decided and drawn the same over VRChat's window on Windows ([`super::desktop`]) and on a Mac
 //! ([`super::desktop_mac`]). No window, no key and no capture is here: those are each system's own.
 
+use orbiters_core::app_log::OrLog as _;
 use super::zones::{self, Around, Placed, Zone};
 use super::{Panel, Panels};
 use egui::Pos2;
@@ -134,10 +135,10 @@ impl Clicks {
     pub(super) fn start() -> Self {
         let click = Arc::new(std::sync::OnceLock::new());
         let slot = click.clone();
-        let _ = std::thread::Builder::new().name("orbit-click".into()).spawn(move || {
+        std::thread::Builder::new().name("orbit-click".into()).spawn(move || {
             use orbiters_sound::{render, sounds, RATE};
             let _ = slot.set(Arc::new(render(&sounds::ROCKER, RATE)));
-        });
+        }).or_log("a thread could not be started");
         Self { output: orbiters_sound::Output::new(), click }
     }
 

@@ -782,7 +782,7 @@ enum Kind {
 }
 
 /// N4N0's picture folders in `logs`; everything else of [`OWN_LOGS`] is a file.
-const OWN_LOG_FOLDERS: &[&str] = &["camera-frames", "vr-pictures", "vr-test-frames"];
+const OWN_LOG_FOLDERS: &[&str] = &["camera-frames", "n4n0-app", "vr-pictures", "vr-test-frames"];
 
 /// What N4N0 writes in the shared `logs` folder: these names, `perf-report-*.json`, and its programs' panic logs
 /// (`<program>.log`, `<program>.old.log`). The booster's logs are removed by `orbiters_booster::log::remove_logs`.
@@ -818,6 +818,8 @@ const OWN_LOGS: &[&str] = &[
     "camera-frames",
     "vr-pictures",
     "vr-test-frames",
+    // The app's own log (orbiters-core's `app_log`).
+    "n4n0-app",
 ];
 
 /// Removes N4N0's own entries ([`OWN_DATA`], [`OWN_LOGS`], the panic logs of `programs`, the file stems of the

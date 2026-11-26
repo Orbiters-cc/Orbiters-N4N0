@@ -85,7 +85,7 @@ impl super::Controller {
             sent = sent.header("Accept", t);
         }
         let unreachable = |e: ureq::Error| {
-            eprintln!("member request: {e}");
+            log_warn!("member request: {e}", e = e);
             tr("Orbiters could not be reached").to_string()
         };
         let response = if reads {
@@ -116,7 +116,7 @@ impl super::Controller {
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         let (status, content_type, retry_after) = (response.status().as_u16(), header("content-type"), header("retry-after"));
         let (body, file) = taken(response.into_body()).map_err(|e| {
-            eprintln!("member request: {e:#}");
+            log_warn!("member request: {e:#}", e = e);
             tr("Orbiters could not be reached").to_string()
         })?;
         Ok(MemberAnswer { status, content_type, retry_after, body, file })

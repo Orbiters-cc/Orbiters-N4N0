@@ -1100,13 +1100,14 @@ pub(crate) fn follow(library: PathBuf, home: PathBuf, logs: PathBuf) {
             Kind::RendererLost => "The engine's log says the game's graphics server dropped it, and no frame came since.".to_string(), // i18n: not shown
         };
         let (followed, look, logs) = (followed.held(), look.clone(), logs.clone());
-        let _ = std::thread::Builder::new().name("vrchat-incident".into()).spawn(move || {
+        use orbiters_core::app_log::OrLog as _;
+        std::thread::Builder::new().name("vrchat-incident".into()).spawn(move || {
             let at = time::OffsetDateTime::now_utc().unix_timestamp();
             match capture(&logs, kind, &followed, &look, &detail) {
                 Ok(dir) => orbiters_core::notice_log::append(&logs, "warning", &orbiters_i18n::tr!("VRChat on this Mac stopped responding ({kind}): what was going on is kept in {path}", kind = kind.word(), path = dir.display().to_string()), at),
                 Err(e) => orbiters_core::notice_log::append(&logs, "detail", &format!("VRChat incident ({}) could not be kept: {e}", kind.word()), at), // i18n: not shown (for the log)
             }
-        });
+        }).or_log("a thread could not be started");
     }
 }
 

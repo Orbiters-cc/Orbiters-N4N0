@@ -86,8 +86,11 @@ fn a_line_says_kinds_codes_counts_and_the_app_s_own_files() {
     assert_eq!(kept!("{}", Word("the picture")), "controller::shares:12 the picture");
     assert_eq!(kept!("{:?}", Some(4)), "controller::shares:12 4");
     assert_eq!(kept!("{}", crate::paths::config_dir().join("settings.json").display()), "controller::shares:12 <settings>/settings.json");
-    assert_eq!(kept!("{}", crate::paths::local_data_root().join("avatars").join("usr_1234").join("x.json").display()), "controller::shares:12 <data>/avatars/….json");
-    assert_eq!(kept!("{}", crate::paths::local_data_root().join("usr_1234.json").display()), "controller::shares:12 <data>/….json");
+    assert_eq!(kept!("{}", crate::paths::config_dir().join("pictures").join("usr_1234").join("x.json").display()), "controller::shares:12 <settings>/pictures/….json");
+    assert_eq!(kept!("{}", crate::paths::config_dir().join(format!("usr_{}.json", 1234)).display()), "controller::shares:12 <settings>/….json");
+    assert_eq!(kept!("{}", crate::paths::config_dir().join("sampleworld.json").display()), "controller::shares:12 <settings>/….json");
+    let private_extension = crate::paths::config_dir().join("report.alpha");
+    assert_eq!(kept!("{}", private_extension.display()), "controller::shares:12 <settings>/…");
     // An error of a type nobody knows here says its type, and the kinds of its causes.
     #[derive(Debug)]
     struct Odd(std::io::Error);
@@ -110,7 +113,7 @@ fn a_line_says_kinds_codes_counts_and_the_app_s_own_files() {
 fn what_looks_like_a_secret_or_a_person_s_is_taken_out() {
     let home = dirs::home_dir().unwrap().to_string_lossy().into_owned();
     for (from, to) in [
-        ("Authorization: Bearer abc.def", "Authorization: … …"),
+        ("Authorization: Bearer abc.def", "Authorization: Bearer …"),
         ("token: s3cr3t and more", "token: … and more"),
         ("auth=authcookie_11112222-3333", "auth=…"),
         ("for usr_11112222-3333-4444-5555-666677778888, in wrld_11112222:123~private(usr_1)", "for …, in …(…)"),
@@ -151,6 +154,9 @@ fn the_files_are_set_aside_and_never_more_than_five_of_two_megabytes_and_fourtee
     write(&dir, &line("2026-11-15", 1), at("2026-11-15T10:00:00Z")).unwrap();
     let left: Vec<String> = (0..FILES).filter_map(|n| std::fs::read_to_string(file(&dir, n)).ok()).map(|t| t[..10].to_string()).collect();
     assert_eq!(left, ["2026-11-15", "2026-11-03"]);
+    // An idle writer still expires its active file without having to write a new line.
+    expire_idle(&dir, at("2026-11-29T10:00:00Z")).unwrap();
+    assert!((0..FILES).all(|n| !file(&dir, n).exists()));
     // What is no log of ours (cut by a power loss) does not stop it, and goes.
     std::fs::write(file(&dir, 0), [0; 64]).unwrap();
     write(&dir, &line("2026-11-15", 2), at("2026-11-15T10:00:00Z")).unwrap();
@@ -191,13 +197,18 @@ fn a_line_goes_through_the_queue_to_the_file_and_nothing_is_made_before_the_firs
     assert_eq!(lines, ["info window x:1 all is well", "warn window x:2 not so well", "error window x:3 not at all"]);
     assert!(time::OffsetDateTime::parse(&text[..20], &time::format_description::well_known::Rfc3339).is_ok());
     // What a person copies: the errors and the warnings, the newest last, across the files.
-    let older: String = (0..5).map(|n| format!("2026-11-25T10:00:00Z error overlay y:{n} before\n")).collect();
+    let now = at(&crate::now_utc_iso());
+    let recent = (now - time::Duration::days(1)).format(&time::format_description::well_known::Rfc3339).unwrap();
+    let expired = (now - time::Duration::days(DAYS)).format(&time::format_description::well_known::Rfc3339).unwrap();
+    let older: String = (0..5).map(|n| format!("{recent} error overlay y:{n} before\n")).collect();
     std::fs::write(file(&folder(&logs), 1), older).unwrap();
+    std::fs::write(file(&folder(&logs), 2), format!("{expired} error window z:1 expired\n")).unwrap();
+    assert_eq!(last_errors_at(&logs, 20, now).len(), 7, "expired entries cannot be copied");
     let told: Vec<String> = last_errors(&logs, 4).iter().map(|l| l.rsplit_once(' ').unwrap().0[21..].to_string() + "|" + l.rsplit(' ').next().unwrap()).collect();
     assert_eq!(told, ["error overlay y:3|before", "error overlay y:4|before", "warn window x:2 not so|well", "error window x:3 not at|all"]);
     assert!(last_errors(&temp("none"), 4).is_empty());
     // A role that is no word of the source is not written.
-    assert_eq!(Sink::new(&logs, "--Mira Vale").role, "app");
+    assert_eq!(Sink::new(&logs, "sampleworld").role, "app");
     std::fs::remove_dir_all(&logs).unwrap();
 }
 
@@ -207,8 +218,15 @@ fn what_is_said_again_and_again_is_counted() {
     assert_eq!((0..25).filter(|_| often.often(100).is_some()).count(), AN_HOUR as usize);
     assert_eq!(often.often(101).as_deref(), Some(" (15 more before)"));
     assert_eq!(often.often(102).as_deref(), Some(""));
-    let once = Site::new("x", 1, "x");
-    let said: Vec<(u32, String)> = (1..=1000).filter_map(|n| once.once().map(|c| (n, c))).collect();
+    let mut kinds = BTreeMap::new();
+    assert_eq!(count_failure(&mut kinds, "NotFound"), 1);
+    assert_eq!(count_failure(&mut kinds, "NotFound"), 2);
+    assert_eq!(count_failure(&mut kinds, "PermissionDenied"), 1);
+    for n in 0..100 {
+        count_failure(&mut kinds, &n.to_string());
+    }
+    assert_eq!(kinds.len(), 17);
+    let said: Vec<(u64, String)> = (1..=1000).filter_map(|n| counted(n).map(|c| (n, c))).collect();
     assert_eq!(said, [(1, String::new()), (10, " (10 times)".into()), (100, " (100 times)".into()), (1000, " (1000 times)".into())]);
 }
 
@@ -226,7 +244,6 @@ fn the_macros_take_what_eprintln_takes() {
     crate::log_info!("{captured}");
     assert_eq!(calls.get(), 1);
     let failed: Result<(), std::io::Error> = Err(std::io::ErrorKind::NotFound.into());
-    crate::log_failed!(failed, "a file of a test could not be written");
-    let text: Result<(), String> = Err("words".into());
-    crate::log_failed!(text, "a text of a test could not be written");
+    failed.or_log("a file of a test could not be written");
+    Ok::<(), std::io::Error>(()).or_log("nothing is said");
 }

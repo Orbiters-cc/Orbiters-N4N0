@@ -9,22 +9,23 @@
 //! error kinds and codes, the app's own files). A value of any other type (a text above all) is `…`. [`redacted`] goes over
 //! the line once more, for what would get through a mistake in that.
 //!
-//! **Where it goes**: `<logs>/app/n4n0.log`, with `n4n0.1.log` to `n4n0.4.log` before it: [`FILES`] files of [`LARGEST`],
+//! **Where it goes**: `<logs>/n4n0-app/n4n0.log`, with `n4n0.1.log` to `n4n0.4.log` before it: [`FILES`] files of [`LARGEST`],
 //! [`DAYS`] days. The app never sends it anywhere: a person opens its folder or copies its last errors (Settings, App &
 //! updates).
 //!
 //! **How**: [`log_error!`](crate::log_error), [`log_warn!`](crate::log_warn), [`log_info!`](crate::log_info), written like
-//! `eprintln!`, and [`log_failed!`](crate::log_failed) for a result nobody waits for. A value is given after the message
+//! `eprintln!`, and [`OrLog::or_log`] for a result nobody waits for. A value is given after the message
 //! (`"{}: {e:#}", n, e = e`): one that is only captured (`"{e}"`) is `…` in the file. The whole line still goes to stderr,
 //! where a developer or a worker's parent reads it. Nothing is written until [`open`] (no test ever opens one); then a line
-//! is put in a queue, and a thread made for the first one writes it: no thread and no file while all is well.
+//! is put in a queue. The writer starts with the first line or at service startup if it has old logs to expire.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::OnceLock;
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 /// A file is set aside before it grows past this.
@@ -65,7 +66,7 @@ pub struct Site {
     module: &'static str,
     line: u32,
     text: &'static str,
-    /// A line's: the hour (since 1970) above, its count below. A failure's: how many times.
+    /// The hour (since 1970) above, its count below.
     count: AtomicU64,
 }
 
@@ -87,16 +88,6 @@ impl Site {
             return Some(if more > 0 { format!(" ({more} more before)") } else { String::new() });
         }
         ((before as u32) < AN_HOUR).then(String::new)
-    }
-
-    /// Whether a failure is written, and what its count adds: the first, then the 10th, the 100th…
-    fn once(&self) -> Option<String> {
-        let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut power = 1u64;
-        while power < n {
-            power = power.saturating_mul(10);
-        }
-        (power == n).then(|| if n == 1 { String::new() } else { format!(" ({n} times)") })
     }
 
     /// What the file gets of a line: where it is from and the message as it stands in the source, its values as their
@@ -251,7 +242,7 @@ impl Plain for serde_json::Error {
     fn plain(&self) -> String {
         match self.io_error_kind() {
             Some(kind) => format!("JSON: {kind:?}"),
-            None => format!("JSON: {:?} at {}:{}", self.classify(), self.line(), self.column()),
+            None => format!("JSON: {:?} at {}:{}", self.classify(), self.line(), self.column()), // i18n: not shown (the log)
         }
     }
 }
@@ -328,7 +319,13 @@ impl Plain for Path {
         ];
         let app = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
         let own = own.into_iter().chain(app.map(|dir| ("app", dir)));
-        let kind = self.extension().map(|e| e.to_string_lossy().to_lowercase()).filter(|e| e.len() <= 5 && e.bytes().all(|b| b.is_ascii_alphanumeric())).map_or_else(String::new, |e| format!(".{e}"));
+        let kind = self.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|ext| matches!(ext.as_str(),
+                "bin" | "dll" | "exe" | "glb" | "jpeg" | "jpg" | "json" | "log" | "mp4" | "png"
+                    | "qoi" | "sqlite3" | "tmp" | "toml" | "txt" | "unity" | "wasm" | "zip"))
+            .map_or_else(String::new, |ext| format!(".{ext}"));
         for (name, root) in own {
             let Ok(inside) = self.strip_prefix(&root) else { continue };
             let parts: Vec<String> = inside.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
@@ -344,12 +341,9 @@ impl Plain for Path {
     }
 }
 
-/// A name the app gives: lower case, hardly a digit (an id, a date and a person's words are not).
+/// These names are assigned by the app. An arbitrary lowercase name can still identify a person or a world.
 fn ours(name: &str) -> bool {
-    name.len() <= 40
-        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_'))
-        && name.bytes().filter(u8::is_ascii_digit).count() <= 2
-        && !IDS.iter().any(|id| name.contains(id))
+    matches!(name, "settings.json" | "calibration.json" | "manifest.json" | "capture-content.json" | "pictures" | "camera-frames")
 }
 
 impl Plain for PathBuf {
@@ -437,20 +431,22 @@ macro_rules! log_warn { ($($line:tt)*) => { $crate::log_line!(Warn $($line)*) };
 #[macro_export]
 macro_rules! log_info { ($($line:tt)*) => { $crate::log_line!(Info $($line)*) }; }
 
-/// A result nobody waits for, of something whose failure says something (a file not written, a thread not started): the
-/// failure is said once, then with its count at the 10th, the 100th… `what` says what did not work.
-#[macro_export]
-macro_rules! log_failed {
-    ($result:expr, $what:literal $(,)?) => {
-        if let Err(failed) = $result {
-            static SITE: $crate::app_log::Site = $crate::app_log::Site::new(module_path!(), line!(), $what);
-            $crate::app_log::failed(&SITE, &|| {
-                #[allow(unused_imports)]
-                use $crate::app_log::{ByError as _, ByNothing as _, ByPlain as _};
-                (&&&$crate::app_log::Arg(&failed)).shown()
-            });
+/// A result nobody waits for, of something whose failure says something (a file not written, a thread not started, a worker
+/// gone): what `let _ =` was.
+pub trait OrLog {
+    /// A failure is said once for each place in the source, then with its count at the 10th, the 100th…: `what` in the source's
+    /// own words, and what the error's type says ([`Plain`]).
+    fn or_log(self, what: &'static str);
+}
+
+impl<T, E: Plain> OrLog for Result<T, E> {
+    #[track_caller]
+    fn or_log(self, what: &'static str) {
+        let place = std::panic::Location::caller();
+        if let Err(e) = self {
+            failed(place, what, &e);
         }
-    };
+    }
 }
 
 /// What the line macros call: the whole line to stderr, what may be kept of it to the log.
@@ -464,20 +460,48 @@ pub fn line(site: &'static Site, level: Level, whole: fmt::Arguments<'_>, values
     }
 }
 
-/// What [`log_failed!`](crate::log_failed) calls.
-pub fn failed(site: &'static Site, why: &dyn Fn() -> String) {
-    let Some(count) = site.once() else { return };
-    let said = format!("{}: {}{count}", site.words(&[]), why());
+#[cold]
+fn failed(place: &'static std::panic::Location<'static>, what: &'static str, e: &dyn Plain) {
+    /// Distinct error kinds stay separate, with a bound on how many kinds each site remembers.
+    type Counts = BTreeMap<(&'static str, u32, u32), BTreeMap<String, u64>>;
+    static FAILED: Mutex<Counts> = Mutex::new(BTreeMap::new());
+    let reason = e.plain();
+    let n = {
+        let mut all = FAILED.lock().unwrap_or_else(PoisonError::into_inner);
+        let counts = all.entry((place.file(), place.line(), place.column())).or_default();
+        count_failure(counts, &reason)
+    };
+    let Some(count) = counted(n) else { return };
+    let said = redacted(&format!("{} {what}: {reason}{count}", place.plain()));
     let _ = writeln!(std::io::stderr(), "{said}");
     if let Some(sink) = SINK.get() {
         sink.send(Level::Warn, &said);
     }
 }
 
+/// Keep the first sixteen error kinds per site distinct, then count unfamiliar kinds together.
+fn count_failure(counts: &mut BTreeMap<String, u64>, reason: &str) -> u64 {
+    const MOST: usize = 16;
+    let key = if counts.len() >= MOST && !counts.contains_key(reason) { "" } else { reason };
+    let n = counts.entry(key.to_owned()).or_default();
+    *n = n.saturating_add(1);
+    *n
+}
+
+/// Whether the `n`th failure of a place is said, and what its count adds: the first, then the 10th, the 100th…
+fn counted(n: u64) -> Option<String> {
+    let mut digits = n;
+    while digits >= 10 && digits.is_multiple_of(10) {
+        digits /= 10;
+    }
+    (digits == 1).then(|| if n == 1 { String::new() } else { format!(" ({n} times)") })
+}
+
 /// A thread's panic ([`crate::panic_log`]): where, and nothing of its message.
-pub(crate) fn panicked(place: &crate::panic_log::Place) {
+pub(crate) fn panicked(place: Option<&std::panic::Location<'_>>) {
     if let Some(sink) = SINK.get() {
-        sink.send(Level::Error, &redacted(&format!("a thread panicked: {}", place.plain())));
+        let place = place.map_or_else(|| "?".into(), Plain::plain);
+        sink.send(Level::Error, &format!("a thread panicked: {place}")); // i18n: not shown (the log)
     }
 }
 
@@ -500,12 +524,15 @@ static SINK: OnceLock<Sink> = OnceLock::new();
 /// Lines of this process go to the log in `logs` from now on, as `role`'s (`window`, `overlay`). Once, in `main`; never in
 /// a test.
 pub fn open(logs: &Path, role: &str) {
-    let _ = SINK.set(Sink::new(logs, role));
+    let sink = SINK.get_or_init(|| Sink::new(logs, role));
+    if role == "service" && sink.dir.is_dir() {
+        sink.start();
+    }
 }
 
 /// The log's folder in `logs`.
 pub fn folder(logs: &Path) -> PathBuf {
-    logs.join("app")
+    logs.join("n4n0-app")
 }
 
 /// Waits until what was said is written, for `most` at the most: before the process ends.
@@ -517,20 +544,23 @@ pub fn flush(most: Duration) {
 
 impl Sink {
     fn new(logs: &Path, role: &str) -> Self {
-        let known = !role.is_empty() && role.len() <= 24 && role.bytes().all(|b| b.is_ascii_lowercase() || b == b'-');
+        let known = matches!(role, "service" | "window" | "overlay" | "orbit-desktop" | "prepare-upload" | "apply-update" | "bridge-shot" | "bridge-guard");
         Self { dir: folder(logs), role: if known { role.into() } else { "app".into() }, tx: OnceLock::new(), lost: AtomicU64::new(0) }
+    }
+
+    fn start(&self) -> Option<&SyncSender<Msg>> {
+        self.tx.get_or_init(|| {
+            let (tx, rx) = sync_channel(QUEUE);
+            let dir = self.dir.clone();
+            std::thread::Builder::new().name("app-log".into()).spawn(move || write_all(&dir, &rx)).ok().map(|_| tx)
+        }).as_ref()
     }
 
     fn send(&self, level: Level, said: &str) {
         let line = |level: Level, said: &str| Msg::Line(format!("{} {} {} {said}\n", crate::now_utc_iso(), level.name(), self.role));
-        let tx = self.tx.get_or_init(|| {
-            let (tx, rx) = sync_channel(QUEUE);
-            let dir = self.dir.clone();
-            std::thread::Builder::new().name("app-log".into()).spawn(move || write_all(&dir, &rx)).ok().map(|_| tx)
-        });
-        let sent = tx.as_ref().is_some_and(|tx| {
+        let sent = self.start().is_some_and(|tx| {
             let lost = self.lost.swap(0, Ordering::Relaxed);
-            if lost > 0 && tx.try_send(line(Level::Warn, &format!("{lost} lines were lost"))).is_err() {
+            if lost > 0 && tx.try_send(line(Level::Warn, &format!("{lost} lines were lost"))).is_err() { // i18n: not shown (the log)
                 self.lost.fetch_add(lost, Ordering::Relaxed);
             }
             tx.try_send(line(level, said)).is_ok()
@@ -551,7 +581,19 @@ impl Sink {
 
 /// The log's thread: ends with the process.
 fn write_all(dir: &Path, rx: &Receiver<Msg>) {
-    while let Ok(first) = rx.recv() {
+    let expire = || {
+        let _ = expire_idle(dir, time::OffsetDateTime::now_utc());
+    };
+    expire();
+    loop {
+        let first = match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(msg) => msg,
+            Err(RecvTimeoutError::Timeout) => {
+                expire();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let (mut lines, mut waiting) = (String::new(), Vec::new());
         for msg in std::iter::once(first).chain(rx.try_iter().take(QUEUE)) {
             match msg {
@@ -583,19 +625,48 @@ fn first(path: &Path) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(std::str::from_utf8(&head).ok()?, &time::format_description::well_known::Rfc3339).ok()
 }
 
+fn hold(dir: &Path) -> std::io::Result<std::fs::File> {
+    let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("n4n0.lock"))?;
+    held.lock()?;
+    Ok(held)
+}
+
+fn expire_idle(dir: &Path, now: time::OffsetDateTime) -> std::io::Result<()> {
+    if dir.is_dir() {
+        let _held = hold(dir)?;
+        expire_files(dir, now);
+    }
+    Ok(())
+}
+
+fn age(path: &Path, now: time::OffsetDateTime) -> Option<i64> {
+    first(path).map(|at| (now - at).whole_days())
+}
+
+fn expire_files(dir: &Path, now: time::OffsetDateTime) {
+    for n in 0..FILES {
+        let path = file(dir, n);
+        if path.exists() && age(&path, now).is_none_or(|d| d >= DAYS) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Adds `lines`. The processes of the app share the files: one at a time, through a lock the system lets go of by itself
 /// when its process ends.
 fn write(dir: &Path, lines: &str, now: time::OffsetDateTime) -> std::io::Result<()> {
     if lines.is_empty() {
         return Ok(());
     }
+    if lines.len() as u64 > LARGEST {
+        return Err(std::io::ErrorKind::FileTooLarge.into());
+    }
     std::fs::create_dir_all(dir)?;
-    let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("n4n0.lock"))?;
-    held.lock()?;
+    let _held = hold(dir)?;
+    expire_files(dir, now);
     let path = file(dir, 0);
     let grown = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.len());
-    let days = |path: &Path| first(path).map(|at| (now - at).whole_days());
-    if grown(&path) > 0 && (grown(&path) + lines.len() as u64 > LARGEST || days(&path).is_none_or(|d| d >= DAYS_A_FILE)) {
+    if grown(&path) > 0 && (grown(&path) + lines.len() as u64 > LARGEST || age(&path, now).is_none_or(|d| d >= DAYS_A_FILE)) {
         let _ = std::fs::remove_file(file(dir, FILES - 1));
         for n in (0..FILES - 1).rev() {
             let _ = std::fs::rename(file(dir, n), file(dir, n + 1));
@@ -604,22 +675,27 @@ fn write(dir: &Path, lines: &str, now: time::OffsetDateTime) -> std::io::Result<
             return Err(std::io::ErrorKind::FileTooLarge.into());
         }
     }
-    for n in 1..FILES {
-        let path = file(dir, n);
-        if path.exists() && days(&path).is_none_or(|d| d >= DAYS) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
     std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(lines.as_bytes())
 }
 
 /// The newest `most` errors and warnings of the log in `logs`, the oldest of them first.
 pub fn last_errors(logs: &Path, most: usize) -> Vec<String> {
+    last_errors_at(logs, most, time::OffsetDateTime::now_utc())
+}
+
+fn last_errors_at(logs: &Path, most: usize, now: time::OffsetDateTime) -> Vec<String> {
     let dir = folder(logs);
     let mut out: Vec<String> = Vec::new();
     for n in 0..FILES {
         let text = std::fs::read(file(&dir, n)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let told = |l: &&str| matches!(l.split(' ').nth(1), Some("error" | "warn"));
+        let told = |l: &&str| {
+            let Some((at, fields)) = l.split_once(' ') else { return false };
+            if !matches!(fields.split(' ').next(), Some("error" | "warn")) {
+                return false;
+            }
+            time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339)
+                .is_ok_and(|at| (now - at).whole_days() < DAYS)
+        };
         out.extend(text.lines().rev().filter(told).take(most - out.len()).map(str::to_string));
         if out.len() >= most {
             break;

@@ -34,7 +34,7 @@ pub fn ready_session() -> Option<Session> {
     let ready = admitted(server, now);
     let mut waiting = WAITING.locked();
     if *waiting != Some((server, ready)) {
-        orbiters_core::log_info!(
+        log_info!(
             "SteamVR {}: {}",
             server.0,
             if ready { "trying non-launching Background connection" } else { "waiting for two-second server age bound; no readiness hint required" });

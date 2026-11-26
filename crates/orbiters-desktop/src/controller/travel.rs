@@ -7,6 +7,7 @@
 //! (`GetNamedPipeServerProcessId`) and the link is written only when it is the person's own VRChat: never one the bridge
 //! started (its main session, a side session, or any VRChat whose `--osc` names other ports than VRChat's own 9000).
 
+use orbiters_core::app_log::OrLog as _;
 use serde::{Deserialize, Serialize};
 
 /// The launch link of `world`'s instance `instance`, as VRChat's website and `launch.exe` write it.
@@ -238,11 +239,11 @@ impl LinkPipe for Pipe {
         // As launch.exe: VRChat may answer; the connection stays open a moment for it to read, then goes.
         if let Ok(mut reader) = file.try_clone() {
             let (tx, rx) = std::sync::mpsc::channel();
-            let _ = std::thread::Builder::new().name("vrchat-link-pipe".into()).spawn(move || {
+            std::thread::Builder::new().name("vrchat-link-pipe".into()).spawn(move || {
                 let mut answer = [0u8; 64];
                 let _ = reader.read(&mut answer);
                 let _ = tx.send(());
-            });
+            }).or_log("a thread could not be started");
             let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
         }
         Ok(())

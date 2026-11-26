@@ -19,6 +19,7 @@ pub mod report;
 #[cfg(test)]
 mod tests;
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_booster::frames::{Frame, Summary};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -579,7 +580,7 @@ pub fn mute_hint(key: &str) {
     let mut muted = hints_muted();
     if !muted.iter().any(|k| k == key) {
         muted.push(key.to_string());
-        let _ = orbiters_core::write_atomic(&hints_file(), &serde_json::to_vec(&muted).unwrap_or_default());
+        orbiters_core::write_atomic(&hints_file(), &serde_json::to_vec(&muted).unwrap_or_default()).or_log("a file could not be written");
     }
 }
 
@@ -787,7 +788,7 @@ pub fn append_to<T: Serialize>(path: &Path, line: &T, max: u64) {
     let Ok(mut text) = serde_json::to_string(line) else { return };
     text.push('\n');
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).or_log("a folder could not be made");
     }
     if std::fs::metadata(path).is_ok_and(|m| m.len() + text.len() as u64 > max) {
         let mut old = path.as_os_str().to_owned();
@@ -795,6 +796,6 @@ pub fn append_to<T: Serialize>(path: &Path, line: &T, max: u64) {
         let _ = std::fs::rename(path, PathBuf::from(old));
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
-        let _ = file.write_all(text.as_bytes());
+        file.write_all(text.as_bytes()).or_log("a file could not be written");
     }
 }

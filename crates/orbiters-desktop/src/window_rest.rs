@@ -377,6 +377,7 @@ pub fn paint_band(p: &Painter, hover: bool, left: f32, seconds: u64) {
 /// The page the window was on when it closed to the tray, for the next window to open on: a small file of its own,
 /// read once by the next window (opened from the tray, a second launch, a menu) within a day.
 pub mod resume {
+    use orbiters_core::app_log::OrLog as _;
     use std::path::PathBuf;
 
     const KEEP_FOR_S: u64 = 24 * 3600;
@@ -392,9 +393,9 @@ pub mod resume {
     pub fn save(page: &str) {
         let f = file();
         if let Some(dir) = f.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir).or_log("a folder could not be made");
         }
-        let _ = std::fs::write(f, format!("{} {page}", now_s()));
+        std::fs::write(f, format!("{} {page}", now_s())).or_log("a file could not be written");
     }
 
     /// The page saved, once (the file goes), when it is recent.

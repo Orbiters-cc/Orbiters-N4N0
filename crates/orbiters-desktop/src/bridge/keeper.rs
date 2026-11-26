@@ -3,6 +3,7 @@
 //! The answer lives in this process's memory only, and nothing in a settings file can stand in for it: a person editing a
 //! file can turn it off, and can never turn it on for an account the server does not say has it.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::clients::{Change, Client, Registrations, Wanted};
 use super::mcp::Server;
@@ -201,12 +202,12 @@ impl Keeper {
     /// Runs on a thread of its own for the life of the process.
     pub fn start(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("bridge-keeper".into()).spawn(move || loop {
+        std::thread::Builder::new().name("bridge-keeper".into()).spawn(move || loop {
             let Some(keeper) = weak.upgrade() else { break };
             keeper.tick();
             drop(keeper);
             std::thread::sleep(Duration::from_millis(250));
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// One look at the three conditions, and acting on what they say, then what Settings shows, a few times a second.
@@ -301,7 +302,7 @@ impl Keeper {
             let server = Server::start(self.bridge.clone(), 0, keys.token.clone())?;
             keys.port = server.port();
             if let Err(e) = keys.save(&self.keys_file) {
-                eprintln!("the bridge's port was not saved: {e}");
+                log_warn!("the bridge's port was not saved: {e}", e = e);
             }
             Ok::<Server, std::io::Error>(server)
         });

@@ -1,4 +1,5 @@
 //! Background jobs for the gallery and its sharing dialogs. No disk or HTTP work in the painting code.
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use orbiters_core::{
     account::{self, Api, Server},
@@ -53,7 +54,7 @@ pub(super) fn spawn_presence(ctl: super::Shared) {
         }
     });
     if let Err(e) = presence {
-        eprintln!("capture presence: {e}");
+        log_warn!("capture presence: {e}", e = e);
     }
 }
 
@@ -971,7 +972,7 @@ pub(crate) fn follow_moved_sessions(records_file: &Path, sessions_dir: &Path) ->
     if moved > 0 {
         if let Ok(bytes) = serde_json::to_vec(&records) {
             if let Err(e) = orbiters_core::write_atomic(records_file, &bytes) {
-                eprintln!("upload records: the moved library could not be noted: {e}");
+                log_warn!("upload records: the moved library could not be noted: {e}", e = e);
                 return 0;
             }
         }
@@ -1065,7 +1066,7 @@ fn forget_record_of(path: &Path, dir: &Path, kind: Kind, id: u64) {
     records.retain(|r| !(r.path == dir && r.uploaded.kind == kind && r.uploaded.id == id));
     if records.len() != before {
         if let Ok(bytes) = serde_json::to_vec(&records) {
-            let _ = orbiters_core::write_atomic(path, &bytes);
+            orbiters_core::write_atomic(path, &bytes).or_log("a file could not be written");
         }
     }
 }

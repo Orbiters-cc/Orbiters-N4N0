@@ -427,7 +427,7 @@ impl Drop for Edits {
         if self.save_error.is_some() {
             self.save();
             if let Some(e) = &self.save_error {
-                eprintln!("Splat edits of {} not saved: {e}", self.session.display());
+                log_warn!("Splat edits of {} not saved: {e}", self.session.display(), e = e);
                 return;
             }
         }
@@ -449,11 +449,11 @@ impl Drop for Edits {
                 }
             }
             if let Err(err) = redraw_picture(&session, window) {
-                eprintln!("The picture of {}: {err:#}", session.display());
+                log_warn!("The picture of {}: {err:#}", session.display(), err = err);
             }
         });
         if let Err(e) = spawned {
-            eprintln!("Splat edits: {e}");
+            log_warn!("Splat edits: {e}", e = e);
         }
     }
 }

@@ -435,7 +435,7 @@ impl super::Controller {
             ctl.tell_about_picture(NoticeKind::Warning, tr(OTHERS_KEPT), tr_latin(OTHERS_SHOW));
         });
         if let Err(e) = spawned {
-            eprintln!("reading Remote User back: {e}");
+            log_warn!("reading Remote User back: {e}", e = e);
         }
     }
 
@@ -483,7 +483,7 @@ impl super::Controller {
         let left = MasksLeft { pid, started, local_user, remote_user };
         if let Ok(bytes) = serde_json::to_vec(&left) {
             if let Err(e) = orbiters_core::write_atomic(&journal, &bytes) {
-                eprintln!("camera masks journal: {e}");
+                log_warn!("camera masks journal: {e}", e = e);
             }
         }
     }
@@ -523,7 +523,7 @@ impl super::Controller {
             if let Some(local) = local_user {
                 let _ = self.with_osc(|o| o.send(LOCAL_PLAYER, vec![rosc::OscType::Bool(local)]));
             }
-            eprintln!("camera masks: put back as they were before a run that ended during a recording ({left:?})"); // i18n: not shown (a log's line)
+            log_info!("camera masks: put back as they were before a run that ended during a recording ({left:?})", left = left); // i18n: not shown (a log's line)
         }
         let _ = std::fs::remove_file(&journal);
     }
@@ -541,7 +541,7 @@ impl super::Controller {
         };
         let ctl = self.clone();
         if let Err(e) = std::thread::Builder::new().name("n4n0-hide-beat".into()).spawn(move || ctl.hide_beat(generation)) {
-            eprintln!("hiding the avatar: {e}");
+            log_warn!("hiding the avatar: {e}", e = e);
             self.hide.locked().hiding = false;
         }
     }
@@ -584,7 +584,7 @@ impl super::Controller {
             }
         });
         if let Err(e) = spawned {
-            eprintln!("turning Local User on: {e}");
+            log_warn!("turning Local User on: {e}", e = e);
         }
     }
 

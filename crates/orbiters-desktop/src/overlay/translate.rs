@@ -18,6 +18,7 @@
 //! the heads recorded for the reading thread are in it, the translations are kept in it, and each turn shows them where
 //! the world is in tracking space now.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::Presenter;
 use crate::backend::Ctl;
@@ -734,7 +735,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
     let core = Mutex::new(core);
     let done = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let _ = std::thread::Builder::new().name("translate show".into()).spawn_scoped(scope, || { // i18n: not shown (a thread's name)
+        std::thread::Builder::new().name("translate show".into()).spawn_scoped(scope, || { // i18n: not shown (a thread's name)
             lower_priority();
             while !done.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(30));
@@ -747,7 +748,7 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool, from: (Option<vr::compositor::
                 }
                 take_logs(&mut c);
             }
-        });
+        }).or_log("a thread could not be started");
         reading(shared, stop, &core, source, &reader, &settings, translator_state.take(), &mut lan, started);
         done.store(true, Ordering::Relaxed);
     });
@@ -890,7 +891,7 @@ fn reading(
                 if f.is_none() {
                     *f = Some((0, 0, None));
                     let (fetching, stop) = (fetching.clone(), stop_flag(stop));
-                    let _ = std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
+                    std::thread::Builder::new().name("translate download".into()).spawn(move || { // i18n: not shown (a thread's name)
                         lower_priority();
                         let result = orbiters_translate::models::install_files(&orbiters_translate::builtin::FILES, &stop, &mut |done, total| {
                             if let Some(f) = fetching.locked().as_mut() {
@@ -900,7 +901,7 @@ fn reading(
                         if let Some(f) = fetching.locked().as_mut() {
                             f.2 = Some(result.map_err(|e| e.to_string()));
                         }
-                    });
+                    }).or_log("a thread could not be started");
                 }
             }
             let downloaded = matches!(*fetching.locked(), Some((_, _, Some(Ok(())))));

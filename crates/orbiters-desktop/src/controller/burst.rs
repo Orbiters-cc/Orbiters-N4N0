@@ -21,6 +21,7 @@
 //! lower resolution than the frame before them, for 1.8 s of everybody's patience (the desktop repository's
 //! docs/3d-picture-angles-2026-11-04.md).
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{around, NoticeKind, Shared};
 use crate::state::CaptureState;
@@ -618,10 +619,10 @@ impl super::Controller {
                 told.push("the older flight: blind, or the 1 s sweep".into()); // i18n: not shown
             }
             for line in &told {
-                eprintln!("3d picture: {line}");
+                log_info!("3d picture: {line}", line = line);
             }
             if let Some(dir) = &session {
-                let _ = std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n");
+                std::fs::write(dir.join(FLIGHT_FILE), told.join("\n") + "\n").or_log("a file could not be written");
             }
             if restore {
                 let _gate = ctl.capture_start_gate.locked();

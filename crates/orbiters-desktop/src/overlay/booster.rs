@@ -6,6 +6,7 @@
 //! hold and flushes to disk, so SteamVR's settings and the journal are on a thread of their own ([`Worker`]), as the log is.
 //! The turn only says what it wants and hears back what came of it.
 
+use orbiters_core::app_log::OrLog as _;
 use crate::backend::Ctl;
 use crate::booster::OverlayReport;
 use crate::state::Snapshot;
@@ -192,7 +193,7 @@ enum LogJob {
 
 fn start_log() -> mpsc::Sender<LogJob> {
     let (tx, rx) = mpsc::channel::<LogJob>();
-    let _ = std::thread::Builder::new().name("fps-log".into()).spawn(move || {
+    std::thread::Builder::new().name("fps-log".into()).spawn(move || {
         let mut logger = Logger::new(orbiters_core::paths::logs_dir());
         for job in rx {
             match job {
@@ -210,7 +211,7 @@ fn start_log() -> mpsc::Sender<LogJob> {
                 }
             }
         }
-    });
+    }).or_log("a thread could not be started");
     tx
 }
 
@@ -328,12 +329,12 @@ impl Host {
         let Some(worker) = &self.worker else { return };
         if self.asked.is_none_or(|asked| (wants.sharpness - asked).abs() > 0.0005) {
             self.asked = Some(wants.sharpness);
-            let _ = worker.jobs.send(Job::Factor(wants.sharpness));
+            worker.jobs.send(Job::Factor(wants.sharpness)).or_log("what a worker was asked did not reach it");
         }
         if self.last_check.is_none_or(|at| at.elapsed() >= CHECK_OWNED) {
             self.last_check = Some(Instant::now());
-            let _ = worker.jobs.send(Job::Check { watching });
-            let _ = worker.jobs.send(Job::ReadForLog);
+            worker.jobs.send(Job::Check { watching }).or_log("what a worker was asked did not reach it");
+            worker.jobs.send(Job::ReadForLog).or_log("what a worker was asked did not reach it");
         }
     }
 
@@ -356,7 +357,7 @@ impl Host {
 
     fn write_log(&mut self, snap: &Snapshot, inputs: &Inputs, wants: &Wants) {
         if let Some((frames, kind)) = self.engine.take_raw_if_any() {
-            let _ = self.log.send(LogJob::Raw(frames, kind));
+            self.log.send(LogJob::Raw(frames, kind)).or_log("what a worker was asked did not reach it");
         }
         let Some(block) = self.engine.take_block() else { return };
         self.session_frames += block.summary.frames as f64;
@@ -383,7 +384,7 @@ impl Host {
             steamvr,
             log_ms: 0.0,
         };
-        let _ = self.log.send(LogJob::Line(Box::new(line)));
+        self.log.send(LogJob::Line(Box::new(line))).or_log("what a worker was asked did not reach it");
     }
 
     /// VRChat left: what this log counted against what SteamVR's compositor counted, in the log.
@@ -391,7 +392,7 @@ impl Host {
         let running = snap.vrchat.running;
         if self.vrchat_was_running && !running && self.session_seconds > 0.0 {
             let real_fps = (self.session_frames / self.session_seconds) as f32;
-            let _ = self.log.send(LogJob::SelfCheck { real_fps, refresh_hz: self.refresh_hz });
+            self.log.send(LogJob::SelfCheck { real_fps, refresh_hz: self.refresh_hz }).or_log("what a worker was asked did not reach it");
             (self.session_frames, self.session_seconds) = (0.0, 0.0);
         }
         self.vrchat_was_running = running;
@@ -405,7 +406,7 @@ impl Host {
     pub fn teardown(&mut self, steamvr_gone: bool) -> bool {
         PANEL_PACE_MS.store(NORMAL_PACE_MS, Ordering::Relaxed);
         let Some(mut worker) = self.worker.take() else { return true };
-        let _ = worker.jobs.send(Job::End { steamvr_gone });
+        worker.jobs.send(Job::End { steamvr_gone }).or_log("what a worker was asked did not reach it");
         let deadline = Instant::now() + END_WAIT;
         loop {
             match worker.heard.recv_timeout(deadline.saturating_duration_since(Instant::now())) {

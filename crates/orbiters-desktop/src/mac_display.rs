@@ -1,6 +1,7 @@
 //! What Home's Play on a Mac asks of the Mac itself: the main display's drawing resolution and its panel's real pixels
 //! (for the render scale VRChat is started with), and whether Low Power Mode is on while the Mac is on power (said to
 //! the player, never changed: it is their battery policy).
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use std::ffi::{c_char, c_void};
 use std::sync::Mutex;
@@ -100,5 +101,5 @@ pub fn low_power_on_power() -> bool {
 
 /// Opens System Settings at Battery, where the person can change it themselves.
 pub fn open_battery_settings() {
-    let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.Battery-Settings.extension").spawn();
+    std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.Battery-Settings.extension").spawn().or_log("a program could not be started");
 }

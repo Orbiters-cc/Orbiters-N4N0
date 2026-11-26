@@ -5,6 +5,7 @@
 //! developer update (Anchored 2048x385, Centered 2048x472): each zone's left and right edge on every row, simplified to
 //! within 1.2 px, as fractions of the canvas. VRChat's pictures are not shipped; these contours are our own data. Where
 //! zones overlap, the later one in each list is on top. They are guides: the real name-length breakpoints are not known.
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use crate::controller::groups::Key;
 use crate::controller::vrchat_data::Scope;
@@ -438,7 +439,7 @@ pub fn load_saved(owner: &str, group: &str) -> Saved {
 pub fn store_saved(owner: &str, group: &str, saved: &Saved) {
     if let Some(file) = saved_file(owner, group) {
         if let (Some(dir), Ok(bytes)) = (file.parent(), serde_json::to_vec_pretty(saved)) {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir).or_log("a folder could not be made");
             let _ = orbiters_core::write_atomic_private(&file, &bytes);
         }
     }

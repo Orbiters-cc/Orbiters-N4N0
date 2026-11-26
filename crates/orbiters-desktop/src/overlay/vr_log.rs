@@ -7,6 +7,7 @@
 //! does what a line did before (create the folder, look at the size, rotate, open, append, close), for each batch of
 //! lines it finds queued. Every other process (the service, the app) writes at once, as before.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -184,7 +185,7 @@ fn write_batch(dir: &Path, items: &[Item]) {
     if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         use std::io::Write;
         let text: String = items.iter().map(|i| i.text.as_str()).collect();
-        let _ = file.write_all(text.as_bytes());
+        file.write_all(text.as_bytes()).or_log("a file could not be written");
     }
 }
 

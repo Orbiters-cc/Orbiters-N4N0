@@ -14,6 +14,7 @@
 //!   (`orbiters_core::vrchat_launch::way`, the one rule of every start and delivery): VRChat starts without it, and it is
 //!   delivered once that very VRChat's own log proves the account it is for ([`Pending`]).
 use orbiters_core::vrchat_api::ClientLock;
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::vrchat_scope::{By, MachineParts, Session, Stamp};
 use super::{Controller, Shared};
@@ -341,18 +342,18 @@ impl MacMachine {
     pub fn new(home: &std::path::Path) -> Self {
         // A newer release of the program (the engine's fixes come with it) is got once per run, a little after the start.
         let tools = orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir());
-        let _ = std::thread::Builder::new().name("obelisk-update".into()).spawn(move || {
+        std::thread::Builder::new().name("obelisk-update".into()).spawn(move || {
             if cfg!(test) {
                 return;
             }
             std::thread::sleep(Duration::from_secs(15));
             super::obelisk_cli::update(&tools, &AtomicBool::new(false));
-        });
+        }).or_log("a thread could not be started");
         // Whatever VRChat the engine runs, its hangs and quits that do not finish are kept as they happen.
         #[cfg(target_os = "macos")]
         if !cfg!(test) {
             let (library, home) = (orbiters_core::obelisk::library(home), home.to_path_buf());
-            let _ = std::thread::Builder::new().name("vrchat-incidents".into()).spawn(move || super::incident::follow(library, home, orbiters_core::paths::logs_dir()));
+            std::thread::Builder::new().name("vrchat-incidents".into()).spawn(move || super::incident::follow(library, home, orbiters_core::paths::logs_dir())).or_log("a thread could not be started");
         }
         MacMachine {
             tools: orbiters_core::obelisk::tools(&orbiters_core::paths::config_dir()),
@@ -1527,7 +1528,7 @@ impl Controller {
                 drop(ctl);
                 seen = bell.wait(seen, Duration::from_secs(2));
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// One look: is the source still the one read, is a read due, is the game running.
@@ -1799,10 +1800,10 @@ impl Controller {
             let asked = self.vrchat_now();
             self.launcher_notice(asked.as_ref(), notice.clone());
             let ctl = self.clone();
-            let _ = std::thread::Builder::new().name("launcher-start-failed".into()).spawn(move || {
+            std::thread::Builder::new().name("launcher-start-failed".into()).spawn(move || {
                 std::thread::sleep(NOTICE_FOR);
                 ctl.launcher_notice_over(asked.as_ref(), &notice);
-            });
+            }).or_log("a thread could not be started");
         }
         let game = match running.first() {
             Some((_, desktop)) => Game::Running(if *desktop { LaunchMode::Desktop } else { LaunchMode::Vr }),
@@ -1852,10 +1853,10 @@ impl Controller {
                     old => Errand::plain(LaunchMode::Desktop, old.and_then(|(errand, _)| errand.profile)),
                 };
                 let ctl = self.clone();
-                let _ = std::thread::Builder::new().name("launcher-queued".into()).spawn(move || {
+                std::thread::Builder::new().name("launcher-queued".into()).spawn(move || {
                     let notice = ctl.launcher_run(errand);
                     ctl.launcher_say(notice);
-                });
+                }).or_log("a thread could not be started");
             } else if let Some((errand, _)) = queued.filter(|(errand, _)| errand.destination.is_some()) {
                 // Its game did not come, or another is there: said, and nothing is started for it.
                 self.launcher_join_failed(errand, JoinFailure::Elsewhere);
@@ -1937,7 +1938,7 @@ impl Controller {
             Waited::Deliver => {
                 let ctl = self.clone();
                 let asked = self.vrchat_now();
-                let _ = std::thread::Builder::new().name("launcher-pending".into()).spawn(move || {
+                std::thread::Builder::new().name("launcher-pending".into()).spawn(move || {
                     // To the account it was asked for only (the pending one is dropped at an account change, and checked here).
                     let notice = ctl.launcher_deliver(&errand, seen.map(|(pid, _)| pid));
                     match &notice {
@@ -1948,7 +1949,7 @@ impl Controller {
                     ctl.launcher_notice(asked.as_ref(), notice.clone());
                     std::thread::sleep(NOTICE_FOR);
                     ctl.launcher_notice_over(asked.as_ref(), &notice);
-                });
+                }).or_log("a thread could not be started");
             }
         }
     }
@@ -2158,10 +2159,10 @@ impl Controller {
         let asked = self.vrchat_now();
         self.launcher_notice(asked.as_ref(), notice.clone());
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("launcher-said".into()).spawn(move || {
+        std::thread::Builder::new().name("launcher-said".into()).spawn(move || {
             std::thread::sleep(NOTICE_FOR);
             ctl.launcher_notice_over(asked.as_ref(), &notice);
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// Whether this computer uses several VRChat profiles: one other than the default one is on Home's choice, or runs or starts now
@@ -2538,12 +2539,12 @@ impl Controller {
         let ctl = self.clone();
         // Its outcome is said to the member who asked for it.
         let asked = self.vrchat_now();
-        let _ = std::thread::Builder::new().name("launcher-action".into()).spawn(move || {
+        std::thread::Builder::new().name("launcher-action".into()).spawn(move || {
             let Some(notice) = ctl.launcher_do(action) else { return };
             ctl.launcher_notice(asked.as_ref(), notice.clone());
             std::thread::sleep(NOTICE_FOR);
             ctl.launcher_notice_over(asked.as_ref(), &notice);
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// An action's outcome, for the member who `asked` for it: into the state, and when it failed, into the toast as well.
@@ -2664,7 +2665,7 @@ impl Controller {
                 }
                 let ctl = self.clone();
                 let asked = self.vrchat_now();
-                let _ = std::thread::Builder::new().name("launcher-restart-lost".into()).spawn(move || {
+                std::thread::Builder::new().name("launcher-restart-lost".into()).spawn(move || {
                     // Its account is the one signed in; its place goes with the start or is delivered after it, by the profiles there
                     // are now, however it went the first time.
                     let (after, with_it) = (Mutex::new(None), Mutex::new(None));
@@ -2707,7 +2708,7 @@ impl Controller {
                         Err(why) => ctl.launcher_notice(asked.as_ref(), Notice::Error(why)),
                     }
                     ctl.launcher_game(machine.as_ref());
-                });
+                }).or_log("a thread could not be started");
                 None
             }
             Action::RepairEngine => {
@@ -2722,7 +2723,7 @@ impl Controller {
                 self.launcher_game(machine.as_ref());
                 let ctl = self.clone();
                 let asked = self.vrchat_now();
-                let _ = std::thread::Builder::new().name("launcher-repair-engine".into()).spawn(move || {
+                std::thread::Builder::new().name("launcher-repair-engine".into()).spawn(move || {
                     let step = |percent: Option<u8>| {
                         ctl.launcher.locked().repairing = Some(percent);
                         ctl.publish_machine(|m| {
@@ -2738,7 +2739,7 @@ impl Controller {
                         Ok(()) => ctl.notify(super::NoticeKind::Success, tr("What runs VRChat was repaired: press Play.").to_string()),
                         Err(why) => ctl.launcher_notice(asked.as_ref(), Notice::Error(why)),
                     }
-                });
+                }).or_log("a thread could not be started");
                 None
             }
             Action::SetAsideRecord { file } => {
@@ -3288,7 +3289,7 @@ impl Controller {
                 if a.hide_failures < HIDE_TRIES {
                     self.launcher.locked().accepted.push(a);
                 } else {
-                    eprintln!("launcher: an accepted invite could not be hidden at VRChat after {HIDE_TRIES} tries"); // i18n: not shown (a log line)
+                    log_warn!("launcher: an accepted invite could not be hidden at VRChat after {HIDE_TRIES} tries", HIDE_TRIES = HIDE_TRIES); // i18n: not shown (a log line)
                 }
             }
         }
@@ -3630,7 +3631,7 @@ fn save_dismissed(kept: &BTreeMap<String, i64>) {
     if let (Some(file), Ok(bytes)) = (dismissed_file(), serde_json::to_vec(kept)) {
         let tmp = file.with_extension("json.tmp");
         if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, &file);
+            std::fs::rename(&tmp, &file).or_log("a file could not be moved or copied");
         }
     }
 }

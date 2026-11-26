@@ -4,6 +4,7 @@
 //! browser to bring the code of the website's Connect, and trades it for the credential. The credential stays in this
 //! process (the window only sees the account's name and state).
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
@@ -204,10 +205,10 @@ impl Controller {
             self.account_saved_at_launch(server, saved);
         }
         let ctl = self.clone();
-        let _ = std::thread::Builder::new().name("account".into()).spawn(move || loop {
+        std::thread::Builder::new().name("account".into()).spawn(move || loop {
             ctl.account_tick();
             std::thread::sleep(Duration::from_millis(500));
-        });
+        }).or_log("a thread could not be started");
     }
 
     fn account_tick(self: &Shared) {
@@ -324,7 +325,7 @@ impl Controller {
             // environment it was last read for, the account installed stays with its own server (a call goes on), but is
             // nobody's for N4N0 until it is read; on any other (the environment was switched), nobody is signed in.
             Err(e) => {
-                eprintln!("account file: {e:#}");
+                log_warn!("account file: {e:#}", e = e);
                 let stays = {
                     let rt = self.account_runtime.locked();
                     rt.generation == before && rt.account.is_some() && rt.read.is_some_and(|(s, _)| s == server)
@@ -436,7 +437,7 @@ impl Controller {
                     AccountState::Expired { username: saved.username.clone() }
                 }
                 Err(e) => {
-                    eprintln!("account check: {e:#}");
+                    log_warn!("account check: {e:#}", e = e);
                     rt.offline_since = Some(Instant::now());
                     AccountState::Offline { username: saved.username.clone() }
                 }
@@ -692,7 +693,7 @@ impl Controller {
             return;
         }
         if let Err(e) = save(account) {
-            eprintln!("account file: {e:#}");
+            log_warn!("account file: {e:#}", e = e);
             return;
         }
         // What the file holds is what was written here, or it is read again as the change it is.

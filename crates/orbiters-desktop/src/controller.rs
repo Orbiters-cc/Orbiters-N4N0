@@ -2,6 +2,7 @@
 //! senders) and the session library, listens to the Action Menu over OSC, and publishes a [`Snapshot`] that
 //! the interface reads every frame. It keeps working while the window is hidden in the tray.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use crate::ipc::ToClient;
 use crate::mailbox::Mailbox;
@@ -435,14 +436,14 @@ fn read_calibration() -> Option<StoredCalibration> {
     let text = match orbiters_core::read_text(&path) {
         Ok(text) => text?,
         Err(e) => {
-            eprintln!("calibration: {}: {e}", path.display());
+            log_warn!("calibration: {}: {e}", path.display(), e = e);
             return None;
         }
     };
     match serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(&text)) {
         Ok(stored) => Some(stored),
         Err(e) => {
-            eprintln!("calibration: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path));
+            log_warn!("calibration: {}: {e}; kept as {:?}", path.display(), orbiters_core::keep_aside(&path), e = e);
             None
         }
     }
@@ -736,26 +737,26 @@ impl Controller {
         {
             // VRChat's camera masks a run killed during a recording left changed (CTL2-2): once VRChat is known.
             let ctl = self.clone();
-            let _ = std::thread::Builder::new().name("masks-left".into()).spawn(move || ctl.put_back_masks_left(Duration::from_secs(20)));
+            std::thread::Builder::new().name("masks-left".into()).spawn(move || ctl.put_back_masks_left(Duration::from_secs(20))).or_log("a thread could not be started");
         }
         {
             let ctl = self.clone();
-            let _ = std::thread::Builder::new().name("paused-reconstructions".into()).spawn(move || ctl.go_on_with_paused());
+            std::thread::Builder::new().name("paused-reconstructions".into()).spawn(move || ctl.go_on_with_paused()).or_log("a thread could not be started");
         }
         // The computer's keyboard for N4N0's menu keyboard: its keys go to N4N0, off the hook's thread.
         let (tx, rx) = mpsc::channel();
         crate::keys::start(tx);
         let ctl = Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("keys".into()).spawn(move || {
+        std::thread::Builder::new().name("keys".into()).spawn(move || {
             while let Ok(key) = rx.recv() {
                 let Some(ctl) = ctl.upgrade() else { return };
                 ctl.n4n0.key(key);
             }
-        });
+        }).or_log("a thread could not be started");
         let c = self.clone();
         std::thread::spawn(move || {
             if let Err(e) = c.ensure_worker() {
-                eprintln!("capture worker: {e}");
+                log_warn!("capture worker: {e}", e = e);
             }
         });
         spawn_watchers(self.clone());
@@ -994,7 +995,7 @@ impl Controller {
         #[cfg(target_os = "macos")]
         let handle = {
             let mut handle = handle;
-            let _ = handle.send(&self.worker_host());
+            handle.send(&self.worker_host()).or_log("what a worker was asked did not reach it");
             handle
         };
         *guard = Some(handle);
@@ -1752,7 +1753,7 @@ impl Controller {
         self.update(|s| s.steamvr.calibration = Some(info.clone()));
         if self.is_capturing() {
             if let Err(e) = self.send(&WorkerCommand::Calibration { calibration: Box::new(stored.calibration.clone()) }) {
-                eprintln!("calibration to the worker: {e:#}");
+                log_warn!("calibration to the worker: {e:#}", e = e);
             }
         }
         self.notify(NoticeKind::Success, tr!("Calibrated: eyes at {eyes} m, hands {hands} m apart.", eyes = format!("{:.2}", info.head_height_m), hands = format!("{:.2}", info.arm_span_m)));
@@ -1913,7 +1914,7 @@ impl Controller {
             Some(Some(addr)) => fetch(addr),
         };
         let values = result.unwrap_or_else(|e| {
-            eprintln!("current OSC values: {e:#}");
+            log_warn!("current OSC values: {e:#}", e = e);
             Vec::new()
         });
         (query, values)
@@ -1927,7 +1928,7 @@ impl Controller {
         }
         let samples = std::mem::take(&mut osc.pending);
         if let Err(e) = self.send_if_running(&WorkerCommand::Osc { samples }) {
-            eprintln!("OSC values to the worker: {e:#}");
+            log_warn!("OSC values to the worker: {e:#}", e = e);
         }
     }
 
@@ -2000,7 +2001,7 @@ impl Controller {
                     if cfg!(debug_assertions) && std::env::var_os("ORBITERS_VR_SANDBOX_ROOT").is_some()
                         // Not /tracking/vrsystem/*: VRChat sends those every frame, and they grew the sandbox's app-err.log by 2.7 MB a minute (227 MB in one session).
                         && (address=="/usercamera/Pose" || address=="/usercamera/Flying") {
-                        eprintln!("sandbox camera OSC {at_ns} {address} {values:?}"); // i18n: not shown (developer diagnostics)
+                        log_info!("sandbox camera OSC {at_ns} {address} {values:?}", at_ns = at_ns, address = address, values = values); // i18n: not shown (developer diagnostics)
                     }
                     // Where VRChat's avatar's hands are: its camera panel opens by the left, and is grabbed from either (`camera_reckon`).
                     let wrist = match address.as_str() { "/tracking/vrsystem/leftwrist/pose" => Some(0), "/tracking/vrsystem/rightwrist/pose" => Some(1), _ => None };
@@ -2059,7 +2060,7 @@ impl Controller {
         let mut osc = self.osc_values.locked();
         let mode = messages.iter().rev().find(|(p,_)| p == CAMERA_MODE).and_then(|(_,v)| match v.first() { Some(OscValue::Int(m)) => Some(*m), _ => None });
         let echo = mode.is_some_and(|mode| osc.camera_command.is_some_and(|(written,_)| written == mode));
-        if echo { eprintln!("camera Mode app echo ignored at {at_ns}: {mode:?}"); } // i18n: not shown (diagnostics)
+        if echo { log_info!("camera Mode app echo ignored at {at_ns}: {mode:?}", at_ns = at_ns, mode = mode); } // i18n: not shown (diagnostics)
         // Command provenance lasts for this connection; a close permits a real reopening.
         if mode == Some(0) { osc.camera_command=None; osc.camera_closed_at=Some(at_ns); }
         let camera = if echo { None } else { camera };
@@ -2085,7 +2086,7 @@ impl Controller {
         }
         drop(osc);
         if let Some(open) = camera {
-            eprintln!("camera Mode received at {at_ns}, publishing open={open}"); // i18n: not shown (diagnostics)
+            log_info!("camera Mode received at {at_ns}, publishing open={open}", at_ns = at_ns, open = open); // i18n: not shown (diagnostics)
             self.update_if(|s| {
                 let changed = s.camera_open_said != Some(open);
                 s.camera_open_said = Some(open);
@@ -2117,7 +2118,7 @@ impl Controller {
             let parameter = RECORD_PARAMETER;
             c.update(|s| s.osc.last_event = Some(format!("{parameter} = {}", if on { "on" } else { "off" })));
             if !c.vrchat_agrees(parameter, on) {
-                eprintln!("{parameter} = {on} came over OSC, but VRChat's avatar does not say so: ignored");
+                log_info!("{parameter} = {on} came over OSC, but VRChat's avatar does not say so: ignored", parameter = parameter, on = on);
                 return;
             }
             c.on_record_toggle(on);
@@ -2292,7 +2293,7 @@ impl Controller {
             left_out = rejected;
         });
         if !left_out.is_empty() {
-            eprintln!("settings from a window: {} left out", left_out.join(", "));
+            log_info!("settings from a window: {} left out", left_out.join(", "));
         }
     }
 
@@ -2417,7 +2418,7 @@ impl Controller {
                         let _ = tx.send((revision, settings));
                         *writer = SettingsWriter::Running(tx, thread);
                     }
-                    Err(e) => eprintln!("settings writer: {e}"),
+                    Err(e) => log_warn!("settings writer: {e}", e = e),
                 }
             }
             SettingsWriter::Running(tx, _) => {
@@ -2493,7 +2494,7 @@ impl Controller {
             }
         }
         // The sink told the person each time; the log keeps it too.
-        eprintln!("settings: revision {revision} could not be written before quitting");
+        log_warn!("settings: revision {revision} could not be written before quitting", revision = revision);
     }
 
     /// How Fast walk carries the person now, for the windows.
@@ -2628,7 +2629,7 @@ impl Controller {
         self.pending_start.locked().take();
         self.change_queue(VecDeque::clear);
         if let Err(e) = self.stop_capture_now() {
-            eprintln!("stopping the capture: {e:#}");
+            log_warn!("stopping the capture: {e:#}", e = e);
         }
         self.quitting.store(true, Ordering::Relaxed);
         // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
@@ -2791,7 +2792,7 @@ impl Controller {
             });
             if let Err(e) = r.handle.pause() {
                 // It has gone or is going by itself: its exit keeps it first in line.
-                eprintln!("could not ask the reconstruction to pause: {e}");
+                log_warn!("could not ask the reconstruction to pause: {e}", e = e);
                 r.handle.cancel();
             }
             dir
@@ -2811,7 +2812,7 @@ impl Controller {
     fn check_pausing(&self) {
         let mut guard = self.reconstruction.locked();
         if let Some(r) = guard.as_mut().filter(|r| !r.freed && r.pausing.is_some_and(|t| pause_overdue(t.elapsed(), r.seen.map(|s| s.elapsed())))) {
-            eprintln!("the reconstruction did not leave the GPU in time after it was asked to pause (seen: {}): it was stopped", r.seen.is_some());
+            log_warn!("the reconstruction did not leave the GPU in time after it was asked to pause (seen: {}): it was stopped", r.seen.is_some());
             r.freed = true;
             r.handle.cancel();
         }
@@ -3147,7 +3148,7 @@ impl Controller {
             move || next.next_reconstruction(),
         );
         if let Err(e) = started {
-            eprintln!("could not start preparing an upload in the background: {e:#}");
+            log_warn!("could not start preparing an upload in the background: {e:#}", e = e);
         }
     }
 
@@ -3698,7 +3699,7 @@ fn spawn_watchers(ctl: Shared) {
                         if history_changed && (flush || history.save_due(true)) {
                             match history.checkpoint(&history_file) {
                                 Ok(()) => history_changed = false,
-                                Err(e) => eprintln!("visited worlds: {e}"),
+                                Err(e) => log_warn!("visited worlds: {e}", e = e),
                             }
                         }
                     }

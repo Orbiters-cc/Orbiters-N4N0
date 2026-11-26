@@ -327,7 +327,7 @@ impl Viewer {
                         }
                     }
                     Err(e) => {
-                        eprintln!("3D view: {e}");
+                        log_warn!("3D view: {e}", e = e);
                         self.refused = Some(to);
                     }
                 }
@@ -1004,7 +1004,7 @@ fn load(dir: &Path, ctx: &egui::Context, window: (wgpu::Device, wgpu::Queue), in
     let source = match integrated.then(|| source(ctx, window.clone(), true, &g, sky.as_ref(), marks)) {
         Some(Ok(s)) => s,
         Some(Err(e)) => {
-            eprintln!("3D view on the window's GPU, not the integrated one: {e:#}");
+            log_warn!("3D view on the window's GPU, not the integrated one: {e:#}", e = e);
             source(ctx, window, false, &g, sky.as_ref(), marks)?
         }
         None => source(ctx, window, false, &g, sky.as_ref(), marks)?,

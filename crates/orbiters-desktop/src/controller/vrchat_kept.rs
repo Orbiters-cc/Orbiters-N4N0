@@ -6,6 +6,7 @@
 //! Only what is verified is kept: a list whose `verified_for` is a member's account, while VRChat says that account is
 //! signed in. Signing out removes it all ([`Controller::kept_forget`]); a write begun before that writes nothing after.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::vrchat_data::Scope;
 use super::vrchat_login::Bell;
@@ -124,7 +125,7 @@ impl Controller {
         let Some(root) = self.kept().root.clone() else { return };
         let weak = Arc::downgrade(self);
         let bell = self.vrchat_kept.bell.clone();
-        let _ = std::thread::Builder::new().name("vrchat-kept".into()).spawn(move || {
+        std::thread::Builder::new().name("vrchat-kept".into()).spawn(move || {
             store::sweep(&root);
             leave_before(&root.with_file_name(BEFORE));
             let mut heard = 0;
@@ -134,7 +135,7 @@ impl Controller {
                 let Some(ctl) = weak.upgrade() else { break };
                 ctl.kept_save(false);
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The list on show as it is now, into its account's store, where it differs from what is there; `leaving`: the service

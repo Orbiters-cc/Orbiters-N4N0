@@ -84,6 +84,7 @@ pub use portable::*;
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use orbiters_core::app_log::OrLog as _;
     use super::MacWindow;
     use std::ffi::c_void;
 
@@ -156,7 +157,7 @@ mod imp {
         // SAFETY: a plain call; macOS shows its own question at most once.
         let allowed = unsafe { CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() };
         if !allowed {
-            let _ = std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").spawn();
+            std::process::Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture").spawn().or_log("a program could not be started");
         }
     }
 

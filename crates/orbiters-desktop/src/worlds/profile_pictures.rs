@@ -21,6 +21,7 @@
 //! Picture addresses are never written to a log. What happened to each person's picture is ([`note`]): a short digest
 //! of their id, the kind of address and the outcome, so the next session's log says why a missing picture is missing.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use egui::ColorImage;
 use image::RgbaImage;
@@ -313,7 +314,7 @@ impl Fetcher {
         }
         for i in 0..FETCHERS {
             let (line, store) = (self.line.clone(), self.store.clone());
-            let _ = std::thread::Builder::new().name(format!("profile-pictures-{i}")).spawn(move || work(&line, &store));
+            std::thread::Builder::new().name(format!("profile-pictures-{i}")).spawn(move || work(&line, &store)).or_log("a thread could not be started");
         }
     }
 
@@ -583,7 +584,7 @@ impl Profiles {
         let me = self.clone();
         // A new list, or the session back: asked again at once.
         self.fetcher.resume();
-        let _ = std::thread::Builder::new().name("profile-pictures-warm".into()).spawn(move || {
+        std::thread::Builder::new().name("profile-pictures-warm".into()).spawn(move || {
             me.fetcher.clear_background();
             let (mut kept, mut elsewhere, mut queued) = (0, 0, 0);
             let total = items.len();
@@ -603,7 +604,7 @@ impl Profiles {
                 me.fetcher.queue(&url, user.as_deref(), via.clone());
             }
             note(&format!("list of {total} pictures: {kept} kept, {elsewhere} from VRCX or VRCNext, {queued} to ask of VRChat")); // i18n: not shown (a log line)
-        });
+        }).or_log("a thread could not be started");
     }
 }
 

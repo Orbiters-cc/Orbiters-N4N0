@@ -6,6 +6,7 @@
 //! Mac's own loopback, as beside a PC's VRChat, on the port VRChat sends to by default (9001) when it can have it, so that
 //! what VRChat says arrives whether or not the two find each other by OSCQuery. An address the person typed stays theirs.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{NoticeKind, Shared};
 use crate::state::{LanLink, LanStatus};
@@ -114,7 +115,7 @@ impl super::Controller {
             return;
         }
         let ctl = std::sync::Arc::downgrade(self);
-        let _ = std::thread::Builder::new().name("vrchat-network".into()).spawn(move || {
+        std::thread::Builder::new().name("vrchat-network".into()).spawn(move || {
             let mut browser: Option<LanBrowser> = None;
             let mut running: Option<Running> = None;
             loop {
@@ -128,7 +129,7 @@ impl super::Controller {
                 };
                 std::thread::sleep(wait);
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// One turn: the list, the choice, the service, what the interface shows.
@@ -152,7 +153,7 @@ impl super::Controller {
         if browser.is_none() {
             match LanBrowser::start() {
                 Ok(started) => *browser = Some(started),
-                Err(e) => eprintln!("looking for VRChat on the network: {e:#}"),
+                Err(e) => log_warn!("looking for VRChat on the network: {e:#}", e = e),
             }
         }
         if self.lan.look.swap(false, Ordering::Relaxed) {
@@ -219,7 +220,7 @@ impl super::Controller {
         }
         let link = if own { own_link(heard) } else { link(&choice, here, heard, refused) };
         if self.lan.alive.swap(link == LanLink::Connected, Ordering::Relaxed) != (link == LanLink::Connected) {
-            eprintln!("VRChat on the network: {link:?} {}", peer.map(|p| p.to_string()).unwrap_or_default());
+            log_info!("VRChat on the network: {link:?} {}", peer.map(|p| p.to_string()).unwrap_or_default(), link = link);
         }
         let label = match &choice {
             _ if own => Some(tr("VRChat on this Mac").to_string()),

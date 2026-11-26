@@ -60,7 +60,7 @@ impl Videos {
         if self.changed && (flush || self.history.save_due(true)) {
             match self.history.checkpoint(&self.file) {
                 Ok(()) => self.changed = false,
-                Err(e) => eprintln!("video history: {e}"),
+                Err(e) => log_warn!("video history: {e}", e = e),
             }
         }
     }
@@ -72,7 +72,7 @@ impl Videos {
             match rx.try_recv() {
                 Ok((url, Ok(found))) => self.changed |= self.history.set_title(&url, found),
                 Ok((_, Err(e))) => {
-                    eprintln!("video history: YouTube's titles: {e}");
+                    log_warn!("video history: YouTube's titles: {e}", e = e);
                     self.offline_until = Some(Instant::now() + OFFLINE_PAUSE);
                 }
                 Err(mpsc::TryRecvError::Empty) => return,

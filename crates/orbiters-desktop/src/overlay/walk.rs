@@ -637,7 +637,8 @@ impl Log {
             let _ = std::fs::rename(&path, dir.join("walk-boost.previous.log"));
         }
         let t = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let _ = std::fs::create_dir_all(&dir);
+        use orbiters_core::app_log::OrLog as _;
+        std::fs::create_dir_all(&dir).or_log("a folder could not be made");
         if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
             let _ = writeln!(file, "{} {:02}:{:02}:{:02}.{:03} {what}", t.date(), t.hour(), t.minute(), t.second(), t.millisecond());
         }

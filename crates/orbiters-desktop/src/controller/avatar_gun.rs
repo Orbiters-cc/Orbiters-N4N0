@@ -13,6 +13,7 @@
 //! OSC: what VRChat sends is only recorded on its receiving thread; every write goes from this module's own thread, one
 //! edge of a parameter per turn at most.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{Controller, NoticeKind, Shared};
 use orbiters_contracts::avatar_gun::{self as gun, params, Event, Outcome};
@@ -372,7 +373,7 @@ impl Controller {
             }
             let fast = ctl.avatar_gun_turn();
             std::thread::sleep(if fast { TRIGGER_TURN } else { TURN });
-        });
+        }).or_log("a thread could not be started");
     }
 
     pub(super) fn stop_avatar_gun(&self) {
@@ -419,13 +420,13 @@ impl Controller {
         match (&shown.kind, main) {
             (CardKind::Ask, true) => {
                 if let Some(hit) = hit {
-                    eprintln!("avatar gun: {} allowed by the person", hit.shot); // i18n: not shown (a log's line)
+                    log_info!("avatar gun: {} allowed by the person", hit.shot); // i18n: not shown (a log's line)
                     self.avatar_gun_change(Hit { allowed: true, ..hit });
                 }
             }
             (CardKind::Ask, false) => {
                 if let Some(hit) = hit {
-                    eprintln!("avatar gun: {} refused by the person", hit.shot); // i18n: not shown (a log's line)
+                    log_warn!("avatar gun: {} refused by the person", hit.shot); // i18n: not shown (a log's line)
                     self.avatar_gun_answer(&hit.to, &hit.shot, Outcome::Refused);
                 }
                 self.avatar_gun_end(card);
@@ -445,7 +446,7 @@ impl Controller {
         if !self.view().avatar_gun.card.as_ref().is_some_and(|c| c.id == card && c.hinted() && c.hint == Hint::Offered) {
             return;
         }
-        eprintln!("avatar gun: first change's hint: {}", if keep { "kept on" } else { "turned off" }); // i18n: not shown (a log's line)
+        log_info!("avatar gun: first change's hint: {}", if keep { "kept on" } else { "turned off" }); // i18n: not shown (a log's line)
         if !keep {
             self.update_settings(|s| s.avatar_gun.allow = AvatarGunAllow::Nobody);
         }
@@ -545,7 +546,7 @@ impl Controller {
         } else {
             let mut rt = self.avatar_gun.locked();
             if rt.streaming.take().is_some() {
-                eprintln!("avatar gun: event stream closed (not needed)"); // i18n: not shown (a log's line)
+                log_info!("avatar gun: event stream closed (not needed)"); // i18n: not shown (a log's line)
             }
             rt.connected = false;
         }
@@ -557,7 +558,7 @@ impl Controller {
             match (param, on) {
                 (params::FIRE, true) if gun_worn => match (ready, account.as_ref(), instance.as_ref(), settings.loaded.as_ref()) {
                     (true, Some(member), Some(instance), Some(loaded)) => self.avatar_gun_shoot(&member.api, &member.token, instance, loaded),
-                    _ => eprintln!("avatar gun: Fire rose, not loaded: no shot reported"), // i18n: not shown (a log's line)
+                    _ => log_info!("avatar gun: Fire rose, not loaded: no shot reported"), // i18n: not shown (a log's line)
                 },
                 (params::CHOOSE, true) if gun_worn => {
                     let choose = {
@@ -565,12 +566,12 @@ impl Controller {
                         rt.choose += 1;
                         rt.choose
                     };
-                    eprintln!("avatar gun: Choose pressed: the picker opens"); // i18n: not shown (a log's line)
+                    log_info!("avatar gun: Choose pressed: the picker opens"); // i18n: not shown (a log's line)
                     self.update(|s| s.avatar_gun.choose = choose);
                 }
                 (params::HIT, true) if receiver && settings.allow != AvatarGunAllow::Nobody => match (connected, account.as_ref(), instance.as_ref()) {
                     (true, Some(member), Some(instance)) => self.avatar_gun_report_hit(&member.api, &member.token, instance),
-                    _ => eprintln!("avatar gun: Hit rose, the stream is not open: not reported"), // i18n: not shown (a log's line)
+                    _ => log_info!("avatar gun: Hit rose, the stream is not open: not reported"), // i18n: not shown (a log's line)
                 },
                 _ => {}
             }
@@ -584,7 +585,7 @@ impl Controller {
             if due && self.avatar_gun_send(params::LOADED, ready) {
                 let mut rt = self.avatar_gun.locked();
                 if rt.loaded_sent.is_none_or(|(was, _)| was != ready) {
-                    eprintln!("avatar gun: Loaded {ready}"); // i18n: not shown (a log's line)
+                    log_info!("avatar gun: Loaded {ready}", ready = ready); // i18n: not shown (a log's line)
                 }
                 rt.loaded_sent = Some((ready, now));
             }
@@ -619,7 +620,7 @@ impl Controller {
             if card.kind == CardKind::Ask {
                 let hit = self.avatar_gun.locked().hit.clone().filter(|h| h.card == card.id);
                 if let Some(hit) = hit {
-                    eprintln!("avatar gun: {} not answered in time: refused", hit.shot); // i18n: not shown (a log's line)
+                    log_warn!("avatar gun: {} not answered in time: refused", hit.shot); // i18n: not shown (a log's line)
                     self.avatar_gun_answer(&hit.to, &hit.shot, Outcome::Refused);
                 }
             }
@@ -655,7 +656,7 @@ impl Controller {
         let has = |name: &str| values.iter().any(|(a, _)| a.strip_prefix(PARAMETERS_PREFIX) == Some(name));
         let (gun_worn, receiver) = (has(params::FIRE), has(params::HIT));
         if (gun_worn, receiver) != (rt.gun, rt.receiver) {
-            eprintln!("avatar gun: the avatar has the gun {gun_worn}, a receiver {receiver}"); // i18n: not shown (a log's line)
+            log_info!("avatar gun: the avatar has the gun {gun_worn}, a receiver {receiver}", gun_worn = gun_worn, receiver = receiver); // i18n: not shown (a log's line)
         }
         (rt.gun, rt.receiver) = (gun_worn, receiver);
         for (address, value) in &values {
@@ -675,7 +676,7 @@ impl Controller {
         let number = {
             let mut rt = self.avatar_gun.locked();
             if rt.streaming.as_ref().is_some_and(|(_, t, i, e)| *t != member.token || i != instance || *e != member.epoch) {
-                eprintln!("avatar gun: another instance or account: the event stream is opened again"); // i18n: not shown (a log's line)
+                log_info!("avatar gun: another instance or account: the event stream is opened again"); // i18n: not shown (a log's line)
                 rt.streaming = None;
                 rt.connected = false;
                 rt.retry_at = None;
@@ -691,9 +692,9 @@ impl Controller {
         };
         let ctl = self.clone();
         let (member, instance) = (member.clone(), instance.to_string());
-        let _ = std::thread::Builder::new().name("avatar-gun-events".into()).spawn(move || {
+        std::thread::Builder::new().name("avatar-gun-events".into()).spawn(move || {
             let url = member.api.url(&format!("{}?instance={instance}", gun::routes::EVENTS));
-            eprintln!("avatar gun: event stream opening"); // i18n: not shown (a log's line)
+            log_info!("avatar gun: event stream opening"); // i18n: not shown (a log's line)
             let still = || {
                 let mut rt = ctl.avatar_gun.locked();
                 let current = !rt.stop && rt.streaming.as_ref().is_some_and(|(n, ..)| *n == number);
@@ -705,15 +706,15 @@ impl Controller {
             let result = super::event_stream::follow(&url, &member.token, STREAM_IDLE, EVENT_MOST, still, |event, data| {
                 match Event::parse(event, data) {
                     Some(e) => ctl.avatar_gun_event(e, &member, &instance),
-                    None => eprintln!("avatar gun: event {event} not read"), // i18n: not shown (a log's line)
+                    None => log_warn!("avatar gun: event {event} not read", event = event), // i18n: not shown (a log's line)
                 }
                 true
             });
             if let Err(e) = &result {
-                eprintln!("avatar gun events: {e:#}"); // i18n: not shown (a log's line)
+                log_warn!("avatar gun events: {e:#}", e = e); // i18n: not shown (a log's line)
             }
             ctl.avatar_gun_stream_ended(number, matches!(result, Ok(true)));
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// The stream `number` ended, `well` or not: when the next one is tried, unless another took its place meanwhile (its
@@ -733,7 +734,7 @@ impl Controller {
     /// `AvatarGun/Fire` rose with the gun loaded: the shot goes to Orbiters.
     fn avatar_gun_shoot(&self, api: &Api, token: &str, instance: &str, loaded: &orbiters_core::settings::LoadedAvatar) {
         let Some(avatar) = gun::Avatar::for_shot(&loaded.id, &loaded.name, Some(&loaded.thumbnail)) else {
-            eprintln!("avatar gun: the loaded avatar is not an avatar's id: no shot"); // i18n: not shown (a log's line)
+            log_info!("avatar gun: the loaded avatar is not an avatar's id: no shot"); // i18n: not shown (a log's line)
             return;
         };
         let shot = uuid::Uuid::new_v4().to_string();
@@ -741,8 +742,8 @@ impl Controller {
         let report = gun::ShotReport { instance: instance.to_string(), shot: shot.clone(), avatar };
         let (api, token) = (api.clone(), token.to_string());
         std::thread::spawn(move || match post(&api, &token, gun::routes::SHOTS, &report) {
-            Ok(()) => eprintln!("avatar gun: shot {shot} reported"), // i18n: not shown (a log's line)
-            Err(e) => eprintln!("avatar gun: shot {shot} not reported: {e:#}"), // i18n: not shown (a log's line)
+            Ok(()) => log_info!("avatar gun: shot {shot} reported", shot = shot), // i18n: not shown (a log's line)
+            Err(e) => log_warn!("avatar gun: shot {shot} not reported: {e:#}", shot = shot, e = e), // i18n: not shown (a log's line)
         });
     }
 
@@ -751,8 +752,8 @@ impl Controller {
         let report = gun::HitReport { instance: instance.to_string() };
         let (api, token) = (api.clone(), token.to_string());
         std::thread::spawn(move || match post(&api, &token, gun::routes::HITS, &report) {
-            Ok(()) => eprintln!("avatar gun: hit reported"), // i18n: not shown (a log's line)
-            Err(e) => eprintln!("avatar gun: hit not reported: {e:#}"), // i18n: not shown (a log's line)
+            Ok(()) => log_info!("avatar gun: hit reported"), // i18n: not shown (a log's line)
+            Err(e) => log_warn!("avatar gun: hit not reported: {e:#}", e = e), // i18n: not shown (a log's line)
         });
     }
 
@@ -766,7 +767,7 @@ impl Controller {
         let (to, report) = (to.clone(), gun::AnswerReport { shot: shot.to_string(), result });
         std::thread::spawn(move || {
             if let Err(e) = post(&to.api, &to.token, gun::routes::ANSWERS, &report) {
-                eprintln!("avatar gun: answer {:?} for {} not sent: {e:#}", report.result, report.shot); // i18n: not shown (a log's line)
+                log_warn!("avatar gun: answer {:?} for {} not sent: {e:#}", report.result, report.shot, e = e); // i18n: not shown (a log's line)
             }
         });
     }
@@ -777,17 +778,17 @@ impl Controller {
             Event::Hit(hit) => self.avatar_gun_hit(hit, to, instance),
             Event::Landed(landed) => {
                 // What the hit player then does comes as an answer: nothing to say yet.
-                eprintln!("avatar gun: shot {} landed on {}", landed.shot, landed.name); // i18n: not shown (a log's line)
+                log_info!("avatar gun: shot {} landed on {}", landed.shot, landed.name); // i18n: not shown (a log's line)
             }
             Event::Answer(answer) => {
-                eprintln!("avatar gun: shot {} answered {:?}", answer.shot, answer.result); // i18n: not shown (a log's line)
+                log_info!("avatar gun: shot {} answered {:?}", answer.shot, answer.result); // i18n: not shown (a log's line)
                 if self.avatar_gun.locked().shots.iter().any(|(s, _)| *s == answer.shot) {
                     let kind = if answer.result == Outcome::Changed { NoticeKind::Success } else { NoticeKind::Info };
                     self.notify(kind, shooter_says(answer.result, &answer.name));
                 }
             }
             Event::Crossed(crossed) => {
-                eprintln!("avatar gun: shot {} crossed another", crossed.shot); // i18n: not shown (a log's line)
+                log_info!("avatar gun: shot {} crossed another", crossed.shot); // i18n: not shown (a log's line)
                 if self.avatar_gun.locked().shots.iter().any(|(s, _)| *s == crossed.shot) {
                     self.notify(NoticeKind::Info, tr(CROSSED));
                 }
@@ -798,7 +799,7 @@ impl Controller {
     /// A hit of another player's shot: what the settings say of it ([`decide`]).
     fn avatar_gun_hit(self: &Shared, hit: gun::Hit, to: &Member, instance: &str) {
         if !gun::is_avatar_id(&hit.avatar.id) {
-            eprintln!("avatar gun: hit {} names no avatar: refused", hit.shot); // i18n: not shown (a log's line)
+            log_warn!("avatar gun: hit {} names no avatar: refused", hit.shot); // i18n: not shown (a log's line)
             self.avatar_gun_answer(to, &hit.shot, Outcome::Refused);
             return;
         }
@@ -827,7 +828,7 @@ impl Controller {
                 }
                 (decision, pending)
             };
-            eprintln!("avatar gun: hit {} by {} ({}), {:?} in {instance}: {decision:?}", hit.shot, hit.from.name, if friend { "a friend" } else { "not a friend" }, allow); // i18n: not shown (a log's line)
+            log_info!("avatar gun: hit {} by {} ({}), {:?} in {instance}: {decision:?}", hit.shot, hit.from.name, if friend { "a friend" } else { "not a friend" }, allow, instance = instance, decision = decision); // i18n: not shown (a log's line)
             match decision {
                 Decision::Refuse(_) => ctl.avatar_gun_answer(&to, &hit.shot, Outcome::Refused),
                 Decision::Ask => {
@@ -853,11 +854,11 @@ impl Controller {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
                 Err(e) => {
-                    eprintln!("avatar gun: {} could not be read: {e:#}", hit.avatar.id); // i18n: not shown (a log's line)
+                    log_warn!("avatar gun: {} could not be read: {e:#}", hit.avatar.id, e = e); // i18n: not shown (a log's line)
                     false
                 }
             };
-            eprintln!("avatar gun: {} is public: {public} (signed in to VRChat: {signed_in})", hit.avatar.id); // i18n: not shown (a log's line)
+            log_info!("avatar gun: {} is public: {public} (signed in to VRChat: {signed_in})", hit.avatar.id, public = public, signed_in = signed_in); // i18n: not shown (a log's line)
             if !public {
                 ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::NotPublic), FAILED_FOR_MS);
                 ctl.avatar_gun_answer(&hit.to, &hit.shot, Outcome::Refused);
@@ -890,7 +891,7 @@ impl Controller {
                     ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::DidNotFollow { signed_in }), FAILED_FOR_MS);
                     ctl.avatar_gun_release(hit.card);
                 } else {
-                    eprintln!("avatar gun: {} is not allowed any more (the instance left, the setting changed): stopped", hit.shot); // i18n: not shown (a log's line)
+                    log_info!("avatar gun: {} is not allowed any more (the instance left, the setting changed): stopped", hit.shot); // i18n: not shown (a log's line)
                     ctl.avatar_gun_end(hit.card);
                 }
                 ctl.avatar_gun_answer(&hit.to, &hit.shot, Outcome::Refused);
@@ -901,14 +902,14 @@ impl Controller {
     /// Undo: back to the avatar worn before, by the same means; Orbiters tells the shooter.
     fn avatar_gun_undo(self: &Shared, hit: Hit) {
         let Some(before) = self.avatar_gun.locked().before.clone() else {
-            eprintln!("avatar gun: Undo, but the avatar worn before is not known"); // i18n: not shown (a log's line)
+            log_info!("avatar gun: Undo, but the avatar worn before is not known"); // i18n: not shown (a log's line)
             self.avatar_gun_card(&hit, CardKind::Failed(Failure::UndoFailed), FAILED_FOR_MS);
             return;
         };
         self.avatar_gun_card(&hit, CardKind::Undoing, gun::CHANGE_WAIT_S * 2000 + 4000);
         let ctl = self.clone();
         std::thread::spawn(move || {
-            eprintln!("avatar gun: Undo of {}: back to {before}", hit.shot); // i18n: not shown (a log's line)
+            log_info!("avatar gun: Undo of {}: back to {before}", hit.shot, before = before); // i18n: not shown (a log's line)
             // The person's own, whatever the settings say.
             if ctl.avatar_gun_wear(&before, || true) {
                 {
@@ -917,7 +918,7 @@ impl Controller {
                 }
                 ctl.avatar_gun_end(hit.card);
                 if let Err(e) = post(&hit.to.api, &hit.to.token, gun::routes::UNDONE, &gun::UndoneReport { shot: hit.shot.clone() }) {
-                    eprintln!("avatar gun: undone of {} not sent: {e:#}", hit.shot); // i18n: not shown (a log's line)
+                    log_warn!("avatar gun: undone of {} not sent: {e:#}", hit.shot, e = e); // i18n: not shown (a log's line)
                 }
             } else {
                 ctl.avatar_gun_card(&hit, CardKind::Failed(Failure::UndoFailed), FAILED_FOR_MS);
@@ -960,35 +961,35 @@ impl Controller {
             let asked = orbiters_core::clock::now_ns();
             match source.select_avatar_while(id, &permitted) {
                 Ok(()) => {
-                    eprintln!("avatar gun: {id} selected through VRChat's API; waiting for VRChat"); // i18n: not shown (a log's line)
+                    log_info!("avatar gun: {id} selected through VRChat's API; waiting for VRChat", id = id); // i18n: not shown (a log's line)
                     if self.avatar_gun_wait(id, asked) {
-                        eprintln!("avatar gun: {id} worn: VRChat followed its API"); // i18n: not shown (a log's line)
+                        log_info!("avatar gun: {id} worn: VRChat followed its API", id = id); // i18n: not shown (a log's line)
                         return true;
                     }
-                    eprintln!("avatar gun: VRChat did not follow its API within {} s", gun::CHANGE_WAIT_S); // i18n: not shown (a log's line)
+                    log_warn!("avatar gun: VRChat did not follow its API within {} s", gun::CHANGE_WAIT_S); // i18n: not shown (a log's line)
                 }
-                Err(e) => eprintln!("avatar gun: VRChat's API refused the selection: {e:#}"), // i18n: not shown (a log's line)
+                Err(e) => log_warn!("avatar gun: VRChat's API refused the selection: {e:#}", e = e), // i18n: not shown (a log's line)
             }
         } else {
-            eprintln!("avatar gun: not signed in to VRChat here: OSC only"); // i18n: not shown (a log's line)
+            log_info!("avatar gun: not signed in to VRChat here: OSC only"); // i18n: not shown (a log's line)
         }
         if !permitted() {
             return false;
         }
         let asked = orbiters_core::clock::now_ns();
         match self.with_osc(|o| o.send(AVATAR_CHANGE, vec![rosc::OscType::String(id.to_string())])) {
-            Some(Ok(())) => eprintln!("avatar gun: /avatar/change {id} sent over OSC; waiting for VRChat"), // i18n: not shown (a log's line)
+            Some(Ok(())) => log_info!("avatar gun: /avatar/change {id} sent over OSC; waiting for VRChat", id = id), // i18n: not shown (a log's line)
             Some(Err(e)) => {
-                eprintln!("avatar gun: OSC /avatar/change failed: {e:#}"); // i18n: not shown (a log's line)
+                log_warn!("avatar gun: OSC /avatar/change failed: {e:#}", e = e); // i18n: not shown (a log's line)
                 return false;
             }
             None => {
-                eprintln!("avatar gun: OSC is off: nothing sent"); // i18n: not shown (a log's line)
+                log_info!("avatar gun: OSC is off: nothing sent"); // i18n: not shown (a log's line)
                 return false;
             }
         }
         let worn = self.avatar_gun_wait(id, asked);
-        eprintln!("avatar gun: {id} {}", if worn { "worn: VRChat followed OSC" } else { "not worn: VRChat did not follow OSC" }); // i18n: not shown (a log's line)
+        log_warn!("avatar gun: {id} {}", if worn { "worn: VRChat followed OSC" } else { "not worn: VRChat did not follow OSC" }, id = id); // i18n: not shown (a log's line)
         worn
     }
 }

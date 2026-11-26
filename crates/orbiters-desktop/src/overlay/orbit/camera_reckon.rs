@@ -275,7 +275,7 @@ impl Fit {
     /// Kept for the next openings.
     pub fn save(&self) {
         if let Err(e) = serde_json::to_string_pretty(self).map_err(|e| e.to_string()).and_then(|text| std::fs::write(Self::file(), text).map_err(|e| e.to_string())) {
-            eprintln!("{}: {e}", Self::file().display());
+            log_warn!("{}: {e}", Self::file().display(), e = e);
         }
     }
 }

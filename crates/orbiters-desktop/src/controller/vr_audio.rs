@@ -398,7 +398,7 @@ fn load(path: &Path) -> Saved {
 fn save(path: &Path, saved: &Saved) {
     let written = serde_json::to_vec_pretty(saved).map_err(std::io::Error::other).and_then(|bytes| orbiters_core::write_atomic(path, &bytes));
     if let Err(e) = written {
-        eprintln!("vr audio: {}: {e}", path.display());
+        log_warn!("vr audio: {}: {e}", path.display(), e = e);
     }
 }
 

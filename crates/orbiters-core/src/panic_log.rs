@@ -7,34 +7,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Where a thread panicked: the place in the source and the thread's name.
-#[derive(Clone, Debug)]
-pub struct Place {
-    at: String,
-    thread: String,
-}
-
-impl std::fmt::Display for Place {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}, thread '{}'", self.at, self.thread)
-    }
-}
-
-impl crate::app_log::Plain for Place {
-    fn plain(&self) -> String {
-        // A thread's name as the source gives it; never one made of what it works on.
-        let known = self.thread.len() <= 32 && self.thread.bytes().all(|b| b.is_ascii_lowercase() || b == b'-');
-        format!("{}, thread '{}'", self.at, if known { &self.thread } else { "…" })
-    }
-}
-
-static LAST: std::sync::Mutex<Option<Place>> = std::sync::Mutex::new(None);
-
-/// The last panic of this process, for what is found broken after it.
-pub fn last() -> Option<Place> {
-    LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
-}
-
 /// A log is set aside as `<name>.old.log` once it grows past this, so a process's notes take at most twice it.
 const MAX_LOG: u64 = 1 << 20;
 
@@ -53,9 +25,7 @@ pub fn install_in(dir: PathBuf) {
         let message = info.payload_as_str().unwrap_or("(a value that is not text)");
         let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "an unknown place".into()); // i18n: not shown (a log line)
         let backtrace = std::backtrace::Backtrace::force_capture();
-        let place = Place { at: info.location().map_or_else(|| "?".into(), |l| format!("{}:{}", crate::app_log::source_file(l.file()), l.line())), thread: thread.name().unwrap_or("unnamed").into() };
-        crate::app_log::panicked(&place);
-        *LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(place);
+        crate::app_log::panicked(info.location());
         let who = match &role {
             Some(role) => format!("{process} {role}"),
             None => process.clone(),

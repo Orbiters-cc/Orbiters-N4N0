@@ -5,6 +5,7 @@
 //! worlds N4N0's menus give feedback on (the shown capture's world, the one the player is in, previous instances'),
 //! handed to N4N0 ([`orbiters_n4n0::N4n0::set_feedback`]) whenever what they show changes.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
@@ -201,7 +202,7 @@ impl WorldFeedbackRuntime {
 
     fn save(&self) {
         if let Err(e) = self.queue.save(&self.queue_path) {
-            eprintln!("world feedback: the queue could not be kept: {e}");
+            log_warn!("world feedback: the queue could not be kept: {e}", e = e);
         }
     }
 
@@ -652,7 +653,7 @@ impl crate::bridge::game::Feedback for RealFeedback {
 /// Starts world feedback: the log's follower, the calls to Orbiters and the local address.
 pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
-    let _ = std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
+    std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
         let mut beat = 0u32;
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let changed = c.feedback_follow();
@@ -663,9 +664,9 @@ pub(super) fn spawn(ctl: Shared) {
             beat = beat.wrapping_add(1);
             std::thread::sleep(LOG_EVERY);
         }
-    });
+    }).or_log("a thread could not be started");
     let c = ctl.clone();
-    let _ = std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
+    std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             // The account and server read once: what is handed out is for them, and goes with them.
             let (api, stamp) = c.account_api_for();
@@ -698,8 +699,8 @@ pub(super) fn spawn(ctl: Shared) {
             }
             c.feedback_publish();
         }
-    });
-    let _ = std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl));
+    }).or_log("a thread could not be started");
+    std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl)).or_log("a thread could not be started");
 }
 
 /// The local address: `GET /n4n0/feedback/v1` on 127.0.0.1:22541 (contracts `Docs/world-feedback.md`).
@@ -726,9 +727,9 @@ fn serve(ctl: Shared) {
         }
         let Ok(stream) = stream else { continue };
         let c = ctl.clone();
-        let _ = std::thread::Builder::new().name("world-feedback-answer".into()).spawn(move || {
+        std::thread::Builder::new().name("world-feedback-answer".into()).spawn(move || {
             let _ = answer(&c, stream);
-        });
+        }).or_log("a thread could not be started");
     }
 }
 

@@ -5,6 +5,7 @@
 //! `Tune` says the share of. Closing signals the reader without waiting or logging on the overlay turn. OrbitVr retains it until it finishes, and joins any remainder at teardown before
 //! the borrowed SteamVR client dies. The picture goes no further than the reading of it.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::camera_track::{self, Found};
 use orbiters_i18n::mark;
@@ -269,7 +270,7 @@ fn keep(pixels: &[u8], width: usize, height: usize, stride: usize, source: Sourc
     }
     rgba.chunks_exact_mut(4).for_each(|p| p[3] = 255);
     let dir = orbiters_core::paths::logs_dir().join("camera-frames");
-    let _ = std::fs::create_dir_all(&dir);
+    std::fs::create_dir_all(&dir).or_log("a folder could not be made");
     if let Some(image) = image::RgbaImage::from_raw(width as u32, height as u32, rgba) {
         let _ = image.save(dir.join(format!("{source:?}-{}.png", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()))));
     }
@@ -327,7 +328,7 @@ fn run(seen:&Mutex<Looks>,stop:&AtomicBool,health:&Mutex<Health>,hints:&Mutex<Op
                                     if let Some(image)=image::RgbaImage::from_raw(picture.width,picture.height,rgba) {
                                         debug_kept=image.save(root.join("camera-reader.png")).is_ok();
                                         let info=serde_json::json!({"from":picture.from,"whole":picture.whole,"record_hint":job.record_hint,"record_found":job.record});
-                                        let _=std::fs::write(root.join("camera-reader.json"),info.to_string());
+                                        std::fs::write(root.join("camera-reader.json"),info.to_string()).or_log("a file could not be written");
                                     }
                                 }
                             }

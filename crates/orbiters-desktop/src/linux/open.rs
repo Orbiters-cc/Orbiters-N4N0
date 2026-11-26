@@ -1,11 +1,12 @@
 //! Opening folders, files and pages with what the person's desktop has for them.
+use orbiters_core::app_log::OrLog as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// `xdg-open`, waited for on a thread of its own (it ends at once, and is nobody's to wait for otherwise).
 fn xdg_open(what: &std::ffi::OsStr) -> anyhow::Result<()> {
     let mut child = Command::new("xdg-open").arg(what).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-    let _ = std::thread::Builder::new().name("xdg-open".into()).spawn(move || child.wait());
+    std::thread::Builder::new().name("xdg-open".into()).spawn(move || child.wait()).or_log("a thread could not be started");
     Ok(())
 }
 

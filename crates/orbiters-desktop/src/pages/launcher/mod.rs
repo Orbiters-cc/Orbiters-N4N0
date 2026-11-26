@@ -18,6 +18,7 @@ mod row;
 pub mod selection;
 pub mod states;
 
+use orbiters_core::app_log::OrLog as _;
 pub use hero::hero;
 pub use mine::card as mine_card;
 
@@ -580,7 +581,7 @@ fn folded_from(saved: Option<Vec<u8>>) -> HashSet<String> {
 
 fn save_folded(folded: &HashSet<String>) {
     if let (Some(file), Ok(json)) = (folded_file(), serde_json::to_vec(folded)) {
-        let _ = std::fs::write(file, json);
+        std::fs::write(file, json).or_log("a file could not be written");
     }
 }
 

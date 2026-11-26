@@ -75,7 +75,7 @@ impl Journal {
         let Some(path) = &self.path else { return };
         if let Ok(bytes) = serde_json::to_vec(self) {
             if let Err(e) = orbiters_core::write_atomic(path, &bytes) {
-                eprintln!("bridge journal: could not be kept: {e}");
+                log_warn!("bridge journal: could not be kept: {e}", e = e);
             }
         }
     }

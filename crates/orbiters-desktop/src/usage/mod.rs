@@ -18,6 +18,7 @@
 pub mod perf;
 pub mod spool;
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -250,13 +251,13 @@ pub fn forward(ctl: crate::backend::Ctl) {
     set_enabled(ctl.view().settings.usage.enabled);
     *LINK.locked() = Some(ctl);
     STARTED.call_once(|| {
-        let _ = std::thread::Builder::new().name("usage".into()).spawn(|| loop {
+        std::thread::Builder::new().name("usage".into()).spawn(|| loop {
             std::thread::sleep(EVERY);
             let ctl = LINK.locked().clone();
             if let Some(ctl) = ctl {
                 flush(&ctl);
             }
-        });
+        }).or_log("a thread could not be started");
     });
 }
 

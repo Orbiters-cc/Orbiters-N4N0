@@ -3,6 +3,7 @@
 //! For a trial: what it shares with its original, what to do in Creator Companion while it waits, then Open in Unity 6
 //! and what each opening showed. Calm and factual: VRChat's Unity 6 SDK is a beta with no announced end for Unity 2022.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use orbiters_i18n::tr;
 use super::art;
@@ -527,7 +528,7 @@ pub(super) fn vcc_steps(ui: &mut Ui, state: &mut State, trial: &Path, target: &t
     match buttons(ui, &list, false) {
         Some(0) => ctx.copy_text(trial.display().to_string()),
         Some(1) => {
-            let _ = orbiters_projects::reveal(trial);
+            orbiters_projects::reveal(trial).or_log("a folder could not be shown");
         }
         Some(2) => {
             state.u6.vccs = None;
@@ -596,7 +597,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
         match buttons(ui, &list, false) {
             Some(0) => state.open(&ctx, job.unity6().path.clone()),
             Some(1) => {
-                let _ = orbiters_projects::reveal(&job.trial.path);
+                orbiters_projects::reveal(&job.trial.path).or_log("a folder could not be shown");
             }
             _ => {}
         }
@@ -686,7 +687,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
                 let log = last.log.clone();
                 let written = !matches!(state.u6.outcomes.get(&(job.id.clone(), last.n)), None | Some(outcome::Outcome::Undetermined { why: outcome::Unknown::NoLog, .. }));
                 if buttons(ui, &[(tr("Show the last log"), icons::FOLDER_OPEN, written, "log")], false).is_some() {
-                    let _ = orbiters_projects::reveal(&log);
+                    orbiters_projects::reveal(&log).or_log("a folder could not be shown");
                 }
             }
         }
@@ -712,7 +713,7 @@ fn trial_body(ui: &mut Ui, cx: &mut Cx, state: &mut State, project: &Project, s:
             }
         }
         Some(1) => {
-            let _ = orbiters_projects::reveal(&job.unity6().path);
+            orbiters_projects::reveal(&job.unity6().path).or_log("a folder could not be shown");
         }
         Some(2) => {
             let id = job.id.clone();
@@ -851,7 +852,7 @@ pub(super) fn job_rows(ui: &mut Ui, state: &mut State) {
                 }
             }
             Some("reveal") => {
-                let _ = orbiters_projects::reveal(&job.trial.path);
+                orbiters_projects::reveal(&job.trial.path).or_log("a folder could not be shown");
             }
             // Its folder stays, and stays known.
             Some("forget") => state.u6.act(&ctx, tr("Taking it off…"), move || {
@@ -926,7 +927,7 @@ pub(super) fn copy_rows(ui: &mut Ui, state: &mut State) {
                 Ok(tr!("The copy at {path} is listed.", path = at.display()))
             }),
             Some("reveal") => {
-                let _ = orbiters_projects::reveal(&copy.destination);
+                orbiters_projects::reveal(&copy.destination).or_log("a folder could not be shown");
             }
             Some("ask") => state.u6.deleting = Some(id),
             Some("keep") => state.u6.deleting = None,

@@ -173,7 +173,7 @@ impl super::Controller {
         };
         let ctl = self.clone();
         if let Err(e) = std::thread::Builder::new().name("n4n0-rig".into()).spawn(move || ctl.follow_camera(generation)) {
-            eprintln!("rig: {e}");
+            log_warn!("rig: {e}", e = e);
         }
     }
 

@@ -15,6 +15,7 @@
 //!
 //! [`Request::Instance`]: crate::controller::vrchat_data::Request::Instance
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::destinations::{joinable_without_asking, kind_access, kinds, rejoinable, Places, Tone};
 use super::selection::{Asker, Destination, Offer, Origin, Outcome, Verified};
@@ -390,7 +391,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
     // A read into memory (whether VRChat says the instance is open): nothing of the window's work, unless Play waits for
     // it: the window does not rest to the tray in the middle of that.
     let working = play.map(|_| crate::pages::Working::begin());
-    let _ = std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
+    std::thread::Builder::new().name("where-previous-open".into()).spawn(move || {
         let _working = working;
         let (world, instance) = (ticket.visit.world_id.clone(), ticket.visit.instance.clone());
         #[cfg(test)]
@@ -403,7 +404,7 @@ pub(super) fn check(state: &mut State, cx: &Cx, play: Option<LaunchMode>) {
         if let Some(ctx) = ctx {
             ctx.request_repaint();
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// What VRChat said of an instance asked about at `asked`, and when it said so: the service may hand on an answer it kept,

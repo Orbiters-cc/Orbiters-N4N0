@@ -3,6 +3,7 @@
 //! signature: Orbiters' own team), kept in the settings' folder, and run: to sign in to Steam with a QR code, to
 //! download VRChat, to start it with N4N0's arguments. A file fetched by N4N0 carries no quarantine mark, so the check
 //! Gatekeeper would make at its first run is made here, before it is ever run.
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use anyhow::Context as _;
 use orbiters_core::launcher::EngineSetup;
@@ -787,7 +788,7 @@ impl Play {
             slot.waits
         };
         let slot = Arc::downgrade(&self.slot);
-        let _ = std::thread::Builder::new().name("obelisk-unwritten".into()).spawn(move || {
+        std::thread::Builder::new().name("obelisk-unwritten".into()).spawn(move || {
             std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
             let Some(slot) = slot.upgrade() else { return };
             let mut slot = slot.locked();
@@ -795,7 +796,7 @@ impl Play {
                 slot.unwritten = None;
                 slot.let_go();
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// What was decided holds the slot no more: let go of where nothing else does (no reservation, no launch, and no wait that
@@ -815,7 +816,7 @@ impl Play {
         }
         let path = gate.with_extension("lock");
         if let Some(folder) = path.parent() {
-            let _ = std::fs::create_dir_all(folder);
+            std::fs::create_dir_all(folder).or_log("a folder could not be made");
         }
         let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path).map_err(|e| slot_refused(&path, &e))?;
         // A program being started may hold a copy of a lock just let go of, for the moment before it runs.
@@ -887,12 +888,12 @@ impl Play {
             slot.deciding = false;
         }
         let slot = Arc::downgrade(&self.slot);
-        let _ = std::thread::Builder::new().name("obelisk-reserved".into()).spawn(move || {
+        std::thread::Builder::new().name("obelisk-reserved".into()).spawn(move || {
             std::thread::sleep(RESERVED_FOR);
             if let Some(slot) = slot.upgrade() {
                 Self::unreserve_slot(&slot, token);
             }
-        });
+        }).or_log("a thread could not be started");
         Ok(())
     }
 
@@ -975,7 +976,7 @@ impl Play {
     fn write_kept(&self, kept: &Kept) -> bool {
         let Some(file) = &self.gate_file else { return true };
         if let Some(folder) = file.parent() {
-            let _ = std::fs::create_dir_all(folder);
+            std::fs::create_dir_all(folder).or_log("a folder could not be made");
         }
         let part = file.with_extension("part");
         if std::fs::write(&part, kept.to_json()).is_err() {

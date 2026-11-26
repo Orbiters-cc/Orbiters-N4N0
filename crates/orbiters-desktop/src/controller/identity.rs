@@ -138,7 +138,7 @@ impl Epochs {
             Ok(())
         });
         if let Err(e) = written {
-            eprintln!("identity epoch: {e:#}");
+            log_warn!("identity epoch: {e:#}", e = e);
         }
     }
 }

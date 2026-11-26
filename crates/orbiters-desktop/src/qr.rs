@@ -191,7 +191,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                         receiver.set_probe((1..=4).map(|k| h * k / 5).filter(|&y| y < h).map(|y| [0, y, w, y + 1]).collect());
                         crate::overlay::vr_log::line(&format!("qr scan: reading \"{name}\", {w} x {h}")); // i18n: not shown (a log's line)
                     }
-                    Err(e) => eprintln!("qr: \"{name}\" could not be opened: {e}"),
+                    Err(e) => log_warn!("qr: \"{name}\" could not be opened: {e}", name = name, e = e),
                 }
             }
         }
@@ -240,7 +240,7 @@ fn run(wanted: &str, events: &QrEvents, stop: &AtomicBool) {
                 Ok(None) => {}
                 Err(e) => {
                     if !matches!(e, orbiters_spout::SpoutError::NotFound(_)) {
-                        eprintln!("qr: reading VRChat's camera failed: {e}");
+                        log_warn!("qr: reading VRChat's camera failed: {e}", e = e);
                     }
                     receiver.disconnect();
                     connected = false;

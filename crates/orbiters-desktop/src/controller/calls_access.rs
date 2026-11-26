@@ -130,7 +130,7 @@ impl CallsAccess {
         let mut all = read_file(file);
         all.insert(whose.key(), known);
         if let Err(e) = write_file(file, &all) {
-            eprintln!("calls access: {e:#}");
+            log_warn!("calls access: {e:#}", e = e);
         }
         true
     }
@@ -159,7 +159,7 @@ fn refresh_outcome(answer: anyhow::Result<bool>) -> Option<bool> {
         Ok(allowed) => Some(allowed),
         Err(e) if e.downcast_ref::<ApiError>().is_some_and(|a| matches!(a.status, 401 | 403 | 404 | 425)) => Some(false),
         Err(e) => {
-            eprintln!("calls access: {e:#}");
+            log_warn!("calls access: {e:#}", e = e);
             None
         }
     }

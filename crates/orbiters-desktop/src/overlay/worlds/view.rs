@@ -10,6 +10,7 @@
 //! batches. Small movement is more responsive during motion; quiet tracking does not continuously redraw. Only
 //! while still and without overload, a stale face out of view is drawn again whole for a later turn.
 
+use orbiters_core::app_log::OrLog as _;
 use super::catalog::Capture;
 use super::opening::Opening;
 use crate::overlay::slots;
@@ -238,11 +239,11 @@ impl Thread {
     fn start(luid: u64) -> Self {
         let (tx, asks) = mpsc::channel::<Ask>();
         let (answers, rx) = mpsc::channel::<Answer>();
-        let _ = std::thread::Builder::new().name("3d-worlds-render".into()).spawn(move || {
+        std::thread::Builder::new().name("3d-worlds-render".into()).spawn(move || {
             if let Err(e) = Self::run(luid, asks, &answers) {
                 let _ = answers.send(Answer::Failed(format!("{e:#}")));
             }
-        });
+        }).or_log("a thread could not be started");
         Self { tx, rx }
     }
 
@@ -604,9 +605,9 @@ impl View {
             // Sorted anew around its subject, on the way to the GPU.
             let (tx, rx) = mpsc::channel();
             let full = capture;
-            let _ = std::thread::Builder::new().name("3d-worlds-small".into()).spawn(move || {
+            std::thread::Builder::new().name("3d-worlds-small".into()).spawn(move || {
                 let _ = tx.send(Arc::new(full.around_subject()));
-            });
+            }).or_log("a thread could not be started");
             self.small_coming = Some(rx);
             self.capture = None;
             self.loaded = false;
@@ -624,9 +625,9 @@ impl View {
     /// `capture` on its way to the GPU, to show as it is placed.
     fn begin(&mut self, capture: Arc<Capture>, transparent: bool) {
         let Some(thread) = &self.thread else { return };
-        let _ = thread.tx.send(Ask::Load(capture.clone(), transparent));
+        thread.tx.send(Ask::Load(capture.clone(), transparent)).or_log("what a worker was asked did not reach it");
         if self.width != self.quality.pixels() + 2 * MARGIN {
-            let _ = thread.tx.send(Ask::Width(self.quality.pixels() + 2 * MARGIN));
+            thread.tx.send(Ask::Width(self.quality.pixels() + 2 * MARGIN)).or_log("what a worker was asked did not reach it");
         }
         self.capture = Some(capture);
         self.loaded = false;
@@ -827,7 +828,7 @@ impl View {
         }
         self.quality = quality;
         if let Some(thread) = &self.thread {
-            let _ = thread.tx.send(Ask::Width(quality.pixels() + 2 * MARGIN));
+            thread.tx.send(Ask::Width(quality.pixels() + 2 * MARGIN)).or_log("what a worker was asked did not reach it");
             self.renew();
         }
     }
@@ -1004,7 +1005,7 @@ impl View {
             self.trace.admitted(now, horizon);
             self.asked_at = Some(now);
             if let Some(thread) = &self.thread {
-                let _ = thread.tx.send(Ask::Render(job));
+                thread.tx.send(Ask::Render(job)).or_log("what a worker was asked did not reach it");
             }
         }
     }
@@ -1241,7 +1242,7 @@ impl View {
 
     /// What shows, or was getting ready to, cannot: it goes, saying why. With nothing showing there is nothing to say.
     fn stopped(&mut self, why: String) {
-        eprintln!("3D worlds: {why}");
+        log_warn!("3D worlds: {why}", why = why);
         self.in_flight = None;
         self.small_coming = None;
         if self.active() {

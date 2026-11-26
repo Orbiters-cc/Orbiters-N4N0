@@ -14,6 +14,7 @@
 //! descriptions, and each side's own wait until both took the call. Calls go through the relay only unless direct
 //! calls are on (`N4n0Settings::direct_calls`), so the other side does not learn them then either.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::{NoticeKind, Shared};
 use crate::state::{CallContact, CallLink, CallPhase, CallView};
@@ -86,13 +87,13 @@ impl Worker {
                 match serde_json::from_str::<CallEvent>(&line) {
                     Ok(e) => ctl.on_call_worker(e),
                     // Not the line: it may hold a description (addresses).
-                    Err(e) => eprintln!("call: unexpected output ({} bytes): {e}", line.len()),
+                    Err(e) => log_warn!("call: unexpected output ({} bytes): {e}", line.len(), e = e),
                 }
             }
             ctl.on_call_worker_exit(number);
         })?;
         std::thread::Builder::new().name("call-stderr".into()).spawn(move || {
-            crate::worker::log_lines(stderr).for_each(|line| eprintln!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
+            crate::worker::log_lines(stderr).for_each(|line| log_info!("call: {}", line.strip_prefix("call: ").unwrap_or(&line)));
         })?;
         Ok(Self { child, stdin, number, ended: false })
     }
@@ -109,7 +110,7 @@ impl Worker {
     fn end_now(mut self) {
         let _ = self.child.kill();
         self.ended = true;
-        let _ = std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self));
+        std::thread::Builder::new().name("call-worker-end".into()).spawn(move || drop(self)).or_log("a thread could not be started");
     }
 }
 
@@ -373,7 +374,7 @@ impl CallsRuntime {
             _ if !open => fail(self, None),
             Relays::Got(servers) => Acts { worker: self.offer(number, servers, mic).into_iter().collect(), ..Default::default() },
             Relays::Failed(e) if self.direct && signed_in => {
-                eprintln!("calls ice-servers: {e}");
+                log_warn!("calls ice-servers: {e}", e = e);
                 Acts { worker: self.offer(number, Vec::new(), mic).into_iter().collect(), ..Default::default() }
             }
             Relays::Failed(e) => fail(self, Some((NoticeKind::Warning, tr!("Call: {message}", message = e)))),
@@ -395,7 +396,7 @@ impl CallsRuntime {
                     *offered = servers;
                 }
             }
-            Relays::Failed(e) => eprintln!("calls ice-servers: {e}"),
+            Relays::Failed(e) => log_warn!("calls ice-servers: {e}", e = e),
         }
         self.answer(mic, now)
     }
@@ -649,17 +650,17 @@ fn old_server_leaves(api: Api, token: String, closing: Option<(String, bool)>, a
     if closing.is_none() && !available {
         return;
     }
-    let _ = std::thread::Builder::new().name("calls-leave-old".into()).spawn(move || {
+    std::thread::Builder::new().name("calls-leave-old".into()).spawn(move || {
         let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
         let auth = format!("Bearer {token}"); // i18n: not shown
         if let Some((id, decline)) = closing {
             let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
-            let _ = agent.post(&api.url(&path)).header("Authorization", &auth).send_json(json!({}));
+            agent.post(&api.url(&path)).header("Authorization", &auth).send_json(json!({})).or_log("Orbiters could not be told");
         }
         if available {
-            let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+            agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call().or_log("Orbiters could not be told");
         }
-    });
+    }).or_log("a thread could not be started");
 }
 
 /// A level in twentieths.
@@ -750,7 +751,7 @@ impl super::Controller {
             }
             ctl.calls_tick();
             std::thread::sleep(Duration::from_secs(2));
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// Signing out of Orbiters (PRIV-7): with the identity that leaves, while it is still there, the call under way is
@@ -811,17 +812,17 @@ impl super::Controller {
         let Some((api, token)) = api else { return };
         // Quitting never waits long on the network: Orbiters drops a presence that stopped coming anyway.
         let (done, wait) = mpsc::channel();
-        let _ = std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
+        std::thread::Builder::new().name("calls-leave".into()).spawn(move || {
             let agent = orbiters_core::http_agent(Some(Duration::from_secs(2)), Some(Duration::from_secs(3)));
             let auth = format!("Bearer {token}"); // i18n: not shown
             if let Some(id) = call_id {
-                let _ = agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({}));
+                agent.post(&api.url(&format!("n4n0/calls/{id}/end"))).header("Authorization", &auth).send_json(json!({})).or_log("Orbiters could not be told");
             }
             if was_on {
-                let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call();
+                agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &auth).call().or_log("Orbiters could not be told");
             }
             let _ = done.send(());
-        });
+        }).or_log("a thread could not be started");
         let _ = wait.recv_timeout(Duration::from_secs(4));
     }
 
@@ -934,7 +935,7 @@ impl super::Controller {
             if was {
                 if let Some((api, token)) = self.account_api() {
                     let agent = orbiters_core::http_agent(Some(Duration::from_secs(5)), Some(Duration::from_secs(10)));
-                    let _ = agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call();
+                    agent.delete(&api.url("n4n0/calls/presence")).header("Authorization", &format!("Bearer {token}")).call().or_log("Orbiters could not be told");
                 }
             }
             let link = if !open {
@@ -1036,7 +1037,7 @@ impl super::Controller {
                     if refused {
                         rt.link = CallLink::NotLinked { account: account.clone(), source: source.name().to_string() };
                     } else {
-                        eprintln!("calls presence: {e:#}");
+                        log_warn!("calls presence: {e:#}", e = e);
                     }
                 }
             }
@@ -1074,7 +1075,7 @@ impl super::Controller {
                         self.calls_access_denied(&token);
                         return;
                     }
-                    eprintln!("calls contacts: {e:#}");
+                    log_warn!("calls contacts: {e:#}", e = e);
                 }
             }
         }
@@ -1100,7 +1101,7 @@ impl super::Controller {
         };
         let ctl = self.clone();
         let (api, token) = (api.clone(), token.to_string());
-        let _ = std::thread::Builder::new().name("calls-events".into()).spawn(move || {
+        std::thread::Builder::new().name("calls-events".into()).spawn(move || {
             let result = ctl.calls_events(&api, &token, number);
             let mut rt = ctl.calls.locked();
             if rt.streaming.as_ref().is_some_and(|(n, _)| *n == number) {
@@ -1114,14 +1115,14 @@ impl super::Controller {
                 }
                 Ok(false) | Err(_) => {
                     if let Err(e) = &result {
-                        eprintln!("calls events: {e:#}");
+                        log_warn!("calls events: {e:#}", e = e);
                     }
                     rt.stream_failures += 1;
                     let pause = STREAM_RETRY.saturating_mul(1 << (rt.stream_failures - 1).min(5)).min(STREAM_RETRY_MOST);
                     rt.stream_retry_at = Some(Instant::now() + pause);
                 }
             }
-        });
+        }).or_log("a thread could not be started");
     }
 
     /// Reads the server's event stream until it ends, fails, stays silent past [`STREAM_IDLE`] or is replaced. True
@@ -1263,7 +1264,7 @@ impl super::Controller {
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("call worker: {e}");
+                    log_warn!("call worker: {e}", e = e);
                     gone.extend(rt.worker.take());
                     if !starts {
                         return Ok(());
@@ -1327,7 +1328,7 @@ impl super::Controller {
                         }
                     }
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/candidates"), &json!({ "candidates": candidates })) {
-                        eprintln!("calls candidates: {e:#}");
+                        log_warn!("calls candidates: {e:#}", e = e);
                         if super::calls_access::not_enabled(&e) {
                             self.calls_access_denied(&token);
                         }
@@ -1344,7 +1345,7 @@ impl super::Controller {
                             Err(Ending::Failed)
                         }
                         Err(e) => {
-                            eprintln!("calls n4n0/calls: {e:#}");
+                            log_warn!("calls n4n0/calls: {e:#}", e = e);
                             self.notify(NoticeKind::Warning, tr!("Call: {message}", message = e));
                             Err(Ending::Failed)
                         }
@@ -1355,7 +1356,7 @@ impl super::Controller {
                 }
                 Signal::Answer { number, id, sdp } => {
                     if let Err(e) = post(&api, &token, &format!("n4n0/calls/{id}/answer"), &json!({ "answer": sdp })) {
-                        eprintln!("calls answer: {e:#}");
+                        log_warn!("calls answer: {e:#}", e = e);
                         if super::calls_access::not_enabled(&e) {
                             if self.calls_access_denied(&token) {
                                 self.notify(NoticeKind::Info, tr(super::calls_access::CALLS_SOON_TOLD));
@@ -1371,7 +1372,7 @@ impl super::Controller {
                 Signal::Close { id, decline } => {
                     let path = format!("n4n0/calls/{id}/{}", if decline { "decline" } else { "end" });
                     if let Err(e) = post(&api, &token, &path, &json!({})) {
-                        eprintln!("calls {path}: {e:#}");
+                        log_warn!("calls {path}: {e:#}", path = path, e = e);
                     }
                 }
             }

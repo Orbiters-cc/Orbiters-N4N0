@@ -719,10 +719,13 @@ pub const BACKGROUND_PACE: Duration = Duration::from_millis(200);
 fn leave_soon() {
     // Tests make links that close: their process stays.
     #[cfg(all(target_os = "macos", not(test)))]
-    let _ = std::thread::Builder::new().name("leaving".into()).spawn(|| {
-        std::thread::sleep(Duration::from_secs(3));
-        std::process::exit(0);
-    });
+    {
+        use orbiters_core::app_log::OrLog as _;
+        std::thread::Builder::new().name("leaving".into()).spawn(|| {
+            std::thread::sleep(Duration::from_secs(3));
+            std::process::exit(0);
+        }).or_log("a thread could not be started");
+    }
 }
 
 impl Client {

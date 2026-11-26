@@ -679,7 +679,7 @@ impl FrameRate {
         self.frames += 1;
         let since = *self.since.get_or_insert(now);
         if now.duration_since(since) >= Duration::from_secs(10) {
-            eprintln!("orbit: {} looks in {:.1} s", self.frames, now.duration_since(since).as_secs_f32());
+            log_info!("orbit: {} looks in {:.1} s", self.frames, now.duration_since(since).as_secs_f32());
             self.since = Some(now);
             self.frames = 0;
         }
@@ -941,10 +941,10 @@ impl Looker {
                         // The old window's capture ends before the new one starts.
                         drop(capture.take());
                         if gpu.is_none() {
-                            gpu = Gpu::new().map_err(|e| eprintln!("capture: {e}")).ok();
+                            gpu = Gpu::new().map_err(|e| log_warn!("capture: {e}", e = e)).ok();
                         }
                         let window = HWND(ask.window as *mut _);
-                        capture = gpu.as_ref().filter(|_| is_vrchat_window(window, ask.pid)).and_then(|g| Capture::new(window, g).map_err(|e| eprintln!("capture: {e}")).ok()).map(|c| (ask.window, c));
+                        capture = gpu.as_ref().filter(|_| is_vrchat_window(window, ask.pid)).and_then(|g| Capture::new(window, g).map_err(|e| log_warn!("capture: {e}", e = e)).ok()).map(|c| (ask.window, c));
                         // A device lost (a driver's update, say) is made again next time.
                         if capture.is_none() {
                             gpu = None;
@@ -1254,7 +1254,7 @@ impl PanelWindow {
             // A layered window shown without its picture is drawn as an opaque black rectangle of its whole size: what round 17's judges saw round the wheel's
             // caption. It shows only with its picture on it, and is hidden, to try again on the next turn, when Windows refused the picture.
             if let Err(e) = updated {
-                eprintln!("panel window: its picture was refused ({e}), it stays hidden"); // i18n: not shown (a log's line)
+                log_warn!("panel window: its picture was refused ({e}), it stays hidden", e = e); // i18n: not shown (a log's line)
                 if self.shown {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
                     self.shown = false;
@@ -1376,7 +1376,7 @@ impl Windows {
                 std::collections::hash_map::Entry::Vacant(e) => match PanelWindow::new(w, h, clicks) {
                     Ok(made) => e.insert(made),
                     Err(err) => {
-                        eprintln!("panel window: {err}");
+                        log_warn!("panel window: {err}", err = err);
                         return;
                     }
                 },
@@ -1739,7 +1739,7 @@ impl Corner {
         let (rect, zoom) = Self::rect(client);
         let px = [rect.width().ceil() as u32, rect.height().ceil() as u32];
         if self.px != px || self.window.is_none() {
-            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| eprintln!("mismatch corner window: {e}")).ok(); // i18n: not shown (a menu mismatch report's line)
+            self.window = PanelWindow::new(px[0], px[1], true).map_err(|e| log_warn!("mismatch corner window: {e}", e = e)).ok(); // i18n: not shown (a menu mismatch report's line)
             self.canvas = Some(crate::overlay::Canvas::zoomed(px[0], px[1], zoom));
             self.px = px;
             self.zoom = zoom;
@@ -1911,7 +1911,7 @@ impl Pill {
         let zoom = (client.y / 720.0).max(0.5);
         let px = [(Self::SIZE.x * zoom).ceil() as u32, (Self::SIZE.y * zoom).ceil() as u32];
         if self.px != px || self.window.is_none() {
-            self.window = PanelWindow::new(px[0], px[1], false).map_err(|e| eprintln!("pill window: {e}")).ok();
+            self.window = PanelWindow::new(px[0], px[1], false).map_err(|e| log_warn!("pill window: {e}", e = e)).ok();
             self.canvas = Some(crate::overlay::Canvas::zoomed(px[0], px[1], zoom));
             self.px = px;
             self.words = None;
@@ -2031,7 +2031,7 @@ pub mod scroll {
                 return None;
             }
             self.downs = downs;
-            eprintln!("orbit: a scroll's click on cell {:?}", self.lit); // i18n: not shown (a log's line)
+            log_info!("orbit: a scroll's click on cell {:?}", self.lit); // i18n: not shown (a log's line)
             let cell = self.lit;
             // Done: the click is VRChat's again until the next scroll.
             ENGAGED.store(false, Ordering::Relaxed);
@@ -2064,7 +2064,7 @@ pub mod scroll {
                     SET.store(false, Ordering::Relaxed);
                     let _ = UnhookWindowsHookEx(set);
                 }
-                eprintln!("orbit: the scroll wheel's hook ended"); // i18n: not shown (a log's line)
+                log_info!("orbit: the scroll wheel's hook ended"); // i18n: not shown (a log's line)
             });
             if let (Ok(handle), Ok(id)) = (spawned, rx.recv_timeout(Duration::from_secs(1))) {
                 if id != 0 {
@@ -2247,7 +2247,7 @@ pub mod pointer {
                 self.window = None;
             }
             if self.window.is_none() {
-                self.window = PanelWindow::new(px, px, false).map_err(|e| eprintln!("pointer window: {e}")).ok().map(|mut w| {
+                self.window = PanelWindow::new(px, px, false).map_err(|e| log_warn!("pointer window: {e}", e = e)).ok().map(|mut w| {
                     let picture = super::cursor::picture(px, px as f32 / PX as f32, accent);
                     w.picture(&picture, [0, 0, px, px]);
                     w

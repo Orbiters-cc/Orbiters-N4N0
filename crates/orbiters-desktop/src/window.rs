@@ -24,10 +24,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         orbiters_projects::discovery::low_priority();
         let swept = orbiters_projects::storage::remove_orphans(&std::sync::atomic::AtomicBool::new(false));
         for cache in &swept.removed {
-            eprintln!("removed the cache an interrupted repair left: {}", cache.display());
+            log_info!("removed the cache an interrupted repair left: {}", cache.display());
         }
         for (path, why) in &swept.failed {
-            eprintln!("could not remove {}: {why}", path.display());
+            log_warn!("could not remove {}: {why}", path.display(), why = why);
         }
     }));
     #[cfg(target_os = "macos")]

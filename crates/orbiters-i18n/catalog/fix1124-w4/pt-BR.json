@@ -1,3 +1,6 @@
 {
+  "Copy the last errors": "Copiar os últimos erros",
+  "No error in the app's log.": "Nenhum erro no registro do app.",
+  "What went wrong inside the app: when, where in it, and error codes. No names, nothing anyone wrote, no tokens. It stays on this computer, two weeks at most.": "O que deu errado dentro do app: quando, em que parte, e os códigos de erro. Nenhum nome, nada que alguém escreveu, nenhum token. Fica neste computador, por duas semanas no máximo.",
   "{folder} is Creator Companion's or ALCOM's own folder: Orbiters puts nothing there. Choose another folder.": "{folder} é uma pasta do Creator Companion ou do ALCOM: o Orbiters não coloca nada ali. Escolha outra pasta."
 }

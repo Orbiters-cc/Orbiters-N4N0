@@ -1,4 +1,5 @@
 //! Small decoded pictures kept on the system disk. Originals are never changed.
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::*;
 
@@ -66,7 +67,7 @@ pub(super) fn write(p: &Picture, path: &Path, width: u32, before: Option<Stamp>,
     }
     if *total + cost > LIMIT { return; }
     if orbiters_core::write_atomic(&file, bytes).is_ok() {
-        let _ = orbiters_core::write_atomic(&meta, &serde_json::to_vec(&stamp).unwrap_or_default());
+        orbiters_core::write_atomic(&meta, &serde_json::to_vec(&stamp).unwrap_or_default()).or_log("a file could not be written");
         *total += cost;
     }
 }

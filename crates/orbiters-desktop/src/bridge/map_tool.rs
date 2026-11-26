@@ -5,6 +5,7 @@
 //! The avatar's position is known exactly when a picture recorded it (`skeleton.bin`, the capture kit's band): from then on
 //! the bridge adds up its own `walk`s and `turn`s, stopped where the plan shows a wall, and says how many it added.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::game::Failure;
 use super::map::{self, Capture, Map, Marks};
@@ -115,16 +116,16 @@ impl Maps {
         let c = Arc::new(Capture::read(&dir)?);
         if let Some(file) = self.file(session) {
             if let Some(parent) = file.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent).or_log("a folder could not be made");
             }
             match serde_json::to_vec(&*c) {
                 Ok(bytes) => {
                     if let Err(e) = orbiters_core::write_atomic(&file, &bytes) {
-                        eprintln!("bridge map: a picture's map could not be kept: {e}");
+                        log_warn!("bridge map: a picture's map could not be kept: {e}", e = e);
                     }
                 }
                 // Never written clamped: kept for as long as its folder is there to read it again.
-                Err(e) => eprintln!("bridge map: {session}'s map is not saved: {e}"),
+                Err(e) => log_warn!("bridge map: {session}'s map is not saved: {e}", session = session, e = e),
             }
         }
         self.captures.locked().insert(session, c.clone());

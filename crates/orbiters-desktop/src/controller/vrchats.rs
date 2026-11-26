@@ -584,7 +584,7 @@ impl super::Controller {
             s.camera_tools.qr = super::camera_tools::Qr::Off;
         });
         self.invalidate_kit(None);
-        eprintln!("following VRChat {pid:?} (was {before:?}), its camera heard {heard:?}"); // i18n: not shown (diagnostics)
+        log_info!("following VRChat {pid:?} (was {before:?}), its camera heard {heard:?}", pid = pid, before = before, heard = heard); // i18n: not shown (diagnostics)
         if heard.is_none() && pid.is_some() {
             // Its tree says how its camera is, as at an OSC start: shown, never proof for a recording.
             let camera = self.camera_values().into_iter().find_map(|(p, v)| match v {
@@ -642,7 +642,7 @@ impl super::Controller {
             if open && streaming {
                 let to = SocketAddr::from(([127, 0, 0, 1], run.osc_in));
                 if send_streaming(to, false).is_ok() {
-                    eprintln!("Spout: VRChat {} streams too: its Spout Stream is off while this recording runs", run.pid); // i18n: not shown (diagnostics)
+                    log_info!("Spout: VRChat {} streams too: its Spout Stream is off while this recording runs", run.pid); // i18n: not shown (diagnostics)
                     quieted.push(to);
                 }
             }

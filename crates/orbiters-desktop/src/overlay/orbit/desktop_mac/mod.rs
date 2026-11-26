@@ -27,6 +27,7 @@ pub mod panel;
 pub mod pointing;
 pub mod wheel;
 
+use orbiters_core::app_log::OrLog as _;
 use super::desk_shared::{self, hit, Clicks, Hints, Presence};
 use super::detect::{MenuKey, Seen, Watcher};
 use super::zones::{self, Around, Zone};
@@ -183,14 +184,14 @@ impl Watchdog {
         if holding && !self.running {
             self.running = true;
             let (held, started) = (self.held.clone(), self.started);
-            let _ = std::thread::Builder::new().name("orbit-watchdog".into()).spawn(move || loop {
+            std::thread::Builder::new().name("orbit-watchdog".into()).spawn(move || loop {
                 std::thread::sleep(Duration::from_millis(250));
                 if hung(held.load(Ordering::Acquire), started.elapsed().as_millis() as u64 + 1) {
-                    eprintln!("orbit: the loop hung while it held the keyboard: ending"); // i18n: not shown (a log's line)
+                    log_info!("orbit: the loop hung while it held the keyboard: ending"); // i18n: not shown (a log's line)
                     // SAFETY: the process ends here, whatever its main thread waits for.
                     unsafe { libc::_exit(70) };
                 }
-            });
+            }).or_log("a thread could not be started");
         }
     }
 }

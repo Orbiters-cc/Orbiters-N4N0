@@ -531,7 +531,7 @@ fn decode_and_upload(device: &wgpu::Device, queue: &wgpu::Queue, p: &Preview) ->
                 };
                 match image::load_from_memory_with_format(p.blob(t.data), format) {
                     Ok(img) => *out[i].locked() = Some(upload_texture(device, queue, img.to_rgba8(), if t.linear { DATA } else { COLOR })),
-                    Err(e) => eprintln!("project preview: picture {i}: {e}"),
+                    Err(e) => log_warn!("project preview: picture {i}: {e}", i = i, e = e),
                 }
             });
         }

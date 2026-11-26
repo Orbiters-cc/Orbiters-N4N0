@@ -317,7 +317,7 @@ impl State {
             let (bookmarks, loaded) = Bookmarks::read(&video_history::bookmarks_file());
             match loaded {
                 Loaded::Whole => {}
-                Loaded::Partial(aside) => eprintln!("video bookmarks: some could not be read, the file kept as {aside:?}"),
+                Loaded::Partial(aside) => log_warn!("video bookmarks: some could not be read, the file kept as {aside:?}", aside = aside),
                 Loaded::Unreadable(e) => self.unreadable = Some(e),
             }
             self.bookmarks = Some(bookmarks);

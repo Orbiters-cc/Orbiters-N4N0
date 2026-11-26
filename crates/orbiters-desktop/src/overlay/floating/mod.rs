@@ -227,8 +227,8 @@ impl Floating {
         Ok(Self {
             panel: Panel::new(overlay, key)?,
             watch: Watch::new(overlay, key)?,
-            strip: strip::Strip::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
-            prompt: prompt::Prompt::new(overlay, key).map_err(|e| eprintln!("{e}")).ok(),
+            strip: strip::Strip::new(overlay, key).map_err(|e| log_warn!("{e}", e = e)).ok(),
+            prompt: prompt::Prompt::new(overlay, key).map_err(|e| log_warn!("{e}", e = e)).ok(),
             rest_said: None,
             notice_held: None,
             notice_down: None,

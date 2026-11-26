@@ -677,13 +677,13 @@ fn options(args: &[String]) -> anyhow::Result<Options> {
                 if arg == "--theme" {
                     let (t, warnings) = Theme::load(Path::new(path)).map_err(|e| anyhow!("--theme: {e}"))?;
                     for w in warnings {
-                        eprintln!("warning: {path}: {w}");
+                        log_info!("warning: {path}: {w}", path = path, w = w);
                     }
                     theme = Some(t);
                 } else {
                     let parsed = Strings::load(Path::new(path)).map_err(|e| anyhow!("--strings: {e}"))?;
                     for w in parsed.warnings.iter().cloned().chain(too_long(&parsed.strings)) {
-                        eprintln!("warning: {path}: {w}");
+                        log_info!("warning: {path}: {w}", path = path, w = w);
                     }
                     strings = Some(parsed.strings);
                 }
@@ -748,7 +748,7 @@ fn noting_shrunk<T>(draw: impl FnOnce() -> T) -> T {
     menu_ui::watch_shrinking();
     let out = draw();
     for (text, scale) in menu_ui::shrunk() {
-        eprintln!("note: {text:?} is drawn at {:.0} % of its size to fit its place", scale * 100.0);
+        log_info!("note: {text:?} is drawn at {:.0} % of its size to fit its place", scale * 100.0, text = text);
     }
     out
 }

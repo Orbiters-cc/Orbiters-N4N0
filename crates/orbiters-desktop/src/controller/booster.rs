@@ -6,6 +6,7 @@
 //! back then. A service that itself is killed leaves programs in efficiency mode until its next start or until they exit, and that gap
 //! is real and is said in `docs/fps-booster.md`.
 
+use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
 use super::Shared;
 use crate::booster::{Command, OverlayReport};
@@ -211,7 +212,7 @@ impl super::Controller {
         }
         let Some(store) = store else { return };
         self.booster.inner.locked().to_put_back = read_to_put_back();
-        let _ = std::thread::Builder::new().name("fps-booster".into()).spawn(move || ctl.booster_thread(store));
+        std::thread::Builder::new().name("fps-booster".into()).spawn(move || ctl.booster_thread(store)).or_log("a thread could not be started");
     }
 
     fn booster_thread(self: Shared, store: Store) {
@@ -396,8 +397,8 @@ fn keep_to_put_back(list: &[ToPutBack]) {
     if list.is_empty() {
         let _ = std::fs::remove_file(path);
     } else if let (Some(dir), Ok(bytes)) = (path.parent(), serde_json::to_vec_pretty(list)) {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::write(path, bytes);
+        std::fs::create_dir_all(dir).or_log("a folder could not be made");
+        std::fs::write(path, bytes).or_log("a file could not be written");
     }
 }
 
@@ -411,11 +412,11 @@ pub(crate) fn dev_build() -> bool {
 }
 
 fn open_folder(path: &std::path::Path) {
-    let _ = std::fs::create_dir_all(path);
+    std::fs::create_dir_all(path).or_log("a folder could not be made");
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    std::process::Command::new("explorer").arg(path).spawn().or_log("a program could not be started");
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
+    std::process::Command::new("open").arg(path).spawn().or_log("a program could not be started");
     #[cfg(target_os = "linux")]
     let _ = crate::linux::open::path(path);
 }
@@ -451,7 +452,7 @@ impl Drop for TestLoad {
 /// What was measured, to the logs folder, in the language of the app: Enzo reads it after the test.
 fn write_test_report(snap: &crate::state::Snapshot) -> Option<std::path::PathBuf> {
     let path = orbiters_core::paths::logs_dir().join("fps-test-report.txt");
-    let _ = std::fs::create_dir_all(path.parent()?);
+    std::fs::create_dir_all(path.parent()?).or_log("a folder could not be made");
     let compositor = orbiters_booster::vrsettings::compositor_log_for_user()
         .and_then(|log| std::fs::read_to_string(log).ok())
         .and_then(|text| orbiters_booster::log::parse_compositor(&text).pop());

@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::link_smoke::Scratch;
 
 pub const PRIVATE: &[&str] = &[
-    "--screenshot", "--gpu-bench", "--idle-frames", "--publish-cost", "--link-smoke",
+    "--screenshot", "--gpu-bench", "--idle-frames", "--idle-service", "--publish-cost", "--link-smoke",
     "--orbit-bench", "--orbit-paint-bench", "--n4n0-menu", "--world-view", "--world-timing", "--world-sequence",
     "--n4n0-menu-strings", "--eye-picture", "--bridge-lab", "--orbit-lab",
 ];
@@ -232,6 +232,8 @@ mod tests {
         ours.extend(orbiters_projects::hub_data_dir());
         ours.extend(orbiters_core::paths::vrchat_log_dir());
         ours.extend(orbiters_core::visited::screenshot_dirs());
+        // The account the Unity tools share: a test that starts the service's threads would sign in as the person.
+        ours.extend(orbiters_core::account::account_path(orbiters_core::account::Server::Production));
         for p in ours {
             assert!(p.starts_with(&root), "not the test's own: {}", p.display());
             assert!(!real.iter().any(|r| p.starts_with(r)), "the person's own: {}", p.display());

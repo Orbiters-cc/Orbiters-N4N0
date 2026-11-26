@@ -15,6 +15,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// When the keeper looks again ([`Keeper::start_resting`]).
+pub enum Look {
+    /// Open, opening or asking: a few times a second.
+    Soon,
+    /// Closed: once Orbiters is to be asked again (`None`: nobody is signed in). `allowed`: Settings may show what it says.
+    At { due: Option<Duration>, allowed: bool },
+}
+
+impl Look {
+    pub const TURN: Duration = Duration::from_millis(250);
+}
+
 /// How often the server is asked again while it says yes.
 pub const ASK_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long the last yes counts when the server cannot be reached: "not reachable with no recent proof" means no bridge.
@@ -199,13 +211,33 @@ impl Keeper {
 
     /// Runs on a thread of its own for the life of the process.
     pub fn start(self: &Arc<Self>) {
+        self.start_resting(|_| std::thread::sleep(Look::TURN));
+    }
+
+    /// [`Self::start`], waiting between two looks as `rest` does: at most until the one it is told of, and less when what the
+    /// looks follow (who is signed in, the switch in Settings) changes.
+    pub fn start_resting(self: &Arc<Self>, rest: impl Fn(Look) + Send + 'static) {
         let weak = Arc::downgrade(self);
         let _ = std::thread::Builder::new().name("bridge-keeper".into()).spawn(move || loop {
             let Some(keeper) = weak.upgrade() else { break };
             keeper.tick();
+            let look = keeper.next_look();
             drop(keeper);
-            std::thread::sleep(Duration::from_millis(250));
+            rest(look);
         });
+    }
+
+    /// What the next look is for.
+    fn next_look(&self) -> Look {
+        let inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        let allowed = inner.identity.is_some() && inner.grant.allowed(now);
+        if inner.open.is_some() || allowed && self.flag.enabled() || self.asking.load(Ordering::Relaxed) || self.repair_due.load(Ordering::Relaxed) {
+            return Look::Soon;
+        }
+        let due = inner.identity.is_some().then(|| inner.grant.wait(now).max(Look::TURN));
+        let due = if allowed { due.map(|due| due.min(inner.grant.remaining(now))) } else { due };
+        Look::At { due, allowed }
     }
 
     /// One look at the three conditions, and acting on what they say, then what Settings shows, a few times a second.
@@ -530,6 +562,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(allowed());
+        // XCT-23: off in Settings, the next look is when Orbiters is to be asked again (what it follows wakes it); with nobody
+        // signed in there is none.
+        assert!(matches!(keeper.next_look(), Look::At { due: Some(due), allowed: true } if due > ASK_EVERY - Duration::from_secs(60) && due <= ASK_EVERY));
+        *flag.identity.lock().unwrap() = None;
+        keeper.tick();
+        assert!(matches!(keeper.next_look(), Look::At { due: None, allowed: false }));
         let _ = std::fs::remove_dir_all(dir);
     }
 

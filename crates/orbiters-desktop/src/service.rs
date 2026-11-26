@@ -138,6 +138,41 @@ impl Service {
             .map(|_| ())
     }
 
+    /// The service's own looks, each on a thread: the overlay and the panels' processes, tracking smoothing, Windows' sound
+    /// devices while SteamVR runs, a recording's coverage on the desktop.
+    pub(crate) fn keep(self: &Arc<Self>) -> std::io::Result<()> {
+        let svc = self.clone();
+        let rest = self.ctl.rest("overlay-keeper", |s| {
+            (s.vrchat.running, s.vrchat.remote, s.steamvr.running, s.steamvr.pid, s.launcher.desktop_game, controller::rest::Part::of(&s.settings), s.n4n0.desktop_mode)
+        });
+        std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || while !svc.quitting.load(Ordering::Relaxed) {
+            svc.keep_overlay();
+            svc.keep_orbit();
+            svc.keep_steamvr_start();
+            svc.keep_tracking();
+            rest.wait(Some(svc.keeper_rests()));
+        })?;
+        let svc = self.clone();
+        std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
+        // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
+        let ctl = self.ctl.clone();
+        std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
+        // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
+        crate::coverage_window::start(self.ctl.clone());
+        Ok(())
+    }
+
+    /// How long until the keepers' next look: two seconds while a game or SteamVR runs or a process of theirs does (or may still
+    /// have to be seen ended); else once a minute, for the smoothing driver's block and an install to try again.
+    fn keeper_rests(&self) -> Duration {
+        let snap = self.ctl.view();
+        let game = snap.vrchat.running || snap.steamvr.running || snap.launcher.desktop_game.is_some();
+        let linked = self.links.lock().unwrap().iter().any(|l| l.role != Role::Window);
+        let overlay = self.overlay.lock().unwrap().as_mut().is_some_and(|(child, ..)| matches!(child.try_wait(), Ok(None)));
+        let orbit = self.orbit.lock().unwrap().as_mut().is_some_and(|(child, _)| matches!(child.try_wait(), Ok(None)));
+        if game || linked || overlay || orbit { Duration::from_secs(2) } else { Duration::from_secs(60) }
+    }
+
     /// How many clients of `role` are linked now.
     pub(crate) fn linked(&self, role: Role) -> usize {
         self.links.lock().unwrap().iter().filter(|l| l.role == role).count()
@@ -240,7 +275,8 @@ impl Service {
     /// what it does now goes to N4N0's Tracking page. Run every keeper turn, at once when the settings change
     /// (`follow_tracking`) and when the overlay says which device is which.
     fn keep_tracking(&self) {
-        if self.quitting.load(Ordering::Relaxed) {
+        // A run over private folders (`--idle-service`) never takes the driver's block from the app the person runs.
+        if self.quitting.load(Ordering::Relaxed) || orbiters_core::paths::roots().is_some() {
             return;
         }
         let snap = self.ctl.view();
@@ -454,7 +490,16 @@ impl Service {
 
     /// [`Service::handle`]; `library`: the sessions folder when the command was read (file work done later on the link's
     /// work thread is judged against it, not against a folder the settings switched to meanwhile).
+    fn settle_edit(&self, link: u64, edit: Option<u64>) {
+        if let Some(id) = edit {
+            if let Some(link) = self.links.lock().unwrap().iter().find(|l| l.id == link) {
+                link.mailbox.post(ToClient::EditSettled { id });
+            }
+        }
+    }
+
     fn handle_in(&self, link: u64, role: Role, msg: ToService, library: Option<&std::path::Path>) {
+        let edit = msg.edit_id();
         let ctl = &self.ctl;
         let report = |r: anyhow::Result<()>| {
             if let Err(e) = r {
@@ -480,7 +525,7 @@ impl Service {
                 ctl.save_settings(*settings);
                 self.follow_usage_switch();
             }
-            ToService::PatchSettings { patch } => {
+            ToService::PatchSettings { patch } | ToService::EditSettings { patch, .. } => {
                 ctl.patch_settings(&patch);
                 self.follow_usage_switch();
             }
@@ -507,7 +552,7 @@ impl Service {
                 report(r);
             }
             // Deleting runs on a thread of its own; the job shows in the snapshot.
-            ToService::CleanUp { trim, delete } => report(ctl.clean_up(trim, delete)),
+            ToService::CleanUp { trim, delete, .. } => report(ctl.clean_up(trim, delete)),
             ToService::Reconstruct { dir } => report(ctl.reconstruct(dir)),
             ToService::SendToMixer { dir, title } => {
                 #[cfg(test)]
@@ -516,19 +561,24 @@ impl Service {
                 }
                 report(ctl.send_to_mixer(dir, title))
             }
-            ToService::SignIn => {
+            ToService::SignIn { edit } => {
                 // Asking Orbiters for the link is a network call: not on the link's reading thread.
                 let c = ctl.clone();
+                let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
                 std::thread::spawn(move || {
                     if let Err(e) = c.sign_in() {
                         c.notify(NoticeKind::Error, tr!("Could not start the sign-in: {error}", error = e));
                     }
+                    if let Some(mailbox) = mailbox {
+                        mailbox.post(ToClient::EditSettled { id: edit });
+                    }
                 });
+                return;
             }
             ToService::ReopenSignIn => report(ctl.reopen_sign_in()),
             ToService::CancelSignIn => ctl.cancel_sign_in(),
             ToService::SignOut => report(ctl.sign_out()),
-            ToService::VrchatLogin { command } => ctl.vrchat_command(command),
+            ToService::VrchatLogin { command, .. } => ctl.vrchat_command(command),
             ToService::Launcher { action } => ctl.launcher_action(action),
             ToService::VrchatData { id, scope, request } => {
                 let mailbox = self.links.lock().unwrap().iter().find(|l| l.id == link).map(|l| l.mailbox.clone());
@@ -664,6 +714,7 @@ impl Service {
             ToService::Bridge { command } => ctl.bridge_command(command),
             ToService::Quit => self.quit(),
         }
+        self.settle_edit(link, edit);
     }
 
     /// One client: check its token (the accept loop counted it among the unauthenticated), then stream every change
@@ -750,6 +801,8 @@ impl Service {
                     {
                         let mut running = svc.file_work.lock().unwrap();
                         if svc.quitting.load(Ordering::SeqCst) {
+                            drop(running);
+                            svc.settle_edit(id, msg.0.edit_id());
                             continue;
                         }
                         *running += 1;
@@ -766,10 +819,14 @@ impl Service {
             if let Ok(msg) = serde_json::from_str::<ToService>(&line) {
                 match msg {
                     // Quitting: no new file work is taken.
-                    msg if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {}
+                    msg if is_file_work(&msg) && self.quitting.load(Ordering::Relaxed) => {
+                        self.settle_edit(id, msg.edit_id());
+                    }
                     msg if is_file_work(&msg) => {
+                        let edit = msg.edit_id();
                         let library = self.ctl.with_settings(|s| s.sessions_dir.clone());
                         if !hand_over(work.as_ref(), (msg, library)) {
+                            self.settle_edit(id, edit);
                             self.ctl.notify(NoticeKind::Error, tr("Orbiters is busy with many requests: try again in a moment."));
                         }
                     }
@@ -1161,21 +1218,7 @@ pub fn run(hidden: bool) -> anyhow::Result<()> {
         service.show_window(true);
     }
 
-    let svc = service.clone();
-    std::thread::Builder::new().name("overlay-keeper".into()).spawn(move || loop {
-        svc.keep_overlay();
-        svc.keep_orbit();
-        svc.keep_steamvr_start();
-        svc.keep_tracking();
-        std::thread::sleep(Duration::from_secs(2));
-    })?;
-    let svc = service.clone();
-    std::thread::Builder::new().name("smoothing".into()).spawn(move || svc.follow_tracking())?;
-    // Windows' default sound devices while SteamVR runs (Settings, "When SteamVR starts").
-    let ctl = service.ctl.clone();
-    std::thread::Builder::new().name("vr-audio".into()).spawn(move || controller::vr_audio::run(ctl))?;
-    // In desktop mode, a recording's coverage in a corner of the screen (in VR the SteamVR overlay shows it).
-    crate::coverage_window::start(service.ctl.clone());
+    service.keep()?;
 
     #[cfg(windows)]
     tray_loop(&service)?;
@@ -1529,6 +1572,27 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn a_refused_optimistic_edit_is_settled_on_its_own_link() {
+        use crate::backend::{Backend, Remote};
+        use crate::controller::vrchat_login::Command;
+
+        let service = service();
+        let other = linked(&service, Role::Orbit);
+        let editor = linked(&service, Role::Window);
+        let unchanged = other.snapshot();
+        let publishes = service.ctl.publishes();
+
+        // Nobody is signed in, so the service refuses Resume without publishing.
+        Remote(editor.clone()).vrchat_login(Command::Resume);
+        // This reply travels behind the answer to Resume on the same connection.
+        editor.send(&ToService::WorkerLog);
+        assert!(until(|| editor.worker_log().is_some()));
+        assert!(!editor.snapshot().vrchat_login.busy, "refusal must clear the optimistic value");
+        assert_eq!(service.ctl.publishes(), publishes);
+        assert!(Arc::ptr_eq(&unchanged, &other.snapshot()));
+    }
+
     /// The whole way, as the app runs it: the controller publishes, each link's thread writes what changed since what
     /// it last wrote, each client's thread takes it in. Every client holds what the service published, whichever part
     /// changed, however fast, whenever it connected, and after it asked for everything again.
@@ -1556,18 +1620,17 @@ pub(crate) mod tests {
         let after = overlay.snapshot();
         assert_eq!(after.settings.walk_boost.strength, 0.75);
         assert!(Slice::same(&before.n4n0.lines, &after.n4n0.lines) && Slice::same(&before.storage, &after.storage), "what did not change was not sent again");
-        // A publish that changes nothing is told all the same: the client holds a new snapshot, and draws for it.
+        // A publish that changes nothing is told to nobody (XCT-18): no link writes, no client holds a new snapshot or draws.
         let before = overlay.snapshot();
-        let told = ctl.publishes();
-        ctl.update(|_| {});
-        assert_eq!(ctl.publishes(), told + 1);
-        let started = Instant::now();
-        while Arc::ptr_eq(&before, &overlay.snapshot()) && started.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(5));
+        let (told, wrote) = (ctl.publishes(), service.links.lock().unwrap()[0].writes.load(Ordering::Relaxed));
+        for _ in 0..50 {
+            ctl.update(|s| s.n4n0.afk = false);
+            ctl.update(|s| s.settings.walk_boost.strength = 0.75);
         }
-        let after = overlay.snapshot();
-        assert!(!Arc::ptr_eq(&before, &after), "told of a publish that changed nothing");
-        assert!(Slice::same(&before.settings, &after.settings) && Slice::same(&before.capture, &after.capture));
+        assert_eq!(ctl.publishes(), told);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(service.links.lock().unwrap()[0].writes.load(Ordering::Relaxed), wrote);
+        assert!(Arc::ptr_eq(&before, &overlay.snapshot()), "told of a publish that changed nothing");
         // A window that opens later is handed everything, and then only what changes, at its own pace.
         let window = linked(&service, Role::Window);
         assert!(in_step(&service, &window));

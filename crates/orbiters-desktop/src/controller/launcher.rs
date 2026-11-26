@@ -1074,6 +1074,9 @@ impl Machine for RealMachine {
 
     #[cfg(target_os = "linux")]
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        if orbiters_core::paths::roots().is_some() {
+            return Vec::new();
+        }
         let vrchats = super::linux_vrchat::running();
         let alive: Vec<(u32, u64)> = vrchats.iter().map(|p| (p.pid, p.started_s())).collect();
         let mut lines = self.desktop.lock().unwrap();
@@ -1090,6 +1093,9 @@ impl Machine for RealMachine {
 
     #[cfg(not(target_os = "linux"))]
     fn running_profiles(&self) -> Vec<(u32, bool, Option<u32>)> {
+        if orbiters_core::paths::roots().is_some() {
+            return Vec::new();
+        }
         // Names and start times only (no process is opened for them); the command line is read for VRChat's processes
         // alone: once each, and again a few times while Windows would not give it.
         let mut system = sysinfo::System::new();
@@ -1151,7 +1157,7 @@ impl Machine for RealMachine {
     fn roster_now(&self) -> Option<Vec<crate::state::VrchatRunShown>> {
         let vrchats = super::bridge_side::vrchats_now();
         let runs = self.roster.lock().unwrap().scan_whole(&vrchats, self.log_dir().as_deref());
-        Some(runs.iter().map(|run| super::vrchats::shown(run, None, None)).collect())
+        Some(super::vrchats::shown_all(&runs, None, None))
     }
 
     fn vrchats_seen(&self) -> Option<Arc<super::vrchats::Seen>> {
@@ -1262,6 +1268,38 @@ pub(super) struct Runtime {
     unknown_confirm: Option<(u32, Instant, Vec<u32>)>,
     /// The account's own profile changes no sooner than this ([`mine::CHANGE_EVERY`] apart).
     mine_next: Option<Instant>,
+}
+
+impl Runtime {
+    /// The worlds of places shown without a name, to ask for (VRChat's friend list names the instance only).
+    fn wanted_worlds(&self, list: &LauncherState) -> Vec<String> {
+        let mut ids = unnamed_worlds(list);
+        ids.retain(|id| !self.worlds.contains_key(id));
+        // Named from before this run, long ago: asked again, as each world was in every run.
+        if !self.old_worlds.is_empty() {
+            for id in places(list).map(|p| &p.world_id) {
+                if self.old_worlds.contains(id) && !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids.retain(|id| self.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN));
+        ids
+    }
+
+    /// The decorations worn whose picture is to be asked for.
+    fn wanted_pictures(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .worn
+            .values()
+            .flat_map(|d| [d.icon_frame.clone(), d.nameplate.clone()])
+            .flatten()
+            .filter(|id| !self.pictures.contains_key(id) && self.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
 }
 
 /// A start's claim on a VRChat profile.
@@ -1515,17 +1553,43 @@ impl Controller {
 
     pub(super) fn start_launcher(self: &Shared) {
         let weak = Arc::downgrade(self);
-        // A VRChat account just signed in rings it: its list is read at once, not at the next look (r21).
-        let bell = self.vrchat_login.lock().unwrap().signed_bell.clone();
+        // A VRChat account just signed in wakes it: its list is read at once, not at the next look (r21).
+        let rest = self.rest("launcher", |s| {
+            let login = &s.vrchat_login;
+            (s.vrchat.running, s.vrchat.runs.len(), s.launcher.game.clone(), login.user.as_ref().map(|u| u.id.clone()), (login.revision, login.allowed, login.waiting, login.restoring))
+        });
         let _ = std::thread::Builder::new().name("launcher".into()).spawn(move || {
-            let mut seen = bell.rung();
             loop {
-                let Some(ctl) = weak.upgrade() else { break };
+                let Some(ctl) = weak.upgrade().filter(|ctl| !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed)) else { break };
                 ctl.launcher_tick();
+                let most = ctl.launcher_rests();
                 drop(ctl);
-                seen = bell.wait(seen, Duration::from_secs(2));
+                rest.wait(Some(most));
             }
         });
+    }
+
+    /// How long until the next look: two seconds while an interface shows the list, a game runs or starts, or anything waits (a
+    /// place to deliver, an accepted invite, a name or a picture to ask for); else until the list is read again, looked at now
+    /// and then while signed in (the connection to VRChat may have come back), and at its own pace where the game is not seen in
+    /// the process list (a Mac).
+    fn launcher_rests(&self) -> Duration {
+        const TURN: Duration = Duration::from_secs(2);
+        const AT_REST: Duration = Duration::from_secs(30);
+        let view = self.view();
+        let game = view.vrchat.running || !view.vrchat.runs.is_empty() || matches!(view.launcher.game, Game::Starting(_) | Game::Running(_));
+        let rt = self.launcher.lock().unwrap();
+        let waits = !rt.starting.is_empty() || !rt.accepted.is_empty() || !rt.hiding.is_empty() || rt.pending.is_some() || rt.kept.is_some() || rt.play_when_ready.is_some() || rt.repairing.is_some();
+        let asks = rt.pipeline.is_some() && (!rt.wanted_worlds(&view.launcher).is_empty() || !rt.wanted_pictures().is_empty());
+        let (signed_in, by_hand) = (view.vrchat_login.user.is_some() || view.vrchat_login.waiting, rt.machine.by_hand());
+        if game || waits || asks || view.vrchat.remote || self.shown() {
+            return TURN;
+        }
+        let read = match rt.retry_at {
+            Some(at) => at.saturating_duration_since(Instant::now()),
+            None => super::rest::until(rt.loaded_at, if signed_in { FULL_EVERY } else { LOCAL_EVERY }),
+        };
+        read.min(if by_hand { GAME_EVERY } else if signed_in { AT_REST } else { LOCAL_EVERY }).max(TURN)
     }
 
     /// One look: is the source still the one read, is a read due, is the game running.
@@ -1688,18 +1752,7 @@ impl Controller {
     fn launcher_resolve_worlds(&self, client: &Arc<Mutex<Client>>, by: &By) {
         let wanted: Vec<String> = {
             let rt = self.launcher.lock().unwrap();
-            let view = self.view();
-            let mut ids = unnamed_worlds(&view.launcher);
-            ids.retain(|id| !rt.worlds.contains_key(id));
-            // Named from before this run, long ago: asked again, as each world was in every run.
-            if !rt.old_worlds.is_empty() {
-                for id in places(&view.launcher).map(|p| &p.world_id) {
-                    if rt.old_worlds.contains(id) && !ids.contains(id) {
-                        ids.push(id.clone());
-                    }
-                }
-            }
-            ids.retain(|id| rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN));
+            let mut ids = rt.wanted_worlds(&self.view().launcher);
             ids.truncate(2);
             ids
         };
@@ -2482,21 +2535,16 @@ impl Controller {
         for (id, d) in applied.unwrap_or_default().decorations {
             rt.worn.insert(id, d);
         }
+        // Someone moved to a world to name, or wears what has no picture yet.
+        if !unnamed_worlds(&self.view().launcher).is_empty() || !rt.wanted_pictures().is_empty() {
+            self.rests.wake("launcher");
+        }
     }
 
     /// Decorations' pictures, a few per look (each one a call, paced), then written into the friends that wear them.
     fn launcher_resolve_pictures(&self, client: &Arc<Mutex<Client>>, by: &By) {
         let wanted: Vec<String> = {
-            let rt = self.launcher.lock().unwrap();
-            let mut ids: Vec<String> = rt
-                .worn
-                .values()
-                .flat_map(|d| [d.icon_frame.clone(), d.nameplate.clone()])
-                .flatten()
-                .filter(|id| !rt.pictures.contains_key(id) && rt.lookup_failed.get(id).is_none_or(|t| t.elapsed() > LOOKUP_AGAIN))
-                .collect();
-            ids.sort();
-            ids.dedup();
+            let mut ids = self.launcher.lock().unwrap().wanted_pictures();
             ids.truncate(3);
             ids
         };
@@ -3710,6 +3758,8 @@ mod mine;
 #[cfg(test)]
 #[path = "launcher_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::pretend_this_computer;
 
 /// M13: the Mac's roster takes a recorded game only as the very process recorded (its birth), never one that reused its number.
 #[cfg(all(test, target_os = "macos"))]

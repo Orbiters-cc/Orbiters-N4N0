@@ -69,20 +69,57 @@ pub fn copy_without_metadata(src: &mut impl Read, out: &mut impl Write) -> std::
 /// SHA-256 (lowercase hex) of the copy [`copy_without_metadata`] makes of the file at `path`: what Orbiters knows that
 /// picture by once it received it without its metadata.
 pub fn clean_sha256(path: &Path) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    struct Hashing(Sha256);
-    impl Write for Hashing {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    let mut hashing = Hashing::default();
+    copy_without_metadata(&mut std::io::BufReader::new(std::fs::File::open(path)?), &mut hashing)?;
+    Ok(hashing.hex())
+}
+
+/// The SHA-256 of the file at `path` and of its copy without metadata ([`clean_sha256`]; none for what is no PNG to copy), from
+/// one reading of it.
+pub(crate) fn both_sha256(path: &Path) -> (Option<String>, Option<String>) {
+    std::fs::File::open(path).map(both_sha256_from).unwrap_or_default()
+}
+
+fn both_sha256_from(file: impl Read) -> (Option<String>, Option<String>) {
+    struct Both<R> {
+        file: R,
+        own: Hashing,
+    }
+    impl<R: Read> Read for Both<R> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.file.read(out)?;
+            self.own.write_all(&out[..n])?;
+            Ok(n)
         }
     }
-    let mut hashing = Hashing(Sha256::new());
-    copy_without_metadata(&mut std::io::BufReader::new(std::fs::File::open(path)?), &mut hashing)?;
-    Ok(hashing.0.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    // (Read in large pieces, whatever the copy asks for: the hash is of the pieces read.)
+    let mut whole = std::io::BufReader::with_capacity(1 << 16, Both { file, own: Hashing::default() });
+    let mut clean = Hashing::default();
+    let copied = copy_without_metadata(&mut whole, &mut clean);
+    // What follows the picture's end, or what stopped the copy, is the file's all the same.
+    let whole_read = std::io::copy(&mut whole, &mut std::io::sink()).is_ok();
+    (whole_read.then(|| whole.into_inner().own.hex()), copied.is_ok().then(|| clean.hex()))
+}
+
+#[derive(Default)]
+struct Hashing(sha2::Sha256);
+
+impl Hashing {
+    fn hex(self) -> String {
+        use sha2::Digest;
+        self.0.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+impl Write for Hashing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Copies that went to Orbiters are removed once sent; one that a stopped app left (a crash, a forced end) is removed
@@ -202,6 +239,40 @@ mod tests {
         png.extend(chunk(b"IEND", &[]));
         png.extend_from_slice(b"trailing usr_00000000-0000-4000-8000-000000000003");
         (png, pixels.to_vec())
+    }
+
+    #[test]
+    fn both_fingerprints_use_each_byte_once_and_keep_a_complete_clean_hash() {
+        struct Count<'a> {
+            bytes: &'a [u8],
+            read: usize,
+            fail_at_end: bool,
+        }
+        impl Read for Count<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.is_empty() && self.fail_at_end {
+                    return Err(std::io::Error::other("fixture read failed"));
+                }
+                let n = self.bytes.read(out)?;
+                self.read += n;
+                Ok(n)
+            }
+        }
+
+        let (mut original, _) = shot();
+        original.extend(vec![7; 128 << 10]);
+        let mut stream = Count { bytes: &original, read: 0, fail_at_end: false };
+        let (raw, clean) = both_sha256_from(&mut stream);
+        assert_eq!(stream.read, original.len(), "both hashes read one complete stream");
+        let mut expected = Hashing::default();
+        expected.write_all(&original).unwrap();
+        assert_eq!(raw, Some(expected.hex()));
+
+        let mut failing = Count { bytes: &original, read: 0, fail_at_end: true };
+        let (raw, clean_after_error) = both_sha256_from(&mut failing);
+        assert!(raw.is_none());
+        assert!(clean.is_some(), "the metadata-free PNG ended before the read error");
+        assert_eq!(clean, clean_after_error);
     }
 
     #[test]

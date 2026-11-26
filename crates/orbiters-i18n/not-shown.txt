@@ -6,6 +6,7 @@ crates/orbiters-desktop/src/pages/projects/unity6_fixtures.rs
 crates/orbiters-desktop/src/bench.rs
 crates/orbiters-desktop/src/background_bench.rs
 crates/orbiters-desktop/src/idle_frames.rs
+crates/orbiters-desktop/src/idle_service.rs
 crates/orbiters-desktop/src/controller/publish_cost.rs
 crates/orbiters-desktop/src/controller/picture_repair.rs
 crates/orbiters-desktop/src/link_smoke.rs

@@ -32,7 +32,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 ureq = { version = "3", default-features = false, features = ["json", "gzip", "multipart"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Security_Cryptography"] }
+windows = { workspace = true, features = ["Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 # The session store's key in the login keychain, and its AES-GCM (`dpapi`; ring is already built for the releases' signatures).
 [target.'cfg(target_os = "macos")'.dependencies]

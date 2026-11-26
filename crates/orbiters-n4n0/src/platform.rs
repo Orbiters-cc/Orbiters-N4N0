@@ -106,6 +106,11 @@ pub trait Host: Send + Sync + 'static {
     fn with_settings(&self, read: &mut dyn FnMut(&Settings));
     /// Changes the settings in place; the app publishes and saves them.
     fn update_settings(&self, change: &mut dyn FnMut(&mut Settings));
+    /// Whether the app wakes N4N0 ([`crate::N4n0::look`]) when what this says changes (the settings, the scene, the world's
+    /// video, the calls, the account, smoothing): N4N0 then sleeps while nothing happens, instead of looking.
+    fn wakes(&self) -> bool {
+        false
+    }
     /// VRChat and SteamVR now.
     fn scene(&self) -> Scene;
     /// The world VRChat is in, as its log says (a phone has no log: nothing known).

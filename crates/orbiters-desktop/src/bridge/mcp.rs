@@ -82,7 +82,30 @@ fn wait_for_one(listener: &TcpListener, most: Duration) {
     unsafe { libc::poll(&mut fd, 1, most.as_millis().max(1) as i32) };
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The same through Windows' poll (it was a look every 15 ms, some 67 a second with nobody there: BRG-7).
+#[cfg(windows)]
+fn wait_for_one(listener: &TcpListener, most: Duration) {
+    use std::os::windows::io::AsRawSocket;
+    // WSAPOLLFD, and POLLIN (POLLRDNORM | POLLRDBAND).
+    #[repr(C)]
+    struct PollFd {
+        fd: usize,
+        events: i16,
+        revents: i16,
+    }
+    const POLLIN: i16 = 0x0300;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAPoll(fds: *mut PollFd, n: u32, timeout: i32) -> i32;
+    }
+    let mut fd = PollFd { fd: listener.as_raw_socket() as usize, events: POLLIN, revents: 0 };
+    // SAFETY: one socket of ours, alive for the call.
+    if unsafe { WSAPoll(&mut fd, 1, most.as_millis().max(1) as i32) } < 0 {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn wait_for_one(_: &TcpListener, _: Duration) {
     std::thread::sleep(Duration::from_millis(15));
 }
@@ -627,6 +650,34 @@ fn tool_result(name: &str, answer: Result<Answer, super::game::Failure>) -> Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_quiet_listener_waits_for_its_housekeeping_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let every = Duration::from_millis(100);
+        let sample = |wait: &dyn Fn(Duration)| {
+            let mut ticked = Instant::now();
+            let end = ticked + every * 6;
+            let mut waits = 0;
+            while Instant::now() < end {
+                assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+                wait(every.saturating_sub(ticked.elapsed()));
+                waits += 1;
+                if ticked.elapsed() >= every {
+                    ticked = Instant::now();
+                }
+            }
+            waits
+        };
+        let before = sample(&|_| std::thread::sleep(Duration::from_millis(15)));
+        let after = sample(&|until| wait_for_one(&listener, until));
+        println!("BRG-7, quiet listener waits in 600 ms: {before} -> {after}");
+        // Windows may round a wait short of the deadline. Allow extra
+        // waits at those boundaries while detecting the old 15 ms cadence.
+        assert!(after <= 18, "a quiet listener completed {after} waits");
+    }
 
     #[test]
     fn answers_carrying_vrchat_s_text_say_it_is_data() {

@@ -44,12 +44,20 @@ pub(crate) fn open(path: &Path) -> Option<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
 }
 
+/// The folder these apps keep their own in: none of the person's where the app's folders were given (a test, a harness).
+fn roaming() -> Option<PathBuf> {
+    match crate::paths::others_folders_in_roots() {
+        Some(r) => Some(r.config.clone()),
+        None => dirs::config_dir(),
+    }
+}
+
 pub(crate) fn vrcx_db() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("VRCX").join("VRCX.sqlite3"))
+    roaming().map(|d| d.join("VRCX").join("VRCX.sqlite3"))
 }
 
 pub(crate) fn vrcnext_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("VRCNext"))
+    roaming().map(|d| d.join("VRCNext"))
 }
 
 /// The account VRCX last signed in with.

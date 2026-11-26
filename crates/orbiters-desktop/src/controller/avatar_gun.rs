@@ -365,19 +365,39 @@ impl Controller {
             return;
         }
         let ctl = self.clone();
+        let rest = self.rest("avatar-gun", |s| (s.vrchat.running, s.avatar_gun.card.is_some()));
         let _ = std::thread::Builder::new().name("avatar-gun".into()).spawn(move || loop {
             if ctl.avatar_gun.lock().unwrap().stop {
                 return;
             }
             let fast = ctl.avatar_gun_turn();
-            std::thread::sleep(if fast { TRIGGER_TURN } else { TURN });
+            rest.wait(ctl.avatar_gun_rests(fast));
         });
+    }
+
+    /// How long until the next turn: at once again while the trigger is read, a turn while the avatar has the gun or a receiver
+    /// or anything of a shot is under way; else the next look at the avatar's tree (a parameter or another avatar wakes it), and
+    /// nothing without VRChat.
+    fn avatar_gun_rests(&self, fast: bool) -> Option<Duration> {
+        let view = self.view();
+        let rt = self.avatar_gun.lock().unwrap();
+        if fast {
+            return Some(TRIGGER_TURN);
+        }
+        if !rt.edges.is_empty() || rt.streaming.is_some() || rt.hit.is_some() || view.avatar_gun.card.is_some() || view.vrchat.running && (rt.gun || rt.receiver) {
+            return Some(TURN);
+        }
+        view.vrchat.running.then(|| match rt.avatar_at {
+            Some(at) => super::rest::until(Some(at), SETTLE),
+            None => super::rest::until(rt.looked, LOOK_AGAIN),
+        }.max(TURN))
     }
 
     pub(super) fn stop_avatar_gun(&self) {
         let mut rt = self.avatar_gun.lock().unwrap();
         rt.stop = true;
         rt.streaming = None;
+        self.rests.wake("avatar-gun");
     }
 
     /// An avatar parameter VRChat sent, on the OSC receiving thread: only kept (the gun's thread acts on it).
@@ -387,6 +407,7 @@ impl Controller {
         let mut rt = self.avatar_gun.lock().unwrap();
         if rt.values.insert(param, on) != Some(on) && rt.edges.len() < 64 {
             rt.edges.push((param, on));
+            self.rests.wake("avatar-gun");
         }
     }
 
@@ -403,6 +424,7 @@ impl Controller {
             rt.before = None;
             rt.put_on = None;
         }
+        self.rests.wake("avatar-gun");
     }
 
     /// A card's button.

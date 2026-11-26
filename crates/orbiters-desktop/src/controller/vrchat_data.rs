@@ -752,8 +752,8 @@ fn cached_avatar_picture(file: &Path, fetch: impl FnOnce() -> anyhow::Result<Opt
 fn avatar_picture(bytes: &[u8]) -> Option<super::vrchat_login::Picture> {
     let rgb = orbiters_n4n0_core::picture::rgb_any(bytes).ok()?;
     let image = orbiters_n4n0_core::picture::letterbox(&rgb, 480, 360, [24, 24, 27]);
-    let rgba = image.pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
-    Some(super::vrchat_login::Picture { width: 480, height: 360, rgba })
+    let rgba = image.pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect::<Vec<u8>>();
+    Some(super::vrchat_login::Picture { width: 480, height: 360, rgba: rgba.into() })
 }
 
 #[cfg(test)]

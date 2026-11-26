@@ -355,9 +355,8 @@ pub fn hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, String> {
     if index.hash(&paths) {
         let _ = index.save(&index_file);
     }
-    let wanted: HashSet<&PathBuf> = paths.iter().collect();
     // Layers without a world of their own are shared too.
-    index.every_shot().into_iter().filter(|s| wanted.contains(&s.path)).filter_map(|s| Some((s.path, s.sha256?))).collect()
+    paths.into_iter().filter_map(|p| index.hashes_of(&p).0.map(str::to_owned).map(|hash| (p, hash))).collect()
 }
 
 /// Every hash Orbiters may know each screenshot by: the file's own (what was sent before PRIV-8, and a gallery share's
@@ -369,13 +368,14 @@ pub fn map_hashes(paths: Vec<PathBuf>) -> HashMap<PathBuf, Vec<String>> {
     if index.hash(&paths) {
         let _ = index.save(&index_file);
     }
-    let wanted: HashSet<&PathBuf> = paths.iter().collect();
-    index
-        .every_shot()
+    paths
         .into_iter()
-        .filter(|s| wanted.contains(&s.path))
-        .map(|s| (s.path, s.sha256.into_iter().chain(s.clean_sha256).collect::<Vec<_>>()))
-        .filter(|(_, h)| !h.is_empty())
+        .map(|p| {
+            let (own, clean) = index.hashes_of(&p);
+            let hashes: Vec<String> = own.into_iter().chain(clean).map(str::to_owned).collect();
+            (p, hashes)
+        })
+        .filter(|(_, hashes)| !hashes.is_empty())
         .collect()
 }
 

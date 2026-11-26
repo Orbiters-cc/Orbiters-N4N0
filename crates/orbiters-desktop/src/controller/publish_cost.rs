@@ -39,6 +39,7 @@ pub(crate) fn busy_evening() -> Snapshot {
     s.account.state = crate::state::AccountState::SignedIn { username: "Orbit".into() };
     s.vrchat.running = true;
     s.vrchat.pid = Some(4242);
+    super::vrchat_scope::stand_in_picture(&mut s, super::vrchat_login::Picture { width: 96, height: 96, rgba: vec![200; 96 * 96 * 4].into() });
     s.vrchat.log_found = true;
     s.vrchat.motion = Some(Default::default());
     let world = &mut s.vrchat.world;

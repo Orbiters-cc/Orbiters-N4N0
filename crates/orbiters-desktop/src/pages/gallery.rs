@@ -2844,8 +2844,9 @@ mod tests {
 
     /// The page over `n` pictures of this computer, ten to an instance, at rest: what a frame allocates and takes (in
     /// microseconds), and how many times the list was laid out over those frames.
-    fn frames_over(n: usize, layout: GalleryLayout) -> (u64, f64, u64) {
-        let root = std::env::temp_dir().join(format!("orbiters-gallery-frames-{}-{n}", std::process::id()));
+    fn frames_over(n: usize, layout: GalleryLayout, remote: bool) -> (u64, f64, u64) {
+        let temp = crate::link_smoke::Scratch::new("orbiters-gallery-frames", false).unwrap();
+        let root = &temp.path;
         std::fs::create_dir_all(root.join("Sessions")).unwrap();
         let history = root.join("visited-worlds.json");
         orbiters_core::visited::History::default().save(&history).unwrap();
@@ -2862,9 +2863,9 @@ mod tests {
         state.locals = (0..n)
             .map(|i| {
                 let mut e = controller::remote_entry(orbiters_core::shares::Item::default());
-                e.remote = None;
                 e.key = format!("C:/Pictures/VRChat/picture-{i:06}.png");
-                e.local = Some(controller::Local::Picture(e.key.clone().into()));
+                e.remote = remote.then(|| orbiters_core::shares::Item { kind: orbiters_core::shares::Kind::Picture, id: 1 + i as u64, ..Default::default() });
+                e.local = (!remote).then(|| controller::Local::Picture(e.key.clone().into()));
                 e.world_id = format!("wrld_{}", i / 10);
                 e.world_name = format!("World {}", i / 10);
                 e.instance = Some(format!("{}~friends(usr_x)", i / 10));
@@ -2903,7 +2904,6 @@ mod tests {
         // The same pictures drawn in both, so what a frame costs can be compared.
         assert!(state.cards.len() < 60, "{} cards drawn", state.cards.len());
         drop(hold);
-        std::fs::remove_dir_all(&root).ok();
         (allocated / 60, took, made)
     }
 
@@ -2912,12 +2912,20 @@ mod tests {
     #[test]
     fn a_frame_costs_what_is_in_view_whatever_the_library() {
         for layout in [GalleryLayout::Rows, GalleryLayout::Masonry, GalleryLayout::Grid] {
-            let (small, small_us, _) = frames_over(200, layout);
-            let (large, large_us, made) = frames_over(5000, layout);
+            let (small, small_us, _) = frames_over(200, layout, false);
+            let (large, large_us, made) = frames_over(5000, layout, false);
             println!("{layout:?}: 200 pictures {small} allocations {small_us:.0} us a frame, 5000 pictures {large} allocations {large_us:.0} us a frame");
             assert_eq!(made, 0, "{layout:?}: nothing changed, nothing laid out again");
             assert!(large <= small + small / 5 + 40, "{layout:?}: {large} allocations a frame over 5000 pictures, {small} over 200");
         }
+    }
+
+    #[test]
+    fn a_frame_of_remote_gallery_uses_published_settings() {
+        let (allocations, micros, layouts) = frames_over(200, GalleryLayout::Grid, true);
+        println!("Remote gallery: {allocations} allocations, {micros:.0} us per frame over 60 frames, {layouts} layouts");
+        assert!(allocations < 5_000, "{allocations} allocations a frame for eight visible Orbiters-only cards");
+        assert_eq!(layouts, 0);
     }
 
     /// What every group laid out one after the other gave, as egui stacked them (DPG-3: the list's places are made once

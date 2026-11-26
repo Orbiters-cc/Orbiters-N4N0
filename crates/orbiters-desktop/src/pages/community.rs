@@ -316,6 +316,8 @@ impl State {
 
     /// The event a gallery belongs to: its own word for it, or its pictures'.
     fn event_of(&self, gallery: u64) -> Option<&Card> {
+        #[cfg(test)]
+        EVENT_LOOKUPS.with(|count| count.set(count.get() + 1));
         self.events.get(&gallery)
     }
 
@@ -1346,8 +1348,26 @@ fn details(
 }
 
 #[cfg(test)]
+thread_local!(static EVENT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_event_lookup_work_scales_with_the_pictures() {
+        let n = 1000;
+        let mut state = State::default();
+        state.feed.items = (1..=n).map(|id| community::Picture { id, gallery_id: id, ..Default::default() }).collect();
+        state.changed();
+        let entries = state.entries(&orbiters_core::search::Query::new(""));
+        assert_eq!(entries.len(), n as usize);
+        EVENT_LOOKUPS.with(|count| count.set(0));
+        assert!(entries.iter().all(|entry| !state.whole(entry)));
+        let lookups = EVENT_LOOKUPS.with(std::cell::Cell::get);
+        println!("Community event probes over {n} entries: {lookups}");
+        assert_eq!(lookups, n as usize);
+    }
 
     #[test]
     fn an_event_gallery_heads_its_pictures_once() {

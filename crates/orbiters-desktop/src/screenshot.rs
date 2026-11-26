@@ -4326,8 +4326,7 @@ mod dashboard_tests {
             let flat: String = text.split_whitespace().collect();
             wrong.extend(flat.match_indices("temp_dir().join(\"").map(|(at, _)| format!("{file}: {}", flat[at..].chars().take(60).collect::<String>())));
         }
-        assert!(wrong.is_empty(), "{}", wrong.join("
-"));
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// Verify2-r21 M5: an `Area` is made through `orbiters_ui::front` and nowhere else, and what draws on a layer of its own

@@ -347,8 +347,10 @@ impl Backend for Remote {
     fn patch_smoothing(&self, patch: serde_json::Value) { self.0.patch_smoothing(patch); }
 
     fn patch_settings(&self, patch: serde_json::Value) {
-        self.0.update_local(|s| s.settings = s.settings.patched(&patch).0.into());
-        self.0.send(&ToService::PatchSettings { patch });
+        self.0.send_edit(|id, s| {
+            s.settings = s.settings.patched(&patch).0.into();
+            ToService::EditSettings { id, patch }
+        });
     }
 
     fn trash_session(&self, dir: PathBuf) {
@@ -357,8 +359,10 @@ impl Backend for Remote {
 
     fn clean_up(&self, trim: Vec<PathBuf>, delete: Vec<PathBuf>) {
         // Under way at once; the service's snapshots carry it on (and end it, a refusal too).
-        self.0.update_local(|s| s.cleanup.get_or_insert_with(Default::default).add(&trim, &delete));
-        self.0.send(&ToService::CleanUp { trim, delete });
+        self.0.send_edit(|edit, s| {
+            s.cleanup.get_or_insert_with(Default::default).add(&trim, &delete);
+            ToService::CleanUp { edit, trim, delete }
+        });
     }
 
     fn reconstruct(&self, dir: PathBuf) {
@@ -379,11 +383,11 @@ impl Backend for Remote {
 
     fn sign_in(&self) {
         // Finishing in the browser at once: the service asks Orbiters for the link, then opens it.
-        self.0.update_local(|s| {
+        self.0.send_edit(|edit, s| {
             s.account.state = AccountState::SigningIn;
             s.account.error = None;
+            ToService::SignIn { edit }
         });
-        self.0.send(&ToService::SignIn);
     }
 
     fn reopen_sign_in(&self) {
@@ -403,11 +407,11 @@ impl Backend for Remote {
     }
 
     fn vrchat_login(&self, command: crate::controller::vrchat_login::Command) {
-        self.0.update_local(|s| {
+        self.0.send_edit(|edit, s| {
             s.vrchat_login.busy = true;
             s.vrchat_login.error = None;
+            ToService::VrchatLogin { edit, command }
         });
-        self.0.send(&ToService::VrchatLogin { command });
     }
 
     fn launcher(&self, action: orbiters_core::launcher::Action) -> bool {

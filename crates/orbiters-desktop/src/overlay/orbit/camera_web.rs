@@ -107,7 +107,7 @@ pub struct CameraWeb {
     pub title: String,
     pub state: WebState,
     /// The page as drawn last, and whether it changed since it was painted.
-    pub frame: Option<ColorImage>,
+    pub frame: Option<std::sync::Arc<ColorImage>>,
     pub fresh: bool,
     /// Where the laser is on the page, in its pixels; where it was pressed and last moved to, and whether that press became a drag.
     at: Option<Pos2>,
@@ -143,7 +143,7 @@ impl CameraWeb {
 
     /// Opens `url` in `spare`'s engine when there is one (started ahead: Request 18), else in one started now; showing `remembered` (the last
     /// picture of the same link's page, closed lately) until a live picture comes.
-    pub fn open_with(url: &str, spare: Option<Spare>, remembered: Option<ColorImage>) -> Self {
+    pub fn open_with(url: &str, spare: Option<Spare>, remembered: Option<std::sync::Arc<ColorImage>>) -> Self {
         // Changed only where an engine opens (Windows, outside tests).
         #[allow(unused_mut)]
         let mut web = Self::idle(url);
@@ -179,7 +179,7 @@ impl CameraWeb {
     }
 
     /// Its last live picture and the link it was opened for, to show at once if the same code is read again ([`REMEMBERED_FOR`]).
-    pub fn last_picture(&self) -> Option<(String, ColorImage)> {
+    pub fn last_picture(&self) -> Option<(String, std::sync::Arc<ColorImage>)> {
         self.frame.as_ref().filter(|_| self.live).map(|f| (self.asked.clone(), f.clone()))
     }
 
@@ -266,7 +266,7 @@ impl CameraWeb {
                     if let Some((what, at)) = self.awaiting.take() {
                         super::super::vr_log::line(&format!("camera page: a {what} showed on the page {} ms after it was sent", at.elapsed().as_millis())); // i18n: not shown (a log's line)
                     }
-                    self.frame = Some(ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba));
+                    self.frame = Some(ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba).into());
                     self.fresh = true;
                     changed = true;
                 }
@@ -483,7 +483,7 @@ mod tests {
         assert!(web.settle(), "slow is said");
         assert_eq!(web.state, WebState::Slow);
         assert!(web.facts().busy);
-        web.frame = Some(ColorImage::filled([4, 4], egui::Color32::WHITE));
+        web.frame = Some(ColorImage::filled([4, 4], egui::Color32::WHITE).into());
         assert!(web.settle());
         assert_eq!(web.state, WebState::Shown, "a picture shows, though the page has not finished loading");
         web.state = WebState::Failed("navigation error 5".into());
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn a_page_closed_lately_shows_its_last_picture_at_once() {
         let mut shown = CameraWeb::idle("https://linktr.ee/someone");
-        shown.frame = Some(ColorImage::filled([4, 4], egui::Color32::RED));
+        shown.frame = Some(ColorImage::filled([4, 4], egui::Color32::RED).into());
         assert_eq!(shown.last_picture(), None, "only a live picture is remembered");
         shown.live = true;
         let (link, picture) = shown.last_picture().unwrap();
@@ -535,7 +535,7 @@ mod tests {
     fn a_slide_scrolls_with_the_laser_and_glides_when_let_go() {
         let mut web = CameraWeb::idle("https://en.wikipedia.org/wiki/Virtual_reality");
         web.state = WebState::Shown;
-        web.frame = Some(ColorImage::filled([410, 470], egui::Color32::WHITE));
+        web.frame = Some(ColorImage::filled([410, 470], egui::Color32::WHITE).into());
         let size = Vec2::new(410.0, 470.0);
         assert_eq!(web.pixel(Pos2::new(410.0, 470.0), size), Pos2::new(PAGE_PX[0] as f32, PAGE_PX[1] as f32), "the page's pixels, not its picture's");
         web.point(Some((Pos2::new(200.0, 400.0), size)));

@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Set by an automated run (the end-to-end test) that clicks controls like a person, by their labels.
 static WATCH: AtomicBool = AtomicBool::new(false);
 
-/// Told the English name of every control pressed (the beta's usage statistics, `orbiters-desktop`'s `usage`). Set once by the app.
-static PRESS_HOOK: std::sync::OnceLock<fn(&'static str)> = std::sync::OnceLock::new();
+/// Told of every control pressed, by what it is labelled (the beta's usage statistics, `orbiters-desktop`'s `usage`). Set once by the app.
+static PRESS_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
 
 thread_local! {
-    /// The label of the settings row ([`field`]) whose control is being drawn: what a toggle or slider there is named by.
-    static FIELD: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// The label of the settings row ([`field`]) whose control is being drawn, as shown: what a toggle or slider there is named by, once it is pressed. Empty outside a row.
+    static FIELD: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     /// The rows [`field`] drew while [`record_fields`] runs.
     static ROWS: std::cell::RefCell<Option<Vec<FieldRow>>> = const { std::cell::RefCell::new(None) };
     /// The controls drawn while [`record_controls`] runs.
@@ -51,6 +51,18 @@ pub fn mark_control(key: &str, kind: &'static str, rect: Rect) {
     });
 }
 
+/// Whether [`record_controls`] runs: what names a control is made only then.
+fn recording_controls() -> bool {
+    CONTROLS.with(|c| c.borrow().is_some())
+}
+
+/// [`mark_control`] by the English of a label, which is looked up only while something records.
+fn mark_labelled(label: &str, kind: &'static str, rect: Rect) {
+    if recording_controls() {
+        mark_control(orbiters_i18n::english_of(label), kind, rect);
+    }
+}
+
 /// Gives the control marked last its rect (marked before its salt was used up).
 fn set_last_mark(rect: Rect) {
     CONTROLS.with(|c| {
@@ -62,8 +74,11 @@ fn set_last_mark(rect: Rect) {
     });
 }
 
-/// An id salt as a control's key: a text salt without its quotes.
-pub fn salt_key(salt: &impl std::fmt::Debug) -> String {
+/// An id salt as a control's key for [`mark_control`]: a text salt without its quotes. Empty, and nothing made, while nothing records.
+pub(crate) fn salt_key(salt: &impl std::fmt::Debug) -> String {
+    if !recording_controls() {
+        return String::new();
+    }
     format!("{salt:?}").trim_matches('"').to_owned()
 }
 
@@ -97,25 +112,28 @@ pub fn unrecorded<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// From now on, `hook` hears the English name of every control pressed: buttons, icon buttons, segments, the switches and sliders of a settings
-/// row (by the row's label). Only the app's own words are told ([`orbiters_i18n::control_name`]): a label that is a name, a number or a text
-/// with values in it is not. Nothing is told while no hook is set.
-pub fn on_press(hook: fn(&'static str)) {
+/// From now on, `hook` hears the label of every control pressed, as shown: buttons, icon buttons, segments, the switches and sliders of a settings
+/// row (by the row's label). What it keeps of it is its own business: a label may be a person's or a world's name
+/// ([`orbiters_i18n::control_name`] knows the app's own words). Nothing is told while no hook is set.
+pub fn on_press(hook: fn(&str)) {
     let _ = PRESS_HOOK.set(hook);
 }
 
 /// A control labelled `label` (in the language now) was pressed, for [`on_press`]'s hook.
 pub fn note_press(label: &str) {
     if let Some(hook) = PRESS_HOOK.get() {
-        if let Some(name) = orbiters_i18n::control_name(label) {
-            hook(name);
-        }
+        hook(label);
     }
 }
 
 fn note_field_press() {
-    if let (Some(hook), Some(name)) = (PRESS_HOOK.get(), FIELD.with(|f| f.get())) {
-        hook(name);
+    if PRESS_HOOK.get().is_some() {
+        FIELD.with(|f| {
+            let label = f.borrow();
+            if !label.is_empty() {
+                note_press(&label);
+            }
+        });
     }
 }
 
@@ -486,7 +504,7 @@ impl<'a> Button<'a> {
         let w = self.desired_width(ui);
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), if self.enabled { Sense::click() } else { Sense::hover() });
         note_control(ui.ctx(), self.label, rect, self.enabled);
-        mark_control(orbiters_i18n::english_of(self.label), "button", rect);
+        mark_labelled(self.label, "button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -510,7 +528,7 @@ impl<'a> Button<'a> {
             pressed(&resp);
         }
         note_control(ui.ctx(), self.label, rect, self.enabled);
-        mark_control(orbiters_i18n::english_of(self.label), "button", rect);
+        mark_labelled(self.label, "button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -623,7 +641,7 @@ impl<'a> IconButton<'a> {
     pub fn show(self, ui: &mut Ui) -> Response {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(self.size), Sense::click());
         note_control(ui.ctx(), self.label, rect, true);
-        mark_control(orbiters_i18n::english_of(self.label), "icon-button", rect);
+        mark_labelled(self.label, "icon-button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -638,7 +656,7 @@ impl<'a> IconButton<'a> {
         let resp = ui.interact(rect, ui.scope_id().with("icon-button").with_salt(key), Sense::click());
         pressed(&resp);
         note_control(ui.ctx(), self.label, rect, true);
-        mark_control(orbiters_i18n::english_of(self.label), "icon-button", rect);
+        mark_labelled(self.label, "icon-button", rect);
         if resp.clicked() {
             note_press(self.label);
         }
@@ -1174,11 +1192,21 @@ pub fn field(ui: &mut Ui, label: &str, description: Option<&str>, control_width:
     }
     let control_rect = Rect::from_min_max(pos2(rect.right() - control_width, rect.top()), rect.max);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    // The row's label names its control's presses; the label lives only for this call, so it is the English of it that is kept (a catalog text is 'static).
-    let named = PRESS_HOOK.get().and(orbiters_i18n::control_name(label));
-    let was = FIELD.with(|f| f.replace(named));
+    // The row's label names its control's presses, in the one buffer every row writes its own to: what it is in English is looked up on a press, if anything asks.
+    let was = FIELD.with(|f| {
+        let mut f = f.borrow_mut();
+        // A row in a row keeps its outer one's.
+        let was = (!f.is_empty()).then(|| f.clone());
+        f.clear();
+        f.push_str(label);
+        was
+    });
     control(&mut child);
-    FIELD.with(|f| f.set(was));
+    FIELD.with(|f| {
+        let mut f = f.borrow_mut();
+        f.clear();
+        f.push_str(was.as_deref().unwrap_or_default());
+    });
 }
 
 /// Hairline between rows.

@@ -475,8 +475,8 @@ pub async fn change(root: &Path, path: &Path, action: Change) -> anyhow::Result<
     ready(root, path, &changes)?;
     let making = crate::installs::Installing::begin(root, path, changes.package_changes().keys().map(|name| name.as_ref()))?;
     let Err(e) = project.apply_pending_changes(&PackageInstaller::new(&io, Some(&client)), changes).await else {
+        // apply_pending_changes has saved the manifests before reporting success.
         making.over();
-        project.save().await?;
         return Ok(());
     };
     // What vrc-get could not move back (its folder in use a moment ago) is tried once more, and said where it stays.
@@ -821,20 +821,30 @@ fn make_link(target: &Path, at: &Path) -> std::io::Result<()> {
 /// very one it made, says so; anything else (a plan folder that came with a copied or imported project) is not looked at. `ours`:
 /// the journals are in Orbiters' own folder, where one that has nothing left to say goes.
 fn unfinished(project: &Path, journals: &Path, ours: bool) -> anyhow::Result<()> {
-    let Ok(entries) = std::fs::read_dir(journals) else { return Ok(()) };
-    for e in entries.flatten() {
-        let path = e.path();
-        let Some(journal) = crate::own::steady(&path).ok().flatten().and_then(|b| serde_json::from_slice::<Journal>(&b).ok()) else { continue };
+    // A journal, or their folder, that cannot be read now is not "none" (W1-2): the change it may say stopped halfway is not
+    // known, and nothing more is changed until it is.
+    let entries = match std::fs::read_dir(journals) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries.map_err(|e| crate::installs::unreadable(journals, e))?,
+    };
+    for e in entries {
+        let path = e.map_err(|e| crate::installs::unreadable(journals, e))?.path();
+        // (Journals only: a write's own temporary file is not one yet.)
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let bytes = crate::own::steady(&path).map_err(|e| crate::installs::unreadable(&path, e))?;
+        let Some(journal) = bytes.and_then(|b| serde_json::from_slice::<Journal>(&b).ok()) else { continue };
         if crate::discovery::key(&journal.project) != crate::discovery::key(project) {
             continue;
         }
         // The same folder it was written for, and its own folder of copies inside it: by identity, not by name.
         let staging_inside = journal.staging.parent().is_some_and(|p| crate::discovery::key(p) == crate::discovery::key(project))
             && journal.staging.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".orbiters-plan-"));
-        if !crate::owned::is_same(project, journal.project_id) || !staging_inside {
+        if !staging_inside || !crate::owned::try_is_same(project, journal.project_id).map_err(|e| crate::installs::unreadable(project, e))? {
             continue;
         }
-        let there = crate::owned::is_same(&journal.staging, journal.staging_id);
+        let there = crate::owned::try_is_same(&journal.staging, journal.staging_id).map_err(|e| crate::installs::unreadable(&journal.staging, e))?;
         if journal.state == "committed" {
             // It went through: only its copies are left, this app's own.
             if ours {
@@ -987,6 +997,25 @@ mod tests {
         std::fs::rename(&moved, &p).unwrap();
         assert!(unfinished(&p, &journals, true).is_err());
         assert!(p.join("Packages/com.a/Mine.cs").is_file());
+    }
+
+    /// W1-2's sibling: a plan's journal held a moment by another program is not "no journal": nothing more is changed until it
+    /// can be read; a write's temporary file is no journal.
+    #[cfg(windows)]
+    #[test]
+    fn a_plan_journal_that_cannot_be_read_now_stops_the_change() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let (p, journals) = (temp.path().join("Project"), temp.path().join("plans"));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::create_dir_all(&journals).unwrap();
+        std::fs::write(journals.join("j.json"), b"{}").unwrap();
+        std::fs::write(journals.join("j.json.1-0.tmp"), b"{").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(journals.join("j.json")).unwrap();
+        let said = unfinished(&p, &journals, true).unwrap_err().to_string();
+        drop(held);
+        assert!(said.contains("j.json"), "{said}");
+        unfinished(&p, &journals, true).unwrap();
     }
 
     /// A VCC folder with VRChat's caches and one remote repository of the person's, its cache holding `cache`.

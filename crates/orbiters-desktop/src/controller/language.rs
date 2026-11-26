@@ -2,6 +2,7 @@
 //! (or a server without this yet), nothing changes: the last language known stays until the next try.
 
 use orbiters_core::app_log::OrLog as _;
+use super::rest::Part;
 use super::{Controller, Shared};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,12 @@ pub(super) fn due(signed_in: Option<bool>, language: Option<&str>, unsent: bool,
     }
 }
 
+/// How long until [`due`] has something by the clock alone: the next try, with an account (what else it follows wakes it).
+pub(super) fn wait(signed_in: Option<bool>, unsent: bool, since_try: Option<Duration>) -> Option<Duration> {
+    let every = if unsent { SEND_EVERY } else { ASK_EVERY };
+    (signed_in == Some(true)).then(|| every.saturating_sub(since_try.unwrap_or(every)).max(Duration::from_secs(1)))
+}
+
 impl Controller {
     pub(super) fn start_language(self: &Shared) {
         let ctl = self.clone();
@@ -47,9 +54,11 @@ impl Controller {
             let mut token: Option<String> = None;
             let mut tried: Option<Instant> = None;
             let mut told = false;
+            let rest = ctl.rest("language", |s| (Part::of(&s.settings), Part::of(&s.account)));
             loop {
                 ctl.language_turn(&mut token, &mut tried, &mut told);
-                std::thread::sleep(Duration::from_secs(1));
+                let unsent = ctl.with_settings(|s| s.language_unsent);
+                rest.wait(wait(ctl.language_account().as_ref().map(Option::is_some), unsent, tried.map(|t| t.elapsed())));
             }
         }).or_log("a thread could not be started");
     }
@@ -140,6 +149,20 @@ mod tests {
         assert_eq!(due(Some(true), Some("fr"), true, false, JUST_NOW), Due::Nothing, "the server is down: not every second");
         assert_eq!(due(Some(true), Some("fr"), true, false, LATER), Due::Send(Some("fr".into())));
         assert_eq!(due(Some(true), Some("fr"), true, true, JUST_NOW), Due::Send(Some("fr".into())), "picked before signing in: it goes up when signed in");
+    }
+
+    /// The thread sleeps until then, never past what is due.
+    #[test]
+    fn it_sleeps_until_something_is_due() {
+        assert_eq!((wait(None, true, None), wait(Some(false), true, LATER)), (None, None), "nobody to ask");
+        for unsent in [false, true] {
+            for since in [None, JUST_NOW, LATER, Some(Duration::from_secs(59)), Some(Duration::from_secs(299))] {
+                let left = wait(Some(true), unsent, since).unwrap();
+                let then = Some(since.unwrap_or(ASK_EVERY) + left);
+                assert_ne!(due(Some(true), Some("fr"), unsent, false, then), Due::Nothing, "{unsent} {since:?}");
+                assert!(left <= ASK_EVERY);
+            }
+        }
     }
 
     #[test]

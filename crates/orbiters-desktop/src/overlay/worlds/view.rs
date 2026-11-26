@@ -638,6 +638,14 @@ impl View {
         self.alpha = 0.0;
     }
 
+    /// The bytes of the copy of a capture that shows small, in order around its subject: beside the one kept in memory.
+    pub fn small_bytes(&self) -> u64 {
+        match (&self.capture, &self.full) {
+            (Some(shown), Some(full)) if !Arc::ptr_eq(shown, full) => super::cache::capture_bytes(shown),
+            _ => 0,
+        }
+    }
+
     /// Whether captures show small before the person and not around them.
     pub fn small_on(&self) -> bool {
         self.small_on

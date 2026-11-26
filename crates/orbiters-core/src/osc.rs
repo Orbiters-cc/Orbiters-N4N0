@@ -290,7 +290,7 @@ pub fn host_info(name: &str, osc_ip: Ipv4Addr, osc_port: u16) -> serde_json::Val
 /// The OSC socket's read timeout: the receiving thread looks whether the service stopped this often, in case the wake-up
 /// of [`OscService`]'s `Drop` is lost. A minute in this crate's tests, so that a stop that waited for it rather than being
 /// woken takes a minute and shows, whatever the speed of the machine (with a second, a busy one could not tell them apart).
-const RECEIVE_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(60) } else { Duration::from_secs(1) };
+const RECEIVE_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(60) } else { Duration::from_secs(15) };
 
 /// OSCQuery requests answered at once at most: each has a thread for up to a second and a half.
 const MAX_ANSWERING: usize = 8;
@@ -910,7 +910,8 @@ impl OscService {
                 // The system browses, and what it saw comes in through `saw`.
                 let (tx, rx) = mpsc::channel::<Sighting>();
                 let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
-                let next = move || match rx.recv_timeout(Duration::from_millis(250)) {
+                // (The service's end hangs up, see `Drop`.)
+                let next = move || match rx.recv_timeout(RECHECK) {
                     Ok(sighting) => Some(Some(sighting)),
                     Err(mpsc::RecvTimeoutError::Timeout) => Some(None),
                     Err(mpsc::RecvTimeoutError::Disconnected) => None,
@@ -924,7 +925,8 @@ impl OscService {
                         match d.browse("_oscjson._tcp.local.") {
                             Ok(events) => {
                                 let (stop, found, a, route) = (stop.clone(), vrchat_query.clone(), announcement.clone(), route.clone());
-                                let next = move || match events.recv_timeout(Duration::from_millis(250)) {
+                                // (The daemon's end hangs up, see `Drop`.)
+                                let next = move || match events.recv_timeout(RECHECK) {
                                     Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => Some(Some(Sighting::Found {
                                         name: info.get_fullname().to_string(),
                                         addresses: info.get_addresses_v4().into_iter().collect(),
@@ -1462,6 +1464,8 @@ fn watch_vrchat(
 impl Drop for OscService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // The browsing thread waits for what comes next: nothing comes any more.
+        self.sightings = None;
         if let Some(d) = self.mdns.take() {
             let _ = d.shutdown();
         }
@@ -1505,6 +1509,18 @@ mod platform_tests {
     fn lan_service(ports: Ports) -> OscService {
         let network = Network::Lan { ip: Ipv4Addr::LOCALHOST, vrchat: LanVrchat { osc_port: VRCHAT_OSC_PORT, ..Default::default() } };
         OscService::start_with("Test", &[], network, Discovery::Platform, ports, |_, _| {}).unwrap()
+    }
+
+    /// XCT-23: the browsing thread sleeps until something is seen; the service's end wakes it, it does not wait for its next look
+    /// ([`RECHECK`]).
+    #[test]
+    fn the_browsing_thread_ends_with_the_service() {
+        let service = lan_service(Ports::default());
+        assert!(service.threads.iter().any(|t| t.thread().name() == Some("oscquery-browse")));
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        drop(service);
+        assert!(started.elapsed() < RECHECK / 2, "{:?}", started.elapsed());
     }
 
     /// `next` as the mdns-sd and system-Bonjour paths both drive it. (127.0.0.1 is no address of the local network, so

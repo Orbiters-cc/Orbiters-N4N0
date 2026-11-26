@@ -114,8 +114,16 @@ impl CallsAccess {
 
     /// Whether to ask the server now.
     fn due(&self, now: Instant) -> bool {
-        let wait = if self.heard.is_some() { ASK_EVERY } else { ASK_AGAIN };
-        self.asked.is_none_or(|t| now.duration_since(t) >= wait)
+        self.asked.is_none_or(|t| now.duration_since(t) >= self.every())
+    }
+
+    fn every(&self) -> Duration {
+        if self.heard.is_some() { ASK_EVERY } else { ASK_AGAIN }
+    }
+
+    /// How long until then.
+    fn wait(&self) -> Duration {
+        super::rest::until(self.asked, self.every())
     }
 
     /// The server said `allowed` to `whose`: kept for this run, and in the file for the next start. An answer for another
@@ -248,6 +256,12 @@ impl Controller {
         }
         let Some(answer) = refresh_outcome(api.member_feature(&token, N4N0_CALLS)) else { return };
         self.calls.locked().access.heard(&whose, answer, &file);
+    }
+
+    /// How long until [`Self::calls_access_refresh`] asks again (never, with nobody signed in).
+    pub(super) fn calls_access_wait(&self) -> Option<Duration> {
+        self.calls_identity()?;
+        Some(self.calls.locked().access.wait())
     }
 }
 #[cfg(test)]

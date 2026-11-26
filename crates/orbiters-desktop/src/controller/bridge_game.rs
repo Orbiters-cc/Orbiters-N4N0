@@ -506,7 +506,15 @@ impl Controller {
                 }
             }),
         );
-        keeper.start();
+        let rest = self.rest("bridge-keeper", |s| (s.settings.experimental.vrchat_bridge, super::rest::Part::of(&s.account), s.settings.development));
+        let ctl = Arc::downgrade(self);
+        keeper.start_resting(move |look| {
+            let shown = ctl.upgrade().is_some_and(|ctl| ctl.shown());
+            rest.wait(match look {
+                crate::bridge::keeper::Look::At { due, allowed } if !(allowed && shown) => due,
+                _ => Some(crate::bridge::keeper::Look::TURN),
+            });
+        });
         *self.bridge.locked() = Some(keeper);
     }
 
@@ -515,6 +523,7 @@ impl Controller {
         let keeper = self.bridge.locked().clone();
         if let Some(keeper) = keeper {
             keeper.command(command);
+            self.rests.wake("bridge-keeper");
         }
     }
 

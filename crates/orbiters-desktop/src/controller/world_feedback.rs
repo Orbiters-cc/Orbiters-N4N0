@@ -7,6 +7,7 @@
 
 use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
+use super::rest::Part;
 use super::Shared;
 use orbiters_contracts::world_feedback::{self as contract, Action as Line, Refusal};
 use orbiters_core::account::Api;
@@ -55,8 +56,6 @@ pub(super) struct WorldFeedbackRuntime {
     known: HashMap<String, Known>,
     /// Worlds shown somewhere (the menus, the N4N0 world), since when.
     wanted: HashMap<String, Instant>,
-    /// Names the menus and the world gave worlds.
-    names: HashMap<String, String>,
     queue: Queue,
     queue_path: PathBuf,
     /// The last error of a menu's action, by world.
@@ -91,7 +90,6 @@ impl WorldFeedbackRuntime {
             world: WorldSession::default(),
             known: HashMap::new(),
             wanted: HashMap::new(),
-            names: HashMap::new(),
             queue: Queue::load(&queue_path, now_ms()),
             queue_path,
             menu_errors: HashMap::new(),
@@ -169,9 +167,6 @@ impl WorldFeedbackRuntime {
             Line::Hello => {}
             Line::Select { world, name, .. } => {
                 let world = world.to_ascii_lowercase();
-                if !name.is_empty() {
-                    self.names.insert(world.clone(), name.clone());
-                }
                 self.wanted.insert(world.clone(), Instant::now());
                 self.world.selected = Some((world, name));
             }
@@ -191,7 +186,7 @@ impl WorldFeedbackRuntime {
     /// Queues an action (kept on disk at once).
     fn push(&mut self, world: &str, action: Action) {
         if let Action::Comment { client_id, .. } = &action {
-            if self.queue.for_stamp(&self.stamp).items.iter().any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
+            if self.queue.for_stamp(&self.stamp).any(|p| matches!(&p.action, Action::Comment { client_id: c, .. } if c == client_id)) {
                 return;
             }
         }
@@ -209,7 +204,7 @@ impl WorldFeedbackRuntime {
     /// What the member sees: Orbiters' answer with what waits FOR THIS server and account (another account's waiting
     /// comment on this computer is never shown as this one's).
     fn seen(&self, world: &str) -> Seen {
-        self.known.get(world).cloned().unwrap_or_default().seen(world, &self.queue.for_stamp(&self.stamp), tr_latin(ME))
+        self.known.get(world).unwrap_or(&Known::default()).seen(world, self.queue.for_stamp(&self.stamp), tr_latin(ME))
     }
 
     /// The server and account of the moment: another than before (an environment switch, another account) and what
@@ -345,6 +340,15 @@ impl WorldFeedbackRuntime {
         // Not asked again before this answer comes.
         self.known.entry(world.clone()).or_default().read_at = now;
         Some(Call::Read { world })
+    }
+
+    /// When the sender next needs to send, read or expire an action. New queue entries and requests wake it directly.
+    fn next_due(&self, now: u64) -> Option<Duration> {
+        let parked = self.parked.iter().filter(|(stamp, until)| stamp.sends_as(&self.stamp) && now < *until).map(|(_, until)| *until).max();
+        let queued = self.queue.items.iter().filter(|p| p.to.as_ref().is_some_and(|to| to.sends_as(&self.stamp))).map(|p| p.due.max(parked.unwrap_or(0)));
+        let expiry = self.queue.items.iter().filter(|p| p.to.is_some()).map(|p| p.since.saturating_add(orbiters_core::world_feedback::DROP_AFTER.as_millis() as u64));
+        let read = self.wanted.keys().map(|w| self.known.get(w).map_or(now, |k| k.read_at + READ_AGAIN.as_millis() as u64 + 1));
+        queued.chain(expiry).chain(read).min().map(|at| Duration::from_millis(at.saturating_sub(now).max(300)))
     }
 
     /// The other server's answers are forgotten, and those still coming are not taken.
@@ -579,6 +583,7 @@ impl super::Controller {
                 }
             }
         }
+        self.rests.wake("world-feedback-send");
         self.feedback_publish();
     }
 
@@ -590,7 +595,7 @@ impl super::Controller {
     /// World label changes and comments waiting to be sent (to whichever environment is active when they go).
     pub(super) fn feedback_pending(&self) -> u32 {
         let rt = self.world_feedback.locked();
-        rt.queue.for_stamp(&rt.stamp).items.len() as u32
+        rt.queue.for_stamp(&rt.stamp).count() as u32
     }
 
     /// The Development environment was switched: what Orbiters answered for worlds is the other server's, so it is read again.
@@ -602,7 +607,13 @@ impl super::Controller {
         let (development, api, stamp) = self.feedback_context();
         let mut rt = self.world_feedback.locked();
         rt.set_stamp(stamp);
-        rt.follow(development, api.is_some())
+        let changed = rt.follow(development, api.is_some());
+        drop(rt);
+        if changed {
+            // A world to read, an action to send.
+            self.rests.wake("world-feedback-send");
+        }
+        changed
     }
 
     /// One read of whom world feedback is for now, for EVERY reader of the log (the follower, the world's local address):
@@ -655,18 +666,23 @@ pub(super) fn spawn(ctl: Shared) {
     let c = ctl.clone();
     std::thread::Builder::new().name("world-feedback-log".into()).spawn(move || {
         let mut beat = 0u32;
+        let rest = c.rest("world-feedback-log", |s| (s.vrchat.running, s.steamvr.running, Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let changed = c.feedback_follow();
             // The menus follow the world, the queue and what Orbiters answers (at most every second when nothing moves).
             if changed || beat.is_multiple_of(4) {
                 c.feedback_publish();
             }
-            beat = beat.wrapping_add(1);
-            std::thread::sleep(LOG_EVERY);
+            // Without VRChat no line of its log comes, and nothing moves but what publishes itself.
+            let view = c.view();
+            let here = view.vrchat.running || view.steamvr.running || c.shown();
+            beat = if here { beat.wrapping_add(1) } else { 0 };
+            rest.wait(here.then_some(LOG_EVERY));
         }
     }).or_log("a thread could not be started");
     let c = ctl.clone();
     std::thread::Builder::new().name("world-feedback-send".into()).spawn(move || {
+        let rest = c.rest("world-feedback-send", |s| (Part::of(&s.account), s.settings.development));
         while !c.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             // The account and server read once: what is handed out is for them, and goes with them.
             let (api, stamp) = c.account_api_for();
@@ -682,7 +698,8 @@ pub(super) fn spawn(ctl: Shared) {
                 (rt.next_call(), rt.scope)
             };
             let Some(call) = call else {
-                std::thread::sleep(Duration::from_millis(300));
+                let due = c.world_feedback.locked().next_due(now_ms());
+                rest.wait(due);
                 continue;
             };
             let result = perform(&call, api.as_ref());
@@ -700,7 +717,9 @@ pub(super) fn spawn(ctl: Shared) {
             c.feedback_publish();
         }
     }).or_log("a thread could not be started");
-    std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl)).or_log("a thread could not be started");
+    if !cfg!(test) && !orbiters_core::osc::no_network_listening() {
+        std::thread::Builder::new().name("world-feedback-probe".into()).spawn(move || serve(ctl)).or_log("a thread could not be started");
+    }
 }
 
 /// The local address: `GET /n4n0/feedback/v1` on 127.0.0.1:22541 (contracts `Docs/world-feedback.md`).
@@ -1053,6 +1072,51 @@ mod tests {
         assert!(rt.known.get(WORLD).is_none_or(|k| k.view.is_none()), "A's answer is not B's view");
         assert!(rt.seen(WORLD).comments.iter().all(|c| c.2 != "A's draft") && rt.seen(WORLD).pending == 0, "A's waiting comment is not shown to B");
         assert!(rt.next_call().is_none_or(|c| !matches!(c, Call::Send { .. })), "nor sent as B");
+        let _ = std::fs::remove_file(&rt.queue_path);
+    }
+
+    /// DCT-14: the sender sleeps until a call or expiry is due and waits for a signal when its queue is empty.
+    #[test]
+    fn the_sender_sleeps_until_its_next_call() {
+        let stamp = Stamp { server: "s".into(), account: Some("1".into()), credential: None };
+        let mut rt = WorldFeedbackRuntime {
+            queue: Queue::default(),
+            queue_path: std::env::temp_dir().join(format!("orbiters-feedback-due-{}.json", uuid::Uuid::new_v4())),
+            instances: (Vec::new(), Some(Instant::now())),
+            stamp: stamp.clone(),
+            ..Default::default()
+        };
+        let now = now_ms();
+        assert!(rt.next_call().is_none() && rt.next_due(now).is_none(), "nothing to do: nothing is due");
+        // The sender never sends another account's waiting action. It still removes it when its retention period ends.
+        rt.queue.push_to(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }), now, Stamp { account: Some("2".into()), ..stamp.clone() });
+        assert!(rt.next_call().is_none());
+        assert_eq!(rt.next_due(now), Some(orbiters_core::world_feedback::DROP_AFTER));
+        rt.queue.items[0].since = now - orbiters_core::world_feedback::DROP_AFTER.as_millis() as u64;
+        assert!(rt.next_call().is_none() && rt.next_due(now).is_none());
+        // Its own is, once its wait is over; parked, once the pause ends.
+        rt.push(WORLD, Action::Set(Set { liked: Some(true), ..Default::default() }));
+        rt.wanted.clear();
+        let mine = rt.queue.items.len() - 1;
+        let first = Duration::from_millis(rt.queue.items[mine].due.saturating_sub(now_ms()));
+        assert!(rt.next_due(now_ms()).is_some_and(|due| due <= first.max(Duration::from_millis(300))), "when it may go");
+        rt.queue.items[mine].due = now + 8_000;
+        let due = rt.next_due(now).unwrap();
+        assert_eq!(due, Duration::from_secs(8));
+        assert!(rt.next_call().is_none());
+        rt.queue.items[mine].due = now;
+        assert!(matches!(rt.next_call(), Some(Call::Send { .. })));
+        rt.parked.push((stamp.clone(), now + 60_000));
+        assert!(rt.next_call().is_none());
+        assert!(rt.next_due(now).unwrap() >= Duration::from_secs(60));
+        rt.parked.clear();
+        rt.queue.items.clear();
+        // A world shown is read, then again once its answer is old.
+        rt.wanted.insert(WORLD.into(), Instant::now());
+        assert_eq!(rt.next_due(now_ms()), Some(Duration::from_millis(300)));
+        assert!(matches!(rt.next_call(), Some(Call::Read { .. })));
+        let due = rt.next_due(now_ms()).unwrap();
+        assert!(due > READ_AGAIN - Duration::from_secs(5) && due <= READ_AGAIN + Duration::from_secs(1), "{due:?}");
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

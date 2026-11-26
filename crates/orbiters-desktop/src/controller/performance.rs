@@ -304,6 +304,12 @@ impl super::Controller {
         keep_pending(&path, pending);
     }
 
+    /// Whether summaries wait that a look could send.
+    pub(super) fn performance_waits(&self) -> bool {
+        let rt = self.performance.locked();
+        rt.hardware.refresh_hz.is_some() && rt.pending.as_ref().is_some_and(|(_, p)| !p.is_empty())
+    }
+
     /// Sends what was gathered when it is time (or `now`), on a thread of its own.
     pub(super) fn performance_send_if_due(self: &Shared, now: bool) {
         let Some(path) = self.performance_file() else { return };

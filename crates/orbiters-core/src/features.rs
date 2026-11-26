@@ -101,8 +101,13 @@ impl Grant {
 
     /// Whether to ask the server now.
     pub fn due(&self, now: Instant) -> bool {
-        let wait = if self.proof.is_some() { self.refresh } else { Self::RETRY.min(self.refresh) };
-        self.asked.is_none_or(|t| now.duration_since(t) >= wait)
+        self.wait(now).is_zero()
+    }
+
+    /// How long until then.
+    pub fn wait(&self, now: Instant) -> Duration {
+        let every = if self.proof.is_some() { self.refresh } else { Self::RETRY.min(self.refresh) };
+        self.asked.map_or(Duration::ZERO, |t| every.saturating_sub(now.duration_since(t)))
     }
 
     /// Whether the feature is granted now: the server said yes, recently enough.

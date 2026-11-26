@@ -6,6 +6,7 @@
 
 use orbiters_core::app_log::OrLog as _;
 use orbiters_core::locks::*;
+use super::rest::{sooner, until};
 use super::{Controller, NoticeKind, Shared};
 use crate::state::AccountState;
 use orbiters_core::account::{self, Account, Api, Callback, Check, Exchange, Served, Server};
@@ -83,14 +84,6 @@ struct SignIn {
 }
 
 impl AccountRuntime {
-    /// A sign-in ended without one, and `before` shows again. The check under way then was dropped with it: the account is read
-    /// and checked again, or "Checking" (and "Connecting", without the member's id) would stay (verify5-r21 m7).
-    fn put_back(&mut self, before: &AccountState) {
-        if matches!(before, AccountState::Checking { .. }) {
-            self.read = self.read.map(|(server, _)| (server, Some(SystemTime::UNIX_EPOCH)));
-        }
-    }
-
     /// Whose all this is; `None` while nothing was read at all.
     pub(super) fn identity(&self) -> Option<super::identity::Identity> {
         use super::identity::Identity;
@@ -194,6 +187,10 @@ fn open_with_browser(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How often the account's file is looked at where the system does not tell of its changes, and the shortest time between two looks.
+const LOOK_EVERY: Duration = Duration::from_secs(2);
+const LOOK_APART: Duration = Duration::from_millis(500);
+
 impl Controller {
     /// Reads the account now, then follows it (and a sign-in in progress) on a thread of its own.
     pub(super) fn start_account(self: &Shared) {
@@ -204,11 +201,49 @@ impl Controller {
         if let Ok(saved) = account::read_saved(server) {
             self.account_saved_at_launch(server, saved);
         }
+        // The file changes when a tool signs in or out: the system says so, else it is looked at now and then. The folder is both
+        // environments'.
+        // An environment change also wakes this wait.
+        let rest = self.rest("account", |_| ());
+        let weak = std::sync::Arc::downgrade(self);
+        let folder: Vec<_> = account::account_path(server).and_then(|p| Some(p.parent()?.to_path_buf())).into_iter().collect();
+        let told = orbiters_core::folder_watch::watch("account-folder", folder, move || {
+            if let Some(ctl) = weak.upgrade() {
+                ctl.rests.wake("account");
+            }
+        });
         let ctl = self.clone();
-        std::thread::Builder::new().name("account".into()).spawn(move || loop {
+        std::thread::Builder::new().name("account".into()).spawn(move || while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             ctl.account_tick();
-            std::thread::sleep(Duration::from_millis(500));
+            rest.wait(ctl.account_rests(told));
         }).or_log("a thread could not be started");
+    }
+
+    /// How long until the next look at the account: until something is due by the clock (a file that could not be read, Orbiters
+    /// out of reach, a refused credential, what the assistant may do), and the file's own pace where nothing tells of it.
+    fn account_rests(&self, told: bool) -> Option<Duration> {
+        let mut due = (!told).then_some(LOOK_EVERY);
+        {
+            let rt = self.account_runtime.locked();
+            if rt.unknown && rt.unreadable.is_none() {
+                due = sooner(due, Some(LOOK_APART));
+            }
+            due = sooner(due, rt.unreadable.map(|(_, _, at)| until(Some(at), REREAD)));
+            due = sooner(due, rt.offline_since.map(|at| until(Some(at), RECHECK_OFFLINE)));
+            due = sooner(due, rt.refused.map(|(at, n)| until(Some(at), refused_recheck(n))));
+        }
+        due = sooner(due, self.assistant_access_wait());
+        // (Never in a row: one due but still being asked is looked at again at the old pace.)
+        due.map(|due| due.max(LOOK_APART))
+    }
+
+    /// A sign-in ended while it was replacing a saved account's check.
+    /// Check the file again even when its contents stayed the same.
+    fn check_restored_account(&self, rt: &mut AccountRuntime, before: &AccountState) {
+        if matches!(before, AccountState::Checking { .. }) {
+            rt.read = rt.read.map(|(server, _)| (server, Some(SystemTime::UNIX_EPOCH)));
+            self.rests.wake("account");
+        }
     }
 
     fn account_tick(self: &Shared) {
@@ -517,7 +552,7 @@ impl Controller {
                 // Unless a newer sign-in or a sign-out came meanwhile, the account shows what it did before.
                 let mut rt = self.account_runtime.locked();
                 if rt.generation == generation {
-                    rt.put_back(&before);
+                    self.check_restored_account(&mut rt, &before);
                     drop(rt);
                     self.update(|s| s.account.state = before);
                 }
@@ -603,7 +638,7 @@ impl Controller {
                 }
                 Exchange::Ended(message) => {
                     let before = rt.signing_in.take().map(|s| s.before.clone());
-                    before.iter().for_each(|b| rt.put_back(b));
+                    before.iter().for_each(|b| self.check_restored_account(&mut rt, b));
                     drop(rt);
                     self.update_if(|s| {
                         let current = self.account_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
@@ -621,7 +656,7 @@ impl Controller {
             let mut rt = self.account_runtime.locked();
             if rt.signing_in.as_ref().is_some_and(|s| s.generation == generation) {
                 let before = rt.signing_in.take().map(|s| s.before.clone());
-                before.iter().for_each(|b| rt.put_back(b));
+                before.iter().for_each(|b| self.check_restored_account(&mut rt, b));
                 drop(rt);
                 self.update(|s| {
                     s.account.state = before.unwrap_or(AccountState::SignedOut);
@@ -647,7 +682,7 @@ impl Controller {
             rt.generation += 1;
             self.account_generation.store(rt.generation, std::sync::atomic::Ordering::SeqCst);
             let before = rt.signing_in.take().map(|s| s.before.clone()).unwrap_or_else(|| rt.resting());
-            rt.put_back(&before);
+            self.check_restored_account(&mut rt, &before);
             before
         };
         self.update(|s| {
@@ -1066,7 +1101,10 @@ mod tests {
         });
         assert_eq!(c.view().account.state, AccountState::SigningIn);
         let modified = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(9));
+        let waiting = c.rest("account", |_| ());
+        assert!(!waiting.wait(Some(Duration::ZERO)));
         c.cancel_sign_in();
+        assert!(waiting.wait(Some(Duration::ZERO)), "reread even without a file change");
         assert!(matches!(c.view().account.state, AccountState::Checking { .. }), "{:?}", c.view().account.state);
         assert!(c.account_runtime.lock().unwrap().read != Some((Server::Production, modified)), "read again at the next look");
         c.read_account_with(Server::Production, modified, false, move || Ok(Some(bare)), |_| Ok(Check::Valid(member("fake-a", "1"))));

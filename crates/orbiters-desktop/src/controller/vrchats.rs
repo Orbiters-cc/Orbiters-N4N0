@@ -481,7 +481,37 @@ impl std::ops::Deref for TargetLog {
     }
 }
 
+/// The roster as the interface shows it ([`shown`] of each), with no account proven twice: VRChat keeps one game session per
+/// account, so where two running VRChats' own logs name the same one, one of them is not that account (a world's script wrote
+/// the line, or a session VRChat ended elsewhere), and neither is sent that account's private places (COR-1). A world writes
+/// only to the log of the game it runs in: it cannot take away what another game's own log says.
+pub(crate) fn shown_all(runs: &[VrchatRun], target: Option<u32>, chosen: Option<u32>) -> Vec<crate::state::VrchatRunShown> {
+    let mut shown: Vec<_> = runs.iter().map(|r| shown(r, target, chosen)).collect();
+    // By how many logs, proven or not (a second claim that is not proven still contradicts the first); one log taken for two
+    // processes is one claim.
+    let named = |id: &str| {
+        let mut logs: Vec<_> = runs.iter().filter(|r| !r.signed_out && r.account.as_ref().is_some_and(|(a, _)| a == id)).map(|r| r.log.as_deref()).collect();
+        logs.sort();
+        logs.dedup();
+        logs.len()
+    };
+    for run in &mut shown {
+        if run.account_id.as_deref().is_some_and(|id| named(id) > 1) {
+            run.account_id = None;
+        }
+    }
+    shown
+}
+
 /// What the interface shows of a VRChat (state.rs), from the roster's.
+// COR-1, what remains: process birth and profile identify the launch, while the account comes from its log, and a world's
+// script can write a record of VRChat's own shape, its `[Authentication - …]` tag included (that tag is the same for every run
+// of a VRChat build: measured on the owner's logs, 2026-11-26). Nothing a world cannot write binds the account to the process
+// in time: VRChat's per-account folders (LocalAvatarData, OSC) are shared by every profile and written when avatar settings are
+// saved (98 s after a sign-in in one run, never in a 14-minute one); VRChat switches accounts within a process, so profile and
+// birth stay; reading the game's memory is out of the question. What a world cannot undo is another game's own log:
+// [`shown_all`] proves no account two running VRChats name. Left: a forged record for an account whose own game is not running
+// on this computer. Measured and argued in review-1124 fix/W3.md.
 pub(crate) fn shown(run: &VrchatRun, target: Option<u32>, chosen: Option<u32>) -> crate::state::VrchatRunShown {
     use crate::state::{VrchatDriverShown, VrchatRunShown};
     VrchatRunShown {
@@ -616,7 +646,7 @@ impl super::Controller {
         let runs = self.sides.roster();
         let target = self.sides.target().map(|t| t.pid);
         let chosen = self.sides.chosen();
-        let shown: Vec<_> = runs.iter().map(|r| shown(r, target, chosen)).collect();
+        let shown = shown_all(&runs, target, chosen);
         self.update_if(|s| {
             if s.vrchat.runs == shown {
                 return false;
@@ -820,6 +850,37 @@ mod tests {
         assert_eq!(id(&f), (None, false));
         let several = facts(&OWN_LOG.replace("--watch-worlds", "--profile=1"));
         assert_eq!(id(&several), (None, false));
+    }
+
+    /// COR-1: a world in a side account's VRChat writes a record of the owner's sign-in in VRChat's own shape. Alone, its log is
+    /// believed (the limit that is left); with the owner's own VRChat running here, whose log says the same account, neither is
+    /// proven: one game session per account. Two VRChats on their own accounts are both proven, as before.
+    #[test]
+    fn an_account_two_running_vrchats_name_is_proven_by_neither() {
+        const OWNER: &str = "usr_1339e525-d75d-4832-9104-98dd89287681";
+        let side_log = |forged: bool| {
+            let mut log = OWN_LOG.replace("--profile=0", "--profile=2").replace(&format!("blackorbit ({OWNER})"), "side (usr_2)");
+            if forged {
+                log.push_str(&format!("2026.11.15 13:40:00 Debug      -  [Authentication - x] Preforming post login checks for blackorbit ({OWNER})\n"));
+            }
+            log
+        };
+        let run = |pid: u32, log: &str, text: &str| VrchatRun { log_sure: true, ..run_of(pid, 1_794_749_922, Some(Path::new(log)), Some(&facts(text))) };
+        let own = run(37076, "logs/own.txt", OWN_LOG);
+        let proven = |runs: &[VrchatRun]| shown_all(runs, None, None).into_iter().map(|r| r.account_id).collect::<Vec<_>>();
+
+        let forged = run(51000, "logs/side.txt", &side_log(true));
+        assert_eq!(proven(std::slice::from_ref(&forged)), [Some(OWNER.to_string())], "the limit left: a log alone is believed");
+        assert_eq!(proven(&[own.clone(), forged.clone()]), [None, None], "the owner's own game contradicts the world's record");
+        // One log taken for two processes is one claim, not two.
+        let twice = run(37077, "logs/own.txt", OWN_LOG);
+        assert_eq!(proven(&[own.clone(), twice]), [Some(OWNER.to_string()), Some(OWNER.to_string())]);
+        // Its own account, and one signed out since: nothing contradicts anything.
+        let honest = run(51000, "logs/side.txt", &side_log(false));
+        assert_eq!(proven(&[own.clone(), honest]), [Some(OWNER.to_string()), Some("usr_2".to_string())]);
+        let mut left = side_log(true);
+        left.push_str("2026.11.15 13:41:00 Debug      -  [Authentication - x] AuthSelectionPage OnPageShown\n");
+        assert_eq!(proven(&[own, run(51000, "logs/side.txt", &left)]), [Some(OWNER.to_string()), None]);
     }
 
     #[test]

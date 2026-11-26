@@ -182,6 +182,7 @@ impl TurnMeter {
             refresh_hz: self.refresh_hz,
             headset: self.headset.clone(),
             vrchat,
+            holds: Vec::new(),
         };
         *self = Self { refresh_hz: self.refresh_hz, headset: self.headset.take(), ..Self::new(self.process, now) };
         Some(out)
@@ -214,6 +215,13 @@ pub struct ProcessTurns {
     pub headset: Option<String>,
     /// VRChat's frames as SteamVR's compositor saw them (VR only).
     pub vrchat: Option<Summary>,
+    /// What its caches hold, each by its name, in megabytes (VR only).
+    pub holds: Vec<(String, f32)>,
+}
+
+/// Bytes as the memory log has them.
+pub fn megabytes(bytes: u64) -> f32 {
+    round2(bytes as f32 / (1024.0 * 1024.0))
 }
 
 impl ProcessTurns {
@@ -746,6 +754,8 @@ pub struct MemoryLine {
     pub mode: String,
     pub ram_free_mb: f32,
     pub ours: Vec<MemoryUse>,
+    /// What the overlay's caches hold, each by its name, in megabytes: what of its memory is whose (DOV-1). Empty while no overlay runs.
+    pub holds: Vec<(String, f32)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -773,6 +783,7 @@ impl MemoryLine {
             mode: line.mode.clone(),
             ram_free_mb: line.ram_free_mb,
             ours: line.ours.iter().map(|p| MemoryUse { role: role(p), pid: p.pid, private_mb: p.private_mb, working_mb: p.working_mb, threads: p.threads }).collect(),
+            holds: line.turns.iter().flat_map(|t| t.holds.iter().cloned()).collect(),
         }
     }
 }

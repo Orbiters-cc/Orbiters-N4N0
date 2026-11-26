@@ -24,7 +24,7 @@ impl Drop for PixelBuffer {
             let mut state = shared.0.locked();
             if !state.stop {
                 state.garbage.push(std::mem::take(&mut self.bytes));
-                // At most 64 cached + 64 retiring frames, finite shell zones and
+                // The cached pages (PAGES_HOLD) + 16 retiring frames, finite shell zones and
                 // two producer slots can release buffers without another worker turn.
                 debug_assert!(state.garbage.len() <= 1024);
                 drop(state); shared.1.notify_one();
@@ -67,10 +67,65 @@ pub(super) struct PartPicture {
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
     pub facts: Facts,
+    pub change: Change,
     #[cfg(test)] pub finish_pixels: usize,
 }
+/// What of a picture is another one than before: a platform that holds the picture numbered `since` needs `area` of this one and no more, any other platform all of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Change {
+    pub number: u64,
+    pub since: u64,
+    /// `None`: it is the one numbered `since` again.
+    pub area: Option<[u32; 4]>,
+}
+impl Change {
+    /// Of no picture yet.
+    const NONE: Self = Self { number: 0, since: 0, area: None };
+    /// A new picture, `area` of it different from the one numbered `since` (0: there was none).
+    fn new(since: u64, area: [u32; 4]) -> Self {
+        // One count for the process: a worker made anew, or a second one, never gives a number that another picture has.
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self { number: LAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1, since, area: Some(area) }
+    }
+    /// The one before was never taken: what it changed is still to be handed on.
+    fn after_untaken(&mut self, untaken: &Self) {
+        if self.since == untaken.number {
+            self.since = untaken.since;
+            self.area = either(self.area, untaken.area);
+        }
+    }
+    /// What to hand on of it to a platform that holds the picture numbered `holds`: an area of `whole`, or nothing.
+    pub fn to_hand_on(&self, holds: u64, whole: [u32; 2]) -> Option<[u32; 4]> {
+        if holds == self.number { None } else if holds == self.since { self.area } else { Some([0, 0, whole[0], whole[1]]) }
+    }
+}
+/// The rectangle around both, of those there are.
+pub(super) fn either(a: Option<[u32; 4]>, b: Option<[u32; 4]>) -> Option<[u32; 4]> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (a, b) => a.or(b),
+    }
+}
 pub(super) struct PartRequest { pub spec: PartSpec, pub facts: Facts, pub time: f64, pub language: orbiters_i18n::Language }
-pub(super) type CompleteSheet = (Pixels, [u32; 2], u32);
+/// The sheet as one finished picture: its head with the page over it, `top` rows down. The page's rows are whole rows of it, as both are as wide.
+#[derive(Clone, Debug)]
+pub(super) struct CompleteSheet {
+    pub pixels: Pixels,
+    pub px: [u32; 2],
+    pub top: u32,
+    pub change: Change,
+}
+/// A sheet's head as drawn under a page.
+#[derive(Clone)]
+pub(super) struct Head {
+    pub items: Vec<Item>,
+    pub hover: Option<usize>,
+    pub pressed: Option<usize>,
+    /// It looks otherwise than in the frame before.
+    pub changed: bool,
+    /// Its picture, where it is not in the sheet's ([`Frame::composed`]).
+    pub pixels: Option<Pixels>,
+}
 #[derive(Clone)]
 pub(super) struct Request {
     pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts,
@@ -80,17 +135,22 @@ pub(super) struct Request {
 }
 #[derive(Clone)]
 pub(super) struct Frame {
-    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Pixels,
+    /// `pixels`: the page's picture, where it is not in the sheet's (`composed`), which is all that is kept of a page then: page and head beside it held the same sheet
+    /// three times (DOV-2).
+    pub px: [u32; 2], pub epoch: u64, pub sheet: Sheet, pub facts: Facts, pub items: Vec<Item>, pub pixels: Option<Pixels>,
     pub phases: crate::overlay::PaintPhases, pub time: f64, pub hover: Option<usize>, pub pressed: Option<usize>,
-    pub scene: Scene, pub header: Option<PartPicture>,
+    pub scene: Scene, pub header: Option<Head>,
     pub header_spec: Option<PartSpec>, pub top: Option<u32>, pub composed: Option<CompleteSheet>, pub pointer: Option<egui::Pos2>, pub language: orbiters_i18n::Language,
+    /// Tests: the page's and the head's pictures apart, as they went into the sheet's.
+    #[cfg(test)] pub apart: Option<(Vec<u8>, Vec<u8>)>,
 }
 impl Frame {
     pub fn matches(&self, epoch: u64, sheet: Option<Sheet>, gallery: &panels::Gallery) -> bool {
         self.epoch == epoch && Some(self.sheet) == sheet && self.facts.recent == *gallery
     }
     fn request(&self) -> Request { Request { px: self.px, epoch: self.epoch, sheet: self.sheet, facts: self.facts.clone(), hover: self.hover, pressed: self.pressed, time: self.time, language: self.language, scene: self.scene.clone(), header: self.header_spec.clone(), top: self.top, pointer: self.pointer } }
-    pub fn bytes(&self) -> usize { self.pixels.len() + self.header.as_ref().map_or(0, |h| h.pixels.len()) + self.composed.as_ref().map_or(0, |c| c.0.len()) }
+    /// The bytes of its pictures.
+    pub fn bytes(&self) -> usize { [self.pixels.as_ref(), self.header.as_ref().and_then(|h| h.pixels.as_ref()), self.composed.as_ref().map(|c| &c.pixels)].into_iter().flatten().map(|p| p.len()).sum() }
     pub fn key(&self) -> String { self.scene.key(self.sheet) }
 }
 #[derive(Default)]
@@ -99,6 +159,8 @@ struct Mailbox {
     request: Option<Request>, frame: Option<Frame>, epoch: Option<u64>,
     parts: HashMap<Zone, PartRequest>, part_frames: HashMap<Zone, PartPicture>, order: VecDeque<Zone>,
     audit: Option<(Frame, std::sync::mpsc::Sender<Audit>)>,
+    /// The canvases there are now, when some went: what is kept for the others goes.
+    keep: Option<Vec<u64>>,
     stop: bool, working: bool, was_page: bool,
     #[cfg(test)] publish_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     #[cfg(test)] gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -139,37 +201,125 @@ fn contained<T>(what: &str, panics: &mut VecDeque<Instant>, fatal: &mut bool, jo
     }
 }
 pub(super) struct Painter { shared: Arc<(Mutex<Mailbox>, Condvar)>, pub ctx: egui::Context }
-struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, pixels: Vec<u8>, published: Option<Pixels>, style: Option<orbiters_core::settings::OrbitSettings> }
-struct Engine { page: Canvas, parts: HashMap<Zone, PartCanvas>, parallel: bool, shared: std::sync::Weak<Shared> }
+/// What a canvas's pictures go through before they are handed on, and what that gave last: only what a paint changed goes through it again.
+#[derive(Default)]
+struct Finished {
+    pixels: Vec<u8>,
+    /// The look it was finished in, and what kept its colours: all of it again in another.
+    style: Option<(orbiters_core::settings::OrbitSettings, Vec<egui::Rect>)>,
+    /// What changed since a sheet was last made of it.
+    since_sheet: Option<[u32; 4]>,
+}
+impl Finished {
+    /// The canvas's last paint finished, `cut` to its shape where it changed. Returns the part that was (nothing: an empty one).
+    fn take(&mut self, canvas: &Canvas, px: [u32; 2], zoom: f32, look: orbiters_core::settings::OrbitSettings, cut: impl FnOnce(&mut [u8], [u32; 4])) -> [u32; 4] {
+        let style = Some((look, panels::kept_colours()));
+        let same = self.pixels.len() == px[0] as usize * px[1] as usize * 4 && self.style == style;
+        let changed = if same { canvas.damage().unwrap_or_default() } else { [0, 0, px[0], px[1]] };
+        self.style = style;
+        let from = canvas.pixels();
+        self.pixels.resize(px[0] as usize * px[1] as usize * 4, 0);
+        for y in changed[1]..changed[3] {
+            let (a, b) = (((y * px[0] + changed[0]) * 4) as usize, ((y * px[0] + changed[2]) * 4) as usize);
+            self.pixels[a..b].copy_from_slice(&from[a..b]);
+        }
+        // Also consumes this draw's preserved-picture rectangles when there is no damage.
+        panels::finish_picture(&mut self.pixels, from, px, zoom, changed);
+        cut(&mut self.pixels, changed);
+        if changed[0] < changed[2] && changed[1] < changed[3] { self.since_sheet = either(self.since_sheet, Some(changed)); }
+        changed
+    }
+}
+struct PartCanvas { id: u64, canvas: Canvas, mask: Option<Arc<Vec<u8>>>, finished: Finished, published: Option<Pixels>, change: Change }
+/// The sheet's pictures handed on. One that the input side still shows or keeps for Back stays as it is; one it let go of is written on where it lacks what changed since, so
+/// that a repaint copies and hands on what changed, not five megabytes (DOV-3).
+struct Sheets { of: Option<([u32; 2], [u32; 2], u32, u64)>, buffers: Vec<(Pixels, Option<[u32; 4]>)>, last: Change }
+impl Sheets {
+    /// As many as are in use at once: the one shown, the one handed on, the one being made.
+    const MOST: usize = 3;
+    fn new() -> Self { Self { of: None, buffers: Vec::new(), last: Change::NONE } }
+}
+struct Engine { page: Canvas, page_finished: Finished, sheets: Sheets, parts: HashMap<Zone, PartCanvas>, parallel: bool, shared: std::sync::Weak<Shared> }
 impl Engine {
-    fn part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> PartPicture {
-        let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, pixels: Vec::new(), published: None, style: None });
+    fn new(page: Canvas, parallel: bool, shared: std::sync::Weak<Shared>) -> Self { Self { page, page_finished: Finished::default(), sheets: Sheets::new(), parts: HashMap::new(), parallel, shared } }
+    /// Draws a part and finishes it: its controls, what is pointed at and pressed, and the part of its picture that changed.
+    fn draw_part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> (Vec<Item>, Option<usize>, Option<usize>, [u32; 4]) {
+        let slot = self.parts.entry(spec.zone).or_insert_with(|| PartCanvas { id: 0, canvas: Canvas::new(1, 1), mask: None, finished: Finished::default(), published: None, change: Change::NONE });
         if slot.id != spec.canvas_id {
             let mut canvas = Canvas::zoomed(spec.px[0], spec.px[1], spec.px[0] as f32 / spec.logical.x).in_orbit_look();
             canvas.textures = crate::overlay::PaintTextures::of(&spec.ctx); canvas.ctx = spec.ctx.clone();
             canvas.painter.set_parallel(self.parallel);
-            *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), pixels: vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], published: None, style: None };
+            *slot = PartCanvas { id: spec.canvas_id, canvas, mask: spec.zone.ring().map(|ring| Arc::new(panels::cell_mask(ring, spec.px, spec.px[0] as f32 / spec.logical.x))), finished: Finished::default(), published: None, change: Change::NONE };
         }
         let items = panels::items(spec.zone, spec.logical, facts);
         let hover = spec.pointer.and_then(|p| panels::hit(&items, p));
         let pressed = spec.pressed.and_then(|a| items.iter().position(|i| i.action == a));
         slot.canvas.paint(time, |p| panels::paint(p, spec.zone, spec.logical, facts, hover, pressed));
         let began = Instant::now();
-        let all = [0, 0, spec.px[0], spec.px[1]];
-        let changed = if slot.style != Some(facts.orbit) { all } else { slot.canvas.damage().unwrap_or([0, 0, 0, 0]) };
-        let from = slot.canvas.pixels();
-        for y in changed[1]..changed[3] {
-            let (a, b) = (((y * spec.px[0] + changed[0]) * 4) as usize, ((y * spec.px[0] + changed[2]) * 4) as usize);
-            slot.pixels[a..b].copy_from_slice(&from[a..b]);
+        let mask = slot.mask.clone();
+        let changed = slot.finished.take(&slot.canvas, spec.px, spec.px[0] as f32 / spec.logical.x, facts.orbit, |pixels, changed| if let Some(mask) = &mask { panels::apply_mask(pixels, mask, spec.px, changed); });
+        super::super::record_phase(3, began.elapsed());
+        (items, hover, pressed, changed)
+    }
+    /// A part on its own, for an overlay of its own.
+    fn part(&mut self, spec: &PartSpec, facts: &Facts, time: f64) -> PartPicture {
+        let (items, hover, pressed, changed) = self.draw_part(spec, facts, time);
+        let began = Instant::now();
+        let slot = self.parts.get_mut(&spec.zone).expect("just drawn");
+        if slot.published.is_none() || changed[0] != changed[2] && changed[1] != changed[3] {
+            // The first one published follows none.
+            let area = if slot.published.is_none() { [0, 0, spec.px[0], spec.px[1]] } else { changed };
+            slot.change = Change::new(slot.change.number, area);
+            slot.published = Some(PixelBuffer::new(slot.finished.pixels.clone(), self.shared.clone()));
         }
-        // Also consumes this draw's preserved-picture rectangles when there is no damage.
-        panels::finish_picture(&mut slot.pixels, from, spec.px, spec.px[0] as f32 / spec.logical.x, changed);
-        if let Some(mask) = &slot.mask { panels::apply_mask(&mut slot.pixels, mask, spec.px, changed); }
-        slot.style = Some(facts.orbit);
-        if slot.published.is_none() || changed[0] != changed[2] && changed[1] != changed[3] { slot.published = Some(PixelBuffer::new(slot.pixels.clone(), self.shared.clone())); }
         let pixels = slot.published.as_ref().unwrap().clone();
         super::super::record_phase(3, began.elapsed());
-        PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.mask.clone(), items, hover, pressed, facts: facts.clone(), #[cfg(test)] finish_pixels: (changed[2] - changed[0]) as usize * (changed[3] - changed[1]) as usize }
+        PartPicture { zone: spec.zone, token: spec.token, pixels, mask: slot.mask.clone(), items, hover, pressed, facts: facts.clone(), change: slot.change, #[cfg(test)] finish_pixels: (changed[2] - changed[0]) as usize * (changed[3] - changed[1]) as usize }
+    }
+    /// Lets go of what is kept for canvases that are no more, and of the page's and the sheet's buffers with the last of them: a part let go of by the input side kept two thirds of what it
+    /// held here. A canvas that still is keeps all it has: its interface sent its textures once.
+    fn keep(&mut self, canvases: &[u64]) {
+        self.parts.retain(|_, part| canvases.contains(&part.id));
+        if !self.parts.contains_key(&Zone::SheetBack) { self.sheets = Sheets::new(); }
+        if self.parts.is_empty() {
+            let [w, h] = self.page.pixel_size();
+            self.page.resize(w, h, w as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32);
+            self.page_finished = Finished::default();
+        }
+    }
+    /// The bytes of the pixels kept here for the parts and the page, the fonts' and other textures not counted.
+    #[cfg(test)]
+    fn bytes(&self) -> usize {
+        self.page.pixels().len() + self.page_finished.pixels.len() + self.parts.values().map(|p| p.canvas.pixels().len() + p.finished.pixels.len()).sum::<usize>() + self.sheets.buffers.iter().map(|b| b.0.len()).sum::<usize>()
+    }
+    /// The sheet as it is now, from its head and its page as they were last finished.
+    fn compose(&mut self, spec: &PartSpec, page_px: [u32; 2], top: u32) -> CompleteSheet {
+        let slot = self.parts.get_mut(&spec.zone).expect("the head was just drawn");
+        let of = Some((spec.px, page_px, top, slot.id));
+        let whole = [0, 0, spec.px[0], spec.px[1]];
+        let moved = self.page_finished.since_sheet.take().map(|c| [c[0], c[1] + top, c[2], c[3] + top]);
+        let mut changed = either(slot.finished.since_sheet.take(), moved);
+        if self.sheets.of != of {
+            (self.sheets.of, changed) = (of, Some(whole));
+            self.sheets.buffers.clear();
+        }
+        let Some(changed) = changed else {
+            // The same picture again: the last one made.
+            let (pixels, _) = self.sheets.buffers.last().expect("a sheet was made of this head and page").clone();
+            return CompleteSheet { pixels, px: spec.px, top, change: Change { since: self.sheets.last.number, area: None, ..self.sheets.last } };
+        };
+        for (_, behind) in &mut self.sheets.buffers { *behind = either(*behind, Some(changed)); }
+        let mut free = None;
+        for n in 0..self.sheets.buffers.len() {
+            if Arc::get_mut(&mut self.sheets.buffers[n].0).is_some() { free = Some(self.sheets.buffers.remove(n)); break; }
+        }
+        let (mut pixels, behind) = free.unwrap_or_else(|| (PixelBuffer::new(vec![0; spec.px[0] as usize * spec.px[1] as usize * 4], self.shared.clone()), Some(whole)));
+        let bytes = &mut Arc::get_mut(&mut pixels).expect("no one else has it").bytes;
+        super::vr::compose_part(bytes, &slot.finished.pixels, spec.px, &self.page_finished.pixels, page_px, top, behind.unwrap_or(changed));
+        if self.sheets.buffers.len() >= Sheets::MOST { self.sheets.buffers.remove(0); }
+        self.sheets.buffers.push((pixels.clone(), None));
+        self.sheets.last = Change::new(self.sheets.last.number, changed);
+        CompleteSheet { pixels, px: spec.px, top, change: self.sheets.last }
     }
 
     fn page(&mut self, mut request: Request) -> Frame {
@@ -205,15 +355,24 @@ impl Engine {
             Scene::Worlds(scene) => scene.draw(p),
         });
         let at = Instant::now();
-        let mut pixels = self.page.pixels().to_vec();
-        panels::finish_picture(&mut pixels, self.page.pixels(), px, px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, px[0], px[1]]);
-        panels::cut_page_corners(&mut pixels, px, [0, 0, px[0], px[1]]);
+        self.page_finished.take(&self.page, px, px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32, request.facts.orbit, |pixels, changed| panels::cut_page_corners(pixels, px, changed));
         super::super::record_phase(3, at.elapsed());
-        let header = request.header.as_ref().map(|spec| self.part(spec, &request.facts, request.time));
+        let mut header = request.header.as_ref().map(|spec| {
+            let (items, hover, pressed, changed) = self.draw_part(spec, &request.facts, request.time);
+            Head { items, hover, pressed, changed: changed[0] < changed[2] && changed[1] < changed[3], pixels: None }
+        });
         let at = Instant::now();
-        let composed = header.as_ref().zip(request.header.as_ref()).zip(request.top).map(|((header, spec), top)| (PixelBuffer::new(super::vr::compose_sheet(&header.pixels, spec.px, &pixels, px, top), self.shared.clone()), spec.px, top));
+        // The sheet's one picture where the page lies on its head; the two apart where it does not yet.
+        let composed = request.header.as_ref().zip(request.top).filter(|(spec, top)| spec.px[0] == px[0] && top + px[1] <= spec.px[1]).map(|(spec, top)| self.compose(spec, px, top));
+        let mut pixels = None;
+        if composed.is_none() {
+            pixels = Some(PixelBuffer::new(self.page_finished.pixels.clone(), self.shared.clone()));
+            if let Some((head, spec)) = header.as_mut().zip(request.header.as_ref()) { head.pixels = Some(PixelBuffer::new(self.parts[&spec.zone].finished.pixels.clone(), self.shared.clone())); }
+        }
         super::super::record_phase(3, at.elapsed());
-        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels: PixelBuffer::new(pixels, self.shared.clone()), phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, top: request.top, composed, pointer: request.pointer, language: request.language }
+        #[cfg(test)]
+        let apart = request.header.as_ref().map(|spec| (self.page_finished.pixels.clone(), self.parts[&spec.zone].finished.pixels.clone()));
+        Frame { px: request.px, epoch: request.epoch, sheet: request.sheet, facts: request.facts, items, pixels, #[cfg(test)] apart, phases: crate::overlay::paint_phases(false), time: request.time, hover, pressed: request.pressed, scene: request.scene, header, header_spec: request.header, top: request.top, composed, pointer: request.pointer, language: request.language }
     }
 }
 
@@ -222,11 +381,12 @@ pub(super) struct Audit { pub pixels: usize, pub header_pixels: usize, pub paral
 impl Audit {
     fn compare(expected: &Frame, serial: &Frame, parallel: &Frame) -> Self {
         let diff = |a: &[u8], b: &[u8]| a.chunks_exact(4).zip(b.chunks_exact(4)).filter(|(a,b)| a != b).count() + a.len().abs_diff(b.len()) / 4;
-        fn header(f: &Frame) -> &[u8] { f.header.as_ref().map(|h| h.pixels.as_slice()).unwrap_or(&[]) }
-        fn sheet(f: &Frame) -> &[u8] { f.composed.as_ref().map(|c| c.0.as_slice()).unwrap_or(&[]) }
+        fn page(f: &Frame) -> &[u8] { f.pixels.as_ref().map(|p| p.as_slice()).unwrap_or(&[]) }
+        fn header(f: &Frame) -> &[u8] { f.header.as_ref().and_then(|h| h.pixels.as_ref()).map(|p| p.as_slice()).unwrap_or(&[]) }
+        fn sheet(f: &Frame) -> &[u8] { f.composed.as_ref().map(|c| c.pixels.as_slice()).unwrap_or(&[]) }
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for b in serial.pixels.iter() { hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3); }
-        Self { sheet_pixels: diff(sheet(expected), sheet(serial)), parallel_sheet_pixels: diff(sheet(serial), sheet(parallel)), pixels: diff(&expected.pixels, &serial.pixels), header_pixels: diff(header(expected), header(serial)), parallel_pixels: diff(&serial.pixels, &parallel.pixels), parallel_header_pixels: diff(header(serial), header(parallel)), items: expected.items == serial.items && serial.items == parallel.items && expected.header.as_ref().map(|h| &h.items) == serial.header.as_ref().map(|h| &h.items), hash }
+        for b in page(serial).iter().chain(sheet(serial)) { hash = (hash ^ *b as u64).wrapping_mul(0x100000001b3); }
+        Self { sheet_pixels: diff(sheet(expected), sheet(serial)), parallel_sheet_pixels: diff(sheet(serial), sheet(parallel)), pixels: diff(page(expected), page(serial)), header_pixels: diff(header(expected), header(serial)), parallel_pixels: diff(page(serial), page(parallel)), parallel_header_pixels: diff(header(serial), header(parallel)), items: expected.items == serial.items && serial.items == parallel.items && expected.header.as_ref().map(|h| &h.items) == serial.header.as_ref().map(|h| &h.items), hash }
     }
 }
 impl Engine {
@@ -249,32 +409,35 @@ impl Painter {
         let thread = shared.clone();
         let fresh_ctx = ctx.clone();
         std::thread::Builder::new().name("orbit-page-paint".into()).spawn(move || {
-            let mut engine = Engine { page, parts: HashMap::new(), parallel: true, shared: Arc::downgrade(&thread) };
+            let mut engine = Engine::new(page, true, Arc::downgrade(&thread));
             // After a contained panic: canvases made as at the start (one left mid-paint is not used again).
             let fresh = |thread: &Arc<(Mutex<Mailbox>, Condvar)>| {
                 let mut page = Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look();
                 page.textures = crate::overlay::PaintTextures::of(&fresh_ctx); page.ctx = fresh_ctx.clone(); page.painter.set_parallel(true);
-                Engine { page, parts: HashMap::new(), parallel: true, shared: Arc::downgrade(thread) }
+                Engine::new(page, true, Arc::downgrade(thread))
             };
             let mut panics = VecDeque::new();
             let mut cleanup = std::time::Duration::ZERO;
             let mut garbage = Vec::with_capacity(1024);
             loop {
-                let (page, part, audit) = {
+                let (page, part, audit, keep) = {
                     let mut state = thread.0.locked();
-                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && state.garbage.is_empty() && !state.stop { state = thread.1.wait_locked(state); }
+                    while state.request.is_none() && state.parts.is_empty() && state.audit.is_none() && state.garbage.is_empty() && state.keep.is_none() && !state.stop { state = thread.1.wait_locked(state); }
                     if state.stop { return; }
                     state.working = true;
                     std::mem::swap(&mut garbage, &mut state.garbage);
+                    let keep = state.keep.take();
                     if state.request.is_some() && (!state.was_page || state.parts.is_empty()) {
-                        state.was_page = true; (state.request.take(), None, None)
+                        state.was_page = true; (state.request.take(), None, None, keep)
                     } else if !state.parts.is_empty() {
                         state.was_page = false;
                         let part = loop { if let Some(zone) = state.order.pop_front() { if let Some(part) = state.parts.remove(&zone) { break part; } } };
-                        (None, Some(part), None)
-                    } else { (None, None, state.audit.take()) }
+                        (None, Some(part), None, keep)
+                    } else { (None, None, state.audit.take(), keep) }
                 };
                 let at = Instant::now(); garbage.clear(); cleanup += at.elapsed();
+                // Before what was asked since, which may be for a canvas made since.
+                if let Some(canvases) = keep { engine.keep(&canvases); }
                 #[cfg(test)] {
                     let gate = thread.0.lock().unwrap().gate.take();
                     if let Some((ready, go)) = gate { ready.send(()).unwrap(); go.recv().unwrap(); }
@@ -311,6 +474,7 @@ impl Painter {
                         }
                         let retired = {
                             let mut state = thread.0.locked();
+                            if let Some((new, untaken)) = frame.composed.as_mut().zip(state.frame.as_ref().and_then(|f| f.composed.as_ref())) { new.change.after_untaken(&untaken.change); }
                             if state.epoch == Some(epoch) && !state.stop { state.frame.replace(frame) } else { Some(frame) }
                         };
                         drop(retired);
@@ -320,8 +484,12 @@ impl Painter {
                     let mut fatal = false;
                     let zone = request.spec.zone;
                     match contained("a part", &mut panics, &mut fatal, || orbiters_i18n::in_language(request.language, || panels::with_render_style(request.facts.orbit, || engine.part(&request.spec, &request.facts, request.time)))) {
-                        Some(picture) => {
-                            let retired = thread.0.locked().part_frames.insert(picture.zone, picture);
+                        Some(mut picture) => {
+                            let retired = {
+                                let mut state = thread.0.locked();
+                                if let Some(untaken) = state.part_frames.get(&picture.zone) { picture.change.after_untaken(&untaken.change); }
+                                state.part_frames.insert(picture.zone, picture)
+                            };
                             drop(retired);
                         }
                         None => {
@@ -393,6 +561,11 @@ impl Painter {
             (requests, frames)
         }; drop(retired);
     }
+    /// Some canvases went: `canvases` are those there are ([`Engine::keep`]).
+    pub fn keep_canvases(&self, canvases: Vec<u64>) {
+        self.shared.0.locked().keep = Some(canvases);
+        self.shared.1.notify_one();
+    }
     /// Outside measured turns only: replay frozen inputs with the same font and texture history.
     pub fn audit(&self, frame: Frame) -> std::sync::mpsc::Receiver<Audit> {
         let (reply, rx) = std::sync::mpsc::channel();
@@ -461,8 +634,9 @@ mod tests {
         assert!(!frame.matches(7, Some(Sheet::Tracking), &frame.facts.recent), "old page");
         assert!(!frame.matches(7, Some(Sheet::Settings), &panels::Gallery::default()), "reordered gallery");
         assert_eq!(frame.items, items);
-        assert_eq!(frame.pixels.len(), 512 * 288 * 4);
-        assert!(frame.pixels.iter().any(|p| *p != 0));
+        let pixels = frame.pixels.as_ref().expect("a page with no head is its own picture");
+        assert_eq!(pixels.len(), 512 * 288 * 4);
+        assert!(pixels.iter().any(|p| *p != 0));
     }
     #[test]
     fn settled_worker_frames_match_the_serial_canvas() {
@@ -489,7 +663,7 @@ mod tests {
                     let mut pixels = serial.pixels().to_vec();
                     panels::finish_picture(&mut pixels, serial.pixels(), [512, 288], 512.0 / orbiters_n4n0_core::menu::layout::WIDTH as f32, [0, 0, 512, 288]);
                     panels::cut_page_corners(&mut pixels, [512, 288], [0, 0, 512, 288]);
-                    assert_eq!(frame.pixels.as_slice(), pixels);
+                    assert_eq!(frame.pixels.as_ref().unwrap().as_slice(), pixels);
                 });
             }
         }
@@ -576,7 +750,7 @@ mod tests {
             assert!(began.elapsed() < Duration::from_secs(20), "the next page still comes");
             std::thread::sleep(Duration::from_millis(2));
         };
-        assert_eq!(frame.pixels.len(), 512 * 288 * 4);
+        assert_eq!(frame.pixels.unwrap().len(), 512 * 288 * 4);
     }
 
     #[test]
@@ -656,13 +830,49 @@ mod review_stage_lifetime {
 }
 
 #[cfg(test)]
+mod let_go {
+    use super::*;
+
+    /// DOV-1: a part the menus let go of gives back what the paint worker kept for it, and the last of them the page's and the sheet's buffers. One that is still there keeps its canvas.
+    #[test]
+    fn a_canvas_that_went_keeps_nothing_here() {
+        let panel = |zone| super::super::Panel::new(super::super::zones::in_units(zone), 2.0, 0, false);
+        let (back, tile) = (panel(Zone::SheetBack), panel(Zone::WingWorlds));
+        let (head, tile) = (super::super::Panels::paint_spec(&back), super::super::Panels::paint_spec(&tile));
+        let px = [head.px[0], 792 * head.px[0] / 1408];
+        let mut engine = Engine::new(Canvas::zoomed(px[0], px[1], px[0] as f32 / orbiters_n4n0_core::menu::layout::WIDTH as f32).in_orbit_look(), false, std::sync::Weak::new());
+        let facts = Facts::default();
+        panels::with_render_style(facts.orbit, || {
+            engine.part(&tile, &facts, 1.0);
+            let top = head.px[1] - px[1];
+            let frame = engine.page(Request { px, epoch: 1, sheet: Sheet::Settings, facts: facts.clone(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: Some(head.clone()), top: Some(top), pointer: None });
+            assert!(frame.composed.is_some());
+        });
+        let all = engine.bytes();
+        engine.keep(&[head.canvas_id, tile.canvas_id]);
+        assert_eq!(engine.bytes(), all, "all still there");
+        engine.keep(&[tile.canvas_id]);
+        let without_head = engine.bytes();
+        assert!(without_head < all && engine.parts.contains_key(&Zone::WingWorlds) && engine.sheets.buffers.is_empty());
+        engine.keep(&[]);
+        assert_eq!(engine.bytes(), 0);
+        println!("the paint worker held {all} bytes of pixels, {without_head} without the sheet's head, none with no part left");
+        // Opened again: painted anew, the same to the last bit.
+        panels::with_render_style(facts.orbit, || {
+            let first = engine.page(Request { px, epoch: 2, sheet: Sheet::Settings, facts: facts.clone(), hover: None, pressed: None, time: 1.0, language: orbiters_i18n::Language::En, scene: Scene::Native, header: None, top: None, pointer: None });
+            assert!(first.pixels.unwrap().chunks_exact(4).any(|p| p[3] == 255));
+        });
+    }
+}
+
+#[cfg(test)]
 mod review_header_finish {
     use super::*;
     #[test]
     fn review_an_unchanged_retro_header_does_no_pixel_finishing_and_a_new_look_does() {
         let source = super::super::Panel::new(super::super::zones::in_units(Zone::SheetBack), 2.0, 0, false);
         let spec = super::super::Panels::paint_spec(&source);
-        let mut engine = Engine { page: Canvas::new(1, 1), parts: HashMap::new(), parallel: true, shared: std::sync::Weak::new() };
+        let mut engine = Engine::new(Canvas::new(1, 1), true, std::sync::Weak::new());
         let mut facts = Facts { sheet: Some(Sheet::Pictures), ..Default::default() }; facts.orbit.theme = orbiters_core::settings::MenuLook::Retro;
         let first = panels::with_render_style(facts.orbit, || engine.part(&spec, &facts, 1.0));
         assert!(first.finish_pixels > 0);

@@ -229,6 +229,46 @@ fn nothing_is_handed_over_while_nothing_happens() {
     }
 }
 
+/// XCT-23: in an app that wakes it, N4N0's thread makes no step while nothing happens, and one at once for what does: a write
+/// nobody published, what the app says changed. With VRChat there it looks again as before.
+#[test]
+fn it_sleeps_while_nothing_happens_and_wakes_for_what_does() {
+    let (t, n, _device) = ready();
+    t.scene(|s| s.vrchat = false);
+    t.wakes.store(true, Ordering::SeqCst);
+    t.settings.lock().unwrap().n4n0.assistant = false;
+    started(&n);
+    n.look();
+    std::thread::sleep(Duration::from_millis(800));
+    let steps = n.steps();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(n.steps() - steps <= 1, "{} steps in a second and a half", n.steps() - steps);
+    // Written to by another thread, which publishes nothing.
+    n.n4n0.lock().unwrap().line(N4n0Who::Note, "unannounced");
+    let wrote = Instant::now();
+    until("a line", || t.view().lines.iter().any(|l| l.text == "unannounced"));
+    assert!(wrote.elapsed() < Duration::from_secs(5));
+    // What it looks at in the app.
+    std::thread::sleep(Duration::from_millis(500));
+    let steps = n.steps();
+    n.look();
+    until("a step", || n.steps() > steps);
+    // VRChat runs: four looks a second.
+    t.scene(|s| s.vrchat = true);
+    n.look();
+    std::thread::sleep(Duration::from_millis(500));
+    let steps = n.steps();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(n.steps() - steps >= 4, "{}", n.steps() - steps);
+    t.scene(|s| s.vrchat = false);
+    n.look();
+    std::thread::sleep(Duration::from_millis(800));
+    let steps = n.steps();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(n.steps() - steps <= 1, "asleep again: {}", n.steps() - steps);
+    t.shutdown(&n);
+}
+
 /// What nobody publishes by itself, a setting changed and VRChat closed are followed all the same.
 #[test]
 fn what_changes_unannounced_is_followed() {

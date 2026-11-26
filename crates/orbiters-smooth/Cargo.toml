@@ -8,9 +8,9 @@ publish.workspace = true
 [features]
 default = ["install"]
 # Installing the driver for SteamVR (the app). The driver itself only needs the control block.
-install = ["dep:serde_json", "dep:anyhow"]
+install = ["dep:serde_json", "dep:anyhow", "dep:orbiters-i18n"]
 
 [dependencies]
-orbiters-i18n = { workspace = true }
+orbiters-i18n = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

@@ -89,6 +89,15 @@ impl Controller {
         }
     }
 
+    /// How long until it is asked again, or a yes is too old to hold (never, with no member it could be asked for).
+    pub(super) fn assistant_access_wait(&self) -> Option<Duration> {
+        self.account_api_of(self.identity_epoch())?;
+        let access = self.assistant_access.locked();
+        let now = Instant::now();
+        let asked = if access.asking { Duration::from_secs(1) } else { access.grant.wait(now) };
+        Some(if access.grant.allowed(now) { asked.min(access.grant.remaining(now)) } else { asked })
+    }
+
     /// It went off: what waits to be done with it is dropped at once. (Outside its lock: N4N0 asks whether it is on.)
     fn assistant_access_changed(&self) {
         let off = self.assistant_access.locked().went_off(Instant::now());

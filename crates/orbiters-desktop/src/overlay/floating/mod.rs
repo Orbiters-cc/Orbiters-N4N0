@@ -220,6 +220,8 @@ pub struct Floating {
     bar_pressed: Option<(BarButton, Instant)>,
     /// Nothing of it shows (the watch off, the panel closed): the last turn put everything away.
     resting: bool,
+    /// Something of it could be pointed at, or is held, as of the last turn.
+    reachable: bool,
 }
 
 impl Floating {
@@ -240,6 +242,7 @@ impl Floating {
             width_seen: None,
             bar_pressed: None,
             resting: false,
+            reachable: false,
         })
     }
 
@@ -253,6 +256,11 @@ impl Floating {
             prompt.destroy(overlay);
         }
         self.lasers.destroy(overlay);
+    }
+
+    /// Nothing of it could be pointed at, and none is held: the loop may take its time ([`super::turn_length`]).
+    pub fn quiet(&self) -> bool {
+        !self.reachable
     }
 
     /// Seconds from now to when what this turn changes lights the displays: the rest of this frame, then from its vsync
@@ -317,6 +325,7 @@ impl Floating {
             if !self.resting {
                 self.rest(cx.overlay, cx.presenter, state, cx.backend);
             }
+            self.reachable = false;
             return turn;
         }
         self.resting = false;
@@ -367,6 +376,7 @@ impl Floating {
         if let Some(head) = head.as_ref().filter(|_| self.panel.is_open()) {
             self.panel.face(cx.overlay, head);
         }
+        self.reachable = panel_targets.is_some() || watch.is_some() || strip.is_some() || prompt.is_some() || self.input.holding().is_some();
         let pointing = !cx.dashboard && cx.input_read && head.is_some() && (panel_targets.is_some() || watch.is_some() || strip.is_some() || prompt.is_some() || !cx.menu.is_empty());
         let outcome = match head.filter(|_| pointing) {
             Some(head) => {

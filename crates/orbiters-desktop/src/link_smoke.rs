@@ -301,7 +301,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
     });
     for round in 1..=3 {
-        run.step(&format!("a publish with nothing changed ({round})"), &ctl, &shown, soon, &|_| ctl.update(|_| {}));
+        run.step(&format!("a change set to what it was ({round})"), &ctl, &shown, soon, &|_| ctl.update(|_| {}));
     }
     // A damaged state ends each real process exactly as EOF does. A new process gets the latest full baseline.
     for s in &shown { s.between.damage(&[Line::Changes]); }

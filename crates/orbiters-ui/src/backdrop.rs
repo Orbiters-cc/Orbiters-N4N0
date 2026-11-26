@@ -142,8 +142,8 @@ pub fn release(textures: &Textures, id: Id) -> bool {
     let mut renderer = textures.write();
     let Some(res) = renderer.callback_resources.get_mut::<BackdropResources>() else { return false };
     match res.backdrops.remove(&id) {
-        Some(mut backdrop) => {
-            backdrop.release();
+        Some(backdrop) => {
+            res.give_back(backdrop);
             true
         }
         None => false,
@@ -342,6 +342,10 @@ pub struct BackdropResources {
     sampler: wgpu::Sampler,
     linear_target: bool,
     backdrops: HashMap<Id, Backdrop>,
+    /// One that was given back, holding nothing of a page: its renderer's pipeline takes the next opening's first frame otherwise (as [`crate::blur`] keeps a band).
+    spare: Option<Backdrop>,
+    /// How many renderers were made (what the spare is for).
+    made: u32,
 }
 
 /// One backdrop's renderer (for the copy), its textures and passes.
@@ -444,7 +448,25 @@ pub fn install(device: &wgpu::Device, format: wgpu::TextureFormat, msaa_samples:
         sampler,
         linear_target: format.is_srgb(),
         backdrops: HashMap::new(),
+        spare: None,
+        made: 0,
     });
+}
+
+impl BackdropResources {
+    /// A backdrop no longer painted: what it holds of the page goes, its renderer stays for the next one.
+    fn give_back(&mut self, mut backdrop: Backdrop) {
+        backdrop.release();
+        self.spare.get_or_insert(backdrop);
+    }
+
+    /// The backdrop `id`, from the spare or made now.
+    fn take(&mut self, device: &wgpu::Device, id: Id) -> Backdrop {
+        self.backdrops.remove(&id).or_else(|| self.spare.take()).unwrap_or_else(|| {
+            self.made += 1;
+            Backdrop::new(device)
+        })
+    }
 }
 
 impl Backdrop {
@@ -569,13 +591,12 @@ impl Backdrop {
 
 /// Lets go of the textures of backdrops no longer painted.
 fn forget_old(res: &mut BackdropResources, pass: u64) {
-    res.backdrops.retain(|_, b| {
-        let keep = b.pass + FORGET_AFTER >= pass;
-        if !keep {
-            b.release();
+    let old: Vec<Id> = res.backdrops.iter().filter(|(_, b)| b.pass + FORGET_AFTER < pass).map(|(id, _)| *id).collect();
+    for id in old {
+        if let Some(backdrop) = res.backdrops.remove(&id) {
+            res.give_back(backdrop);
         }
-        keep
-    });
+    }
 }
 
 fn begin(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) -> wgpu::RenderPass<'static> {
@@ -611,7 +632,7 @@ impl egui_wgpu::CallbackTrait for BackdropCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(res) = resources.get_mut::<BackdropResources>() else { return Vec::new() };
         forget_old(res, self.pass);
-        let mut backdrop = res.backdrops.remove(&self.id).unwrap_or_else(|| Backdrop::new(device));
+        let mut backdrop = res.take(device, self.id);
         backdrop.pass = self.pass;
         let composite = Composite { extra: [if res.linear_target { 1.0 } else { 0.0 }, self.composite.extra[1], self.composite.extra[2], 0.0], ..self.composite };
         queue.write_buffer(&backdrop.composite_uniforms, 0, bytemuck::bytes_of(&composite));
@@ -708,9 +729,18 @@ mod tests {
             .expect("a frame");
         };
         let small = egui::vec2(320.0, 240.0);
-        for _ in 0..3 {
+        let timed = |frame: &mut dyn FnMut(egui::Vec2, bool), open: bool| {
+            let began = std::time::Instant::now();
+            frame(small, open);
+            began.elapsed().as_secs_f64() * 1000.0
+        };
+        frame(small, false);
+        frame(small, false);
+        let first = timed(&mut frame, true);
+        for _ in 0..2 {
             frame(small, true);
         }
+        let still = timed(&mut frame, true);
         let (mirrored, size) = held(&textures, id).expect("held while painted");
         assert!(mirrored >= 2, "the font atlas and the page's picture: {mirrored}");
         assert!(size[0] > 0 && size[1] > 0);
@@ -728,14 +758,22 @@ mod tests {
         assert_eq!(count(&textures), 1);
         assert!(release(&textures, id));
         // Repeated cycles.
+        let mut again = Vec::new();
         for _ in 0..5 {
-            frame(small, true);
+            again.push(timed(&mut frame, true));
             frame(small, true);
             assert_eq!(count(&textures), 1);
             frame(small, false);
             assert!(release(&textures, id));
             assert_eq!(count(&textures), 0);
         }
+        // VRR-28: each opening made a renderer, its shaders and pipeline compiled on the first frame.
+        println!("the first frame of an opening: {first:.2} ms made anew, {again:.2?} ms from the spare; a frame of an open one {still:.2} ms");
+        let renderer = textures.read();
+        let resources = renderer.callback_resources.get::<BackdropResources>().unwrap();
+        assert_eq!(resources.made, 1, "one renderer for every opening");
+        let spare = resources.spare.as_ref().expect("kept for the next");
+        assert!(spare.mirrored.is_empty() && spare.targets.is_none(), "and it holds nothing of a page");
     }
 
     #[test]

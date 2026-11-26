@@ -210,6 +210,10 @@ pub struct Panel {
     /// The picture as the platform takes it: the canvas's, cut to its shape.
     out: Vec<u8>,
     shown_pixels: Option<page_painter::Pixels>,
+    /// The rows of them that are this part's, in bytes, where the picture is the whole sheet's (a page's, in its sheet). All of them otherwise.
+    shown_rows: Option<std::ops::Range<usize>>,
+    /// The number of the picture the platform was last handed for it, 0 where none or another: only what changed since is handed on.
+    holds: u64,
     /// The last picture SteamVR took, with its controls, while a newer one is handed over: put back when that one is not
     /// shown, so what is hit-tested is always what shows (verify-vr on OVL2-20).
     acknowledged: Option<Shown>,
@@ -292,7 +296,7 @@ impl Panel {
             px,
             logical,
             canvas: Canvas::zoomed(px[0], px[1], zoom).in_orbit_look(),
-            out: Vec::new(), shown_pixels: None, acknowledged: None, retry_at: None,
+            out: Vec::new(), shown_pixels: None, shown_rows: None, holds: 0, acknowledged: None, retry_at: None,
             mask,
             items: Vec::new(),
             hover: None,
@@ -308,7 +312,7 @@ impl Panel {
 
     /// The picture (RGBA, premultiplied), as painted last.
     pub fn pixels(&self) -> &[u8] {
-        self.shown_pixels.as_ref().map_or(self.out.as_slice(), |p| p.as_slice())
+        self.shown_pixels.as_ref().map_or(self.out.as_slice(), |p| self.shown_rows.clone().and_then(|rows| p.get(rows)).unwrap_or(p))
     }
 
     /// Takes what the canvas painted: the changed part, cut to the panel's shape. Returns it (x0, y0, x1, y1). A part kept from an earlier opening takes all of it the first
@@ -359,9 +363,12 @@ struct Rested {
 /// How long a part of a menu that closed is kept. A person opens these menus every few minutes while they use them; past this, the memory goes back and the next opening
 /// makes its parts as a first one does.
 const RESTS_FOR: Duration = Duration::from_secs(600);
-/// How much the parts kept may hold together, in bytes ([`Panel::bytes`]): past it the ones kept longest go first. Every part of both menus and a sheet in a headset is under
-/// half of it (the report has the numbers).
-const RESTS_HOLD: usize = 160 << 20;
+/// How much the pictures of pages lately seen may hold together, in bytes, kept for Back and for a tab pressed again to show at once: about nine pages in a headset, each one
+/// picture of 5 MB. One further back is painted again, a frame or two later (the owner's answer, review 1124).
+const PAGES_HOLD: usize = 48 << 20;
+/// How much the parts kept may hold together, in bytes ([`Panel::bytes`]): past it the ones kept longest go first. Every part of both menus and a sheet in a headset hold 62 MB
+/// (the paint bench's count).
+const RESTS_HOLD: usize = 80 << 20;
 
 /// How often a colour held on the bar shows: every part is painted for it.
 const HUE_EVERY: Duration = Duration::from_millis(60);
@@ -446,7 +453,7 @@ struct Recents {
     /// What reads pictures: what to read, newest last, and what it read.
     reader: Option<(PicturesAsked, mpsc::Receiver<(crate::worlds::Picture, Option<ColorImage>)>)>,
     /// The picture shown large, as it is asked for, and it when it came.
-    big: Option<(crate::worlds::Picture, Option<ColorImage>)>,
+    big: Option<(crate::worlds::Picture, Option<std::sync::Arc<ColorImage>>)>,
     /// What lists them instead of [`list_pictures`]: the headless bench's own pictures ([`paint_bench`]), so that what it measures and compares is not this computer's library.
     lister: Option<fn(&std::path::Path, &[PathBuf]) -> Vec<LoadedRecent>>,
 }
@@ -505,7 +512,8 @@ struct LoadedRecent {
     /// Its world's id: its world's own picture stands in for a recording that kept no picture of its own.
     world_id: String,
     title: String,
-    image: Option<ColorImage>,
+    /// The one copy of its pixels: the page's texture, and what paints it, share it.
+    image: Option<std::sync::Arc<ColorImage>>,
     asked: bool,
     has_view: bool,
     /// A capture, and of those a 3D picture, not one of VRChat's pictures.
@@ -584,7 +592,7 @@ impl Recents {
         if let Some(rx) = &self.rx {
             if let Ok(mut list) = rx.try_recv() {
                 // What was read already stays.
-                let mut had: HashMap<crate::worlds::Picture, Option<ColorImage>> = HashMap::new();
+                let mut had: HashMap<crate::worlds::Picture, Option<std::sync::Arc<ColorImage>>> = HashMap::new();
                 for i in &self.asked {
                     if let Some(old) = self.loaded.get_mut(*i) {
                         let image = old.image.take();
@@ -680,14 +688,14 @@ impl Recents {
         let mut any = false;
         for (picture, image) in got.try_iter().take(2) {
             if let Some(big) = self.big.as_mut().filter(|b| b.0 == picture) {
-                big.1 = image;
+                big.1 = image.map(std::sync::Arc::new);
                 any = true;
             } else if let Some(i) = self.asked.iter().copied().find(|i| self.loaded.get(*i).is_some_and(|r| r.session && r.source == picture)) {
                 // A capture's thumbnail of a dark world, lifted for the tile only: most could not be told apart (round 13's judges).
-                self.loaded[i].image = image;
+                self.loaded[i].image = image.map(std::sync::Arc::new);
                 any = true;
             } else if let Some(i) = self.asked.iter().copied().find(|i| self.loaded.get(*i).is_some_and(|r| r.source == picture)) {
-                self.loaded[i].image = image;
+                self.loaded[i].image = image.map(std::sync::Arc::new);
                 any = true;
             }
         }
@@ -931,7 +939,7 @@ impl Stage {
         let canvas = Canvas::zoomed(px[0], px[1], px[0] as f32 / layout::WIDTH as f32).in_orbit_look();
         let host = MenuHost::with_media(canvas.ctx().clone(), media.clone()).holding(orbiters_n4n0::MenuHolder::Panels);
         let worlds = with_worlds.then(|| Worlds::alone(canvas.ctx().clone()));
-        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, stale: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
+        Self { remote_pictures: crate::worlds::Pictures::new(&canvas.ctx()).within(super::PICTURES_HOLD), async_pages: false, worker_phases: Default::default(), painter: page_painter::Painter::with_context(px, canvas.ctx().clone()), epoch: 0, cache: Vec::new(), retired: Vec::new(), sheet_picture: None, restore: false, presented: None, presented_scene: None, navigation: None, stale: false, canvas, host, worlds, px, retro: false, skin: page_skin(DEFAULT_PAGE_ACCENT), skin_for: (DEFAULT_PAGE_ACCENT, orbiters_i18n::language()) }
     }
 }
 
@@ -1094,7 +1102,7 @@ pub struct Panels {
     assistant_seen: Option<u32>,
     assistant_wait: Option<(u32, Instant)>,
     /// What plays's picture as last made, by its name: panels make their own textures of it.
-    art: Option<(String, ColorImage)>,
+    art: Option<(String, std::sync::Arc<ColorImage>)>,
     /// The camera's tiles lie on its right ([`super::vr`]): what they say lines up on that side.
     pub camera_right: bool,
     /// When Stop was pressed: it says Stopping at once, and another press does nothing.
@@ -1110,7 +1118,7 @@ pub struct Panels {
     /// "Share 3D capture" (REQUEST18 3): the first time's question up on its tile, for the capture it names; that capture's
     /// thumbnail (its folder, and the picture once read), and the read under way.
     share_asking: Option<u64>,
-    share_thumb: Option<(String, Option<ColorImage>)>,
+    share_thumb: Option<(String, Option<std::sync::Arc<ColorImage>>)>,
     share_thumb_coming: Option<mpsc::Receiver<(String, Option<ColorImage>)>>,
     web_for: Option<u64>,
     /// An engine started ahead while the camera looks for a code, and when one was last started (Request 18: a code's page opens without the engine's
@@ -1118,7 +1126,9 @@ pub struct Panels {
     web_spare: Option<camera_web::Spare>,
     web_spare_at: Option<Instant>,
     /// The last pictures of pages closed lately, by the link their code held: the same code read again shows its page at once.
-    web_remembered: Vec<(String, egui::ColorImage, Instant)>,
+    web_remembered: Vec<(String, std::sync::Arc<egui::ColorImage>, Instant)>,
+    /// Parts kept from menus that closed were let go of since the paint worker was told which there are ([`Panels::parts_went`]).
+    some_went: bool,
     /// When the demo avatar was put on: said for a moment.
     demo_done: Option<Instant>,
     /// The links the desktop sent to the browser, in tests.
@@ -1250,6 +1260,7 @@ impl Panels {
             web_spare: None,
             web_spare_at: None,
             web_remembered: Vec::new(),
+            some_went: false,
             demo_done: None,
             #[cfg(test)]
             opened_in_browser: Vec::new(),
@@ -1454,6 +1465,8 @@ impl Panels {
         while held > bytes && !self.rested.is_empty() {
             // In the order they were kept: the first is the one kept longest.
             held -= self.rested.remove(0).panel.bytes();
+            // Told to the paint worker at the next turn, when every part is in its place again: one on its way from the menu to those kept is in neither now.
+            self.some_went = true;
         }
     }
 
@@ -1472,9 +1485,30 @@ impl Panels {
 
     /// Lets go of the parts kept for longer than [`RESTS_FOR`]. Every turn, menus up or not: with none kept it does nothing.
     pub fn let_go(&mut self, now: Instant) {
-        if !self.rested.is_empty() {
-            self.rested.retain(|r| now.saturating_duration_since(r.since) < RESTS_FOR);
+        let kept = self.rested.len();
+        self.rested.retain(|r| now.saturating_duration_since(r.since) < RESTS_FOR);
+        if std::mem::take(&mut self.some_went) || self.rested.len() < kept {
+            self.parts_went();
         }
+    }
+
+    /// Parts were let go of, and every other is in its place: what the paint worker kept for them goes too, and with the last of all, menus closed, the pictures of the pages seen.
+    fn parts_went(&mut self) {
+        let there = self.list.iter().chain(&self.takeover).chain(self.rested.iter().map(|r| &r.panel)).map(|p| p.canvas.id).collect();
+        self.stage.painter.keep_canvases(there);
+        if self.rested.is_empty() && self.is_empty() {
+            self.stage.cache.clear();
+            self.stage.retired.clear();
+            self.stage.sheet_picture = None;
+        }
+    }
+
+    /// What its caches hold, in bytes ([`super::held_bytes`]): the pictures of pages lately seen, the parts kept from menus that closed, the parts up, and the textures pages are
+    /// drawn with (pictures fetched, and the fonts' atlas).
+    pub fn held_bytes(&self) -> Vec<(&'static str, u64)> {
+        let pages: usize = self.stage.cache.iter().chain(&self.stage.retired).map(|f| f.bytes()).sum();
+        let up: usize = self.list.iter().chain(&self.takeover).map(Panel::bytes).sum();
+        vec![("pages", pages as u64), ("resting parts", self.resting().1 as u64), ("parts up", up as u64), ("page textures", super::texture_bytes(&self.stage.painter.ctx))] // i18n: not shown (names in a log)
     }
 
     /// How many parts are kept from menus that closed, and the bytes they hold.
@@ -1521,7 +1555,7 @@ impl Panels {
             self.bloom = Bloom::default();
             self.show_keys = false;
         }
-        if !self.rested.is_empty() {
+        if self.some_went || !self.rested.is_empty() {
             self.let_go(Instant::now());
         }
         if around.is_none() {
@@ -2239,7 +2273,7 @@ impl Panels {
         if let Some(Ok((key, picture))) = self.share_thumb_coming.as_ref().map(|rx| rx.try_recv()) {
             self.share_thumb_coming = None;
             if let Some(thumb) = self.share_thumb.as_mut().filter(|t| t.0 == key) {
-                thumb.1 = picture;
+                thumb.1 = picture.map(std::sync::Arc::new);
                 self.share_here_dirty();
             }
         }
@@ -2812,9 +2846,12 @@ impl Panels {
         self.stage.retired.append(&mut self.stage.cache);
         // Each paint accepts at most one new frame; each follow retires one. The cap also
         // bounds callers that invalidate repeatedly without taking normal input turns.
-        if self.stage.retired.len() > 64 { self.stage.retired.drain(..self.stage.retired.len() - 64); }
+        if self.stage.retired.len() > 16 { self.stage.retired.drain(..self.stage.retired.len() - 16); }
         self.stage.restore = false;
-        self.rested.clear();
+        if !self.rested.is_empty() {
+            self.rested.clear();
+            self.some_went = true;
+        }
         for panel in self.list.iter_mut().chain(self.takeover.iter_mut()) {
             // One kept from an earlier opening and not painted in this one yet drew its text in the look before: its interface anew, as it was when every opening made
             // its parts (a look or a language chosen in the app's window while the menus were closed).
@@ -4065,14 +4102,18 @@ impl Panels {
     }
     fn publish_page(&mut self, frame: &page_painter::Frame, show: &mut impl FnMut(&Panel, [u32; 4])) -> bool {
         let Some(page) = self.takeover.as_ref() else { return false };
-        if page.px[0] as usize * page.px[1] as usize * 4 != frame.pixels.len() { return false; }
+        if page.px != frame.px { return false; }
         let Some(back) = self.list.iter_mut().find(|p| p.zone == Zone::SheetBack) else { return false };
-        let Some(header) = &frame.header else { return false };
-        if back.px[0] as usize * back.px[1] as usize * 4 != header.pixels.len() { return false; }
+        let Some((header, spec)) = frame.header.as_ref().zip(frame.header_spec.as_ref()) else { return false };
+        if back.px != spec.px { return false; }
         let at = Instant::now();
         let pressed = back.pressed.and_then(|i| back.items.get(i)).map(|i| i.action);
-        let changed = !back.painted || back.shown_pixels.as_ref().is_none_or(|p| !std::sync::Arc::ptr_eq(p, &header.pixels));
-        back.shown_pixels = Some(header.pixels.clone());
+        let changed = !back.painted || match &header.pixels { Some(pixels) => !same_picture(true, back.shown_pixels.as_ref(), pixels), None => header.changed };
+        // The sheet's one picture, which each of the two shows its rows of; or their own, where the page is not in its sheet yet.
+        let sheet = frame.composed.as_ref();
+        back.shown_pixels = sheet.map(|c| c.pixels.clone()).or_else(|| header.pixels.clone());
+        back.shown_rows = None;
+        back.holds = 0;
         back.items.clone_from(&header.items);
         back.hover = back.pointer.and_then(|p| panels::hit(&back.items, p)); back.pressed = pressed.and_then(|a| back.items.iter().position(|i| i.action == a));
         back.canvas.ran |= frame.header_spec.as_ref().is_some_and(|spec| spec.canvas_id == back.canvas.id);
@@ -4083,7 +4124,9 @@ impl Panels {
         let at = Instant::now();
         let page = self.takeover.as_mut().unwrap();
         let first = !page.painted;
-        page.shown_pixels = Some(frame.pixels.clone()); page.items.clone_from(&frame.items);
+        page.shown_pixels = sheet.map(|c| c.pixels.clone()).or_else(|| frame.pixels.clone());
+        page.shown_rows = sheet.map(|c| { let row = c.px[0] as usize * 4; c.top as usize * row..(c.top + frame.px[1]) as usize * row });
+        page.items.clone_from(&frame.items);
         page.hover = match &frame.scene {
             page_painter::Scene::Native => self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p)),
             page_painter::Scene::Menu { menu, .. } => self.sheet_pointer.and_then(|p| panels::history_sheet::menu_hit(menu, p).or_else(|| layout::hit_pointable(layout::cached(ScreenPage::of(menu)), menu, p.x, p.y).map(|(n, _)| n))),
@@ -4116,13 +4159,15 @@ impl Panels {
                 if !unchanged {
                     panel.acknowledged = Some(Shown { pixels: panel.shown_pixels.clone(), items: panel.items.clone(), mask: panel.mask.clone(), painted: panel.painted, displayed: panel.displayed.clone() });
                 }
-                panel.shown_pixels = Some(frame.pixels); panel.items = frame.items; panel.mask = frame.mask;
+                let part = frame.change.to_hand_on(if panel.painted { panel.holds } else { 0 }, panel.px);
+                panel.holds = frame.change.number;
+                panel.shown_pixels = Some(frame.pixels); panel.shown_rows = None; panel.items = frame.items; panel.mask = frame.mask;
                 panel.hover = panel.pointer.and_then(|p| panels::hit(&panel.items, p));
                 panel.dirty |= first || panel.hover != frame.hover || panel.pressed != frame.pressed;
                 panel.canvas.ran = true;
                 panel.painted = true; panel.again = false; panel.displayed = Some(frame.facts);
                 if !unchanged {
-                    show(panel, [0, 0, panel.px[0], panel.px[1]]);
+                    show(panel, part.unwrap_or([0, 0, panel.px[0], panel.px[1]]));
                 }
             }
         }
@@ -4182,7 +4227,7 @@ impl Panels {
                     self.stage.worker_phases = frame.phases;
                     self.stage.cache.retain(|f| f.key() != key);
                     self.stage.cache.push(frame);
-                    while self.stage.cache.len() > 64 || self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > 512 * 1024 * 1024 { self.stage.cache.remove(0); }
+                    while self.stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > PAGES_HOLD && self.stage.cache.len() > 1 { self.stage.cache.remove(0); }
                 } else { self.takeover.as_mut().unwrap().dirty = true; }
             }
         }
@@ -4236,7 +4281,7 @@ impl Panels {
         self.stage.painter.submit(request);
     }
 
-    pub(super) fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
+    fn take_sheet_picture(&mut self) -> Option<page_painter::CompleteSheet> { self.stage.sheet_picture.take() }
 
     pub fn paint(&mut self, snap: &Snapshot, mut show: impl FnMut(&Panel, [u32; 4])) {
         // Of the picture handed over last turn, and shown.
@@ -4330,7 +4375,7 @@ impl Panels {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 let copy_at = Instant::now();
-                panel.shown_pixels = Some(frame.pixels.clone());
+                panel.shown_pixels = frame.pixels.clone();
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 let first = !panel.painted;
@@ -4341,7 +4386,7 @@ impl Panels {
                 stage.worker_phases = frame.phases;
                 stage.cache.retain(|f| f.sheet != frame.sheet);
                 stage.cache.push(frame);
-                while stage.cache.iter().map(|f| f.pixels.len()).sum::<usize>() > 96 * 1024 * 1024 { stage.cache.remove(0); }
+                while stage.cache.iter().map(|f| f.bytes()).sum::<usize>() > PAGES_HOLD { stage.cache.remove(0); }
             }
         }
         if std::mem::take(&mut stage.restore) {
@@ -4349,7 +4394,7 @@ impl Panels {
                 stage.presented = Some((stage.epoch, frame.facts.clone(), frame.time));
                 for back in self.list.iter_mut().filter(|p| p.zone == Zone::SheetBack) { back.dirty = true; }
                 let copy_at = Instant::now();
-                panel.shown_pixels = Some(frame.pixels.clone());
+                panel.shown_pixels = frame.pixels.clone();
                 panel.items.clone_from(&frame.items);
                 panel.hover = self.sheet_pointer.and_then(|p| panels::hit(&frame.items, p));
                 panel.painted = true;
@@ -4471,7 +4516,7 @@ impl Panels {
                     }
                     // The avatar gun's avatars in view, and the one loaded: their pictures, read through the service.
                     if sheet == Sheet::AvatarGun {
-                        let pictures = self.gun_pictures.get_or_insert_with(|| crate::worlds::Pictures::with_backend(&ctx, Some(self.backend.clone())));
+                        let pictures = self.gun_pictures.get_or_insert_with(|| crate::worlds::Pictures::with_backend(&ctx, Some(self.backend.clone())).within(super::PICTURES_HOLD));
                         let gun = &mut facts.avatar_gun;
                         if let Some(scope) = gun.scope.clone() {
                             let picture = |id: &str, url: &str, pictures: &mut crate::worlds::Pictures| {
@@ -4816,12 +4861,14 @@ impl Panel {
     fn not_presented(&mut self, now: Instant) {
         if let Some(shown) = self.acknowledged.take() {
             self.shown_pixels = shown.pixels;
+            self.shown_rows = None;
             self.items = shown.items;
             self.mask = shown.mask;
             self.painted = shown.painted;
             self.displayed = shown.displayed;
             self.hover = self.pointer.and_then(|p| panels::hit(&self.items, p));
         }
+        self.holds = 0;
         self.retry_at = Some(now + PRESENT_RETRY);
     }
 }
@@ -5355,7 +5402,7 @@ mod tests {
         once.dedup();
         assert_eq!(once.len(), recents.asked.len(), "{:?}", recents.asked);
         assert!(once.contains(&0) && once.contains(&1));
-        recents.loaded[0].image = Some(ColorImage::from_rgb([1, 1], &[0, 0, 0]));
+        recents.loaded[0].image = Some(ColorImage::from_rgb([1, 1], &[0, 0, 0]).into());
         // The same one twice, however it came: what was read stays.
         recents.asked.push(0);
         let (tx, rx) = mpsc::channel();

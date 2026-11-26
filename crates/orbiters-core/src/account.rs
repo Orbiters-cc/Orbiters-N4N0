@@ -187,8 +187,12 @@ impl std::fmt::Debug for Account {
     }
 }
 
-/// Unity's preferences folder (`InternalEditorUtility.unityPreferencesFolder`), shared by every project and version.
+/// Unity's preferences folder (`InternalEditorUtility.unityPreferencesFolder`), shared by every project and version. A
+/// harness or a test has its own: never the person's account.
 fn unity_preferences() -> Option<PathBuf> {
+    if let Some(r) = crate::paths::others_folders_in_roots() {
+        return Some(r.config.join("Unity").join("Preferences"));
+    }
     if cfg!(windows) {
         dirs::config_dir().map(|d| d.join("Unity").join("Editor-5.x").join("Preferences"))
     } else if cfg!(target_os = "macos") {

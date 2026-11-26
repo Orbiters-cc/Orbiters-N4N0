@@ -201,7 +201,9 @@ impl super::Controller {
     /// Once a second (N4N0's watch) and after a menu asked something: the last capture made, the 3D views made since,
     /// the waiting shares whose view is there (they go now) or that nothing makes; N4N0 is handed the captures when
     /// where they stand changed.
-    pub(super) fn menu_captures_tick(self: &Shared) {
+    ///
+    /// Whether a share waits for its 3D view, so the next look is soon.
+    pub(super) fn menu_captures_tick(self: &Shared) -> bool {
         let snap = self.view();
         let mut m = self.menu_shares.locked();
         let m = &mut *m;
@@ -255,6 +257,12 @@ impl super::Controller {
             // Handed over under the lock, so a newer view never goes before an older one.
             self.n4n0.set_captures(view);
         }
+        // (A job not in a snapshot yet shows as busy for a time.)
+        m.asked.values().any(|asked| match asked {
+            Asked::Waiting { .. } => true,
+            Asked::Job { since, .. } => since.elapsed() < JOB_SHOWS + std::time::Duration::from_secs(1),
+            Asked::Failed(_) => false,
+        })
     }
 
     /// Lists the computer's captures again for History (a menu opened it), as Photos & captures lists them.

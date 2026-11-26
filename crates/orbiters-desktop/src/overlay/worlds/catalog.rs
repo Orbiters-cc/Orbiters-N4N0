@@ -646,19 +646,30 @@ pub struct Capture {
     pub view: StartView,
 }
 
+/// The splats of `g` in the order `order` says (a distance and an index each), with what draws them alone: what is for training and for editing (whether a splat is sky, its
+/// filter, what the keyframes saw of it: 25 of a splat's 81 bytes) stays empty, which reads as unknown (DOV-5). Exactly as many as kept: pushed one by one, its vectors would hold
+/// up to twice that (request 18: the captures kept in memory took 2.6 times what the cache counted).
+fn drawn(g: &Gaussians, order: &[(f32, usize)]) -> Gaussians {
+    fn of<T: Copy>(v: &[T], order: &[(f32, usize)]) -> Vec<T> {
+        order.iter().map(|&(_, i)| v[i]).collect()
+    }
+    Gaussians {
+        means: of(&g.means, order),
+        log_scales: of(&g.log_scales, order),
+        rotations: of(&g.rotations, order),
+        opacity_logits: of(&g.opacity_logits, order),
+        colors: of(&g.colors, order),
+        ..Gaussians::default()
+    }
+}
+
 impl Capture {
     pub fn new(g: Gaussians, sky: Option<SkyMap>, view: StartView) -> Self {
         let eye = view.eye();
         let distance = |i: usize| stereo::length(stereo::sub(g.means[i], eye));
         let mut order: Vec<(f32, usize)> = (0..g.len()).filter(|&i| g.is_finite(i)).map(|i| (distance(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        // Exactly as many as kept: pushed one by one, its vectors would hold up to twice that (request 18: the captures kept in
-        // memory took 2.6 times what the cache counted).
-        let mut sorted = Gaussians::default();
-        sorted.reserve_exact(order.len());
-        for &(_, i) in &order {
-            sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
-        }
+        let sorted = drawn(&g, &order);
         Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky, view, small_reach: None }
     }
 
@@ -752,13 +763,7 @@ impl Capture {
         let kept: Vec<usize> = (0..g.len()).filter(|&i| g.is_finite(i) && keep[i]).collect();
         let mut order: Vec<(f32, usize)> = kept.into_iter().map(|i| (across(i), i)).collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
-        // Exactly as many as kept: pushed one by one, its vectors would hold up to twice that (request 18: the captures kept in
-        // memory took 2.6 times what the cache counted).
-        let mut sorted = Gaussians::default();
-        sorted.reserve_exact(order.len());
-        for &(_, i) in &order {
-            sorted.push(g.means[i], g.log_scales[i], g.rotations[i], g.opacity_logits[i], g.colors[i]);
-        }
+        let sorted = drawn(g, &order);
         Self { gaussians: sorted, distances: order.into_iter().map(|(d, _)| d).collect(), sky: None, view, small_reach: Some(frame.reach) }
     }
 

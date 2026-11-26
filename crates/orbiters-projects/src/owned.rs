@@ -102,7 +102,18 @@ pub fn id_of_file(file: &std::fs::File) -> std::io::Result<FileId> {
 
 /// Whether `path` is still the very object `id` names, and not a link.
 pub fn is_same(path: &Path, id: FileId) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| !is_link(&m)) && id_of(path).is_ok_and(|now| now == id)
+    try_is_same(path, id).unwrap_or(false)
+}
+
+/// Recovery callers need to distinguish a missing or different object from one they cannot inspect.
+pub(crate) fn try_is_same(path: &Path, id: FileId) -> std::io::Result<bool> {
+    let matches = || -> std::io::Result<bool> {
+        Ok(!is_link(&std::fs::symlink_metadata(path)?) && id_of(path)? == id)
+    };
+    match matches() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        other => other,
+    }
 }
 
 /// A folder held open so that, while held, nobody can rename, move or delete it, nor any folder above it (Windows: the

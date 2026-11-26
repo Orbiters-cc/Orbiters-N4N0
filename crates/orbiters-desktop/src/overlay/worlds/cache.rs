@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// Bytes of ready captures kept in memory at most (a capture of a million splats is about 60 MB).
-pub const MEMORY_BUDGET: u64 = 1280 << 20;
+/// Bytes of ready captures kept in memory at most: six of a million splats (60 MB each) beside the one on screen, as many as a carousel shows a step from. One shown longer ago is
+/// read again from the disk, 0.3 to 0.7 s (the owner's answer, review 1124: 1.3 GB were kept beside VRChat).
+pub const MEMORY_BUDGET: u64 = 384 << 20;
 /// Bytes of downloaded files kept on disk at most.
 pub const DISK_CAP: u64 = 2 << 30;
 /// Files are kept on disk only while the drive keeps this much free after them.
@@ -45,7 +46,7 @@ impl Key {
     }
 }
 
-/// The bytes a ready capture holds in memory: every vector's room, what the splats keep for viewers (`seen`) too. Counting only the
+/// The bytes a ready capture holds in memory: every vector's room. Counting only the
 /// splats' lengths, the budget saw 38 % of what the captures took: the owner's overlay held 4.1 GB under a 1.28 GB budget (request 18).
 pub fn capture_bytes(c: &Capture) -> u64 {
     let distances = c.distances.capacity() * std::mem::size_of::<f32>();
@@ -288,8 +289,8 @@ mod tests {
     #[test]
     fn memory_lets_go_of_the_least_lately_shown_but_never_the_one_on_screen() {
         let one = capture_bytes(&capture(1000));
-        // Each splat's 56 bytes, what the splats keep for viewers (25) and its distance (4).
-        assert!((1000 * 85..1000 * 87).contains(&one), "{one}");
+        // Each splat's 56 bytes and its distance (4): nothing that only training reads (DOV-5: 85 bytes a splat).
+        assert!((1000 * 60..1000 * 62).contains(&one), "{one}");
         // Room for three.
         let mut m = Memory::new(one * 3);
         for id in 1..=3 {
@@ -327,7 +328,10 @@ mod tests {
         let mut c = Capture::new(pushed, None, view);
         assert_eq!(c.gaussians.means.capacity(), c.gaussians.len(), "the capture's own vectors are exactly as long as needed");
         let exact = capture_bytes(&c);
-        assert!(exact >= 5000 * 85, "{exact}");
+        assert!((5000 * 60..5000 * 61).contains(&exact), "{exact}");
+        assert!(c.gaussians.seen.capacity() == 0 && c.gaussians.sky.capacity() == 0 && c.gaussians.filter_3d.capacity() == 0);
+        // The same small: a copy of the same kind.
+        assert!((4000 * 60..5000 * 61).contains(&capture_bytes(&c.around_subject())));
         // Room over is counted.
         c.gaussians.seen.reserve_exact(5000);
         assert!(capture_bytes(&c) >= exact + 5000 * std::mem::size_of::<orbiters_reconstruct::gaussians::Seen>() as u64);

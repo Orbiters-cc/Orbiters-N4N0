@@ -33,6 +33,7 @@ pub fn start(ctl: crate::controller::Shared) {
         let mut canvas: Option<Canvas> = None;
         let mut shown: Option<Arc<Snapshot>> = None;
         let mut last_paint: Option<Instant> = None;
+        let rest = ctl.rest("coverage-window", wanted_on_desktop);
         loop {
             let snap = ctl.view();
             if !wanted_on_desktop(&snap) {
@@ -40,7 +41,7 @@ pub fn start(ctl: crate::controller::Shared) {
                     w.close();
                 }
                 shown = None;
-                std::thread::sleep(Duration::from_millis(500));
+                rest.wait(None);
                 continue;
             }
             if window.is_none() {

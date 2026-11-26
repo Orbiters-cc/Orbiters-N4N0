@@ -161,6 +161,8 @@ pub struct Controller {
     repaint: Mutex<Option<egui::Context>>,
     /// Interfaces in other processes (window, overlay) get every change over their link, the tray too.
     subscribers: Mutex<Vec<Arc<Mailbox>>>,
+    /// The waits of the service's loops.
+    rests: rest::Rests,
     /// Held while a snapshot is taken and handed out: they go out in the order they were taken.
     publishing: Mutex<()>,
     /// The latest T-pose calibration and when it was taken (Unix ms; the shared clock restarts with Windows).
@@ -493,14 +495,14 @@ pub(crate) struct PublishRate {
 }
 
 impl PublishRate {
-    /// Another second went by, the controller having published `publishes` times in all, to `readers` subscribers.
-    /// Returns the minute's line once sixty have, when anything was published in them.
-    pub(crate) fn second(&mut self, publishes: u64, readers: usize) -> Option<String> {
+    /// Another second went by (`seconds` of them, at rest), the controller having published `publishes` times in all, to
+    /// `readers` interfaces. Returns the minute's line once sixty have, when anything was published in them.
+    pub(crate) fn second(&mut self, seconds: u32, publishes: u64, readers: usize) -> Option<String> {
         let now = publishes.saturating_sub(self.seen);
         self.seen = publishes;
         self.minute += now;
         self.most = self.most.max(now);
-        self.seconds += 1;
+        self.seconds += seconds;
         if self.seconds < 60 {
             return None;
         }
@@ -569,6 +571,7 @@ pub(crate) mod menu_shares;
 mod n4n0;
 mod perf;
 mod previous_invite;
+pub(crate) mod rest;
 mod performance;
 pub mod publish_cost;
 pub mod picture_repair;
@@ -625,6 +628,7 @@ impl Controller {
             library_version: AtomicU64::new(0),
             repaint: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
+            rests: Default::default(),
             publishing: Mutex::new(()),
             calibration: Mutex::new(calibration),
             reconstruction: Mutex::new(None),
@@ -723,7 +727,9 @@ impl Controller {
 
     /// What tracking smoothing's driver does now, as the service's keeper found it.
     pub fn set_tracking_note(&self, note: String) {
-        *self.tracking_note.locked() = note;
+        if std::mem::replace(&mut *self.tracking_note.locked(), note.clone()) != note {
+            self.n4n0.look();
+        }
     }
 
     pub fn tracking_note(&self) -> String {
@@ -759,6 +765,17 @@ impl Controller {
                 log_warn!("capture worker: {e}", e = e);
             }
         });
+        self.start_loops();
+    }
+
+    /// The idle harness measures the normal loops over private data and sockets.
+    pub(crate) fn start_idle_service(self: &Shared) {
+        self.start_osc();
+        self.start_loops();
+    }
+
+    /// The loops that follow what goes on (a test starts these alone: nothing listens, hooks or is started).
+    fn start_loops(self: &Shared) {
         spawn_watchers(self.clone());
         shares::spawn_presence(self.clone());
         explorer::spawn(self.clone());
@@ -796,10 +813,21 @@ impl Controller {
                 mailbox.post(ToClient::Notice { notice });
             }
         }
+        let shows = mailbox.shows_notices();
         self.subscribers.locked().push(mailbox);
+        // What nobody looked at until now is looked at again.
+        if shows {
+            self.rests.wake_all();
+        }
     }
 
-
+    /// Every change from now on, to a mailbox that watches one thing: it has the state now, and is not woken for it.
+    fn watch_from_now(&self, mailbox: &Arc<Mailbox>) {
+        let _turn = self.publishing.locked();
+        mailbox.post_snapshot(self.view());
+        mailbox.wait(Some(Duration::ZERO));
+        self.subscribers.locked().push(mailbox.clone());
+    }
 
     /// Posts a message to every subscriber (forgetting those gone). Returns whether one that shows notices got it.
     fn broadcast(&self, msg: impl Fn() -> ToClient) -> bool {
@@ -874,6 +902,9 @@ impl Controller {
     /// The copy shares every part of the snapshot. A part that was written to since the last publish and holds what it
     /// held (a flag set to what it was) becomes the published part again first ([`Parts::settle`]): from here on a
     /// part is another allocation exactly when it changed.
+    ///
+    /// Nothing changed (a flag set to what it was, two changes another publish already took): nothing is handed out, and
+    /// no window, overlay or watcher is woken (XCT-18).
     fn publish(&self) {
         use orbiters_core::slice::Parts;
         let _turn = self.publishing.locked();
@@ -884,6 +915,9 @@ impl Controller {
             let now = self.vrchat_stamp_of(&s.account);
             vrchat_login::follow_orbiters_and_record(&mut s, &mut self.vrchat_login.locked(), now.as_ref());
             s.settle(&previous);
+            if s.same(&previous) {
+                return;
+            }
             let published = Arc::new(s.clone());
             // Recovery needs the newest published value before another update can acquire the snapshot.
             *self.published.locked() = published.clone();
@@ -2632,6 +2666,7 @@ impl Controller {
             log_warn!("stopping the capture: {e:#}", e = e);
         }
         self.quitting.store(true, Ordering::Relaxed);
+        self.rests.wake_all();
         // N4N0's ears and its thread stop, and its screen is closed while OSC can still tell VRChat.
         self.n4n0.shutdown();
         // The friends list as it is, for the next start.
@@ -3341,6 +3376,11 @@ impl WorldSplit {
         }
     }
 
+    /// A join is under way.
+    fn waits(&self) -> bool {
+        self.joining.is_some() || self.due
+    }
+
     /// Whether the session splits now (`recording`: one records, paused or not). A split due while nothing records is
     /// forgotten.
     fn take(&mut self, recording: bool, now: Instant) -> bool {
@@ -3455,6 +3495,9 @@ impl StorageSweep {
     }
 }
 
+/// How long after VRChat closed its log is still followed as while it ran.
+const SETTLED_AFTER_VRCHAT: Duration = Duration::from_secs(30);
+
 fn spawn_watchers(ctl: Shared) {
     std::thread::Builder::new()
         .name("watchers".into())
@@ -3474,8 +3517,6 @@ fn spawn_watchers(ctl: Shared) {
             let mut history_flush = false;
             // The videos the worlds played, the same way (the Videos page).
             let mut videos = videos::Videos::load();
-            #[cfg(not(target_os = "linux"))]
-            let mut system = sysinfo::System::new();
             let mut tick = 0u64;
             let mut storage_sweep = StorageSweep::default();
             let mut rate = PublishRate::default();
@@ -3483,34 +3524,31 @@ fn spawn_watchers(ctl: Shared) {
             // Since when VRChat runs, and when VRChat was last asked to find the OSC service.
             let mut vrchat_since: Option<Instant> = None;
             let mut osc_asked: Option<Instant> = None;
-            loop {
+            // When VRChat was last seen running (its log's last lines come after it).
+            let mut vrchat_gone: Option<Instant> = None;
+            let rest = ctl.rest("watchers", |s| s.capture.state);
+            let mut storage_looked: Option<Instant> = None;
+            let mut step = 1;
+            let private = orbiters_core::paths::roots().is_some();
+            while !ctl.quitting.load(Ordering::Relaxed) {
                 // VRChat process, every 3 s (first, so the world below knows whether VRChat runs).
                 if tick.is_multiple_of(3) {
-                    // Names only: the default refresh also reads every process's command line and environment. On a Mac
-                    // nothing of VRChat or SteamVR runs under those names (its VRChat is the engine's, known by its
-                    // records): a look now and then.
-                    // On Linux from /proc: Wine's threads have VRChat's name too, and sysinfo counts threads.
+                    // One Windows inventory gives both process names and the full birth time.
+                    // Linux's /proc inventory counts Wine processes without their similarly named threads.
+                    #[cfg(windows)]
+                    let system = if cfg!(test) { Vec::new() } else { orbiters_booster::programs::scan() };
                     #[cfg(target_os = "linux")]
-                    let system = orbiters_core::processes::all();
-                    #[cfg(target_os = "linux")]
-                    let named = |names: &[&str]| system.iter().find(|p| names.iter().any(|n| p.is(n))).map(|p| p.pid);
-                    #[cfg(not(target_os = "linux"))]
-                    if orbiters_core::osc::VRCHAT_RUNS_HERE || tick.is_multiple_of(30) {
-                        system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    let named = |names: &[&str]| {
-                        system
-                            .processes()
-                            .values()
-                            .find(|p| {
-                                let n = p.name().to_string_lossy().to_lowercase();
-                                names.contains(&n.as_str())
-                            })
-                            .map(|p| p.pid().as_u32())
-                    };
-                    // The person's VRChat (or the main session's), never one the bridge runs beside it, unless lent to it.
+                    let system = if cfg!(test) { Vec::new() } else { orbiters_core::processes::all() };
+                    #[cfg(any(windows, target_os = "linux"))]
+                    let steamvr_pid = system.iter().find(|p| p.name.eq_ignore_ascii_case("vrserver.exe") || p.name.eq_ignore_ascii_case("vrserver")).map(|p| p.pid);
+                    #[cfg(any(windows, target_os = "linux"))]
                     let started = bridge_side::vrchat_births(&system);
+                    // Home follows its own engine's records on a Mac.
+                    #[cfg(not(any(windows, target_os = "linux")))]
+                    let (steamvr_pid, started) = (None::<u32>, Vec::<(u32, u64)>::new());
+                    // A game that starts during a private harness run belongs to the person.
+                    // Still measure the inventory, while keeping its results out of the harness.
+                    let (steamvr_pid, started) = if private { (None, Vec::new()) } else { (steamvr_pid, started) };
                     let vrchats: Vec<u32> = started.iter().map(|(p, _)| *p).collect();
                     if orbiters_core::osc::VRCHAT_RUNS_HERE {
                         let dir = orbiters_core::paths::vrchat_log_dir();
@@ -3527,7 +3565,7 @@ fn spawn_watchers(ctl: Shared) {
                     let pid = ctl.sides.app_pid(&vrchats);
                     // The developer VR sandbox's SteamVR (a bridge VR session's emulated headset) is not the person's VR: no
                     // overlay, sound devices or start choice for it (steamvr_start::sandbox_runs).
-                    let steamvr_pid = named(&["vrserver.exe", "vrserver"]).filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
+                    let steamvr_pid = steamvr_pid.filter(|_| !crate::steamvr_start::sandbox_runs() || crate::steamvr_start::sandbox_test_app());
                     let steamvr = steamvr_pid.is_some();
                     let was = running;
                     // A VRChat on the network counts as running, for N4N0 and the interface; `remote` says it costs
@@ -3575,10 +3613,15 @@ fn spawn_watchers(ctl: Shared) {
                         ctl.next_reconstruction();
                     }
                     // Microphones come and go (headsets): ask the worker again now and then.
-                    if tick.is_multiple_of(15) && tick > 0 {
+                    if !private && tick.is_multiple_of(15) && tick > 0 {
                         ctl.send(&WorkerCommand::ListSources).or_log("what a worker was asked did not reach it");
                     }
                 }
+
+                if running {
+                    vrchat_gone = Some(Instant::now());
+                }
+                let looked_at = ctl.shown() || running || ctl.view().capture.state != CaptureState::Idle || ctl.stopping_since.locked().is_some();
 
                 // VRChat log: world changes (and new segments when recording). The last log keeps the last world
                 // after VRChat closes; only a running VRChat is in a world. Until the log is read to its end, the world
@@ -3642,11 +3685,12 @@ fn spawn_watchers(ctl: Shared) {
                 ctl.check_stopping();
                 ctl.check_pausing();
 
-                // Spout senders, every 2 s: on a Mac, those of the VRChat Home started, through its engine.
+                // Spout senders, every 2 s while something could use or show one: on a Mac, those of the VRChat Home started, through
+                // its engine.
                 #[cfg(target_os = "macos")]
                 ctl.follow_camera_host();
                 #[cfg(any(windows, target_os = "macos"))]
-                if tick.is_multiple_of(2) {
+                if tick.is_multiple_of(2) && looked_at {
                     let sources: Vec<_> = orbiters_spout::list_senders()
                         .into_iter()
                         .filter_map(|n| orbiters_spout::sender_info(&n))
@@ -3705,8 +3749,10 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
 
-                // Storage, every 30 s: the whole library when something may have changed, else the free space.
-                if tick.is_multiple_of(30) {
+                // Storage, every 30 s while it is shown or a recording fills it: the whole library when something may have changed, else
+                // the free space.
+                if storage_looked.is_none_or(|at| looked_at && at.elapsed() >= Duration::from_secs(29)) {
+                    storage_looked = Some(Instant::now());
                     let dir = ctl.with_settings(|s| s.sessions_dir.clone());
                     let modified = library_fingerprint(&dir);
                     if storage_sweep.due(ctl.library_version(), &dir, modified, ctl.is_capturing(), Instant::now()) {
@@ -3716,12 +3762,15 @@ fn spawn_watchers(ctl: Shared) {
                     }
                 }
                 // How often the state was published, once a minute (this loop turns once a second, and a little more).
-                let readers = ctl.subscribers.locked().len();
-                if let Some(line) = rate.second(ctl.publishes(), readers) {
+                let readers = ctl.subscribers.locked().iter().filter(|m| m.shows_notices()).count();
+                if let Some(line) = rate.second(step as u32, ctl.publishes(), readers) {
                     publish_log(&line);
                 }
-                tick += 1;
-                std::thread::sleep(Duration::from_secs(1));
+                // Nobody looks, no game and no recording: what is left is whether one of them starts (the next process look).
+                let resting = !looked_at && !running && !split.waits() && vrchat_gone.is_none_or(|at| at.elapsed() > SETTLED_AFTER_VRCHAT);
+                step = if resting { 3 - tick % 3 } else { 1 };
+                tick += step;
+                rest.wait(Some(Duration::from_secs(step)));
             }
         })
         .expect("watchers thread");
@@ -4033,7 +4082,7 @@ mod tests {
         let mut rate = PublishRate::default();
         let mut publishes = 100;
         // What was published before it first looked counts in the first second.
-        assert_eq!(rate.second(publishes, 3), None);
+        assert_eq!(rate.second(1, publishes, 3), None);
         let mut lines = Vec::new();
         for second in 1..180u64 {
             // The first minute: one a second, and a burst of 25; the second: nothing; the third: two.
@@ -4043,7 +4092,7 @@ mod tests {
                 130 | 131 => 1,
                 _ => 0,
             };
-            lines.extend(rate.second(publishes, 3).map(|line| (second, line)));
+            lines.extend(rate.second(1, publishes, 3).map(|line| (second, line)));
         }
         assert_eq!(
             lines,
@@ -4108,7 +4157,8 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second) && second.n4n0.afk && !first.n4n0.afk, "the state handed out before stays as it was");
         assert!(Slice::same(&first.settings, &second.settings) && Slice::same(&first.capture, &second.capture) && Slice::same(&first.vrchat.world, &second.vrchat.world));
         assert!(Slice::same(&first.n4n0.lines, &second.n4n0.lines));
-        // Written to, with what they held: the same parts again once published.
+        // Written to, with what they held: nothing to hand out (XCT-18), and the same parts again at the next change.
+        let told = ctl.publishes();
         ctl.update(|s| {
             s.osc.listening = first.osc.listening;
             s.capture.trail.clear();
@@ -4116,8 +4166,9 @@ mod tests {
             s.vrchat.world.players.clear();
             s.settings.walk_boost.strength = first.settings.walk_boost.strength;
         });
+        assert!(Arc::ptr_eq(&second, &ctl.view()) && ctl.publishes() == told, "nothing changed: nothing published");
+        ctl.update(|s| s.n4n0.afk = false);
         let third = ctl.view();
-        assert!(!Arc::ptr_eq(&second, &third), "a publish all the same");
         for same in [
             Slice::same(&second.osc, &third.osc),
             Slice::same(&second.capture, &third.capture),

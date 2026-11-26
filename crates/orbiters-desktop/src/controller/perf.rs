@@ -11,15 +11,19 @@ use std::time::{Duration, Instant};
 impl Controller {
     pub(super) fn start_perf(self: &Shared) {
         let ctl = std::sync::Arc::downgrade(self);
-        std::thread::Builder::new().name("perf".into()).spawn(move || {
-            let mut next = Instant::now();
+        let rest = self.rest("perf", |_| ());
+        let _ = std::thread::Builder::new().name("perf".into()).spawn(move || {
+            let mut next = Instant::now() + Duration::from_millis(100);
             // Windows' GPU counters, opened while the usage statistics are on (`usage::perf`).
             let mut gpu: Option<perf::gpu::Gpu> = None;
             loop {
-                std::thread::sleep(next.saturating_duration_since(Instant::now()).max(Duration::from_millis(100)));
+                rest.wait(Some(next.saturating_duration_since(Instant::now())));
                 let Some(ctl) = ctl.upgrade() else { return };
                 if ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
+                }
+                if Instant::now() < next {
+                    continue;
                 }
                 let snap = ctl.view();
                 let mode = match (snap.vrchat.running, snap.steamvr.running) {

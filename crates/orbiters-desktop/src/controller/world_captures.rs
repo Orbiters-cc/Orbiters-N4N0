@@ -158,7 +158,8 @@ struct Job {
     file: PathBuf,
 }
 
-/// The requests' thread: every [`TICK`], while the app runs.
+/// The requests' thread: at each change of their folder (every [`TICK`] where the system tells of none), and every [`TICK`] while
+/// something of one is under way.
 pub(super) fn spawn(ctl: Shared) {
     std::thread::Builder::new().name("world-captures".into()).spawn(move || {
         let mut taken: HashSet<String> = HashSet::new();
@@ -166,6 +167,13 @@ pub(super) fn spawn(ctl: Shared) {
         let mut jobs: HashMap<String, Job> = HashMap::new();
         let mut watched: HashMap<String, Instant> = HashMap::new();
         let mut written: HashMap<String, String> = HashMap::new();
+        let rest = ctl.rest("world-captures", |_| ());
+        let weak = std::sync::Arc::downgrade(&ctl);
+        let told = orbiters_core::folder_watch::watch("world-captures-folder", vec![root().join("requests")], move || {
+            if let Some(ctl) = weak.upgrade() {
+                ctl.rests.wake("world-captures");
+            }
+        });
         while !ctl.quitting.load(std::sync::atomic::Ordering::Relaxed) {
             let requests = root().join("requests");
             for (file, request) in read_requests(&requests) {
@@ -206,7 +214,9 @@ pub(super) fn spawn(ctl: Shared) {
                 .filter_map(|(file, r)| r.ok().map(|r| r.id).or_else(|| file.file_stem().map(|s| s.to_string_lossy().into_owned())))
                 .collect();
             taken.retain(|id| on_disk.contains(id));
-            std::thread::sleep(TICK);
+            // A request that could not be read yet is still on disk.
+            let busy = !imports.is_empty() || !jobs.is_empty() || !watched.is_empty() || !taken.is_empty();
+            rest.wait((busy || !told).then_some(TICK));
         }
     }).or_log("a thread could not be started");
 }

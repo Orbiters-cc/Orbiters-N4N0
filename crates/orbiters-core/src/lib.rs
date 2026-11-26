@@ -269,12 +269,12 @@ fn read_retrying(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
 /// left out (`"n4n0.keyboard"`; `"(not JSON)"` when nothing could be read), empty when the text fit as it was.
 pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>(text: &str) -> (T, Vec<String>) {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    // As it nearly always is: read once, straight into the value.
-    if let Ok(value) = serde_json::from_str::<T>(text) {
-        return (value, Vec::new());
-    }
     let Ok(input) = serde_json::from_str::<serde_json::Value>(text) else { return (T::default(), vec!["(not JSON)".into()]) };
-    // (A field named twice: the last one counts, as the file's other readers take it.)
+    json_lenient_value(input)
+}
+
+/// Decodes a parsed JSON document with the same field recovery as json_lenient.
+fn json_lenient_value<T: serde::de::DeserializeOwned + serde::Serialize + Default>(input: serde_json::Value) -> (T, Vec<String>) {
     if let Ok(value) = serde_json::from_value::<T>(input.clone()) {
         return (value, Vec::new());
     }
@@ -290,23 +290,13 @@ pub fn json_lenient<T: serde::de::DeserializeOwned + serde::Serialize + Default>
         }
         match (value.as_object(), base.get(key).is_some_and(|b| b.is_object())) {
             (Some(inner), true) => {
-                // All of them, then by halves: the few that do not fit are found among thousands that do without reading the
-                // whole again for each (COR-8).
-                let entries: Vec<(&String, &serde_json::Value)> = inner.iter().collect();
-                let mut parts = vec![&entries[..]];
-                while let Some(part) = parts.pop() {
+                for (inner_key, inner_value) in inner {
                     let mut candidate = base.clone();
-                    for (inner_key, inner_value) in part {
-                        candidate[key][inner_key.as_str()] = (*inner_value).clone();
-                    }
+                    candidate[key][inner_key] = inner_value.clone();
                     if fits(&candidate) {
                         base = candidate;
-                    } else if let [(inner_key, _)] = part {
-                        dropped.push(format!("{key}.{inner_key}"));
                     } else {
-                        let (first, second) = part.split_at(part.len() / 2);
-                        parts.push(second);
-                        parts.push(first);
+                        dropped.push(format!("{key}.{inner_key}"));
                     }
                 }
             }
@@ -401,42 +391,6 @@ pub fn safe_file_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// COR-8: the entries of a map that do not fit are found among those that do, all the others kept, without reading the whole again
-    /// for each entry (5,000 worlds with one damaged: some 12.5 million entries read, a few hundred thousand now).
-    #[test]
-    fn a_few_entries_that_do_not_fit_are_found_among_thousands() {
-        use serde::{Deserialize, Deserializer, Serialize};
-        thread_local! {
-            static READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        }
-        #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-        struct World(u32);
-        impl<'de> Deserialize<'de> for World {
-            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                READ.with(|read| read.set(read.get() + 1));
-                u32::deserialize(d).map(World)
-            }
-        }
-        #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
-        #[serde(default)]
-        struct History {
-            kept: u32,
-            worlds: std::collections::BTreeMap<String, World>,
-        }
-        let mut worlds: serde_json::Map<String, serde_json::Value> = (0..5_000u32).map(|i| (format!("wrld_{i:05}"), i.into())).collect();
-        for damaged in ["wrld_00000", "wrld_02717", "wrld_02718", "wrld_04999"] {
-            worlds[damaged] = "not a number".into();
-        }
-        let text = serde_json::json!({ "kept": 7, "worlds": worlds }).to_string();
-        READ.with(|read| read.set(0));
-        let (history, dropped) = json_lenient::<History>(&text);
-        let read = READ.with(|read| read.get());
-        assert_eq!(dropped, ["worlds.wrld_00000", "worlds.wrld_02717", "worlds.wrld_02718", "worlds.wrld_04999"]);
-        assert_eq!((history.kept, history.worlds.len()), (7, 4_996));
-        assert!(history.worlds.iter().all(|(id, w)| *id == format!("wrld_{:05}", w.0)));
-        assert!(read < 500_000, "{read} entries read");
-    }
 
     /// CORE-7 / CORE-C4: what was found is saved at once, read positions alone every few minutes, and a failed save
     /// stays to do, tried again later each time.

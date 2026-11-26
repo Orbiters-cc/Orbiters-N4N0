@@ -1004,14 +1004,13 @@ impl Settings {
         };
         // A later read that works does NOT end the unreadable state: what this process holds (the service's live
         // settings) is still the defaults, and a save must go onto the person's file ([`Settings::save_to`]).
-        let migrated = migrated(&text);
-        let (settings, dropped) = Self::parse(migrated.as_deref().unwrap_or(&text));
+        let (settings, dropped, migrated) = Self::parse(&text);
         known_until_unreadable(path, &settings);
         if !dropped.is_empty() {
             let aside = crate::keep_aside(path);
             eprintln!("settings: {} left at their default ({}), the file kept as {:?}", dropped.join(", "), path.display(), aside);
         }
-        if migrated.is_some() {
+        if migrated {
             // Written again at once under today's names: the earlier one is read this once only.
             if let Err(e) = settings.save_to(path) {
                 eprintln!("settings: {}: {e:#}", path.display());
@@ -1026,12 +1025,17 @@ impl Settings {
 
     /// The settings in `text` as [`crate::json_lenient`] reads them, a statistics switch that did not read off, never on
     /// by default (the person may have turned it off; PRIV-12); with the fields left out.
-    fn parse(text: &str) -> (Self, Vec<String>) {
-        let (mut settings, dropped) = crate::json_lenient::<Self>(text);
+    pub(crate) fn parse(text: &str) -> (Self, Vec<String>, bool) {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let Ok(mut input) = serde_json::from_str(text) else {
+            return (Self::unread(), vec!["(not JSON)".into()], false);
+        };
+        let migrated = migrate_fields(&mut input);
+        let (mut settings, dropped) = crate::json_lenient_value::<Self>(input);
         if dropped.iter().any(|d| d == "usage" || d == "usage.enabled" || d == "(not JSON)") {
             settings.usage.enabled = false;
         }
-        (settings, dropped)
+        (settings, dropped, migrated)
     }
 
     /// The language a program of its own (the call, capture and speech workers) speaks: the one these settings hold (what the account gave
@@ -1070,8 +1074,7 @@ impl Settings {
                         eprintln!("settings: {} kept as {} before the first save onto it", path.display(), aside.display());
                         set_kept_aside(path);
                     }
-                    let migrated = migrated(&text);
-                    let (on_disk, _) = Self::parse(migrated.as_deref().unwrap_or(&text));
+                    let (on_disk, _, _) = Self::parse(&text);
                     rebased = self.changes_onto(on_disk, &baseline(path));
                     &rebased
                 }
@@ -1254,24 +1257,15 @@ fn was_loaded_unreadable(path: &Path) -> Option<bool> {
     LOADED_UNREADABLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(path).copied()
 }
 
-fn migrated(text: &str) -> Option<String> {
-    // Nothing to move in a file that does not name it (a Mac's other default needs reading).
-    if !cfg!(target_os = "macos") && !text.contains(&format!("\"{LEGACY_N4N0_KEY}\"")) {
-        return None;
-    }
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let fields = value.as_object_mut()?;
+fn migrate_fields(value: &mut serde_json::Value) -> bool {
+    let Some(fields) = value.as_object_mut() else { return false };
     let legacy = fields.remove(LEGACY_N4N0_KEY);
     let moved = legacy.is_some();
     if let Some(legacy) = legacy {
         fields.entry("n4n0").or_insert(legacy);
     }
     let rendered = cfg!(target_os = "macos") && saved_on_a_mac(fields) && fields.get_mut("launch").is_some_and(earlier_render_default);
-    if !moved && !rendered {
-        return None;
-    }
-    serde_json::to_string(&value).ok()
+    moved || rendered
 }
 
 /// Whether settings were last written on a Mac, as far as they can tell: by where recordings go, a folder of the computer that
@@ -1362,7 +1356,7 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(saved.get(LEGACY_N4N0_KEY).is_none() && saved["n4n0"]["wake_word"] == true, "{saved}");
         assert_eq!(Settings::load_from(&path), s, "and read the same way afterwards");
-        assert!(migrated(&std::fs::read_to_string(&path).unwrap()).is_none(), "nothing left to move");
+        assert!(!Settings::parse(&std::fs::read_to_string(&path).unwrap()).2, "nothing left to move");
         // Both keys (an earlier version wrote the file after a newer one): today's wins.
         let both = format!("{{\"{LEGACY_N4N0_KEY}\": {{\"wake_word\": true}}, \"n4n0\": {{\"wake_word\": false}}}}");
         std::fs::write(&path, both).unwrap();

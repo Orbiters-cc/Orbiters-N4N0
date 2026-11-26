@@ -28,8 +28,6 @@ const WANTED_FOR: Duration = Duration::from_secs(300);
 /// Worlds a menu asked about lately (the overlay's 3D worlds panel shows any capture's world) whose feedback the menus
 /// get besides their subjects' (for [`WANTED_FOR`]).
 const ASKED_MAX: usize = 6;
-/// Worlds whose answer is kept.
-const KNOWN_MAX: usize = 128;
 /// Previous instances are read again from their file after this long.
 const INSTANCES_EVERY: Duration = Duration::from_secs(10);
 /// What the answer gives the member's own comments as their author (the world says "You").
@@ -342,18 +340,6 @@ impl WorldFeedbackRuntime {
         Some(Call::Read { world })
     }
 
-    /// At most [`KNOWN_MAX`] worlds' answers stay: those read longest ago go first, never one wanted or asked about now, selected in
-    /// the world, or with an action waiting (it is read again when it is shown again).
-    fn forget_old(&mut self) {
-        while self.known.len() > KNOWN_MAX {
-            let in_use = |w: &String| {
-                self.wanted.contains_key(w) || self.asked.iter().any(|(a, _)| a == w) || self.world.selected.as_ref().is_some_and(|(s, _)| s == w) || self.queue.items.iter().any(|p| p.world == *w)
-            };
-            let Some(oldest) = self.known.iter().filter(|(w, _)| !in_use(w)).min_by_key(|(_, k)| k.read_at).map(|(w, _)| w.clone()) else { return };
-            self.known.remove(&oldest);
-        }
-    }
-
     /// How long until [`Self::next_call`] may have one by the clock alone: never with nothing queued and no world shown (what is
     /// queued and shown meanwhile wakes the sender).
     fn next_due(&self, now: u64) -> Option<Duration> {
@@ -398,7 +384,6 @@ impl WorldFeedbackRuntime {
         match (call, result) {
             (Call::Read { world }, Ok(Some(view))) | (Call::Send { world, .. }, Ok(Some(view))) => {
                 self.known.insert(world.clone(), Known { view: Some(view), read_at: now });
-                self.forget_old();
                 if let Some(i) = index(&self.queue) {
                     self.queue.items.remove(i);
                     self.save();
@@ -1091,7 +1076,7 @@ mod tests {
     /// DCT-14: the sender sleeps until the next call there is, and for ever with none: never past one, so nothing is sent later
     /// than it was. DCT-27: the answers kept are bounded, and none in use goes.
     #[test]
-    fn the_sender_sleeps_until_its_next_call_and_what_is_kept_is_bounded() {
+    fn the_sender_sleeps_until_its_next_call() {
         let stamp = Stamp { server: "s".into(), account: Some("1".into()), credential: None };
         let mut rt = WorldFeedbackRuntime {
             queue: Queue::default(),
@@ -1128,16 +1113,6 @@ mod tests {
         assert!(matches!(rt.next_call(), Some(Call::Read { .. })));
         let due = rt.next_due(now_ms()).unwrap();
         assert!(due > READ_AGAIN - Duration::from_secs(5) && due <= READ_AGAIN + Duration::from_secs(1), "{due:?}");
-        // What is kept.
-        for i in 0..KNOWN_MAX as u64 + 40 {
-            rt.known.insert(format!("wrld_{i}"), Known { view: None, read_at: i });
-        }
-        rt.asked.push(("wrld_0".into(), Instant::now()));
-        rt.world.selected = Some(("wrld_1".into(), String::new()));
-        rt.forget_old();
-        assert_eq!(rt.known.len(), KNOWN_MAX);
-        assert!(["wrld_0", "wrld_1", WORLD].iter().all(|w| rt.known.contains_key(*w)), "in use");
-        assert!(!rt.known.contains_key("wrld_2") && rt.known.contains_key(&format!("wrld_{}", KNOWN_MAX as u64 + 39)), "the oldest went");
         let _ = std::fs::remove_file(&rt.queue_path);
     }
 

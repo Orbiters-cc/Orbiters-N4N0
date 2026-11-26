@@ -814,7 +814,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What COR-8, 9, 10, 20 and 28 cost as they were and as they are (printed: run it alone, with `--ignored --nocapture`).
+    /// What COR-9, COR-10, COR-20 and COR-28 cost as they were and as they are (printed: run it alone, with `--ignored --nocapture`).
     #[test]
     #[ignore]
     fn what_the_removed_work_cost() {
@@ -863,7 +863,7 @@ mod tests {
             }),
             101,
         );
-        let after = middle(Box::new(move || assert!(crate::json_lenient::<crate::settings::Settings>(&u).1.is_empty())), 101);
+        let after = middle(Box::new(move || assert!(crate::settings::Settings::parse(&u).1.is_empty())), 101);
         println!("COR-28, {} bytes of settings read: {:.0} us -> {:.0} us", text.len(), before * 1e3, after * 1e3);
         // COR-20, DCT-19: 12 worlds shown, 200 comments waiting.
         use crate::world_feedback::{Action, Known, Pending, Queue, Stamp};

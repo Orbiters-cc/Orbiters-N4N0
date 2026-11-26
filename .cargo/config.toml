@@ -7,4 +7,4 @@ xtask = "run --package xtask --"
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 # The release's version, written by `cargo xtask bump`: what the programs say they are (orbiters-version says why it is
 # not each crate's own version: a development bump then recompiles the programs, not all 25 crates).
-ORBITERS_VERSION = "0.3.11-dev.28"
+ORBITERS_VERSION = "0.3.11-dev.29"

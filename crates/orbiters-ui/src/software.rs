@@ -166,6 +166,8 @@ pub struct Software {
     clear: Option<Color32>,
     /// What the last frame changed (x0, y0, x1, y1).
     damage: Option<[u32; 4]>,
+    #[cfg(test)]
+    painted_pixels: usize,
     parallel: bool,
 }
 
@@ -184,6 +186,8 @@ impl Software {
             stale: true,
             clear: None,
             damage: None,
+            #[cfg(test)]
+            painted_pixels: 0,
             parallel: false,
         }
     }
@@ -335,6 +339,10 @@ impl Software {
         };
         // Small damage stays serial. The page worker alone opts in, keeping the input thread free of thread setup.
         let damaged: usize = areas.iter().map(|a| (a[2]-a[0])*(a[3]-a[1])).sum();
+        #[cfg(test)]
+        {
+            self.painted_pixels = damaged;
+        }
         if self.parallel && damaged > 128 * 1024 {
             // Retro's layered page remains raster-bound at four bands on the VR
             // CPU fixture. Six bounded row jobs retain identical per-row arithmetic.
@@ -796,6 +804,8 @@ mod tests {
         let ctx = egui::Context::default();
         let (mut sw, mut whole) = (Software::new(512, 256), Software::new(512, 256));
         let mut painted = 0;
+        let mut painted_pixels = Vec::new();
+        let mut upload_pixels = Vec::new();
         for n in 1..=24u32 {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(512.0, 256.0))), ..Default::default() };
             let mut full = ctx.run_ui(input, |ui| {
@@ -820,11 +830,18 @@ mod tests {
             let area = sw.damage().map_or(0, |d| (d[2] - d[0]) * (d[3] - d[1]));
             if !sets.is_empty() && !atlas_whole && n > 1 {
                 painted += 1;
-                // Its tiles, and those of letters whose texels lie beside the new ones in the atlas.
-                assert!(area > 0 && area <= 512 * 256 / 6, "frame {n}: {:?} painted for one word", sw.damage());
+                // Existing glyphs near the new texels may be in distant tiles. The upload
+                // rectangle encloses those tiles even when the painter visits them separately.
+                assert!(sw.painted_pixels > 0 && sw.painted_pixels <= 512 * 256 / 6, "frame {n}: {} pixels repainted for one word", sw.painted_pixels);
+                assert!(area > 0 && area < 512 * 256 / 2, "frame {n}: {:?} handed on for one word", sw.damage());
+                painted_pixels.push(sw.painted_pixels);
+                upload_pixels.push(area);
             }
         }
         assert!(painted >= 10, "the atlas took new letters in part {painted} times");
+        let mean = upload_pixels.iter().sum::<u32>() / upload_pixels.len() as u32;
+        assert!(mean < 512 * 256 / 5, "{upload_pixels:?}");
+        println!("new words: painted {painted_pixels:?}, handed on {upload_pixels:?}, full canvas {}", 512 * 256);
     }
 
     /// A picture that arrives, changes or goes repaints where it is drawn, and nothing else; one drawn over it counts too.

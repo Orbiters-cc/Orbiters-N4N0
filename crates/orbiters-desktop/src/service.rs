@@ -1606,25 +1606,25 @@ pub(crate) mod tests {
         let ctl = service.ctl.clone();
         let (first, between) = linked_through(&service, Role::Overlay);
         ctl.update(|s| s.projects_changed = 42);
+        assert!(until(|| ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1));
         assert!(in_step(&service, &first));
-        assert!(ctl.view().steamvr.overlay && service.linked(Role::Overlay) == 1);
         // The connection drops: the client says the service is gone, the service lets the link go and no longer counts
         // an overlay as linked.
         between.hang_up();
         assert!(until(|| first.should_close()));
         assert!(until(|| service.linked(Role::Overlay) == 0 && !ctl.view().steamvr.overlay));
         let held = first.snapshot();
-        // The service goes on, with nobody linked.
-        ctl.update(|s| s.n4n0.lines.push(said("said while nobody was linked")));
+        // Change settings while nobody is linked. The old link can still publish N4N0's status as it finishes closing.
         ctl.update(|s| s.settings.walk_boost.strength = 0.5);
         // It comes back: handed everything, and then what changes.
         let again = linked(&service, Role::Overlay);
         assert!(in_step(&service, &again));
-        assert_eq!(again.snapshot().n4n0.lines.len(), 1);
+        assert_eq!(again.snapshot().settings.walk_boost.strength, 0.5);
         assert_eq!(again.snapshot().projects_changed, 42);
         assert!(until(|| ctl.view().steamvr.overlay));
-        ctl.update(|s| s.n4n0.afk = true);
+        ctl.update(|s| s.projects_changed = 43);
         assert!(in_step(&service, &again));
+        assert_eq!(again.snapshot().projects_changed, 43);
         assert!(Arc::ptr_eq(&held, &first.snapshot()), "nothing of the new link reaches the client that went");
         // Coming and going again and again leaves no link behind.
         for _ in 0..3 {

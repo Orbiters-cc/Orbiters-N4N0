@@ -1,6 +1,6 @@
 //! `orbiters-desktop --idle-service [--seconds <s>] [--settle <s>]` counts what wakes the tray service while nothing
 //! happens: no VRChat, no SteamVR, nobody signed in, no window (review 1124, XCT-23). It runs the service's own threads
-//! (`Controller::start`, the bridge's keeper, `Service`'s keepers) over private folders, and after `--settle` seconds reads
+//! (`Controller::start_idle_service`, the bridge's keeper, `Service`'s keepers) over private folders, and after `--settle` seconds reads
 //! how often each thread of this process was switched to over `--seconds` (Windows' and Linux' context switch counts).
 //! Rescheduling within work also increments that count. The service's loop counters measure returns from waits separately.
 //! The report includes CPU time and the number of snapshots published.
@@ -31,19 +31,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let (seconds, settle) = (number("--seconds", 60).max(1), number("--settle", 30));
     // mDNS binds every interface, and Windows' firewall asks the person about each new program that does.
     std::env::set_var("ORBITERS_NO_NETWORK_LISTENING", "1");
-    let names = ["vrchat.exe", "vrserver.exe", "vrserver"];
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
-    anyhow::ensure!(
-        !system.processes().values().any(|p| names.contains(&p.name().to_string_lossy().to_lowercase().as_str())),
-        "VRChat or SteamVR runs: not an idle computer"
-    );
-    drop(system);
+    require_idle_host()?;
     let mut settings = Settings::default();
     // Nothing is sent anywhere, whatever was noted.
     settings.usage.enabled = false;
     let ctl = Controller::new(settings);
-    ctl.start();
+    ctl.start_idle_service();
     ctl.start_bridge();
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let endpoint = Endpoint { port: listener.local_addr()?.port(), token: uuid::Uuid::new_v4().simple().to_string() };
@@ -83,6 +76,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }).collect();
     println!("{:.1} controller loop turns a minute: {turns:?}", a_minute(turns.iter().map(|(_, n)| n).sum()));
     ctl.shutdown();
+    require_idle_host()
+}
+
+fn require_idle_host() -> anyhow::Result<()> {
+    let names = ["vrchat.exe", "vrserver.exe", "vrserver"];
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, sysinfo::ProcessRefreshKind::nothing());
+    anyhow::ensure!(
+        !system.processes().values().any(|p| names.contains(&p.name().to_string_lossy().to_lowercase().as_str())),
+        "VRChat or SteamVR runs: not an idle computer"
+    );
+    drop(system);
     Ok(())
 }
 

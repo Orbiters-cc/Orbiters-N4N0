@@ -754,6 +754,12 @@ impl Controller {
         self.start_loops();
     }
 
+    /// The idle harness measures the normal loops over private data and sockets.
+    pub(crate) fn start_idle_service(self: &Shared) {
+        self.start_osc();
+        self.start_loops();
+    }
+
     /// The loops that follow what goes on (a test starts these alone: nothing listens, hooks or is started).
     fn start_loops(self: &Shared) {
         spawn_watchers(self.clone());
@@ -3498,6 +3504,7 @@ fn spawn_watchers(ctl: Shared) {
             let rest = ctl.rest("watchers", |s| s.capture.state);
             let mut storage_looked: Option<Instant> = None;
             let mut step = 1;
+            let private = orbiters_core::paths::roots().is_some();
             while !ctl.quitting.load(Ordering::Relaxed) {
                 // VRChat process, every 3 s (first, so the world below knows whether VRChat runs).
                 if tick.is_multiple_of(3) {
@@ -3514,6 +3521,9 @@ fn spawn_watchers(ctl: Shared) {
                     // Home follows its own engine's records on a Mac.
                     #[cfg(not(any(windows, target_os = "linux")))]
                     let (steamvr_pid, started) = (None::<u32>, Vec::<(u32, u64)>::new());
+                    // A game that starts during a private harness run belongs to the person.
+                    // Still measure the inventory, while keeping its results out of the harness.
+                    let (steamvr_pid, started) = if private { (None, Vec::new()) } else { (steamvr_pid, started) };
                     let vrchats: Vec<u32> = started.iter().map(|(p, _)| *p).collect();
                     if orbiters_core::osc::VRCHAT_RUNS_HERE {
                         let dir = orbiters_core::paths::vrchat_log_dir();

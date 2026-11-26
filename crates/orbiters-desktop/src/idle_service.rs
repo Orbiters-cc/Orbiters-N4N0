@@ -72,7 +72,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let (total, cpu) = rows.iter().fold((0, 0), |(n, c), r| (n + r.1, c + r.2));
     println!("{:<28} {:>14} {:>12}", "thread", "switches/min", "cpu ms/min");
-    for (name, n, cpu) in rows.iter().filter(|r| r.1 > 0) {
+    for (name, n, cpu) in &rows {
         println!("{:<28} {:>14.1} {:>12.2}", if name.is_empty() { "(no name)" } else { name }, a_minute(*n), a_minute(*cpu) / 1e4);
     }
     println!("{} threads, {} asleep all along", rows.len(), rows.iter().filter(|r| r.1 == 0).count());

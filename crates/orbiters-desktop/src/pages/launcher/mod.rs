@@ -83,6 +83,7 @@ struct Modal {
 
 pub struct State {
     pub(in crate::pages) data: Arc<LauncherState>,
+    friend_ids: std::cell::RefCell<Option<(Arc<LauncherState>, HashSet<String>)>>,
     query: String,
     /// Sections closed by the person, kept between runs.
     folded: HashSet<String>,
@@ -142,6 +143,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             data: Arc::new(LauncherState::default()),
+            friend_ids: Default::default(),
             query: String::new(),
             folded: HashSet::new(),
             folded_read: false,
@@ -179,8 +181,18 @@ impl Default for State {
 }
 
 impl State {
+    /// A friends-only instance checks its owner's membership against the current roster.
+    fn has_friend(&self, id: &str) -> bool {
+        let mut ids = self.friend_ids.borrow_mut();
+        if ids.as_ref().is_none_or(|(from, _)| !Arc::ptr_eq(from, &self.data)) {
+            *ids = Some((self.data.clone(), self.data.friends.iter().map(|friend| friend.id.clone()).collect()));
+        }
+        ids.as_ref().is_some_and(|(_, ids)| ids.contains(id))
+    }
+
     /// What the controller knows now (the page keeps where the person was in the list).
     pub fn set_data(&mut self, data: Arc<LauncherState>) {
+        *self.friend_ids.get_mut() = None;
         self.data = data;
         self.staged = true;
     }
@@ -190,6 +202,7 @@ impl State {
     pub fn wire(&mut self, ctx: &egui::Context, cx: &Cx) {
         let data = cx.snap.launcher.arc();
         if !self.staged && !Arc::ptr_eq(&data, &self.data) {
+            *self.friend_ids.get_mut() = None;
             self.data = data;
             self.take_back_failed();
         }

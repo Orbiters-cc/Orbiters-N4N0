@@ -91,7 +91,7 @@ pub struct Previous {
     /// The text searched for at the last frame ([`crate::pages::new_search`]).
     searched: Option<String>,
     /// Which of the rows the search finds: the rows and the text they were looked for in.
-    found: Option<(Arc<[Visit]>, String, Vec<usize>)>,
+    found: Option<(Arc<[Visit]>, String, Arc<[usize]>)>,
     /// The history's instances, read when the sheet opens (pictures of the page hand them in), and whether a read is
     /// under way: one lock, so a read finishing while the sheet is closed is never lost (verify-r21 Major 5).
     history: Arc<Mutex<HistoryRead>>,
@@ -437,13 +437,12 @@ pub(super) fn friend_selectable(state: &State, friend: &orbiters_core::launcher:
         return None;
     }
     // Signed out, or a profile of another account: nothing can be asked of VRChat for it; Request as before.
-    let me = match &state.places.desk.asker().account {
-        Some(me) => me.clone(),
-        None if state.places.previous.connecting => String::new(),
+    let me = match state.places.desk.asker().account.as_deref() {
+        Some(me) => me,
+        None if state.places.previous.connecting => "",
         None => return None,
     };
-    // (Asked of the one owner of a friends' instance, for a row in view: the list is looked through, not copied.)
-    joinable_without_asking(&place.instance_id, &me, &|id| state.data.friends.iter().any(|f| f.id == id)).then(|| place.clone())
+    joinable_without_asking(&place.instance_id, me, &|id| state.has_friend(id)).then(|| place.clone())
 }
 
 /// Select on a friend's row or profile (REQUEST23): their instance becomes Where's destination, nothing sent to VRChat.
@@ -578,10 +577,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
         let find = orbiters_core::search::Query::new(query);
         previous.found = rows.as_ref().map(|r| (r.clone(), query.to_owned(), r.iter().enumerate().filter(|(_, v)| find.matches(&v.name)).map(|(i, _)| i).collect()));
     }
-    let shown: Vec<&Visit> = match (&rows, &previous.found) {
-        (Some(rows), Some((.., found))) => found.iter().map(|i| &rows[*i]).collect(),
-        _ => Vec::new(),
-    };
+    let shown = previous.found.as_ref().map(|(.., found)| found.clone()).unwrap_or_default();
     let mut pressed: Option<(Visit, bool)> = None;
     let mut lu = panel.new_child(UiBuilder::new().max_rect(list).id_salt("where-previous-list"));
     lu.set_clip_rect(list.intersect(panel.clip_rect()));
@@ -602,7 +598,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             widgets::text(&p, c + vec2(0.0, 34.0), Align2::CENTER_CENTER, &Txt::new(title, 15.0).weight(weight::SEMIBOLD));
             widgets::text(&p, c + vec2(0.0, 56.0), Align2::CENTER_CENTER, &Txt::new(text, 12.5).color(theme::fg_3()));
         }
-        Some(_) => {
+        Some(rows) => {
             let mut scroll = egui::ScrollArea::vertical().id_salt("where-previous-rows").auto_shrink([false, false]);
             let searched = &mut state.places.previous.searched;
             if crate::pages::new_search(searched, state.places.previous.query.as_str()) {
@@ -612,7 +608,7 @@ pub(super) fn sheet(ui: &mut Ui, cx: &mut Cx, state: &mut State, page: Rect) {
             scroll.show_rows(&mut lu, ROW_H, shown.len(), |ui, range| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
                 for i in range {
-                    let v = shown[i];
+                    let v = &rows[shown[i]];
                     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
                     let r = r.shrink2(vec2(8.0, 0.0));
                     if let Some(p) = row(ui, state, r, v, now) {

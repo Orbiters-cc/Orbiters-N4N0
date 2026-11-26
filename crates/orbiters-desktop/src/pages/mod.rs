@@ -542,7 +542,10 @@ pub const PAD_X: f32 = 32.0;
 pub fn local_time(iso: &str) -> String {
     use time::format_description::well_known::Rfc3339;
     let Ok(t) = time::OffsetDateTime::parse(iso, &Rfc3339) else { return iso.to_string() };
-    let t = time::UtcOffset::current_local_offset().map(|o| t.to_offset(o)).unwrap_or(t);
+    date_time(localized(t))
+}
+
+fn date_time(t: time::OffsetDateTime) -> String {
     // The whole date is one text, so each language puts day, month and year in its own order (Japanese: 2026年10月20日, 01:55).
     let month = match t.month() as u8 {
         1 => tr_ctx("month", "Jan"),
@@ -558,39 +561,59 @@ pub fn local_time(iso: &str) -> String {
         11 => tr_ctx("month", "Nov"),
         _ => tr_ctx("month", "Dec"),
     };
-    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = format!("{:02}:{:02}", t.hour(), t.minute()))
+    tr!("{day} {month} {year}, {time}", day = t.day(), month = month, year = t.year(), time = clock_text(t))
+}
+
+fn clock_text(t: time::OffsetDateTime) -> String {
+    format!("{:02}:{:02}", t.hour(), t.minute())
 }
 
 /// This computer's offset from UTC (asked again once a minute: summer time).
 pub(crate) fn offset() -> time::UtcOffset {
-    static KEPT: std::sync::Mutex<Option<(std::time::Instant, time::UtcOffset)>> = std::sync::Mutex::new(None);
+    local_offset().unwrap_or(time::UtcOffset::UTC)
+}
+
+fn localized(t: time::OffsetDateTime) -> time::OffsetDateTime {
+    local_offset().map_or(t, |offset| t.to_offset(offset))
+}
+
+fn local_offset() -> Option<time::UtcOffset> {
+    static KEPT: std::sync::Mutex<Option<(std::time::Instant, Option<time::UtcOffset>)>> = std::sync::Mutex::new(None);
     let mut kept = KEPT.lock().unwrap_or_else(|e| e.into_inner());
     match *kept {
         Some((at, offset)) if at.elapsed().as_secs() < 60 => offset,
         _ => {
-            let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let offset = time::UtcOffset::current_local_offset().ok();
             *kept = Some((std::time::Instant::now(), offset));
             offset
         }
     }
 }
 
+fn unix_date(secs: u64) -> Option<time::OffsetDateTime> {
+    let t = time::OffsetDateTime::from_unix_timestamp(secs as i64).ok()?;
+    // Keep the range previously accepted by the RFC 3339 formatter.
+    (0..=9999).contains(&t.year()).then_some(t)
+}
+
 /// The time of day alone of Unix seconds, in local time: "21:30", as [`local_time`] ends.
 pub fn local_clock(secs: u64) -> String {
-    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
-    let t = t.to_offset(offset());
-    format!("{:02}:{:02}", t.hour(), t.minute())
+    unix_date(secs).map(localized).map(clock_text).unwrap_or_default()
 }
 
 /// From one moment to a later one (Unix seconds), in local time: "28 Oct 2026, 21:30 – 22:30" on one day, both dates
 /// otherwise, one moment alone as [`local_time`].
 pub fn local_span(from: u64, to: u64) -> String {
-    let start = local_time_unix(from);
     if from == to {
-        return start;
+        return local_time_unix(from);
     }
-    let day = |secs: u64| time::OffsetDateTime::from_unix_timestamp(secs as i64).ok().map(|t| t.to_offset(offset()).date());
-    if day(from) == day(to) { format!("{start} – {}", local_clock(to)) } else { format!("{start} – {}", local_time_unix(to)) }
+    let start = unix_date(from).map(localized);
+    let end = unix_date(to).map(localized);
+    let end_text = match (start, end) {
+        (Some(start), Some(end)) if start.date() == end.date() => clock_text(end),
+        _ => end.map(date_time).unwrap_or_default(),
+    };
+    format!("{} – {end_text}", start.map(date_time).unwrap_or_default())
 }
 
 /// "5 min ago" for the moment `epoch` at `now` (Unix seconds; `orbiters_ui::format::relative_time`), and a frame asked
@@ -662,8 +685,7 @@ fn local_day_in(now: u64, offset_at: &dyn Fn(i64) -> i64) -> (i64, u64) {
 
 /// Unix seconds in local time, as [`local_time`].
 pub fn local_time_unix(secs: u64) -> String {
-    let Ok(t) = time::OffsetDateTime::from_unix_timestamp(secs as i64) else { return String::new() };
-    local_time(&t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default())
+    unix_date(secs).map(localized).map(date_time).unwrap_or_default()
 }
 
 /// What a page costs while nothing happens, for the pages' tests.

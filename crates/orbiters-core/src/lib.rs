@@ -279,7 +279,11 @@ fn json_lenient_value<T: serde::de::DeserializeOwned + serde::Serialize + Defaul
         return (value, Vec::new());
     }
     let (Ok(mut base), Some(fields)) = (serde_json::to_value(T::default()), input.as_object()) else { return (T::default(), vec!["(not JSON)".into()]) };
-    let fits = |candidate: &serde_json::Value| serde_json::from_value::<T>(candidate.clone()).is_ok();
+    let fits = |candidate: &serde_json::Value| {
+        #[cfg(test)]
+        RECOVERY_PROBES.set(RECOVERY_PROBES.get() + 1);
+        serde_json::from_value::<T>(candidate.clone()).is_ok()
+    };
     let mut dropped = Vec::new();
     for (key, value) in fields {
         let mut candidate = base.clone();
@@ -304,6 +308,11 @@ fn json_lenient_value<T: serde::de::DeserializeOwned + serde::Serialize + Defaul
         }
     }
     (serde_json::from_value(base).unwrap_or_default(), dropped)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECOVERY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// When a file that keeps how far VRChat's logs were read beside what was found in them (the visited worlds, the

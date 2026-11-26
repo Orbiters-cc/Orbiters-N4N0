@@ -852,8 +852,15 @@ mod tests {
         }).to_string();
         std::fs::write(&path, &text).unwrap();
 
+        crate::RECOVERY_PROBES.set(0);
         let (before, before_dropped) = crate::json_lenient::<History>(&text);
+        let before_probes = crate::RECOVERY_PROBES.replace(0);
         let (after, after_dropped) = History::decode(&text);
+        let after_probes = crate::RECOVERY_PROBES.replace(0);
+        // The generic recovery probes once for each of the three world entries
+        // in addition to the other fields. The specialized path decodes worlds
+        // separately, so none of those probes reconstructs the whole history.
+        assert_eq!((before_probes, after_probes), (8, 5));
         assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(before).unwrap());
         assert_eq!(after_dropped, before_dropped);
         assert_eq!(after_dropped, ["logs.bad.txt", "worlds.b"]);

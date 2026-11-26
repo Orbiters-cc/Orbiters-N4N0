@@ -32,6 +32,12 @@ impl Record {
     fn before(&self) -> Option<&str> {
         self.manifest.as_deref().filter(|m| !m.is_empty())
     }
+
+    /// The version of `name` the manifest before the change locks, if it does.
+    fn locked(&self, name: &str) -> Option<String> {
+        let manifest: serde_json::Value = serde_json::from_str(self.before()?.trim_start_matches('\u{feff}')).ok()?;
+        manifest["locked"][name]["version"].as_str().map(str::to_owned)
+    }
 }
 
 /// The manifest as it is now: its text, none, or one that is there, read whole and steady, and is not a package list.
@@ -205,11 +211,17 @@ fn undo(path: &Path, file: &Path, record: &Record) -> std::io::Result<Vec<String
     let mut said = vec![];
     for name in record.added.iter().filter(named) {
         let at = path.join("Packages").join(name);
-        let kept = out.join(name);
+        let mut kept = out.join(name);
+        // V2-4: the version the list had locked, put back by Restore (its folder was missing), is no first addition: the list is
+        // the same because it already named it. It stays, whether or not that Restore could close its record.
+        if record.locked(name).is_some_and(|locked| version_in(&at).as_deref() == Some(locked.as_str())) {
+            continue;
+        }
         if there(&at)? {
             crate::disk::create_dir_all(&out)?;
+            // (Kept there once already: by a recovery whose record could not be removed. Never an error for good.)
             if there(&kept)? {
-                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, kept.display().to_string()));
+                kept = out.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
             }
             crate::disk::rename(&at, &kept)?;
         }
@@ -230,6 +242,13 @@ fn undo(path: &Path, file: &Path, record: &Record) -> std::io::Result<Vec<String
         }
     }
     Ok(said)
+}
+
+/// The version the package in the folder `at` says it is.
+fn version_in(at: &Path) -> Option<String> {
+    let bytes = std::fs::read(at.join("package.json")).ok()?;
+    let package: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    package["version"].as_str().map(str::to_owned)
 }
 
 /// The folder vrc-get moved the package `name` of the project at `path` to; an error when its folder cannot be looked through now.
@@ -429,6 +448,28 @@ mod tests {
             assert_eq!(std::fs::read_to_string(p.join("Packages/com.a/package.json")).unwrap(), "mine");
             assert_eq!(records(&root), 0);
             assert_eq!(std::fs::read(p.join(MANIFEST)).ok().as_deref(), now);
+        }
+    }
+
+    /// V2-4: Restore put back the version the list locks (its folder was missing) and its record could not be removed then (another
+    /// program held it a moment). The list is the same, as it already named the package: that is no first addition, and the
+    /// next recovery leaves it in place. A folder of another version (a change cut before its list was saved) is still taken out.
+    #[test]
+    fn a_restored_package_whose_record_stayed_is_not_taken_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let (root, p) = (temp.path().join("vcc"), temp.path().join("Project"));
+        project(&p);
+        std::fs::write(p.join(MANIFEST), r#"{"dependencies":{},"locked":{"com.r":{"version":"1.0.0","dependencies":{}}}}"#).unwrap();
+        for (put, stays) in [("1.0.0", true), ("2.0.0", false)] {
+            let _ = std::fs::remove_dir_all(p.join("Packages/com.r"));
+            let restore = Installing::begin(&root, &p, ["com.r"].into_iter()).unwrap();
+            std::fs::create_dir_all(p.join("Packages/com.r")).unwrap();
+            std::fs::write(p.join("Packages/com.r/package.json"), format!(r#"{{"name":"com.r","version":"{put}"}}"#)).unwrap();
+            drop(restore);
+            let result = recover(&root, &p);
+            assert_eq!(result.is_ok(), stays, "{put}: {result:?}");
+            assert_eq!(p.join("Packages/com.r/package.json").is_file(), stays, "{put}");
+            assert_eq!(records(&root), 0);
         }
     }
 
